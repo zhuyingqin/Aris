@@ -17,6 +17,106 @@ use serde_json::{Map, Value};
 pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
+const DEFAULT_BROWSER_TOOL_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_BROWSER_TOOL_MAX_RUNTIME_SECS: u64 = 600;
+const MIN_BROWSER_TOOL_TIMEOUT_SECS: u64 = 30;
+const MAX_BROWSER_TOOL_TIMEOUT_SECS: u64 = 1_800;
+const BROWSER_WAIT_COMPLETION_GRACE_SECS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McpToolTimeoutPolicy {
+    idle_timeout: Duration,
+    hard_timeout: Duration,
+}
+
+/// Return the renewable idle lease for an interactive MCP browser call.
+///
+/// Long-running shell, compute, image-generation, and agent-style MCP tools
+/// deliberately return `None`: they keep their own progress-aware or
+/// transport-level limits. An explicit browser wait is given enough time to
+/// finish the requested wait plus a small protocol/serialization allowance.
+#[must_use]
+pub fn mcp_tool_timeout(tool_name: &str, input: &str) -> Option<Duration> {
+    mcp_tool_timeout_policy(tool_name, input).map(|policy| policy.idle_timeout)
+}
+
+/// Return the non-renewable maximum runtime shown by desktop heartbeats.
+#[must_use]
+pub fn mcp_tool_max_runtime(tool_name: &str, input: &str) -> Option<Duration> {
+    mcp_tool_timeout_policy(tool_name, input).map(|policy| policy.hard_timeout)
+}
+
+fn mcp_tool_timeout_policy(tool_name: &str, input: &str) -> Option<McpToolTimeoutPolicy> {
+    let idle_secs = std::env::var("ARIS_BROWSER_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BROWSER_TOOL_TIMEOUT_SECS)
+        .clamp(MIN_BROWSER_TOOL_TIMEOUT_SECS, MAX_BROWSER_TOOL_TIMEOUT_SECS);
+    let hard_secs = std::env::var("ARIS_BROWSER_TOOL_MAX_RUNTIME_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BROWSER_TOOL_MAX_RUNTIME_SECS)
+        .clamp(MIN_BROWSER_TOOL_TIMEOUT_SECS, MAX_BROWSER_TOOL_TIMEOUT_SECS);
+    mcp_tool_timeout_policy_with_defaults(tool_name, input, idle_secs, hard_secs)
+}
+
+#[cfg(test)]
+fn mcp_tool_timeout_with_default(
+    tool_name: &str,
+    input: &str,
+    default_secs: u64,
+) -> Option<Duration> {
+    mcp_tool_timeout_policy_with_defaults(
+        tool_name,
+        input,
+        default_secs,
+        DEFAULT_BROWSER_TOOL_MAX_RUNTIME_SECS,
+    )
+    .map(|policy| policy.idle_timeout)
+}
+
+fn mcp_tool_timeout_policy_with_defaults(
+    tool_name: &str,
+    input: &str,
+    default_idle_secs: u64,
+    default_hard_secs: u64,
+) -> Option<McpToolTimeoutPolicy> {
+    let mut segments = tool_name.split("__");
+    let is_browser_tool = segments.next() == Some("mcp")
+        && segments.next().is_some()
+        && segments
+            .next()
+            .is_some_and(|raw_name| raw_name.starts_with("browser_"));
+    if !is_browser_tool {
+        return None;
+    }
+
+    let mut idle_secs =
+        default_idle_secs.clamp(MIN_BROWSER_TOOL_TIMEOUT_SECS, MAX_BROWSER_TOOL_TIMEOUT_SECS);
+    let mut hard_secs = default_hard_secs
+        .clamp(MIN_BROWSER_TOOL_TIMEOUT_SECS, MAX_BROWSER_TOOL_TIMEOUT_SECS)
+        .max(idle_secs);
+    if tool_name.ends_with("__browser_wait_for") {
+        let explicit_wait_secs = serde_json::from_str::<Value>(input)
+            .ok()
+            .and_then(|value| value.get("time").and_then(Value::as_f64))
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(|seconds| seconds.ceil() as u64);
+        if let Some(wait_secs) = explicit_wait_secs {
+            idle_secs = idle_secs.max(
+                wait_secs
+                    .saturating_add(BROWSER_WAIT_COMPLETION_GRACE_SECS)
+                    .min(MAX_BROWSER_TOOL_TIMEOUT_SECS),
+            );
+            hard_secs = hard_secs.max(idle_secs);
+        }
+    }
+    Some(McpToolTimeoutPolicy {
+        idle_timeout: Duration::from_secs(idle_secs),
+        hard_timeout: Duration::from_secs(hard_secs),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct CommonSystemPromptOptions {
     pub workspace: PathBuf,
@@ -227,9 +327,7 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     } else if m.contains("deepseek") {
         // ~64k window — small, so the fixed prompt/output reserve bites harder.
         40_000
-    } else if m.contains("claude-sonnet")
-        || m.contains("claude-opus")
-        || m.contains("claude-fable")
+    } else if m.contains("claude-sonnet") || m.contains("claude-opus") || m.contains("claude-fable")
     {
         // Sonnet 4.6, Opus 4.6+ and Fable 5 have a 1M context window by
         // default. Preserve room for the 128k maximum completion, system
@@ -310,6 +408,581 @@ pub struct ChatToolSpec {
     pub required_permission: PermissionMode,
 }
 
+/// Schema slots sent with the first provider request of a turn.
+pub const MAX_ROUTED_TOOLS: usize = 20;
+
+/// Hard ceiling on the live active set, including everything `ToolSearch`
+/// activates later in the same turn. The headroom over [`MAX_ROUTED_TOOLS`]
+/// lets one search land a whole capability family before the bounded LRU in the
+/// conversation runtime has to evict anything.
+pub const MAX_ACTIVE_TOOLS: usize = 24;
+
+/// Always visible, never evicted: without `ToolSearch` the model cannot recover
+/// anything, and the read/search set is what every task starts from.
+const PINNED_CORE_TOOLS: &[&str] = &[
+    "ToolSearch",
+    "read_file",
+    "read_files",
+    "glob_search",
+    "grep_search",
+    "bash",
+];
+
+/// Visible from the first request but evictable once the turn's real shape is
+/// known.
+const SECONDARY_CORE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "session_search",
+    "memory",
+    "TodoWrite",
+];
+
+/// Upper bound on pins, so the LRU always keeps rotating slots for whatever the
+/// turn turns out to need.
+const MAX_PINNED_TOOLS: usize = MAX_ACTIVE_TOOLS - 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRoutingMode {
+    Off,
+    Shadow,
+    Active,
+}
+
+impl ToolRoutingMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Active => "active",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRoutingPlan {
+    pub mode: ToolRoutingMode,
+    pub profile: String,
+    pub catalog_names: BTreeSet<String>,
+    pub active_names: BTreeSet<String>,
+    /// Subset of `active_names` the runtime's bounded LRU may never evict.
+    pub pinned_names: BTreeSet<String>,
+    pub deferred_names: BTreeSet<String>,
+    pub reasons: Vec<String>,
+}
+
+impl ToolRoutingPlan {
+    /// The routing decision as the conversation runtime consumes it.
+    #[must_use]
+    pub fn runtime_routing(&self) -> runtime::DynamicToolRouting {
+        runtime::DynamicToolRouting {
+            catalog: self.catalog_names.clone(),
+            active: self.active_names.clone(),
+            pinned: self.pinned_names.clone(),
+            max_active: MAX_ACTIVE_TOOLS,
+        }
+    }
+}
+
+/// One intent's tool bundle. `required` is what the intent cannot be executed
+/// without and is allocated before any group's `optional` extras, so a prompt
+/// that triggers several intents does not let the first one exhaust the budget.
+struct ToolGroup {
+    profile: &'static str,
+    reason: &'static str,
+    required: Vec<String>,
+    optional: Vec<String>,
+}
+
+/// Resolve the rollout mode once per process. Dynamic routing is enabled by
+/// default for ordinary desktop chat; operators can use `shadow` to audit the
+/// proposed subset without changing requests, or `off` for immediate rollback.
+#[must_use]
+pub fn dynamic_tool_routing_mode() -> ToolRoutingMode {
+    static MODE: OnceLock<ToolRoutingMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("ARIS_DYNAMIC_TOOL_ROUTING")
+            .unwrap_or_else(|_| "on".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "0" | "false" => ToolRoutingMode::Off,
+            "shadow" | "audit" => ToolRoutingMode::Shadow,
+            _ => ToolRoutingMode::Active,
+        }
+    })
+}
+
+/// Choose a conservative initial model-visible subset. This is only a schema
+/// projection: every name still remains in the executable permission catalog,
+/// and ToolSearch can activate deferred names before the next model request.
+#[must_use]
+pub fn route_chat_tools(
+    user_text: &str,
+    tool_specs: &[ChatToolSpec],
+    mode: ToolRoutingMode,
+) -> ToolRoutingPlan {
+    let catalog_names = tool_specs
+        .iter()
+        .map(|spec| spec.name.clone())
+        .collect::<BTreeSet<_>>();
+    if mode == ToolRoutingMode::Off
+        || catalog_names.len() <= MAX_ROUTED_TOOLS
+        || !catalog_names.contains("ToolSearch")
+    {
+        let (profile, reason) = if mode == ToolRoutingMode::Off {
+            ("off", "routing disabled")
+        } else if !catalog_names.contains("ToolSearch") {
+            (
+                "fallback-no-tool-search",
+                "safe fallback without ToolSearch",
+            )
+        } else {
+            ("small-catalog", "full catalog retained")
+        };
+        return ToolRoutingPlan {
+            mode,
+            profile: profile.to_string(),
+            catalog_names: catalog_names.clone(),
+            active_names: catalog_names.clone(),
+            // Nothing was routed away, so nothing may be evicted either.
+            pinned_names: catalog_names,
+            deferred_names: BTreeSet::new(),
+            reasons: vec![reason.to_string()],
+        };
+    }
+
+    let lowered = user_text.to_lowercase();
+    let mut profiles = vec!["core"];
+    let mut reasons = Vec::new();
+    let mut active_names = BTreeSet::new();
+    let mut pinned_names = BTreeSet::new();
+
+    for name in resolve_named(&catalog_names, PINNED_CORE_TOOLS) {
+        pinned_names.insert(name.clone());
+        active_names.insert(name);
+    }
+
+    // A tool the user named outright is the strongest signal there is, so it is
+    // pinned rather than merely activated.
+    let mentioned = catalog_names
+        .iter()
+        .filter(|name| mentions_tool(&lowered, name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !mentioned.is_empty() {
+        reasons.push(format!("named tools: {}", mentioned.join(", ")));
+        for name in mentioned {
+            // The cap holds even against a prompt that lists more tool names
+            // than the whole budget.
+            if active_names.len() >= MAX_ROUTED_TOOLS && !active_names.contains(&name) {
+                break;
+            }
+            if pinned_names.len() < MAX_PINNED_TOOLS {
+                pinned_names.insert(name.clone());
+            }
+            active_names.insert(name);
+        }
+    }
+
+    let groups = intent_tool_groups(&lowered, &catalog_names);
+    for group in &groups {
+        if !profiles.contains(&group.profile) {
+            profiles.push(group.profile);
+        }
+        reasons.push(group.reason.to_string());
+    }
+
+    // Every matched intent gets its must-have tools before any intent gets its
+    // extras. Otherwise the first intent in the list drains the budget and a
+    // mixed request ("fix the UI, then verify in the browser") arrives without
+    // the tools for its second half.
+    for group in &groups {
+        for name in &group.required {
+            if active_names.len() >= MAX_ROUTED_TOOLS && !active_names.contains(name) {
+                break;
+            }
+            active_names.insert(name.clone());
+            if pinned_names.len() < MAX_PINNED_TOOLS {
+                pinned_names.insert(name.clone());
+            }
+        }
+    }
+    for name in resolve_named(&catalog_names, SECONDARY_CORE_TOOLS) {
+        if active_names.len() >= MAX_ROUTED_TOOLS {
+            break;
+        }
+        active_names.insert(name);
+    }
+    let widest_group = groups
+        .iter()
+        .map(|group| group.optional.len())
+        .max()
+        .unwrap_or_default();
+    'extras: for index in 0..widest_group {
+        for group in &groups {
+            let Some(name) = group.optional.get(index) else {
+                continue;
+            };
+            if active_names.len() >= MAX_ROUTED_TOOLS && !active_names.contains(name) {
+                break 'extras;
+            }
+            active_names.insert(name.clone());
+        }
+    }
+
+    let deferred_names = catalog_names
+        .difference(&active_names)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    ToolRoutingPlan {
+        mode,
+        profile: profiles.join("+"),
+        catalog_names,
+        active_names,
+        pinned_names,
+        deferred_names,
+        reasons,
+    }
+}
+
+/// Tool bundles for every intent the prompt matches, in allocation priority
+/// order.
+fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
+    let mut groups = Vec::new();
+    if contains_any(
+        lowered,
+        &[
+            "create", "new file", "generate", "scaffold", "draft", "新建", "创建", "生成", "新增",
+            "写一个", "写个",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "code",
+            reason: "create-file intent",
+            required: resolve_named(catalog, &["write_file", "write_files"]),
+            optional: resolve_named(
+                catalog,
+                &[
+                    "append_file",
+                    "begin_large_write",
+                    "append_write_chunk",
+                    "commit_large_write",
+                ],
+            ),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "fix", "implement", "edit", "change", "refactor", "build", "update", "modify", "rename",
+            "修改", "修复", "实现", "添加", "重构", "更新", "调整", "优化",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "code",
+            reason: "modify-file intent",
+            // Editing an existing file is read-then-edit; `multi_edit` is the
+            // form two or more known replacements must take.
+            required: resolve_named(catalog, &["read_file", "edit_file", "multi_edit"]),
+            optional: resolve_named(
+                catalog,
+                &[
+                    "write_file",
+                    "write_files",
+                    "append_file",
+                    "change_list",
+                    "change_get",
+                    "change_revert",
+                ],
+            ),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "investigate",
+            "audit",
+            "trace",
+            "review",
+            "where",
+            "why",
+            "which file",
+            "调查",
+            "排查",
+            "审计",
+            "为什么",
+            "在哪",
+            "查找",
+            "定位",
+            "梳理",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "investigate",
+            reason: "multi-file investigation intent",
+            required: resolve_named(catalog, &["read_files", "glob_search", "grep_search"]),
+            optional: resolve_named(catalog, &["session_search", "WorkspaceLayout", "bash"]),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "browser",
+            "webpage",
+            "page",
+            "frontend",
+            "react",
+            "css",
+            "ui",
+            "playwright",
+            "e2e",
+            "acceptance",
+            "浏览器",
+            "网页",
+            "页面",
+            "界面",
+            "验收",
+        ],
+    ) {
+        // Observe, act, verify: navigate and snapshot are useless without a way
+        // to act, and clicking is unverifiable without a way to read state back.
+        let required = resolve_suffixes(
+            catalog,
+            &[
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_click",
+                "browser_evaluate",
+            ],
+        );
+        let reason = if required.is_empty() {
+            // Visible in the `tool.routing` trace: the intent was recognized but
+            // MCP discovery produced no browser backend for this turn.
+            "browser or UI intent without any discovered browser tool"
+        } else {
+            "browser or UI intent"
+        };
+        groups.push(ToolGroup {
+            profile: "browser",
+            reason,
+            required,
+            optional: resolve_suffixes(
+                catalog,
+                &[
+                    "browser_type",
+                    "browser_fill_form",
+                    "browser_fill",
+                    "browser_take_screenshot",
+                    "browser_wait_for",
+                    "browser_press_key",
+                    "browser_select_option",
+                    "browser_console_messages",
+                    "browser_network_requests",
+                    "browser_resize",
+                    "browser_drag",
+                ],
+            ),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "research",
+            "literature",
+            "paper",
+            "citation",
+            "evidence",
+            "search",
+            "研究",
+            "文献",
+            "论文",
+            "引用",
+            "证据",
+            "检索",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "research",
+            reason: "research intent",
+            required: resolve_named(catalog, &["LiteratureSearch"]),
+            optional: resolve_contains(
+                catalog,
+                &[
+                    "literature",
+                    "arxiv",
+                    "scopus",
+                    "evidence",
+                    "retrieval",
+                    "zotero",
+                ],
+            ),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "http://",
+            "https://",
+            "website",
+            "online",
+            "latest",
+            "news",
+            "current",
+            "web search",
+            "网站",
+            "网上",
+            "联网",
+            "最新",
+            "新闻",
+            "搜索",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "web",
+            reason: "web intent",
+            required: resolve_named(catalog, &["WebSearch", "WebFetch"]),
+            optional: Vec::new(),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "data",
+            "analysis",
+            "compute",
+            "python",
+            "notebook",
+            "experiment",
+            "数据",
+            "分析",
+            "计算",
+            "实验",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "compute",
+            reason: "compute intent",
+            required: Vec::new(),
+            optional: resolve_contains(catalog, &["compute", "repl", "notebook", "experiment"]),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "image", "audio", "video", "pdf", "图片", "图像", "音频", "视频",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "media",
+            reason: "media intent",
+            required: Vec::new(),
+            optional: resolve_contains(catalog, &["image", "media", "audio", "video", "pdf"]),
+        });
+    }
+    if contains_any(
+        lowered,
+        &["skill", "agent", "delegate", "智能体", "技能", "委派"],
+    ) {
+        groups.push(ToolGroup {
+            profile: "delegation",
+            reason: "skill or agent intent",
+            required: Vec::new(),
+            optional: resolve_named(catalog, &["Skill", "Agent"]),
+        });
+    }
+    if contains_any(
+        lowered,
+        &["email", "mail", "inbox", "邮件", "邮箱", "收件箱"],
+    ) {
+        groups.push(ToolGroup {
+            profile: "mail",
+            reason: "mail intent",
+            required: Vec::new(),
+            optional: catalog
+                .iter()
+                .filter(|name| name.to_lowercase().starts_with("mail_"))
+                .cloned()
+                .collect(),
+        });
+    }
+    if contains_any(lowered, &["chatgpt", "oracle", "咨询", "网页账号"]) {
+        groups.push(ToolGroup {
+            profile: "oracle",
+            reason: "configured consultation intent",
+            required: Vec::new(),
+            optional: catalog
+                .iter()
+                .filter(|name| name.to_lowercase().starts_with("chatgptweb"))
+                .cloned()
+                .collect(),
+        });
+    }
+    groups
+}
+
+/// Catalog names for an ordered wish list, spelling-insensitively and skipping
+/// anything this turn's catalog does not actually contain.
+fn resolve_named(catalog: &BTreeSet<String>, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter_map(|wanted| {
+            let wanted = tools::canonical_tool_token(wanted);
+            catalog
+                .iter()
+                .find(|name| tools::canonical_tool_token(name) == wanted)
+                .cloned()
+        })
+        .collect()
+}
+
+/// Catalog names ending in each suffix, in suffix order. MCP tools arrive as
+/// `mcp__<server>__browser_click`, so the suffix is the stable part.
+fn resolve_suffixes(catalog: &BTreeSet<String>, suffixes: &[&str]) -> Vec<String> {
+    let mut resolved: Vec<String> = Vec::new();
+    for suffix in suffixes {
+        for name in catalog {
+            if name.ends_with(suffix) && !resolved.contains(name) {
+                resolved.push(name.clone());
+            }
+        }
+    }
+    resolved
+}
+
+fn resolve_contains(catalog: &BTreeSet<String>, terms: &[&str]) -> Vec<String> {
+    catalog
+        .iter()
+        .filter(|name| {
+            let lowered = name.to_lowercase();
+            terms.iter().any(|term| lowered.contains(term))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the prompt names this tool outright, in any of the spellings a
+/// person actually types. Deliberately literal: canonicalizing the whole prompt
+/// would drop CJK characters and fuse unrelated ASCII runs into false hits.
+fn mentions_tool(lowered_text: &str, name: &str) -> bool {
+    let candidates = [name, name.rsplit("__").next().unwrap_or(name)];
+    candidates.iter().any(|candidate| {
+        let candidate = candidate.to_lowercase();
+        if candidate.len() < 4 {
+            return false;
+        }
+        lowered_text.contains(&candidate)
+            || (candidate.contains('_')
+                && (lowered_text.contains(&candidate.replace('_', " "))
+                    || lowered_text.contains(&candidate.replace('_', "-"))))
+    })
+}
+
+fn contains_any(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
 fn tool_schema_context_overhead_tokens(tool_specs: &[ChatToolSpec], enable_tools: bool) -> usize {
     if !enable_tools || tool_specs.is_empty() {
         return 0;
@@ -352,7 +1025,13 @@ pub struct McpToolExecutor<T> {
     runtime: Option<tokio::runtime::Runtime>,
     manager: Option<McpServerManager>,
     tool_names: BTreeSet<String>,
+    /// Every tool name this Chat turn can reach, with its description, so
+    /// `ToolSearch` ranks the real catalog instead of the kernel's subset.
+    search_tools: BTreeMap<String, String>,
+    /// Configured MCP servers that produced no tools this turn.
+    unavailable_servers: Vec<String>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    timeout_policy_override: Option<McpToolTimeoutPolicy>,
 }
 
 impl<T> ToolExecutor for McpToolExecutor<T>
@@ -386,7 +1065,12 @@ where
             let mut output = self
                 .inner
                 .execute_output_with_id(tool_use_id, tool_name, input)?;
-            output.text = merge_mcp_tool_search_results(output.text, input, &self.tool_names);
+            output.text = merge_mcp_tool_search_results(
+                output.text,
+                input,
+                &self.search_tools,
+                &self.unavailable_servers,
+            );
             return Ok(output);
         }
         if !self.tool_names.contains(tool_name) {
@@ -401,6 +1085,7 @@ where
 
         let arguments = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid MCP tool input JSON: {error}")))?;
+        let browser_acceptance_tool = browser_acceptance_snapshot_name(tool_name, &self.tool_names);
         let runtime = self
             .runtime
             .as_ref()
@@ -412,14 +1097,44 @@ where
         enum McpCallOutcome<T> {
             Response(Result<T, ToolError>),
             Cancelled,
+            IdleTimedOut(Duration),
+            HardTimedOut(Duration),
         }
         let cancel_flag = self.cancel_flag.clone();
+        let timeout_policy = self
+            .timeout_policy_override
+            .or_else(|| mcp_tool_timeout_policy(tool_name, input));
         let outcome = runtime.block_on(async {
-            tokio::select! {
-                result = manager.call_tool(tool_name, Some(arguments)) => {
-                    McpCallOutcome::Response(result.map_err(|error| ToolError::new(error.to_string())))
+            if let Some(policy) = timeout_policy {
+                // The idle lease starts after the MCP server is initialized
+                // and tools/call is about to be sent. Bootstrap time is still
+                // covered by the absolute ceiling, but cannot consume the
+                // entire no-progress allowance before the tool even starts.
+                let last_progress = Arc::new(Mutex::new(None::<Instant>));
+                let call_progress = last_progress.clone();
+                tokio::select! {
+                    result = manager.call_tool_with_progress(tool_name, Some(arguments), move || {
+                        if let Ok(mut progress_at) = call_progress.lock() {
+                            *progress_at = Some(Instant::now());
+                        }
+                    }) => {
+                        McpCallOutcome::Response(result.map_err(|error| ToolError::new(error.to_string())))
+                    }
+                    () = wait_for_mcp_cancel(cancel_flag) => McpCallOutcome::Cancelled,
+                    () = wait_for_mcp_idle_timeout(last_progress, policy.idle_timeout) => {
+                        McpCallOutcome::IdleTimedOut(policy.idle_timeout)
+                    }
+                    () = tokio::time::sleep(policy.hard_timeout) => {
+                        McpCallOutcome::HardTimedOut(policy.hard_timeout)
+                    }
                 }
-                () = wait_for_mcp_cancel(cancel_flag) => McpCallOutcome::Cancelled,
+            } else {
+                tokio::select! {
+                    result = manager.call_tool(tool_name, Some(arguments)) => {
+                        McpCallOutcome::Response(result.map_err(|error| ToolError::new(error.to_string())))
+                    }
+                    () = wait_for_mcp_cancel(cancel_flag) => McpCallOutcome::Cancelled,
+                }
             }
         });
         let response = match outcome {
@@ -432,6 +1147,34 @@ where
                 }
                 return Err(ToolError::interrupted_by_user());
             }
+            McpCallOutcome::IdleTimedOut(timeout) => {
+                if let (Some(runtime), Some(manager)) =
+                    (self.runtime.as_ref(), self.manager.as_mut())
+                {
+                    let _ = runtime.block_on(manager.shutdown());
+                }
+                return Err(ToolError::timed_out_after(
+                    format!(
+                        "MCP browser tool `{tool_name}` produced no progress for {}s. The MCP server was restarted so the conversation can recover. For an intentional long wait, use `browser_wait_for` with its `time` argument; for long-running computation, use a background-capable tool.",
+                        timeout.as_secs()
+                    ),
+                    timeout,
+                ));
+            }
+            McpCallOutcome::HardTimedOut(timeout) => {
+                if let (Some(runtime), Some(manager)) =
+                    (self.runtime.as_ref(), self.manager.as_mut())
+                {
+                    let _ = runtime.block_on(manager.shutdown());
+                }
+                return Err(ToolError::timed_out_after(
+                    format!(
+                        "MCP browser tool `{tool_name}` exceeded its {}s maximum runtime despite progress signals. The MCP server was restarted so the conversation can recover.",
+                        timeout.as_secs()
+                    ),
+                    timeout,
+                ));
+            }
         };
 
         if let Some(error) = response.error {
@@ -443,7 +1186,18 @@ where
         let result = response
             .result
             .ok_or_else(|| ToolError::new(format!("MCP tool `{tool_name}` returned no result")))?;
-        mcp_result_to_tool_output(result)
+        let mut output = mcp_result_to_tool_output(result)?;
+        if let Some(snapshot_tool) = browser_acceptance_tool {
+            attach_browser_acceptance(
+                &mut output,
+                tool_name,
+                &snapshot_tool,
+                runtime,
+                manager,
+                self.cancel_flag.clone(),
+            );
+        }
+        Ok(output)
     }
 
     fn execution(&self, tool_name: &str) -> ToolExecution {
@@ -536,6 +1290,137 @@ impl<T> McpToolExecutor<T> {
     }
 }
 
+const BROWSER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn browser_acceptance_snapshot_name(
+    tool_name: &str,
+    tool_names: &BTreeSet<String>,
+) -> Option<String> {
+    const MUTATIONS: &[&str] = &[
+        "browser_click",
+        "browser_drag",
+        "browser_file_upload",
+        "browser_fill",
+        "browser_fill_form",
+        "browser_go_back",
+        "browser_handle_dialog",
+        "browser_navigate",
+        "browser_press_key",
+        "browser_select_option",
+        "browser_type",
+    ];
+    let mutation = MUTATIONS
+        .iter()
+        .find(|suffix| tool_name.ends_with(**suffix))?;
+    let prefix = tool_name.strip_suffix(mutation)?;
+    let snapshot = format!("{prefix}browser_snapshot");
+    tool_names.contains(&snapshot).then_some(snapshot)
+}
+
+fn browser_output_has_state_evidence(output: &ToolOutput) -> bool {
+    if !output.media.is_empty() {
+        return true;
+    }
+    let lowered = output.text.to_ascii_lowercase();
+    [
+        "page url:",
+        "page state",
+        "accessibility snapshot",
+        "browser snapshot",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+fn attach_browser_acceptance(
+    output: &mut ToolOutput,
+    action_tool: &str,
+    snapshot_tool: &str,
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut McpServerManager,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) {
+    if output.reported_error {
+        return;
+    }
+    if browser_output_has_state_evidence(output) {
+        output.text.push_str(&format!(
+            "\n\nBrowser acceptance: action `{action_tool}` is verified by the page-state evidence returned with the action."
+        ));
+        return;
+    }
+
+    enum AcceptanceOutcome {
+        Response(
+            Result<
+                runtime::JsonRpcResponse<runtime::McpToolCallResult>,
+                runtime::McpServerManagerError,
+            >,
+        ),
+        Cancelled,
+        TimedOut,
+    }
+    let outcome = runtime.block_on(async {
+        tokio::select! {
+            result = manager.call_tool(snapshot_tool, Some(serde_json::json!({}))) => AcceptanceOutcome::Response(result),
+            () = wait_for_mcp_cancel(cancel_flag) => AcceptanceOutcome::Cancelled,
+            () = tokio::time::sleep(BROWSER_ACCEPTANCE_TIMEOUT) => AcceptanceOutcome::TimedOut,
+        }
+    });
+    let acceptance = match outcome {
+        AcceptanceOutcome::Response(Ok(response)) => {
+            if let Some(error) = response.error {
+                format!(
+                    "acceptance snapshot failed: {} ({})",
+                    error.message, error.code
+                )
+            } else if let Some(result) = response.result {
+                match mcp_result_to_tool_output(result) {
+                    Ok(snapshot) if !snapshot.reported_error && browser_output_has_state_evidence(&snapshot) => {
+                        output.media.extend(snapshot.media);
+                        format!("verified by automatic `{snapshot_tool}` after the action.\n\n{}", snapshot.text)
+                    }
+                    Ok(snapshot) => format!(
+                        "automatic `{snapshot_tool}` returned without recognizable page-state evidence.\n\n{}",
+                        snapshot.text
+                    ),
+                    Err(error) => format!("acceptance snapshot could not be decoded: {error}"),
+                }
+            } else {
+                "acceptance snapshot returned no result".to_string()
+            }
+        }
+        AcceptanceOutcome::Response(Err(error)) => {
+            format!("acceptance snapshot failed: {error}")
+        }
+        AcceptanceOutcome::Cancelled => "acceptance snapshot was cancelled".to_string(),
+        AcceptanceOutcome::TimedOut => format!(
+            "acceptance snapshot timed out after {}s",
+            BROWSER_ACCEPTANCE_TIMEOUT.as_secs()
+        ),
+    };
+    output.text.push_str(&format!(
+        "\n\n## Browser acceptance\nAction `{action_tool}` completed; {acceptance}"
+    ));
+}
+
+async fn wait_for_mcp_idle_timeout(last_progress: Arc<Mutex<Option<Instant>>>, timeout: Duration) {
+    loop {
+        let elapsed = last_progress
+            .lock()
+            .ok()
+            .and_then(|progress_at| progress_at.as_ref().map(Instant::elapsed));
+        let Some(elapsed) = elapsed else {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        };
+        let Some(remaining) = timeout.checked_sub(elapsed) else {
+            return;
+        };
+        tokio::time::sleep(remaining).await;
+    }
+}
+
 /// Convert MCP's heterogeneous content blocks into the runtime's transport
 /// neutral representation. Image bytes stay in `ToolMedia`; only textual
 /// blocks and structured JSON are rendered into the context string.
@@ -606,6 +1491,7 @@ fn mcp_result_to_tool_output(result: runtime::McpToolCallResult) -> Result<ToolO
         text: text_parts.join("\n\n"),
         media,
         reported_error: result.is_error.unwrap_or(false),
+        evidence_text: None,
     })
 }
 
@@ -622,10 +1508,18 @@ async fn wait_for_mcp_cancel(cancel_flag: Option<Arc<AtomicBool>>) {
     }
 }
 
+/// Re-rank a kernel `ToolSearch` result against the catalog this Chat turn
+/// actually has.
+///
+/// The kernel searches its own tool list; Chat additionally holds every
+/// discovered MCP tool. Ranking the union in one pass — rather than appending
+/// MCP hits after kernel hits and truncating — is what lets a single call for
+/// `browser` return the whole family instead of one tool per call.
 fn merge_mcp_tool_search_results(
     output: String,
     input: &str,
-    tool_names: &BTreeSet<String>,
+    search_tools: &BTreeMap<String, String>,
+    unavailable_servers: &[String],
 ) -> String {
     let Ok(input) = serde_json::from_str::<Value>(input) else {
         return output;
@@ -635,41 +1529,25 @@ fn merge_mcp_tool_search_results(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim()
-        .to_lowercase();
-    let max_results = input
-        .get("max_results")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(5)
-        .max(1);
-    let mut matches = if let Some(selection) = query.strip_prefix("select:") {
-        let selected = selection
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .collect::<BTreeSet<_>>();
-        tool_names
-            .iter()
-            .filter(|name| selected.contains(name.to_lowercase().as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        let terms = query
-            .split_whitespace()
-            .map(|term| term.trim_start_matches('+'))
-            .filter(|term| !term.is_empty())
-            .collect::<Vec<_>>();
-        tool_names
-            .iter()
-            .filter(|name| {
-                let lowered = name.to_lowercase();
-                terms.is_empty() || terms.iter().all(|term| lowered.contains(term))
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+        .to_string();
+    let max_results = tools::tool_search_result_limit(
+        &query,
+        input
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(tools::DEFAULT_TOOL_SEARCH_RESULTS),
+    );
+    let candidates = search_tools
+        .iter()
+        .map(|(name, description)| tools::ToolSearchCandidate {
+            name,
+            description,
+        })
+        .collect::<Vec<_>>();
+    let mut matches = tools::rank_tool_search_candidates(&query, &candidates, max_results);
 
-    if matches.is_empty() {
+    if matches.is_empty() && unavailable_servers.is_empty() {
         return output;
     }
 
@@ -685,18 +1563,37 @@ fn merge_mcp_tool_search_results(
     let Some(existing) = existing.as_array_mut() else {
         return output;
     };
-    matches.retain(|name| !existing.iter().any(|item| item.as_str() == Some(name)));
-    existing.extend(matches.into_iter().map(Value::String));
-    existing.truncate(max_results);
+    // This turn's catalog is authoritative once it is known: the kernel searches
+    // its whole tool list, which still contains names this turn blocked, and
+    // those must not be advertised back to the model.
+    if !search_tools.is_empty() {
+        matches.truncate(max_results);
+        *existing = matches.into_iter().map(Value::String).collect();
+    }
     let total = object
         .get("total_deferred_tools")
         .and_then(Value::as_u64)
         .unwrap_or_default()
-        .saturating_add(tool_names.len() as u64);
+        .max(search_tools.len() as u64);
     object.insert(
         "total_deferred_tools".to_string(),
         Value::Number(total.into()),
     );
+    if unavailable_servers.is_empty() {
+        object.remove("pending_mcp_servers");
+    } else {
+        // Naming the servers that failed to start stops the model from
+        // searching repeatedly for a tool that cannot appear this turn.
+        object.insert(
+            "pending_mcp_servers".to_string(),
+            Value::Array(
+                unavailable_servers
+                    .iter()
+                    .map(|server| Value::String(server.clone()))
+                    .collect(),
+            ),
+        );
+    }
     serde_json::to_string_pretty(&value).unwrap_or(output)
 }
 
@@ -810,6 +1707,15 @@ pub fn attach_mcp_tools_with_cancel<T>(
         })
         .collect::<Vec<_>>();
     let mut tool_names = BTreeSet::new();
+    let mut unavailable_servers = manager
+        .unsupported_servers()
+        .iter()
+        .map(|server| server.server_name.clone())
+        .collect::<Vec<_>>();
+    let mut search_tools = tool_specs
+        .iter()
+        .map(|spec| (spec.name.clone(), spec.description.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     if feature_config.mcp().servers().is_empty() {
         return McpToolBundle {
@@ -818,7 +1724,10 @@ pub fn attach_mcp_tools_with_cancel<T>(
                 runtime: None,
                 manager: None,
                 tool_names,
+                search_tools,
+                unavailable_servers,
                 cancel_flag,
+                timeout_policy_override: None,
             },
             tool_specs,
             warnings,
@@ -832,13 +1741,23 @@ pub fn attach_mcp_tools_with_cancel<T>(
         Ok(runtime) => runtime,
         Err(error) => {
             warnings.push(format!("could not start MCP runtime: {error}"));
+            unavailable_servers.extend(
+                feature_config
+                    .mcp()
+                    .servers()
+                    .iter()
+                    .map(|(name, _)| name.clone()),
+            );
             return McpToolBundle {
                 executor: McpToolExecutor {
                     inner,
                     runtime: None,
                     manager: None,
                     tool_names,
+                    search_tools,
+                    unavailable_servers,
                     cancel_flag,
+                    timeout_policy_override: None,
                 },
                 tool_specs,
                 warnings,
@@ -848,11 +1767,10 @@ pub fn attach_mcp_tools_with_cancel<T>(
 
     let (discovered, failures) =
         discover_mcp_tools_cached(&mut manager, feature_config, &mcp_runtime);
-    warnings.extend(
-        failures
-            .into_iter()
-            .map(|(server, error)| format!("could not discover MCP server `{server}`: {error}")),
-    );
+    warnings.extend(failures.into_iter().map(|(server, error)| {
+        unavailable_servers.push(server.clone());
+        format!("could not discover MCP server `{server}`: {error}")
+    }));
     for managed in discovered {
         if allowed_tools.is_some_and(|allowed| !allowed.contains(&managed.qualified_name)) {
             continue;
@@ -870,6 +1788,7 @@ pub fn attach_mcp_tools_with_cancel<T>(
             })
         });
         tool_names.insert(managed.qualified_name.clone());
+        search_tools.insert(managed.qualified_name.clone(), description.clone());
         tool_specs.push(ChatToolSpec {
             name: managed.qualified_name,
             description,
@@ -877,6 +1796,8 @@ pub fn attach_mcp_tools_with_cancel<T>(
             required_permission: PermissionMode::DangerFullAccess,
         });
     }
+    unavailable_servers.sort();
+    unavailable_servers.dedup();
 
     McpToolBundle {
         executor: McpToolExecutor {
@@ -884,7 +1805,10 @@ pub fn attach_mcp_tools_with_cancel<T>(
             runtime: Some(mcp_runtime),
             manager: Some(manager),
             tool_names,
+            search_tools,
+            unavailable_servers,
             cancel_flag,
+            timeout_policy_override: None,
         },
         tool_specs,
         warnings,

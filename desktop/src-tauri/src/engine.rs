@@ -1067,16 +1067,23 @@ fn start_tool_heartbeat(
     session_id: String,
     tool_use_id: String,
     tool_name: String,
-    done: Arc<AtomicBool>,
+    timeout: Option<Duration>,
     cancelled: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> ToolHeartbeat {
+    let done = Arc::new(AtomicBool::new(false));
+    let worker_done = done.clone();
+    let handle = std::thread::spawn(move || {
         let started = Instant::now();
+        let mut wait = Duration::from_secs(1);
         loop {
-            std::thread::sleep(Duration::from_millis(1_000));
-            if done.load(Ordering::SeqCst) || cancelled.load(Ordering::SeqCst) {
+            std::thread::park_timeout(wait);
+            if worker_done.load(Ordering::SeqCst) || cancelled.load(Ordering::SeqCst) {
                 break;
             }
+            let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            let timeout_ms = timeout.map(|value| value.as_millis().try_into().unwrap_or(u64::MAX));
+            let near_timeout =
+                timeout_ms.is_some_and(|deadline| elapsed_ms >= deadline.saturating_sub(30_000));
             emit_tool_progress(
                 delivery,
                 &app,
@@ -1084,17 +1091,42 @@ fn start_tool_heartbeat(
                 &tool_use_id,
                 &tool_name,
                 &tools::ToolProgress {
-                    elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                    timeout_ms: None,
+                    elapsed_ms,
+                    timeout_ms,
                     pid: None,
                     stdout_tail: None,
                     stderr_tail: None,
-                    near_timeout: false,
-                    message: "Still running".to_string(),
+                    near_timeout,
+                    message: "Awaiting tool completion".to_string(),
                 },
             );
+            // The first update appears quickly; subsequent lifecycle updates
+            // are sparse enough not to flood the durable event log.
+            wait = Duration::from_secs(10);
         }
-    })
+    });
+    ToolHeartbeat {
+        done,
+        handle: Some(handle),
+    }
+}
+
+struct ToolHeartbeat {
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ToolHeartbeat {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        // Wake immediately instead of making a completed tool wait for the
+        // heartbeat interval before its result can be returned.
+        handle.thread().unpark();
+        let _ = handle.join();
+    }
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -1312,19 +1344,18 @@ impl LatexRepairGuard {
     fn note_source_write(&mut self, tool_name: &str, input: &str, workspace: &Path) {
         if !matches!(
             tool_name,
-            "write_file" | "edit_file" | "multi_edit" | "append_file"
+            "write_file" | "write_files" | "edit_file" | "multi_edit" | "append_file"
         ) {
             return;
         }
-        let Some(path) = edited_file_path(input) else {
-            return;
-        };
-        if !path.to_ascii_lowercase().ends_with(".tex") || self.baselines.contains_key(&path) {
-            return;
-        }
-        let absolute = workspace.join(&path);
-        if let Ok(content) = std::fs::read_to_string(&absolute) {
-            self.baselines.insert(path, content);
+        for path in edited_file_paths(input) {
+            if !path.to_ascii_lowercase().ends_with(".tex") || self.baselines.contains_key(&path) {
+                continue;
+            }
+            let absolute = workspace.join(&path);
+            if let Ok(content) = std::fs::read_to_string(&absolute) {
+                self.baselines.insert(path, content);
+            }
         }
     }
 
@@ -1464,18 +1495,33 @@ fn structural_unit(line: &str) -> Option<String> {
     None
 }
 
-/// The workspace-relative path a write tool is about to modify.
-fn edited_file_path(input: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+/// Workspace-relative paths a write tool is about to modify.
+fn edited_file_paths(input: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
     for key in ["path", "file_path", "filePath"] {
         if let Some(path) = value.get(key).and_then(serde_json::Value::as_str) {
             let path = path.trim();
             if !path.is_empty() {
-                return Some(path.replace('\\', "/"));
+                paths.push(path.replace('\\', "/"));
             }
         }
     }
-    None
+    if let Some(files) = value.get("files").and_then(serde_json::Value::as_array) {
+        for file in files {
+            if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    paths.push(path.replace('\\', "/"));
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 impl LatexRepairGuard {
@@ -1730,6 +1776,7 @@ where
     ) -> Result<ToolOutput, ToolError> {
         match inner_result {
             Ok(output) => {
+                let evidence_text = output.text.clone();
                 // The tool already ran, so its output is real work that must not
                 // be lost to a cancel that lands right after completion.
                 let workspace = self.workspace.clone();
@@ -1789,11 +1836,32 @@ where
                     text: context_output,
                     media: output.media,
                     reported_error: is_error,
+                    evidence_text: Some(evidence_text),
                 })
             }
             Err(error) => {
                 if error.is_interrupted() {
                     return Err(error);
+                }
+                if error.is_timed_out() {
+                    let timeout_ms = error.timeout_ms();
+                    publish_chat_event(
+                        self.event_delivery,
+                        &self.app,
+                        "chat-tool-progress",
+                        &self.session_id,
+                        "tool_timeout",
+                        json!({
+                            "sessionId": self.session_id,
+                            "id": tool_use_id,
+                            "name": tool_name,
+                            "elapsedMs": timeout_ms.unwrap_or_default(),
+                            "timeoutMs": timeout_ms,
+                            "nearTimeout": true,
+                            "recovered": true,
+                            "message": error.to_string(),
+                        }),
+                    );
                 }
                 let output = format_tool_error_with_recovery(tool_name, &error.to_string());
                 Err(ToolError::new(output))
@@ -1841,7 +1909,6 @@ where
         // The pre-edit content is only on disk until this write runs.
         self.latex_repair_guard
             .note_source_write(tool_name, input, &self.workspace);
-        let heartbeat_done = Arc::new(AtomicBool::new(false));
         let heartbeat = should_emit_generic_tool_progress(tool_name).then(|| {
             start_tool_heartbeat(
                 self.event_delivery,
@@ -1849,7 +1916,7 @@ where
                 self.session_id.clone(),
                 tool_use_id.to_string(),
                 tool_name.to_string(),
-                heartbeat_done.clone(),
+                aris_chat::mcp_tool_max_runtime(tool_name, input),
                 self.cancelled.clone(),
             )
         });
@@ -1978,10 +2045,7 @@ where
             })
             .map_err(ToolError::new)?
         };
-        heartbeat_done.store(true, Ordering::SeqCst);
-        if let Some(handle) = heartbeat {
-            let _ = handle.join();
-        }
+        drop(heartbeat);
         self.finish_tool_execution(tool_use_id, tool_name, input, inner_result)
     }
 
@@ -2013,6 +2077,17 @@ where
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
+        let heartbeat = should_emit_generic_tool_progress(tool_name).then(|| {
+            start_tool_heartbeat(
+                self.event_delivery,
+                self.app.clone(),
+                self.session_id.clone(),
+                tool_use_id.to_string(),
+                tool_name.to_string(),
+                aris_chat::mcp_tool_max_runtime(tool_name, input),
+                self.cancelled.clone(),
+            )
+        });
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
         let inner_result = with_bound_project_environment(&workspace, &project_id, || {
@@ -2020,6 +2095,7 @@ where
                 .execute_output_with_id(tool_use_id, tool_name, input)
         })
         .map_err(ToolError::new)?;
+        drop(heartbeat);
         self.finish_tool_execution_output(tool_use_id, tool_name, input, inner_result)
     }
 
@@ -2080,19 +2156,17 @@ where
         let heartbeats = invocations
             .iter()
             .map(|invocation| {
-                let done = Arc::new(AtomicBool::new(false));
-                let handle = should_emit_generic_tool_progress(&invocation.tool_name).then(|| {
+                should_emit_generic_tool_progress(&invocation.tool_name).then(|| {
                     start_tool_heartbeat(
                         self.event_delivery,
                         self.app.clone(),
                         self.session_id.clone(),
                         invocation.tool_use_id.clone(),
                         invocation.tool_name.clone(),
-                        done.clone(),
+                        aris_chat::mcp_tool_max_runtime(&invocation.tool_name, &invocation.input),
                         self.cancelled.clone(),
                     )
-                });
-                (done, handle)
+                })
             })
             .collect::<Vec<_>>();
 
@@ -2108,14 +2182,7 @@ where
                 .collect()
         });
 
-        for (done, _) in &heartbeats {
-            done.store(true, Ordering::SeqCst);
-        }
-        for (_, handle) in heartbeats {
-            if let Some(handle) = handle {
-                let _ = handle.join();
-            }
-        }
+        drop(heartbeats);
 
         invocations
             .iter()
@@ -2180,6 +2247,58 @@ struct DesktopWireTraceSink {
     session_id: String,
     cancelled: Arc<AtomicBool>,
     event_delivery: ChatEventDelivery,
+}
+
+struct DesktopRuntimeEventSink {
+    session_id: String,
+}
+
+impl runtime::EventSink for DesktopRuntimeEventSink {
+    fn emit(&mut self, event: &runtime::RuntimeEvent) {
+        match &event.event_type {
+            runtime::EventType::EvidenceObservation {
+                tool_name,
+                novelty,
+                fingerprint,
+                consecutive_no_new,
+                unique_evidence,
+                total_observations,
+            } => crate::chat_events::record_wire_event(
+                &self.session_id,
+                "tool.evidence",
+                json!({
+                    "sessionId": &self.session_id,
+                    "tool": tool_name,
+                    "novelty": novelty,
+                    "fingerprint": fingerprint,
+                    "consecutiveNoNewEvidence": consecutive_no_new,
+                    "uniqueEvidence": unique_evidence,
+                    "totalObservations": total_observations,
+                }),
+            ),
+            runtime::EventType::ContextCheckpoint {
+                reason,
+                iteration,
+                tool_calls,
+                tokens_before,
+                tokens_after,
+                removed_messages,
+            } => crate::chat_events::record_wire_event(
+                &self.session_id,
+                "context.checkpoint",
+                json!({
+                    "sessionId": &self.session_id,
+                    "reason": reason,
+                    "iteration": iteration,
+                    "toolCalls": tool_calls,
+                    "tokensBefore": tokens_before,
+                    "tokensAfter": tokens_after,
+                    "removedMessages": removed_messages,
+                }),
+            ),
+            _ => {}
+        }
+    }
 }
 
 impl aris_executor::ExecutorTraceSink for DesktopWireTraceSink {
@@ -2975,6 +3094,7 @@ fn compact_tool_input_json_for_ui(tool_name: &str, value: &mut serde_json::Value
         "write_file" | "append_file" | "append_write_chunk" => {
             omit_large_json_string_field(value, "content", &format!("{tool_name}.content"));
         }
+        "write_files" => compact_json_string_values_for_ui(value),
         "edit_file" | "str_replace_based_edit_tool" => {
             omit_large_json_string_field(value, "old_string", "edit_file.old_string");
             omit_large_json_string_field(value, "new_string", "edit_file.new_string");
@@ -6298,6 +6418,7 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
             *name,
             "bash"
                 | "write_file"
+                | "write_files"
                 | "append_file"
                 | "commit_large_write"
                 | "edit_file"
@@ -7946,6 +8067,43 @@ async fn run_chat_turn_with_context(
         for warning in &mcp_bundle.warnings {
             eprintln!("SomniQ desktop: {warning}");
         }
+        let tool_routing = (!autonomous_workflow
+            && worker_retrieval_follow_up != InterruptedResearchFollowUp::Summarize)
+            .then(|| {
+                aris_chat::route_chat_tools(
+                    &worker_user_text,
+                    &mcp_bundle.tool_specs,
+                    aris_chat::dynamic_tool_routing_mode(),
+                )
+            });
+        if let Some(routing) = &tool_routing {
+            crate::chat_events::record_wire_event(
+                &worker_session_id,
+                "tool.routing",
+                json!({
+                    "sessionId": &worker_session_id,
+                    "mode": routing.mode.as_str(),
+                    "profile": &routing.profile,
+                    "catalogToolCount": routing.catalog_names.len(),
+                    "activeToolCount": routing.active_names.len(),
+                    "deferredToolCount": routing.deferred_names.len(),
+                    "maxActiveToolCount": aris_chat::MAX_ACTIVE_TOOLS,
+                    "activeTools": &routing.active_names,
+                    "pinnedTools": &routing.pinned_names,
+                    "reasons": &routing.reasons,
+                }),
+            );
+        }
+        crate::chat_events::record_wire_event(
+            &worker_session_id,
+            "tool.evidence_guard",
+            json!({
+                "sessionId": &worker_session_id,
+                "mode": runtime::evidence_guard_mode().as_str(),
+                "nudgeAfter": runtime::NO_NEW_EVIDENCE_NUDGE_CALLS,
+                "blockAfter": runtime::NO_NEW_EVIDENCE_BLOCK_CALLS,
+            }),
+        );
         let trace_sink: Arc<dyn aris_executor::ExecutorTraceSink> =
             Arc::new(DesktopWireTraceSink {
                 app: worker_app.clone(),
@@ -8041,6 +8199,17 @@ async fn run_chat_turn_with_context(
             );
         }
         if !autonomous_workflow {
+            if tool_routing
+                .as_ref()
+                .is_some_and(|routing| routing.mode == aris_chat::ToolRoutingMode::Active)
+            {
+                system_prompt.push(
+                    format!(
+                        "Tool schemas are dynamically routed for this turn. If the visible tools do not cover the next necessary action, call ToolSearch once and ask for everything that action needs: `select:name_a,name_b,name_c` activates that exact list, and a capability keyword such as `browser` returns the whole family. Every returned match is activated for the following model step. Do not issue one ToolSearch call per tool. The active set is capped at {} tools, so a tool that has gone unused may be dropped from the visible list; it stays authorized and callable, and calling it activates it again. ToolSearch changes visibility only and never bypasses permissions.",
+                        aris_chat::MAX_ACTIVE_TOOLS
+                    ),
+                );
+            }
             if crate::oracle_web::consult_tool_available() {
                 system_prompt.push(
                     "Configured integration: ChatGPT Web consultation is available through the user's pre-bound Oracle account. When the user asks in natural language to use the configured ChatGPT account, the webpage account, or Oracle to consult/delegate/compare, call ChatGptWebConsult. Calls within this SomniQ Chat session continue the prior ChatGPT webpage conversation by default; set continueConversation:false only when the user asks for a fresh or independent Oracle conversation. Use followUps when several planned prompts must run sequentially in that same webpage conversation. Do not call it for an ordinary Chat answer, do not ask the user to select an account, and never request or expose browser cookies, passwords, or account-selection metadata."
@@ -8067,7 +8236,7 @@ async fn run_chat_turn_with_context(
         // turn silently lose the user's request.
         let mut build_failure_session = session.clone();
         build_failure_session.messages.push(user_message.clone());
-        let mut runtime = aris_chat::build_conversation_runtime_with_trace(
+        let runtime = aris_chat::build_conversation_runtime_with_trace(
             session,
             executor_config,
             model,
@@ -8085,24 +8254,35 @@ async fn run_chat_turn_with_context(
         .map_err(|error| ChatTurnWorkerFailure {
             message: error.to_string(),
             session: Some(build_failure_session),
-        })?
-        .with_compaction_session_id(worker_session_id.clone())
-        .with_retrieval_continuation(
-            worker_retrieval_checkpoint.clone(),
-            worker_retrieval_follow_up == InterruptedResearchFollowUp::Continue,
-        )
-        .with_retrieval_summary(
-            worker_retrieval_checkpoint,
-            worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize,
-        )
-        .with_retrieval_checkpoint_listener({
-            let registry = worker_retrieval_registry.clone();
-            let session_id = worker_session_id.clone();
-            move |checkpoint| {
-                record_retrieval_checkpoint(&registry, &session_id, worker_turn_id, checkpoint);
-            }
-        })
-        .with_tool_result_listener({
+        })?;
+        let runtime = if let Some(routing) = tool_routing
+            .filter(|routing| routing.mode == aris_chat::ToolRoutingMode::Active)
+        {
+            runtime.with_dynamic_tool_routing(routing.runtime_routing())
+        } else {
+            runtime
+        };
+        let mut runtime = runtime
+            .with_event_sink(Box::new(DesktopRuntimeEventSink {
+                session_id: worker_session_id.clone(),
+            }))
+            .with_compaction_session_id(worker_session_id.clone())
+            .with_retrieval_continuation(
+                worker_retrieval_checkpoint.clone(),
+                worker_retrieval_follow_up == InterruptedResearchFollowUp::Continue,
+            )
+            .with_retrieval_summary(
+                worker_retrieval_checkpoint,
+                worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize,
+            )
+            .with_retrieval_checkpoint_listener({
+                let registry = worker_retrieval_registry.clone();
+                let session_id = worker_session_id.clone();
+                move |checkpoint| {
+                    record_retrieval_checkpoint(&registry, &session_id, worker_turn_id, checkpoint);
+                }
+            })
+            .with_tool_result_listener({
             let app = worker_app.clone();
             let session_id = worker_session_id.clone();
             let turn_id = worker_audit_turn_id.clone();
@@ -8149,7 +8329,7 @@ async fn run_chat_turn_with_context(
                     payload,
                 );
             }
-        });
+            });
         emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
         // `DesktopPermissionPrompter` blocks until a human answers. A work task
         // was queued by someone who then walked away, so it gets the prompter
@@ -9998,6 +10178,12 @@ fn export_debug_zip(
         wire_log_path.as_deref(),
         &rotated_wire_log_paths,
     )?;
+    let diagnostics = build_debug_performance_summary(
+        &export_session,
+        &session_usage_log,
+        wire_log_path.as_deref(),
+        &rotated_wire_log_paths,
+    )?;
     if let Some(path) = event_log_path.as_deref() {
         zip_write_file_if_exists(&mut zip, "events.jsonl", path)?;
     }
@@ -10020,6 +10206,11 @@ fn export_debug_zip(
         &serde_json::to_string_pretty(&redacted_config_json())
             .map_err(|error| error.to_string())?,
     )?;
+    zip_write_text(
+        &mut zip,
+        "diagnostics.json",
+        &serde_json::to_string_pretty(&diagnostics).map_err(|error| error.to_string())?,
+    )?;
     for artifact in &tool_output_artifacts {
         zip_write_file_if_exists(&mut zip, &artifact.zip_name, &artifact.path)?;
     }
@@ -10037,7 +10228,7 @@ fn export_debug_zip(
         })
         .collect::<Vec<_>>();
     let manifest = json!({
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "createdAt": current_time_millis(),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "sessionId": session_id,
@@ -10060,6 +10251,7 @@ fn export_debug_zip(
             "runtime-session.persisted-manifest.json": persisted_session_manifest_path.as_ref().is_some_and(|path| path.exists()),
             "usage-log.jsonl": !session_usage_log.is_empty(),
             "config.redacted.json": true,
+            "diagnostics.json": true,
             "toolOutputArtifacts": tool_output_artifacts.len()
         },
         "fileBytes": {
@@ -10074,6 +10266,7 @@ fn export_debug_zip(
             "sourcePath": artifact.path.display().to_string(),
             "bytes": artifact.bytes,
         })).collect::<Vec<_>>(),
+        "performanceSummary": diagnostics,
         "traceGovernance": {
             "wireTraceEnv": std::env::var("ARIS_WIRE_TRACE").unwrap_or_else(|_| "on".to_string()),
             "wireTraceRawSseEnv": std::env::var("ARIS_WIRE_TRACE_RAW_SSE").unwrap_or_else(|_| "off".to_string()),
@@ -10087,6 +10280,7 @@ fn export_debug_zip(
             "tool-output/* contains large tool outputs that were stored out-of-band during the chat.",
             "events.jsonl remains the UI/runtime event log used for replay and restore.",
             "usage-log.jsonl contains only entries whose sessionId matches this debug bundle.",
+            "diagnostics.json summarizes model requests, token occupancy, tool use, routing, evidence, and context checkpoints without requiring manual JSONL analysis.",
             "config.redacted.json redacts secret-bearing keys and conservatively redacts command/env/header/argument fields."
         ]
     });
@@ -10106,6 +10300,212 @@ fn export_debug_zip(
         message_count: export_session.logical_message_count(),
         session_source,
     })
+}
+
+fn build_debug_performance_summary(
+    session: &Session,
+    usage_log: &str,
+    wire_log_path: Option<&Path>,
+    rotated_wire_log_paths: &[PathBuf],
+) -> Result<Value, String> {
+    let mut tool_calls = 0_usize;
+    let mut tool_failures = 0_usize;
+    let mut tool_counts = BTreeMap::<String, usize>::new();
+    let mut staged_write_calls = 0_usize;
+    let mut direct_write_calls = 0_usize;
+    let mut no_new_evidence_blocks = 0_usize;
+    for message in &session.messages {
+        for block in &message.blocks {
+            match block {
+                ContentBlock::ToolUse { name, .. } => {
+                    tool_calls += 1;
+                    *tool_counts.entry(name.clone()).or_default() += 1;
+                    if matches!(
+                        name.as_str(),
+                        "begin_large_write" | "append_write_chunk" | "commit_large_write"
+                    ) {
+                        staged_write_calls += 1;
+                    }
+                    if matches!(name.as_str(), "write_file" | "write_files") {
+                        direct_write_calls += 1;
+                    }
+                }
+                ContentBlock::ToolResult {
+                    output, is_error, ..
+                } => {
+                    tool_failures += usize::from(*is_error);
+                    if output.contains("no_new_evidence_loop") {
+                        no_new_evidence_blocks += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut usage_entries = 0_usize;
+    let mut executor_usage_entries = 0_usize;
+    let mut reviewer_usage_entries = 0_usize;
+    let mut total_input_tokens = 0_u64;
+    let mut total_output_tokens = 0_u64;
+    let mut total_cache_creation_tokens = 0_u64;
+    let mut total_cache_read_tokens = 0_u64;
+    let mut peak_prompt_tokens = 0_u64;
+    let mut total_duration_ms = 0_u64;
+    for line in usage_log.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<crate::usage_log::UsageLogEntry>(line) else {
+            continue;
+        };
+        usage_entries += 1;
+        executor_usage_entries += usize::from(entry.role == "executor");
+        reviewer_usage_entries += usize::from(entry.role == "reviewer");
+        let prompt = u64::from(entry.input_tokens)
+            .saturating_add(u64::from(entry.cache_creation_input_tokens))
+            .saturating_add(u64::from(entry.cache_read_input_tokens));
+        peak_prompt_tokens = peak_prompt_tokens.max(prompt);
+        total_input_tokens = total_input_tokens.saturating_add(u64::from(entry.input_tokens));
+        total_output_tokens = total_output_tokens.saturating_add(u64::from(entry.output_tokens));
+        total_cache_creation_tokens = total_cache_creation_tokens
+            .saturating_add(u64::from(entry.cache_creation_input_tokens));
+        total_cache_read_tokens =
+            total_cache_read_tokens.saturating_add(u64::from(entry.cache_read_input_tokens));
+        total_duration_ms = total_duration_ms.saturating_add(entry.duration_ms);
+    }
+
+    let mut model_requests = 0_usize;
+    let mut model_errors = 0_usize;
+    let mut model_retries = 0_usize;
+    let mut checkpoints = 0_usize;
+    let mut checkpoint_tokens_before = 0_u64;
+    let mut checkpoint_tokens_after = 0_u64;
+    let mut checkpoint_removed_messages = 0_u64;
+    let mut checkpoint_reasons = BTreeMap::<String, usize>::new();
+    let mut routing_events = 0_usize;
+    let mut routing_active_min = None::<u64>;
+    let mut routing_active_max = None::<u64>;
+    let mut routing_deferred_max = 0_u64;
+    let mut evidence_observations = 0_usize;
+    let mut evidence_new = 0_usize;
+    let mut wire_paths = rotated_wire_log_paths.to_vec();
+    if let Some(path) = wire_log_path {
+        wire_paths.push(path.to_path_buf());
+    }
+    for path in wire_paths {
+        if !path.exists() {
+            continue;
+        }
+        let file = fs::File::open(&path).map_err(|error| error.to_string())?;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|error| error.to_string())?;
+            let Ok(event) = serde_json::from_str::<crate::chat_events::ChatEventLogEntry>(&line)
+            else {
+                continue;
+            };
+            match event.kind.as_str() {
+                "llm.request" => model_requests += 1,
+                "llm.error" => model_errors += 1,
+                "llm.retry" => model_retries += 1,
+                "context.checkpoint" => {
+                    checkpoints += 1;
+                    checkpoint_tokens_before = checkpoint_tokens_before.saturating_add(
+                        event.payload.get("tokensBefore").and_then(Value::as_u64).unwrap_or(0),
+                    );
+                    checkpoint_tokens_after = checkpoint_tokens_after.saturating_add(
+                        event.payload.get("tokensAfter").and_then(Value::as_u64).unwrap_or(0),
+                    );
+                    checkpoint_removed_messages = checkpoint_removed_messages.saturating_add(
+                        event.payload.get("removedMessages").and_then(Value::as_u64).unwrap_or(0),
+                    );
+                    let reason = event
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    *checkpoint_reasons.entry(reason).or_default() += 1;
+                }
+                "tool.routing" => {
+                    routing_events += 1;
+                    let active = event
+                        .payload
+                        .get("activeToolCount")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    routing_active_min = Some(routing_active_min.map_or(active, |old| old.min(active)));
+                    routing_active_max = Some(routing_active_max.map_or(active, |old| old.max(active)));
+                    routing_deferred_max = routing_deferred_max.max(
+                        event.payload.get("deferredToolCount").and_then(Value::as_u64).unwrap_or(0),
+                    );
+                }
+                "tool.evidence" => {
+                    evidence_observations += 1;
+                    evidence_new += usize::from(
+                        event.payload.get("novelty").and_then(Value::as_str) == Some("new"),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let checkpoint_tokens_saved =
+        checkpoint_tokens_before.saturating_sub(checkpoint_tokens_after);
+    Ok(json!({
+        "schemaVersion": 1,
+        "model": {
+            "requestCount": model_requests,
+            "errorCount": model_errors,
+            "retryCount": model_retries,
+            "usageEntryCount": usage_entries,
+            "executorUsageEntries": executor_usage_entries,
+            "reviewerUsageEntries": reviewer_usage_entries,
+            "peakPromptTokens": peak_prompt_tokens,
+            "totalInputTokens": total_input_tokens,
+            "totalOutputTokens": total_output_tokens,
+            "totalCacheCreationInputTokens": total_cache_creation_tokens,
+            "totalCacheReadInputTokens": total_cache_read_tokens,
+            "recordedDurationMs": total_duration_ms,
+        },
+        "tools": {
+            "callCount": tool_calls,
+            "failureCount": tool_failures,
+            "uniqueToolCount": tool_counts.len(),
+            "byName": tool_counts,
+            "directWriteCalls": direct_write_calls,
+            "stagedWriteProtocolCalls": staged_write_calls,
+            "noNewEvidenceBlocks": no_new_evidence_blocks,
+        },
+        "context": {
+            "checkpointCount": checkpoints,
+            "checkpointReasons": checkpoint_reasons,
+            "tokensBeforeTotal": checkpoint_tokens_before,
+            "tokensAfterTotal": checkpoint_tokens_after,
+            "estimatedTokensRemoved": checkpoint_tokens_saved,
+            "removedMessages": checkpoint_removed_messages,
+            "persistedCompactionCount": session.compactions.len(),
+            "policy": {
+                "toolCallInterval": runtime::soft_checkpoint_tool_call_interval_from_env(),
+                "contextRatio": runtime::soft_checkpoint_context_ratio_from_env(),
+                "tokenGrowthRatio": runtime::soft_checkpoint_token_growth_ratio_from_env(),
+            },
+        },
+        "routing": {
+            "eventCount": routing_events,
+            "activeToolCountMin": routing_active_min,
+            "activeToolCountMax": routing_active_max,
+            "maxDeferredToolCount": routing_deferred_max,
+        },
+        "evidence": {
+            "observationCount": evidence_observations,
+            "newObservationCount": evidence_new,
+            "noNewObservationCount": evidence_observations.saturating_sub(evidence_new),
+        },
+        "limitations": [
+            "Model request counts require wire tracing; zero may mean tracing was disabled.",
+            "Token totals come from the session-scoped usage log and exclude requests whose provider returned no usage.",
+            "Checkpoint token savings are heuristic live-context estimates, not billing-token savings."
+        ]
+    }))
 }
 
 #[tauri::command]

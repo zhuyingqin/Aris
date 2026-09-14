@@ -4,20 +4,362 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    attach_mcp_tools_with_cancel, chat_tool_specs, clear_mcp_discovery_cache,
+    attach_mcp_tools_with_cancel, browser_acceptance_snapshot_name,
+    browser_output_has_state_evidence, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
-    llm_review_override_section, mcp_result_to_tool_output, merge_mcp_tool_search_results,
-    model_developer, model_identity_section, permission_policy_for_tools,
-    resolve_settings_executor_config, resolve_summarizer_model,
-    tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
+    llm_review_override_section, mcp_result_to_tool_output, mcp_tool_timeout_policy_with_defaults,
+    mcp_tool_timeout_with_default, merge_mcp_tool_search_results, model_developer,
+    model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
+    resolve_summarizer_model, route_chat_tools, tool_schema_context_overhead_tokens,
+    ChatExecutorConfig, ChatToolSpec, McpToolTimeoutPolicy, ToolRoutingMode, MAX_ACTIVE_TOOLS,
+    MAX_ROUTED_TOOLS,
 };
 use api::AuthSource;
 use runtime::{
     ConfigSource, ContentBlock, ConversationMessage, McpServerConfig, McpStdioServerConfig,
     McpToolCallContent, McpToolCallResult, PermissionMode, RuntimeFeatureConfig,
-    ScopedMcpServerConfig, StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, TurnSummary,
+    ScopedMcpServerConfig, StaticToolExecutor, TokenUsage, ToolExecutor, ToolMedia, ToolOutput,
+    TurnSummary,
 };
 use serde_json::{json, Value};
+
+fn routing_spec(name: &str) -> ChatToolSpec {
+    ChatToolSpec {
+        name: name.to_string(),
+        description: format!("{name} test tool"),
+        input_schema: json!({"type": "object"}),
+        required_permission: PermissionMode::ReadOnly,
+    }
+}
+
+#[test]
+fn dynamic_tool_router_keeps_a_bounded_relevant_subset() {
+    let names = [
+        "ToolSearch",
+        "AskUserQuestion",
+        "bash",
+        "read_file",
+        "read_files",
+        "glob_search",
+        "grep_search",
+        "session_search",
+        "memory",
+        "write_file",
+        "append_file",
+        "edit_file",
+        "multi_edit",
+        "change_list",
+        "change_get",
+        "change_revert",
+        "mcp__pw__browser_navigate",
+        "mcp__pw__browser_snapshot",
+        "mcp__pw__browser_click",
+        "mcp__pw__browser_fill_form",
+        "mcp__pw__browser_evaluate",
+        "mcp__pw__browser_take_screenshot",
+        "mcp__pw__browser_wait_for",
+        "mcp__pw__browser_resize",
+        "LiteratureSearch",
+        "ArxivSearch",
+        "EvidenceGet",
+        "NotebookEdit",
+        "ComputeRun",
+        "ReadMediaFile",
+        "Agent",
+    ];
+    let specs = names.into_iter().map(routing_spec).collect::<Vec<_>>();
+    let plan = route_chat_tools(
+        "修复 React UI，并在浏览器验收",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    assert!(plan.active_names.len() <= 20);
+    assert!(plan.active_names.contains("ToolSearch"));
+    assert!(plan.active_names.contains("read_file"));
+    assert!(plan.active_names.contains("read_files"));
+    assert!(plan.active_names.contains("edit_file"));
+    assert!(plan.active_names.contains("mcp__pw__browser_navigate"));
+    assert!(!plan.deferred_names.is_empty());
+    assert!(plan.profile.contains("code"));
+    assert!(plan.profile.contains("browser"));
+}
+
+fn desktop_like_catalog() -> Vec<ChatToolSpec> {
+    [
+        "ToolSearch",
+        "AskUserQuestion",
+        "bash",
+        "read_file",
+        "read_files",
+        "glob_search",
+        "grep_search",
+        "session_search",
+        "memory",
+        "TodoWrite",
+        "WorkspaceLayout",
+        "write_file",
+        "append_file",
+        "begin_large_write",
+        "append_write_chunk",
+        "commit_large_write",
+        "edit_file",
+        "multi_edit",
+        "change_list",
+        "change_get",
+        "change_revert",
+        "mcp__pw__browser_navigate",
+        "mcp__pw__browser_snapshot",
+        "mcp__pw__browser_click",
+        "mcp__pw__browser_evaluate",
+        "mcp__pw__browser_type",
+        "mcp__pw__browser_fill_form",
+        "mcp__pw__browser_take_screenshot",
+        "mcp__pw__browser_wait_for",
+        "mcp__pw__browser_resize",
+        "LiteratureSearch",
+        "ArxivSearch",
+        "EvidenceGet",
+        "NotebookEdit",
+        "ComputeRun",
+        "ReadMediaFile",
+        "WebSearch",
+        "WebFetch",
+        "Agent",
+        "Skill",
+    ]
+    .into_iter()
+    .map(routing_spec)
+    .collect()
+}
+
+#[test]
+fn dynamic_tool_router_gives_every_matched_intent_its_required_tools() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "创建一个新的配置文件，再修改 lib.rs，最后在浏览器里验收页面",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    // Create.
+    assert!(plan.active_names.contains("write_file"), "{plan:?}");
+    // Modify.
+    for name in ["read_file", "edit_file", "multi_edit"] {
+        assert!(plan.active_names.contains(name), "{name} missing: {plan:?}");
+    }
+    // Browser acceptance: observe, act, and read state back.
+    for name in [
+        "mcp__pw__browser_navigate",
+        "mcp__pw__browser_snapshot",
+        "mcp__pw__browser_click",
+        "mcp__pw__browser_evaluate",
+    ] {
+        assert!(plan.active_names.contains(name), "{name} missing: {plan:?}");
+    }
+    // The first intent must not drain the budget before the later ones are served.
+    assert!(plan.active_names.len() <= MAX_ACTIVE_TOOLS);
+}
+
+#[test]
+fn dynamic_tool_router_serves_a_multi_file_investigation() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "调查一下这个 bug 在哪些文件里被触发",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    for name in ["read_files", "glob_search", "grep_search"] {
+        assert!(plan.active_names.contains(name), "{name} missing: {plan:?}");
+    }
+    assert!(plan.profile.contains("investigate"), "{plan:?}");
+}
+
+#[test]
+fn dynamic_tool_router_pins_core_tools_within_the_hard_cap() {
+    let specs = desktop_like_catalog();
+    let every_name = specs
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for prompt in [
+        "修复 React UI，并在浏览器验收",
+        "查一下最新文献并整理引用",
+        "跑一下这个 notebook 的数据分析",
+        "随便聊聊",
+        // A prompt that names more tools than the entire budget.
+        &format!("用这些工具做点什么：{every_name}"),
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS, "{plan:?}");
+        assert!(MAX_ROUTED_TOOLS <= MAX_ACTIVE_TOOLS);
+        assert!(plan.pinned_names.is_subset(&plan.active_names), "{plan:?}");
+        assert!(plan.pinned_names.len() < plan.active_names.len(), "{plan:?}");
+        // Without ToolSearch the model cannot recover anything that was routed
+        // away, so it is never evictable.
+        assert!(plan.pinned_names.contains("ToolSearch"), "{plan:?}");
+        assert_eq!(
+            plan.active_names.len() + plan.deferred_names.len(),
+            plan.catalog_names.len(),
+            "{plan:?}"
+        );
+    }
+}
+
+/// A website task used to cost one `ToolSearch` call per browser tool, because
+/// the router activated two of them and the search required every query term to
+/// be a substring of one name. Routing now lands the acceptance bundle up front
+/// and one keyword search covers the rest.
+#[test]
+fn a_browser_task_needs_at_most_one_tool_search_for_the_whole_family() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools("在浏览器里验收这个页面", &specs, ToolRoutingMode::Active);
+
+    let catalog = specs
+        .iter()
+        .map(|spec| (spec.name.clone(), spec.description.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let merged = merge_mcp_tool_search_results(
+        json!({"matches": [], "query": "browser", "total_deferred_tools": 0}).to_string(),
+        r#"{"query":"browser"}"#,
+        &catalog,
+        &[],
+    );
+    let merged: Value = serde_json::from_str(&merged).expect("merged search output");
+
+    let mut reachable = plan.active_names.clone();
+    reachable.extend(
+        merged["matches"]
+            .as_array()
+            .expect("matches")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string),
+    );
+    for name in [
+        "mcp__pw__browser_navigate",
+        "mcp__pw__browser_snapshot",
+        "mcp__pw__browser_click",
+        "mcp__pw__browser_evaluate",
+        "mcp__pw__browser_type",
+        "mcp__pw__browser_take_screenshot",
+    ] {
+        assert!(reachable.contains(name), "{name} unreachable: {reachable:?}");
+    }
+}
+
+#[test]
+fn dynamic_tool_router_pins_a_tool_the_user_named() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "用 multi_edit 把这三处一起改了",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    assert!(plan.pinned_names.contains("multi_edit"), "{plan:?}");
+}
+
+#[test]
+fn browser_mutations_resolve_their_matching_snapshot_tool() {
+    let tools = BTreeSet::from([
+        "mcp__playwright__browser_click".to_string(),
+        "mcp__playwright__browser_snapshot".to_string(),
+        "mcp__other__browser_snapshot".to_string(),
+    ]);
+    assert_eq!(
+        browser_acceptance_snapshot_name("mcp__playwright__browser_click", &tools).as_deref(),
+        Some("mcp__playwright__browser_snapshot")
+    );
+    assert_eq!(
+        browser_acceptance_snapshot_name("mcp__playwright__browser_snapshot", &tools),
+        None
+    );
+
+    let output = ToolOutput::text("### Page state\n- Page URL: http://localhost:3000");
+    assert!(browser_output_has_state_evidence(&output));
+}
+
+#[test]
+fn dynamic_tool_router_falls_back_to_full_catalog_without_tool_search() {
+    let specs = (0..25)
+        .map(|index| routing_spec(&format!("custom_{index}")))
+        .collect::<Vec<_>>();
+    let plan = route_chat_tools("do the custom task", &specs, ToolRoutingMode::Active);
+
+    assert_eq!(plan.active_names.len(), specs.len());
+    assert!(plan.deferred_names.is_empty());
+    assert_eq!(plan.profile, "fallback-no-tool-search");
+}
+
+#[test]
+fn tool_search_can_find_non_mcp_tools_from_the_full_chat_catalog() {
+    let inner = StaticToolExecutor::new().register("ToolSearch", |_| {
+        Ok(json!({
+            "matches": [],
+            "query": "mail draft",
+            "total_deferred_tools": 0
+        })
+        .to_string())
+    });
+    let mut bundle = attach_mcp_tools_with_cancel(
+        inner,
+        vec![routing_spec("MailDraft")],
+        &RuntimeFeatureConfig::default(),
+        None,
+        None,
+    );
+    let output = bundle
+        .executor
+        .execute("ToolSearch", r#"{"query":"mail draft","max_results":5}"#)
+        .expect("search catalog");
+    assert!(output.contains("MailDraft"), "{output}");
+}
+
+#[test]
+fn browser_tool_timeout_is_class_aware() {
+    assert_eq!(
+        mcp_tool_timeout_with_default(
+            "mcp__playwright__browser_evaluate",
+            r#"{"function":"() => 1"}"#,
+            120,
+        ),
+        Some(std::time::Duration::from_secs(120))
+    );
+    assert_eq!(
+        mcp_tool_timeout_with_default("mcp__codex__run", r#"{"prompt":"work"}"#, 120),
+        None
+    );
+    assert_eq!(
+        mcp_tool_timeout_with_default("bash", r#"{"command":"train"}"#, 120),
+        None
+    );
+}
+
+#[test]
+fn explicit_browser_wait_extends_safety_deadline() {
+    let extended = mcp_tool_timeout_policy_with_defaults(
+        "mcp__playwright__browser_wait_for",
+        r#"{"time":600}"#,
+        120,
+        600,
+    )
+    .expect("browser wait policy");
+    assert_eq!(extended.idle_timeout, std::time::Duration::from_secs(630));
+    assert_eq!(extended.hard_timeout, std::time::Duration::from_secs(630));
+
+    let capped = mcp_tool_timeout_policy_with_defaults(
+        "mcp__playwright__browser_wait_for",
+        r#"{"time":99999}"#,
+        120,
+        600,
+    )
+    .expect("capped browser wait policy");
+    assert_eq!(capped.idle_timeout, std::time::Duration::from_secs(1_800));
+    assert_eq!(capped.hard_timeout, std::time::Duration::from_secs(1_800));
+}
 
 #[test]
 fn summarizer_model_honors_explicit_setting_over_defaults() {
@@ -407,6 +749,61 @@ fn resolves_openai_compatible_settings() {
     }
 }
 
+fn write_progress_mcp_server_script(root: &Path) -> PathBuf {
+    fs::create_dir_all(root).expect("temp dir");
+    let script_path = root.join("progress-mcp.py");
+    let script = r#"import json, sys, time
+
+def read_message():
+    header = b''
+    while not header.endswith(b'\r\n\r\n'):
+        chunk = sys.stdin.buffer.read(1)
+        if not chunk:
+            return None
+        header += chunk
+    length = 0
+    for line in header.decode().split('\r\n'):
+        if line.lower().startswith('content-length:'):
+            length = int(line.split(':', 1)[1].strip())
+    return json.loads(sys.stdin.buffer.read(length).decode())
+
+def send(message):
+    payload = json.dumps(message).encode()
+    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)
+    sys.stdout.buffer.flush()
+
+while True:
+    request = read_message()
+    if request is None:
+        break
+    if request['method'] == 'initialize':
+        send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
+            'protocolVersion': request['params']['protocolVersion'],
+            'capabilities': {'tools': {}},
+            'serverInfo': {'name': 'progress-test', 'version': '1.0.0'}}})
+    elif request['method'] == 'tools/list':
+        send({'jsonrpc': '2.0', 'id': request['id'], 'result': {'tools': [
+            {'name': 'browser_progress', 'description': 'Reports progress',
+             'inputSchema': {'type': 'object'}},
+            {'name': 'browser_hang', 'description': 'Never completes in time',
+             'inputSchema': {'type': 'object'}}]}})
+    elif request['method'] == 'tools/call':
+        name = request['params']['name']
+        if name == 'browser_hang':
+            time.sleep(5)
+        else:
+            for step in range(5):
+                time.sleep(0.04)
+                send({'jsonrpc': '2.0', 'method': 'notifications/progress',
+                      'params': {'progressToken': 'test', 'progress': step + 1, 'total': 5}})
+            send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
+                'content': [{'type': 'text', 'text': 'completed with progress'}],
+                'isError': False}})
+"#;
+    fs::write(&script_path, script).expect("write progress MCP server");
+    script_path
+}
+
 #[test]
 fn managed_newapi_settings_enable_the_initial_routing_header() {
     let obj = json!({
@@ -506,7 +903,7 @@ fn permission_policy_uses_tool_requirements() {
 #[test]
 fn attaches_discovers_and_executes_mcp_tools() {
     clear_mcp_discovery_cache();
-    let root = temp_dir();
+    let root = temp_dir().join("echo");
     let script = write_mcp_server_script(&root);
     let python = if cfg!(windows) { "python" } else { "python3" };
     let feature_config = RuntimeFeatureConfig::default().with_mcp_servers(BTreeMap::from([(
@@ -579,10 +976,140 @@ fn attaches_discovers_and_executes_mcp_tools() {
 }
 
 #[test]
+fn browser_timeout_renews_on_progress_and_recovers_after_a_hang() {
+    clear_mcp_discovery_cache();
+    let root = temp_dir().join("timeout-progress");
+    let script = write_progress_mcp_server_script(&root);
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let feature_config = RuntimeFeatureConfig::default().with_mcp_servers(BTreeMap::from([(
+        "playwright".to_string(),
+        ScopedMcpServerConfig {
+            scope: ConfigSource::Local,
+            config: McpServerConfig::Stdio(McpStdioServerConfig {
+                command: python.to_string(),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: BTreeMap::from([(
+                    "ARIS_MCP_STDIO_FRAMING".to_string(),
+                    "content-length".to_string(),
+                )]),
+                request_timeout_secs: Some(10),
+            }),
+        },
+    )]));
+    let mut bundle = attach_mcp_tools_with_cancel(
+        StaticToolExecutor::new(),
+        Vec::new(),
+        &feature_config,
+        None,
+        None,
+    );
+    assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
+    bundle.executor.timeout_policy_override = Some(McpToolTimeoutPolicy {
+        idle_timeout: std::time::Duration::from_millis(100),
+        hard_timeout: std::time::Duration::from_secs(1),
+    });
+
+    let progress_started = std::time::Instant::now();
+    let output = bundle
+        .executor
+        .execute("mcp__playwright__browser_progress", "{}")
+        .expect("progress notifications should renew the idle lease");
+    assert!(output.contains("completed with progress"));
+    assert!(progress_started.elapsed() >= std::time::Duration::from_millis(180));
+
+    let hang_started = std::time::Instant::now();
+    let error = bundle
+        .executor
+        .execute("mcp__playwright__browser_hang", "{}")
+        .expect_err("silent browser call should time out");
+    assert!(error.is_timed_out(), "{error}");
+    assert_eq!(error.timeout_ms(), Some(100));
+    assert!(error.to_string().contains("produced no progress"));
+    assert!(hang_started.elapsed() < std::time::Duration::from_secs(2));
+
+    let recovered = bundle
+        .executor
+        .execute("mcp__playwright__browser_progress", "{}")
+        .expect("manager should respawn after the timed-out child is stopped");
+    assert!(recovered.contains("completed with progress"));
+
+    drop(bundle);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn browser_cancellation_stops_the_child_and_allows_a_clean_restart() {
+    clear_mcp_discovery_cache();
+    let root = temp_dir().join("cancel-progress");
+    let script = write_progress_mcp_server_script(&root);
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let feature_config = RuntimeFeatureConfig::default().with_mcp_servers(BTreeMap::from([(
+        "playwright".to_string(),
+        ScopedMcpServerConfig {
+            scope: ConfigSource::Local,
+            config: McpServerConfig::Stdio(McpStdioServerConfig {
+                command: python.to_string(),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: BTreeMap::from([(
+                    "ARIS_MCP_STDIO_FRAMING".to_string(),
+                    "content-length".to_string(),
+                )]),
+                request_timeout_secs: Some(10),
+            }),
+        },
+    )]));
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut bundle = attach_mcp_tools_with_cancel(
+        StaticToolExecutor::new(),
+        Vec::new(),
+        &feature_config,
+        None,
+        Some(cancelled.clone()),
+    );
+    bundle.executor.timeout_policy_override = Some(McpToolTimeoutPolicy {
+        idle_timeout: std::time::Duration::from_secs(1),
+        hard_timeout: std::time::Duration::from_secs(2),
+    });
+
+    let cancellation_signal = cancelled.clone();
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cancellation_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let error = bundle
+        .executor
+        .execute("mcp__playwright__browser_hang", "{}")
+        .expect_err("cancelled browser call should stop");
+    cancel_thread.join().expect("cancel thread");
+    assert!(error.is_interrupted(), "{error}");
+    assert!(!error.is_timed_out());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+    // A real next turn creates a fresh flag and executor. Clearing this
+    // test-owned flag exercises the equivalent process-respawn path in place.
+    cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let recovered = bundle
+        .executor
+        .execute("mcp__playwright__browser_progress", "{}")
+        .expect("manager should respawn after cancellation shutdown");
+    assert!(recovered.contains("completed with progress"));
+
+    drop(bundle);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn tool_search_results_include_discovered_mcp_tools() {
-    let names = BTreeSet::from([
-        "mcp__playwright__browser_navigate".to_string(),
-        "mcp__playwright__browser_click".to_string(),
+    let names = BTreeMap::from([
+        (
+            "mcp__playwright__browser_navigate".to_string(),
+            "Navigate to a URL.".to_string(),
+        ),
+        (
+            "mcp__playwright__browser_click".to_string(),
+            "Click an element.".to_string(),
+        ),
     ]);
     let output = json!({
         "matches": [],
@@ -597,14 +1124,120 @@ fn tool_search_results_include_discovered_mcp_tools() {
         output,
         r#"{"query":"playwright navigate","max_results":5}"#,
         &names,
+        &[],
+    );
+    let merged: Value = serde_json::from_str(&merged).expect("merged search output");
+
+    // One search returns the whole matching family, best match first, instead
+    // of forcing a separate call per tool.
+    assert_eq!(
+        merged["matches"],
+        json!([
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_click"
+        ])
+    );
+    assert_eq!(merged["total_deferred_tools"], 10);
+    assert!(merged["pending_mcp_servers"].is_null());
+}
+
+/// Verbatim from a real session (`chat-1789320268388-4cgvxg`, call 7 of 13):
+/// the model asked for six browser tools at once, the old all-terms-substring
+/// filter matched no single name, and it then spent six more calls asking for
+/// them one at a time.
+#[test]
+fn the_multi_tool_browser_query_that_used_to_return_nothing_returns_everything() {
+    let catalog = [
+        "mcp__playwright__browser_take_screenshot",
+        "mcp__playwright__browser_resize",
+        "mcp__playwright__browser_evaluate",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_console_messages",
+        "mcp__playwright__browser_navigate",
+        "read_file",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), format!("{name} test tool")))
+    .collect::<BTreeMap<_, _>>();
+
+    let merged = merge_mcp_tool_search_results(
+        json!({"matches": [], "query": "", "total_deferred_tools": 0}).to_string(),
+        r#"{"max_results": 10, "query": "mcp__playwright__browser_take_screenshot browser_resize browser_evaluate browser_click browser_snapshot browser_console_messages"}"#,
+        &catalog,
+        &[],
+    );
+    let merged: Value = serde_json::from_str(&merged).expect("merged search output");
+    let matches = merged["matches"]
+        .as_array()
+        .expect("matches")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+
+    for name in [
+        "mcp__playwright__browser_take_screenshot",
+        "mcp__playwright__browser_resize",
+        "mcp__playwright__browser_evaluate",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_console_messages",
+    ] {
+        assert!(matches.contains(&name), "{name} missing from {matches:?}");
+    }
+    // The tool named first is answered first, and an unrelated tool does not
+    // crowd out a requested one.
+    assert_eq!(matches[0], "mcp__playwright__browser_take_screenshot");
+    assert!(!matches.contains(&"read_file"));
+}
+
+#[test]
+fn tool_search_does_not_advertise_a_tool_this_turn_blocked() {
+    let catalog = BTreeMap::from([("read_file".to_string(), "Read a text file.".to_string())]);
+    // The kernel searches its whole tool list, including names this turn removed.
+    let output = json!({"matches": ["bash", "read_file"], "query": "read", "total_deferred_tools": 40})
+        .to_string();
+
+    let merged = merge_mcp_tool_search_results(output, r#"{"query":"read"}"#, &catalog, &[]);
+    let merged: Value = serde_json::from_str(&merged).expect("merged search output");
+
+    assert_eq!(merged["matches"], json!(["read_file"]));
+}
+
+#[test]
+fn tool_search_activates_a_whole_browser_family_in_one_call() {
+    let names = [
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_evaluate",
+        "read_file",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), format!("{name} test tool")))
+    .collect::<BTreeMap<_, _>>();
+    let output = json!({"matches": [], "query": "", "total_deferred_tools": 0}).to_string();
+
+    let merged = merge_mcp_tool_search_results(
+        output,
+        r#"{"query":"select:browser_navigate,browser_snapshot,browser_click,browser_evaluate"}"#,
+        &names,
+        &["codex".to_string()],
     );
     let merged: Value = serde_json::from_str(&merged).expect("merged search output");
 
     assert_eq!(
         merged["matches"],
-        json!(["mcp__playwright__browser_navigate"])
+        json!([
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "mcp__playwright__browser_click",
+            "mcp__playwright__browser_evaluate"
+        ])
     );
-    assert_eq!(merged["total_deferred_tools"], 12);
+    // A server that produced no tools is named, so the model stops searching
+    // for something that cannot appear this turn.
+    assert_eq!(merged["pending_mcp_servers"], json!(["codex"]));
 }
 
 #[test]

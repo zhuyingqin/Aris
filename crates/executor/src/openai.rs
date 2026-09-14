@@ -11,12 +11,15 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
 use crate::{
-    assistant_events_to_value, interrupted_error, push_text_event, stream_cancel_requested,
-    tool_specs_to_value, trace_record, wait_for_stream_cancel, ExecutorToolSpec, ExecutorTraceSink,
-    StreamObserver,
+    assistant_events_to_value, interrupted_error, projected_tool_specs, push_text_event,
+    stream_cancel_requested, tool_specs_to_value, trace_record, wait_for_stream_cancel,
+    ExecutorToolSpec, ExecutorTraceSink, StreamObserver,
 };
 
 /// Buffers raw SSE bytes until a complete line is available, then decodes the
@@ -1855,6 +1858,7 @@ pub struct OpenAIRuntimeClient {
     model: String,
     enable_tools: bool,
     tool_specs: Vec<ExecutorToolSpec>,
+    active_tool_names: Option<BTreeSet<String>>,
     observer: Box<dyn StreamObserver>,
     trace_sink: Option<std::sync::Arc<dyn ExecutorTraceSink>>,
     /// Configured endpoint preference; `Auto` selects by model capability and
@@ -1888,6 +1892,7 @@ impl OpenAIRuntimeClient {
             model,
             enable_tools,
             tool_specs,
+            active_tool_names: None,
             observer,
             trace_sink: None,
             transport: OpenAiTransport::default(),
@@ -1933,8 +1938,14 @@ impl ApiClient for OpenAIRuntimeClient {
         }
     }
 
+    fn set_active_tools(&mut self, tool_names: Option<&BTreeSet<String>>) {
+        self.active_tool_names = tool_names.cloned();
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let active_tool_specs =
+            projected_tool_specs(&self.tool_specs, self.active_tool_names.as_ref());
         let system_prompt = if request.system_prompt.is_empty() {
             None
         } else {
@@ -1963,7 +1974,7 @@ impl ApiClient for OpenAIRuntimeClient {
             build_responses_body(
                 &self.model,
                 convert_messages_responses(&request.messages, &self.model),
-                &self.tool_specs,
+                &active_tool_specs,
                 self.enable_tools,
                 system_prompt.as_deref(),
                 &responses_prompt_cache_key(
@@ -1976,7 +1987,7 @@ impl ApiClient for OpenAIRuntimeClient {
             build_chat_completions_body(
                 &self.model,
                 convert_messages_openai(&request.messages, system_prompt.as_deref(), &self.model),
-                &self.tool_specs,
+                &active_tool_specs,
                 self.enable_tools,
                 chat_reasoning_effort_for(&self.model, &self.base_url, self.enable_tools),
             )
@@ -1993,8 +2004,8 @@ impl ApiClient for OpenAIRuntimeClient {
                 "model": &self.model,
                 "transport": transport,
                 "enabled": self.enable_tools,
-                "toolCount": self.tool_specs.len(),
-                "tools": tool_specs_to_value(&self.tool_specs),
+                "toolCount": active_tool_specs.len(),
+                "tools": tool_specs_to_value(&active_tool_specs),
             }),
         );
         trace_record(
@@ -2160,7 +2171,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     system_prompt.as_deref(),
                                     &self.model,
                                 ),
-                                &self.tool_specs,
+                                &active_tool_specs,
                                 self.enable_tools,
                                 chat_reasoning_effort_for(
                                     &self.model,
@@ -2213,7 +2224,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             body = build_responses_body(
                                 &self.model,
                                 convert_messages_responses(&request.messages, &self.model),
-                                &self.tool_specs,
+                                &active_tool_specs,
                                 self.enable_tools,
                                 system_prompt.as_deref(),
                                 &responses_prompt_cache_key(

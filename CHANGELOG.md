@@ -1,5 +1,82 @@
 # ARIS-Code Changelog
 
+## v0.4.69 (2026-09-13)
+
+- **Evidence ledger: per-turn tool-loop novelty tracking** —
+  `crates/runtime/src/evidence_ledger.rs` (new module) tracks
+  whether each tool call returned a *new* observation or another
+  copy of one the turn already has. Tool-call count is not
+  progress: several differently phrased calls can keep
+  returning the same page, status, empty result, or failure.
+  The ledger uses deterministic `sha256` fingerprints of the
+  tool name + arguments + outcome, exposes
+  `EvidenceGuardMode`, and nudges the model after
+  `NO_NEW_EVIDENCE_NUDGE_CALLS = 4` calls without new evidence
+  and blocks after `NO_NEW_EVIDENCE_BLOCK_CALLS = 6`. Polling
+  patterns (3+ identical invocations or 3+ identical outcomes)
+  also block. The ledger never judges whether the evidence is
+  good; it only records whether it is new.
+- **Tool output artifact: project-local persistence for large
+  results** — `crates/runtime/src/tool_output_artifact.rs`
+  (new module) keeps tool outputs above
+  `TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS = 32_000` under
+  `.somniq/tmp/tool-output` keyed by `sha256`, and replaces
+  them in the transcript with a bounded
+  `TOOL_OUTPUT_REFERENCE_PREVIEW_CHARS = 12_000` preview plus
+  the file path the model can read selectively. The transcript
+  stays a working projection; the durable copy lives outside
+  the conversation state so context-window pressure no longer
+  forces the model to lose the page it just spent a turn
+  fetching. `crates/runtime/src/tests/tool_output_artifact.rs`
+  pins the round-trip.
+- **Runtime hardening pass** — `crates/runtime/src/atomic_file.rs`,
+  `bash.rs`, `compact.rs`, `conversation.rs`, `event_sink.rs`,
+  `file_ops.rs`, `focus_trace.rs`, `lib.rs`, `mcp_stdio.rs`,
+  `process_registry.rs`, `tool_outcome.rs` (plus tests for
+  `compact`, `conversation`, `file_ops`, `process_registry`)
+  carry the matching surface fixes the two new modules depend
+  on. `focus_trace.rs` is new wiring that names the production
+  evidence sources the evidence ledger records. The changes
+  are deliberately scoped to the existing module surfaces —
+  no new public API outside `evidence_ledger.rs` and
+  `tool_output_artifact.rs`.
+- **Chat event wire trace + event versioning** —
+  `desktop/src-tauri/src/chat_events.rs` is the rewritten
+  chat event emitter with `EVENT_VERSION = 1`, per-session
+  `EventSeqState` registries (`EVENT_SEQS`, `WIRE_SEQS`),
+  and a rotation policy of `DEFAULT_WIRE_TRACE_ROTATIONS = 3`
+  capped at `MAX_WIRE_TRACE_ROTATIONS = 10` with a
+  `DEFAULT_WIRE_TRACE_MAX_BYTES = 50 MiB` budget and
+  `DEFAULT_WIRE_TRACE_MAX_STRING_CHARS = 64_000`. `engine.rs`,
+  `lib.rs`, `state.rs`, `system_prompt.rs`, and
+  `tests/chat_events.rs` carry the matching wiring.
+- **Typeset visual editor → PDF render-window sync** —
+  `desktop/src/typeset/pdfGeometry.ts` (+14) introduces
+  `stablePdfRenderRange` (retains the pressed page while a
+  drag-scroll expands into later pages; compacts to the visible
+  window once the pointer gesture ends). `PdfPage.tsx` (+26),
+  `TypesetVisualEditor.tsx` (+118), `TypesetPdfPreview.tsx`
+  (+63), and the matching `Typeset.css` rewrite (-21 / re-add)
+  wire the editor ↔ preview sync. `pdfRenderWindow.test.ts`
+  (new) pins the stability contract;
+  `TypesetVisualEditorSync.test.tsx` (new) exercises the
+  CodeMirror transaction path the sync rides on.
+- **OpenAI executor + chat runtime + tools polish** —
+  `crates/executor/src/openai.rs` (+ lib.rs + tests/lib.rs),
+  `crates/chat/src/lib.rs` (+ tests), and
+  `crates/tools/src/lib.rs` (+ tests/lib/{file_ops,misc,skill})
+  carry the small surface fixes the runtime hardening and the
+  evidence ledger depend on.
+- **Design docs** — four new notes under
+  `docs/development-logic/`:
+  `batched-io-browser-acceptance-service-reuse.md`,
+  `dynamic-tool-routing.md`, `evidence-ledger.md`, and
+  `working-context-and-tool-artifacts.md`. `docs/mcp.md`
+  (+21) is the matching MCP integration reference.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.69.
+
 ## v0.4.68 (2026-09-12)
 
 - **Global-hotkey region screenshot → chat composer** —

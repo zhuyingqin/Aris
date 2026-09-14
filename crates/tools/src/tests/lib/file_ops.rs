@@ -26,6 +26,60 @@ fn execute_file_tool(name: &str, input: &serde_json::Value) -> Result<String, St
 }
 
 #[test]
+fn batch_read_preserves_order_and_partial_success() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("batch-read");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    fs::write(&first, "alpha\nbeta\n").expect("write first");
+    fs::write(&second, "gamma\ndelta\n").expect("write second");
+
+    let output = execute_tool(
+        "read_files",
+        &json!({
+            "requests": [
+                { "path": first, "offset": 1, "limit": 1 },
+                { "path": root.join("missing.txt") },
+                { "path": second, "limit": 1 }
+            ]
+        }),
+    )
+    .expect("batch itself should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("batch json");
+
+    assert_eq!(output["requested"], 3);
+    assert_eq!(output["succeeded"], 2);
+    assert_eq!(output["failed"], 1);
+    assert!(!runtime::tool_output_reports_failure(
+        "read_files",
+        &output.to_string()
+    ));
+    assert_eq!(output["results"][0]["result"]["file"]["content"], "beta");
+    assert_eq!(output["results"][1]["ok"], false);
+    assert_eq!(output["results"][2]["result"]["file"]["content"], "gamma");
+    assert_eq!(tool_execution("read_files"), ToolExecution::Parallel);
+    assert!(mvp_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "read_files"));
+
+    let all_failed = execute_tool(
+        "read_files",
+        &json!({ "requests": [{ "path": root.join("also-missing.txt") }] }),
+    )
+    .expect("batch payload should remain inspectable");
+    assert!(runtime::tool_output_reports_failure(
+        "read_files",
+        &all_failed
+    ));
+
+    fs::remove_dir_all(root).expect("remove root");
+}
+
+#[test]
 fn file_tools_cover_read_write_and_edit_behaviors() {
     let _guard = env_lock()
         .lock()
@@ -687,6 +741,84 @@ fn glob_and_grep_tools_cover_success_and_errors() {
 }
 
 #[test]
+fn batch_write_preflights_every_revision_before_publishing() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("batch-write-preflight");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("existing.txt"), "current\n").expect("seed file");
+
+    let rejected = execute_file_tool(
+        "write_files",
+        &json!({ "files": [
+            { "path": "new.txt", "content": "new\n", "expected_revision": "absent" },
+            { "path": "existing.txt", "content": "replacement\n", "expected_revision": "stale" }
+        ] }),
+    )
+    .expect_err("a stale item rejects the whole batch");
+    assert!(rejected.contains("No files were changed"));
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(fs::read_to_string(root.join("existing.txt")).unwrap(), "current\n");
+
+    let current = runtime::read_file("existing.txt", None, None).expect("read revision");
+    let written = execute_file_tool(
+        "write_files",
+        &json!({ "files": [
+            { "path": "new.txt", "content": "new\n", "expected_revision": "absent" },
+            { "path": "existing.txt", "content": "replacement\n", "expected_revision": current.file.revision }
+        ] }),
+    )
+    .expect("write batch");
+    let written: serde_json::Value = serde_json::from_str(&written).expect("batch json");
+    assert_eq!(written["written"], 2);
+    assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "new\n");
+    assert_eq!(
+        fs::read_to_string(root.join("existing.txt")).unwrap(),
+        "replacement\n"
+    );
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn small_staged_write_is_rejected_before_allocating_transaction_state() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("small-staged-write");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    let error = execute_file_tool(
+        "begin_large_write",
+        &json!({ "path": "small.md", "expected_revision": "absent", "estimated_bytes": 1024 }),
+    )
+    .expect_err("small file should use direct write");
+    assert!(error.contains("staged-write threshold"));
+    assert!(!root.join("small.md").exists());
+
+    let accepted = execute_file_tool(
+        "begin_large_write",
+        &json!({ "path": "model-limited.jsx", "expected_revision": "absent", "estimated_bytes": 9000 }),
+    )
+    .expect("9 KB output may require model-side chunking");
+    let accepted: serde_json::Value = serde_json::from_str(&accepted).expect("begin json");
+    let write_id = accepted["writeId"].as_str().expect("write id");
+    execute_file_tool("abort_large_write", &json!({ "write_id": write_id }))
+        .expect("abort fixture transaction");
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn oversized_write_recommends_atomic_staging_for_every_file_kind() {
     let oversized = "x".repeat(MAX_FILE_TOOL_PAYLOAD_BYTES + 1);
     let _guard = env_lock()
@@ -835,7 +967,7 @@ fn staged_write_tools_publish_once_and_keep_tool_results_compact() {
 
     let begun = execute_file_tool(
         "begin_large_write",
-        &json!({ "path": ".somniq/papers/chapter.tex", "expected_revision": "absent" }),
+        &json!({ "path": ".somniq/papers/chapter.tex", "expected_revision": "absent", "estimated_bytes": 100_000 }),
     )
     .expect("begin staged write");
     let begun: serde_json::Value = serde_json::from_str(&begun).expect("begin json");

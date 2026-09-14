@@ -34,6 +34,28 @@ pub fn with_path_lock<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
     operation()
 }
 
+/// Hold every process-local path stripe needed by a multi-file transaction.
+/// Stripe indexes are sorted and deduplicated before locking, giving all
+/// callers one lock order and avoiding self-deadlock when paths share a stripe.
+pub(crate) fn with_paths_locked<T>(paths: &[PathBuf], operation: impl FnOnce() -> T) -> T {
+    let locks = PATH_LOCKS.get_or_init(|| (0..PATH_LOCK_STRIPES).map(|_| Mutex::new(())).collect());
+    let mut indexes = paths
+        .iter()
+        .map(|path| path_lock_index(path))
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes.dedup();
+    let _guards = indexes
+        .iter()
+        .map(|index| {
+            locks[*index]
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        })
+        .collect::<Vec<_>>();
+    operation()
+}
+
 pub fn write_replace(path: &Path, body: impl AsRef<[u8]>) -> io::Result<()> {
     with_path_lock(path, || write_replace_unlocked(path, body.as_ref()))
 }

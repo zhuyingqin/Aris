@@ -120,6 +120,34 @@ pub fn execute_bash_with_cancel_and_progress(
     }
 
     if input.run_in_background.unwrap_or(false) {
+        let service_key = crate::background_service_key(&cwd, &input.command);
+        if let Some(process) = crate::reusable_background_service(&service_key) {
+            let log_path = process.log_path.clone();
+            return Ok(BashCommandOutput {
+                stdout: format!(
+                    "Reused running background service {} for this workspace, command, and port.",
+                    process.pid
+                ),
+                stderr: String::new(),
+                raw_output_path: log_path.clone(),
+                interrupted: false,
+                is_image: None,
+                background_task_id: Some(process.pid.to_string()),
+                backgrounded_by_user: Some(false),
+                assistant_auto_backgrounded: Some(false),
+                dangerously_disable_sandbox: input.dangerously_disable_sandbox,
+                return_code_interpretation: None,
+                no_output_expected: Some(false),
+                structured_content: Some(vec![serde_json::json!({
+                    "type": "background_service_reused",
+                    "pid": process.pid,
+                    "persistedOutputPath": log_path
+                })]),
+                persisted_output_path: process.log_path,
+                persisted_output_size: None,
+                sandbox_status: Some(sandbox_status),
+            });
+        }
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
         let log = crate::background_log::create(&cwd, &input.command);
         child.stdin(Stdio::null());
@@ -134,10 +162,11 @@ pub fn execute_bash_with_cancel_and_progress(
         let log_path = log
             .as_ref()
             .map(crate::background_log::BackgroundLog::display);
-        let pid = crate::spawn_managed_background(
+        let pid = crate::spawn_managed_background_service(
             &mut child,
             format!("bash background: {}", truncate_label(&input.command)),
             log_path.clone(),
+            service_key,
         )?;
 
         return Ok(BashCommandOutput {

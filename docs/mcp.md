@@ -67,6 +67,27 @@ disable other healthy MCP servers.
 Use `--allowedTools mcp__codex__codex` to explicitly allow an MCP tool in CLI
 sessions that use an allowlist.
 
+## Browser tool stuck protection
+
+Interactive MCP browser tools (`mcp__<server>__browser_*`) use a separate
+progress-aware safety policy in Desktop chat. The default idle lease is 120
+seconds: each standard MCP `notifications/progress` message renews it. A
+continuously progressing call may run for at most 600 seconds, after which the
+server process is stopped and restarted so the conversation can continue.
+Other MCP tools keep the server's normal `requestTimeoutSecs` policy; slow
+agent-style tools are therefore not subjected to the shorter browser lease.
+
+`browser_wait_for` is treated as an intentional delay. When its JSON input has
+a positive `time` value, SomniQ allows that many seconds plus 30 seconds of
+protocol overhead, up to 1,800 seconds. Operators can change the browser idle
+lease with `ARIS_BROWSER_TOOL_TIMEOUT_SECS` and the absolute browser ceiling
+with `ARIS_BROWSER_TOOL_MAX_RUNTIME_SECS`; both values are clamped to 30..=1800
+seconds, and the absolute ceiling is never shorter than the idle lease.
+
+A timed-out tool produces a durable `tool_timeout` event with the tool id,
+name, applied timeout, and recovery status. User cancellation remains distinct
+from timeout and also shuts down the active MCP child before the next call.
+
 ## Managed Oracle MCP
 
 Oracle Web appears in the Desktop MCP settings as a SomniQ-managed MCP service.

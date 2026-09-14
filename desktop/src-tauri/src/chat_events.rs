@@ -752,7 +752,7 @@ pub fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEven
                 let blocks = ensure_assistant_turn(&mut turns, event.seq);
                 upsert_tool_call(blocks, &event.payload);
             }
-            "tool_progress" => {
+            "tool_progress" | "tool_timeout" => {
                 let blocks = ensure_assistant_turn(&mut turns, event.seq);
                 update_tool_progress(blocks, &event.payload);
             }

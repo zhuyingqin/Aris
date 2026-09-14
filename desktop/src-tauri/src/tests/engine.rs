@@ -104,6 +104,25 @@ fn debug_export_rebuilds_empty_cancelled_session_from_event_log() {
     let mut archive = zip::ZipArchive::new(file).expect("valid debug zip");
     assert!(archive.by_name("app-events.jsonl").is_err());
     assert!(archive.by_name("usage-log.jsonl").is_err());
+    let mut diagnostics = String::new();
+    archive
+        .by_name("diagnostics.json")
+        .expect("diagnostics entry")
+        .read_to_string(&mut diagnostics)
+        .expect("read diagnostics");
+    let diagnostics: serde_json::Value =
+        serde_json::from_str(&diagnostics).expect("diagnostics JSON");
+    assert_eq!(diagnostics["schemaVersion"], 1);
+    let mut manifest = String::new();
+    archive
+        .by_name("manifest.json")
+        .expect("manifest entry")
+        .read_to_string(&mut manifest)
+        .expect("read manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).expect("manifest JSON");
+    assert_eq!(manifest["schemaVersion"], 4);
+    assert_eq!(manifest["files"]["diagnostics.json"], true);
+    assert!(manifest.get("performanceSummary").is_some());
     let mut runtime_session = String::new();
     archive
         .by_name("runtime-session.json")
@@ -175,6 +194,22 @@ fn builtin_tool_availability_reports_the_chat_registry() {
         .iter()
         .any(|tool| tool.name == "LiteratureSearch" && tool.available));
     assert_eq!(tools.len(), 2);
+}
+
+#[test]
+fn ordinary_chat_routes_the_real_registry_to_a_small_recoverable_schema_set() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "修复 React 界面并在浏览器验收",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert!(plan.catalog_names.len() > 20);
+    assert!(plan.active_names.len() <= 20);
+    assert!(plan.active_names.contains("ToolSearch"));
+    assert!(plan.active_names.contains("edit_file"));
+    assert!(!plan.deferred_names.is_empty());
 }
 
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
@@ -1476,6 +1511,99 @@ fn latex_repair_guard_no_longer_blocks_repeated_failures() {
     // is "no block, no notification"; tests asserting the old contract are
     // intentionally removed.
     let _guard = LatexRepairGuard::default();
+}
+
+#[test]
+fn batch_write_paths_are_all_visible_to_latex_repair_guard() {
+    let paths = edited_file_paths(
+        r#"{"files":[{"path":"paper/main.tex"},{"path":"paper/sections/results.tex"},{"path":"notes.md"}]}"#,
+    );
+    assert_eq!(
+        paths,
+        vec![
+            "notes.md".to_string(),
+            "paper/main.tex".to_string(),
+            "paper/sections/results.tex".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse {
+            id: "write-1".to_string(),
+            name: "write_file".to_string(),
+            input: "{}".to_string(),
+        },
+    ]));
+    session.messages.push(ConversationMessage {
+        role: runtime::MessageRole::Tool,
+        blocks: vec![ContentBlock::ToolResult {
+            tool_use_id: "write-1".to_string(),
+            tool_name: "write_file".to_string(),
+            output: "ok".to_string(),
+            is_error: false,
+        }],
+        usage: None,
+    });
+    let usage = serde_json::json!({
+        "createdAt": 1,
+        "sessionId": "summary-test",
+        "role": "executor",
+        "server": "local",
+        "model": "test",
+        "provider": "test",
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "cacheCreationInputTokens": 10,
+        "cacheReadInputTokens": 30,
+        "durationMs": 500,
+        "reasoningEffort": "low"
+    })
+    .to_string();
+    let wire_path = std::env::temp_dir().join(format!(
+        "somniq-debug-summary-{}.jsonl",
+        current_time_millis()
+    ));
+    let wire = [
+        crate::chat_events::ChatEventLogEntry {
+            version: 1,
+            seq: 1,
+            ts: 1,
+            session_id: "summary-test".to_string(),
+            kind: "llm.request".to_string(),
+            payload: json!({}),
+        },
+        crate::chat_events::ChatEventLogEntry {
+            version: 1,
+            seq: 2,
+            ts: 2,
+            session_id: "summary-test".to_string(),
+            kind: "context.checkpoint".to_string(),
+            payload: json!({
+                "reason": "tool_call_interval",
+                "tokensBefore": 1000,
+                "tokensAfter": 600,
+                "removedMessages": 12
+            }),
+        },
+    ]
+    .into_iter()
+    .map(|event| serde_json::to_string(&event).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    fs::write(&wire_path, format!("{wire}\n")).expect("wire fixture");
+
+    let summary =
+        build_debug_performance_summary(&session, &usage, Some(&wire_path), &[]).expect("summary");
+    assert_eq!(summary["model"]["requestCount"], 1);
+    assert_eq!(summary["model"]["peakPromptTokens"], 140);
+    assert_eq!(summary["tools"]["callCount"], 1);
+    assert_eq!(summary["context"]["checkpointCount"], 1);
+    assert_eq!(summary["context"]["estimatedTokensRemoved"], 400);
+    let _ = fs::remove_file(wire_path);
 }
 
 #[test]

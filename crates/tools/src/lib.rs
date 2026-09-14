@@ -20,8 +20,9 @@ use runtime::{
     commit_large_write, edit_file_with_context_expected, get_file_change, glob_search, grep_search,
     list_file_changes, load_system_prompt, multi_edit_file_with_context_expected,
     read_file_with_images, record_text_file_change, revert_file_change,
-    write_file_with_context_expected, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
-    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
+    write_file_with_context_expected, write_files_with_context_expected, ApiClient, ApiRequest,
+    AssistantEvent, BashCommandInput, BatchWriteRequest, ConversationRuntime, FileChangeGetInput,
+    FileChangeListInput, FileChangeOperation,
     FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput,
     MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
     StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
@@ -40,6 +41,13 @@ const MAX_FILE_TOOL_PAYLOAD_CHARS: usize = MAX_FILE_TOOL_PAYLOAD_BYTES;
 const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
+const MAX_BATCH_READ_FILES: usize = 16;
+const MAX_BATCH_WRITE_FILES: usize = 16;
+// This threshold protects genuinely small edits from a three-call staged
+// protocol, but must remain below realistic model/proxy output ceilings. A
+// 9-32 KiB source file can exceed one model response even though the file tool
+// transport itself accepts much more.
+const MIN_STAGED_WRITE_ESTIMATED_BYTES: usize = 8 * 1024;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES: u64 = 2_000_000;
 const WORKSPACE_AUDIT_MAX_FILES: usize = 8_000;
@@ -94,6 +102,7 @@ pub struct ToolSpec {
 pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
+        | "read_files"
         | "ReadMediaFile"
         | "WorkspaceLayout"
         | "change_list"
@@ -187,7 +196,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. An identical running service in the same project and on the same port is reused automatically. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -218,6 +227,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "limit": { "type": "integer", "minimum": 1 }
                 },
                 "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "read_files",
+            description: "Read up to 16 independent text/PDF file windows in one call. Results preserve request order and report per-file errors without discarding successful reads. Prefer this over repeated read_file calls when the paths or line windows are already known; each successful item has the same revision-bearing payload as read_file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "requests": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_BATCH_READ_FILES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "offset": { "type": "integer", "minimum": 0 },
+                                "limit": { "type": "integer", "minimum": 1 }
+                            },
+                            "required": ["path"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["requests"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -268,6 +304,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "write_files",
+            description: "Write 1-16 complete text files in one ordered call. Prefer this when several independent small files are already fully known. Every payload and expected revision is preflighted before the first write, so a stale or invalid item rejects the batch without publishing predictable partial work. Each successful file keeps its own audit record. Do not use this when a later file depends on inspecting an earlier result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_BATCH_WRITE_FILES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
+                                "expected_revision": { "type": "string", "description": "Use `absent` for a new path, or the sha256 revision returned by read_file/read_files." }
+                            },
+                            "required": ["path", "content", "expected_revision"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["files"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "append_file",
             description: concat!(
                 "Append a modest text suffix to a workspace file without returning the full file; do not use it to assemble a long generated artifact at its final path. Use the staged large-write transaction for that. ",
@@ -291,14 +354,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "begin_large_write",
-            description: "Begin an atomic staged whole-file write for content that cannot fit safely in one write_file call. Pass `absent` for a new destination or the revision returned by read_file for an existing one. This creates only SomniQ temporary state; it does not touch the destination.",
+            description: "Begin an atomic staged whole-file write when the estimated final UTF-8 size is at least 8 KiB and the complete content cannot fit safely in one model tool call. This threshold reflects model/proxy output limits, not the much larger filesystem transport limit. Smaller complete files must use write_file, or write_files for several independent files. Pass `absent` for a new destination or the revision returned by read_file for an existing one. This creates only SomniQ temporary state; it does not touch the destination.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "expected_revision": { "type": "string" }
+                    "expected_revision": { "type": "string" },
+                    "estimated_bytes": { "type": "integer", "minimum": MIN_STAGED_WRITE_ESTIMATED_BYTES, "description": "Estimated final UTF-8 byte length. Values below 8 KiB must use write_file/write_files." }
                 },
-                "required": ["path", "expected_revision"],
+                "required": ["path", "expected_revision", "estimated_bytes"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -1216,12 +1280,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "ToolSearch",
-            description: "Search for deferred or specialized tools by exact name or keywords.",
+            description: concat!(
+                "Search for deferred or specialized tools by exact name or keywords, and make every match callable. ",
+                "Ask for everything the next step needs in ONE call: `select:name_a,name_b,name_c` activates that exact list in that order and is not truncated, while a capability keyword such as `browser` or `literature` returns the whole family ranked by relevance. ",
+                "Prefix a term with `+` to require it. Do not issue one call per tool."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1 }
+                    "query": { "type": "string", "description": "`select:tool_a,tool_b` for exact names, or capability keywords. Exact names always rank first." },
+                    "max_results": { "type": "integer", "minimum": 1, "description": "Ranked keyword matches to return. Defaults to 8; a `select:` list keeps every name it asked for." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -1331,7 +1399,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
-                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. Do not start duplicate background processes. ",
+                "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. An identical running service in the same project and on the same port is reused automatically. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
             ),
             input_schema: json!({
@@ -1437,10 +1505,14 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "bash" => from_value::<BashCommandInput>(input)
             .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "read_files" => from_value::<ReadFilesInput>(input).and_then(run_read_files),
         "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
             from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, context))
+        }
+        "write_files" => {
+            from_value::<WriteFilesInput>(input).and_then(|input| run_write_files(input, context))
         }
         "append_file" => {
             from_value::<AppendFileInput>(input).and_then(|input| run_append_file(input, context))
@@ -1615,6 +1687,55 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn run_read_files(input: ReadFilesInput) -> Result<String, String> {
+    if input.requests.is_empty() {
+        return Err("read_files requires at least one request".to_string());
+    }
+    if input.requests.len() > MAX_BATCH_READ_FILES {
+        return Err(format!(
+            "read_files accepts at most {MAX_BATCH_READ_FILES} requests per call"
+        ));
+    }
+
+    let results = std::thread::scope(|scope| {
+        input
+            .requests
+            .into_iter()
+            .map(|request| {
+                scope.spawn(move || {
+                    let path = request.path.clone();
+                    match run_read_file(request) {
+                        Ok(output) => {
+                            let value = serde_json::from_str::<Value>(&output)
+                                .unwrap_or_else(|_| Value::String(output));
+                            json!({ "path": path, "ok": true, "result": value })
+                        }
+                        Err(error) => json!({ "path": path, "ok": false, "error": error }),
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| json!({ "ok": false, "error": "read worker panicked" }))
+            })
+            .collect::<Vec<_>>()
+    });
+    let succeeded = results
+        .iter()
+        .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    to_pretty_json(json!({
+        "requested": results.len(),
+        "succeeded": succeeded,
+        "failed": results.len().saturating_sub(succeeded),
+        "results": results
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn run_read_media_file(input: ReadFileInput) -> Result<String, String> {
     let output =
         to_pretty_json(read_file_with_images(&input.path, None, None).map_err(io_to_string)?)?;
@@ -1680,6 +1801,96 @@ fn run_write_file(input: WriteFileInput, context: &ToolRunContext) -> Result<Str
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn run_write_files(input: WriteFilesInput, context: &ToolRunContext) -> Result<String, String> {
+    if input.files.is_empty() || input.files.len() > MAX_BATCH_WRITE_FILES {
+        return Err(format!(
+            "write_files requires 1-{MAX_BATCH_WRITE_FILES} files; received {}. No files were changed.",
+            input.files.len()
+        ));
+    }
+
+    let mut paths = BTreeSet::new();
+    for file in &input.files {
+        validate_file_tool_payload_bytes("write_files", &file.content)?;
+        if !paths.insert(file.path.clone()) {
+            return Err(format!(
+                "write_files contains duplicate path `{}`. Each path may appear once; no files were changed.",
+                file.path
+            ));
+        }
+        match runtime::read_file(&file.path, Some(0), Some(1)) {
+            Ok(current) if current.file.revision != file.expected_revision.trim() => {
+                return Err(format!(
+                    "write_files preflight rejected `{}`: expected revision `{}`, current revision `{}`. No files were changed.",
+                    file.path,
+                    file.expected_revision.trim(),
+                    current.file.revision
+                ));
+            }
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && file.expected_revision.trim() == "absent" => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "write_files preflight rejected `{}`: the path is absent but expected revision was `{}`. No files were changed.",
+                    file.path,
+                    file.expected_revision.trim()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "write_files preflight could not validate `{}`: {error}. No files were changed.",
+                    file.path
+                ));
+            }
+        }
+    }
+
+    let requests = input
+        .files
+        .into_iter()
+        .map(|file| BatchWriteRequest {
+            path: file.path,
+            content: file.content,
+            expected_revision: file.expected_revision,
+        })
+        .collect::<Vec<_>>();
+    let output = write_files_with_context_expected(
+        &requests,
+        &context.mutation_context("write_files"),
+    )
+    .map_err(io_to_string)?;
+    let mut results = Vec::with_capacity(output.files.len());
+    for file in output.files {
+        let output = file;
+        let (added_lines, removed_lines) = patch_line_counts(&output.structured_patch);
+        results.push(json!({
+            "ok": true,
+            "type": output.kind,
+            "filePath": output.file_path,
+            "bytes": output.bytes,
+            "lines": output.lines,
+            "revision": output.revision,
+            "changeId": output.change_id,
+            "diff_summary": {
+                "hunks": output.structured_patch.len(),
+                "addedLines": added_lines,
+                "removedLines": removed_lines,
+            }
+        }));
+    }
+    to_pretty_json(json!({
+        "ok": true,
+        "atomicPreflight": true,
+        "rollbackOnPublishFailure": true,
+        "batchId": output.batch_id,
+        "written": results.len(),
+        "results": results,
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<String, String> {
     validate_file_tool_payload_bytes("append_file", &input.content)?;
     let output = append_file_with_context_expected(
@@ -1721,6 +1932,12 @@ fn run_begin_large_write(
     input: BeginLargeWriteInput,
     context: &ToolRunContext,
 ) -> Result<String, String> {
+    if input.estimated_bytes < MIN_STAGED_WRITE_ESTIMATED_BYTES {
+        return Err(format!(
+            "estimated final size is {} bytes, below the {MIN_STAGED_WRITE_ESTIMATED_BYTES}-byte staged-write threshold. Use write_file or write_files; no staging transaction was created.",
+            input.estimated_bytes
+        ));
+    }
     to_pretty_json(
         begin_large_write(
             &input.path,
@@ -2340,11 +2557,16 @@ fn display_audit_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ReadFileInput {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadFilesInput {
+    requests: Vec<ReadFileInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2428,6 +2650,11 @@ struct WriteFileInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct WriteFilesInput {
+    files: Vec<WriteFileInput>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AppendFileInput {
     path: String,
     content: String,
@@ -2439,6 +2666,7 @@ struct AppendFileInput {
 struct BeginLargeWriteInput {
     path: String,
     expected_revision: String,
+    estimated_bytes: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3785,6 +4013,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
+            "read_files",
             "ReadMediaFile",
             "glob_search",
             "grep_search",
@@ -3796,6 +4025,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "read_files",
             "ReadMediaFile",
             "glob_search",
             "grep_search",
@@ -3810,6 +4040,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "read_files",
             "ReadMediaFile",
             "glob_search",
             "grep_search",
@@ -3823,6 +4054,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-code-guide" => vec![
             "read_file",
+            "read_files",
             "ReadMediaFile",
             "glob_search",
             "grep_search",
@@ -3836,7 +4068,9 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "statusline-setup" => vec![
             "bash",
             "read_file",
+            "read_files",
             "write_file",
+            "write_files",
             "append_file",
             "edit_file",
             "multi_edit",
@@ -3847,8 +4081,10 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "read_files",
             "ReadMediaFile",
             "write_file",
+            "write_files",
             "append_file",
             "edit_file",
             "multi_edit",
@@ -4171,58 +4407,113 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
 
 #[allow(clippy::needless_pass_by_value)]
 fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
-    let deferred = deferred_tool_specs();
-    let max_results = input.max_results.unwrap_or(5).max(1);
+    let searchable = searchable_tool_specs();
     let query = input.query.trim().to_string();
+    let max_results = tool_search_result_limit(
+        &query,
+        input.max_results.unwrap_or(DEFAULT_TOOL_SEARCH_RESULTS),
+    );
     let normalized_query = normalize_tool_search_query(&query);
-    let matches = search_tool_specs(&query, max_results, &deferred);
+    let candidates = searchable
+        .iter()
+        .map(|spec| ToolSearchCandidate {
+            name: spec.name,
+            description: spec.description,
+        })
+        .collect::<Vec<_>>();
+    let matches = rank_tool_search_candidates(&query, &candidates, max_results);
 
     ToolSearchOutput {
         matches,
         query,
         normalized_query,
-        total_deferred_tools: deferred.len(),
+        total_deferred_tools: searchable.len(),
         pending_mcp_servers: None,
     }
 }
 
-fn deferred_tool_specs() -> Vec<ToolSpec> {
+/// Every kernel tool except `ToolSearch` itself is searchable.
+///
+/// Which tools are visible is decided per turn by dynamic routing, so a static
+/// "always loaded" exclusion list would make exactly the routed-away core tools
+/// (`write_file`, `edit_file`, `multi_edit`, …) impossible to recover: the model
+/// would search for the tool it needs and be told it does not exist.
+fn searchable_tool_specs() -> Vec<ToolSpec> {
     mvp_tool_specs()
         .into_iter()
-        .filter(|spec| {
-            !matches!(
-                spec.name,
-                "bash"
-                    | "read_file"
-                    | "write_file"
-                    | "append_file"
-                    | "edit_file"
-                    | "multi_edit"
-                    | "change_list"
-                    | "change_get"
-                    | "change_revert"
-                    | "glob_search"
-                    | "grep_search"
-                    | "memory"
-                    | "session_search"
-            )
-        })
+        .filter(|spec| spec.name != "ToolSearch")
         .collect()
 }
 
-fn search_tool_specs(query: &str, max_results: usize, specs: &[ToolSpec]) -> Vec<String> {
-    let lowered = query.to_lowercase();
+/// Default number of ranked matches a `ToolSearch` call returns.
+///
+/// Chat activates every match, so one search should be able to cover a whole
+/// capability family (navigate + snapshot + click + …) rather than forcing one
+/// call per tool.
+pub const DEFAULT_TOOL_SEARCH_RESULTS: usize = 8;
+
+/// Ceiling for an explicit `select:` list. Naming tools outright is the model's
+/// strongest signal, so such a list is never truncated below what was asked for.
+pub const MAX_TOOL_SEARCH_SELECTION: usize = 16;
+
+/// The tool the model named outright always outranks a keyword or description
+/// hit. Underscore normalization is a fuzzy aid for spelling variants; it must
+/// never let a loosely related tool displace an exact name.
+const TOOL_SEARCH_TIER_EXACT_NAME: i32 = 400;
+const TOOL_SEARCH_TIER_NAME_SUBSTRING: i32 = 200;
+const TOOL_SEARCH_TIER_DESCRIPTION: i32 = 100;
+
+/// One searchable tool, as seen by [`rank_tool_search_candidates`].
+#[derive(Debug, Clone, Copy)]
+pub struct ToolSearchCandidate<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+}
+
+/// How many matches a query may return. An explicit `select:` list keeps every
+/// name it asked for; a keyword query keeps the caller's bound.
+#[must_use]
+pub fn tool_search_result_limit(query: &str, max_results: usize) -> usize {
+    let max_results = max_results.max(1);
+    if query.trim().to_lowercase().starts_with("select:") {
+        max_results.max(MAX_TOOL_SEARCH_SELECTION)
+    } else {
+        max_results
+    }
+}
+
+/// Rank tools for a `ToolSearch` query, best match first.
+///
+/// Shared by the kernel catalog and by Chat's catalog (kernel + discovered MCP
+/// tools) so both produce one consistent ordering instead of two lists that are
+/// concatenated and truncated.
+#[must_use]
+pub fn rank_tool_search_candidates(
+    query: &str,
+    candidates: &[ToolSearchCandidate<'_>],
+    max_results: usize,
+) -> Vec<String> {
+    let lowered = query.trim().to_lowercase();
+    let max_results = max_results.max(1);
     if let Some(selection) = lowered.strip_prefix("select:") {
         return selection
             .split(',')
             .map(str::trim)
             .filter(|part| !part.is_empty())
+            .map(canonical_tool_token)
+            .filter(|wanted| !wanted.is_empty())
             .filter_map(|wanted| {
-                let wanted = canonical_tool_token(wanted);
-                specs
+                candidates
                     .iter()
-                    .find(|spec| canonical_tool_token(spec.name) == wanted)
-                    .map(|spec| spec.name.to_string())
+                    // An MCP tool is selected by the name the model writes
+                    // (`browser_click`), not by its `mcp__server__` prefix.
+                    .find(|candidate| canonical_tool_token(candidate.name) == wanted)
+                    .or_else(|| {
+                        candidates.iter().find(|candidate| {
+                            wanted.len() >= 4 && canonical_tool_segment(candidate.name) == wanted
+                        })
+                    })
+                    .map(|candidate| candidate.name.to_string())
             })
             .take(max_results)
             .collect();
@@ -4230,69 +4521,118 @@ fn search_tool_specs(query: &str, max_results: usize, specs: &[ToolSpec]) -> Vec
 
     let mut required = Vec::new();
     let mut optional = Vec::new();
-    for term in lowered.split_whitespace() {
+    for term in lowered.split(|ch: char| ch.is_whitespace() || ch == ',') {
         if let Some(rest) = term.strip_prefix('+') {
             if !rest.is_empty() {
                 required.push(rest);
             }
-        } else {
+        } else if !term.is_empty() {
             optional.push(term);
         }
     }
-    let terms = if required.is_empty() {
-        optional.clone()
-    } else {
-        required.iter().chain(optional.iter()).copied().collect()
-    };
-
-    let mut scored = specs
+    let terms = required
         .iter()
-        .filter_map(|spec| {
-            let name = spec.name.to_lowercase();
-            let canonical_name = canonical_tool_token(spec.name);
-            let normalized_description = normalize_tool_search_query(spec.description);
-            let haystack = format!(
-                "{name} {} {canonical_name}",
-                spec.description.to_lowercase()
-            );
-            let normalized_haystack = format!("{canonical_name} {normalized_description}");
-            if required.iter().any(|term| !haystack.contains(term)) {
+        .chain(optional.iter())
+        .copied()
+        .collect::<Vec<_>>();
+
+    let mut scored = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let index = ToolSearchIndex::new(candidate);
+            if required
+                .iter()
+                .any(|term| index.match_tier(term).is_none())
+            {
                 return None;
             }
-
-            let mut score = 0_i32;
-            for term in &terms {
-                let canonical_term = canonical_tool_token(term);
-                if haystack.contains(term) {
-                    score += 2;
-                }
-                if name == *term {
-                    score += 8;
-                }
-                if name.contains(term) {
-                    score += 4;
-                }
-                if canonical_name == canonical_term {
-                    score += 12;
-                }
-                if normalized_haystack.contains(&canonical_term) {
-                    score += 3;
-                }
-            }
-
-            if score == 0 && !lowered.is_empty() {
+            let term_tiers = terms
+                .iter()
+                .map(|term| index.match_tier(term))
+                .collect::<Vec<_>>();
+            let matched_terms = term_tiers.iter().filter(|tier| tier.is_some()).count();
+            if matched_terms == 0 && !terms.is_empty() {
                 return None;
             }
-            Some((score, spec.name.to_string()))
+            let tier = term_tiers.iter().flatten().copied().max().unwrap_or_default();
+            // The position of the term that earned the best tier, not of any
+            // term that happened to match. `edit_file` mentions `write_file` in
+            // its description; that must not make it answer term 0 first.
+            let first_term = term_tiers
+                .iter()
+                .position(|term_tier| *term_tier == Some(tier))
+                .unwrap_or_default();
+            Some((tier, first_term, matched_terms, candidate.name.to_string()))
         })
         .collect::<Vec<_>>();
 
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    // Strongest tier first, then the order the query listed the terms in, so
+    // `write_file edit_file multi_edit` answers in exactly that order. Match
+    // count and name only break remaining ties.
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.3.cmp(&right.3))
+    });
     scored
         .into_iter()
-        .map(|(_, name)| name)
+        .map(|(_, _, _, name)| name)
         .take(max_results)
         .collect()
+}
+
+/// Precomputed lowercase/canonical forms of one candidate, so a multi-term
+/// query does not re-normalize the same name and description per term.
+struct ToolSearchIndex {
+    name_lower: String,
+    canonical_name: String,
+    canonical_segment: String,
+    description_lower: String,
+    canonical_description: String,
+}
+
+impl ToolSearchIndex {
+    fn new(candidate: &ToolSearchCandidate<'_>) -> Self {
+        Self {
+            name_lower: candidate.name.to_lowercase(),
+            canonical_name: canonical_tool_token(candidate.name),
+            canonical_segment: canonical_tool_segment(candidate.name),
+            description_lower: candidate.description.to_lowercase(),
+            canonical_description: normalize_tool_search_query(candidate.description),
+        }
+    }
+
+    fn match_tier(&self, term: &str) -> Option<i32> {
+        let canonical_term = canonical_tool_token(term);
+        if !canonical_term.is_empty() {
+            if self.canonical_name == canonical_term
+                // An MCP tool is named `mcp__<server>__browser_navigate`, but
+                // the model writes `browser_navigate`. Its trailing segment is
+                // an exact name, not a fuzzy substring hit.
+                || (canonical_term.len() >= 4 && self.canonical_segment == canonical_term)
+            {
+                return Some(TOOL_SEARCH_TIER_EXACT_NAME);
+            }
+            if self.name_lower.contains(term)
+                || (canonical_term.len() >= 3 && self.canonical_name.contains(&canonical_term))
+            {
+                return Some(TOOL_SEARCH_TIER_NAME_SUBSTRING);
+            }
+            if self.description_lower.contains(term)
+                || (canonical_term.len() >= 4
+                    && self.canonical_description.contains(&canonical_term))
+            {
+                return Some(TOOL_SEARCH_TIER_DESCRIPTION);
+            }
+            return None;
+        }
+        self.name_lower
+            .contains(term)
+            .then_some(TOOL_SEARCH_TIER_NAME_SUBSTRING)
+    }
 }
 
 fn normalize_tool_search_query(query: &str) -> String {
@@ -4305,7 +4645,11 @@ fn normalize_tool_search_query(query: &str) -> String {
         .join(" ")
 }
 
-fn canonical_tool_token(value: &str) -> String {
+/// Spelling-insensitive form of a tool name or query token: `write_file`,
+/// `writeFile`, `write-file` and `WriteFileTool` all canonicalize to
+/// `writefile`. Used for matching only; it never renames a tool.
+#[must_use]
+pub fn canonical_tool_token(value: &str) -> String {
     let mut canonical = value
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -4315,6 +4659,14 @@ fn canonical_tool_token(value: &str) -> String {
         canonical = stripped.to_string();
     }
     canonical
+}
+
+/// Canonical form of the trailing `__` segment of a tool name, which is the
+/// part of an MCP name (`mcp__playwright__browser_navigate`) the model and the
+/// user actually say.
+#[must_use]
+pub fn canonical_tool_segment(name: &str) -> String {
+    canonical_tool_token(name.rsplit("__").next().unwrap_or(name))
 }
 
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
@@ -6682,6 +7034,35 @@ fn execute_shell_command(
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let command_arg = powershell_command_arg(command);
     if run_in_background.unwrap_or(false) {
+        let cwd = runtime::execution_current_dir()?;
+        let service_key = runtime::background_service_key(&cwd, command);
+        if let Some(process) = runtime::reusable_background_service(&service_key) {
+            let log_path = process.log_path.clone();
+            return Ok(runtime::BashCommandOutput {
+                stdout: format!(
+                    "Reused running background service {} for this workspace, command, and port.",
+                    process.pid
+                ),
+                stderr: String::new(),
+                raw_output_path: log_path.clone(),
+                interrupted: false,
+                is_image: None,
+                background_task_id: Some(process.pid.to_string()),
+                backgrounded_by_user: Some(true),
+                assistant_auto_backgrounded: Some(false),
+                dangerously_disable_sandbox: None,
+                return_code_interpretation: None,
+                no_output_expected: Some(false),
+                structured_content: Some(vec![json!({
+                    "type": "background_service_reused",
+                    "pid": process.pid,
+                    "persistedOutputPath": log_path
+                })]),
+                persisted_output_path: process.log_path,
+                persisted_output_size: None,
+                sandbox_status: None,
+            });
+        }
         let mut process = runtime::hidden_command(shell);
         process
             .arg("-NoProfile")
@@ -6689,7 +7070,6 @@ fn execute_shell_command(
             .arg("-Command")
             .arg(&command_arg)
             .stdin(std::process::Stdio::null());
-        let cwd = runtime::execution_current_dir()?;
         let log = runtime::background_log::create(&cwd, command);
         match &log {
             Some(log) => {
@@ -6704,10 +7084,11 @@ fn execute_shell_command(
         let log_path = log
             .as_ref()
             .map(runtime::background_log::BackgroundLog::display);
-        let pid = runtime::spawn_managed_background(
+        let pid = runtime::spawn_managed_background_service(
             &mut process,
             format!("PowerShell background: {}", truncate_process_label(command)),
             log_path.clone(),
+            service_key,
         )?;
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),

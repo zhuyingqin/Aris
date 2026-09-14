@@ -3,8 +3,9 @@ use super::{
     in_flight_compactions, is_internal_continuation_message, overflow_preserve_message_count,
     parse_auto_compaction_threshold, run_compaction_singleflight,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
-    CompactionFlightKey, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecution, ToolExecutor, ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
+    CompactionFlightKey, ConversationRuntime, DynamicToolRouting, DynamicToolRoutingState,
+    RuntimeError, StaticToolExecutor, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
+    ToolMedia, ToolOutput, TurnSummary,
     DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
@@ -627,6 +628,7 @@ fn rich_tool_output_keeps_mcp_image_even_when_tool_reports_error() {
                     data: "aGVsbG8=".to_string(),
                 }],
                 reported_error: true,
+                evidence_text: None,
             })
         }
 
@@ -4335,7 +4337,8 @@ fn a_narrow_tool_loop_gets_an_in_band_main_line_reminder() {
         tools,
         PermissionPolicy::new(PermissionMode::Allow),
         vec!["system".to_string()],
-    );
+    )
+    .with_evidence_guard_mode(crate::EvidenceGuardMode::Off);
 
     runtime
         .run_turn("make the parser accept v3", None)
@@ -4454,6 +4457,50 @@ fn an_unconverging_turn_stops_on_its_own_without_a_configured_limit() {
     assert!(!runtime.session().messages.is_empty());
 }
 
+#[test]
+fn forty_tool_calls_create_a_soft_checkpoint_and_continue_the_turn() {
+    struct LongButFiniteClient {
+        calls: usize,
+    }
+    impl ApiClient for LongButFiniteClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls <= 41 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("step-{}", self.calls),
+                        name: "step".to_string(),
+                        input: format!(r#"{{"index":{}}}"#, self.calls),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("completed after checkpoint".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let tools = StaticToolExecutor::new().register("step", |input| Ok(input.to_string()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        LongButFiniteClient { calls: 0 },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false)
+    .with_evidence_guard_mode(crate::EvidenceGuardMode::Off);
+
+    let summary = runtime
+        .run_turn("complete a long finite workflow", None)
+        .expect("soft checkpoint must not stop the turn");
+    assert_eq!(assistant_text_from_turn_summary(&summary), "completed after checkpoint");
+    assert!(summary.auto_compaction.is_some());
+    assert!(!runtime.session().compactions.is_empty());
+}
+
 /// Iteration count does not bound elapsed time: a handful of slow tool calls
 /// can hold one turn open for hours without ever approaching the ceiling.
 #[test]
@@ -4523,4 +4570,407 @@ fn turn_budgets_have_finite_defaults_and_remain_disablable() {
     runtime
         .run_turn("hello", None)
         .expect("an ordinary turn is unaffected by the budgets");
+}
+
+#[test]
+fn tool_search_activates_deferred_schemas_before_the_next_model_step() {
+    #[derive(Clone)]
+    struct RoutingClient {
+        calls: usize,
+        active_history: std::sync::Arc<std::sync::Mutex<Vec<std::collections::BTreeSet<String>>>>,
+    }
+
+    impl ApiClient for RoutingClient {
+        fn set_active_tools(&mut self, tool_names: Option<&std::collections::BTreeSet<String>>) {
+            self.active_history
+                .lock()
+                .expect("active history")
+                .push(tool_names.cloned().unwrap_or_default());
+        }
+
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "search-1".to_string(),
+                        name: "ToolSearch".to_string(),
+                        input: r#"{"query":"browser"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            } else {
+                Ok(vec![
+                    AssistantEvent::TextDelta("ready".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+    }
+
+    let history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = RoutingClient {
+        calls: 0,
+        active_history: history.clone(),
+    };
+    let tools = StaticToolExecutor::new().register("ToolSearch", |_| {
+        Ok(r#"{"matches":["browser_snapshot"],"query":"browser"}"#.to_string())
+    });
+    let routing = DynamicToolRouting {
+        catalog: ["ToolSearch", "browser_snapshot"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        active: ["ToolSearch"].into_iter().map(str::to_string).collect(),
+        pinned: ["ToolSearch"].into_iter().map(str::to_string).collect(),
+        max_active: 24,
+    };
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        client,
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_dynamic_tool_routing(routing);
+
+    let summary = runtime.run_turn("inspect the page", None).expect("turn");
+    let history = history.lock().expect("active history");
+    assert_eq!(history.len(), 2);
+    assert!(!history[0].contains("browser_snapshot"));
+    assert!(history[1].contains("browser_snapshot"));
+    assert!(summary
+        .tool_results
+        .iter()
+        .any(|message| message.blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { output, .. } if output.contains("activated")
+        ))));
+}
+
+fn routing_state(active: &[&str], pinned: &[&str], max_active: usize) -> DynamicToolRoutingState {
+    DynamicToolRoutingState {
+        catalog: [
+            "ToolSearch",
+            "read_file",
+            "grep_search",
+            "glob_search",
+            "browser_click",
+            "browser_snapshot",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        active: active.iter().copied().map(str::to_string).collect(),
+        pinned: pinned.iter().copied().map(str::to_string).collect(),
+        max_active,
+        last_used: std::collections::BTreeMap::new(),
+        tick: 0,
+    }
+}
+
+#[test]
+fn dynamic_tool_routing_evicts_the_least_recently_used_unpinned_tool() {
+    let mut state = routing_state(
+        &["ToolSearch", "read_file", "grep_search", "glob_search"],
+        &["ToolSearch", "read_file"],
+        4,
+    );
+    state.touch("grep_search");
+
+    let (activated, evicted) = state.activate(vec![
+        "browser_click".to_string(),
+        "browser_snapshot".to_string(),
+    ]);
+
+    assert_eq!(activated, vec!["browser_click", "browser_snapshot"]);
+    // `glob_search` was never used this turn; `grep_search` was used once.
+    assert_eq!(evicted, vec!["glob_search", "grep_search"]);
+    assert_eq!(state.active.len(), 4);
+    assert!(state.active.contains("ToolSearch"));
+    assert!(state.active.contains("read_file"));
+}
+
+#[test]
+fn dynamic_tool_routing_never_evicts_a_pinned_tool() {
+    let mut state = routing_state(&["ToolSearch", "read_file"], &["ToolSearch", "read_file"], 2);
+
+    let (activated, evicted) = state.activate(vec![
+        "browser_click".to_string(),
+        "browser_snapshot".to_string(),
+    ]);
+
+    // Nothing evictable exists yet: pinned tools are off limits and a freshly
+    // activated tool is never its own victim, so the set the model just asked
+    // for survives intact and the next activation trims it back.
+    assert_eq!(activated.len(), 2);
+    assert!(evicted.is_empty());
+    assert!(state.pinned.iter().all(|name| state.active.contains(name)));
+
+    state.touch("browser_click");
+    let (_, evicted) = state.activate(vec!["glob_search".to_string()]);
+    // Least recently used first, and the pinned pair keeps the set above the
+    // ceiling rather than being evicted to satisfy it.
+    assert_eq!(evicted, vec!["browser_snapshot", "browser_click"]);
+    assert!(state.active.contains("ToolSearch"));
+    assert!(state.active.contains("read_file"));
+    assert!(state.active.contains("glob_search"));
+}
+
+#[test]
+fn dynamic_tool_routing_ignores_names_outside_the_authorized_catalog() {
+    let mut state = routing_state(&["ToolSearch"], &["ToolSearch"], 4);
+
+    let (activated, evicted) = state.activate(vec!["rm_rf".to_string()]);
+
+    assert!(activated.is_empty());
+    assert!(evicted.is_empty());
+    assert!(!state.active.contains("rm_rf"));
+}
+
+#[test]
+fn repeated_tool_results_are_nudged_then_blocked_without_reexecuting() {
+    struct RepeatingClient {
+        calls: usize,
+    }
+
+    impl ApiClient for RepeatingClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            let blocked = request.messages.last().is_some_and(|message| {
+                message.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::ToolResult { output, .. }
+                            if output.contains("no_new_evidence_loop")
+                    )
+                })
+            });
+            if blocked {
+                return Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "The repeated read is blocked; I will stop.".to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: format!("read-{}", self.calls),
+                    name: "read_file".to_string(),
+                    input: r#"{"path":"same.txt"}"#.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_executions = executions.clone();
+    let tools = StaticToolExecutor::new().register("read_file", move |_| {
+        observed_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("unchanged contents".to_string())
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        RepeatingClient { calls: 0 },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_focus_nudge(false);
+
+    let summary = runtime
+        .run_turn("inspect until useful", None)
+        .expect("turn");
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        7,
+        "the eighth identical attempt must be refused before execution"
+    );
+    let outputs = summary
+        .tool_results
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(outputs
+        .iter()
+        .any(|output| output.contains("Evidence check")));
+    assert!(outputs
+        .iter()
+        .any(|output| output.contains("no_new_evidence_loop")));
+}
+
+#[test]
+fn large_tool_output_is_addressable_without_entering_model_context_in_full() {
+    struct ArtifactClient {
+        calls: usize,
+    }
+    impl ApiClient for ArtifactClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "large-1".to_string(),
+                        name: "large_read".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            let output = request
+                .messages
+                .iter()
+                .flat_map(|message| message.blocks.iter())
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult { output, .. } => Some(output),
+                    _ => None,
+                })
+                .expect("projected tool result");
+            let value: serde_json::Value =
+                serde_json::from_str(output).expect("artifact reference envelope");
+            assert_eq!(value["status"], "referenced");
+            assert!(output.chars().count() < crate::TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS);
+            let path = value["persistedOutputPath"]
+                .as_str()
+                .expect("artifact path");
+            assert!(std::path::Path::new(path).is_file());
+            assert!(std::fs::read_to_string(path)
+                .expect("full artifact")
+                .contains("middle evidence"));
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("temporary project");
+    let context = crate::ProjectExecutionContext::new(directory.path());
+    let output = format!(
+        "start\n{}\nmiddle evidence\n{}\nend",
+        "x".repeat(30_000),
+        "y".repeat(30_000)
+    );
+    let tools = StaticToolExecutor::new().register("large_read", move |_| Ok(output.clone()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ArtifactClient { calls: 0 },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+
+    crate::with_project_execution_context(&context, || {
+        runtime.run_turn("inspect it", None).expect("turn")
+    });
+}
+
+#[test]
+fn low_context_budget_lowers_the_large_output_reference_threshold() {
+    struct OneShotClient;
+    impl ApiClient for OneShotClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+    let runtime = ConversationRuntime::new(
+        Session::new(),
+        OneShotClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(20_000);
+
+    assert_eq!(
+        runtime.tool_output_artifact_threshold_chars(),
+        crate::tool_output_artifact::MIN_TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS
+    );
+}
+
+#[test]
+fn evidence_ledger_observes_pristine_text_instead_of_the_context_projection() {
+    struct TwoToolClient {
+        calls: usize,
+    }
+    impl ApiClient for TwoToolClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls <= 2 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("call-{}", self.calls),
+                        name: "projected".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct ProjectingExecutor;
+    impl ToolExecutor for ProjectingExecutor {
+        fn execute(&mut self, _tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            unreachable!("rich execution path")
+        }
+
+        fn execute_output_batch(
+            &mut self,
+            invocations: &[ToolInvocation],
+        ) -> Vec<Result<ToolOutput, ToolError>> {
+            invocations
+                .iter()
+                .map(|invocation| {
+                    Ok(ToolOutput {
+                        text: "same compact preview".to_string(),
+                        media: Vec::new(),
+                        reported_error: false,
+                        evidence_text: Some(format!(
+                            "distinct pristine evidence from {}",
+                            invocation.tool_use_id
+                        )),
+                    })
+                })
+                .collect()
+        }
+    }
+
+    struct ObservationSink(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl crate::EventSink for ObservationSink {
+        fn emit(&mut self, event: &crate::RuntimeEvent) {
+            if let crate::EventType::EvidenceObservation { novelty, .. } = &event.event_type {
+                self.0.lock().expect("observations").push(novelty.clone());
+            }
+        }
+    }
+
+    let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        TwoToolClient { calls: 0 },
+        ProjectingExecutor,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_event_sink(Box::new(ObservationSink(observations.clone())));
+
+    runtime.run_turn("inspect twice", None).expect("turn");
+    assert_eq!(
+        observations.lock().expect("observations").as_slice(),
+        ["new", "new"]
+    );
 }

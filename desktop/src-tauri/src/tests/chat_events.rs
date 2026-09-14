@@ -84,6 +84,36 @@ fn replay_updates_a_streamed_question_when_its_answer_channel_becomes_ready() {
 }
 
 #[test]
+fn replay_preserves_a_timeout_if_the_final_tool_result_was_not_written() {
+    let events = vec![
+        event(
+            1,
+            "tool_call",
+            json!({"id":"browser-1","name":"mcp__playwright__browser_evaluate","input":"{}"}),
+        ),
+        event(
+            2,
+            "tool_timeout",
+            json!({
+                "id":"browser-1",
+                "name":"mcp__playwright__browser_evaluate",
+                "elapsedMs":120000,
+                "timeoutMs":120000,
+                "nearTimeout":true,
+                "recovered":true,
+                "message":"No progress for 120s"
+            }),
+        ),
+    ];
+
+    let replay = replay_events("chat-test", &events);
+    let progress = &replay.turns[0]["blocks"][0]["progress"];
+    assert_eq!(progress["nearTimeout"], json!(true));
+    assert_eq!(progress["recovered"], json!(true));
+    assert_eq!(progress["message"], json!("No progress for 120s"));
+}
+
+#[test]
 fn export_recovery_builds_runtime_session_from_cancelled_stream_events() {
     let events = vec![
         event(

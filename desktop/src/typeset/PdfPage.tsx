@@ -4,6 +4,7 @@
 import { Fragment, memo, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { isPdfXrefError } from "../pdf/runtime";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import {
@@ -60,6 +61,11 @@ export interface PdfPageProps {
   highlight?: PdfPageHighlight | null;
   /** Find-in-PDF hits on this page, addressed by pdf.js item index. */
   searchHighlights?: { items: readonly number[]; activeItems: readonly number[] } | null;
+  /** A page that fails to render is usually a fault of the *document*, not of
+   *  this page: a cross-reference table that disagrees with the file only shows
+   *  up on the pages whose objects it mis-addresses. The owner of the document
+   *  is the one that can reopen it repaired. */
+  onRenderError?: (error: unknown, page: number) => void;
 }
 
 /** Client coordinates to a SyncTeX query point, or null before the page renders. */
@@ -93,6 +99,7 @@ export const PdfPage = memo(function PdfPage({
   onPointConverter,
   highlight,
   searchHighlights,
+  onRenderError,
 }: PdfPageProps) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].pdfPage;
@@ -107,7 +114,9 @@ export const PdfPage = memo(function PdfPage({
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; detail: string } | null>(null);
+  const renderErrorRef = useRef(onRenderError);
+  renderErrorRef.current = onRenderError;
   const dragRef = useRef<{
     id: string;
     startClientX: number;
@@ -190,9 +199,16 @@ export const PdfPage = memo(function PdfPage({
         });
       })
       .catch((renderError) => {
-        if (!disposed && renderError?.name !== "RenderingCancelledException") {
-          setError(String(renderError));
-        }
+        if (disposed || renderError?.name === "RenderingCancelledException") return;
+        const detail = String(renderError);
+        setError({
+          // A broken cross-reference table is a property of the file, so name it
+          // as such rather than leaking `UnknownErrorException: Bad
+          // (uncompressed) XRef entry: 1327R` at the reader.
+          text: isPdfXrefError(renderError) ? copy.damagedDocument : detail,
+          detail,
+        });
+        renderErrorRef.current?.(renderError, page);
       });
     return () => {
       disposed = true;
@@ -598,7 +614,7 @@ export const PdfPage = memo(function PdfPage({
           aria-hidden="true"
         />
       )}
-      {error && <div className="typeset-pdf-page-error">{error}</div>}
+      {error && <div className="typeset-pdf-page-error" title={error.detail}>{error.text}</div>}
     </div>
   );
 });

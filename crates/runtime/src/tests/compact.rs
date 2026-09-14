@@ -149,6 +149,72 @@ fn fallback_summary_carries_latest_todowrite_state_and_forward_plan() {
 }
 
 #[test]
+fn fallback_summary_preserves_evidence_novelty_state() {
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("inspect the same source until it changes"),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "read-1".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"notes.md"}"#.to_string(),
+            }]),
+            ConversationMessage::tool_result("read-1", "read_file", "unchanged", false),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "read-2".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"notes.md"}"#.to_string(),
+            }]),
+            ConversationMessage::tool_result("read-2", "read_file", "unchanged", false),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let summary = summarize_messages(&session.messages);
+    let pinned = pinned_context_lines(&session.messages).join("\n");
+
+    assert!(summary.contains("## Evidence Ledger"));
+    assert!(summary.contains("1 distinct evidence result(s) across 2 completed tool call(s)"));
+    assert!(summary.contains("current no-new-evidence streak is 1 tool call(s)"));
+    assert!(pinned.contains("Evidence ledger: 1 distinct evidence result(s)"));
+}
+
+#[test]
+fn working_context_projection_keeps_large_output_artifact_addresses() {
+    let path = r"F:\project\.somniq\tmp\tool-output\abc-read.txt";
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("inspect the complete test output"),
+            ConversationMessage::tool_result(
+                "test-1",
+                "bash",
+                serde_json::json!({
+                    "status": "referenced",
+                    "preview": "3 tests failed",
+                    "persistedOutputPath": path,
+                    "persistedOutputSize": 182_000,
+                    "sha256": "abcdef1234567890abcdef1234567890"
+                })
+                .to_string(),
+                true,
+            ),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let summary = summarize_messages(&session.messages);
+    let pinned = pinned_context_lines(&session.messages).join("\n");
+
+    assert!(summary.contains("## Artifact References"));
+    assert!(summary.contains(path));
+    assert!(summary.contains("182000 bytes"));
+    assert!(summary.contains("sha256:abcdef1234567890"));
+    assert!(pinned.contains("Artifact reference:"));
+    assert!(pinned.contains(path));
+}
+
+#[test]
 fn continuation_treats_preserved_tail_as_authoritative() {
     let message = get_compact_continuation_message("<summary>old</summary>", true, true);
     assert!(message.contains("Recent messages are preserved verbatim and are authoritative"));

@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use encoding_rs::{GB18030, GBK};
@@ -45,7 +45,9 @@ pub const ABSENT_FILE_REVISION: &str = "absent";
 pub const MAX_FILE_TOOL_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STAGED_WRITE_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 const STAGED_WRITE_DIR_NAME: &str = "file-writes";
+const BATCH_WRITE_JOURNAL_DIR_NAME: &str = "file-write-batches";
 const STAGED_WRITE_FORMAT_VERSION: u8 = 1;
+pub const DEFAULT_STAGED_WRITE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
@@ -327,6 +329,46 @@ pub struct LargeWriteAbortOutput {
     pub aborted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchWriteRequest {
+    pub path: String,
+    pub content: String,
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchWriteOutput {
+    pub batch_id: String,
+    pub files: Vec<WriteFileOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchWriteJournal {
+    version: u8,
+    batch_id: String,
+    entries: Vec<BatchWriteJournalEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchWriteJournalEntry {
+    path: String,
+    original: Option<String>,
+    before_revision: String,
+    after_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchWriteRecoveryOutput {
+    pub scanned: usize,
+    pub recovered: usize,
+    pub conflicts: usize,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum StagedWriteStatus {
@@ -352,6 +394,19 @@ struct StagedWriteMetadata {
     status: StagedWriteStatus,
     chunks: Vec<StagedWriteChunk>,
     staged_bytes: usize,
+    #[serde(default)]
+    created_at_epoch_secs: u64,
+    #[serde(default)]
+    last_activity_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedWriteCleanupOutput {
+    pub scanned: usize,
+    pub removed: usize,
+    pub skipped_committing: usize,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1087,6 +1142,245 @@ pub fn write_file_with_context_expected(
     })
 }
 
+/// Revision-check and publish a set of complete files as one recoverable
+/// in-process transaction. All destination locks remain held from preflight
+/// through publication. If a later replacement fails, earlier replacements
+/// are restored from their exact preflight snapshots before the error returns.
+pub fn write_files_with_context_expected(
+    requests: &[BatchWriteRequest],
+    context: &FileMutationContext,
+) -> io::Result<BatchWriteOutput> {
+    if requests.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "batch write requires at least one file",
+        ));
+    }
+    let mut prepared = Vec::with_capacity(requests.len());
+    let mut unique = std::collections::BTreeSet::new();
+    for request in requests {
+        let path = normalize_path_allow_missing(&request.path)?;
+        let canonical_key = display_path(&path).to_ascii_lowercase();
+        if !unique.insert(canonical_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("duplicate batch-write path `{}`", request.path),
+            ));
+        }
+        prepared.push((path, request));
+    }
+    let paths = prepared
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let batch_id = create_batch_write_id()?;
+
+    crate::atomic_file::with_paths_locked(&paths, || {
+        let mut snapshots = Vec::with_capacity(prepared.len());
+        for (path, request) in &prepared {
+            let original = read_optional_utf8(path)?;
+            validate_expected_revision(
+                path,
+                Some(&request.expected_revision),
+                original.as_deref(),
+            )?;
+            let content = harmonize_write_eol(original.as_deref(), &request.content);
+            snapshots.push((original, content));
+        }
+
+        let journal_root = batch_write_journal_root()?;
+        fs::create_dir_all(&journal_root)?;
+        let journal_path = journal_root.join(format!("{batch_id}.json"));
+        let journal = BatchWriteJournal {
+            version: 1,
+            batch_id: batch_id.clone(),
+            entries: prepared
+                .iter()
+                .zip(snapshots.iter())
+                .map(|((path, _), (original, content))| BatchWriteJournalEntry {
+                    path: display_path(path),
+                    before_revision: current_revision(original.as_deref()),
+                    after_revision: content_revision(content.as_bytes()),
+                    original: original.clone(),
+                })
+                .collect(),
+        };
+        crate::atomic_file::write_replace_unlocked(
+            &journal_path,
+            &serde_json::to_vec(&journal).map_err(io::Error::other)?,
+        )?;
+
+        let mut published = 0_usize;
+        for (index, ((path, _), (_, content))) in
+            prepared.iter().zip(snapshots.iter()).enumerate()
+        {
+            if let Err(error) = replace_file_contents_unlocked(path, content) {
+                let mut rollback_errors = Vec::new();
+                for rollback_index in (0..published).rev() {
+                    let rollback_path = &prepared[rollback_index].0;
+                    let rollback = match &snapshots[rollback_index].0 {
+                        Some(original) => replace_file_contents_unlocked(rollback_path, original),
+                        None => fs::remove_file(rollback_path),
+                    };
+                    if let Err(rollback_error) = rollback {
+                        rollback_errors.push(format!(
+                            "{}: {rollback_error}",
+                            display_path(rollback_path)
+                        ));
+                    }
+                }
+                let rollback_note = if rollback_errors.is_empty() {
+                    let _ = fs::remove_file(&journal_path);
+                    "earlier files were rolled back".to_string()
+                } else {
+                    format!("rollback errors: {}", rollback_errors.join("; "))
+                };
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "batch write failed while publishing item {index} (`{}`): {error}; {rollback_note}",
+                        display_path(path)
+                    ),
+                ));
+            }
+            published += 1;
+        }
+
+        let mut files = Vec::with_capacity(prepared.len());
+        for ((path, _), (original, content)) in prepared.iter().zip(snapshots.iter()) {
+            let file_path = display_path(path);
+            let structured_patch = make_patch(original.as_deref().unwrap_or(""), content);
+            let changes = make_file_changes(&file_path, original.as_deref(), Some(content));
+            let unified_diff = make_unified_diff(
+                &file_path,
+                original.as_deref().unwrap_or(""),
+                content,
+            );
+            let operation = if original.is_some() {
+                FileChangeOperation::Update
+            } else {
+                FileChangeOperation::Create
+            };
+            let change_id = record_text_file_change(
+                context,
+                path,
+                operation,
+                original.as_deref(),
+                Some(content),
+                structured_patch.clone(),
+                unified_diff,
+                None,
+            )?
+            .map(|record| record.change_id);
+            files.push(WriteFileOutput {
+                kind: if original.is_some() { "update" } else { "create" }.to_string(),
+                file_path,
+                changes,
+                content: content.clone(),
+                structured_patch,
+                original_file: original.clone(),
+                git_diff: None,
+                change_id,
+                revision: content_revision(content.as_bytes()),
+                bytes: content.len(),
+                lines: content.lines().count(),
+            });
+        }
+        let _ = fs::remove_file(&journal_path);
+        Ok(BatchWriteOutput { batch_id, files })
+    })
+}
+
+fn create_batch_write_id() -> io::Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(format!(
+        "bat_{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn batch_write_journal_root() -> io::Result<PathBuf> {
+    let workspace = workspace_root()?.unwrap_or(crate::execution_current_dir()?);
+    Ok(crate::somniq_project_tmp_dir(workspace).join(BATCH_WRITE_JOURNAL_DIR_NAME))
+}
+
+/// Recover interrupted multi-file publications. Recovery is conservative: an
+/// entire journal is left untouched if any target has a revision other than
+/// its recorded before/after value, which means later user work is never
+/// overwritten by startup repair.
+pub fn recover_pending_batch_writes_at(workspace: &Path) -> io::Result<BatchWriteRecoveryOutput> {
+    let root = crate::somniq_project_tmp_dir(workspace).join(BATCH_WRITE_JOURNAL_DIR_NAME);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(BatchWriteRecoveryOutput::default())
+        }
+        Err(error) => return Err(error),
+    };
+    let mut output = BatchWriteRecoveryOutput::default();
+    for entry in entries.flatten() {
+        let journal_path = entry.path();
+        if journal_path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        output.scanned += 1;
+        let journal = match fs::read(&journal_path)
+            .and_then(|bytes| serde_json::from_slice::<BatchWriteJournal>(&bytes).map_err(io::Error::other))
+        {
+            Ok(journal) if journal.version == 1 => journal,
+            Ok(journal) => {
+                output.errors.push(format!(
+                    "{}: unsupported batch journal version {}",
+                    journal_path.display(), journal.version
+                ));
+                continue;
+            }
+            Err(error) => {
+                output.errors.push(format!("{}: {error}", journal_path.display()));
+                continue;
+            }
+        };
+        let paths = journal
+            .entries
+            .iter()
+            .map(|item| PathBuf::from(&item.path))
+            .collect::<Vec<_>>();
+        let recovered = crate::atomic_file::with_paths_locked(&paths, || {
+            for (path, item) in paths.iter().zip(journal.entries.iter()) {
+                let revision = current_revision(read_optional_utf8(path)?.as_deref());
+                if revision != item.before_revision && revision != item.after_revision {
+                    return Ok::<_, io::Error>(false);
+                }
+            }
+            for (path, item) in paths.iter().zip(journal.entries.iter()) {
+                let revision = current_revision(read_optional_utf8(path)?.as_deref());
+                if revision == item.before_revision {
+                    continue;
+                }
+                match &item.original {
+                    Some(original) => replace_file_contents_unlocked(path, original)?,
+                    None if path.exists() => fs::remove_file(path)?,
+                    None => {}
+                }
+            }
+            fs::remove_file(&journal_path)?;
+            Ok(true)
+        });
+        match recovered {
+            Ok(true) => output.recovered += 1,
+            Ok(false) => output.conflicts += 1,
+            Err(error) => output
+                .errors
+                .push(format!("{}: {error}", journal_path.display())),
+        }
+    }
+    Ok(output)
+}
+
 pub fn append_file(
     path: &str,
     content: &str,
@@ -1575,9 +1869,11 @@ pub fn begin_large_write(
     })?;
 
     let stage_root = staged_write_root()?;
+    let _ = cleanup_stale_large_writes_in_root(&stage_root, DEFAULT_STAGED_WRITE_MAX_AGE);
     fs::create_dir_all(&stage_root)?;
     let write_id = create_staged_write_id(&stage_root)?;
     let (metadata_path, part_path) = staged_write_paths(&stage_root, &write_id)?;
+    let now = epoch_secs_now();
     let metadata = StagedWriteMetadata {
         version: STAGED_WRITE_FORMAT_VERSION,
         write_id: write_id.clone(),
@@ -1587,6 +1883,8 @@ pub fn begin_large_write(
         status: StagedWriteStatus::Open,
         chunks: Vec::new(),
         staged_bytes: 0,
+        created_at_epoch_secs: now,
+        last_activity_epoch_secs: now,
     };
 
     fs::OpenOptions::new()
@@ -1712,6 +2010,7 @@ pub fn append_write_chunk(
             sha256: chunk_hash,
         });
         metadata.staged_bytes = next_total;
+        metadata.last_activity_epoch_secs = epoch_secs_now();
         save_staged_write_metadata_unlocked(&metadata_path, &metadata)?;
         Ok(LargeWriteChunkOutput {
             ok: true,
@@ -1723,6 +2022,91 @@ pub fn append_write_chunk(
             staged_bytes: metadata.staged_bytes,
         })
     })
+}
+
+/// Remove open staged-write transactions that have been abandoned beyond the
+/// supplied age. Committing transactions are always preserved. Exact `.json`
+/// and `.part` files are removed; unrelated temporary files are never touched.
+pub fn cleanup_stale_large_writes_at(
+    workspace: &Path,
+    max_age: Duration,
+) -> io::Result<StagedWriteCleanupOutput> {
+    cleanup_stale_large_writes_in_root(
+        &crate::somniq_project_tmp_dir(workspace).join(STAGED_WRITE_DIR_NAME),
+        max_age,
+    )
+}
+
+fn cleanup_stale_large_writes_in_root(
+    stage_root: &Path,
+    max_age: Duration,
+) -> io::Result<StagedWriteCleanupOutput> {
+    let mut output = StagedWriteCleanupOutput::default();
+    let entries = match fs::read_dir(stage_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(output),
+        Err(error) => return Err(error),
+    };
+    let now = epoch_secs_now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(write_id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if staged_write_paths(stage_root, write_id).is_err() {
+            continue;
+        }
+        output.scanned += 1;
+        let metadata = match load_staged_write_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                output.errors.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        if metadata.status == StagedWriteStatus::Committing {
+            output.skipped_committing += 1;
+            continue;
+        }
+        let activity = if metadata.last_activity_epoch_secs > 0 {
+            metadata.last_activity_epoch_secs
+        } else {
+            entry
+                .metadata()
+                .and_then(|value| value.modified())
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map_or(now, |value| value.as_secs())
+        };
+        if now.saturating_sub(activity) < max_age.as_secs() {
+            continue;
+        }
+        let (_, part_path) = staged_write_paths(stage_root, write_id)?;
+        let removal = crate::atomic_file::with_path_lock(&path, || {
+            if part_path.exists() {
+                fs::remove_file(&part_path)?;
+            }
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            Ok::<_, io::Error>(())
+        });
+        match removal {
+            Ok(()) => output.removed += 1,
+            Err(error) => output.errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    Ok(output)
+}
+
+fn epoch_secs_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub fn commit_large_write(

@@ -326,7 +326,7 @@ pub(crate) fn focus_nudge_due(last_nudge_tool_calls: Option<usize>, tool_calls: 
 /// A stable identity for an error, so the same failure recurring with different
 /// line numbers or offsets still counts as a repeat. Digit runs are collapsed
 /// because that is what usually varies between otherwise identical failures.
-fn error_signature(tool_name: &str, output: &str) -> Option<String> {
+pub(crate) fn error_signature(tool_name: &str, output: &str) -> Option<String> {
     let detail = json_error_detail(output);
     let salient = detail
         .as_deref()

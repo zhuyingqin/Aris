@@ -26,6 +26,22 @@ pub enum EventType {
         input_summary: String,
         is_error: bool,
     },
+    EvidenceObservation {
+        tool_name: String,
+        novelty: String,
+        fingerprint: Option<String>,
+        consecutive_no_new: usize,
+        unique_evidence: usize,
+        total_observations: usize,
+    },
+    ContextCheckpoint {
+        reason: String,
+        iteration: usize,
+        tool_calls: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+        removed_messages: usize,
+    },
     SkillInvoke {
         skill_name: String,
         args: String,
@@ -45,6 +61,10 @@ impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ToolCall { tool_name, .. } => write!(f, "tool_call:{tool_name}"),
+            Self::EvidenceObservation {
+                tool_name, novelty, ..
+            } => write!(f, "tool_evidence:{tool_name}:{novelty}"),
+            Self::ContextCheckpoint { reason, .. } => write!(f, "context_checkpoint:{reason}"),
             Self::SkillInvoke { skill_name, .. } => write!(f, "skill_invoke:{skill_name}"),
             Self::UserPrompt { .. } => write!(f, "user_prompt"),
             Self::SessionStart { model } => write!(f, "session_start:{model}"),
@@ -147,6 +167,45 @@ impl EventSink for JsonlEventSink {
                     escape_json(&summary),
                 )
             }
+            EventType::EvidenceObservation {
+                tool_name,
+                novelty,
+                fingerprint,
+                consecutive_no_new,
+                unique_evidence,
+                total_observations,
+            } => format!(
+                r#"{{"ts":"{}","session":"{}","event":"tool_evidence","tool":"{}","novelty":"{}","fingerprint":{},"consecutive_no_new":{},"unique_evidence":{},"total_observations":{}}}"#,
+                event.timestamp,
+                escape_json(&sanitize_field(&self.session_id, 60)),
+                escape_json(&sanitize_field(tool_name, 60)),
+                escape_json(&sanitize_field(novelty, 20)),
+                fingerprint.as_ref().map_or_else(
+                    || "null".to_string(),
+                    |value| format!("\"{}\"", escape_json(&sanitize_field(value, 20))),
+                ),
+                consecutive_no_new,
+                unique_evidence,
+                total_observations,
+            ),
+            EventType::ContextCheckpoint {
+                reason,
+                iteration,
+                tool_calls,
+                tokens_before,
+                tokens_after,
+                removed_messages,
+            } => format!(
+                r#"{{"ts":"{}","session":"{}","event":"context_checkpoint","reason":"{}","iteration":{},"tool_calls":{},"tokens_before":{},"tokens_after":{},"removed_messages":{}}}"#,
+                event.timestamp,
+                escape_json(&sanitize_field(&self.session_id, 60)),
+                escape_json(&sanitize_field(reason, 40)),
+                iteration,
+                tool_calls,
+                tokens_before,
+                tokens_after,
+                removed_messages,
+            ),
             EventType::SkillInvoke { skill_name, args } => {
                 let args_field = if self.level == MetaLoggingLevel::Content {
                     sanitize_field(args, 200)
@@ -308,4 +367,41 @@ fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_sink_records_evidence_metadata_without_tool_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("events.jsonl");
+        let mut sink = JsonlEventSink::new(
+            path.clone(),
+            MetaLoggingLevel::Metadata,
+            "session-1".to_string(),
+        );
+
+        sink.emit(&RuntimeEvent {
+            timestamp: "2026-09-13T00:00:00Z".to_string(),
+            session_id: "session-1".to_string(),
+            event_type: EventType::EvidenceObservation {
+                tool_name: "read_file".to_string(),
+                novelty: "repeated".to_string(),
+                fingerprint: Some("abcdef123456".to_string()),
+                consecutive_no_new: 4,
+                unique_evidence: 1,
+                total_observations: 5,
+            },
+        });
+
+        let record = fs::read_to_string(path).expect("event record");
+        let value: serde_json::Value = serde_json::from_str(record.trim()).expect("valid JSON");
+        assert_eq!(value["event"], "tool_evidence");
+        assert_eq!(value["novelty"], "repeated");
+        assert_eq!(value["consecutive_no_new"], 4);
+        assert_eq!(value["fingerprint"], "abcdef123456");
+        assert!(value.get("output").is_none());
+    }
 }

@@ -479,6 +479,51 @@ impl McpServerManager {
         Ok(response)
     }
 
+    pub async fn call_tool_with_progress(
+        &mut self,
+        qualified_tool_name: &str,
+        arguments: Option<JsonValue>,
+        mut on_progress: impl FnMut(),
+    ) -> Result<JsonRpcResponse<McpToolCallResult>, McpServerManagerError> {
+        let route = self
+            .tool_index
+            .get(qualified_tool_name)
+            .cloned()
+            .ok_or_else(|| McpServerManagerError::UnknownTool {
+                qualified_name: qualified_tool_name.to_string(),
+            })?;
+
+        self.ensure_server_ready(&route.server_name).await?;
+        // Starting or respawning a server can consume a noticeable share of a
+        // short interactive lease. Completing initialization is real forward
+        // movement, so renew the lease immediately before tools/call.
+        on_progress();
+        let request_id = self.take_request_id();
+        let response =
+            {
+                let server = self.server_mut(&route.server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: route.server_name.clone(),
+                        method: "tools/call",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                process
+                    .call_tool_with_progress(
+                        request_id,
+                        McpToolCallParams {
+                            name: route.raw_name,
+                            arguments,
+                            meta: None,
+                        },
+                        on_progress,
+                    )
+                    .await?
+            };
+        Ok(response)
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {
@@ -1044,6 +1089,18 @@ impl McpStdioProcess {
         method: impl Into<String>,
         params: Option<TParams>,
     ) -> io::Result<JsonRpcResponse<TResult>> {
+        self.request_with_notifications(id, method, params, false, || {})
+            .await
+    }
+
+    async fn request_with_notifications<TParams: Serialize, TResult: DeserializeOwned>(
+        &mut self,
+        id: JsonRpcId,
+        method: impl Into<String>,
+        params: Option<TParams>,
+        renew_on_progress: bool,
+        mut on_progress: impl FnMut(),
+    ) -> io::Result<JsonRpcResponse<TResult>> {
         let request = JsonRpcRequest::new(id.clone(), method, params);
         let timeout = mcp_request_timeout(self.request_timeout_override_secs);
 
@@ -1069,14 +1126,23 @@ impl McpStdioProcess {
         // a frame with `id == request.id` arrives. An id mismatch on
         // a *response* frame remains fatal, exactly as before.
         let send_then_read = async {
-            self.send_request(&request).await?;
+            let mut deadline = tokio::time::Instant::now() + timeout;
+            tokio::time::timeout_at(deadline, self.send_request(&request))
+                .await
+                .map_err(|_| mcp_request_timeout_error(timeout))??;
             loop {
-                let payload = self.read_jsonrpc_payload().await?;
+                let payload = tokio::time::timeout_at(deadline, self.read_jsonrpc_payload())
+                    .await
+                    .map_err(|_| mcp_request_timeout_error(timeout))??;
                 let value: JsonValue = serde_json::from_slice(&payload)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 let frame_id = value.as_object().and_then(|object| object.get("id"));
                 match frame_id {
                     None | Some(JsonValue::Null) => {
+                        if renew_on_progress && is_mcp_progress_notification(&value) {
+                            on_progress();
+                            deadline = tokio::time::Instant::now() + timeout;
+                        }
                         // Notification — no id at all, or explicit null.
                         // Servers like Codex emit dozens-to-hundreds of
                         // notifications per call; logging every one floods
@@ -1102,7 +1168,7 @@ impl McpStdioProcess {
         };
 
         let request_result = tokio::select! {
-            response = tokio::time::timeout(timeout, send_then_read) => Some(response),
+            response = send_then_read => Some(response),
             () = wait_for_interrupt() => None,
         };
 
@@ -1116,22 +1182,12 @@ impl McpStdioProcess {
                     "MCP request interrupted by user",
                 ));
             }
-            Some(Ok(Ok(response))) => response,
-            Some(Ok(Err(error))) => {
+            Some(Ok(response)) => response,
+            Some(Err(error)) => {
                 // I/O error during send or read. Stdio buffer is now
                 // ambiguous — kill so the next call respawns cleanly.
                 let _ = self.terminate().await;
                 return Err(error);
-            }
-            Some(Err(_elapsed)) => {
-                let _ = self.terminate().await;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "MCP server did not respond within {}s (override via per-server requestTimeoutSecs or MCP_REQUEST_TIMEOUT_SECS env, max 1800s)",
-                        timeout.as_secs()
-                    ),
-                ));
             }
         };
 
@@ -1180,6 +1236,16 @@ impl McpStdioProcess {
         params: McpToolCallParams,
     ) -> io::Result<JsonRpcResponse<McpToolCallResult>> {
         self.request(id, "tools/call", Some(params)).await
+    }
+
+    pub async fn call_tool_with_progress(
+        &mut self,
+        id: JsonRpcId,
+        params: McpToolCallParams,
+        on_progress: impl FnMut(),
+    ) -> io::Result<JsonRpcResponse<McpToolCallResult>> {
+        self.request_with_notifications(id, "tools/call", Some(params), true, on_progress)
+            .await
     }
 
     pub async fn list_resources(
@@ -1348,6 +1414,23 @@ fn mcp_request_timeout_from_env_value(
         .map(|n| n.clamp(MIN_SECS, MAX_SECS))
         .unwrap_or(DEFAULT_SECS);
     std::time::Duration::from_secs(secs)
+}
+
+fn mcp_request_timeout_error(timeout: Duration) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "MCP server did not respond within {}s (override via per-server requestTimeoutSecs or MCP_REQUEST_TIMEOUT_SECS env, max 1800s)",
+            timeout.as_secs()
+        ),
+    )
+}
+
+fn is_mcp_progress_notification(value: &JsonValue) -> bool {
+    value
+        .get("method")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|method| method == "notifications/progress")
 }
 
 fn default_initialize_params() -> McpInitializeParams {

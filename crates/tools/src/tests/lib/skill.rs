@@ -344,3 +344,49 @@ fn tool_search_supports_keyword_and_select_queries() {
     assert_eq!(selected_with_alias_output["matches"][0], "Agent");
     assert_eq!(selected_with_alias_output["matches"][1], "Skill");
 }
+
+#[test]
+fn tool_search_ranks_named_tools_above_tools_that_merely_mention_them() {
+    // Every one of these tools describes the others, so a scorer that sums
+    // keyword hits ranks `append_file` above the three tools actually named.
+    let output = execute_tool(
+        "ToolSearch",
+        &json!({"query": "write_file edit_file multi_edit"}),
+    )
+    .expect("ToolSearch should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+    let matches = output["matches"].as_array().expect("matches");
+
+    assert_eq!(matches[0], "write_file");
+    assert_eq!(matches[1], "edit_file");
+    assert_eq!(matches[2], "multi_edit");
+}
+
+#[test]
+fn tool_search_can_recover_a_routed_away_core_tool() {
+    // Dynamic routing decides visibility per turn, so no tool may be statically
+    // excluded from the search corpus: the model would ask for the one tool it
+    // needs and be told it does not exist.
+    for name in ["write_file", "edit_file", "multi_edit", "read_files", "bash"] {
+        let output = execute_tool("ToolSearch", &json!({"query": format!("select:{name}")}))
+            .expect("ToolSearch should succeed");
+        let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(output["matches"][0], name, "{name} must be recoverable");
+    }
+}
+
+#[test]
+fn tool_search_select_lists_are_not_truncated_below_what_was_asked_for() {
+    let output = execute_tool(
+        "ToolSearch",
+        &json!({
+            "query": "select:read_file,read_files,glob_search,grep_search,write_file,edit_file,multi_edit",
+            "max_results": 2
+        }),
+    )
+    .expect("ToolSearch should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+    let matches = output["matches"].as_array().expect("matches");
+
+    assert_eq!(matches.len(), 7, "{matches:?}");
+}

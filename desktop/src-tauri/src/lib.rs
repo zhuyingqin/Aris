@@ -735,6 +735,44 @@ pub fn run() {
             }
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            if let Ok((projects, _)) =
+                projects::registered_projects(app.state::<projects::ProjectState>().inner())
+            {
+                for project in projects {
+                    match runtime::recover_pending_batch_writes_at(std::path::Path::new(
+                        &project.path,
+                    )) {
+                        Ok(report) if report.recovered > 0 || report.conflicts > 0 || !report.errors.is_empty() => eprintln!(
+                            "SomniQ batch-write recovery for {}: recovered {}, conflicts {}, errors {}",
+                            project.id,
+                            report.recovered,
+                            report.conflicts,
+                            report.errors.len()
+                        ),
+                        Ok(_) => {}
+                        Err(error) => eprintln!(
+                            "SomniQ batch-write recovery skipped for {}: {error}",
+                            project.id
+                        ),
+                    }
+                    match runtime::cleanup_stale_large_writes_at(
+                        std::path::Path::new(&project.path),
+                        runtime::DEFAULT_STAGED_WRITE_MAX_AGE,
+                    ) {
+                        Ok(report) if report.removed > 0 || !report.errors.is_empty() => eprintln!(
+                            "SomniQ staged-write cleanup for {}: removed {}, errors {}",
+                            project.id,
+                            report.removed,
+                            report.errors.len()
+                        ),
+                        Ok(_) => {}
+                        Err(error) => eprintln!(
+                            "SomniQ staged-write cleanup skipped for {}: {error}",
+                            project.id
+                        ),
+                    }
+                }
+            }
             let browser_project =
                 projects::current_project_path(app.state::<projects::ProjectState>().inner())
                     .map_err(std::io::Error::other)?;

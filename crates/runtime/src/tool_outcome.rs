@@ -51,8 +51,23 @@ fn classifier(tool_name: &str) -> Option<fn(&str) -> bool> {
             literature_search_output_reports_failure
         }
         "WebSearch" => web_search_output_reports_failure,
+        "read_files" => batch_read_output_reports_failure,
         _ => return None,
     })
+}
+
+/// A batch remains useful when at least one requested window was read. Mark it
+/// failed only when every item failed, while preserving per-item errors for a
+/// partial result.
+fn batch_read_output_reports_failure(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    value
+        .get("requested")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|requested| requested > 0)
+        && value.get("succeeded").and_then(serde_json::Value::as_u64) == Some(0)
 }
 
 /// A web search whose every provider refused still returns a well-formed

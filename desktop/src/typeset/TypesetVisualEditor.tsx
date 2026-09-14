@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
-import { Compartment, Prec, type Extension } from "@codemirror/state";
+import { Compartment, Prec, Transaction, type Extension, type StateEffect } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
-import { createSharedEditorView, reconfigureReadOnly } from "../editor/editorView";
+import { createSharedEditorView, minimalReplacement, reconfigureReadOnly } from "../editor/editorView";
 import {
   editorKeybindingsFacet,
+  spellCheckLanguageAttribute,
   visualTypographyFor,
   type EditorSettings,
 } from "../editor/editorSettings";
@@ -132,7 +133,7 @@ export function TypesetVisualEditor({
   onPasteImage,
   onPasteError,
   spellCheck = false,
-  spellCheckLanguage = null,
+  spellCheckLanguage,
   readOnly = false,
   diffLines = [],
   reviewHunks = null,
@@ -184,9 +185,20 @@ export function TypesetVisualEditor({
   const onForwardSearchCompartmentRef = useRef(new Compartment());
   const spellCheckCompartmentRef = useRef(new Compartment());
   const themeCompartmentRef = useRef(new Compartment());
+  const documentSyncRef = useRef({
+    draft,
+    path,
+    numbering,
+    theorems,
+    onOpenCodeRange,
+    onForwardSearch: onForwardSearch ?? null,
+  });
   // The page scales with the shared font-size setting; everything else about
   // the Visual surface's typography stays its own.
   const editorSettings = useEditorSettings();
+  const effectiveSpellCheckLanguage = spellCheckLanguage === undefined
+    ? spellCheckLanguageAttribute(editorSettings)
+    : spellCheckLanguage;
   const editorSettingsRef = useRef(editorSettings);
   editorSettingsRef.current = editorSettings;
   // Keep the latest onChange without recreating the editor on every render.
@@ -247,7 +259,7 @@ export function TypesetVisualEditor({
         theoremsCompartmentRef.current.of(visualTheoremsFacet.of(theorems)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
-        spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck, spellCheckLanguage)),
+        spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck, effectiveSpellCheckLanguage)),
         latexHtmlPaste,
         latexImagePaste(
           (file) => onPasteImageRef.current?.(file) ?? Promise.resolve(null),
@@ -314,17 +326,9 @@ export function TypesetVisualEditor({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)),
+      effects: spellCheckCompartmentRef.current.reconfigure(spellCheckAttributes(spellCheck, effectiveSpellCheckLanguage)),
     });
-  }, [path]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: spellCheckCompartmentRef.current.reconfigure(spellCheckAttributes(spellCheck, spellCheckLanguage)),
-    });
-  }, [spellCheck, spellCheckLanguage]);
+  }, [effectiveSpellCheckLanguage, spellCheck]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -332,42 +336,60 @@ export function TypesetVisualEditor({
     view.dispatch({ effects: themeCompartmentRef.current.reconfigure(visualThemeFor(editorSettings)) });
   }, [editorSettings]);
 
-  // The prefix moves when the project graph resolves, when another chapter
-  // gains or loses a heading, or when the compile root changes — each of which
-  // shifts every number in this file.
+  /**
+   * A file switch changes the document and several document-scoped facets at
+   * once. Dispatching each compartment separately makes the Visual decoration
+   * field rebuild the entire previous file for every facet, then rebuild the
+   * new file again after the document replacement. Keep the last applied
+   * inputs here and commit every changed facet plus the text replacement in a
+   * single transaction, so CodeMirror builds decorations once against the
+   * final state. Ordinary typing carries no compartment effects and keeps the
+   * cheap mapped-decoration path.
+   */
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    view.dispatch({
-      effects: numberingCompartmentRef.current.reconfigure(visualNumberingFacet.of(numbering)),
-    });
-  }, [numbering]);
+    const previous = documentSyncRef.current;
+    const next = {
+      draft,
+      path,
+      numbering,
+      theorems,
+      onOpenCodeRange,
+      onForwardSearch: onForwardSearch ?? null,
+    };
+    const effects: StateEffect<unknown>[] = [];
+    if (previous.path !== path) {
+      effects.push(sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)));
+    }
+    // The prefix moves when the project graph resolves, when another chapter
+    // gains or loses a heading, or when the compile root changes.
+    if (previous.numbering !== numbering) {
+      effects.push(numberingCompartmentRef.current.reconfigure(visualNumberingFacet.of(numbering)));
+    }
+    // Root-preamble theorem declarations apply across included chapter files.
+    if (previous.theorems !== theorems) {
+      effects.push(theoremsCompartmentRef.current.reconfigure(visualTheoremsFacet.of(theorems)));
+    }
+    if (previous.onOpenCodeRange !== onOpenCodeRange) {
+      effects.push(onOpenCodeRangeCompartmentRef.current.reconfigure(onOpenCodeRangeFacet.of(onOpenCodeRange)));
+    }
+    if (previous.onForwardSearch !== next.onForwardSearch) {
+      effects.push(onForwardSearchCompartmentRef.current.reconfigure(onForwardSearchFacet.of(next.onForwardSearch)));
+    }
 
-  // Editing a theorem declaration in the root preamble renames every
-  // environment it declares, across every file that uses them.
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current === draft && effects.length === 0) {
+      documentSyncRef.current = next;
+      return;
+    }
+    documentSyncRef.current = next;
+    const replacement = current === draft ? null : minimalReplacement(current, draft);
     view.dispatch({
-      effects: theoremsCompartmentRef.current.reconfigure(visualTheoremsFacet.of(theorems)),
+      ...(replacement ? { changes: replacement, annotations: Transaction.addToHistory.of(false) } : {}),
+      effects,
     });
-  }, [theorems]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: onOpenCodeRangeCompartmentRef.current.reconfigure(onOpenCodeRangeFacet.of(onOpenCodeRange)),
-    });
-  }, [onOpenCodeRange]);
-
-  useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({
-      effects: onForwardSearchCompartmentRef.current.reconfigure(onForwardSearchFacet.of(onForwardSearch ?? null)),
-    });
-  }, [onForwardSearch]);
+  }, [draft, numbering, onForwardSearch, onOpenCodeRange, path, theorems]);
 
   useEffect(() => {
     const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
@@ -385,14 +407,6 @@ export function TypesetVisualEditor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Reconcile external `draft` changes into the document. When the change came
-  // from the user typing, `draft` already equals the doc, so this is a no-op.
-  // `setDocument` diffs the common prefix/suffix so an external edit maps the
-  // caret through the *changed* range instead of resetting it (see editorView.ts).
-  useEffect(() => {
-    handleRef.current?.setDocument(draft, { addToHistory: false, preserveSelection: true });
-  }, [draft]);
 
   useEffect(() => {
     const view = viewRef.current;

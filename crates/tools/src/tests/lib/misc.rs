@@ -595,6 +595,7 @@ fn every_tool_has_a_failure_classification_decision() {
         "ReadMediaFile",
         "session_search",
         "write_file",
+        "write_files",
     ];
 
     let inventory: BTreeSet<String> = mvp_tool_specs()
@@ -746,8 +747,10 @@ fn every_tool_is_triaged_for_external_retrieval() {
         "memory",
         "multi_edit",
         "read_file",
+        "read_files",
         "session_search",
         "write_file",
+        "write_files",
     ];
 
     let inventory: BTreeSet<String> = mvp_tool_specs()

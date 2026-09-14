@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Condvar, Mutex, OnceLock,
 };
+use std::time::Duration;
 
 use crate::compact::{
     assemble_compacted_session_with_usage, bound_fallback_summary, estimate_session_tokens,
@@ -12,6 +13,7 @@ use crate::compact::{
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
+use crate::evidence_ledger::{evidence_guard_mode, EvidenceGuardMode, EvidenceLedger};
 use crate::file_ops::ReadImageOutput;
 use crate::hooks::{HookRunResult, HookRunner};
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
@@ -66,6 +68,16 @@ const MAX_OVERFLOW_PRESERVED_MESSAGES: usize = 8;
 const MIN_OVERFLOW_PRESERVED_USER_TURNS: usize = 2;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 const MAX_PARALLEL_TOOL_BATCH: usize = 8;
+/// Long autonomous turns need continuity checkpoints well before the provider
+/// rejects an oversized request. This is deliberately a soft budget: it
+/// summarizes older completed exchanges but never stops a healthy tool call.
+const DEFAULT_SOFT_CHECKPOINT_TOOL_CALL_INTERVAL: usize = 40;
+const SOFT_CHECKPOINT_TOOL_CALLS_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_TOOL_CALLS";
+const DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO: f64 = 0.60;
+const SOFT_CHECKPOINT_CONTEXT_RATIO_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_CONTEXT_RATIO";
+const DEFAULT_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO: f64 = 0.20;
+const SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO_ENV_VAR: &str =
+    "ARIS_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO";
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
@@ -244,6 +256,13 @@ pub enum AssistantEvent {
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 
+    /// Restrict the tool schemas sent on subsequent provider requests.
+    ///
+    /// The executor and permission policy still retain the full catalog; this
+    /// only changes model visibility. `None` restores the client's complete
+    /// configured tool set. Stateless/test clients may ignore the hint.
+    fn set_active_tools(&mut self, _tool_names: Option<&BTreeSet<String>>) {}
+
     /// Attach the stable identity of the conversation that owns this client.
     /// Provider adapters may use it for routing/cache affinity headers. The
     /// default keeps providers without session-aware transport unchanged.
@@ -284,6 +303,10 @@ pub struct ToolOutput {
     /// A tool may report failure while still returning useful evidence (for
     /// example a Playwright screenshot plus a failed assertion).
     pub reported_error: bool,
+    /// Optional pristine text used only for evidence fingerprinting and
+    /// artifact persistence. Wrappers that compact output before returning it
+    /// can retain the original here without putting it into model context.
+    pub evidence_text: Option<String>,
 }
 
 impl ToolOutput {
@@ -293,6 +316,7 @@ impl ToolOutput {
             text: text.into(),
             media: Vec::new(),
             reported_error: false,
+            evidence_text: None,
         }
     }
 }
@@ -383,6 +407,8 @@ pub trait ToolExecutor {
 pub struct ToolError {
     message: String,
     interrupted: bool,
+    timed_out: bool,
+    timeout_ms: Option<u64>,
 }
 
 impl ToolError {
@@ -391,6 +417,8 @@ impl ToolError {
         Self {
             message: message.into(),
             interrupted: false,
+            timed_out: false,
+            timeout_ms: None,
         }
     }
 
@@ -399,12 +427,44 @@ impl ToolError {
         Self {
             message: "interrupted by user".to_string(),
             interrupted: true,
+            timed_out: false,
+            timeout_ms: None,
+        }
+    }
+
+    #[must_use]
+    pub fn timed_out(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            interrupted: false,
+            timed_out: true,
+            timeout_ms: None,
+        }
+    }
+
+    #[must_use]
+    pub fn timed_out_after(message: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            message: message.into(),
+            interrupted: false,
+            timed_out: true,
+            timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
         }
     }
 
     #[must_use]
     pub fn is_interrupted(&self) -> bool {
         self.interrupted
+    }
+
+    #[must_use]
+    pub fn is_timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    #[must_use]
+    pub fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
     }
 }
 
@@ -591,6 +651,90 @@ pub struct ConversationRuntime<C, T> {
     /// is stopped before it begins; a changed, narrower request is still free
     /// to run.
     browser_timeout_requests: HashSet<String>,
+    /// Optional per-turn model-visible subset of the full executable catalog.
+    /// ToolSearch can expand it between provider iterations without widening
+    /// the permission policy.
+    dynamic_tool_routing: Option<DynamicToolRoutingState>,
+    /// Deterministic novelty ledger for completed tool results in the current
+    /// turn. It resets on each runtime turn and is independent of retrieval's
+    /// domain-specific evidence protocol.
+    evidence_ledger: EvidenceLedger,
+    evidence_guard_mode: EvidenceGuardMode,
+    evidence_observed_tool_uses: HashSet<String>,
+}
+
+/// A turn's model-visible tool projection, as the caller computes it.
+#[derive(Debug, Clone, Default)]
+pub struct DynamicToolRouting {
+    /// Every name the executor is authorized to run this turn.
+    pub catalog: BTreeSet<String>,
+    /// The subset sent with the first provider request.
+    pub active: BTreeSet<String>,
+    /// Names the LRU may never evict.
+    pub pinned: BTreeSet<String>,
+    /// Hard ceiling on the live active set. `0` means "no ceiling".
+    pub max_active: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DynamicToolRoutingState {
+    catalog: BTreeSet<String>,
+    active: BTreeSet<String>,
+    pinned: BTreeSet<String>,
+    max_active: usize,
+    /// Monotonic use counter per tool; absent means "not used yet this turn".
+    last_used: BTreeMap<String, u64>,
+    tick: u64,
+}
+
+impl DynamicToolRoutingState {
+    fn touch(&mut self, name: &str) {
+        self.tick += 1;
+        self.last_used.insert(name.to_string(), self.tick);
+    }
+
+    /// Add names to the active set and evict back down to the ceiling.
+    ///
+    /// Returns `(activated, evicted)`. Eviction never touches a pinned tool or
+    /// one activated in this same call, and prefers tools this turn has not
+    /// used; an evicted tool loses only its schema, never its authorization, so
+    /// a later call to it still runs and re-activates it.
+    fn activate(&mut self, names: Vec<String>) -> (Vec<String>, Vec<String>) {
+        let mut activated = Vec::new();
+        for name in names {
+            if !self.catalog.contains(&name) {
+                continue;
+            }
+            if self.active.insert(name.clone()) {
+                activated.push(name.clone());
+            }
+            self.touch(&name);
+        }
+        let just_activated = activated.iter().cloned().collect::<BTreeSet<_>>();
+        let mut evicted = Vec::new();
+        while self.max_active > 0 && self.active.len() > self.max_active {
+            let victim = self
+                .active
+                .iter()
+                .filter(|name| !self.pinned.contains(*name) && !just_activated.contains(*name))
+                .min_by(|left, right| {
+                    self.last_used
+                        .get(*left)
+                        .copied()
+                        .unwrap_or_default()
+                        .cmp(&self.last_used.get(*right).copied().unwrap_or_default())
+                        .then_with(|| left.cmp(right))
+                })
+                .cloned();
+            let Some(victim) = victim else {
+                break;
+            };
+            self.active.remove(&victim);
+            self.last_used.remove(&victim);
+            evicted.push(victim);
+        }
+        (activated, evicted)
+    }
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -658,7 +802,42 @@ where
             retrieval_checkpoint_listener: None,
             tool_result_listener: None,
             browser_timeout_requests: HashSet::new(),
+            dynamic_tool_routing: None,
+            evidence_ledger: EvidenceLedger::default(),
+            evidence_guard_mode: evidence_guard_mode(),
+            evidence_observed_tool_uses: HashSet::new(),
         }
+    }
+
+    /// Enable dynamic schema routing for this runtime. Every collection holds
+    /// names from the already-authorized tool catalog; unknown active and
+    /// pinned names are discarded defensively.
+    #[must_use]
+    pub fn with_dynamic_tool_routing(mut self, routing: DynamicToolRouting) -> Self {
+        let DynamicToolRouting {
+            catalog,
+            mut active,
+            mut pinned,
+            max_active,
+        } = routing;
+        active.retain(|name| catalog.contains(name));
+        pinned.retain(|name| active.contains(name));
+        self.api_client.set_active_tools(Some(&active));
+        self.dynamic_tool_routing = Some(DynamicToolRoutingState {
+            catalog,
+            active,
+            pinned,
+            max_active,
+            last_used: BTreeMap::new(),
+            tick: 0,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn with_evidence_guard_mode(mut self, mode: EvidenceGuardMode) -> Self {
+        self.evidence_guard_mode = mode;
+        self
     }
 
     /// Turn off the retrieval guard for a runtime that has no retrieval tools.
@@ -861,6 +1040,8 @@ where
         // reminder must not suppress this turn's first one.
         self.last_focus_nudge_tool_calls = None;
         self.browser_timeout_requests.clear();
+        self.evidence_ledger = EvidenceLedger::default();
+        self.evidence_observed_tool_uses.clear();
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -870,6 +1051,12 @@ where
         let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
+        let mut turn_tool_calls = 0_usize;
+        let mut last_soft_checkpoint_tool_calls = 0_usize;
+        let mut last_soft_checkpoint_tokens = 0_usize;
+        let soft_checkpoint_tool_call_interval = soft_checkpoint_tool_call_interval_from_env();
+        let soft_checkpoint_context_ratio = soft_checkpoint_context_ratio_from_env();
+        let soft_checkpoint_token_growth_ratio = soft_checkpoint_token_growth_ratio_from_env();
         let turn_started = std::time::Instant::now();
 
         loop {
@@ -879,6 +1066,13 @@ where
             }
             iterations += 1;
             if iterations > self.max_iterations {
+                if let Some(event) = self.soft_checkpoint(
+                    iterations,
+                    turn_tool_calls,
+                    "iteration_budget",
+                ) {
+                    merge_auto_compaction_event(&mut auto_compaction, event);
+                }
                 return Err(Self::turn_budget_error(&format!(
                     "ran {iterations} model iterations (limit {})",
                     self.max_iterations
@@ -890,12 +1084,44 @@ where
             if let Some(budget) = self.max_turn_duration {
                 let elapsed = turn_started.elapsed();
                 if elapsed >= budget {
+                    if let Some(event) =
+                        self.soft_checkpoint(iterations, turn_tool_calls, "duration_budget")
+                    {
+                        merge_auto_compaction_event(&mut auto_compaction, event);
+                    }
                     return Err(Self::turn_budget_error(&format!(
                         "ran for {} minutes (limit {} minutes)",
                         elapsed.as_secs() / 60,
                         budget.as_secs() / 60
                     )));
                 }
+            }
+
+            let estimated_tokens = self.estimated_request_tokens();
+            let token_threshold = ((self.context_compaction_estimated_tokens_threshold as f64)
+                * soft_checkpoint_context_ratio)
+                .round() as usize;
+            let token_growth = ((self.context_compaction_estimated_tokens_threshold as f64)
+                * soft_checkpoint_token_growth_ratio)
+                .round() as usize;
+            let calls_due = turn_tool_calls.saturating_sub(last_soft_checkpoint_tool_calls)
+                >= soft_checkpoint_tool_call_interval;
+            let tokens_due = turn_tool_calls > 0
+                && estimated_tokens >= token_threshold.max(1)
+                && (last_soft_checkpoint_tokens == 0
+                    || estimated_tokens.saturating_sub(last_soft_checkpoint_tokens)
+                        >= token_growth.max(1));
+            if calls_due || tokens_due {
+                let reason = if calls_due {
+                    "tool_call_interval"
+                } else {
+                    "context_growth"
+                };
+                if let Some(event) = self.soft_checkpoint(iterations, turn_tool_calls, reason) {
+                    merge_auto_compaction_event(&mut auto_compaction, event);
+                }
+                last_soft_checkpoint_tool_calls = turn_tool_calls;
+                last_soft_checkpoint_tokens = self.estimated_request_tokens();
             }
 
             if let Some(event) = self.prepare_context_for_request() {
@@ -980,6 +1206,7 @@ where
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            turn_tool_calls = turn_tool_calls.saturating_add(pending_tool_uses.len());
 
             self.session.messages.push(assistant_message.clone());
             assistant_messages.push(assistant_message);
@@ -1116,6 +1343,10 @@ where
                 }
 
                 let mut ordered_blocks = vec![None; group.len()];
+                let evidence_inputs = group
+                    .iter()
+                    .map(|invocation| (invocation.tool_use_id.clone(), invocation.input.clone()))
+                    .collect::<HashMap<_, _>>();
                 let mut executable = Vec::new();
                 for (index, mut invocation) in group.into_iter().enumerate() {
                     if self
@@ -1131,6 +1362,29 @@ where
                             tool_use_id: invocation.tool_use_id,
                             tool_name: invocation.tool_name,
                             output: message,
+                            is_error: true,
+                        }]);
+                        continue;
+                    }
+                    if let Some(blocked) = (self.evidence_guard_mode == EvidenceGuardMode::Block)
+                        .then(|| {
+                            self.evidence_ledger
+                                .block_repeated_invocation(&invocation.tool_name, &invocation.input)
+                        })
+                        .flatten()
+                    {
+                        ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                            tool_use_id: invocation.tool_use_id,
+                            tool_name: invocation.tool_name,
+                            output: serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "blocked",
+                                "reason": "no_new_evidence_loop",
+                                "message": blocked.message,
+                                "consecutiveNoNewEvidence": blocked.consecutive_no_new,
+                                "identicalInvocations": blocked.identical_invocations,
+                                "identicalOutcomes": blocked.identical_outcomes,
+                            }))
+                            .unwrap_or_else(|_| blocked.message),
                             is_error: true,
                         }]);
                         continue;
@@ -1269,6 +1523,24 @@ where
                     }
                 }
                 for blocks in ordered_blocks.into_iter().flatten() {
+                    for block in &blocks {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            tool_name,
+                            output,
+                            is_error,
+                        } = block
+                        {
+                            if self.evidence_observed_tool_uses.contains(tool_use_id) {
+                                continue;
+                            }
+                            let input = evidence_inputs
+                                .get(tool_use_id)
+                                .map(String::as_str)
+                                .unwrap_or("{}");
+                            self.observe_tool_evidence(tool_name, input, output, *is_error);
+                        }
+                    }
                     turn_tool_results.extend(blocks);
                 }
                 if group_interrupted || self.cancellation_requested() {
@@ -1288,7 +1560,17 @@ where
                 // outright by the OpenAI converters. Appending to the output
                 // reuses the path hook feedback already travels, which every
                 // executor carries.
-                if let Some(nudge) = self.maybe_focus_nudge() {
+                let nudge = [
+                    (self.evidence_guard_mode != EvidenceGuardMode::Off)
+                        .then(|| self.evidence_ledger.take_nudge())
+                        .flatten(),
+                    self.maybe_focus_nudge(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+                if !nudge.is_empty() {
                     if let Some(ContentBlock::ToolResult { output, .. }) = turn_tool_results
                         .iter_mut()
                         .rev()
@@ -1478,6 +1760,7 @@ where
             tool_name,
             input,
         } = invocation;
+        self.note_dynamic_tool_use(&tool_name);
         let (tool_output, mut is_error) = match execution_result {
             // `Ok` means the tool ran, not that the work succeeded: a non-zero
             // exit or a raised cell comes back here as a successful call whose
@@ -1499,10 +1782,16 @@ where
                     text: error.to_string(),
                     media: Vec::new(),
                     reported_error: true,
+                    evidence_text: None,
                 },
                 true,
             ),
         };
+        let evidence_output = tool_output
+            .evidence_text
+            .as_deref()
+            .unwrap_or(&tool_output.text)
+            .to_string();
         let mut output = tool_output.text;
         // The same identity `before_tool` keyed on, so a transient failure
         // releases the exact entry it reserved and the retry is not refused as
@@ -1545,8 +1834,28 @@ where
             output,
             post_hook_result.is_denied(),
         );
+        if tool_name == "ToolSearch" && !is_error {
+            output = self.activate_tool_search_matches(output);
+        }
+        self.observe_tool_evidence(&tool_name, &input, &evidence_output, is_error);
+        self.evidence_observed_tool_uses.insert(tool_use_id.clone());
         if read_file_image.is_none() {
-            output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
+            let artifact_threshold = self.tool_output_artifact_threshold_chars();
+            let artifact = crate::tool_output_artifact::ensure_tool_output_artifact(
+                &tool_use_id,
+                &tool_name,
+                &evidence_output,
+                &output,
+                artifact_threshold,
+            );
+            output = match artifact {
+                Some(artifact) => crate::tool_output_artifact::project_tool_output(
+                    output,
+                    &artifact,
+                    artifact_threshold,
+                ),
+                None => bound_tool_result(output, MAX_TOOL_RESULT_CHARS),
+            };
         }
 
         let media = normalize_tool_media(tool_output.media);
@@ -1619,6 +1928,74 @@ where
         Ok(blocks)
     }
 
+    fn activate_tool_search_matches(&mut self, output: String) -> String {
+        let Some(routing) = self.dynamic_tool_routing.as_mut() else {
+            return output;
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&output) else {
+            return output;
+        };
+        let matches = value
+            .get("matches")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let (activated, evicted) = routing.activate(matches);
+        self.api_client.set_active_tools(Some(&routing.active));
+        let active_tool_count = routing.active.len() as u64;
+
+        let Some(object) = value.as_object_mut() else {
+            return output;
+        };
+        object.insert(
+            "activated".to_string(),
+            serde_json::Value::Array(
+                activated
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        if !evicted.is_empty() {
+            // Named rather than silent: an evicted tool is still callable and
+            // still authorized, so the model should know it can ask for it back
+            // instead of assuming the capability disappeared.
+            object.insert(
+                "deactivated".to_string(),
+                serde_json::Value::Array(
+                    evicted.into_iter().map(serde_json::Value::String).collect(),
+                ),
+            );
+        }
+        object.insert(
+            "active_tool_count".to_string(),
+            serde_json::Value::Number(active_tool_count.into()),
+        );
+        serde_json::to_string_pretty(&value).unwrap_or(output)
+    }
+
+    /// Record that a tool actually ran, so the LRU evicts what the turn is not
+    /// using. A tool called after being evicted is re-activated here: routing
+    /// governs visibility only, and a call that already executed should not be
+    /// answered by a schema the next request omits.
+    fn note_dynamic_tool_use(&mut self, tool_name: &str) {
+        let Some(routing) = self.dynamic_tool_routing.as_mut() else {
+            return;
+        };
+        if !routing.catalog.contains(tool_name) {
+            return;
+        }
+        if routing.active.contains(tool_name) {
+            routing.touch(tool_name);
+            return;
+        }
+        routing.activate(vec![tool_name.to_string()]);
+        self.api_client.set_active_tools(Some(&routing.active));
+    }
+
     /// Synthetic `tool_result` for a `tool_use` that was cancelled before it
     /// produced output. Keeps every `tool_use` answered so the recorded
     /// assistant/tool message pair is a valid conversation the provider accepts
@@ -1662,6 +2039,52 @@ where
         }
         self.last_focus_nudge_tool_calls = Some(signals.tool_calls);
         Some(nudge)
+    }
+
+    fn observe_tool_evidence(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+        is_error: bool,
+    ) {
+        if self.evidence_guard_mode == EvidenceGuardMode::Off {
+            return;
+        }
+        if output.contains("\"reason\": \"no_new_evidence_loop\"") {
+            // The refusal describes the ledger; it is not evidence gathered
+            // from the requested tool and must not reset the stalled streak.
+            return;
+        }
+        let observation = self
+            .evidence_ledger
+            .observe(tool_name, input, output, is_error);
+        self.event_sink.emit(&RuntimeEvent {
+            timestamp: now_iso8601(),
+            session_id: String::new(),
+            event_type: EventType::EvidenceObservation {
+                tool_name: observation.tool_name,
+                novelty: observation.novelty.as_str().to_string(),
+                fingerprint: observation.fingerprint,
+                consecutive_no_new: observation.consecutive_no_new,
+                unique_evidence: observation.unique_evidence,
+                total_observations: observation.total_observations,
+            },
+        });
+    }
+
+    fn tool_output_artifact_threshold_chars(&self) -> usize {
+        // Keep one result below roughly 5% of the configured context budget.
+        // Four characters per token is deliberately approximate; the same
+        // estimate is already used by compaction, and the min/max bounds keep
+        // tiny and very large models predictable.
+        self.context_compaction_estimated_tokens_threshold
+            .saturating_mul(4)
+            .saturating_div(20)
+            .clamp(
+                crate::tool_output_artifact::MIN_TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS,
+                crate::tool_output_artifact::TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS,
+            )
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
@@ -1719,6 +2142,39 @@ where
         let event = self.compact_now(CompactionConfig::overflow(preserve))?;
         self.restore_pristine_archive(&pristine, event.removed_message_count);
         Some(event)
+    }
+
+    fn soft_checkpoint(
+        &mut self,
+        iteration: usize,
+        tool_calls: usize,
+        reason: &str,
+    ) -> Option<AutoCompactionEvent> {
+        let tokens_before = self.estimated_request_tokens();
+        let pristine = self.session.messages.clone();
+        let preserve = overflow_preserve_message_count(&self.session);
+        let event = self.compact_now(CompactionConfig::overflow(preserve))?;
+        self.restore_pristine_archive(&pristine, event.removed_message_count);
+        // The archive above retains complete tool I/O. The active projection
+        // can therefore be leaner without sacrificing session search or audit.
+        compact_context_history(&mut self.session, true);
+        let tokens_after = self.estimated_request_tokens();
+        self.event_sink.emit(&RuntimeEvent {
+            timestamp: now_iso8601(),
+            session_id: String::new(),
+            event_type: EventType::ContextCheckpoint {
+                reason: reason.to_string(),
+                iteration,
+                tool_calls,
+                tokens_before,
+                tokens_after,
+                removed_messages: event.removed_message_count,
+            },
+        });
+        Some(AutoCompactionEvent {
+            tokens_after,
+            ..event
+        })
     }
 
     /// Aggressively shrink the session after the provider rejected the request
@@ -2509,6 +2965,46 @@ pub fn max_turn_duration_from_env() -> Option<std::time::Duration> {
         None => DEFAULT_MAX_TURN_SECONDS,
     };
     Some(std::time::Duration::from_secs(seconds))
+}
+
+#[must_use]
+pub fn soft_checkpoint_tool_call_interval_from_env() -> usize {
+    std::env::var(SOFT_CHECKPOINT_TOOL_CALLS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| (10..=200).contains(value))
+        .unwrap_or(DEFAULT_SOFT_CHECKPOINT_TOOL_CALL_INTERVAL)
+}
+
+#[must_use]
+pub fn soft_checkpoint_context_ratio_from_env() -> f64 {
+    parse_bounded_ratio(
+        std::env::var(SOFT_CHECKPOINT_CONTEXT_RATIO_ENV_VAR)
+            .ok()
+            .as_deref(),
+        DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO,
+        0.30,
+        0.90,
+    )
+}
+
+#[must_use]
+pub fn soft_checkpoint_token_growth_ratio_from_env() -> f64 {
+    parse_bounded_ratio(
+        std::env::var(SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO_ENV_VAR)
+            .ok()
+            .as_deref(),
+        DEFAULT_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO,
+        0.05,
+        0.50,
+    )
+}
+
+fn parse_bounded_ratio(value: Option<&str>, default: f64, min: f64, max: f64) -> f64 {
+    value
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= min && *value <= max)
+        .unwrap_or(default)
 }
 
 #[must_use]

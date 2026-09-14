@@ -1,17 +1,20 @@
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::Write;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use encoding_rs::{GB18030, GBK};
 use flate2::{write::ZlibEncoder, Compression};
 
 use super::{
-    abort_large_write, append_file, append_write_chunk, begin_large_write, commit_large_write,
-    content_revision, display_path, edit_file, edit_file_with_context_expected, glob_search,
-    grep_search, multi_edit_file, read_file, read_file_with_images, write_file, FileChange,
-    FileRevisionConflictError, GrepSearchInput, MultiEditOperation, MultiEditValidationError,
-    ReadFileResult, MAX_READ_FILE_CONTENT_CHARS, MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
+    abort_large_write, append_file, append_write_chunk, begin_large_write,
+    cleanup_stale_large_writes_at, commit_large_write, content_revision, display_path, edit_file,
+    edit_file_with_context_expected, glob_search, grep_search, multi_edit_file, read_file,
+    read_file_with_images, recover_pending_batch_writes_at, write_file, BatchWriteJournal,
+    BatchWriteJournalEntry, FileChange, FileRevisionConflictError, GrepSearchInput,
+    MultiEditOperation, MultiEditValidationError, ReadFileResult, BATCH_WRITE_JOURNAL_DIR_NAME,
+    MAX_READ_FILE_CONTENT_CHARS, MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
 };
 use crate::FileMutationContext;
 
@@ -866,6 +869,84 @@ fn staged_commit_rechecks_revision_and_preserves_newer_content() {
             .expect("abort staged write")
             .aborted
     );
+}
+
+#[test]
+fn stale_open_staged_write_is_cleaned_without_touching_destination() {
+    let _guard = crate::test_env_lock();
+    let root = temp_path("staged-cleanup");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let original = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+    let context = FileMutationContext {
+        session_id: Some("cleanup-session".to_string()),
+        tool_name: "begin_large_write".to_string(),
+        ..FileMutationContext::default()
+    };
+    let begun = begin_large_write("draft.md", "absent", &context).expect("begin");
+    append_write_chunk(&begun.write_id, 0, "partial", &context).expect("append");
+
+    let stage_root = crate::somniq_project_tmp_dir(&root).join("file-writes");
+    let metadata_path = stage_root.join(format!("{}.json", begun.write_id));
+    let part_path = stage_root.join(format!("{}.part", begun.write_id));
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).expect("metadata")).expect("json");
+    metadata["lastActivityEpochSecs"] = serde_json::json!(1);
+    fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).expect("age metadata");
+
+    let report = cleanup_stale_large_writes_at(&root, Duration::from_secs(1)).expect("cleanup");
+    assert_eq!(report.removed, 1);
+    assert!(!metadata_path.exists());
+    assert!(!part_path.exists());
+    assert!(!root.join("draft.md").exists());
+
+    std::env::set_current_dir(original).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_batch_journal_rolls_back_only_recorded_after_revisions() {
+    let _guard = crate::test_env_lock();
+    let root = temp_path("batch-journal-recovery");
+    fs::create_dir_all(&root).expect("create root");
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    fs::write(&first, "new first\n").expect("published first");
+    fs::write(&second, "old second\n").expect("unpublished second");
+    let journal_root =
+        crate::somniq_project_tmp_dir(&root).join(BATCH_WRITE_JOURNAL_DIR_NAME);
+    fs::create_dir_all(&journal_root).expect("journal root");
+    let journal = BatchWriteJournal {
+        version: 1,
+        batch_id: "bat_test".to_string(),
+        entries: vec![
+            BatchWriteJournalEntry {
+                path: display_path(&first),
+                original: Some("old first\n".to_string()),
+                before_revision: content_revision(b"old first\n"),
+                after_revision: content_revision(b"new first\n"),
+            },
+            BatchWriteJournalEntry {
+                path: display_path(&second),
+                original: Some("old second\n".to_string()),
+                before_revision: content_revision(b"old second\n"),
+                after_revision: content_revision(b"new second\n"),
+            },
+        ],
+    };
+    fs::write(
+        journal_root.join("bat_test.json"),
+        serde_json::to_vec(&journal).unwrap(),
+    )
+    .expect("journal");
+
+    let report = recover_pending_batch_writes_at(&root).expect("recover");
+    assert_eq!(report.recovered, 1);
+    assert_eq!(fs::read_to_string(first).unwrap(), "old first\n");
+    assert_eq!(fs::read_to_string(second).unwrap(), "old second\n");
+    assert!(!journal_root.join("bat_test.json").exists());
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

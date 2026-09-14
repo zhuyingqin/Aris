@@ -685,6 +685,25 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
         }
     }
 
+    let evidence_ledger = crate::evidence_ledger::EvidenceLedger::from_messages(messages);
+    let evidence_facts = evidence_ledger.facts();
+    if !evidence_facts.is_empty() {
+        lines.push(String::new());
+        lines.push("## Evidence Ledger".to_string());
+        lines.extend(evidence_facts.into_iter().map(|fact| format!("- {fact}")));
+    }
+
+    let artifact_references = collect_tool_output_artifact_references(messages);
+    if !artifact_references.is_empty() {
+        lines.push(String::new());
+        lines.push("## Artifact References".to_string());
+        lines.extend(
+            artifact_references
+                .into_iter()
+                .map(|reference| format!("- {reference}")),
+        );
+    }
+
     if !prior_compaction_summaries.is_empty() {
         lines.push(String::new());
         lines.push("## Prior Compaction Summary".to_string());
@@ -848,6 +867,8 @@ const PINNED_HEADER_MARKER: &str = "## Pinned Context";
 /// Flat, round-trippable prefix for a pinned user request, so the block a
 /// compaction injects can be recovered by the next compaction.
 const PINNED_REQUEST_PREFIX: &str = "- User request: ";
+const ARTIFACT_REFERENCE_PREFIX: &str = "- Artifact reference: ";
+const MAX_PINNED_ARTIFACT_REFERENCES: usize = 8;
 /// Round-trippable prefix for an approach already ruled out. Rolls forward the
 /// same way pinned requests do, so a dead end survives repeated compaction.
 const DEAD_END_PREFIX: &str = "- Dead end: ";
@@ -1016,6 +1037,23 @@ fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
     for fact in signals.facts() {
         lines.push(format!("{FOCUS_SIGNAL_PREFIX}{fact}"));
     }
+    for fact in crate::evidence_ledger::EvidenceLedger::from_messages(messages).facts() {
+        lines.push(format!("- Evidence ledger: {fact}"));
+    }
+    let mut artifact_references = carried_pinned_values(
+        messages,
+        ARTIFACT_REFERENCE_PREFIX,
+        MAX_PINNED_ARTIFACT_REFERENCES,
+    );
+    for reference in collect_tool_output_artifact_references(messages) {
+        push_unique_request(&mut artifact_references, reference);
+    }
+    if artifact_references.len() > MAX_PINNED_ARTIFACT_REFERENCES {
+        artifact_references.drain(..artifact_references.len() - MAX_PINNED_ARTIFACT_REFERENCES);
+    }
+    for reference in artifact_references {
+        lines.push(format!("{ARTIFACT_REFERENCE_PREFIX}{reference}"));
+    }
     // Code state: the key files in play and the latest assistant decision/status,
     // so "where the work is" survives even if the summary drops it. Key files
     // roll forward naturally because `collect_key_files` re-scans the injected
@@ -1121,6 +1159,66 @@ fn collect_recent_tool_errors(messages: &[ConversationMessage], limit: usize) ->
         .into_iter()
         .rev()
         .collect()
+}
+
+fn collect_tool_output_artifact_references(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut references = Vec::new();
+    for output in messages.iter().flat_map(|message| {
+        message.blocks.iter().filter_map(|block| match block {
+            ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
+            _ => None,
+        })
+    }) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+            continue;
+        };
+        collect_artifact_references_from_value(&value, &mut references);
+    }
+    references.dedup();
+    if references.len() > MAX_PINNED_ARTIFACT_REFERENCES {
+        references.drain(..references.len() - MAX_PINNED_ARTIFACT_REFERENCES);
+    }
+    references
+}
+
+fn collect_artifact_references_from_value(value: &serde_json::Value, references: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let path = object
+                .get("persistedOutputPath")
+                .or_else(|| object.get("rawOutputPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty());
+            if let Some(path) = path {
+                let bytes = object
+                    .get("persistedOutputSize")
+                    .and_then(serde_json::Value::as_u64);
+                let sha256 = object
+                    .get("sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let mut reference = path.to_string();
+                if let Some(bytes) = bytes {
+                    reference.push_str(&format!(" ({bytes} bytes)"));
+                }
+                if let Some(sha256) = sha256 {
+                    reference.push_str(&format!(" [sha256:{}]", &sha256[..sha256.len().min(16)]));
+                }
+                push_unique_request(references, reference);
+            }
+            for nested in object.values() {
+                collect_artifact_references_from_value(nested, references);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_artifact_references_from_value(nested, references);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn render_pinned_lines(lines: Vec<String>) -> Option<String> {

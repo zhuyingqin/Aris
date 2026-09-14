@@ -13,7 +13,7 @@ import {
 import { createPortal } from "react-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { fileOpen, typesetOutputFiles, type SyncTexLocation, type TypesetOutputFile } from "../api/tauri";
-import { openPdfDocumentFromPath } from "../pdf/runtime";
+import { isPdfXrefError, openPdfDocumentFromPath, openPdfDocumentWithRebuiltXref } from "../pdf/runtime";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import {
@@ -24,7 +24,6 @@ import {
   type LatexEngineChoice,
 } from "./compileModel";
 import { TYPESET_EDITOR_COPY } from "./i18n";
-import { basename } from "./latexText";
 import { TypesetPopover } from "./TypesetPopover";
 import {
   clampNumber,
@@ -32,6 +31,7 @@ import {
   PDF_ZOOM_MAX,
   PDF_ZOOM_MIN,
   PDF_ZOOM_PRESETS,
+  stablePdfRenderRange,
   type PdfPointConverter,
 } from "./pdfGeometry";
 import { PdfFallbackPage, PdfPage, type PdfClickPosition } from "./PdfPage";
@@ -107,6 +107,11 @@ async function pdfPageForDestination(pdf: PDFDocumentProxy, destination: unknown
   return (await pdf.getPageIndex(pageReference)) + 1;
 }
 
+/** Identifies one loaded document, so a repair is attempted at most once for it. */
+function pdfLoadKey(path: string, refreshKey: number): string {
+  return `${path}:${refreshKey}`;
+}
+
 function readablePdfLoadError(loadError: unknown): string {
   if (loadError instanceof Error && loadError.message.trim()) return loadError.message.trim();
   if (typeof loadError === "string" && loadError.trim()) return loadError.trim();
@@ -168,6 +173,12 @@ export default function TypesetPdfPreview({
   const [renderRange, setRenderRange] = useState({ start: 1, end: 3 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A cross-reference table that disagrees with the file lets the document open
+  // and then kills individual pages. Reopening it with the table rebuilt is the
+  // repair; `xrefRepairsRef` keeps it to one attempt per loaded document so a
+  // still-broken file cannot spin.
+  const [xrefRepairKey, setXrefRepairKey] = useState(0);
+  const xrefRepairsRef = useRef<string | null>(null);
   const [compileMenuOpen, setCompileMenuOpen] = useState(false);
   const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
   const [presenting, setPresenting] = useState(false);
@@ -236,6 +247,7 @@ export default function TypesetPdfPreview({
   const pendingWheelZoomRef = useRef<number | null>(null);
   const wheelZoomTimerRef = useRef<number | null>(null);
   const scrollFrameRef = useRef(0);
+  const pointerScrollActiveRef = useRef(false);
   const programmaticPageRef = useRef<number | null>(null);
   const scrollSettleTimerRef = useRef<number | null>(null);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
@@ -426,7 +438,8 @@ export default function TypesetPdfPreview({
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
-    void openPdfDocumentFromPath(path)
+    const repairing = xrefRepairsRef.current === pdfLoadKey(path, refreshKey);
+    void (repairing ? openPdfDocumentWithRebuiltXref(path) : openPdfDocumentFromPath(path))
       .then((document) => {
         loadedPdf = document;
         if (disposed) {
@@ -457,6 +470,14 @@ export default function TypesetPdfPreview({
       disposed = true;
       if (loadedPdf) void loadedPdf.destroy();
     };
+  }, [path, refreshKey, xrefRepairKey]);
+
+  const handlePageRenderError = useCallback((renderError: unknown) => {
+    if (!path || !isPdfXrefError(renderError)) return;
+    const loadKey = pdfLoadKey(path, refreshKey);
+    if (xrefRepairsRef.current === loadKey) return;
+    xrefRepairsRef.current = loadKey;
+    setXrefRepairKey((key) => key + 1);
   }, [path, refreshKey]);
 
   useEffect(() => {
@@ -586,9 +607,16 @@ export default function TypesetPdfPreview({
         start: Math.max(1, visibleStart - radius),
         end: Math.min(numPages, visibleEnd + radius),
       };
-      setRenderRange((range) => (
-        range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
-      ));
+      setRenderRange((range) => {
+        // A long press followed by a drag can make the browser auto-scroll the
+        // PDF while its native selection is still anchored in the page where
+        // the gesture began. Replacing that page with a placeholder destroys
+        // the anchor and makes the canvas disappear/re-render on every small
+        // scroll correction. Keep mounted pages for the lifetime of the
+        // pointer gesture; the pointer-up pass below compacts the window again.
+        const stableRange = stablePdfRenderRange(range, nextRange, pointerScrollActiveRef.current);
+        return range.start === stableRange.start && range.end === stableRange.end ? range : stableRange;
+      });
     }
   }, [cancelProgrammaticScroll, numPages, pdf, zoom]);
 
@@ -610,6 +638,24 @@ export default function TypesetPdfPreview({
       });
     }, 160);
   }, [updateVisiblePages]);
+
+  useEffect(() => {
+    const finishPointerScroll = () => {
+      if (!pointerScrollActiveRef.current) return;
+      pointerScrollActiveRef.current = false;
+      scheduleVisiblePagesUpdate();
+    };
+    window.addEventListener("pointerup", finishPointerScroll);
+    window.addEventListener("pointercancel", finishPointerScroll);
+    window.addEventListener("touchend", finishPointerScroll);
+    window.addEventListener("touchcancel", finishPointerScroll);
+    return () => {
+      window.removeEventListener("pointerup", finishPointerScroll);
+      window.removeEventListener("pointercancel", finishPointerScroll);
+      window.removeEventListener("touchend", finishPointerScroll);
+      window.removeEventListener("touchcancel", finishPointerScroll);
+    };
+  }, [scheduleVisiblePagesUpdate]);
 
   useEffect(() => {
     if (!pdf || numPages < 1) return;
@@ -958,7 +1004,6 @@ export default function TypesetPdfPreview({
     >
       <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid" ref={toolbarRef}>
         <div className="typeset-pdf-left toolbar-pdf-left" ref={toolbarLeftRef}>
-          <span className="typeset-pdf-panel-label">{copy.compiledPdfLabel}</span>
           <div
             ref={compileMenuRef}
             className={`typeset-compile-button-group compile-button-group${dirty ? " has-changes" : ""}`}
@@ -1139,7 +1184,6 @@ export default function TypesetPdfPreview({
           )}
         </div>
         <div className="typeset-preview-actions toolbar-pdf-right" ref={toolbarActionsRef}>
-          <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : copy.preview}</span>
           <div className="typeset-pdf-page-control" aria-label={copy.pdfPageNavigationLabel}>
             <button
               type="button"
@@ -1423,10 +1467,12 @@ export default function TypesetPdfPreview({
         tabIndex={-1}
         onPointerDown={(event) => {
           event.stopPropagation();
+          pointerScrollActiveRef.current = true;
           cancelProgrammaticScroll();
         }}
         onTouchStart={(event) => {
           event.stopPropagation();
+          pointerScrollActiveRef.current = true;
           cancelProgrammaticScroll();
         }}
         onTouchMove={(event) => event.stopPropagation()}
@@ -1480,6 +1526,7 @@ export default function TypesetPdfPreview({
               onPointConverter={registerPointConverter}
               onPdfLinkClick={followPdfLink}
               highlight={highlight}
+              onRenderError={handlePageRenderError}
             />
           );
         })}

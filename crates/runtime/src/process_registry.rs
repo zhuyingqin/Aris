@@ -83,6 +83,64 @@ fn registry() -> &'static Mutex<BTreeMap<u32, ManagedProcessInfo>> {
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+fn background_services() -> &'static Mutex<BTreeMap<String, u32>> {
+    static SERVICES: OnceLock<Mutex<BTreeMap<String, u32>>> = OnceLock::new();
+    SERVICES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Stable identity for an unattended service. The workspace boundary prevents
+/// a server in one project from being reused by another; the normalized command
+/// retains executable/argument identity, including an explicitly selected port.
+#[must_use]
+pub fn background_service_key(cwd: &Path, command: &str) -> String {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = if cfg!(windows) {
+        cwd.to_string_lossy().to_ascii_lowercase()
+    } else {
+        cwd.to_string_lossy().into_owned()
+    };
+    let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let port = service_port(&command)
+        .map(|port| port.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    format!("{cwd}\u{1f}{command}\u{1f}port={port}")
+}
+
+fn service_port(command: &str) -> Option<u16> {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        let candidate = token
+            .strip_prefix("--port=")
+            .or_else(|| token.strip_prefix("PORT="))
+            .or_else(|| {
+                matches!(*token, "--port" | "-p")
+                    .then(|| tokens.get(index + 1).copied())
+                    .flatten()
+            });
+        if let Some(port) = candidate.and_then(|value| value.trim_matches(['\'', '"']).parse().ok())
+        {
+            return Some(port);
+        }
+    }
+    None
+}
+
+#[must_use]
+pub fn reusable_background_service(service_key: &str) -> Option<ManagedProcessInfo> {
+    let pid = background_services()
+        .lock()
+        .ok()?
+        .get(service_key)
+        .copied()?;
+    let process = registry().lock().ok()?.get(&pid).cloned();
+    if process.is_none() {
+        if let Ok(mut services) = background_services().lock() {
+            services.remove(service_key);
+        }
+    }
+    process
+}
+
 /// Jobs owning each registered process and everything it spawned. Kept apart
 /// from [`ManagedProcessInfo`] so that stays a plain, cloneable data record.
 /// A job lives exactly as long as its registry entry: dropping it closes the
@@ -137,6 +195,9 @@ fn job_for(pid: u32) -> Option<Arc<ManagedJob>> {
 pub fn unregister_managed_process(pid: u32) {
     if let Ok(mut processes) = registry().lock() {
         processes.remove(&pid);
+    }
+    if let Ok(mut services) = background_services().lock() {
+        services.retain(|_, registered_pid| *registered_pid != pid);
     }
     // Dropping the job closes our last handle to it, which is what kills any
     // descendant the process left behind.
@@ -197,6 +258,23 @@ pub fn spawn_managed_background(
             unregister_managed_process(pid);
         })
         .map_err(io::Error::other)?;
+    Ok(pid)
+}
+
+pub fn spawn_managed_background_service(
+    command: &mut Command,
+    label: impl Into<String>,
+    log_path: Option<String>,
+    service_key: impl Into<String>,
+) -> io::Result<u32> {
+    let service_key = service_key.into();
+    if let Some(process) = reusable_background_service(&service_key) {
+        return Ok(process.pid);
+    }
+    let pid = spawn_managed_background(command, label, log_path)?;
+    if let Ok(mut services) = background_services().lock() {
+        services.insert(service_key, pid);
+    }
     Ok(pid)
 }
 

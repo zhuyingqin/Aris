@@ -1,6 +1,7 @@
 use super::{
-    drain_reader, managed_processes_snapshot, read_stream_in_thread, run_managed_command,
-    run_managed_command_with_cancel, spawn_managed_background, terminate_managed_process_tree,
+    background_service_key, drain_reader, managed_processes_snapshot, read_stream_in_thread,
+    reusable_background_service, run_managed_command, run_managed_command_with_cancel,
+    spawn_managed_background, spawn_managed_background_service, terminate_managed_process_tree,
     unregister_managed_process, RollingLog,
 };
 
@@ -99,6 +100,41 @@ fn managed_background_is_registered_and_shutdown() {
     assert!(!managed_processes_snapshot()
         .iter()
         .any(|process| process.pid == pid));
+}
+
+#[test]
+fn background_service_identity_reuses_the_running_process() {
+    let cwd = std::env::current_dir().expect("cwd");
+    let key = background_service_key(&cwd, "dev-server   --port 4317");
+    assert_eq!(key, background_service_key(&cwd, "dev-server --port 4317"));
+    assert_ne!(key, background_service_key(&cwd, "dev-server --port 4318"));
+
+    let mut first = long_running_shell_command();
+    first
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let first_pid = spawn_managed_background_service(&mut first, "service one", None, key.clone())
+        .expect("first service should start");
+    let mut duplicate = long_running_shell_command();
+    let reused_pid =
+        spawn_managed_background_service(&mut duplicate, "service duplicate", None, key.clone())
+            .expect("duplicate should reuse");
+
+    assert_eq!(reused_pid, first_pid);
+    assert_eq!(
+        reusable_background_service(&key).map(|process| process.pid),
+        Some(first_pid)
+    );
+    assert_eq!(
+        managed_processes_snapshot()
+            .iter()
+            .filter(|process| process.pid == first_pid)
+            .count(),
+        1
+    );
+    terminate_managed_process_tree(first_pid);
+    unregister_managed_process(first_pid);
 }
 
 /// A stream that yields one chunk and then never reaches EOF, standing in for a
