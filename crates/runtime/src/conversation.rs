@@ -685,6 +685,10 @@ struct DynamicToolRoutingState {
     /// Monotonic use counter per tool; absent means "not used yet this turn".
     last_used: BTreeMap<String, u64>,
     tick: u64,
+    /// Tools this turn executed while their schema was routed away. Not
+    /// activated mid-turn — that would invalidate the provider's prompt prefix
+    /// — but handed to the next turn's plan so it starts with them visible.
+    deferred_but_used: BTreeSet<String>,
 }
 
 impl DynamicToolRoutingState {
@@ -708,6 +712,9 @@ impl DynamicToolRoutingState {
             if self.active.insert(name.clone()) {
                 activated.push(name.clone());
             }
+            // It is visible again, so it no longer needs carrying to the next
+            // turn on the deferred-but-used list.
+            self.deferred_but_used.remove(&name);
             self.touch(&name);
         }
         let just_activated = activated.iter().cloned().collect::<BTreeSet<_>>();
@@ -830,6 +837,7 @@ where
             max_active,
             last_used: BTreeMap::new(),
             tick: 0,
+            deferred_but_used: BTreeSet::new(),
         });
         self
     }
@@ -1661,6 +1669,22 @@ where
         {
             (summary, CompactionSummarySource::Llm, usage)
         } else {
+            // Name the cause while it is still known. "No summarizer model was
+            // resolved" issues no request, so downstream a wire log cannot tell
+            // it apart from a provider failure — and the user only sees a
+            // summary that reads like scraped terminal output.
+            let reason = if self.summarizer.is_none() {
+                "no_summarizer_model_configured"
+            } else {
+                "summarizer_call_failed"
+            };
+            self.event_sink.emit(&RuntimeEvent {
+                timestamp: now_iso8601(),
+                session_id: String::new(),
+                event_type: EventType::CompactionSummaryFallback {
+                    reason: reason.to_string(),
+                },
+            });
             let summary = summarize_messages(&plan.removed);
             let summary = if overflow {
                 let reserve = overflow_pinned
@@ -1946,6 +1970,17 @@ where
         let (activated, evicted) = routing.activate(matches);
         self.api_client.set_active_tools(Some(&routing.active));
         let active_tool_count = routing.active.len() as u64;
+        if !activated.is_empty() || !evicted.is_empty() {
+            self.event_sink.emit(&RuntimeEvent {
+                timestamp: now_iso8601(),
+                session_id: String::new(),
+                event_type: EventType::ToolRoutingChanged {
+                    activated: activated.clone(),
+                    deactivated: evicted.clone(),
+                    active_tool_count: active_tool_count as usize,
+                },
+            });
+        }
 
         let Some(object) = value.as_object_mut() else {
             return output;
@@ -1978,9 +2013,22 @@ where
     }
 
     /// Record that a tool actually ran, so the LRU evicts what the turn is not
-    /// using. A tool called after being evicted is re-activated here: routing
-    /// governs visibility only, and a call that already executed should not be
-    /// answered by a schema the next request omits.
+    /// using, and remember a tool that ran while deferred so the *next* turn
+    /// ships its schema.
+    ///
+    /// This deliberately does not re-activate mid-turn. Tool definitions sit at
+    /// the head of the prompt, so adding one is an insertion before the entire
+    /// conversation, not an append: every provider prefix cache is invalidated
+    /// and the whole transcript is billed again as fresh input. Measured on a
+    /// real session, five such mid-turn additions re-paid 249k of the 364k
+    /// input tokens the session spent — 68% of its input bill to publish five
+    /// schemas worth about 2k.
+    ///
+    /// Deferring costs nothing in capability. Routing governs visibility only:
+    /// the call that triggered this already executed and returned its result,
+    /// and any further call to the same tool executes too. The tool becomes
+    /// visible again at the next turn boundary, where
+    /// [`Self::dynamic_tool_routing_carry_forward`] hands it to the next plan.
     fn note_dynamic_tool_use(&mut self, tool_name: &str) {
         let Some(routing) = self.dynamic_tool_routing.as_mut() else {
             return;
@@ -1988,12 +2036,31 @@ where
         if !routing.catalog.contains(tool_name) {
             return;
         }
-        if routing.active.contains(tool_name) {
-            routing.touch(tool_name);
-            return;
+        routing.touch(tool_name);
+        if !routing.active.contains(tool_name) {
+            routing.deferred_but_used.insert(tool_name.to_string());
         }
-        routing.activate(vec![tool_name.to_string()]);
-        self.api_client.set_active_tools(Some(&routing.active));
+    }
+
+    /// Tools the next turn should start with active: everything this turn had
+    /// active plus everything it actually reached for while deferred.
+    ///
+    /// Without this, each user turn re-planned from the prompt text alone and
+    /// threw away what the session had already paid to publish — one observed
+    /// turn boundary dropped four tools the previous turn had used and admitted
+    /// two that were never called.
+    #[must_use]
+    pub fn dynamic_tool_routing_carry_forward(&self) -> BTreeSet<String> {
+        self.dynamic_tool_routing
+            .as_ref()
+            .map(|routing| {
+                routing
+                    .active
+                    .union(&routing.deferred_but_used)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Synthetic `tool_result` for a `tool_use` that was cancelled before it
@@ -2168,6 +2235,7 @@ where
                 tool_calls,
                 tokens_before,
                 tokens_after,
+                context_overhead_tokens: self.context_overhead_estimated_tokens,
                 removed_messages: event.removed_message_count,
             },
         });
@@ -3358,8 +3426,7 @@ fn bound_tool_result(output: String, max_chars: usize) -> String {
 /// (`ReadFileResult::Image`). A plain text/PDF `read_file` result has no
 /// top-level `mediaType`/`base64`/`bytes` fields, so it never matches here.
 fn parse_read_file_image(output: &str) -> Option<ReadImageOutput> {
-    let image: ReadImageOutput = serde_json::from_str(output).ok()?;
-    (image.kind == "image").then_some(image)
+    crate::file_ops::parse_image_tool_output(output)
 }
 
 /// Apply bounded, per-result media limits without serializing image bytes into

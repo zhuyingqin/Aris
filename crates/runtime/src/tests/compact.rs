@@ -1252,3 +1252,111 @@ fn compression_fidelity_benchmark() {
     // Don't assert on the score itself — that's the metric we're measuring.
     // Future LLM-summary upgrade should push this to 10/10.
 }
+
+/// The whole reason `MAX_CARRIED_USER_IMAGES` exists.
+///
+/// A reference image is the task input for "make it look like this". Before
+/// this, compaction reduced it to `[image: image/png, N base64 chars]` and the
+/// model spent the rest of the session unable to look at the thing it was
+/// asked to match — while the pinned user request kept asserting the image was
+/// right there in the message.
+#[test]
+fn compaction_carries_user_attached_images_into_the_compacted_session() {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "make the poster page look like this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgoAAAA".repeat(64),
+            },
+        ],
+        usage: None,
+    });
+    for index in 0..20 {
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!(
+                    "step {index} of the rework, described at some length so \
+                     the session is worth compacting"
+                ),
+            }]));
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!("continue {index}")));
+    }
+
+    let result = compact_session_for_test(&session, CompactionConfig::overflow(4));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+
+    let carried = result.compacted_session.messages[0]
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .count();
+    assert_eq!(
+        carried, 1,
+        "the user's attachment must survive: {:#?}",
+        result.compacted_session.messages[0].blocks
+    );
+}
+
+/// Tool screenshots are regenerable evidence and are not carried; the summary
+/// must then say the image is gone rather than imply it is present.
+#[test]
+fn compaction_does_not_claim_a_dropped_image_is_still_present() {
+    let messages = vec![ConversationMessage {
+        role: MessageRole::Tool,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo".repeat(8),
+        }],
+        usage: None,
+    }];
+    let summary = summarize_messages(&messages);
+    assert!(
+        summary.contains("image omitted from summary"),
+        "summary must name the image as omitted: {summary}"
+    );
+}
+
+/// `data.len() / 4` charged a 2.1 MB screenshot 721k tokens against a measured
+/// ~1.7k, inflating one session's reported context 8.5x and making
+/// `should_compact` true from the first turn of any session with a pasted
+/// image.
+#[test]
+fn image_token_estimate_tracks_what_a_vision_model_actually_bills() {
+    let big = ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            // 2,886,208 base64 chars: the real attachment from the session that
+            // exposed this.
+            data: "A".repeat(2_886_208),
+        }],
+        usage: None,
+    };
+    let mut session = Session::new();
+    session.messages.push(big);
+    let estimate = estimate_session_tokens(&session);
+    assert!(
+        (256..=1_600).contains(&estimate),
+        "a single screenshot must not dominate the context estimate: {estimate}"
+    );
+
+    // Still monotonic in size, so a thumbnail is cheaper than a full page.
+    let mut small = Session::new();
+    small.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "A".repeat(4_000),
+        }],
+        usage: None,
+    });
+    assert!(estimate_session_tokens(&small) < estimate);
+}

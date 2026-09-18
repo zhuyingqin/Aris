@@ -1986,3 +1986,52 @@ fn planning_a_protocol_is_not_retrieval() {
     assert!(performs_retrieval("LiteratureSearchExecute"));
     assert!(performs_retrieval("LiteraturePdfDownload"));
 }
+
+/// Hitting this machine is not external retrieval. Before the host check, every
+/// `curl http://localhost:5180/` spent a retrieval budget slot and dragged the
+/// full candidate-evidence preamble onto the result.
+#[test]
+fn a_local_url_is_not_external_retrieval() {
+    let bash = |command: &str| {
+        is_network_tool_call("bash", &json!({ "command": command }).to_string())
+    };
+
+    for command in [
+        "curl -s http://localhost:5180/",
+        "curl http://127.0.0.1:1420/index.html",
+        "curl http://127.1.2.3:8080/health",
+        "curl 'http://[::1]:8080/api'",
+        "curl http://0.0.0.0:3000/",
+        "curl http://app.localhost:3000/",
+        "curl http://10.1.2.3/status",
+        "curl http://192.168.1.10:8080/",
+        "curl http://172.16.0.4/ && curl http://172.31.255.1/",
+        "curl -u user:pw@ http://admin@localhost:9000/",
+    ] {
+        assert!(!bash(command), "{command:?} must not count as retrieval");
+    }
+
+    for command in [
+        "curl -s https://api.openalex.org/works?search=federated",
+        "curl http://172.32.0.1/",
+        "curl http://example.com/",
+        // Mixed: one external destination is enough.
+        "curl http://localhost:5180/ && curl https://arxiv.org/abs/2401.00001",
+        // A verb with no literal URL keeps the conservative answer: the guard
+        // cannot see where `$ENDPOINT` points.
+        "curl -s \"$ENDPOINT\" | jq .",
+        "python -c 'import requests; requests.get(url)'",
+    ] {
+        assert!(bash(command), "{command:?} must count as retrieval");
+    }
+}
+
+#[test]
+fn url_host_strips_scheme_userinfo_and_port() {
+    assert_eq!(url_host("http://localhost:5180/x"), Some("localhost"));
+    assert_eq!(url_host("https://user:pw@example.com/p?q=1"), Some("example.com"));
+    assert_eq!(url_host("http://[::1]:8080/api"), Some("::1"));
+    assert_eq!(url_host("http://[::1]"), Some("::1"));
+    assert_eq!(url_host("https://example.com"), Some("example.com"));
+    assert_eq!(url_host("not-a-url"), None);
+}

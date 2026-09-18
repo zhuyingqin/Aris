@@ -42,9 +42,14 @@ pub struct ManagedCommandOutput {
     pub interrupted: bool,
     pub timed_out: bool,
     /// `true` when the command finished but something it spawned still holds our
-    /// stdout/stderr pipe, so the captured output was drained on a deadline and
-    /// may be incomplete. See [`READER_DRAIN_GRACE`].
+    /// stdout/stderr pipe, so the capture was drained on a deadline rather than
+    /// on EOF. See [`READER_DRAIN_GRACE`].
     pub output_pipe_held: bool,
+    /// `true` when that deadline was reached while bytes were *still arriving*,
+    /// which is the only case where the capture above is actually incomplete. A
+    /// held pipe on its own does not imply missing output: a backgrounded
+    /// service holds it open while saying nothing. See [`READER_SETTLE_WINDOW`].
+    pub output_truncated: bool,
     /// Set when the command left a service running and the registry adopted it,
     /// so callers can tell the user (and the model) where it went.
     pub adopted_background_pid: Option<u32>,
@@ -75,8 +80,23 @@ struct ManagedStreamReader {
 /// output collected so far and lets the call finish.
 const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long the capture must sit unchanged before a still-open pipe counts as
+/// settled rather than truncated.
+const READER_SETTLE_WINDOW: Duration = Duration::from_millis(500);
+
 /// How often an adopted survivor group is re-checked for liveness.
 const SURVIVOR_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long to wait before believing that a process listed in the job object is
+/// a service rather than a grandchild on its way out.
+///
+/// A Windows job object keeps reporting a pid until the kernel reaps it, so the
+/// list sampled the instant the shell exits still contains processes that have
+/// already terminated. Adopting one registers a phantom background service the
+/// user then sees in the project summary: on one measured session this happened
+/// on 10 of 130 commands, including one whose whole body was `echo && grep &&
+/// sed`.
+const SURVIVOR_ADOPTION_GRACE: Duration = Duration::from_millis(150);
 
 fn registry() -> &'static Mutex<BTreeMap<u32, ManagedProcessInfo>> {
     static REGISTRY: OnceLock<Mutex<BTreeMap<u32, ManagedProcessInfo>>> = OnceLock::new();
@@ -609,15 +629,16 @@ fn finish_managed_output(
     // One deadline for both streams: a survivor normally holds both, and two
     // sequential grace periods would double the wait for no extra output.
     let deadline = Instant::now() + READER_DRAIN_GRACE;
-    let (stdout, stdout_held) = drain_reader(stdout_reader, deadline);
-    let (stderr, stderr_held) = drain_reader(stderr_reader, deadline);
+    let stdout = drain_reader(stdout_reader, deadline);
+    let stderr = drain_reader(stderr_reader, deadline);
     ManagedCommandOutput {
-        stdout,
-        stderr,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
         status,
         interrupted,
         timed_out,
-        output_pipe_held: stdout_held || stderr_held,
+        output_pipe_held: stdout.held || stderr.held,
+        output_truncated: stdout.truncated || stderr.truncated,
         adopted_background_pid: None,
     }
 }
@@ -628,7 +649,18 @@ fn finish_managed_output(
 /// invisible and immortal — nothing knows its pid once the shell is gone.
 fn adopt_survivors(leader: u32, label: &str, job: Option<Arc<ManagedJob>>) -> Option<u32> {
     let job = job?;
-    let anchor = *job.live_pids().first()?;
+    // Two samples a grace apart, and only what is in both. A pid the kernel has
+    // not finished reaping is still listed in the first sample and gone from the
+    // second; a service is in both. Sampling once — which is what the comment at
+    // the call site already claimed this did — adopted the former as often as
+    // the latter.
+    let first = job.live_pids();
+    if first.is_empty() {
+        return None;
+    }
+    thread::sleep(SURVIVOR_ADOPTION_GRACE);
+    let second = job.live_pids();
+    let anchor = *first.iter().find(|pid| second.contains(pid))?;
     // Move the job off the finished command before its guard drops (which would
     // close the job and kill exactly the processes we are adopting).
     drop(take_job(leader));
@@ -665,21 +697,58 @@ fn watch_survivors(anchor: u32, job: Arc<ManagedJob>) {
 
 /// Collect a stream's bytes, waiting for EOF only until `deadline`. Returns the
 /// bytes read so far and whether the reader was still blocked on the pipe.
-fn drain_reader(reader: Option<ManagedStreamReader>, deadline: Instant) -> (Vec<u8>, bool) {
+struct DrainedStream {
+    bytes: Vec<u8>,
+    held: bool,
+    truncated: bool,
+}
+
+fn drain_reader(reader: Option<ManagedStreamReader>, deadline: Instant) -> DrainedStream {
     let Some(reader) = reader else {
-        return (Vec::new(), false);
+        return DrainedStream {
+            bytes: Vec::new(),
+            held: false,
+            truncated: false,
+        };
     };
+    let mut last_len = buffer_len(&reader.buffer);
+    let mut last_growth = Instant::now();
     while !reader.handle.is_finished() {
         if Instant::now() >= deadline {
             // Abandon the reader thread rather than block the caller forever.
             // It stays parked on a pipe another process holds open and ends
             // when that process does.
-            return (snapshot_buffer(&reader.buffer), true);
+            //
+            // Whether the capture is *incomplete* is a separate question from
+            // whether the pipe is still open: an idle service holds the pipe
+            // indefinitely with nothing further to say. Only claim truncation
+            // when bytes were still arriving as we gave up, because the note it
+            // produces tells the model its output may be missing — which has
+            // already cost one unnecessary re-run of a command that had in fact
+            // printed everything.
+            return DrainedStream {
+                bytes: snapshot_buffer(&reader.buffer),
+                held: true,
+                truncated: last_growth.elapsed() < READER_SETTLE_WINDOW,
+            };
         }
         thread::sleep(Duration::from_millis(20));
+        let len = buffer_len(&reader.buffer);
+        if len != last_len {
+            last_len = len;
+            last_growth = Instant::now();
+        }
     }
     let _ = reader.handle.join();
-    (snapshot_buffer(&reader.buffer), false)
+    DrainedStream {
+        bytes: snapshot_buffer(&reader.buffer),
+        held: false,
+        truncated: false,
+    }
+}
+
+fn buffer_len(buffer: &Arc<Mutex<Vec<u8>>>) -> usize {
+    buffer.lock().map(|buffer| buffer.len()).unwrap_or_default()
 }
 
 fn snapshot_buffer(buffer: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {

@@ -168,7 +168,6 @@ describe("Extensions global MCP settings", () => {
     render(<Extensions />);
 
     expect(await screen.findByText("已配置的 MCP")).toBeTruthy();
-    expect(screen.getByText(/SomniQ\/mcp\.json/)).toBeTruthy();
     expect(screen.getByRole("button", { name: /global-server/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /oracle-web/ })).toBeTruthy();
   });
@@ -263,8 +262,9 @@ describe("Extensions global MCP settings", () => {
       }),
     ]));
     expect(screen.getAllByRole("button", { name: "本机不可用" })).toHaveLength(2);
-    expect(screen.getByText("内置路径")).toBeTruthy();
-    expect(screen.getByText("C:/SomniQ/resources/bin/aris-playwright-mcp.cmd")).toBeTruthy();
+    expect(screen.getByText("可添加的 MCP")).toBeTruthy();
+    expect(screen.getByText("Playwright").closest(".ext-card")?.getAttribute("title"))
+      .toContain("C:/SomniQ/resources/bin/aris-playwright-mcp.cmd");
   });
 
   it("installs the pinned PPT Master Skill and refreshes the skill list", async () => {

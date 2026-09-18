@@ -8,6 +8,7 @@ import {
   literatureAttachmentOpenExternal,
   literatureAttachmentStatus,
   literatureLlm,
+  literaturePdfBytes,
   literatureAddIdentifier,
   literatureDuplicateCandidates,
   literatureExportBibliography,
@@ -40,6 +41,8 @@ import {
   type ProjectRagSearchResult,
 } from "../api/tauri";
 import { useStore, type Language } from "../store";
+import { imageMimeType, isImagePath } from "../imageFiles";
+import ImageLightbox from "../ImageLightbox";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import LiteratureViewTabs, { type LiteraturePageView } from "./LiteratureViewTabs";
 import AdvancedSearchBuilder from "./AdvancedSearchBuilder";
@@ -1924,6 +1927,11 @@ export default function Literature({
   const [readerPage, setReaderPage] = useState(1);
   const [readerAnnotationId, setReaderAnnotationId] = useState<string | null>(null);
   const [readerAttachment, setReaderAttachment] = useState<LiteratureAttachment | null>(null);
+  // Image supplement opened in the shared viewer. `url` is an object URL, so
+  // closing the viewer has to revoke it.
+  const [imageAttachment, setImageAttachment] = useState<
+    { url: string; label: string; path: string } | null
+  >(null);
   const [readerPaperIds, setReaderPaperIds] = useState<string[]>([]);
   const [attachmentHealth, setAttachmentHealth] = useState<Record<string, { exists: boolean; bytes?: number }>>({});
   const [storageStatus, setStorageStatus] = useState<LiteratureStorageStatus | null>(null);
@@ -2983,6 +2991,29 @@ export default function Literature({
       setReaderPage(page);
       setReaderAnnotationId(annotationId);
       setWorkspaceTab("reader");
+      return;
+    }
+    // A figure or scan stored in the library opens in SomniQ's own viewer.
+    // Attachments that only exist as an external file stay with the system
+    // application: nothing here can read bytes from outside the library.
+    if (attachment.path && isImagePath(attachment.path)) {
+      try {
+        const bytes = await literaturePdfBytes(attachment.path);
+        const mimeType = attachment.mimeType?.startsWith("image/")
+          ? attachment.mimeType
+          : imageMimeType(attachment.path, "image/png");
+        const next = {
+          url: URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mimeType })),
+          label: attachment.label || attachment.filename || attachment.path,
+          path: attachment.path,
+        };
+        setImageAttachment((current) => {
+          if (current) URL.revokeObjectURL(current.url);
+          return next;
+        });
+      } catch (error) {
+        setError(copy.dialogs.openAttachmentFailed(String(error)));
+      }
       return;
     }
     try {
@@ -4113,6 +4144,21 @@ export default function Literature({
           busy={newItemSaving}
           onClose={() => { if (!newItemSaving) setNewItemOpen(false); }}
           onSubmit={(input) => void createManualItem(input)}
+        />
+      )}
+      {imageAttachment && (
+        <ImageLightbox
+          src={imageAttachment.url}
+          alt={imageAttachment.label}
+          title={imageAttachment.label}
+          path={imageAttachment.path}
+          // The library resolves its own paths, so the system-viewer escape
+          // hatch goes through the literature command rather than `file_open`.
+          onOpenExternal={() => void literatureAttachmentOpen(imageAttachment.path).catch(() => undefined)}
+          onClose={() => {
+            URL.revokeObjectURL(imageAttachment.url);
+            setImageAttachment(null);
+          }}
         />
       )}
       {savedSearchMenu &&

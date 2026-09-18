@@ -87,7 +87,7 @@ fn bundle_inventory_skill_md_refs_resolve_to_bundled_resources() {
     //   "$ARIS_CACHE_DIR/<key>" or "${ARIS_CACHE_DIR:-.}/<key>"
     //   bare "tools/<helper>.{py,sh}" (legacy literal still in some SKILLs)
     let cache_re = Regex::new(
-        r#"\$\{?ARIS_CACHE_DIR(?::-[^}]*)?\}?/((?:tools|skills/[a-zA-Z0-9_-]+|shared-references|shared-governance)/[a-zA-Z0-9_./-]+\.(?:py|sh|tex|cls|bst|md|toml|yaml|yml|json))"#,
+        r#"\$\{?ARIS_CACHE_DIR(?::-[^}]*)?\}?/((?:tools|skills/[a-zA-Z0-9_-]+|shared-references|shared-governance)/[a-zA-Z0-9_./-]+\.(?:py|sh|cjs|tex|cls|bst|md|toml|yaml|yml|json))"#,
     )
     .expect("compile cache_re");
     let legacy_re =
@@ -117,6 +117,130 @@ fn bundle_inventory_skill_md_refs_resolve_to_bundled_resources() {
         missing
             .iter()
             .map(|(s, k)| format!("  /{s}: {k}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// The whole bundle must materialise on disk, not just compile in.
+///
+/// Non-ASCII keys are the reason this is worth asserting: /soft-copyright ships
+/// `软件说明书模板.html` and `申请表字段规则.md`, and a filesystem that mangles
+/// those would fail at skill-run time, far from the bundler.
+#[test]
+fn full_bundle_extracts_including_non_ascii_keys() {
+    let tmp = std::env::temp_dir().join(format!("aris-bundle-{}", rand_suffix()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let (extracted, failed) = try_extract_to(&tmp).expect("create cache dir");
+    assert!(failed.is_empty(), "per-file extraction failures: {failed:?}");
+    assert_eq!(
+        extracted.len(),
+        crate::BUNDLED_RESOURCES.len(),
+        "every bundled resource should extract"
+    );
+
+    for (key, content) in crate::BUNDLED_RESOURCES {
+        let path = tmp.join(key);
+        let got = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read back {}: {e}", path.display()));
+        assert_eq!(&got, content, "content mismatch for {key}");
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Every asset file whose extension `build.rs` bundles must actually be in
+/// `BUNDLED_RESOURCES` (or be the skill's own `SKILL.md`).
+///
+/// The bundler skips unknown extensions *silently*, so adding a helper in a
+/// language nobody bundled before (`.cjs` for /soft-copyright was the first)
+/// ships a SKILL.md whose scripts resolve to nothing at runtime. Filename
+/// charset matters too — /soft-copyright's template and reference docs have
+/// CJK names, which the regex-based reference tests above cannot see.
+///
+/// `ALLOWED_EXTS` is duplicated from `build.rs` (a build script's consts are
+/// not importable). Drift is one-directional and safe: an extension added
+/// there but not here only under-checks; one removed there fails loudly.
+#[test]
+fn every_bundleable_asset_file_is_actually_bundled() {
+    use std::collections::HashSet;
+
+    const ALLOWED_EXTS: &[&str] = &[
+        "md", "py", "sh", "tex", "cls", "bst", "toml", "yaml", "yml", "json", "html", "cjs",
+    ];
+    const EXCLUDED_SKILL_PREFIX: &str = "skills-codex";
+    // build.rs bundles these at key `<dir>/<rel>`, dropping the `skills/` segment.
+    const SHARED_RESOURCE_DIRS: &[&str] = &["shared-references", "shared-governance"];
+    // Only assets/tools/ and assets/skills/ are walked by build.rs. assets/prompts/
+    // is `include_str!`d directly by prompt.rs, not routed through the cache.
+    const UNBUNDLED_ROOTS: &[&str] = &["prompts/"];
+
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let bundled_keys: HashSet<&'static str> =
+        crate::BUNDLED_RESOURCES.iter().map(|(k, _)| *k).collect();
+    let bundled_skills: HashSet<&'static str> =
+        crate::BUNDLED_SKILLS.iter().map(|(n, _)| *n).collect();
+
+    let mut missing: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(&assets).sort_by_file_name() {
+        let entry = entry.expect("walk assets");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let mut rel = entry
+            .path()
+            .strip_prefix(&assets)
+            .expect("strip assets prefix")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if UNBUNDLED_ROOTS.iter().any(|root| rel.starts_with(root)) {
+            continue;
+        }
+
+        let ext = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if !ALLOWED_EXTS.contains(&ext) {
+            continue;
+        }
+
+        // `skills/<name>/...` — the review-snapshot mirrors are excluded from
+        // the bundle by design, and SKILL.md lands in BUNDLED_SKILLS instead.
+        if let Some(under_skills) = rel.strip_prefix("skills/") {
+            let Some((skill, sub)) = under_skills.split_once('/') else {
+                continue; // loose file directly under assets/skills/
+            };
+            if skill.starts_with(EXCLUDED_SKILL_PREFIX) {
+                continue;
+            }
+            if SHARED_RESOURCE_DIRS.contains(&skill) {
+                rel = under_skills.to_string();
+            } else if sub == "SKILL.md" {
+                assert!(
+                    bundled_skills.contains(skill),
+                    "{rel} exists on disk but /{skill} is not in BUNDLED_SKILLS"
+                );
+                continue;
+            }
+        }
+
+        if !bundled_keys.contains(rel.as_str()) {
+            missing.push(rel);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "{} asset file(s) have a bundleable extension but are NOT in \
+         BUNDLED_RESOURCES — check build.rs ALLOWED_EXTS and the 512KB cap:\n{}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|k| format!("  {k}"))
             .collect::<Vec<_>>()
             .join("\n")
     );

@@ -1,0 +1,95 @@
+% ==== 图 4　大体积输出的外置与证据身份桥接示意图 ====
+%
+% 上半部：S401–S406 的外置流程，框里只写动作名，细节由说明书
+%         [0067]–[0075] 承载。菱形内手写 \\ 控制断行。
+% 下半部：S407 证据身份的对照示意，放在一个以分隔虚线为原点的 scope 里，
+%         内部用局部坐标，整块要上下移动只改 scope 的 shift。
+%
+% 下半部的关键约束：存储路径支路与内容摘要值支路走**不同的水平高度**，
+% 且存储路径支路在叉号处即终止、不再延伸。两组折线因此互不相交——这是
+% 此图可读性的唯一要点，改图时不要把两者并到同一高度上。
+% ====================================================
+\begin{tikzpicture}[x=1cm,y=1cm,node distance=5mm]
+
+  % ================= 上半部：外置流程 =================
+  \node[pterm] (start) {一次已完成的工具调用};
+
+  \node[pbox=8.0cm, below=of start] (s401)
+    {S401\quad 由上下文预算推导外置阈值};
+
+  \node[pdia=2.4, below=of s401] (s402)
+    {S402\\ 输出超过外置阈值？};
+
+  \node[pbox=8.0cm, below=of s402] (s403)
+    {S403\quad 对输出原文计算内容摘要值};
+
+  \node[pdia=2.2, below=of s403] (s404)
+    {S404\\ 已有同内容的产物文件？};
+
+  \node[pbox=8.0cm, below=of s404] (s405)
+    {S405\quad 写入产物文件\\
+     文件名＝摘要值前缀＋工具名称＋调用标识};
+
+  \node[pbox=8.0cm, below=of s405] (s406)
+    {S406\quad 以引用式结果替换该输出};
+
+  % 旁支：S402 的「否」与 S404 的「是」
+  % 宽度取 2.8cm：「按既有上限截断」7 字约 2.6cm，窄了会断成「按既有上/
+  % 限截断」。reuse 用显式 \\ 断在词边界。
+  \node[pbox=2.8cm, anchor=west] (trunc) at (4.6,0 |- s402) {按既有上限截断};
+  \node[pbox=2.8cm, anchor=east] (reuse) at (-4.6,0 |- s404) {复用已有\\ 产物文件};
+
+  % 主干
+  \draw[pl] (start) -- (s401);
+  \draw[pl] (s401)  -- (s402);
+  \draw[pl] (s402)  -- (s403);
+  \draw[pl] (s403)  -- (s404);
+  \draw[pl] (s404)  -- (s405);
+  \draw[pl] (s405)  -- (s406);
+
+  % 旁支连线
+  \draw[pl] (s402.east) -- (trunc.west);
+  \draw[pl] (s404.west) -- (reuse.east);
+  \coordinate (m404) at ($(s405.south)!0.5!(s406.north)$);
+  \draw[pll] (reuse.south) -- (reuse.south |- m404) -- (m404);
+
+  \node[plab, anchor=south west] at ($(s402.east)+(0.1,0.02)$) {否};
+  \node[plab, anchor=south east] at ($(s404.west)+(-0.1,0.02)$) {是};
+  \node[plab, anchor=west] at ($(s402.south)!0.5!(s403.north)+(0.12,0)$) {是};
+  \node[plab, anchor=west] at ($(s404.south)!0.5!(s405.north)+(0.12,0)$) {否};
+
+  % ================= 下半部：S407 证据身份 =================
+  \begin{scope}[shift={($(s406.south)+(0,-1.1)$)}]
+
+    \draw[dashed, line width=0.25mm] (-8.2,0) -- (8.2,0);
+    \node[pnote, anchor=west, font=\small] at (-8.2,-0.8) {S407\quad 证据身份};
+
+    % 两次调用各自的引用式结果
+    \draw[pline] (-8.1,-1.6) rectangle (-3.7,-3.8);
+    \node[pnote, anchor=center] at (-5.9,-2.05) {第一次调用的引用式结果};
+    \node[pnote, anchor=west]   at (-7.6,-2.80) {存储路径};
+    \node[pnote, anchor=west]   at (-7.6,-3.35) {内容摘要值};
+
+    \draw[pline] (-8.1,-4.8) rectangle (-3.7,-7.0);
+    \node[pnote, anchor=center] at (-5.9,-5.25) {第二次调用的引用式结果};
+    \node[pnote, anchor=west]   at (-7.6,-6.00) {存储路径};
+    \node[pnote, anchor=west]   at (-7.6,-6.55) {内容摘要值};
+
+    % 存储路径支路：短横线后即以断开标记终止，不作为证据身份的依据
+    \draw[pll] (-3.7,-2.80) -- (-2.4,-2.80);
+    \draw[pll] (-3.7,-6.00) -- (-2.4,-6.00);
+    \pcross{(-2.0,-2.80)}{0.22}
+    \pcross{(-2.0,-6.00)}{0.22}
+    \node[pnote, anchor=west] at (-1.4,-4.4) {路径不同，不作为依据};
+
+    % 内容摘要值支路：汇合后作为证据指纹的生成依据
+    \draw[pll] (-3.7,-3.35) -- (2.6,-3.35) -- (2.6,-4.95);
+    \draw[pll] (-3.7,-6.55) -- (2.6,-6.55) -- (2.6,-4.95);
+    \draw[pl]  (2.6,-4.95)  -- (4.2,-4.95);
+    \node[pnote, anchor=west] at (-1.4,-7.3) {摘要值相同，作为依据};
+
+    \node[pbox=2.6cm, anchor=west] (fp) at (4.4,-4.95) {证据指纹相同\\ 判定为重复};
+
+  \end{scope}
+
+\end{tikzpicture}

@@ -250,6 +250,234 @@ fn a_browser_task_needs_at_most_one_tool_search_for_the_whole_family() {
     }
 }
 
+/// Every one of these is a real message from a session that spent 148 tool
+/// calls editing a website. None matched an intent, so the router served the
+/// read-only core for the whole session: `edit_file` reached the model in 1 of
+/// 128 requests, and that request made no tool calls at all. Every edit went
+/// through a `bash` heredoc instead, which cost two failed here-documents, two
+/// GBK encoding crashes, and one corrupted JavaScript file.
+#[test]
+fn dynamic_tool_router_serves_plainly_worded_edit_requests() {
+    let specs = desktop_like_catalog();
+    for prompt in [
+        "到2026就停，不要循环跳",
+        "刷新还有，你删一下",
+        "2026部分，你弄一个20周年",
+        "这个Logo背景色弄成透明，所有的颜色弄为白色",
+        "Posters Xiaoou 的文件夹，你将这个里面的海报，全部按照Posters的命名方式重命名后放到文件夹，并且显示到网页上",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        for name in ["edit_file", "multi_edit"] {
+            assert!(
+                plan.active_names.contains(name),
+                "{name} missing for {prompt:?}: {plan:?}"
+            );
+        }
+        assert!(plan.profile.contains("code"), "{prompt:?}: {plan:?}");
+    }
+}
+
+/// The editors are core, not a reward for phrasing the request in a way the
+/// keyword table recognizes. A prompt that matches no intent at all still has
+/// to be able to change a file.
+#[test]
+fn dynamic_tool_router_always_pins_the_file_editors() {
+    let specs = desktop_like_catalog();
+    for prompt in ["随便聊聊", "部署到服务器上", ""] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        for name in ["edit_file", "multi_edit", "bash"] {
+            assert!(
+                plan.pinned_names.contains(name),
+                "{name} not pinned for {prompt:?}: {plan:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dynamic_tool_router_pins_the_confirmation_path_before_deploying() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools("部署到服务器上", &specs, ToolRoutingMode::Active);
+
+    assert!(plan.profile.contains("deploy"), "{plan:?}");
+    assert!(plan.pinned_names.contains("AskUserQuestion"), "{plan:?}");
+}
+
+/// A keyword buried inside a longer word is not an intent. The desktop's own
+/// attachment boilerplate supplied `ui` (from "requires") and `search` (from
+/// "searching"), which loaded the browser and literature bundles onto a turn
+/// that only asked for a logo to be recolored.
+#[test]
+fn dynamic_tool_router_ignores_attachment_boilerplate() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "这个Logo背景色弄成透明，所有的颜色弄为白色\n\n\
+         [Attached image: image.png; local path: .somniq/uploads/1789526116789808800-0-image.png]\n\
+         The image is included directly in this message. Inspect it directly instead of searching \
+         the workspace for it. Use the local path only when a tool requires a file path.",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    assert!(plan.profile.contains("code"), "{plan:?}");
+    assert!(!plan.profile.contains("research"), "{plan:?}");
+    assert!(!plan.active_names.contains("LiteratureSearch"), "{plan:?}");
+    assert!(
+        !plan.active_names.contains("mcp__pw__browser_navigate"),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn keyword_matching_anchors_at_a_word_start() {
+    // Infix hits are never an intent.
+    assert!(!super::contains_term("when a tool requires a path", "ui"));
+    assert!(!super::contains_term("open the homepage", "page"));
+    assert!(!super::contains_term("an exchange rate", "change"));
+    assert!(!super::contains_term("the suffix table", "fix"));
+    // A word start is, and English inflection still counts.
+    assert!(super::contains_term("tweak the ui a bit", "ui"));
+    assert!(super::contains_term("i updated the config", "update"));
+    assert!(super::contains_term("fixes for the parser", "fix"));
+    // Two-letter stems are the exception: they must also end at a boundary,
+    // because a word start alone still lets `uid` through.
+    assert!(!super::contains_term("the user uid column", "ui"));
+    // CJK has no word separators, so substring semantics are kept.
+    assert!(super::contains_term("你删一下这段", "删"));
+    // A term whose own edge is not a word character needs no boundary there.
+    assert!(super::contains_term("see https://example.com", "https://"));
+}
+
+/// A resumed turn arrives as a whole summary document. Routing on all of it
+/// takes its signal from preserved tool traces and section headers instead of
+/// from the request the summary itself marks as authoritative.
+#[test]
+fn dynamic_tool_router_resumes_on_the_stated_goal() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "This session is being continued from a previous conversation that ran out of context.\n\n\
+         ## Current Focus\n\
+         - Active user goal: 把首页的年份改成 2026\n\
+         - Aris internal continuation/compaction prompts are resume metadata, not user tasks.\n\n\
+         ## Main-line Check\n\
+         - failure repeated 2 times: mcp__playwright__browser_navigate: ### error\n\
+         - 36 tool calls have run since the user's last message.\n",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    assert!(plan.profile.contains("code"), "{plan:?}");
+    // The preserved failure trace names a browser tool; it is a record of what
+    // went wrong, not a request to do it again.
+    assert!(
+        !plan.active_names.contains("mcp__pw__browser_navigate"),
+        "{plan:?}"
+    );
+}
+
+/// The compactor writes the same goal field three ways. Only the first was
+/// recognized, so a session compacted more than once — the case this is for —
+/// went back to routing on the whole document, where the literal section header
+/// `## Current Focus` supplies the web intent's `current` keyword.
+#[test]
+fn dynamic_tool_router_resumes_on_every_spelling_of_the_goal() {
+    let specs = desktop_like_catalog();
+    for goal_line in [
+        "- Active user goal: 把首页的年份改成 2026",
+        "- Active user goal from prior compacted state: 把首页的年份改成 2026",
+    ] {
+        let plan = route_chat_tools(
+            &format!(
+                "This session is being continued from a previous conversation that ran out of \
+                 context.\n\n## Current Focus\n{goal_line}\n- Aris internal \
+                 continuation/compaction prompts are resume metadata, not user tasks.\n"
+            ),
+            &specs,
+            ToolRoutingMode::Active,
+        );
+
+        assert_eq!(plan.profile, "core+code", "{goal_line:?}: {plan:?}");
+        for name in ["WebSearch", "WebFetch"] {
+            assert!(
+                !plan.pinned_names.contains(name),
+                "{goal_line:?} pinned {name}: {plan:?}"
+            );
+        }
+    }
+}
+
+/// "No request in this range" is an empty goal, not a missing one. Falling
+/// through to the full document here routed on the headers again.
+#[test]
+fn dynamic_tool_router_does_not_invent_an_intent_for_a_goalless_resume() {
+    let specs = desktop_like_catalog();
+    let plan = route_chat_tools(
+        "This session is being continued from a previous conversation that ran out of context.\n\n\
+         ## Current Focus\n\
+         - No explicit user request found in compacted range.\n\
+         - Recent preserved messages, if any, supersede this summary.\n\n\
+         ## Main-line Check\n\
+         - failure repeated 2 times: mcp__playwright__browser_navigate: ### error\n",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+
+    assert_eq!(plan.profile, "core", "{plan:?}");
+}
+
+/// The pinned block keeps the session's *first* request forever by design, so
+/// it cannot be read as a list of current intents. A session that opened with a
+/// literature ask and is now editing CSS was still pinning `LiteratureSearch`.
+#[test]
+fn dynamic_tool_router_resumes_on_the_latest_pinned_request_only() {
+    let specs = desktop_like_catalog();
+    let resume = |focus: &str| {
+        route_chat_tools(
+            &format!(
+                "This session is being continued from a previous conversation that ran out of \
+                 context.\n\n## Current Focus\n{focus}\n\n## Pinned Context (verbatim — \
+                 authoritative, do not drop)\n- User request: 帮我检索一下联邦学习的最新论文，做个文献综述\n\
+                 - User request: 把 logo 的背景改成白色\n",
+            ),
+            &specs,
+            ToolRoutingMode::Active,
+        )
+    };
+
+    // A stated goal wins outright; the pinned block is not consulted at all.
+    let stated = resume("- Active user goal: 把 logo 的背景改成白色");
+    assert_eq!(stated.profile, "core+code", "{stated:?}");
+    assert!(!stated.pinned_names.contains("LiteratureSearch"), "{stated:?}");
+
+    // With no stated goal, the newest pinned request stands in for it — not the
+    // whole list, whose oldest entry outlives the intent it came from.
+    let fallback = resume("- No explicit user request found in compacted range.");
+    assert_eq!(fallback.profile, "core+code", "{fallback:?}");
+    assert!(
+        !fallback.pinned_names.contains("LiteratureSearch"),
+        "{fallback:?}"
+    );
+}
+
+/// A group's `required` is allocated before any group's `optional`, so a stray
+/// intent match does not just add tools — it evicts them. These are the bare
+/// CJK verbs that used to match ordinary prose.
+#[test]
+fn dynamic_tool_router_does_not_read_an_edit_intent_into_ordinary_prose() {
+    let specs = desktop_like_catalog();
+    for prompt in [
+        "这个算法的复杂度是多少？顺便说说加州理工那篇",
+        "帮我检索联邦学习的论文，再加一篇综述",
+        "启动开发服务器看一下",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(!plan.profile.contains("code"), "{prompt:?}: {plan:?}");
+        assert!(!plan.profile.contains("deploy"), "{prompt:?}: {plan:?}");
+        // Still able to edit, because the editors are pinned rather than earned.
+        assert!(plan.pinned_names.contains("edit_file"), "{prompt:?}: {plan:?}");
+    }
+}
+
 #[test]
 fn dynamic_tool_router_pins_a_tool_the_user_named() {
     let specs = desktop_like_catalog();
@@ -453,6 +681,126 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
         ),
         Some("some-small-model".to_string())
     );
+}
+
+/// Returning `None` for every unrecognized model family is not a safe default.
+///
+/// It disables LLM summarization for the whole session without one request or
+/// one log line, and every compaction then ships the deterministic summary —
+/// the one that lists ANSI-coloured build output as "key files". The gateway
+/// already publishes what it serves, so look there before giving up.
+#[test]
+fn an_unfamiliar_model_takes_a_cheap_summarizer_from_the_gateway_catalogue() {
+    let managed = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec![
+            "MiniMax-M3".into(),
+            "Qwen3.8-Flash-Next".into(),
+            "claude-opus-5".into(),
+            "deepseek-v4.1-flash".into(),
+            "gpt-5.6-sol".into(),
+        ],
+    };
+
+    // The executor is itself a cheap tier: summarizing with it costs no more
+    // than the turn that triggered the compaction.
+    assert_eq!(
+        resolve_summarizer_model(&managed, "deepseek-v4.1-flash", Some("auto")),
+        Some("deepseek-v4.1-flash".to_string()),
+    );
+
+    // An expensive executor borrows the cheapest served model instead of
+    // silently disabling summarization.
+    assert_eq!(
+        resolve_summarizer_model(&managed, "claude-opus-5", Some("auto")),
+        Some("Qwen3.8-Flash-Next".to_string()),
+    );
+
+    // Same vendor wins when the catalogue offers a choice.
+    let two_vendors = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec![
+            "acme-flash".into(),
+            "deepseek-v4.1-flash".into(),
+            "deepseek-v4.1-pro".into(),
+        ],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&two_vendors, "deepseek-v4.1-pro", Some("auto")),
+        Some("deepseek-v4.1-flash".to_string()),
+    );
+
+    // Nothing cheap on offer still means no summarizer rather than spending the
+    // main model on a 120k-character call.
+    let no_cheap_tier = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec!["acme-large".into(), "acme-huge".into()],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&no_cheap_tier, "acme-large", Some("auto")),
+        None
+    );
+}
+
+/// Tool schemas head the prompt, so re-planning the array from scratch each
+/// turn re-bills the whole transcript. One measured turn boundary dropped four
+/// tools the previous turn had used and admitted two it never called.
+#[test]
+fn routing_carries_the_previous_turns_tools_across_a_turn_boundary() {
+    let specs = desktop_like_catalog();
+    let carry = ["mcp__pw__browser_resize", "ReadMediaFile"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+    let plan = super::route_chat_tools_with_carry_forward(
+        "把海报页的间距再调一下",
+        &specs,
+        ToolRoutingMode::Active,
+        &carry,
+    );
+
+    for name in &carry {
+        assert!(
+            plan.active_names.contains(name),
+            "{name} was paid for last turn and must stay visible: {:?}",
+            plan.active_names
+        );
+        assert!(!plan.deferred_names.contains(name));
+    }
+    assert!(
+        plan.active_names.len() <= MAX_ACTIVE_TOOLS,
+        "carry-forward must still respect the live ceiling: {}",
+        plan.active_names.len()
+    );
+    assert!(
+        plan.reasons.iter().any(|reason| reason.contains("carried")),
+        "the carry must be explained in the plan: {:?}",
+        plan.reasons
+    );
+
+    // A name the catalogue no longer serves is dropped rather than published.
+    let stale = ["a_tool_that_no_longer_exists".to_string()]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let plan = super::route_chat_tools_with_carry_forward(
+        "继续",
+        &specs,
+        ToolRoutingMode::Active,
+        &stale,
+    );
+    assert!(!plan
+        .active_names
+        .contains("a_tool_that_no_longer_exists"));
 }
 
 #[test]

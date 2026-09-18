@@ -1,0 +1,52 @@
+% =====================================================================
+%  symbols.sty —— 把 SimSun / SimHei 没有字形的符号映射到 LaTeX 构造
+%
+%  为什么需要：xelatex 遇到当前字体没有的字符时，只在 .log 里留一行
+%  “Missing character: There is no ∧”，PDF 里那个字直接消失，页面看上去
+%  一切正常。专利文件里丢一个 ≥ 或 ∧ 会改变技术方案的含义，因此
+%  build.cjs 把 Missing character 当作构建失败，而这里提供正确的写法。
+%
+%  源文件里仍然直接写 ∧ ≥ ① 这些字符（可读、可编辑），由本文件负责渲染。
+% =====================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{symbols}[2026/09/15 unicode symbol fallbacks]
+
+\RequirePackage{amssymb}
+\RequirePackage{newunicodechar}
+
+% ---- 逻辑与比较 ----
+\newunicodechar{∧}{\ensuremath{\wedge}}
+\newunicodechar{∨}{\ensuremath{\vee}}
+\newunicodechar{¬}{\ensuremath{\lnot}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≠}{\ensuremath{\neq}}
+\newunicodechar{≈}{\ensuremath{\approx}}
+\newunicodechar{∈}{\ensuremath{\in}}
+\newunicodechar{∞}{\ensuremath{\infty}}
+\newunicodechar{±}{\ensuremath{\pm}}
+\newunicodechar{√}{\ensuremath{\surd}}
+
+% ---- 箭头 ----
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{↔}{\ensuremath{\leftrightarrow}}
+\newunicodechar{⇒}{\ensuremath{\Rightarrow}}
+
+% ---- 记号 ----
+\newunicodechar{✓}{\ensuremath{\checkmark}}
+\newunicodechar{✗}{\ensuremath{\times}}
+\newunicodechar{□}{\ensuremath{\square}}
+\newunicodechar{●}{\ensuremath{\bullet}}
+\newunicodechar{○}{\ensuremath{\circ}}
+
+% ---- 带圈数字 ----
+\newcommand{\nccircled}[1]{\textcircled{\raisebox{0.15ex}{\scriptsize #1}}}
+\newunicodechar{①}{\nccircled{1}}
+\newunicodechar{②}{\nccircled{2}}
+\newunicodechar{③}{\nccircled{3}}
+\newunicodechar{④}{\nccircled{4}}
+\newunicodechar{⑤}{\nccircled{5}}
+\newunicodechar{⑥}{\nccircled{6}}
+
+\endinput

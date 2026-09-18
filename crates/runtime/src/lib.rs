@@ -49,9 +49,9 @@ mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
 pub use bash::{
-    adopted_background_note, execute_bash, execute_bash_with_cancel,
+    adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
-    BashCommandOutput, BACKGROUND_PIPE_NOTE,
+    BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
@@ -112,7 +112,7 @@ pub use file_ops::{
     BatchWriteRecoveryOutput, StagedWriteCleanupOutput, DEFAULT_STAGED_WRITE_MAX_AGE,
     MultiEditValidationError, MultiEditValidationIssue, ReadFileOutput, ReadFileResult,
     ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput, ABSENT_FILE_REVISION,
-    MAX_FILE_TOOL_PAYLOAD_BYTES,
+    MAX_FILE_TOOL_PAYLOAD_BYTES, parse_image_tool_output,
 };
 pub use focus_trace::{
     FocusSignals, RABBIT_HOLE_ERROR_REPEATS, RABBIT_HOLE_FILE_REPEATS,
@@ -168,9 +168,10 @@ pub use oauth::{
     PkceChallengeMethod, PkceCodePair,
 };
 pub use paths::{
-    command_exists, migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
-    project_run_state_dir_from_env, project_runtime_dir_for, project_runtime_dir_from_env,
-    project_sessions_dir_from_env, somniq_config_dir_from_env, workspace_root_from_env,
+    canonicalize, command_exists, migrate_legacy_project_runtime_dirs, plain_path,
+    project_agent_store_dir_from_env, project_run_state_dir_from_env, project_runtime_dir_for,
+    project_runtime_dir_from_env, project_sessions_dir_from_env, somniq_config_dir_from_env,
+    workspace_root_from_env,
     AGENTS_DIR_NAME, ARIS_AGENT_STORE_DIR_ENV, ARIS_RUNTIME_ROOT_ENV, ARIS_RUN_STATE_DIR_ENV,
     ARIS_SESSIONS_DIR_ENV, ARIS_WORKSPACE_ROOT_ENV, CLAWD_AGENT_STORE_ENV, LEGACY_CLAUDE_DIR_NAME,
     LEGACY_CLAWD_AGENTS_DIR_NAME, RUN_STATE_DIR_NAME, SESSIONS_DIR_NAME, SOMNIQ_RUNTIME_DIR_NAME,
@@ -255,7 +256,9 @@ pub use review_workflow_driver::{
     StageOutput, StageTransition, WorkflowAction, WorkflowNext, WorkflowStep,
 };
 pub use session::{
-    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,
+    compact_session_event_log, compact_session_event_log_unlocked,
+    session_manifest_logical_message_count, ContentBlock, ConversationMessage, EventLogCompaction,
+    MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
     index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,

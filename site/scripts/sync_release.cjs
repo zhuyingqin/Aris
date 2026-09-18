@@ -246,9 +246,25 @@ async function main() {
     fs.mkdirSync(tempDir, { recursive: true });
   }
 
+  const exeFileName = `SomniQ.Studio_${version}_x64-setup.exe`;
+  const smallFiles = [
+    'latest.json',
+    `${exeFileName}.sig`,
+    'SomniQ.Studio.app.tar.gz.sig'
+  ];
+
+  const largeFiles = [
+    exeFileName,
+    `SomniQ.Studio_${version}_universal.dmg`,
+    'SomniQ.Studio.app.tar.gz'
+  ];
+
+  const targetAssetNames = new Set([...smallFiles, ...largeFiles]);
+  const assetsToDownload = release.assets.filter(a => targetAssetNames.has(a.name));
+
   // Download all assets in parallel (concurrency pool)
-  console.log('\n⬇️ Downloading assets in parallel locally from GitHub with resume support...');
-  const downloadPromises = release.assets.map((asset) => {
+  console.log(`\n⬇️ Downloading ${assetsToDownload.length} required assets in parallel locally from GitHub with resume support...`);
+  const downloadPromises = assetsToDownload.map((asset) => {
     const dest = path.join(tempDir, asset.name);
     return downloadWithRetry(asset.browser_download_url, dest, asset.size);
   });
@@ -281,21 +297,8 @@ async function main() {
   const httpServer = await startLocalHttpServer(tempDir, tunnelPort);
 
   const remoteTagDir = `${remoteReleasesDir}/${tag}`;
-  const exeFileName = `SomniQ.Studio_${version}_x64-setup.exe`;
 
   console.log('\n🚀 Transferring assets to server via SSH reverse tunnel at maximum speed...');
-
-  const smallFiles = [
-    'latest.json',
-    `${exeFileName}.sig`,
-    'SomniQ.Studio.app.tar.gz.sig'
-  ];
-
-  const largeFiles = [
-    exeFileName,
-    `SomniQ.Studio_${version}_universal.dmg`,
-    'SomniQ.Studio.app.tar.gz'
-  ];
 
   const smallCurlCommands = smallFiles.map(file => 
     `echo "Fetching ${file}..." && curl -sS -O "http://127.0.0.1:${tunnelPort}/${file}" && echo "✓ Done ${file}"`
@@ -311,6 +314,7 @@ async function main() {
     `cd "${remoteTagDir}"`,
     smallCurlCommands,
     largeCurlCommands,
+    `[ -f "${remoteReleasesDir}/latest.json" ] && cp "${remoteReleasesDir}/latest.json" "${remoteReleasesDir}/latest.json.backup-before-${tag}" || true`,
     `cp "${remoteTagDir}/latest.json" "${remoteReleasesDir}/latest.json"`,
     `ln -sf "../${tag}/${exeFileName}" "${remoteReleasesDir}/latest/SomniQ.Studio_latest_x64-setup.exe"`,
     `ln -sf "../latest.json" "${remoteReleasesDir}/latest/latest.json"`,

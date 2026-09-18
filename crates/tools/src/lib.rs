@@ -43,6 +43,21 @@ const READ_FILE_CACHE_CAPACITY: usize = 64;
 const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
 const MAX_BATCH_READ_FILES: usize = 16;
 const MAX_BATCH_WRITE_FILES: usize = 16;
+/// Shared wording for every `expected_revision` field.
+///
+/// A revision token can only come from a tool result, so a model holding no
+/// current one has exactly two options: re-read, or fabricate. Spelling out
+/// every supplier — including the one a shell command produces — keeps the
+/// second option from looking like a shortcut, since an invented sha256 fails
+/// the check every time and costs a whole extra round trip.
+///
+/// A macro rather than a `const` so the surrounding per-tool wording can stay a
+/// single `concat!`-ed literal.
+macro_rules! expected_revision_source_doc {
+    () => {
+        "Copy it verbatim from the most recent tool result for this exact path: read_file/read_files, the `revision` of your own previous mutation of this file, or `changes[path].revision` when bash/REPL/PowerShell/LaTeXRender reports having modified it. Never construct, guess, or adapt a revision string; if you are not holding a current one, read the file again first."
+    };
+}
 // This threshold protects genuinely small edits from a three-call staged
 // protocol, but must remain below realistic model/proxy output ceilings. A
 // 9-32 KiB source file can exceed one model response even though the file tool
@@ -195,6 +210,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Execute a shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. ",
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
+                "When a command does change workspace files, the result lists them under `changes`, and each entry carries the `revision` the file now has: pass that value as expected_revision for your next file-tool edit of that path instead of re-reading or inventing one. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
                 "Use run_in_background for long-running services and watchers (dev servers, file watchers) instead of a shell `&`: it returns immediately with a pid, keeps the process visible and stoppable in the project summary, and captures its stdout/stderr to the log file reported in persistedOutputPath, which you can read with read_file to confirm the service came up. An identical running service in the same project and on the same port is reused automatically. ",
                 "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
@@ -296,7 +312,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "path": { "type": "string" },
                     "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
-                    "expected_revision": { "type": "string", "description": "Use `absent` for a new path, or the sha256 revision returned by read_file." }
+                    "expected_revision": { "type": "string", "description": concat!("Use `absent` for a new path, or the sha256 revision of the existing file. ", expected_revision_source_doc!()) }
                 },
                 "required": ["path", "content", "expected_revision"],
                 "additionalProperties": false
@@ -318,7 +334,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                             "properties": {
                                 "path": { "type": "string" },
                                 "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
-                                "expected_revision": { "type": "string", "description": "Use `absent` for a new path, or the sha256 revision returned by read_file/read_files." }
+                                "expected_revision": { "type": "string", "description": concat!("Use `absent` for a new path, or the sha256 revision of the existing file. ", expected_revision_source_doc!()) }
                             },
                             "required": ["path", "content", "expected_revision"],
                             "additionalProperties": false
@@ -345,7 +361,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "path": { "type": "string" },
                     "content": { "type": "string", "maxLength": MAX_FILE_TOOL_PAYLOAD_CHARS },
                     "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to false, so a mistyped path fails loudly instead of silently creating a second file. Pass true only when appending to a file that may legitimately not exist yet." },
-                    "expected_revision": { "type": "string", "description": "Use the sha256 revision returned by read_file, or `absent` with create_if_missing=true." }
+                    "expected_revision": { "type": "string", "description": concat!("Use the target file's sha256 revision, or `absent` with create_if_missing=true. ", expected_revision_source_doc!()) }
                 },
                 "required": ["path", "content", "expected_revision"],
                 "additionalProperties": false
@@ -359,7 +375,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "expected_revision": { "type": "string" },
+                    "expected_revision": { "type": "string", "description": concat!("Use `absent` for a new destination, or the sha256 revision of the existing file. ", expected_revision_source_doc!()) },
                     "estimated_bytes": { "type": "integer", "minimum": MIN_STAGED_WRITE_ESTIMATED_BYTES, "description": "Estimated final UTF-8 byte length. Values below 8 KiB must use write_file/write_files." }
                 },
                 "required": ["path", "expected_revision", "estimated_bytes"],
@@ -411,6 +427,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique — if it matches multiple locations the call fails unless replace_all is set. ",
                 "CRLF/LF line-ending differences are matched automatically and the file's existing endings are preserved on write. ",
                 "For two or more known replacements in the same file, prefer one multi_edit call; keep edit_file for a single replacement or when the next edit genuinely depends on inspecting a result. ",
+                "Never issue two mutations of the same path in one response: the first one to land invalidates the revision the second is carrying, so the second is rejected as stale no matter how the edits are ordered. Same-file edits must go in one multi_edit, or in separate sequential responses. ",
                 "Prefer the shortest stable unique span; avoid copying an entire long table or section when a smaller anchor is sufficient, and never submit text containing the Unicode replacement character `�`. ",
                 "Pass the revision returned by the source read. The entire read/check/edit/write sequence is locked and a stale revision is rejected. By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
             ),
@@ -422,7 +439,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "new_string": { "type": "string", "description": "Replacement text. Do not include the Unicode replacement character `�` unless it already exists in the matched source and is intentionally being preserved." },
                     "replace_all": { "type": "boolean" },
                     "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." },
-                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." }
+                    "expected_revision": { "type": "string", "description": concat!("Exact current sha256 revision of the file. ", expected_revision_source_doc!()) }
                 },
                 "required": ["path", "old_string", "new_string", "expected_revision"],
                 "additionalProperties": false
@@ -442,7 +459,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "expected_revision": { "type": "string", "description": "Exact sha256 revision returned by read_file." },
+                    "expected_revision": { "type": "string", "description": concat!("Exact current sha256 revision of the file. ", expected_revision_source_doc!()) },
                     "edits": {
                         "type": "array",
                         "minItems": 1,
@@ -2305,7 +2322,7 @@ fn capture_workspace_text_snapshot() -> std::io::Result<WorkspaceTextSnapshot> {
 }
 
 fn workspace_root_for_audit() -> std::io::Result<PathBuf> {
-    runtime::workspace_root_from_env().canonicalize()
+    runtime::canonicalize(runtime::workspace_root_from_env())
 }
 
 fn collect_workspace_text_files(
@@ -2350,7 +2367,7 @@ fn collect_workspace_text_files(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let canonical = path.canonicalize().unwrap_or(path);
+        let canonical = runtime::canonicalize(&path).unwrap_or(path);
         files.insert(canonical, content);
         if files.len() >= WORKSPACE_AUDIT_MAX_FILES {
             return Ok(());
@@ -2460,22 +2477,32 @@ fn inject_workspace_audit_changes(output: &mut Value, changes: &[AuditedWorkspac
     object.insert("changeIds".to_string(), Value::Array(change_ids));
 }
 
+/// A shell command that rewrites a file invalidates every revision token the
+/// model is holding for it, and `bash` used to report the change without
+/// issuing a replacement token. The only remaining supplier was a full
+/// `read_file`, so a model that skipped the re-read had nothing valid to pass
+/// as `expected_revision` — and a fabricated 64-hex token fails the check every
+/// time. The post-command snapshot already holds the exact bytes now on disk,
+/// so hand back the revision they hash to.
 fn audited_change_json(change: &AuditedWorkspaceChange) -> Value {
     match (change.before.as_ref(), change.after.as_ref()) {
         (None, Some(after)) => json!({
             "type": "add",
             "content": after,
             "changeId": change.record.change_id,
+            "revision": runtime::content_revision(after.as_bytes()),
         }),
         (Some(before), None) => json!({
             "type": "delete",
             "content": before,
             "changeId": change.record.change_id,
+            "revision": runtime::ABSENT_FILE_REVISION,
         }),
-        (Some(_), Some(_)) => json!({
+        (Some(_), Some(after)) => json!({
             "type": "update",
             "unified_diff": change.record.unified_diff,
             "changeId": change.record.change_id,
+            "revision": runtime::content_revision(after.as_bytes()),
         }),
         (None, None) => json!({}),
     }
@@ -2595,7 +2622,7 @@ fn read_file_cache_key(input: &ReadFileInput) -> Option<ReadFileCacheKey> {
     } else {
         runtime::workspace_root_from_env().join(path)
     };
-    let path = candidate.canonicalize().ok()?;
+    let path = runtime::canonicalize(candidate).ok()?;
     let metadata = fs::metadata(&path).ok()?;
     Some(ReadFileCacheKey {
         path,
@@ -4941,7 +4968,7 @@ fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
 }
 
 fn resolve_attachment(path: &str) -> Result<ResolvedAttachment, String> {
-    let resolved = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let resolved = runtime::canonicalize(path).map_err(|error| error.to_string())?;
     let metadata = std::fs::metadata(&resolved).map_err(|error| error.to_string())?;
     Ok(ResolvedAttachment {
         path: resolved.display().to_string(),
@@ -5664,7 +5691,7 @@ fn execute_latex_compile(
 }
 
 fn latex_output_directory_lock(output_dir: &Path) -> Arc<Mutex<()>> {
-    let key = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
+    let key = runtime::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
     let mut locks = LATEX_OUTPUT_DIRECTORY_LOCKS
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
@@ -6061,13 +6088,18 @@ fn latex_input_snapshot(input_path: &Path, workspace: &Path) -> BTreeMap<PathBuf
     let Some(root_dir) = input_path.parent() else {
         return BTreeMap::new();
     };
+    // Normalized once, because this containment test fails *silently*: a
+    // verbatim root never prefixes a normalized child, so every dependency
+    // would be dropped and the empty manifest would report a stale PDF as
+    // up to date rather than raising anything.
+    let workspace = runtime::plain_path(workspace);
     let mut pending = vec![input_path.to_path_buf()];
     let mut snapshot = BTreeMap::new();
     while let Some(path) = pending.pop() {
-        let Ok(path) = path.canonicalize() else {
+        let Ok(path) = runtime::canonicalize(&path) else {
             continue;
         };
-        if !path.starts_with(workspace) || snapshot.contains_key(&path) {
+        if !path.starts_with(&workspace) || snapshot.contains_key(&path) {
             continue;
         }
         let Some(hash) = latex_file_hash(&path) else {
@@ -6095,9 +6127,13 @@ fn latex_input_snapshot(input_path: &Path, workspace: &Path) -> BTreeMap<PathBuf
 }
 
 fn latex_input_manifest_hash(snapshot: &BTreeMap<PathBuf, String>, workspace: &Path) -> String {
+    // Same normalization as the snapshot: a root in the other spelling would
+    // strip nothing, quietly hashing absolute paths and making the manifest
+    // differ between two machines holding identical sources.
+    let workspace = runtime::plain_path(workspace);
     let mut hasher = Sha256::new();
     for (path, hash) in snapshot {
-        let relative = path.strip_prefix(workspace).unwrap_or(path);
+        let relative = path.strip_prefix(&workspace).unwrap_or(path);
         hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
         hasher.update([0]);
         hasher.update(hash.as_bytes());
@@ -6359,6 +6395,7 @@ fn run_latex_engine(
         interrupted: second.interrupted,
         timed_out: second.timed_out,
         output_pipe_held: first.output_pipe_held || second.output_pipe_held,
+        output_truncated: first.output_truncated || second.output_truncated,
         adopted_background_pid: second.adopted_background_pid,
     })
 }
@@ -6690,24 +6727,11 @@ fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
         .unwrap_or_else(|| input_path.as_os_str())
 }
 
-#[cfg(target_os = "windows")]
+/// TeX engines are handed the ordinary spelling of a path, never the
+/// extended-length one. Workspace resolution already strips it, so this is the
+/// backstop for a path that reached the compiler from anywhere else.
 fn tex_tool_path(path: &Path) -> PathBuf {
-    let value = path.to_string_lossy();
-    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    if value.starts_with(r"\\?\Volume{") {
-        return path.to_path_buf();
-    }
-    value
-        .strip_prefix(r"\\?\")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn tex_tool_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
+    runtime::plain_path(path)
 }
 
 fn extract_latex_diagnostics(
@@ -6884,12 +6908,12 @@ fn push_latex_diagnostic(diagnostics: &mut Vec<LatexDiagnostic>, diagnostic: Lat
 fn canonical_workspace_root() -> Result<PathBuf, String> {
     let root = runtime::workspace_root_from_env();
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    std::fs::canonicalize(&root).map_err(|error| error.to_string())
+    runtime::canonicalize(&root).map_err(|error| error.to_string())
 }
 
 fn resolve_existing_workspace_path(path: &str, workspace: &Path) -> Result<PathBuf, String> {
     let candidate = lexically_normalize_path(&workspace_path_candidate(path, workspace)?);
-    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+    let canonical = runtime::canonicalize(&candidate).map_err(|error| {
         format!(
             "could not resolve workspace path `{}`: {error}",
             candidate.display()
@@ -6946,7 +6970,7 @@ fn workspace_path_candidate(path: &str, workspace: &Path) -> Result<PathBuf, Str
 
 fn canonicalize_path_allow_missing(path: &Path) -> Result<PathBuf, String> {
     if path.exists() {
-        return std::fs::canonicalize(path).map_err(|error| error.to_string());
+        return runtime::canonicalize(path).map_err(|error| error.to_string());
     }
 
     let mut missing = Vec::new();
@@ -6967,7 +6991,7 @@ fn canonicalize_path_allow_missing(path: &Path) -> Result<PathBuf, String> {
         })?;
     }
 
-    let mut canonical = std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+    let mut canonical = runtime::canonicalize(ancestor).map_err(|error| error.to_string())?;
     for component in missing.iter().rev() {
         canonical.push(component);
     }
@@ -6990,8 +7014,15 @@ fn lexically_normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Both sides are normalized before comparing so the verdict cannot depend on
+/// which spelling the caller happened to hold. A `\\?\` root tested against a
+/// plain child — or the reverse — makes `starts_with` false for a file that is
+/// plainly inside the workspace, and the rejection that follows is both wrong
+/// and, quoted into a shell, unusable.
 fn ensure_workspace_child(path: &Path, workspace: &Path) -> Result<(), String> {
-    if path.starts_with(workspace) {
+    let path = runtime::plain_path(path);
+    let workspace = runtime::plain_path(workspace);
+    if path.starts_with(&workspace) {
         Ok(())
     } else {
         Err(format!(
@@ -7131,7 +7162,10 @@ fn execute_shell_command(
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.output_pipe_held {
-        stderr = append_process_status_message(stderr, runtime::BACKGROUND_PIPE_NOTE);
+        stderr = append_process_status_message(
+            stderr,
+            runtime::background_pipe_note(output.output_truncated),
+        );
     }
     if let Some(pid) = output.adopted_background_pid {
         stderr = append_process_status_message(stderr, &runtime::adopted_background_note(pid));

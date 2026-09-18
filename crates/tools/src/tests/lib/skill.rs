@@ -212,6 +212,12 @@ fn bundled_skill_is_discoverable_and_invokable() {
         .expect("prompt")
         .contains("legacy alias `research-lit`"));
 
+    // /soft-copyright is the first bundled skill whose helpers are Node, not
+    // Python. Its scripts only reach the model through the cache path in the
+    // resolver preamble, so pin that the skill resolves and names them.
+    let soft_copyright = skill_markdown("soft-copyright").expect("soft-copyright markdown");
+    assert!(soft_copyright.contains("skills/soft-copyright/scripts/gen-source-listing.cjs"));
+
     let literature_search = skill_markdown("literature-search").expect("canonical skill markdown");
     assert!(literature_search.contains("# Literature Search"));
     assert!(literature_search.contains("LiteratureSearchPreview"));

@@ -1858,8 +1858,18 @@ pub struct SessionSummary {
     pub modified_epoch_secs: u64,
 }
 
+/// Summarize every runtime session on disk.
+///
+/// Async on purpose: this walks the whole session directory, and Tauri would
+/// run a blocking command on the main thread.
 #[tauri::command]
-pub fn sessions_list() -> Vec<SessionSummary> {
+pub async fn sessions_list() -> Vec<SessionSummary> {
+    crate::blocking::off_main_thread(|| Ok(sessions_list_blocking()))
+        .await
+        .unwrap_or_default()
+}
+
+fn sessions_list_blocking() -> Vec<SessionSummary> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(state::sessions_dir()) else {
         return out;
@@ -1886,8 +1896,14 @@ pub fn sessions_list() -> Vec<SessionSummary> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or_default();
-        let message_count = Session::load_from_path(&path)
-            .map(|s| s.logical_message_count())
+        // The manifest publishes this count. Falling back to a full load means
+        // replaying that session's whole event log for one number.
+        let message_count = runtime::session_manifest_logical_message_count(&path)
+            .or_else(|| {
+                Session::load_from_path(&path)
+                    .map(|session| session.logical_message_count())
+                    .ok()
+            })
             .unwrap_or_default();
         let id = path
             .file_stem()

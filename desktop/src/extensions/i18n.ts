@@ -18,6 +18,7 @@ export const EXTENSIONS_COPY: Record<Language, {
   connectedHeading: string;
   configuredHeading: string;
   configuredSubtitle: string;
+  configuredStep: string;
   testAll: string;
   verified: string;
   failed: string;
@@ -30,6 +31,8 @@ export const EXTENSIONS_COPY: Record<Language, {
   noConnectedPlugins: string;
   addCustomMcp: string;
   recommended: string;
+  recommendedStep: string;
+  recommendedSubtitle: string;
   added: string;
   add: string;
   skillsHeading: string;
@@ -129,7 +132,8 @@ export const EXTENSIONS_COPY: Record<Language, {
     loadingSkillContent: "正在读取 SKILL.md…",
     connectedHeading: "MCP 服务",
     configuredHeading: "已配置的 MCP",
-    configuredSubtitle: "状态只表示配置或运行时情况；验证后才代表工具实际可用。",
+    configuredSubtitle: "查看状态，点击条目管理配置。",
+    configuredStep: "01 · 正在使用",
     testAll: "验证全部",
     verified: "已验证",
     failed: "验证失败",
@@ -141,7 +145,9 @@ export const EXTENSIONS_COPY: Record<Language, {
     bundledInstallPath: "内置路径",
     noConnectedPlugins: "还没有连接任何 MCP 插件",
     addCustomMcp: "添加自定义 MCP",
-    recommended: "推荐",
+    recommended: "可添加的 MCP",
+    recommendedStep: "02 · 扩展能力",
+    recommendedSubtitle: "选择需要的能力，一键接入本机可用服务。",
     added: "已添加",
     add: "添加",
     skillsHeading: "技能",
@@ -270,7 +276,8 @@ export const EXTENSIONS_COPY: Record<Language, {
     loadingSkillContent: "Loading SKILL.md…",
     connectedHeading: "MCP services",
     configuredHeading: "Configured MCP",
-    configuredSubtitle: "Configured and runtime states are not connectivity claims; verify to confirm tools actually load.",
+    configuredSubtitle: "Review status or select an item to manage it.",
+    configuredStep: "01 · In use",
     testAll: "Verify all",
     verified: "Verified",
     failed: "Failed",
@@ -282,7 +289,9 @@ export const EXTENSIONS_COPY: Record<Language, {
     bundledInstallPath: "Bundled path",
     noConnectedPlugins: "No MCP plugins connected yet",
     addCustomMcp: "Add custom MCP",
-    recommended: "Recommended",
+    recommended: "Add MCP integrations",
+    recommendedStep: "02 · Extend capabilities",
+    recommendedSubtitle: "Choose a capability and connect an available local service.",
     added: "Added",
     add: "Add",
     skillsHeading: "Skills",

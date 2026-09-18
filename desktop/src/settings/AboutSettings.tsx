@@ -35,7 +35,7 @@ export default function AboutSettings({
     setUpdateProgress(null);
     setUpdateMessage("");
     try {
-      const result = await appUpdateCheck();
+      const result = await appUpdateCheck(language === "cn");
       setUpdateInfo(result);
       if (result.available) {
         setUpdateState("available");
@@ -55,7 +55,7 @@ export default function AboutSettings({
     setUpdateProgress(null);
     setUpdateMessage(copy.updateMsgDownloading);
     try {
-      const result = await appUpdateDownloadAndInstall((progress) => {
+      const result = await appUpdateDownloadAndInstall(language === "cn", (progress) => {
         setUpdateProgress(progress);
         if (progress.stage === "finished") setUpdateMessage(copy.updateMsgInstalled);
       });

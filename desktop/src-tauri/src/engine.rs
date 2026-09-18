@@ -80,6 +80,116 @@ const MAX_CACHED_CHAT_SESSIONS: usize = MAX_RUNNING_CHAT_TURNS;
 
 static SESSION_STORAGE_DIRS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 static PROJECT_ACTIVITY_REVIEWS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// Per-session tool names the next turn should start with visible.
+///
+/// Tool schemas head the prompt, so re-cutting the array between turns
+/// invalidates the provider's prefix cache and re-bills the whole transcript.
+/// Carrying the previous turn's set forward is what keeps that array stable
+/// across a conversation; see
+/// `runtime::ConversationRuntime::dynamic_tool_routing_carry_forward`.
+static SESSION_TOOL_CARRY_FORWARD: OnceLock<Mutex<HashMap<String, BTreeSet<String>>>> =
+    OnceLock::new();
+
+fn session_tool_carry_forward(session_id: &str) -> BTreeSet<String> {
+    SESSION_TOOL_CARRY_FORWARD
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|map| map.get(session_id).cloned())
+        .unwrap_or_default()
+}
+
+fn record_session_tool_carry_forward(session_id: &str, tools: BTreeSet<String>) {
+    let Ok(mut map) = SESSION_TOOL_CARRY_FORWARD.get_or_init(Default::default).lock() else {
+        return;
+    };
+    if tools.is_empty() {
+        map.remove(session_id);
+        return;
+    }
+    // Bounded like the session cache above: a long-lived process should not
+    // accumulate one entry per session it has ever run.
+    if map.len() >= MAX_CACHED_CHAT_SESSIONS * 8 && !map.contains_key(session_id) {
+        map.clear();
+    }
+    map.insert(session_id.to_string(), tools);
+}
+
+pub(crate) fn forget_session_tool_carry_forward(session_id: &str) {
+    if let Ok(mut map) = SESSION_TOOL_CARRY_FORWARD.get_or_init(Default::default).lock() {
+        map.remove(session_id);
+    }
+}
+
+/// Per-request model latency, accumulated from the wire trace for the turn in
+/// flight. The executor reports token usage per request but not how long the
+/// request took, and the usage log is the only place that number is ever
+/// written down.
+static MODEL_REQUEST_TIMINGS: OnceLock<Mutex<HashMap<String, ModelRequestTimings>>> =
+    OnceLock::new();
+
+#[derive(Default)]
+struct ModelRequestTimings {
+    started: Option<Instant>,
+    completed: Vec<crate::usage_log::ModelRequestTiming>,
+}
+
+/// Drop anything left over from an earlier turn of this session.
+///
+/// A turn that ends on the error path, or an ephemeral turn that never writes
+/// usage, leaves its timings behind. Clearing at turn start means the next turn
+/// can never line its usage rows up against a previous turn's latencies, and
+/// keeps the map from growing across a long-lived process.
+fn reset_model_request_timings(session_id: &str) {
+    let Ok(mut map) = MODEL_REQUEST_TIMINGS.get_or_init(Default::default).lock() else {
+        return;
+    };
+    map.remove(session_id);
+    if map.len() >= MAX_CACHED_CHAT_SESSIONS * 8 {
+        map.clear();
+    }
+}
+
+fn note_model_request_started(session_id: &str) {
+    if let Ok(mut map) = MODEL_REQUEST_TIMINGS.get_or_init(Default::default).lock() {
+        map.entry(session_id.to_string()).or_default().started = Some(Instant::now());
+    }
+}
+
+fn note_model_request_finished(session_id: &str) {
+    let Ok(mut map) = MODEL_REQUEST_TIMINGS.get_or_init(Default::default).lock() else {
+        return;
+    };
+    let Some(entry) = map.get_mut(session_id) else {
+        return;
+    };
+    // `llm.request` always precedes `llm.response` for the same call, so a
+    // missing start means this response belongs to a request from before the
+    // last drain. Record it with an unknown duration rather than guessing, so
+    // the length check downstream still lines rows up correctly.
+    let duration_ms = entry
+        .started
+        .take()
+        .map(|started| started.elapsed().as_millis() as u64)
+        .unwrap_or_default();
+    entry.completed.push(crate::usage_log::ModelRequestTiming {
+        finished_at_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default(),
+        duration_ms,
+    });
+}
+
+fn take_model_request_timings(session_id: &str) -> Vec<crate::usage_log::ModelRequestTiming> {
+    MODEL_REQUEST_TIMINGS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(session_id))
+        .map(|entry| entry.completed)
+        .unwrap_or_default()
+}
 
 const PROJECT_ACTIVITY_REVIEW_CHUNK_CHARS: usize = 48_000;
 const PROJECT_ACTIVITY_REVIEW_OUTPUT_CHARS: usize = 6_000;
@@ -284,7 +394,8 @@ pub(crate) fn remote_chat_session_events(
     validate_remote_chat_project(project_id)?;
     crate::sessions::remote_chat_session_validate(project_id, session_id)?;
     let sessions_dir = chat_sessions_dir_for_project(Some(project_id))?;
-    crate::chat_events::read_events_for_session_in_dir(session_id, &sessions_dir)
+    // The paired client subscribes to the whole stream, so no kind narrowing.
+    crate::chat_events::read_events_for_session_in_dir(session_id, &sessions_dir, None)
 }
 
 /// A model choice returned to the remote-control boundary. The values are
@@ -1776,6 +1887,19 @@ where
     ) -> Result<ToolOutput, ToolError> {
         match inner_result {
             Ok(output) => {
+                // An image result is not text that happens to be long: the
+                // conversation runtime lifts this exact JSON into an image
+                // content block and replaces the text with a one-line summary,
+                // so nothing oversized survives into context anyway. Spilling
+                // it to an artifact or truncating it here would break that
+                // parse and leave the model with base64 it cannot look at —
+                // which is the whole reason the tool exists.
+                if runtime::parse_image_tool_output(&output.text).is_some() {
+                    if self.is_cancelled() {
+                        return Err(ToolError::interrupted_by_user());
+                    }
+                    return Ok(output);
+                }
                 let evidence_text = output.text.clone();
                 // The tool already ran, so its output is real work that must not
                 // be lost to a cancel that lands right after completion.
@@ -2282,6 +2406,7 @@ impl runtime::EventSink for DesktopRuntimeEventSink {
                 tool_calls,
                 tokens_before,
                 tokens_after,
+                context_overhead_tokens,
                 removed_messages,
             } => crate::chat_events::record_wire_event(
                 &self.session_id,
@@ -2291,9 +2416,37 @@ impl runtime::EventSink for DesktopRuntimeEventSink {
                     "reason": reason,
                     "iteration": iteration,
                     "toolCalls": tool_calls,
+                    // Request-scoped, i.e. messages + system prompt + tool
+                    // schemas. `tokensScope` and the overhead are spelled out so
+                    // this cannot be silently compared against the
+                    // messages-only figures in the session compaction record.
+                    "tokensScope": "request",
                     "tokensBefore": tokens_before,
                     "tokensAfter": tokens_after,
+                    "contextOverheadTokens": context_overhead_tokens,
                     "removedMessages": removed_messages,
+                }),
+            ),
+            runtime::EventType::CompactionSummaryFallback { reason } => {
+                crate::chat_events::record_wire_event(
+                    &self.session_id,
+                    "context.summary_fallback",
+                    json!({ "sessionId": &self.session_id, "reason": reason }),
+                );
+            }
+            runtime::EventType::ToolRoutingChanged {
+                activated,
+                deactivated,
+                active_tool_count,
+            } => crate::chat_events::record_wire_event(
+                &self.session_id,
+                "tool.routing",
+                json!({
+                    "sessionId": &self.session_id,
+                    "phase": "changed",
+                    "activated": activated,
+                    "deactivated": deactivated,
+                    "activeToolCount": active_tool_count,
                 }),
             ),
             _ => {}
@@ -2304,6 +2457,13 @@ impl runtime::EventSink for DesktopRuntimeEventSink {
 impl aris_executor::ExecutorTraceSink for DesktopWireTraceSink {
     fn record(&self, kind: &str, payload: Value) {
         crate::chat_events::record_wire_event(&self.session_id, kind, payload.clone());
+        // Exact matches: `llm.response_start` is the headers arriving, not the
+        // end of the call.
+        match kind {
+            "llm.request" => note_model_request_started(&self.session_id),
+            "llm.response" => note_model_request_finished(&self.session_id),
+            _ => {}
+        }
         self.record_retry_lifecycle(kind, payload);
     }
 
@@ -6145,10 +6305,14 @@ fn emit_independent_review_event(
         app,
         "chat-review",
         session_id,
-        "independent_review",
+        INDEPENDENT_REVIEW_EVENT_KIND,
         payload,
     );
 }
+
+/// Event-log kind for the independent review stream. Both the backend memory
+/// restore and the Chat panel read the log narrowed to this kind.
+pub(crate) const INDEPENDENT_REVIEW_EVENT_KIND: &str = "independent_review";
 
 #[derive(Clone, Default)]
 struct PersistedReviewMemory {
@@ -6157,7 +6321,12 @@ struct PersistedReviewMemory {
 }
 
 fn load_persisted_review_memory(session_id: &str) -> PersistedReviewMemory {
-    let Ok(events) = crate::chat_events::read_events_for_session(session_id) else {
+    // Only review rows matter here, and they are a handful of entries in a log
+    // that is otherwise streaming deltas.
+    let Ok(events) = crate::chat_events::read_events_for_session(
+        session_id,
+        Some(&[INDEPENDENT_REVIEW_EVENT_KIND]),
+    ) else {
         return PersistedReviewMemory::default();
     };
     persisted_review_memory_from_events(events)
@@ -6664,7 +6833,7 @@ fn add_review_evidence_path(
     } else {
         workspace.join(candidate)
     };
-    let Ok(canonical) = joined.canonicalize() else {
+    let Ok(canonical) = runtime::canonicalize(&joined) else {
         return;
     };
     if !canonical.starts_with(workspace_root)
@@ -6726,7 +6895,7 @@ fn collect_recent_literature_evidence(
 }
 
 fn review_materialized_evidence(summary: &runtime::TurnSummary, workspace: &Path) -> String {
-    let Ok(workspace_root) = workspace.canonicalize() else {
+    let Ok(workspace_root) = runtime::canonicalize(workspace) else {
         return "Workspace path could not be resolved.".to_string();
     };
     let mut candidates = Vec::new();
@@ -7647,6 +7816,11 @@ async fn run_chat_turn_with_context(
     let turn_id = state.next_turn_id.fetch_add(1, Ordering::Relaxed);
     // The in-memory cancellation counter is not a persistent identity. Random
     // entropy plus the local sequence keeps audit turns distinct after restart.
+    // Also the grouping key for this turn's usage rows: the Profile page used
+    // to group them by `createdAt`, which only held while every row of a turn
+    // shared one timestamp. Rows now carry their own request time, so the turn
+    // has to be named — and naming it with the audit id lets a usage row be
+    // lined up against the turn's change ledger.
     let audit_turn_id = format!("turn-{:032x}-{turn_id}", rand::random::<u128>());
     {
         let mut running = state
@@ -8070,12 +8244,14 @@ async fn run_chat_turn_with_context(
         let tool_routing = (!autonomous_workflow
             && worker_retrieval_follow_up != InterruptedResearchFollowUp::Summarize)
             .then(|| {
-                aris_chat::route_chat_tools(
+                aris_chat::route_chat_tools_with_carry_forward(
                     &worker_user_text,
                     &mcp_bundle.tool_specs,
                     aris_chat::dynamic_tool_routing_mode(),
+                    &session_tool_carry_forward(&worker_session_id),
                 )
             });
+        reset_model_request_timings(&worker_session_id);
         if let Some(routing) = &tool_routing {
             crate::chat_events::record_wire_event(
                 &worker_session_id,
@@ -8199,9 +8375,9 @@ async fn run_chat_turn_with_context(
             );
         }
         if !autonomous_workflow {
-            if tool_routing
+            if let Some(routing) = tool_routing
                 .as_ref()
-                .is_some_and(|routing| routing.mode == aris_chat::ToolRoutingMode::Active)
+                .filter(|routing| routing.mode == aris_chat::ToolRoutingMode::Active)
             {
                 system_prompt.push(
                     format!(
@@ -8209,6 +8385,23 @@ async fn run_chat_turn_with_context(
                         aris_chat::MAX_ACTIVE_TOOLS
                     ),
                 );
+                // Naming them is what makes the instruction above usable. A
+                // model that only sees the active schemas has no way to know
+                // which capability is one ToolSearch away, so it substitutes
+                // whatever the active set allows — which in practice meant
+                // routing every file edit through a `bash` heredoc while
+                // `edit_file` sat deferred and unmentioned.
+                if !routing.deferred_names.is_empty() {
+                    system_prompt.push(format!(
+                        "Deferred this turn — authorized and callable, but schema-less until ToolSearch returns them: {}.",
+                        routing
+                            .deferred_names
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
             }
             if crate::oracle_web::consult_tool_available() {
                 system_prompt.push(
@@ -8363,6 +8556,13 @@ async fn run_chat_turn_with_context(
         }
         let review_user_anchor = user_message.clone();
         let summary_result = runtime.run_turn_message(user_message, permission_prompter!());
+        // Recorded before the error branch: a turn that failed still published
+        // tool schemas and still reached for deferred tools, and re-cutting the
+        // array on the retry would throw that away at full re-cache price.
+        record_session_tool_carry_forward(
+            &worker_session_id,
+            runtime.dynamic_tool_routing_carry_forward(),
+        );
         let summary = match summary_result {
             Ok(summary) => summary,
             Err(error) => {
@@ -8797,6 +8997,7 @@ async fn run_chat_turn_with_context(
         // the turn actually ran at, not the stored wish, so a model that
         // narrowed it isn't reported at a tier it never used.
         let turn_duration_ms = turn_started.elapsed().as_millis() as u64;
+        let request_timings = take_model_request_timings(&session_id);
         let executor_effort = aris_executor::reasoning_effort::closest_level(
             &usage_model,
             &crate::config::reasoning_effort(),
@@ -8805,11 +9006,13 @@ async fn run_chat_turn_with_context(
         .to_string();
         if let Err(error) = crate::usage_log::append_turn_usage(
             &session_id,
+            &audit_turn_id,
             "executor",
             &usage_model,
             &usage_provider,
             &usage_server,
             &turn_usages,
+            &request_timings,
             turn_duration_ms,
             &executor_effort,
         ) {
@@ -8820,11 +9023,13 @@ async fn run_chat_turn_with_context(
                 let reviewer_server = config_string("reviewer_base_url").unwrap_or_default();
                 if let Err(error) = crate::usage_log::append_turn_usage(
                     &session_id,
+                    &audit_turn_id,
                     "reviewer",
                     &reviewer_model,
                     &reviewer_provider,
                     &reviewer_server,
                     &reviewer_usages,
+                    &[],
                     0,
                     "",
                 ) {
@@ -9201,6 +9406,7 @@ pub fn chat_delete(
         .map_err(|_| "chat state poisoned".to_string())?
         .remove(&session_id);
     clear_retrieval_continuation(&state, &session_id);
+    forget_session_tool_carry_forward(&session_id);
     let path = match project_id {
         Some(project_id) => {
             if !crate::state::valid_project_id(&project_id) {
@@ -10127,7 +10333,9 @@ fn export_debug_zip(
     session: &Session,
     requested_path: Option<&str>,
 ) -> Result<DebugExportResult, String> {
-    let events = crate::chat_events::read_events_for_session(session_id).unwrap_or_default();
+    // The debug bundle wants the whole stream, including the deltas a stopped
+    // turn never checkpointed.
+    let events = crate::chat_events::read_events_for_session(session_id, None).unwrap_or_default();
     let recovered = crate::chat_events::recover_session_for_export(session_id, &events);
     let (export_session, session_source) =
         if recovered.logical_message_count() > session.logical_message_count() {
@@ -10179,7 +10387,7 @@ fn export_debug_zip(
         &rotated_wire_log_paths,
     )?;
     let diagnostics = build_debug_performance_summary(
-        &export_session,
+        &events,
         &session_usage_log,
         wire_log_path.as_deref(),
         &rotated_wire_log_paths,
@@ -10302,8 +10510,18 @@ fn export_debug_zip(
     })
 }
 
+/// Summarize a session for the debug bundle.
+///
+/// Tool statistics come from `events`, the append-only event log, and not from
+/// the live `Session`. The session is the *surviving* projection: compaction
+/// removes messages from it, so counting there reports whatever happened since
+/// the last compaction and calls it the session. One exported bundle claimed 35
+/// calls across 7 tools with zero failures for a session whose own event log,
+/// shipped in the same zip, recorded 72 calls across 13 tools with three
+/// failures — and the tools it dropped entirely were the ones the user was
+/// trying to debug.
 fn build_debug_performance_summary(
-    session: &Session,
+    events: &[crate::chat_events::ChatEventLogEntry],
     usage_log: &str,
     wire_log_path: Option<&Path>,
     rotated_wire_log_paths: &[PathBuf],
@@ -10314,32 +10532,60 @@ fn build_debug_performance_summary(
     let mut staged_write_calls = 0_usize;
     let mut direct_write_calls = 0_usize;
     let mut no_new_evidence_blocks = 0_usize;
-    for message in &session.messages {
-        for block in &message.blocks {
-            match block {
-                ContentBlock::ToolUse { name, .. } => {
-                    tool_calls += 1;
-                    *tool_counts.entry(name.clone()).or_default() += 1;
-                    if matches!(
-                        name.as_str(),
-                        "begin_large_write" | "append_write_chunk" | "commit_large_write"
-                    ) {
-                        staged_write_calls += 1;
-                    }
-                    if matches!(name.as_str(), "write_file" | "write_files") {
-                        direct_write_calls += 1;
-                    }
-                }
-                ContentBlock::ToolResult {
-                    output, is_error, ..
-                } => {
-                    tool_failures += usize::from(*is_error);
-                    if output.contains("no_new_evidence_loop") {
-                        no_new_evidence_blocks += 1;
+    let mut compaction_count = 0_usize;
+    let mut compaction_summary_sources = BTreeMap::<String, usize>::new();
+    let mut counted_tool_uses = HashSet::<String>::new();
+    for event in events {
+        let payload = &event.payload;
+        match event.kind.as_str() {
+            "tool_call" => {
+                let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                // `AskUserQuestion` emits a second `tool_call` carrying
+                // `ready: true` once its answer channel is registered, so the
+                // log legitimately holds two events for one call. Dedupe on the
+                // tool-use id rather than teaching this one tool's name.
+                if let Some(id) = payload.get("id").and_then(Value::as_str) {
+                    if !counted_tool_uses.insert(id.to_string()) {
+                        continue;
                     }
                 }
-                _ => {}
+                tool_calls += 1;
+                *tool_counts.entry(name.to_string()).or_default() += 1;
+                if matches!(
+                    name,
+                    "begin_large_write" | "append_write_chunk" | "commit_large_write"
+                ) {
+                    staged_write_calls += 1;
+                }
+                if matches!(name, "write_file" | "write_files") {
+                    direct_write_calls += 1;
+                }
             }
+            "tool_result" => {
+                tool_failures +=
+                    usize::from(payload.get("isError").and_then(Value::as_bool) == Some(true));
+                if payload
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .is_some_and(|output| output.contains("no_new_evidence_loop"))
+                {
+                    no_new_evidence_blocks += 1;
+                }
+            }
+            "session_compaction" => {
+                compaction_count += 1;
+                let source = payload
+                    .get("compaction")
+                    .and_then(|compaction| compaction.get("summary_source"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                *compaction_summary_sources
+                    .entry(source.to_string())
+                    .or_default() += 1;
+            }
+            _ => {}
         }
     }
 
@@ -10386,6 +10632,9 @@ fn build_debug_performance_summary(
     let mut routing_deferred_max = 0_u64;
     let mut evidence_observations = 0_usize;
     let mut evidence_new = 0_usize;
+    let mut summary_fallback_reasons = BTreeMap::<String, usize>::new();
+    let mut observed_models = BTreeMap::<String, usize>::new();
+    let mut observed_base_urls = BTreeSet::<String>::new();
     let mut wire_paths = rotated_wire_log_paths.to_vec();
     if let Some(path) = wire_log_path {
         wire_paths.push(path.to_path_buf());
@@ -10402,7 +10651,19 @@ fn build_debug_performance_summary(
                 continue;
             };
             match event.kind.as_str() {
-                "llm.request" => model_requests += 1,
+                "llm.request" => {
+                    model_requests += 1;
+                    // What the session actually ran, which is not necessarily
+                    // what `config.redacted.json` says: that file is a snapshot
+                    // of settings at export time, so a model switched after the
+                    // session sends a reader chasing the wrong provider.
+                    if let Some(model) = event.payload.get("model").and_then(Value::as_str) {
+                        *observed_models.entry(model.to_string()).or_default() += 1;
+                    }
+                    if let Some(base_url) = event.payload.get("baseUrl").and_then(Value::as_str) {
+                        observed_base_urls.insert(base_url.to_string());
+                    }
+                }
                 "llm.error" => model_errors += 1,
                 "llm.retry" => model_retries += 1,
                 "context.checkpoint" => {
@@ -10443,6 +10704,15 @@ fn build_debug_performance_summary(
                         event.payload.get("novelty").and_then(Value::as_str) == Some("new"),
                     );
                 }
+                "context.summary_fallback" => {
+                    let reason = event
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    *summary_fallback_reasons.entry(reason).or_default() += 1;
+                }
                 _ => {}
             }
         }
@@ -10456,6 +10726,8 @@ fn build_debug_performance_summary(
             "requestCount": model_requests,
             "errorCount": model_errors,
             "retryCount": model_retries,
+            "observedModels": observed_models,
+            "observedBaseUrls": observed_base_urls,
             "usageEntryCount": usage_entries,
             "executorUsageEntries": executor_usage_entries,
             "reviewerUsageEntries": reviewer_usage_entries,
@@ -10464,7 +10736,10 @@ fn build_debug_performance_summary(
             "totalOutputTokens": total_output_tokens,
             "totalCacheCreationInputTokens": total_cache_creation_tokens,
             "totalCacheReadInputTokens": total_cache_read_tokens,
-            "recordedDurationMs": total_duration_ms,
+            // Sum of per-request latencies, i.e. time this session spent
+            // waiting on the model. Not session wall-clock: it excludes tool
+            // execution and thinking time between turns.
+            "totalRequestDurationMs": total_duration_ms,
         },
         "tools": {
             "callCount": tool_calls,
@@ -10482,7 +10757,12 @@ fn build_debug_performance_summary(
             "tokensAfterTotal": checkpoint_tokens_after,
             "estimatedTokensRemoved": checkpoint_tokens_saved,
             "removedMessages": checkpoint_removed_messages,
-            "persistedCompactionCount": session.compactions.len(),
+            "persistedCompactionCount": compaction_count,
+            // `fallback` here means the compaction shipped the deterministic
+            // summary. `summaryFallbackReasons` says why; an empty map next to
+            // a non-zero fallback count means the session predates that event.
+            "compactionSummarySources": compaction_summary_sources,
+            "summaryFallbackReasons": summary_fallback_reasons,
             "policy": {
                 "toolCallInterval": runtime::soft_checkpoint_tool_call_interval_from_env(),
                 "contextRatio": runtime::soft_checkpoint_context_ratio_from_env(),
@@ -10503,7 +10783,9 @@ fn build_debug_performance_summary(
         "limitations": [
             "Model request counts require wire tracing; zero may mean tracing was disabled.",
             "Token totals come from the session-scoped usage log and exclude requests whose provider returned no usage.",
-            "Checkpoint token savings are heuristic live-context estimates, not billing-token savings."
+            "Checkpoint token savings are heuristic live-context estimates, not billing-token savings.",
+            "Checkpoint token figures are request-scoped (messages plus system prompt and tool schemas); the session compaction records count messages only, so the two differ by contextOverheadTokens.",
+            "Tool counts come from the event log and so cover the whole session, including calls a compaction later removed from the live session."
         ]
     }))
 }
@@ -10611,7 +10893,7 @@ fn collect_tool_output_artifacts(
     rotated_wire_log_paths: &[PathBuf],
 ) -> Result<Vec<DebugToolOutputArtifact>, String> {
     let root = runtime::somniq_project_tmp_dir(crate::state::workspace_dir()).join("tool-output");
-    let root = match fs::canonicalize(&root) {
+    let root = match runtime::canonicalize(&root) {
         Ok(path) => path,
         Err(_) => return Ok(Vec::new()),
     };
@@ -10628,7 +10910,7 @@ fn collect_tool_output_artifacts(
     let mut artifacts = Vec::new();
     for raw_path in raw_paths {
         let path = PathBuf::from(raw_path.trim());
-        let canonical = match fs::canonicalize(&path) {
+        let canonical = match runtime::canonicalize(&path) {
             Ok(path) => path,
             Err(_) => continue,
         };
@@ -10773,7 +11055,19 @@ fn file_size(path: &Path) -> Option<u64> {
 }
 
 fn redacted_config_json() -> Value {
-    Value::Object(redact_sensitive_object(crate::config::load_object()))
+    let mut object = redact_sensitive_object(crate::config::load_object());
+    // Leading underscore so it sorts above the real keys. Without this note the
+    // file reads as "the settings this session ran under", which it is not: an
+    // executor model changed after the session shows up here and sends whoever
+    // is debugging after the wrong provider.
+    object.insert(
+        "_note".to_string(),
+        Value::String(
+            "Application settings as of the export, not necessarily the settings this session ran under. diagnostics.json -> model.observedModels / model.observedBaseUrls record what the session actually called."
+                .to_string(),
+        ),
+    );
+    Value::Object(object)
 }
 
 fn redact_sensitive_object(object: Map<String, Value>) -> Map<String, Value> {

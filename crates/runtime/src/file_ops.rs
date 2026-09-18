@@ -99,6 +99,28 @@ pub enum ReadFileResult {
     Image(ReadImageOutput),
 }
 
+/// Recognize a tool result that carries an image the model is meant to *see*
+/// (`read_file` / `ReadMediaFile` on a supported raster). A text or PDF result
+/// has no top-level `mediaType`/`base64`/`bytes`, so it never matches.
+///
+/// This is deliberately shared rather than reimplemented per surface: the
+/// conversation runtime uses it to lift the payload into an image content
+/// block, and every wrapper that shortens tool output must use the same
+/// predicate to leave the payload alone. A wrapper that truncates or spills
+/// this JSON to an artifact first does not merely shorten the text — it
+/// destroys the only copy of the image the model would ever have seen, because
+/// the lift downstream can no longer parse it.
+#[must_use]
+pub fn parse_image_tool_output(output: &str) -> Option<ReadImageOutput> {
+    // Cheap reject before the full parse: these results are megabytes of
+    // base64 and run on every tool result in the session.
+    if !output.contains("\"base64\"") {
+        return None;
+    }
+    let image: ReadImageOutput = serde_json::from_str(output).ok()?;
+    (image.kind == "image").then_some(image)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StructuredPatchHunk {
     #[serde(rename = "oldStart")]
@@ -1071,8 +1093,8 @@ fn validate_expected_revision(
         file_path: display_path(path),
         expected_revision: expected_revision.to_string(),
         current_revision,
-        retry: "Re-read the current file or focused window, rebuild the edit against that revision, and retry once. No changes were written.".to_string(),
-        message: "The target changed after the caller's source read; the stale mutation was rejected. No changes were written.".to_string(),
+        retry: "Re-read the current file or focused window, rebuild the edit against that revision, and retry once. Do not resend with current_revision copied from this error: the point of the check is that the edit was built against content you have not seen. No changes were written.".to_string(),
+        message: "The target changed after the caller's source read; the stale mutation was rejected. expected_revision must be copied verbatim from a tool result for this path (read_file, the revision of a previous mutation, or changes[path].revision after a shell command modified it) and must never be constructed. No changes were written.".to_string(),
     };
     Err(io::Error::new(io::ErrorKind::Other, error))
 }
@@ -2625,7 +2647,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
                 continue;
             }
             if root.is_some() {
-                let Ok(canonical) = entry.canonicalize() else {
+                let Ok(canonical) = crate::canonicalize(entry) else {
                     continue;
                 };
                 if is_under_any_root(&canonical, &readable_roots) {
@@ -2819,7 +2841,7 @@ fn fast_glob_matches(
         }
 
         if workspace_root.is_some() {
-            let Ok(canonical) = file.canonicalize() else {
+            let Ok(canonical) = crate::canonicalize(file) else {
                 continue;
             };
             if is_under_any_root(&canonical, readable_roots) {
@@ -2896,8 +2918,13 @@ fn rg_files(base_path: &Path) -> io::Result<Option<Vec<PathBuf>>> {
     Ok(Some(files))
 }
 
+/// The spelling of a path the file tools hand back to a model.
+///
+/// Normalized first: slash-converting a verbatim path yields `//?/C:/…`, which
+/// is no more usable than the `\\?\` it came from, and is the form a model
+/// would copy into its next tool call.
 fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::plain_path(path).to_string_lossy().replace('\\', "/")
 }
 
 fn matches_optional_filters(
@@ -4320,7 +4347,7 @@ fn workspace_root() -> io::Result<Option<PathBuf>> {
     }
     let root = PathBuf::from(trimmed);
     fs::create_dir_all(&root)?;
-    Ok(Some(root.canonicalize()?))
+    Ok(Some(crate::canonicalize(&root)?))
 }
 
 fn readonly_roots() -> Vec<PathBuf> {
@@ -4332,7 +4359,7 @@ fn readonly_roots() -> Vec<PathBuf> {
             if path.as_os_str().is_empty() || !path.exists() {
                 return None;
             }
-            path.canonicalize().ok()
+            crate::canonicalize(path).ok()
         })
         .collect()
 }
@@ -4397,7 +4424,7 @@ fn ensure_search_base_allowed(base: &Path, roots: &[PathBuf]) -> io::Result<()> 
 fn ensure_glob_search_allowed(search_path: &Path, roots: &[PathBuf]) -> io::Result<()> {
     let prefix = static_glob_prefix(search_path);
     let base = if prefix.exists() {
-        prefix.canonicalize()?
+        crate::canonicalize(&prefix)?
     } else {
         lexically_normalize(&prefix)
     };
@@ -4433,7 +4460,7 @@ fn static_glob_prefix(path: &Path) -> PathBuf {
 /// does exist, listing what is in it, and pointing at any file with the same
 /// name elsewhere underneath usually makes the next attempt the right one.
 fn canonicalize_with_hint(candidate: &Path) -> io::Result<PathBuf> {
-    match candidate.canonicalize() {
+    match crate::canonicalize(candidate) {
         Ok(canonical) => Ok(canonical),
         Err(error) => {
             let mut message = format!("failed to resolve `{}`: {error}", candidate.display());
@@ -4551,7 +4578,7 @@ fn find_by_file_name(root: &Path, file_name: &std::ffi::OsStr) -> Vec<String> {
 
 fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {
     let candidate = lexically_normalize(candidate);
-    if let Ok(canonical) = candidate.canonicalize() {
+    if let Ok(canonical) = crate::canonicalize(&candidate) {
         return Ok(canonical);
     }
 
@@ -4573,7 +4600,7 @@ fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {
         })?;
     }
 
-    let mut canonical = ancestor.canonicalize()?;
+    let mut canonical = crate::canonicalize(ancestor)?;
     for component in missing.iter().rev() {
         canonical.push(component);
     }

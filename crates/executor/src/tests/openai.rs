@@ -2148,3 +2148,77 @@ fn non_responses_models_keep_their_original_chat_request() {
     assert_eq!(usage.cache_creation_input_tokens, 0);
     assert_eq!(usage.prompt_tokens(), 195_916);
 }
+
+/// A gateway that attaches `"usage": null` to every delta chunk used to
+/// manufacture one all-zero usage event per chunk: 47,535 of them in a single
+/// measured session, 94% of every event the stream produced and half the wire
+/// log by volume. Repeats of the same real totals are dropped for the same
+/// reason.
+#[test]
+fn null_and_repeated_usage_frames_do_not_flood_the_event_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request");
+        let _request = read_mock_http_request(&mut stream);
+        let real = "{\"prompt_tokens\":100,\"completion_tokens\":7}";
+        let mut sse = String::new();
+        // 20 content chunks, each carrying the gateway's null usage.
+        for _ in 0..20 {
+            sse.push_str(
+                "data: {\"usage\":null,\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+            );
+        }
+        // The real totals, then the same totals repeated on the terminal chunk.
+        sse.push_str(&format!(
+            "data: {{\"usage\":{real},\"choices\":[{{\"delta\":{{\"content\":\"!\"}}}}]}}\n\n"
+        ));
+        sse.push_str(&format!(
+            "data: {{\"usage\":{real},\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n"
+        ));
+        sse.push_str("data: [DONE]\n\n");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+            sse.len(),
+        )
+        .expect("write SSE");
+    });
+
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url: format!("http://{address}/v1"),
+        },
+        "usage-flood-model".to_string(),
+        false,
+        Vec::new(),
+        Box::new(crate::NoopStreamObserver),
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions);
+
+    let events = client
+        .stream(ApiRequest {
+            system_prompt: Vec::new(),
+            messages: vec![ConversationMessage::user_text("hello")],
+        })
+        .expect("stream");
+
+    let usage_events = events
+        .iter()
+        .filter_map(|event| match event {
+            AssistantEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        usage_events.len(),
+        1,
+        "one reported reading, not one per chunk: {usage_events:?}"
+    );
+    assert_eq!(usage_events[0].input_tokens, 100);
+    assert_eq!(usage_events[0].output_tokens, 7);
+    server.join().expect("mock gateway thread");
+}

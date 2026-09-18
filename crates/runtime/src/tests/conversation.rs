@@ -4666,6 +4666,7 @@ fn routing_state(active: &[&str], pinned: &[&str], max_active: usize) -> Dynamic
         max_active,
         last_used: std::collections::BTreeMap::new(),
         tick: 0,
+        deferred_but_used: std::collections::BTreeSet::new(),
     }
 }
 
@@ -4726,6 +4727,90 @@ fn dynamic_tool_routing_ignores_names_outside_the_authorized_catalog() {
     assert!(activated.is_empty());
     assert!(evicted.is_empty());
     assert!(!state.active.contains("rm_rf"));
+}
+
+/// Calling a deferred tool must not rewrite the tool array mid-turn.
+///
+/// Tool schemas head the prompt, so each such rewrite invalidates the provider
+/// prefix cache and re-bills the entire transcript. In one measured session
+/// five of them re-paid 249k of 364k total input tokens. The tool still runs;
+/// it simply becomes visible again at the next turn boundary.
+#[test]
+fn calling_a_deferred_tool_does_not_rewrite_the_tool_array_mid_turn() {
+    struct ProbeClient {
+        calls: usize,
+        active_history: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        active: Option<String>,
+    }
+
+    impl ApiClient for ProbeClient {
+        fn set_active_tools(&mut self, names: Option<&std::collections::BTreeSet<String>>) {
+            self.active = names.map(|names| names.iter().cloned().collect::<Vec<_>>().join(","));
+        }
+
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.active_history
+                .lock()
+                .expect("history")
+                .push(self.active.clone().unwrap_or_default());
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "browser_snapshot".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ProbeClient {
+        calls: 0,
+        active_history: history.clone(),
+        active: None,
+    };
+    let tools = StaticToolExecutor::new().register("browser_snapshot", |_| Ok("{}".to_string()));
+    let routing = DynamicToolRouting {
+        catalog: ["ToolSearch", "browser_snapshot"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        active: ["ToolSearch"].into_iter().map(str::to_string).collect(),
+        pinned: ["ToolSearch"].into_iter().map(str::to_string).collect(),
+        max_active: 24,
+    };
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        client,
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_dynamic_tool_routing(routing);
+
+    runtime.run_turn("take a snapshot", None).expect("turn");
+
+    let history = history.lock().expect("history");
+    assert_eq!(history.len(), 2);
+    assert!(
+        history.iter().all(|active| !active.contains("browser_snapshot")),
+        "the array must be identical across the turn: {history:?}"
+    );
+    // But the next turn starts with it visible, so the capability is not lost.
+    assert!(
+        runtime
+            .dynamic_tool_routing_carry_forward()
+            .contains("browser_snapshot"),
+        "a tool the turn actually used must carry into the next plan"
+    );
 }
 
 #[test]

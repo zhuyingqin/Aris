@@ -15,6 +15,9 @@ fn entry(session: &str, created_at: u64, input: u32, output: u32) -> UsageLogEnt
         cache_read_input_tokens: 0,
         duration_ms: 0,
         reasoning_effort: String::new(),
+        // Legacy shape on purpose: these fixtures cover the timestamp-grouping
+        // fallback for rows written before `turnId` existed.
+        turn_id: String::new(),
     }
 }
 
@@ -125,4 +128,47 @@ fn day_math_matches_known_dates() {
     assert_eq!(days_to_ymd(18628), (2021, 1, 1));
     assert_eq!(date_string(0), "1970-01-01");
     assert_eq!(date_string(18628), "2021-01-01");
+}
+
+/// Per-request rows must not each count as a turn.
+///
+/// Turns were identified by `(session, createdAt)` back when every row of a
+/// turn carried the same timestamp. Rows now carry their own request time, so
+/// without `turnId` a ten-request turn would report as ten turns and "longest
+/// task" would shrink to the slowest single call.
+#[test]
+fn a_multi_request_turn_counts_once_and_sums_its_own_latency() {
+    let today_secs = (now_secs() / DAY_SECS) * DAY_SECS;
+    let rows = (0..5)
+        .map(|index| UsageLogEntry {
+            duration_ms: 400,
+            turn_id: "chat-a#1".to_string(),
+            ..entry("chat-a", today_secs + 10 + index * 7, 100, 20)
+        })
+        .collect::<Vec<_>>();
+
+    let stats = aggregate(rows, Vec::new(), 0, false);
+
+    assert_eq!(stats.total_turns, 1);
+    // 5 x 400ms of model time in one turn, not a 400ms "longest task".
+    assert_eq!(stats.longest_task_seconds, Some(2));
+}
+
+/// Two turns in the same second are still two turns.
+#[test]
+fn turns_are_distinguished_by_id_not_by_timestamp() {
+    let today_secs = (now_secs() / DAY_SECS) * DAY_SECS;
+    let rows = vec![
+        UsageLogEntry {
+            turn_id: "chat-a#1".to_string(),
+            ..entry("chat-a", today_secs + 10, 100, 20)
+        },
+        UsageLogEntry {
+            turn_id: "chat-a#2".to_string(),
+            ..entry("chat-a", today_secs + 10, 100, 20)
+        },
+    ];
+
+    let stats = aggregate(rows, Vec::new(), 0, false);
+    assert_eq!(stats.total_turns, 2);
 }

@@ -1,0 +1,144 @@
+% =====================================================================
+%  合订本 —— 把全部内容装订成一册，供阅读、打印与存档
+%
+%  ⚠ 这一册**不是**递交件。向 CNIPA 递交时提交的是 output/CNIPA/ 下的各个
+%    单独 PDF：各文件必须分别编写页码、且「一页纸上不得包含两种以上
+%    文件」。本册只是把它们按审查指南的装订顺序串起来方便通读。
+%
+%  申请文件的排列顺序（审查指南第一部分第一章）：
+%      请求书 → 说明书摘要 → 摘要附图 → 权利要求书 → 说明书 → 说明书附图
+%  请求书是 CNIPA 的官方表格，须在专利事务办理系统中填写，本册不含，
+%  仅以一页说明其需要填写的关键项。
+%
+%  被收录的 PDF 保留各自原有的页码（\includepdf 不再另加页码），
+%  因此翻到任何一页都能看出它在原文件中的位置。
+% =====================================================================
+\documentclass[12pt,UTF8]{ctexart}
+\usepackage{geometry}
+\usepackage{pdfpages}
+\usepackage{xcolor}
+
+\geometry{a4paper, left=25mm, right=15mm, top=25mm, bottom=20mm}
+\setCJKmainfont{SimSun}
+\newCJKfontfamily\cbf{SimHei}
+\linespread{1.4}\selectfont
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+\newcommand{\divider}[3]{%
+  \clearpage
+  \null\vspace*{0.22\textheight}
+  \begin{center}
+    {\zihao{5}\color{black!55}#1}\\[6mm]
+    {\zihao{2}\cbf #2}\\[8mm]
+    \begin{minipage}{0.76\linewidth}\centering\zihao{5}#3\end{minipage}
+  \end{center}
+  \clearpage}
+
+% 收录一份 PDF：先出隔页，再原样并入全部页面（不叠加新页码）
+\newcommand{\includedoc}[4]{%
+  \divider{#1}{#2}{#3}%
+  \includepdf[pages=-, pagecommand={\thispagestyle{empty}}]{#4}}
+
+\input{.build/page-counts.tex}
+\newcommand{\docpages}[1]{\csname pages-#1\endcsname}
+
+\begin{document}
+
+% ---------------------------- 封面 ----------------------------
+\null\vspace*{0.16\textheight}
+\begin{center}
+  {\zihao{5}\color{black!55} 发明专利申请文件·合订本}\\[14mm]
+  {\zihao{1}\cbf 一种大语言模型智能体的}\\[4mm]
+  {\zihao{1}\cbf 工具调用控制方法及系统}\\[16mm]
+  \rule{0.5\linewidth}{0.6pt}\\[8mm]
+  {\zihao{4} 发明专利　·　国家知识产权局（CNIPA）}\\[3mm]
+  {\zihao{4} 权利要求 14 项　·　附图 5 幅}\\[16mm]
+  \begin{minipage}{0.8\linewidth}\zihao{5}
+    \textbf{本册不是递交件。}本册供纸面核对与存档。2026 年电子申请须提交符合 CNIPA 标准的 XML；本册 PDF 不能替代 XML。申请文件
+    各部分须分别编写页码，且一页纸上不得包含两种以上文件。本册仅按审查指南
+    规定的装订顺序把全部内容串成一册，供通读、打印与存档；被收录的各文件
+    保留其原有页码。
+  \end{minipage}
+\end{center}
+\clearpage
+
+% ---------------------------- 目录 ----------------------------
+\null\vspace*{0.08\textheight}
+\begin{center}{\zihao{2}\cbf 目　录}\end{center}
+\vspace{10mm}
+
+{\zihao{4}\cbf 第一部分　申请文件}\\[2mm]
+\hspace*{2em}按《专利审查指南》第一部分第一章规定的排列顺序装订：\\[3mm]
+\hspace*{2em}〇　请求书\hfill（官方表格，另在系统中填写，本册仅附说明）\\[2mm]
+\hspace*{2em}一　说明书摘要\hfill \docpages{abstract} 页\\[2mm]
+\hspace*{2em}二　摘要附图（图 1）\hfill \docpages{abstract-figure} 页\\[2mm]
+\hspace*{2em}三　权利要求书\hfill \docpages{claims} 页\\[2mm]
+\hspace*{2em}四　说明书\hfill \docpages{description} 页\\[2mm]
+\hspace*{2em}五　说明书附图（图 1～图 5）\hfill \docpages{drawings} 页\\[8mm]
+
+{\zihao{4}\cbf 第二部分　内部工作文档（不递交）}\\[3mm]
+\hspace*{2em}六　现有技术检索记录\hfill \docpages{notes-prior-art} 页\\[2mm]
+\hspace*{2em}七　发明构建书\hfill \docpages{notes-disclosure} 页\\[2mm]
+\hspace*{2em}八　递交前注意事项与代理人核查清单\hfill \docpages{notes-draft} 页\\[10mm]
+
+\begin{minipage}{\linewidth}\zihao{5}\color{black!70}
+  第二部分只供内部与代理人使用：其中的现有技术文献号由申请人提供、未经独立
+  复核，未经代理人核实不得写入说明书背景技术或答复审查意见。
+\end{minipage}
+\clearpage
+
+% ------------------------ 第一部分 ------------------------
+\divider{第一部分}{申请文件}{按《专利审查指南》第一部分第一章规定的排列顺序：\\[2mm]
+  请求书　→　说明书摘要　→　摘要附图　→　权利要求书　→　说明书　→　说明书附图}
+
+% 〇 请求书（官方表格，本册不含）
+\divider{〇}{请求书}{请求书是国家知识产权局的官方表格，须在专利事务办理系统中
+  填写并生成，本册不含。填写时需要与本册内容保持一致的项：\\[4mm]
+  \begin{flushleft}
+  \hspace*{1em}· 发明名称：一种大语言模型智能体的工具调用控制方法及系统（22 字）\\[1.5mm]
+  \hspace*{1em}· 摘要附图图号：图 1\\[1.5mm]
+  \hspace*{1em}· 分类号建议：G06F 9/48、G06F 16/903、G06N 5/04\\[1.5mm]
+  \hspace*{1em}· 权利要求项数：14（超出 10 项的 4 项产生附加费）
+  \end{flushleft}}
+
+\includedoc{一}{说明书摘要}{文字部分含标点 299 字，未超过 300 字上限；
+  已写明发明名称、所属技术领域、所要解决的技术问题、技术方案要点与主要用途。}
+  {.build/abstract.pdf}
+
+\includedoc{二}{摘要附图}{指定图 1（工具调用控制系统的结构示意图）为摘要附图，
+  图号须同时写入请求书。}
+  {.build/abstract-figure.pdf}
+
+\includedoc{三}{权利要求书}{共 14 项：权 1 方法独权、权 2～12 从属、
+  权 13 系统独权、权 14 计算机可读存储介质独权。编号连续不断号，
+  编号前不冠以「权利要求」「权项」等词。}
+  {.build/claims.pdf}
+
+\includedoc{四}{说明书}{第一页第一行为发明名称并左右居中，名称与正文之间空一行；
+  技术领域、背景技术、发明内容、附图说明、具体实施方式五部分齐全并各自写明标题；
+  自然段按官方空白表格采用首行缩进；源文件中的段落计数保留供编辑使用。}
+  {.build/description.pdf}
+
+\includedoc{五}{说明书附图}{图 1～图 5，一图一页。黑色线条绘制，不着色不加阴影，
+  图周无与图无关的框线；图号标注在相应附图正下方；附图标记 100～111 与说明书
+  文字部分双向一致。}
+  {.build/drawings.pdf}
+
+% ------------------------ 第二部分 ------------------------
+\divider{第二部分}{内部工作文档}{以下三份不属于递交件，仅供申请人与代理人使用。}
+
+\includedoc{六}{现有技术检索记录}{A1／A2／A3 三条路线的检索结果、
+  为什么只递 A1、以及抵触申请与申请人自身在先公开两项风险。
+  文献号由申请人提供，本工具未独立复核。}
+  {.build/notes-prior-art.pdf}
+
+\includedoc{七}{发明构建书}{核心发明构思、F1～F24 技术特征落位表
+  （哪个特征进独权、哪个进从属）、以及全文锁定的术语表。}
+  {.build/notes-disclosure.pdf}
+
+\includedoc{八}{递交前注意事项}{最高优先级风险（申请人自身在先公开）、
+  创造性答辩的三个支点、权利要求与说明书的代理人核查清单。}
+  {.build/notes-draft.pdf}
+
+\end{document}

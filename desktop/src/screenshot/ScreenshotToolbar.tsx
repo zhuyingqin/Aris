@@ -221,7 +221,7 @@ export default function ScreenshotToolbar({
         <button type="button" className="screenshot-action" onClick={onCancel}>
           {copy.cancel}
         </button>
-        <button type="button" className="screenshot-action" onClick={onCopy} disabled={busy}>
+        <button type="button" className="screenshot-action is-primary" onClick={onCopy} disabled={busy}>
           {copy.copy}
         </button>
         <button type="button" className="screenshot-action" onClick={onPin} disabled={busy}>
@@ -229,7 +229,7 @@ export default function ScreenshotToolbar({
         </button>
         <button
           type="button"
-          className="screenshot-action is-primary"
+          className="screenshot-action"
           onClick={onAttach}
           disabled={busy}
         >

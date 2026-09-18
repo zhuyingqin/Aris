@@ -1158,12 +1158,15 @@ pub(crate) fn load_workflow(
 /// Replay the run-owned, project-scoped event log.  Generic Chat replay uses
 /// the active global session directory, which is intentionally not trusted for
 /// a workflow whose Rust ledger fixes both its project and its session id.
+/// Async on purpose: a workflow's audit log grows with every turn it records
+/// (280 MB for one real review run), and Tauri would run a blocking command on
+/// the main thread, freezing every window while it decodes.
 #[tauri::command]
-pub fn review_workflow_transcript(
+pub async fn review_workflow_transcript(
     app: AppHandle,
     run_id: String,
 ) -> Result<crate::chat_events::ChatEventsReplay, String> {
-    workflow_transcript(&TauriCtx::new(app), &run_id)
+    crate::blocking::off_main_thread(move || workflow_transcript(&TauriCtx::new(app), &run_id)).await
 }
 
 pub(crate) fn workflow_transcript(
@@ -1172,12 +1175,7 @@ pub(crate) fn workflow_transcript(
 ) -> Result<crate::chat_events::ChatEventsReplay, String> {
     let (_run, binding) = load_turn_binding(ctx, run_id, None, None)?;
     let sessions_dir = crate::state::sessions_dir_for_project(&binding.project_id);
-    let events =
-        crate::chat_events::read_events_for_session_in_dir(&binding.session_id, &sessions_dir)?;
-    Ok(crate::chat_events::replay_events(
-        &binding.session_id,
-        &events,
-    ))
+    crate::chat_events::replay_session_events_in_dir(&binding.session_id, &sessions_dir)
 }
 
 #[tauri::command]

@@ -95,7 +95,9 @@ fn desktop_prompt_requests_links_for_generated_files() {
     assert!(prompt.contains("Existing artifact edits"));
     assert!(prompt.contains("Do not create sibling version files"));
     assert!(prompt.contains("fenced `mermaid` code block"));
-    assert!(prompt.contains("Long file generation"));
+    // The section was reworded from "Long file generation" to "File
+    // generation"; what the test is for is that it is present at all.
+    assert!(prompt.contains("File generation: use write_file"));
     // A complete CJK payload must not be rejected by an after-the-fact token
     // estimate. Oversized generation uses a staged atomic transaction.
     assert!(prompt.contains("exceeds 9000"));

@@ -41,6 +41,7 @@ mod textdiff;
 mod tool_output;
 mod typeset;
 mod typeset_state;
+mod updater;
 mod usage_log;
 mod watcher;
 mod work_task;
@@ -824,6 +825,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updater::app_update_check,
+            updater::app_update_download_and_install,
             open_chat_companion,
             take_chat_companion_handoff,
             screenshot::screenshot_capture_begin,

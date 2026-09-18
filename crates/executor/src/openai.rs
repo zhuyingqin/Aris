@@ -1317,7 +1317,9 @@ fn parse_non_stream_chat_response(
             events.push(AssistantEvent::StopReason(reason.to_string()));
         }
     }
-    if let Some(usage) = parsed.get("usage") {
+    // A present-but-null `usage` is the provider saying it has none, not a
+    // reading of zero. Same gateway behaviour the streaming path filters.
+    if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
         events.push(AssistantEvent::Usage(token_usage_from_openai_usage(usage)));
     }
     observer.on_message_stop()?;
@@ -2482,6 +2484,9 @@ impl ApiClient for OpenAIRuntimeClient {
             // truncation. We still read until EOF (never stop early at
             // finish_reason) so a trailing usage-only chunk isn't lost.
             let mut observed_finish_reason = false;
+            // Last usage this stream actually reported, so repeated frames
+            // carrying the same totals are not re-emitted.
+            let mut last_stream_usage: Option<TokenUsage> = None;
 
             loop {
                 // Check for Ctrl+C interrupt between chunks
@@ -2953,8 +2958,22 @@ impl ApiClient for OpenAIRuntimeClient {
                     // doesn't have a direct equivalent on OpenAI; we leave
                     // it 0 (their automatic write-on-first-use is not
                     // reported as a separate quantity).
-                    if let Some(usage) = parsed.get("usage") {
-                        events.push(AssistantEvent::Usage(token_usage_from_openai_usage(usage)));
+                    //
+                    // Two filters, both load-bearing. `usage: null` is not
+                    // usage: several gateways attach the key to *every* delta
+                    // chunk and only fill it on the last one, so taking
+                    // `get("usage")` at face value manufactured an all-zero
+                    // usage event per chunk — 47,535 of them in one measured
+                    // session, 94% of every event the stream produced and half
+                    // the wire log by volume. Identical repeats are dropped for
+                    // the same reason: a provider that re-sends the same
+                    // cumulative totals on each chunk has nothing new to say.
+                    if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
+                        let usage = token_usage_from_openai_usage(usage);
+                        if last_stream_usage != Some(usage) {
+                            last_stream_usage = Some(usage);
+                            events.push(AssistantEvent::Usage(usage));
+                        }
                     }
 
                     let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) else {

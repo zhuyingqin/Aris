@@ -1945,6 +1945,42 @@ describe("Literature library", () => {
     expect(screen.queryByText("main.pdf")).toBeNull();
   });
 
+  it("opens an image supplement in the in-app viewer instead of the system image app", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0] = {
+      ...library.papers[0],
+      attachments: [{
+        id: "figure-1",
+        label: "figure-1.png",
+        kind: "supplement",
+        path: "papers/attachments/figure-1.png",
+        addedAt: "2026-06-01T00:00:00.000Z",
+      }],
+    };
+    mocks.literatureLoad.mockResolvedValue(library);
+    mocks.literaturePdfBytes.mockResolvedValue([137, 80, 78, 71]);
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:figure-1"),
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), writable: true, configurable: true });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Expand item" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    await user.click(screen.getByRole("button", { name: "Expand item" }));
+    await user.click(screen.getByText("figure-1.png").closest("tr") as HTMLElement);
+
+    const viewer = await screen.findByRole("dialog", { name: "figure-1.png" });
+    expect(mocks.literaturePdfBytes).toHaveBeenCalledWith("papers/attachments/figure-1.png");
+    expect(mocks.literatureAttachmentOpen).not.toHaveBeenCalled();
+    expect(within(viewer).getByAltText("figure-1.png").getAttribute("src")).toBe("blob:figure-1");
+  });
+
   it("opens an annotation on its secondary PDF and preserves the page target", async () => {
     const user = userEvent.setup();
     const library = fixtureLibrary();

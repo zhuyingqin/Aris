@@ -1,0 +1,37 @@
+{
+  "_说明": "复制到目标工程根目录并改名为 copyright.config.json。softwareName 必填，其余可缺省。",
+
+  "softwareName": "XX科研工作台软件（Example Studio）",
+  "version": "V1.0",
+  "outDir": "copyright/out",
+
+  "_includeRoots说明": "源码根目录，决定源程序前 30 页/后 30 页的内容顺序。建议把最能体现技术含量的模块排在最前。留空则自动探测 src/lib/app/crates 等常见目录。",
+  "includeRoots": [
+    "crates/core/src",
+    "server/src",
+    "web/src"
+  ],
+
+  "_extensions说明": "参与收录的源文件后缀。样式文件（.css/.scss）通常建议排除——界面样式最容易与第三方 UI 库雷同。",
+  "extensions": [".rs", ".ts", ".tsx"],
+
+  "_excludePathParts说明": "路径片段命中即排除，会与脚本内置的测试/依赖/构建目录清单合并。",
+  "excludePathParts": [
+    "/legacy/",
+    "/examples/"
+  ],
+
+  "_thirdPartyTokens说明": "关键：文件内容命中任一正则即整个文件排除。登记勾选「原创」是法律声明，凡引用、改编或补丁化第三方项目的文件都不得混入提交的 60 页。请按本工程实际引入的第三方项目逐一列出。",
+  "thirdPartyTokens": [
+    "vscodium",
+    "overleaf",
+    "tectonic"
+  ],
+
+  "_maxAcceptableLine说明": "单行超过该长度多为内嵌 base64、压缩产物或超长提示词，不具代码展示性，整文件排除。",
+  "maxAcceptableLine": 400,
+
+  "linesPerPage": 50,
+  "frontPages": 30,
+  "backPages": 30
+}

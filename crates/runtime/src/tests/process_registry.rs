@@ -161,13 +161,39 @@ fn drain_reader_returns_partial_output_instead_of_waiting_for_eof() {
     let reader = read_stream_in_thread(PartialThenParked { sent: false });
     let started = Instant::now();
 
-    let (bytes, held) = drain_reader(Some(reader), Instant::now() + Duration::from_millis(400));
+    let drained = drain_reader(Some(reader), Instant::now() + Duration::from_millis(400));
 
-    assert!(held, "a pipe with no EOF must be reported as still held");
-    assert_eq!(bytes, b"partial");
+    assert!(
+        drained.held,
+        "a pipe with no EOF must be reported as still held"
+    );
+    assert_eq!(drained.bytes, b"partial");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "draining must respect the deadline instead of blocking on the reader"
+    );
+}
+
+/// A held pipe is not the same as a truncated capture. An idle service holds
+/// stdout open forever with nothing more to say, and telling the model its
+/// output "may be incomplete" there sends it to re-run a command that already
+/// printed everything.
+#[test]
+fn a_pipe_held_open_after_the_output_settles_is_not_reported_as_truncated() {
+    let reader = read_stream_in_thread(PartialThenParked { sent: false });
+
+    // Long enough past the settle window that the absence of new bytes is
+    // observable, unlike the deadline in the test above.
+    let drained = drain_reader(
+        Some(reader),
+        Instant::now() + super::READER_SETTLE_WINDOW + Duration::from_millis(400),
+    );
+
+    assert!(drained.held, "the pipe is still open");
+    assert_eq!(drained.bytes, b"partial");
+    assert!(
+        !drained.truncated,
+        "output stopped arriving well before the deadline"
     );
 }
 

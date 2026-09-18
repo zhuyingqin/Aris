@@ -38,8 +38,14 @@ pub enum EventType {
         reason: String,
         iteration: usize,
         tool_calls: usize,
+        /// Whole-request estimates: messages *plus* the system prompt and tool
+        /// schemas. The `SessionCompactionRecord` for the same checkpoint counts
+        /// messages only, so the two differ by exactly `context_overhead_tokens`
+        /// — recorded here so a reader can reconcile them instead of reading two
+        /// unequal numbers for one event as a contradiction.
         tokens_before: usize,
         tokens_after: usize,
+        context_overhead_tokens: usize,
         removed_messages: usize,
     },
     SkillInvoke {
@@ -55,6 +61,29 @@ pub enum EventType {
         model: String,
     },
     SessionEnd,
+    /// A compaction shipped the deterministic summary instead of an LLM one.
+    ///
+    /// The degraded summary is visible in the transcript, but nothing used to
+    /// say *why* — and the most common cause, "no summarizer model was ever
+    /// resolved for this provider", makes zero requests and so leaves no trace
+    /// at all in a wire log. A user looking at a summary that lists ANSI escape
+    /// codes as key files has no way to distinguish that from a provider
+    /// outage.
+    CompactionSummaryFallback {
+        reason: String,
+    },
+    /// The model-visible tool array changed mid-turn.
+    ///
+    /// Emitted because the turn-start routing snapshot is not the whole story:
+    /// a `ToolSearch` can grow the live set past what that snapshot recorded,
+    /// and every such change re-cuts the head of the prompt. Without this event
+    /// a diagnostics bundle reports the turn-start count as both the minimum
+    /// and the maximum and the re-cache looks like it came from nowhere.
+    ToolRoutingChanged {
+        activated: Vec<String>,
+        deactivated: Vec<String>,
+        active_tool_count: usize,
+    },
 }
 
 impl fmt::Display for EventType {
@@ -69,6 +98,12 @@ impl fmt::Display for EventType {
             Self::UserPrompt { .. } => write!(f, "user_prompt"),
             Self::SessionStart { model } => write!(f, "session_start:{model}"),
             Self::SessionEnd => write!(f, "session_end"),
+            Self::ToolRoutingChanged {
+                active_tool_count, ..
+            } => write!(f, "tool_routing_changed:{active_tool_count}"),
+            Self::CompactionSummaryFallback { reason } => {
+                write!(f, "compaction_summary_fallback:{reason}")
+            }
         }
     }
 }
@@ -194,9 +229,10 @@ impl EventSink for JsonlEventSink {
                 tool_calls,
                 tokens_before,
                 tokens_after,
+                context_overhead_tokens,
                 removed_messages,
             } => format!(
-                r#"{{"ts":"{}","session":"{}","event":"context_checkpoint","reason":"{}","iteration":{},"tool_calls":{},"tokens_before":{},"tokens_after":{},"removed_messages":{}}}"#,
+                r#"{{"ts":"{}","session":"{}","event":"context_checkpoint","reason":"{}","iteration":{},"tool_calls":{},"tokens_before":{},"tokens_after":{},"context_overhead_tokens":{},"removed_messages":{}}}"#,
                 event.timestamp,
                 escape_json(&sanitize_field(&self.session_id, 60)),
                 escape_json(&sanitize_field(reason, 40)),
@@ -204,6 +240,7 @@ impl EventSink for JsonlEventSink {
                 tool_calls,
                 tokens_before,
                 tokens_after,
+                context_overhead_tokens,
                 removed_messages,
             ),
             EventType::SkillInvoke { skill_name, args } => {
@@ -266,6 +303,28 @@ impl EventSink for JsonlEventSink {
                     event.timestamp, self.session_id,
                 )
             }
+            EventType::CompactionSummaryFallback { reason } => {
+                format!(
+                    r#"{{"ts":"{}","session":"{}","event":"compaction_summary_fallback","reason":"{}"}}"#,
+                    event.timestamp,
+                    escape_json(&sanitize_field(&self.session_id, 60)),
+                    escape_json(&sanitize_field(reason, 80)),
+                )
+            }
+            EventType::ToolRoutingChanged {
+                activated,
+                deactivated,
+                active_tool_count,
+            } => {
+                format!(
+                    r#"{{"ts":"{}","session":"{}","event":"tool_routing_changed","activated":{},"deactivated":{},"active_tool_count":{}}}"#,
+                    event.timestamp,
+                    escape_json(&sanitize_field(&self.session_id, 60)),
+                    json_string_array(activated),
+                    json_string_array(deactivated),
+                    active_tool_count,
+                )
+            }
         };
 
         // Best-effort write; never crash the runtime on log failure
@@ -279,6 +338,15 @@ fn write_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{line}")
+}
+
+fn json_string_array(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape_json(&sanitize_field(value, 80))))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{items}]")
 }
 
 /// Sanitize a string: truncate and remove control chars.

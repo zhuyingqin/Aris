@@ -93,6 +93,24 @@ const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 16_000;
 /// compaction cannot collapse the working set below the last couple of
 /// exchanges (the near-context-reset failure mode).
 pub(crate) const MIN_PRESERVED_USER_TURNS: usize = 2;
+/// How many user-attached images survive a compaction verbatim.
+///
+/// Summarizing an image is not possible: `[image: image/png, 2886208 base64
+/// chars]` is not a lossy description of a design mock-up, it is the absence of
+/// one. A task like "make the page look like this" refers to the attachment for
+/// the rest of the session, and the pinned user request literally says the image
+/// is in the message — so dropping it both blinds the model and makes the pinned
+/// text a lie. Bounded because the point is to keep the task's inputs, not to
+/// re-inflate the context: a resized raster costs on the order of
+/// [`IMAGE_TOKEN_CEILING`] tokens, so this ceiling is a few thousand tokens.
+///
+/// The emergency-shrink path uses the same ceiling rather than a stricter one.
+/// That looks careless and is not: the overflow path sheds hundreds of
+/// thousands of tokens to get under a hard provider limit, and four resized
+/// rasters are under 7k. A separate emergency cap would be guarding against the
+/// old `base64_len / 4` estimate, which is exactly the arithmetic
+/// [`estimate_image_tokens`] exists to correct.
+const MAX_CARRIED_USER_IMAGES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionSource {
@@ -283,6 +301,10 @@ pub struct CompactionPlan {
     pub preserved: Vec<ConversationMessage>,
     pub split_index: usize,
     pub tokens_before: usize,
+    /// User-attached images from `removed` that ride into the compacted session
+    /// verbatim, because no summary of them exists. See
+    /// [`MAX_CARRIED_USER_IMAGES`].
+    pub carried_images: Vec<ContentBlock>,
 }
 
 /// Decide what to remove vs preserve, returning `None` when the session is too
@@ -323,12 +345,41 @@ pub fn plan_compaction(session: &Session, config: &CompactionConfig) -> Option<C
         return None;
     }
     let preserved = session.messages[split_index..].to_vec();
+    let carried_images = carry_forward_user_images(&removed, MAX_CARRIED_USER_IMAGES);
     Some(CompactionPlan {
         removed,
         preserved,
         split_index,
         tokens_before: estimate_session_tokens(session),
+        carried_images,
     })
+}
+
+/// The most recent user-attached images in `removed`, oldest-first so several
+/// attachments keep the order the user sent them in.
+///
+/// Only images the *user* attached are carried. A tool-result screenshot is
+/// regenerable evidence — the model can take it again, and it was captured to
+/// answer a question that the summary already records. A user's attachment is a
+/// task input with no other copy in the conversation.
+fn carry_forward_user_images(
+    removed: &[ConversationMessage],
+    max_images: usize,
+) -> Vec<ContentBlock> {
+    if max_images == 0 {
+        return Vec::new();
+    }
+    let mut carried = removed
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::User)
+        .flat_map(|message| message.blocks.iter().rev())
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .take(max_images)
+        .cloned()
+        .collect::<Vec<_>>();
+    carried.reverse();
+    carried
 }
 
 /// Number of newest messages to try to preserve so that their cumulative token
@@ -549,9 +600,15 @@ pub fn assemble_compacted_session_with_usage(
     // MessageRole::System messages, so under the old code the compaction
     // summary was silently dropped for OpenAI-compatible executors. User role
     // is serialized as "user" by every executor.
+    // The carried attachments ride on the continuation message itself rather
+    // than as a separate message: it is already the User turn that speaks for
+    // everything compaction removed, and its pinned block quotes the request
+    // that refers to them ("the image is included directly in this message").
+    let mut continuation_blocks = vec![ContentBlock::Text { text: continuation }];
+    continuation_blocks.extend(plan.carried_images.iter().cloned());
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::User,
-        blocks: vec![ContentBlock::Text { text: continuation }],
+        blocks: continuation_blocks,
         usage: None,
     }];
     compacted_messages.extend(plan.preserved.iter().cloned());
@@ -573,12 +630,18 @@ pub fn assemble_compacted_session_with_usage(
                 .iter()
                 .map(estimate_message_tokens)
                 .sum::<usize>();
+            let carried_image_tokens = plan
+                .carried_images
+                .iter()
+                .map(estimate_block_tokens)
+                .sum::<usize>();
             (
                 usize::try_from(summary_output_tokens)
                     .unwrap_or(usize::MAX)
                     .saturating_add(extra_summary_tokens)
                     .saturating_add(wrapper_tokens)
-                    .saturating_add(preserved_tokens),
+                    .saturating_add(preserved_tokens)
+                    .saturating_add(carried_image_tokens),
                 CompactionTokenEstimateSource::ProviderSummaryUsage,
             )
         } else {
@@ -1366,8 +1429,15 @@ pub(crate) fn bound_fallback_summary(summary: String, max_content_chars: usize) 
 fn summarize_block(block: &ContentBlock) -> String {
     let raw = match block {
         ContentBlock::Text { text } => text.clone(),
+        // Named as omitted, not as present. `plan_compaction` carries the
+        // user's own attachments into the compacted session, so anything that
+        // reaches this line really is gone from context and the model must not
+        // read the placeholder as "the picture is right here".
         ContentBlock::Image { media_type, data } => {
-            format!("[image: {media_type}, {} base64 chars]", data.len())
+            format!(
+                "[image omitted from summary: {media_type}, {} base64 chars]",
+                data.len()
+            )
         }
         ContentBlock::ToolUse { name, .. } => format!("tool_use {name}([input omitted])"),
         ContentBlock::ToolResult {
@@ -1825,24 +1895,54 @@ fn truncate_summary(content: &str, max_chars: usize) -> String {
 }
 
 pub(crate) fn estimate_message_tokens(message: &ConversationMessage) -> usize {
-    message
-        .blocks
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => estimate_text_tokens(text),
-            ContentBlock::Image { data, .. } => data.len() / 4 + 1,
-            ContentBlock::ToolUse { name, input, .. } => {
-                estimate_text_tokens(name) + estimate_text_tokens(input)
-            }
-            ContentBlock::ToolResult {
-                tool_name, output, ..
-            } => estimate_text_tokens(tool_name) + estimate_text_tokens(output),
-            ContentBlock::Thinking {
-                thinking,
-                signature,
-            } => estimate_text_tokens(thinking) + estimate_text_tokens(signature),
-        })
-        .sum()
+    message.blocks.iter().map(estimate_block_tokens).sum()
+}
+
+pub(crate) fn estimate_block_tokens(block: &ContentBlock) -> usize {
+    match block {
+        ContentBlock::Text { text } => estimate_text_tokens(text),
+        ContentBlock::Image { data, .. } => estimate_image_tokens(data.len()),
+        ContentBlock::ToolUse { name, input, .. } => {
+            estimate_text_tokens(name) + estimate_text_tokens(input)
+        }
+        ContentBlock::ToolResult {
+            tool_name, output, ..
+        } => estimate_text_tokens(tool_name) + estimate_text_tokens(output),
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => estimate_text_tokens(thinking) + estimate_text_tokens(signature),
+    }
+}
+
+/// Every image costs at least this much: providers charge for a fixed grid of
+/// patches even on a thumbnail.
+const IMAGE_TOKEN_FLOOR: usize = 256;
+/// And never more than this: a vision model resizes the raster to a bounded
+/// long edge before tokenizing it, so per-image cost saturates instead of
+/// scaling with the file.
+const IMAGE_TOKEN_CEILING: usize = 1_600;
+/// Decoded bytes per token between the floor and the ceiling. Chosen so a
+/// typical full-page screenshot lands near the ceiling and a small icon stays
+/// near the floor.
+const IMAGE_BYTES_PER_TOKEN: usize = 512;
+
+/// Cost of an image block, from the length of its base64 payload.
+///
+/// Emphatically *not* `base64_len / 4`. A vision model tokenizes a resized
+/// raster, never the transport encoding, so encoded length is not even the
+/// right order of magnitude: a 2.1 MB pasted screenshot measured ~1.7k prompt
+/// tokens while `len / 4` claimed 721k. That single line inflated one session's
+/// reported context by 8.5x (789,553 estimated against 92,567 actually billed)
+/// and — because [`should_compact`] compares this estimate against the model's
+/// window — made every session that contains a pasted image look due for
+/// compaction from its first turn.
+#[must_use]
+fn estimate_image_tokens(base64_len: usize) -> usize {
+    let bytes = base64_len / 4 * 3;
+    IMAGE_TOKEN_FLOOR
+        .saturating_add(bytes / IMAGE_BYTES_PER_TOKEN)
+        .min(IMAGE_TOKEN_CEILING)
 }
 
 #[must_use]

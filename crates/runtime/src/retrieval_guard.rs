@@ -2891,7 +2891,7 @@ fn is_network_tool_call(tool_name: &str, input: &str) -> bool {
         })
         .unwrap_or_default()
         .to_ascii_lowercase();
-    [
+    if ![
         "http://",
         "https://",
         "curl ",
@@ -2906,6 +2906,64 @@ fn is_network_tool_call(tool_name: &str, input: &str) -> bool {
     ]
     .iter()
     .any(|marker| command.contains(marker))
+    {
+        return false;
+    }
+    // Talking to this machine is not external retrieval. Counting it as such
+    // charged every dev-server check the full candidate-evidence preamble, and
+    // spent one of the `TOTAL_RETRIEVAL_CALL_LIMIT` budget slots — a limit that
+    // is not gated by `candidate_workflow`, so a long verification session
+    // could be told external retrieval was closed for the sole reason that it
+    // kept curling its own preview.
+    //
+    // A command with a network verb but no literal URL (`curl "$ENDPOINT"`)
+    // still counts: the destination is unknowable here, and the safe default
+    // for a guard is to assume it left the machine.
+    let urls = urls_in_text(&command);
+    !(!urls.is_empty() && urls.iter().all(|url| is_local_url(url)))
+}
+
+/// Whether a URL's host is this machine or a private network that cannot be
+/// reached from outside it.
+fn is_local_url(url: &str) -> bool {
+    let Some(host) = url_host(url) else {
+        return false;
+    };
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if host == "::1" || host == "0.0.0.0" {
+        return true;
+    }
+    let octets = host
+        .split('.')
+        .map(|part| part.parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>();
+    match octets.as_deref() {
+        // Loopback is the whole 127.0.0.0/8 block, not just 127.0.0.1.
+        Some([127, ..]) => true,
+        // RFC1918.
+        Some([10, ..]) | Some([192, 168, _, _]) => true,
+        Some([172, second, _, _]) => (16..=31).contains(second),
+        _ => false,
+    }
+}
+
+/// The bare host of a URL: no scheme, no userinfo, no port, and IPv6 brackets
+/// removed so `[::1]:8080` compares equal to `::1`.
+fn url_host(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal: the port, if any, follows the closing bracket.
+        Some(rest) => rest.split_once(']').map_or(rest, |(inside, _)| inside),
+        None => authority.split_once(':').map_or(authority, |(host, _)| host),
+    };
+    (!host.is_empty()).then_some(host)
 }
 
 fn urls_in_text(text: &str) -> Vec<&str> {

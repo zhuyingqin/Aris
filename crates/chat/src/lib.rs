@@ -419,6 +419,15 @@ pub const MAX_ACTIVE_TOOLS: usize = 24;
 
 /// Always visible, never evicted: without `ToolSearch` the model cannot recover
 /// anything, and the read/search set is what every task starts from.
+///
+/// The edit pair is pinned for the same reason `bash` is. `bash`'s own
+/// description tells the model to change files with `edit_file`/`multi_edit`
+/// and not with heredocs or in-place `sed`, so a core set that ships the shell
+/// without the editors states a rule the model cannot follow: every edit then
+/// has to be smuggled through `bash`, which is both more turns and a worse
+/// failure mode (a broken heredoc corrupts the file instead of failing the
+/// call). Creating files stays intent-routed — `write_file` is needed far less
+/// often than the editors, and the slots are better spent rotating.
 const PINNED_CORE_TOOLS: &[&str] = &[
     "ToolSearch",
     "read_file",
@@ -426,6 +435,8 @@ const PINNED_CORE_TOOLS: &[&str] = &[
     "glob_search",
     "grep_search",
     "bash",
+    "edit_file",
+    "multi_edit",
 ];
 
 /// Visible from the first request but evictable once the turn's real shape is
@@ -517,11 +528,38 @@ pub fn dynamic_tool_routing_mode() -> ToolRoutingMode {
 /// Choose a conservative initial model-visible subset. This is only a schema
 /// projection: every name still remains in the executable permission catalog,
 /// and ToolSearch can activate deferred names before the next model request.
+///
+/// Equivalent to [`route_chat_tools_with_carry_forward`] for a session's first
+/// turn. Later turns should pass what the previous turn ended up using.
 #[must_use]
 pub fn route_chat_tools(
     user_text: &str,
     tool_specs: &[ChatToolSpec],
     mode: ToolRoutingMode,
+) -> ToolRoutingPlan {
+    route_chat_tools_with_carry_forward(user_text, tool_specs, mode, &BTreeSet::new())
+}
+
+/// Route this turn's tools, starting from the names the session has already
+/// paid to publish.
+///
+/// `carry_forward` is the previous turn's active set plus anything it executed
+/// while deferred. Honouring it is what keeps the tool array — and therefore
+/// the provider's prompt prefix cache — stable across a conversation. Planning
+/// each turn from its prompt text alone looks harmless but silently re-cuts the
+/// array every turn: one measured session dropped four tools the previous turn
+/// had used and admitted two it never called, and paid a full re-cache for the
+/// privilege.
+///
+/// Carry-forward is a floor on visibility, never a ceiling on the budget: it is
+/// applied before intent extras so that a turn which needs new tools can still
+/// get them, and the whole set stays under `MAX_ROUTED_TOOLS`.
+#[must_use]
+pub fn route_chat_tools_with_carry_forward(
+    user_text: &str,
+    tool_specs: &[ChatToolSpec],
+    mode: ToolRoutingMode,
+    carry_forward: &BTreeSet<String>,
 ) -> ToolRoutingPlan {
     let catalog_names = tool_specs
         .iter()
@@ -553,7 +591,7 @@ pub fn route_chat_tools(
         };
     }
 
-    let lowered = user_text.to_lowercase();
+    let lowered = routing_text(&user_text.to_lowercase());
     let mut profiles = vec!["core"];
     let mut reasons = Vec::new();
     let mut active_names = BTreeSet::new();
@@ -609,6 +647,23 @@ pub fn route_chat_tools(
             }
         }
     }
+    // Everything the session already published, against the *live* ceiling
+    // rather than the first-request one. Keeping a tool that was in last turn's
+    // array is free — the schema bytes were already sent and cached — while
+    // dropping it re-cuts the array and re-bills the entire transcript. So this
+    // outranks the speculative extras below and may push the initial set past
+    // `MAX_ROUTED_TOOLS`, which is a budget for guessing, not for facts.
+    let carried = carry_forward
+        .iter()
+        .filter(|name| catalog_names.contains(*name))
+        .filter(|name| !active_names.contains(*name))
+        .take(MAX_ACTIVE_TOOLS.saturating_sub(active_names.len()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !carried.is_empty() {
+        reasons.push(format!("carried from previous turn: {}", carried.join(", ")));
+        active_names.extend(carried);
+    }
     for name in resolve_named(&catalog_names, SECONDARY_CORE_TOOLS) {
         if active_names.len() >= MAX_ROUTED_TOOLS {
             break;
@@ -647,6 +702,92 @@ pub fn route_chat_tools(
     }
 }
 
+const RESUME_PREAMBLE: &str = "this session is being continued from a previous conversation";
+/// The compactor's `## Current Focus` goal line. Deliberately stops before the
+/// colon: the same field is emitted as `- Active user goal: …` and, once the
+/// compacted range no longer contains a user message of its own, as
+/// `- Active user goal from prior compacted state: …`. Anchoring on the colon
+/// matched only the first, so every second-and-later resume fell back to
+/// routing on the whole document.
+const RESUME_GOAL_PREFIX: &str = "- active user goal";
+/// The compactor's third spelling of the same field. It means the goal is
+/// *empty*, not that the document has none to offer — falling through to the
+/// full text here would route on section headers (`## Current Focus` supplies
+/// the web intent's `current`) and on preserved tool-failure traces.
+const RESUME_NO_GOAL_LINE: &str = "- no explicit user request found";
+/// A verbatim request carried in the pinned block. That block keeps the
+/// session's *first* request forever by design, so only the last such line can
+/// stand for the current intent: taking all of them kept a months-old research
+/// ask pinning `LiteratureSearch` onto every later CSS turn.
+const RESUME_PINNED_REQUEST_PREFIX: &str = "- user request:";
+
+/// Fixed sentences the desktop appends to a message that carries a file.
+///
+/// Only the prose is dropped. The `[Attached image: …]` marker itself stays:
+/// its file name is something the user chose, so it is a legitimate signal,
+/// and it was never the thing that misrouted a turn.
+const ATTACHMENT_NOTICES: &[&str] = &[
+    "the image is included directly in this message.",
+    "inspect it directly instead of searching the workspace for it.",
+    "use the local path only when a tool requires a file path.",
+];
+
+/// The part of a turn's prompt that should steer routing, lowercased.
+///
+/// `user_text` is not only what the user typed. The desktop appends attachment
+/// boilerplate to every message carrying a file, and a turn resumed after
+/// compaction arrives as a whole summary document. Both were routing real turns
+/// on words nobody chose: "…when a tool req**ui**res a file path" supplied the
+/// `ui` that loaded the browser bundle, and "instead of **search**ing the
+/// workspace" supplied the `search` that loaded the literature one — on a turn
+/// whose actual request was to recolor a logo.
+fn routing_text(lowered: &str) -> String {
+    let resumed = resume_goal_lines(lowered);
+    strip_attachment_boilerplate(resumed.as_deref().unwrap_or(lowered))
+}
+
+/// A resume prompt's own statement of what the user wants, which the template
+/// marks as authoritative. Routing on the whole document instead would take its
+/// signal from preserved tool traces and section headers.
+fn resume_goal_lines(lowered: &str) -> Option<String> {
+    if !lowered.contains(RESUME_PREAMBLE) {
+        return None;
+    }
+    let mut goals = Vec::new();
+    let mut latest_pinned_request = None;
+    let mut stated_no_goal = false;
+    for line in lowered.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(RESUME_GOAL_PREFIX) {
+            // Whichever spelling this is, the goal is what follows the first
+            // colon — either immediately, or after "from prior compacted state".
+            if let Some((_, goal)) = rest.split_once(':') {
+                goals.push(goal);
+            }
+        } else if trimmed.starts_with(RESUME_NO_GOAL_LINE) {
+            stated_no_goal = true;
+        } else if let Some(request) = trimmed.strip_prefix(RESUME_PINNED_REQUEST_PREFIX) {
+            latest_pinned_request = Some(request);
+        }
+    }
+    // The pinned block is a fallback, not a supplement: it speaks for the turn
+    // only when `## Current Focus` named no goal of its own.
+    if goals.is_empty() {
+        goals.extend(latest_pinned_request);
+    }
+    (!goals.is_empty() || stated_no_goal).then(|| goals.join("\n"))
+}
+
+fn strip_attachment_boilerplate(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    for notice in ATTACHMENT_NOTICES {
+        if cleaned.contains(notice) {
+            cleaned = cleaned.replace(notice, " ");
+        }
+    }
+    cleaned
+}
+
 /// Tool bundles for every intent the prompt matches, in allocation priority
 /// order.
 fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
@@ -655,7 +796,7 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         lowered,
         &[
             "create", "new file", "generate", "scaffold", "draft", "新建", "创建", "生成", "新增",
-            "写一个", "写个",
+            "写一个", "写个", "做一个", "做个", "弄一个", "加一个",
         ],
     ) {
         groups.push(ToolGroup {
@@ -673,11 +814,62 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             ),
         });
     }
+    // The verbs people actually type for "change this file". The English half
+    // was the only half that worked: a turn spent entirely on edits ("你删一下",
+    // "弄成透明", "到2026就停") matched nothing here and ran on the read-only
+    // core, so every edit went through a `bash` heredoc.
     if contains_any(
         lowered,
         &[
-            "fix", "implement", "edit", "change", "refactor", "build", "update", "modify", "rename",
-            "修改", "修复", "实现", "添加", "重构", "更新", "调整", "优化",
+            "fix",
+            "implement",
+            "edit",
+            "change",
+            "refactor",
+            "build",
+            "rebuild",
+            "update",
+            "modify",
+            "rename",
+            "replace",
+            "remove",
+            "delete",
+            "修改",
+            "修复",
+            "实现",
+            "添加",
+            "重构",
+            "更新",
+            "调整",
+            "优化",
+            "改",
+            "删",
+            "去掉",
+            "换",
+            "替换",
+            // Compounds, not the bare verbs. `加`, `停` and `弄` are common
+            // enough as syllables that they matched ordinary prose ("加州理工"
+            // routed a complexity question to the editors), and because a
+            // group's `required` is allocated before any group's `optional`, a
+            // stray match does not merely add tools — it takes them. One
+            // incidental `加` in a literature request cost that turn
+            // `LiteraturePdfDownload` and `LiteratureSearchExecute`.
+            "加上",
+            "加个",
+            "增加",
+            "停在",
+            "停止",
+            "停下",
+            "就停",
+            "弄成",
+            "弄为",
+            "弄好",
+            "弄到",
+            "重命名",
+            "移动",
+            "放到",
+            "对齐",
+            "统一",
         ],
     ) {
         groups.push(ToolGroup {
@@ -724,6 +916,33 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             reason: "multi-file investigation intent",
             required: resolve_named(catalog, &["read_files", "glob_search", "grep_search"]),
             optional: resolve_named(catalog, &["session_search", "WorkspaceLayout", "bash"]),
+        });
+    }
+    if contains_any(
+        lowered,
+        &[
+            "deploy",
+            "publish",
+            "rollout",
+            "部署",
+            "上线",
+            "发布",
+            // Not bare `服务器`: "启动开发服务器看一下" is not a deployment, and
+            // it was pinning the confirmation tool on ordinary local work.
+            // `部署` already covers "部署到服务器".
+            "传到服务器",
+            "推送到",
+        ],
+    ) {
+        // Shipping is the outward-facing, hard-to-reverse step of a coding
+        // turn, so the tool that asks before taking it must not be an evictable
+        // extra. `bash` and the readers are already core; the point of this
+        // group is to pin the confirmation path.
+        groups.push(ToolGroup {
+            profile: "deploy",
+            reason: "deployment intent",
+            required: resolve_named(catalog, &["AskUserQuestion"]),
+            optional: resolve_named(catalog, &["bash", "read_file", "change_list"]),
         });
     }
     if contains_any(
@@ -980,7 +1199,54 @@ fn mentions_tool(lowered_text: &str, name: &str) -> bool {
 }
 
 fn contains_any(text: &str, terms: &[&str]) -> bool {
-    terms.iter().any(|term| text.contains(term))
+    terms.iter().any(|term| contains_term(text, term))
+}
+
+/// Whether `term` occurs in `text` as the start of a word rather than buried
+/// inside a longer one.
+///
+/// Bare substring matching routed real turns on text the user never wrote: the
+/// attachment boilerplate's "when a tool req**ui**res a file path" matched the
+/// browser keyword `ui`, and a CSS tweak arrived with the browser and
+/// literature bundles loaded while the file editors stayed deferred. Anchoring
+/// the start kills every such infix hit while keeping English inflection
+/// ("update" still matches "updated"), which a full word boundary would drop.
+///
+/// Two deliberate exceptions:
+/// - A term containing non-ASCII characters keeps plain substring semantics.
+///   CJK is written without separators, so there is no boundary to test.
+/// - Terms of two ASCII characters (`ui`) also have to end at a boundary.
+///   Anchoring the start already rules out `requires`, but not `uid` or
+///   `ui_state`, and a two-letter stem has no inflection worth preserving.
+///   Three letters does: `fix` has to keep matching `fixes`.
+fn contains_term(text: &str, term: &str) -> bool {
+    if !term.is_ascii() {
+        return text.contains(term);
+    }
+    let anchor_start = term.starts_with(is_keyword_char);
+    let anchor_end = term.len() <= 2 && term.ends_with(is_keyword_char);
+    if !anchor_start && !anchor_end {
+        return text.contains(term);
+    }
+    text.match_indices(term).any(|(start, matched)| {
+        let start_ok = !anchor_start
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_keyword_char(ch));
+        let end_ok = !anchor_end
+            || text[start + matched.len()..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_keyword_char(ch));
+        start_ok && end_ok
+    })
+}
+
+/// What counts as "still the same word" for [`contains_term`]. ASCII only: a
+/// CJK character next to an ASCII keyword is a boundary, not a continuation.
+fn is_keyword_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn tool_schema_context_overhead_tokens(tool_specs: &[ChatToolSpec], enable_tools: bool) -> usize {
@@ -2186,30 +2452,87 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
             // the deterministic compact summary instead of accidentally
             // spending the main model on a 120k-character summarization call.
             let sibling = if model_lower_starts_with(model, "gpt-5") {
-                "gpt-5-mini"
+                Some("gpt-5-mini")
             } else if model_lower_starts_with(model, "gpt-4o") {
-                "gpt-4o-mini"
+                Some("gpt-4o-mini")
             } else if model_lower_starts_with(model, "gpt-4.1") {
-                "gpt-4.1-mini"
+                Some("gpt-4.1-mini")
             } else {
-                return None;
+                None
             };
             // A family name is not a promise that the gateway carries the whole
             // family. The managed gateway serves gpt-5.x without any `-mini`,
             // so guessing there cost three retries and a degraded summary on
             // *every* compaction. Where the served models are known, the
             // sibling has to be among them.
-            if known_models.is_empty()
-                || known_models
-                    .iter()
-                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(sibling))
-            {
-                Some(sibling.to_string())
-            } else {
-                None
+            if let Some(sibling) = sibling {
+                if known_models.is_empty()
+                    || known_models
+                        .iter()
+                        .any(|candidate| candidate.trim().eq_ignore_ascii_case(sibling))
+                {
+                    return Some(sibling.to_string());
+                }
             }
+            // No guessable sibling — but the gateway told us what it serves, so
+            // look instead of giving up. Returning `None` here is not a neutral
+            // default: it disables LLM summarization for the whole session
+            // without a single request or log line, and every compaction then
+            // silently ships the deterministic summary, which is the one that
+            // lists ANSI-coloured build output as "key files".
+            cheap_model_from_catalog(model, known_models)
         }
     }
+}
+
+/// Words a served model name uses to advertise itself as the small, cheap tier.
+///
+/// Matched as whole delimiter-separated segments, never as substrings:
+/// `MiniMax-M3` is a flagship that happens to start with the letters of "mini",
+/// and `gemini-*` contains them too. A substring test picks both as the cheap
+/// tier and quietly routes summarization to an expensive model.
+const CHEAP_MODEL_MARKERS: &[&str] = &["mini", "flash", "lite", "small", "nano", "haiku"];
+
+fn advertises_cheap_tier(name: &str) -> bool {
+    name.to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|segment| CHEAP_MODEL_MARKERS.contains(&segment))
+}
+
+/// Pick a summarization model out of the gateway's own catalog.
+///
+/// Preference order: the executor itself when it is already a cheap tier (the
+/// summary is then exactly as cheap as the turn that triggered it), then a
+/// cheap model from the same vendor, then any cheap model. Deterministic given
+/// the same catalog, so a session does not swap summarizers between
+/// compactions.
+fn cheap_model_from_catalog(model: &str, known_models: &[String]) -> Option<String> {
+    if advertises_cheap_tier(model) {
+        return Some(model.to_string());
+    }
+    let vendor = model_vendor_prefix(model);
+    let mut candidates = known_models
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty() && advertises_cheap_tier(name))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates
+        .iter()
+        .find(|name| !vendor.is_empty() && model_vendor_prefix(name) == vendor)
+        .or_else(|| candidates.first())
+        .map(|name| (*name).to_string())
+}
+
+/// The leading vendor-ish token of a model name: `deepseek` from
+/// `deepseek-v4.1-flash`, `gpt` from `gpt-5.6-sol`.
+fn model_vendor_prefix(model: &str) -> String {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect()
 }
 
 fn model_lower_starts_with(model: &str, prefix: &str) -> bool {

@@ -1,5 +1,107 @@
 # ARIS-Code Changelog
 
+## v0.4.70 (2026-09-17)
+
+- **Tauri auto-updater: dual-endpoint China / Global** —
+  `desktop/src-tauri/src/updater.rs` (157 lines, new) wires
+  `tauri_plugin_updater` against two endpoints:
+  `https://somni.chat/releases/latest.json` for the China
+  mirror and
+  `https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json`
+  for Global. The plugin emits `AppUpdateInfo`,
+  `AppUpdateInstallResult`, and `AppUpdateProgress` (the last
+  via `tauri::ipc::Channel` so the desktop can render a live
+  progress bar without polling). `desktop/src-tauri/src/lib.rs`
+  (+3), `engine.rs` (+8), and the matching capability diff in
+  `capabilities/default.json` register the commands and
+  permissions; `desktop/src/api/tauri.ts` (+57) exposes the
+  IPC surface; `App.tsx` (+6), `SvgIcon.tsx` (+49), and
+  `settings/AboutSettings.tsx` (+4) carry the UI hook into
+  the titlebar and the About page.
+- **In-app ImageLightbox (no more OS-default hand-off)** —
+  `desktop/src/ImageLightbox.{tsx,css}` and `imageFiles.ts`
+  (new) keep image previews inside SomniQ with the zoom /
+  100% / fit controls the LaTeX figure preview already
+  offers. The system viewer is demoted to an explicit action;
+  previously every figure, screenshot, or paper supplement
+  launched a separate program on top of the app. Wired into
+  `chat/ChatImagePreview.tsx` (+ tests).
+- **Tool output Tauri command surface** —
+  `desktop/src-tauri/src/tool_output.rs` (+39, new) and
+  `tests/tool_output.rs` (+42, new) are the Tauri command
+  layer over the v0.4.69 `crates/runtime/src/tool_output_artifact.rs`.
+- **Independent review controller hardening** —
+  `desktop/src/chat/useIndependentReview.ts` and its test
+  carry the controller changes the audit
+  `[[project_independent_review_loop_analysis]]` flagged;
+  combined with `crates/runtime/src/retrieval_guard.rs`
+  (plus its test) which now matches the
+  `[[project_retrieval_guard_refusal_contract]]` (counts +
+  clearable, candidate_workflow fail-open, retrieval_role
+  is the sole outbound allowlist).
+- **Runtime paths module + tests** —
+  `crates/runtime/src/paths.rs` (+110, new) and
+  `tests/paths.rs` (+67, new) centralise the runtime path
+  helpers that file_ops, tool_output_artifact, and the
+  evidence ledger all reach for. `crates/runtime/build.rs`
+  (+2) ships the matching build-script wiring.
+- **soft-copyright skill: 中国软件著作权登记材料** —
+  `crates/runtime/assets/skills/soft-copyright/` ships the
+  bundled runtime skill: `SKILL.md` (183) plus
+  `scripts/check-fields.cjs`,
+  `scripts/gen-source-listing.cjs`,
+  `scripts/render-pdf.cjs`, `scripts/verify-pdf.cjs`,
+  `scripts/config.example.json`, two `references/` notes,
+  and an `assets/` HTML form template. The skill produces
+  the 中国版权保护中心 application-form field content
+  (each field already adjusted to the word limit), the
+  60-page source-code listing PDF (first 30 + last 30
+  pages, 50 lines per page), the 60-page user manual PDF,
+  and the inclusion listing. Trigger keywords: 写软著,
+  软件著作权, 软著登记, 申请软著, software copyright
+  registration, 软著材料. The `docs/copyright/` mirror
+  carries the same content for the docs site
+  (`README.md`, scripts, references, plus an `out/.gitignore`
+  so generated PDFs do not get committed).
+- **Patent A1 application materials** —
+  `patent/` lands the A1 evidence-ledger patent dossier in
+  the repo (see `[[project_patent_a1_evidence_ledger]]`):
+  `README.md` (the only authoritative description, LaTeX is
+  the single source of truth per project convention),
+  `PATENT_STATE.json` for `/patent-pipeline` resume,
+  `docs/CNIPA-TEMPLATE.md` reference, the `tex/` sources,
+  the `references/`, and the `output/CNIPA/` build artefacts
+  (权利要求书 / 说明书 / 摘要附图 / 现有技术检索记录 /
+  发明构建书 / 合订本 PDFs plus `build-manifest.json` /
+  `layout-check.json` / `drawings-layout-check.json`).
+- **Extensions page overhaul** —
+  `desktop/src/extensions/Extensions.tsx` (+208 / −),
+  `Extensions.test.tsx` (+6), `i18n.ts` (+17), and
+  `desktop/src/styles.css` (+672) ship the rewritten
+  extensions surface that pairs with the v0.4.68 screenshot
+  subsystem and the v0.4.69 evidence ledger.
+- **Profile / sessions / workflow / usage_log + memory +
+  retrieval_guard hardening** —
+  `desktop/src-tauri/src/profile.rs` (+ tests/profile.rs +
+  tests/usage_log.rs), `sessions.rs`, `workflow.rs`,
+  `memory.rs`, `usage_log.rs` carry the Tauri-side changes
+  that align with the runtime hardening pass. Session +
+  retrieval guard + memory (research_memory + hot_memory +
+  cache tests + session tests) follow.
+- **Literature + Chat runtime polish** —
+  `desktop/src/literature/Literature.tsx` (+ tests), the
+  chat runtime hardening pass (`crates/chat/src/lib.rs`
+  + tests + `useChatRun` and image preview consumers), and
+  the executor tests for OpenAI transport complete the
+  surface.
+- **Site + sync_release** —
+  `site/scripts/sync_release.cjs` (+34) and
+  `site/src/i18n.ts` (+6) carry the matching marketing-site
+  sync and translations.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.70.
+
 ## v0.4.69 (2026-09-13)
 
 - **Evidence ledger: per-turn tool-loop novelty tracking** —

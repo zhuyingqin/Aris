@@ -101,6 +101,24 @@ fn entry_tokens(entry: &UsageLogEntry) -> u64 {
         + u64::from(entry.cache_read_input_tokens)
 }
 
+/// How usage rows are grouped into turns: `(session, turn)`.
+type TurnKey = (String, String);
+
+/// A turn's identity, with the pre-`turnId` fallback.
+///
+/// Rows used to be grouped by `(sessionId, createdAt)`, which worked only
+/// because a turn's rows all carried the same timestamp. They now carry their
+/// own request time, so a timestamp grouping would count every request as its
+/// own turn. Legacy rows have no `turnId` and keep the old behaviour.
+fn turn_key_for(entry: &UsageLogEntry) -> TurnKey {
+    let turn = if entry.turn_id.trim().is_empty() {
+        format!("@{}", entry.created_at)
+    } else {
+        entry.turn_id.clone()
+    };
+    (entry.session_id.clone(), turn)
+}
+
 fn aggregate(
     entries: Vec<UsageLogEntry>,
     top_skills: Vec<ProfileSkillCount>,
@@ -111,13 +129,15 @@ fn aggregate(
     let cutoff_day = today.saturating_sub(HEATMAP_DAYS - 1);
 
     let mut day_tokens: BTreeMap<u64, u64> = BTreeMap::new();
-    let mut day_turns: BTreeMap<u64, HashSet<(String, u64)>> = BTreeMap::new();
-    let mut model_agg: HashMap<(String, String), (u64, HashSet<(String, u64)>)> = HashMap::new();
-    let mut turn_keys: HashSet<(String, u64)> = HashSet::new();
+    let mut day_turns: BTreeMap<u64, HashSet<TurnKey>> = BTreeMap::new();
+    let mut model_agg: HashMap<(String, String), (u64, HashSet<TurnKey>)> = HashMap::new();
+    let mut turn_keys: HashSet<TurnKey> = HashSet::new();
     let mut cumulative: u64 = 0;
     let mut since: Option<u64> = None;
-    let mut max_duration_ms: u64 = 0;
-    let mut effort_turns: HashMap<String, HashSet<(String, u64)>> = HashMap::new();
+    // Per-turn totals, because one turn is many requests: "longest task" means
+    // the longest turn, not the slowest single call within it.
+    let mut turn_duration_ms: HashMap<TurnKey, u64> = HashMap::new();
+    let mut effort_turns: HashMap<String, HashSet<TurnKey>> = HashMap::new();
 
     for entry in &entries {
         let tokens = entry_tokens(entry);
@@ -125,13 +145,13 @@ fn aggregate(
             continue;
         }
         let day = entry.created_at / DAY_SECS;
-        let turn_key = (entry.session_id.clone(), entry.created_at);
+        let turn_key = turn_key_for(entry);
 
         cumulative = cumulative.saturating_add(tokens);
         *day_tokens.entry(day).or_default() += tokens;
         day_turns.entry(day).or_default().insert(turn_key.clone());
         turn_keys.insert(turn_key.clone());
-        max_duration_ms = max_duration_ms.max(entry.duration_ms);
+        *turn_duration_ms.entry(turn_key.clone()).or_default() += entry.duration_ms;
         if !entry.reasoning_effort.trim().is_empty() {
             effort_turns
                 .entry(entry.reasoning_effort.clone())
@@ -179,6 +199,7 @@ fn aggregate(
     let mut top_skills = top_skills;
     top_skills.truncate(MAX_SKILLS);
 
+    let max_duration_ms = turn_duration_ms.values().copied().max().unwrap_or(0);
     let longest_task_seconds = if max_duration_ms > 0 {
         Some(max_duration_ms / 1000)
     } else {

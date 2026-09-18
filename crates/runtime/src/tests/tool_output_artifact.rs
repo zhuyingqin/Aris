@@ -113,6 +113,82 @@ fn an_existing_project_local_artifact_is_reused_but_an_external_path_is_not() {
         )
         .expect("safe replacement artifact")
     });
-    assert!(Path::new(&replaced.path).starts_with(root.canonicalize().unwrap()));
+    assert!(Path::new(&replaced.path).starts_with(crate::canonicalize(root).unwrap()));
     assert_ne!(Path::new(&replaced.path), outside.as_path());
+}
+
+/// The measured failure mode: JSON objects serialize in key order, so blind
+/// head-and-tail trimming spent ~88% of the preview on the alphabetically-early
+/// `changes` diff and left `stdout` — the reason the call was made — with about
+/// 165 characters.
+#[test]
+fn a_large_diff_does_not_crowd_stdout_out_of_the_preview() {
+    let diff = (0..4_000)
+        .map(|index| format!("+added line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stdout = "PASS src/a.test.ts\nPASS src/b.test.ts\nTests: 2 passed, 2 total";
+    let output = serde_json::json!({
+        "changes": {
+            "src/app.ts": {
+                "type": "update",
+                "unified_diff": diff,
+                "changeId": "chg-1",
+                "revision": "rev-9",
+            }
+        },
+        "stdout": stdout,
+        "ok": true,
+    })
+    .to_string();
+
+    let projected = super::project_tool_output(
+        output,
+        &super::ToolOutputArtifact {
+            path: "C:/w/.somniq/tmp/tool-output/x.txt".to_string(),
+            bytes: 4_096,
+            chars: 4_096,
+            sha256: Some("abc".to_string()),
+        },
+        12_000,
+    );
+    let value: Value = serde_json::from_str(&projected).expect("projection is JSON");
+    let preview = value["preview"].as_str().expect("preview is a string");
+
+    // stdout survives in full. Compared line by line because the preview holds
+    // serialized JSON, where the newlines are escaped.
+    for line in stdout.lines() {
+        assert!(preview.contains(line), "{line:?} missing from {preview}");
+    }
+    // The diff body does not, but its shape and the revision the next edit
+    // needs both do.
+    assert!(!preview.contains("added line 3999"), "{preview}");
+    assert!(preview.contains("+4000/-0"), "{preview}");
+    assert!(preview.contains("rev-9"), "{preview}");
+    assert!(preview.contains("chg-1"), "{preview}");
+    // Small scalars keep their JSON type instead of being flattened to strings.
+    assert!(preview.contains("\"ok\": true"), "{preview}");
+}
+
+/// Plain text has no fields to rank, so it keeps the previous behaviour exactly.
+#[test]
+fn a_non_json_result_still_gets_whole_string_edge_trimming() {
+    let output = format!("begin{}end", "x".repeat(40_000));
+
+    let projected = super::project_tool_output(
+        output,
+        &super::ToolOutputArtifact {
+            path: "C:/w/.somniq/tmp/tool-output/y.txt".to_string(),
+            bytes: 40_010,
+            chars: 40_010,
+            sha256: None,
+        },
+        12_000,
+    );
+    let value: Value = serde_json::from_str(&projected).expect("projection is JSON");
+    let preview = value["preview"].as_str().expect("preview is a string");
+
+    assert!(preview.starts_with("begin"), "{preview}");
+    assert!(preview.ends_with("end"), "{preview}");
+    assert!(preview.contains("omitted the middle"), "{preview}");
 }

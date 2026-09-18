@@ -106,3 +106,70 @@ fn command_lookup_uses_platform_executable_rules() {
         vec![root.path().to_path_buf()],
     ));
 }
+
+#[cfg(windows)]
+#[test]
+fn plain_path_removes_the_prefix_a_posix_shell_cannot_quote() {
+    // The bug this guards: `"\\?\F:\...\latexmk"` reaches `exec` as
+    // `\?\F:\...\latexmk`, because a double-quoted `\\` collapses to `\`.
+    assert_eq!(
+        plain_path(Path::new(r"\\?\F:\Agent\Aris\resources\bin\latexmk")),
+        PathBuf::from(r"F:\Agent\Aris\resources\bin\latexmk")
+    );
+    assert_eq!(
+        plain_path(Path::new(r"\\?\UNC\server\share\paper.tex")),
+        PathBuf::from(r"\\server\share\paper.tex")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn plain_path_leaves_ordinary_and_unrepresentable_paths_untouched() {
+    for path in [
+        r"F:\Agent\Aris",
+        r"\\server\share",
+        r"relative\path",
+        // No drive-letter spelling exists for a volume GUID.
+        r"\\?\Volume{d2b3f1a0-0000-0000-0000-100000000000}\data",
+    ] {
+        assert_eq!(plain_path(Path::new(path)), PathBuf::from(path), "{path}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn plain_path_keeps_the_prefix_where_win32_would_resolve_a_different_file() {
+    let long = format!(r"\\?\F:\{}", "segment\\".repeat(40));
+    for path in [
+        long.as_str(),
+        r"\\?\F:\work\CON",
+        r"\\?\F:\work\LPT1.txt",
+        r"\\?\F:\work\trailing.",
+        r"\\?\F:\work\trailing ",
+    ] {
+        assert_eq!(plain_path(Path::new(path)), PathBuf::from(path), "{path}");
+    }
+    // `COM0` is not a reserved device, so it is safe to normalize.
+    assert_eq!(
+        plain_path(Path::new(r"\\?\F:\work\COM0")),
+        PathBuf::from(r"F:\work\COM0")
+    );
+}
+
+#[test]
+fn canonicalize_never_returns_a_verbatim_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let file = root.path().join("paper.tex");
+    fs::write(&file, "x").expect("write");
+
+    let canonical = canonicalize(&file).expect("canonicalize");
+    assert!(
+        !canonical.to_string_lossy().starts_with(r"\\?\"),
+        "canonicalize leaked a verbatim path: {}",
+        canonical.display()
+    );
+    assert!(canonical.ends_with("paper.tex"));
+    // Roots and children stay in the same form, so `starts_with` still holds.
+    let canonical_root = canonicalize(root.path()).expect("canonicalize root");
+    assert!(canonical.starts_with(&canonical_root));
+}

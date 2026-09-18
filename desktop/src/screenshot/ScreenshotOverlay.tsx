@@ -1,6 +1,7 @@
 // Borderless full-monitor window that paints the frozen capture, lets the user
 // pick a region (by dragging, or by clicking the window they want), annotate
-// it, and only then confirm. One of these exists per monitor while a region
+// it, and only then confirm. Confirming copies by default; attaching to chat
+// and pinning remain explicit actions. One of these exists per monitor while a region
 // screenshot is in flight; the backend owns their lifetime.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -133,7 +134,7 @@ export default function ScreenshotOverlay() {
   const copy = language === "cn"
     ? {
         hintIdle: "拖动选择区域，或点击某个窗口直接框住它",
-        hintReady: "拖动边角可调整 · 双击或回车完成 · Ctrl+T 钉住 · Esc 取消",
+        hintReady: "拖动边角可调整 · 双击或回车复制 · Ctrl+T 钉住 · Esc 取消",
         saving: "正在处理…",
         failed: "截图失败：",
         tools: {
@@ -146,7 +147,7 @@ export default function ScreenshotOverlay() {
     : {
         hintIdle: "Drag to select a region, or click a window to capture it",
         hintReady:
-          "Drag the edges to adjust · Double-click or Enter to finish · Ctrl+T to pin · Esc to cancel",
+          "Drag the edges to adjust · Double-click or Enter to copy · Ctrl+T to pin · Esc to cancel",
         saving: "Working…",
         failed: "Screenshot failed: ",
         tools: {
@@ -397,7 +398,7 @@ export default function ScreenshotOverlay() {
       if (textDraft) return;
       if (event.key === "Enter") {
         event.preventDefault();
-        if (selection && committed) void finish("attach");
+        if (selection && committed) void finish("copy");
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "t") {
@@ -595,7 +596,7 @@ export default function ScreenshotOverlay() {
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onDoubleClick={() => {
-        if (committed && selection) void finish("attach");
+        if (committed && selection) void finish("copy");
       }}
       onContextMenu={(event) => {
         event.preventDefault();

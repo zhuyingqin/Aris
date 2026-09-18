@@ -1437,7 +1437,7 @@ fn ensure_outbox_next_attempt_column(connection: &Connection) -> Result<(), Stri
 /// references untouched.
 #[must_use]
 pub fn canonicalize_research_memory_text(workspace: &Path, text: &str) -> String {
-    let Ok(canonical_workspace) = workspace.canonicalize() else {
+    let Ok(canonical_workspace) = crate::canonicalize(workspace) else {
         return text.to_string();
     };
     let mut replacements = Vec::new();
@@ -1448,7 +1448,7 @@ pub fn canonicalize_research_memory_text(workspace: &Path, text: &str) -> String
         } else {
             canonical_workspace.join(path)
         };
-        let Ok(canonical) = candidate.canonicalize() else {
+        let Ok(canonical) = crate::canonicalize(&candidate) else {
             continue;
         };
         let Ok(relative) = canonical.strip_prefix(&canonical_workspace) else {

@@ -259,6 +259,39 @@ pub(crate) fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> S
     format!("{error}\n\nRecovery hint: {hint}")
 }
 
+/// A shell failure caused by Windows' extended-length prefix collapsing under
+/// the shell's own quoting rules.
+///
+/// `"\\?\C:\dir\tool"` names a real file, but a POSIX shell keeps only one
+/// backslash of a quoted `\\`, so `exec` is handed `\?\C:\dir\tool` and reports
+/// it missing. Nothing about the command reads as wrong afterwards, which is
+/// why this needs naming rather than a generic "fix the command" nudge.
+///
+/// SomniQ no longer hands out `\\?\` paths, but a session whose earlier turns
+/// already contain one — or a path the user pasted — can still reach a shell.
+fn collapsed_verbatim_prefix_hint(output: &str) -> Option<String> {
+    // A `?` fenced by backslashes and followed by a drive letter. Counting the
+    // backslashes rather than matching a literal covers all four spellings this
+    // can arrive in: collapsed or intact, and raw or JSON-escaped — the tool
+    // payload reaching this point is serialized, so every backslash is doubled.
+    let bytes = output.as_bytes();
+    let names_verbatim_path = output.match_indices('?').any(|(index, _)| {
+        if index == 0 || bytes[index - 1] != b'\\' {
+            return false;
+        }
+        let mut cursor = index + 1;
+        while bytes.get(cursor) == Some(&b'\\') {
+            cursor += 1;
+        }
+        cursor > index + 1
+            && bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(cursor + 1) == Some(&b':')
+    });
+    names_verbatim_path.then(|| {
+        "This is a quoting failure, not a missing file. The `\\\\?\\` extended-length prefix cannot survive a quoted shell argument — the shell collapses `\\\\` to `\\`, so the program name reached the OS as `\\?\\...` and does not exist. Retry with the ordinary path (`C:\\dir\\tool`), or with just the command name when it is on PATH. Never put a `\\\\?\\` prefix in a shell command.".to_string()
+    })
+}
+
 fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     let lower = output.to_ascii_lowercase();
     if tool_name == "LaTeXCompile" {
@@ -291,6 +324,12 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
         }
     }
     if matches!(tool_name, "bash" | "PowerShell") {
+        // Ahead of the generic hints: this failure names a path that looks
+        // right in the transcript, so "inspect stderr and fix the command"
+        // sends the model looking for a problem that is not in the command.
+        if let Some(hint) = collapsed_verbatim_prefix_hint(output) {
+            return Some(hint);
+        }
         if lower.contains("timeout") || lower.contains("exceeded timeout") {
             return Some("The shell command timed out. Retry with a narrower command, add pagination/filters, or use run_in_background for a genuine long-running service. Only increase timeout when the long run is intentional.".to_string());
         }

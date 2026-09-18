@@ -1,0 +1,63 @@
+% =====================================================================
+%  patfig.sty —— 说明书附图的 TikZ 样式
+%
+%  CNIPA 对附图的要求：黑色线条绘制，不着色、不加阴影，除必需的词语外
+%  不加注释。因此这里一律 draw=black / fill=none，结构图的模块内只写
+%  附图标记，流程图内的步骤文字属于「必需的词语」。
+%
+%  线宽统一 0.4mm；箭头统一 Latex 实心三角。
+% =====================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{patfig}[2026/09/15 CNIPA patent drawing styles]
+
+\RequirePackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,shapes.misc,calc,fit}
+
+\tikzset{
+  % 线宽与箭头
+  pline/.style={line width=0.4mm, draw=black},
+  pl/.style   ={pline, -{Latex[length=2.4mm,width=1.9mm]}},
+  pll/.style  ={pline},                                  % 无箭头连线
+  plr/.style  ={pline, {Latex[length=2.4mm,width=1.9mm]}-%
+                       {Latex[length=2.4mm,width=1.9mm]}}, % 双向
+  % 图内文字一律压回接近单倍行距，避免继承说明书正文的固定宽行距后，
+  % 多行节点把整幅流程图撑出页面。
+  %
+  % CJKglue 置零是必须的：框比文字宽时，TikZ 的 align=center 挡不住中文
+  % 字间胶伸展，短行会被拉成「生 成 证 据 指 纹」——实测 6 字的每字宽
+  % 13.88pt，而同字号长行只有 11.04pt。置零后回到 10.91pt（＝字号本身）。
+  pfont/.style={font=\small\linespread{1.05}\selectfont,
+                execute at begin node={\xeCJKsetup{CJKglue=\hskip 0pt}}},
+  % 处理框：可选参数为文字宽度（全图取同一个值，框宽才整齐）。
+  % 框内文字务必短到一行放得下，需要两行时手写 \\，不要让它自动折行——
+  % 自动折行会断在中文词中间。说明书正文承载细节，图里只留动作名。
+  pbox/.style args={#1}{pline, rectangle, align=center, inner xsep=2.2mm,
+                        inner ysep=1.6mm, text width=#1, pfont},
+  pbox/.default=10.4cm,
+  % 结构图的模块框：只放附图标记
+  pmod/.style={pline, rectangle, minimum width=2.4cm, minimum height=0.95cm,
+               align=center, font=\normalsize},
+  pmodsmall/.style={pline, rectangle, minimum width=1.8cm, minimum height=0.95cm,
+               align=center, font=\normalsize},
+  % 判断菱形。**不设 text width**：一旦设了，TikZ 会按字符数自动折行，
+  % 中文会断在词中间（「是否处/于阻断模式」「调用指纹计/数不小于第三阈」），
+  % 这是流程图读不下去的主因。改为在文字里手写 \\ 控制断行，菱形按各行
+  % 的自然宽度定尺寸。可选参数是长宽比。
+  pdia/.style args={#1}{pline, diamond, aspect=#1, align=center,
+                        inner xsep=-1.5mm, inner ysep=-0.5mm, pfont},
+  pdia/.default=2.2,
+  % 起止端点
+  pterm/.style={pline, rounded rectangle, align=center, inner xsep=4mm,
+                inner ysep=1.2mm, pfont},
+  % 分支标注与图内注记
+  plab/.style={font=\footnotesize, inner sep=1.2pt},
+  pnote/.style={font=\footnotesize, inner sep=1.2pt, align=left},
+}
+
+% 断开标记：表示该支路不被采用（图 4 用）
+% \pcross{坐标}{半边长}
+\newcommand{\pcross}[2]{%
+  \draw[line width=0.5mm] ($#1+(-#2,-#2)$) -- ($#1+(#2,#2)$);
+  \draw[line width=0.5mm] ($#1+(-#2,#2)$) -- ($#1+(#2,-#2)$);}
+
+\endinput

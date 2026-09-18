@@ -1,0 +1,85 @@
+{
+  "generatedAt": "2026-09-15T09:42:03.731Z",
+  "hashes": {
+    "sources": {
+      "abstract-figure.tex": "d80c9a7d47ac3f76f462129ab909a183bcadc02cdcc1a458a5eb9d96e6815abe",
+      "abstract.tex": "1fa7184b66cef082b88b1e9563d47b9d0934118db34f0645fa26e40fe263646a",
+      "build.cjs": "158847b935a648e01c4f8cf2f0ce123897815cffea09fcbd249ca83a36241ad0",
+      "claims.tex": "37c985cce28985dae011b3053200343fa76639df1c509fd4a1b8f00ee6e9662c",
+      "cnipa.sty": "79e7ae5eff4d5087e5c79d9e5ccb57cc622029b3a1241a227aad8e7c61ac6066",
+      "combined.tex": "7c77612440892801747c72c52230753391b39608d18452064e162f04e9feab6d",
+      "description.tex": "692562203cb6a2136af7bc5d79d30b89542510de515d8ccca97930c20e84f163",
+      "drawings.tex": "444e62f11cabb7288605f91ecf9c75b0704d18eed28c610eac28b1d0e1187af3",
+      "figures\\fig1.tex": "aaa6d98b87080995d2b016b3a7a15d5b90a7237a60147357ac0d5469fafa9013",
+      "figures\\fig2.tex": "39cacaa5afaaa3be9eb1c6457c1b4005df4a1d7deb9a72a22dcf2cce44835ae9",
+      "figures\\fig3.tex": "bd7a08d27461260c77392f8c9a879dd6e97bec6c6eed0af06f5cb7de86da000d",
+      "figures\\fig4.tex": "42ad20e1a3b9b645e90fdacc2fea7dfaf800f6458ebde37559b999a4865e47ff",
+      "figures\\fig5.tex": "1a13874c33d3b19d9292c510bc2e992c0d851e522f1e30a387f6faaa4cf17ed1",
+      "notes-disclosure.tex": "97cd67fc806be1de047b062ff94ba5f618ef41d510472a84235c811eeabbf279",
+      "notes-draft.tex": "18a3174982ca0f548ad81503ecf80167ccff8632b81dd72539562cf2346fcd17",
+      "notes-prior-art.tex": "47229f29c9052ef5b9c050aa0b63850c85eb7b06f904666407bf794f100646ff",
+      "notes.sty": "cfe9073d7f7ac8d5fa87b0cfffd9fe9a78749cf4a262a7bedf5211ed6d6fe7c0",
+      "patfig.sty": "0c884b1c2679af9eb0e75dc766f6b3689f9d5a00a0f78c8199e24de972de838d",
+      "symbols.sty": "dae76c31026627273f72cdb4f9432b268669fe96f8ae6335f7882a3170c36e83",
+      "verify_layout.py": "f7318f15b492d93a5a55f727c6efe5b0ec49186013de09d576bb669582ab06af"
+    },
+    "outputs": {
+      "说明书摘要.pdf": "1db05d24c6a07f14e8b45a03f72977801c94bc203b22c6812518e6d030a2eceb",
+      "摘要附图.pdf": "fa8c2158e5f5506c923aba3242d52c76da0186a8a3cd49bea51a66d383600109",
+      "权利要求书.pdf": "a24ac75aace479f5307dde4eda7204696971ac91c7aa75f17e377e5d01b71c99",
+      "说明书.pdf": "daa26018f70c59af7458a629f8ff603be121dad9a7731b36872b31bc912adae1",
+      "说明书附图.pdf": "3dcb1ba63b549360e77c6c54eaac0cddbed08a00e4edc94fd13acc8f84601dda",
+      "现有技术检索记录.pdf": "c293f9a175fc20fcc997151390901a4d4a0631c9a0a20f996bcbfbaebce24f09",
+      "发明构建书.pdf": "49b4dab39193517ae84b09d7cbef3f044c22ff6536ecd927109a03d513153b47",
+      "递交前注意事项.pdf": "b237b251dc80992fb8f7a46a613dfb80f0316878ba9afc997a788aef1821e018",
+      "合订本.pdf": "9d6ba3560a3b92416031aaab36544ea3554dc55d593d9df9ab9f5abfbc57e9f6"
+    }
+  },
+  "documents": [
+    {
+      "job": "abstract",
+      "file": "说明书摘要.pdf",
+      "pages": 1
+    },
+    {
+      "job": "abstract-figure",
+      "file": "摘要附图.pdf",
+      "pages": 1
+    },
+    {
+      "job": "claims",
+      "file": "权利要求书.pdf",
+      "pages": 4
+    },
+    {
+      "job": "description",
+      "file": "说明书.pdf",
+      "pages": 10
+    },
+    {
+      "job": "drawings",
+      "file": "说明书附图.pdf",
+      "pages": 5
+    },
+    {
+      "job": "notes-prior-art",
+      "file": "现有技术检索记录.pdf",
+      "pages": 3
+    },
+    {
+      "job": "notes-disclosure",
+      "file": "发明构建书.pdf",
+      "pages": 4
+    },
+    {
+      "job": "notes-draft",
+      "file": "递交前注意事项.pdf",
+      "pages": 4
+    },
+    {
+      "job": "combined",
+      "file": "合订本.pdf",
+      "pages": 45
+    }
+  ]
+}

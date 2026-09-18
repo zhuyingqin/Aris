@@ -1,6 +1,6 @@
 // Routed through the transport switch so the same calls can target the packaged
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
-import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
@@ -806,60 +806,21 @@ export const newapiUsageLogs = (page: number, pageSize: number) =>
 
 export const profileStats = () => invoke<ProfileStats>("profile_stats");
 
-export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
+export const appUpdateCheck = async (isChina: boolean): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
-  const { check } = await import("@tauri-apps/plugin-updater");
-  const update = await check();
-  if (!update) return { available: false };
-  return {
-    available: true,
-    currentVersion: update.currentVersion,
-    version: update.version,
-    date: update.date,
-    body: update.body,
-  };
+  return tauriInvoke<AppUpdateInfo>("app_update_check", { isChina });
 };
 export const appUpdateDownloadAndInstall = async (
+  isChina: boolean,
   onProgress?: (progress: AppUpdateProgress) => void,
 ): Promise<AppUpdateInstallResult> => {
   if (!isTauri()) return { installed: false };
-  const { check } = await import("@tauri-apps/plugin-updater");
-  const update = await check();
-  if (!update) return { installed: false };
-
-  let downloadedBytes = 0;
-  let contentLength: number | null = null;
-  await update.downloadAndInstall((event) => {
-    if (event.event === "Started") {
-      downloadedBytes = 0;
-      contentLength = event.data.contentLength ?? null;
-      onProgress?.({
-        stage: "started",
-        downloadedBytes,
-        contentLength,
-        percent: null,
-      });
-    } else if (event.event === "Progress") {
-      downloadedBytes += event.data.chunkLength;
-      const percent = contentLength
-        ? Math.min(100, Math.round((downloadedBytes / contentLength) * 100))
-        : null;
-      onProgress?.({
-        stage: "progress",
-        downloadedBytes,
-        contentLength,
-        percent,
-      });
-    } else {
-      onProgress?.({
-        stage: "finished",
-        downloadedBytes,
-        contentLength,
-        percent: 100,
-      });
-    }
+  const progress = new Channel<AppUpdateProgress>();
+  progress.onmessage = (event) => onProgress?.(event);
+  return tauriInvoke<AppUpdateInstallResult>("app_update_download_and_install", {
+    isChina,
+    onProgress: progress,
   });
-  return { installed: true, version: update.version };
 };
 
 export const appRelaunch = async () => {
@@ -2608,8 +2569,18 @@ export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { s
 export const chatRunningTurnCount = () => invoke<number>("chat_running_turn_count");
 export const chatReviewClear = (sessionId: string) =>
   invoke<void>("chat_review_clear", { sessionId });
-export const chatEventsRead = (sessionId: string) =>
-  invoke<ChatEventLogEntry[]>("chat_events_read", { sessionId });
+/**
+ * Read a session's durable event log.
+ *
+ * Pass the kinds you actually consume: a long session's log is mostly
+ * streaming deltas (98 MB / 140k entries for one real chat), and without a
+ * filter every one of them is decoded and shipped across the IPC boundary.
+ */
+export const chatEventsRead = (sessionId: string, kinds?: readonly string[]) =>
+  invoke<ChatEventLogEntry[]>("chat_events_read", {
+    sessionId,
+    kinds: kinds ? [...kinds] : null,
+  });
 export const chatEventsReplay = (sessionId: string) =>
   invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
 export const chatDebugZipExport = (sessionId: string, path?: string | null) =>

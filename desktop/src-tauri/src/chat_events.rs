@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -152,32 +152,57 @@ pub fn chat_wire_log_exists(session_id: &str) -> bool {
     chat_wire_log_path(session_id).is_ok_and(|path| path.exists())
 }
 
+/// Where the tail scan for the newest sequence starts, and how fast it backs
+/// off. One archived compaction row can be megabytes on its own, so the window
+/// has to be able to grow past a single line.
+const SEQ_TAIL_SCAN_BYTES: u64 = 64 * 1024;
+const SEQ_TAIL_SCAN_GROWTH: u64 = 16;
+
+/// Newest sequence in an event log.
+///
+/// Sequences are assigned under the path lock in append order, so the last
+/// well-formed row carries the maximum and there is no reason to decode the
+/// whole log — which on a long session meant re-reading tens of megabytes
+/// every time the in-process sequence cache missed.
 fn read_last_seq(path: &Path) -> Result<u64, String> {
-    let file = match fs::File::open(path) {
+    let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error.to_string()),
     };
-    let mut last = 0;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<ChatEventLogEntry>(&line) {
-            Ok(entry) => last = last.max(entry.seq),
-            Err(error) => {
-                // A previous process may have been interrupted while appending
-                // JSONL, or older versions may have interleaved two writers.
-                // Keep valid later records usable instead of making every
-                // subsequent save fail on the first damaged line.
-                eprintln!(
-                    "SomniQ desktop: ignoring malformed chat event while finding sequence: {error}"
-                );
-            }
-        }
+    let len = file.metadata().map_err(|error| error.to_string())?.len();
+    if len == 0 {
+        return Ok(0);
     }
-    Ok(last)
+    let mut window = SEQ_TAIL_SCAN_BYTES;
+    loop {
+        let start = len.saturating_sub(window);
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| error.to_string())?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        let text = String::from_utf8_lossy(&buffer);
+        let mut lines = text.split('\n').collect::<Vec<_>>();
+        // The window can start mid-row; that partial line is never the newest.
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        if let Some(seq) = lines.iter().rev().find_map(|line| {
+            (!line.trim().is_empty())
+                .then(|| serde_json::from_str::<ChatEventHeader>(line).ok())
+                .flatten()
+                .map(|header| header.seq)
+        }) {
+            return Ok(seq);
+        }
+        if start == 0 {
+            // Nothing in the log parses. A fresh sequence is the only option
+            // that keeps the session writable.
+            return Ok(0);
+        }
+        window = window.saturating_mul(SEQ_TAIL_SCAN_GROWTH);
+    }
 }
 
 fn append_jsonl_entry(file: &mut fs::File, entry: &ChatEventLogEntry) -> Result<(), String> {
@@ -594,11 +619,48 @@ pub fn record_session_snapshot(session_id: &str, reason: &str, session: &Session
         "storage": "event_log",
     });
     record_event(session_id, "session_checkpoint", payload);
+    compact_session_log(session_id);
 }
 
-pub fn read_events_for_session(session_id: &str) -> Result<Vec<ChatEventLogEntry>, String> {
+/// Collect the streaming rows the checkpoint just superseded.
+///
+/// Best-effort: the checkpoint is already durable, so a failed compaction
+/// costs disk, not history.
+fn compact_session_log(session_id: &str) {
+    let Ok(path) = chat_event_log_path(session_id) else {
+        return;
+    };
+    let compacted = runtime::with_path_lock(&path, || {
+        runtime::compact_session_event_log_unlocked(&path)
+    });
+    match compacted {
+        Ok(outcome) if outcome.removed_lines > 0 => {
+            // The cached sequence is keyed on the file length, which the
+            // rewrite just changed.
+            if let Ok(mut seqs) = event_seqs().lock() {
+                seqs.remove(session_id);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("SomniQ desktop: failed to compact chat event log: {error}");
+        }
+    }
+}
+
+/// Read an event log, optionally decoding only the kinds a caller needs.
+///
+/// A session log is dominated by streaming deltas and archived compaction
+/// snapshots — a 98 MB log here is 140k lines of which a reader like the
+/// independent-review restore wants six. `kinds` is matched against the raw
+/// line before the JSON parser runs, so everything else costs a substring scan
+/// instead of a decoded `Value`.
+pub fn read_events_for_session(
+    session_id: &str,
+    kinds: Option<&[&str]>,
+) -> Result<Vec<ChatEventLogEntry>, String> {
     let path = chat_event_log_path(session_id)?;
-    read_events_from_path(session_id, &path)
+    read_events_from_path(session_id, &path, kinds)
 }
 
 /// Read a project-scoped event log without changing the process-wide live
@@ -606,35 +668,94 @@ pub fn read_events_for_session(session_id: &str) -> Result<Vec<ChatEventLogEntry
 pub fn read_events_for_session_in_dir(
     session_id: &str,
     sessions_dir: &Path,
+    kinds: Option<&[&str]>,
 ) -> Result<Vec<ChatEventLogEntry>, String> {
     validate_session_id(session_id)?;
-    read_events_from_path(
-        session_id,
-        &sessions_dir.join(format!("{session_id}.events.jsonl")),
-    )
+    read_events_from_path(session_id, &session_log_path(session_id, sessions_dir), kinds)
 }
 
-fn read_events_from_path(session_id: &str, path: &Path) -> Result<Vec<ChatEventLogEntry>, String> {
-    runtime::with_path_lock(path, || read_events_from_path_unlocked(session_id, path))
+fn session_log_path(session_id: &str, sessions_dir: &Path) -> PathBuf {
+    sessions_dir.join(format!("{session_id}.events.jsonl"))
+}
+
+fn read_events_from_path(
+    session_id: &str,
+    path: &Path,
+    kinds: Option<&[&str]>,
+) -> Result<Vec<ChatEventLogEntry>, String> {
+    runtime::with_path_lock(path, || {
+        read_events_from_path_unlocked(session_id, path, kinds)
+    })
+}
+
+/// The `"kind":"<k>"` needles for a kind list. Entries are written by
+/// [`append_jsonl_entry`] with compact `serde_json`, so the field always
+/// renders in exactly this shape.
+fn kind_needles(kinds: &[&str]) -> Vec<String> {
+    kinds.iter().map(|kind| format!("\"kind\":\"{kind}\"")).collect()
+}
+
+/// Whether a raw line may carry one of `needles`.
+///
+/// A match is only a hint — the payload can contain the same text — so callers
+/// still check the decoded `kind`. A line with no `"kind":` field at all is
+/// treated as a candidate rather than dropped, so a hand-edited or
+/// foreign-format row still reaches the parser that knows how to complain.
+fn line_may_match(line: &str, needles: &[String]) -> bool {
+    if !line.contains("\"kind\":\"") {
+        return true;
+    }
+    needles.iter().any(|needle| line.contains(needle.as_str()))
+}
+
+/// Everything but the payload. Deserializing into this skips the payload
+/// structurally instead of materializing it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatEventHeader {
+    #[serde(default)]
+    seq: u64,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    kind: String,
+}
+
+fn open_event_log(path: &Path) -> Result<Option<fs::File>, String> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn read_events_from_path_unlocked(
     session_id: &str,
     path: &Path,
+    kinds: Option<&[&str]>,
 ) -> Result<Vec<ChatEventLogEntry>, String> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.to_string()),
+    let Some(file) = open_event_log(path)? else {
+        return Ok(Vec::new());
     };
+    let needles = kinds.map(kind_needles);
     let mut out = Vec::new();
     for (index, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
+        if let Some(needles) = needles.as_deref() {
+            if !line_may_match(&line, needles) {
+                continue;
+            }
+        }
         match serde_json::from_str::<ChatEventLogEntry>(&line) {
-            Ok(entry) if entry.session_id == session_id => out.push(entry),
+            Ok(entry)
+                if entry.session_id == session_id
+                    && kinds.is_none_or(|kinds| kinds.contains(&entry.kind.as_str())) =>
+            {
+                out.push(entry)
+            }
             Ok(_) => {}
             Err(error) => {
                 // Recovery logs are append-only. A malformed historical line
@@ -648,6 +769,178 @@ fn read_events_from_path_unlocked(
         }
     }
     Ok(out)
+}
+
+/// Canonical kinds whose payload the replay projection reads.
+///
+/// `session_compaction` is deliberately absent: its payload is an archived
+/// snapshot of every removed message (3 MB each, 45 MB of one real 98 MB log),
+/// it is pushed into `Session::compactions`, and nothing in the replay ever
+/// reads that field back.
+const REPLAY_CANONICAL_KINDS: &[&str] = &[
+    "session_reset",
+    "session_message",
+    "session_usage",
+    "session_checkpoint",
+];
+const SESSION_COMPACTION_KIND: &str = "session_compaction";
+
+#[derive(Default)]
+struct ReplaySource {
+    entries: Vec<ChatEventLogEntry>,
+    total_events: usize,
+}
+
+struct ReplayBoundaries {
+    /// Newest line `replay_events` treats as the canonical cut-off — the last
+    /// checkpoint, else the last canonical event. `None` when the log has no
+    /// canonical events, which replays the whole UI stream exactly as before.
+    boundary: Option<usize>,
+    /// Only tracked when there is no checkpoint, which is the one case where
+    /// the cut-off can land on an archived compaction.
+    last_compaction: Option<usize>,
+}
+
+/// Locate the canonical cut-off without decoding payloads.
+///
+/// Events are appended under a path lock with a monotonic sequence, so file
+/// order is sequence order and a line index stands in for the `seq` comparison
+/// `replay_events` makes. A session is checkpointed on every save, so scanning
+/// from the end normally settles within a few lines of the tail.
+fn scan_replay_boundaries(session_id: &str, lines: &[&str]) -> ReplayBoundaries {
+    let mut canonical_kinds = REPLAY_CANONICAL_KINDS.to_vec();
+    canonical_kinds.push(SESSION_COMPACTION_KIND);
+    let canonical_needles = kind_needles(&canonical_kinds);
+    let mut last_canonical = None;
+    let mut last_compaction = None;
+    for (index, line) in lines.iter().enumerate().rev() {
+        if !line_may_match(line, &canonical_needles) {
+            continue;
+        }
+        let Ok(header) = serde_json::from_str::<ChatEventHeader>(line) else {
+            continue;
+        };
+        if header.session_id != session_id {
+            continue;
+        }
+        match header.kind.as_str() {
+            // The newest checkpoint wins outright, so the scan can stop here.
+            "session_checkpoint" => {
+                return ReplayBoundaries {
+                    boundary: Some(index),
+                    last_compaction: None,
+                }
+            }
+            SESSION_COMPACTION_KIND => {
+                last_canonical = last_canonical.or(Some(index));
+                last_compaction = last_compaction.or(Some(index));
+            }
+            kind if REPLAY_CANONICAL_KINDS.contains(&kind) => {
+                last_canonical = last_canonical.or(Some(index))
+            }
+            _ => {}
+        }
+    }
+    ReplayBoundaries {
+        boundary: last_canonical,
+        last_compaction,
+    }
+}
+
+/// An archived compaction reduced to its header. Keeping the row lets the
+/// cut-off logic in `replay_events` see the same canonical stream it always
+/// did; dropping the payload is what makes reopening a long session cheap.
+fn compaction_header_entry(session_id: &str, line: &str) -> Option<ChatEventLogEntry> {
+    let header = serde_json::from_str::<ChatEventHeader>(line).ok()?;
+    (header.session_id == session_id).then(|| ChatEventLogEntry {
+        version: EVENT_VERSION,
+        seq: header.seq,
+        ts: 0,
+        session_id: header.session_id,
+        kind: header.kind,
+        payload: Value::Null,
+    })
+}
+
+/// Read only what the replay projection consumes: the canonical stream plus
+/// every event after the latest checkpoint. Everything the cut-off would
+/// discard anyway — which on a long session is ~98% of the lines — costs a
+/// substring scan instead of a decoded payload.
+fn read_events_for_replay(session_id: &str, path: &Path) -> Result<ReplaySource, String> {
+    // One read, then two scans over the same buffer: the cut-off is only known
+    // after looking at the tail, and re-reading a 280 MB log — or allocating a
+    // String per line — costs more than holding it.
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReplaySource::default())
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let lines = raw
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect::<Vec<_>>();
+    let boundaries = scan_replay_boundaries(session_id, &lines);
+
+    let keep_needles = kind_needles(REPLAY_CANONICAL_KINDS);
+    let session_needle = format!("\"sessionId\":\"{session_id}\"");
+    let mut entries = Vec::new();
+    let mut total_events = 0;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.contains(session_needle.as_str()) {
+            total_events += 1;
+        }
+        let after_boundary = boundaries.boundary.is_none_or(|boundary| index > boundary);
+        if !after_boundary && !line_may_match(line, &keep_needles) {
+            if boundaries.last_compaction == Some(index) {
+                if let Some(entry) = compaction_header_entry(session_id, line) {
+                    entries.push(entry);
+                }
+            }
+            continue;
+        }
+        match serde_json::from_str::<ChatEventLogEntry>(line) {
+            Ok(entry) if entry.session_id == session_id => entries.push(entry),
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!(
+                    "SomniQ desktop: ignoring malformed chat event at line {}: {error}",
+                    index + 1
+                );
+            }
+        }
+    }
+    Ok(ReplaySource {
+        entries,
+        total_events,
+    })
+}
+
+/// Replay one session's durable event log into the UI transcript.
+pub fn replay_session_events(session_id: &str) -> Result<ChatEventsReplay, String> {
+    let path = chat_event_log_path(session_id)?;
+    replay_session_events_at(session_id, &path)
+}
+
+/// [`replay_session_events`] for a log outside the process-default event
+/// directory, used by project-owned workflow sessions.
+pub fn replay_session_events_in_dir(
+    session_id: &str,
+    sessions_dir: &Path,
+) -> Result<ChatEventsReplay, String> {
+    validate_session_id(session_id)?;
+    replay_session_events_at(session_id, &session_log_path(session_id, sessions_dir))
+}
+
+fn replay_session_events_at(session_id: &str, path: &Path) -> Result<ChatEventsReplay, String> {
+    let source = runtime::with_path_lock(path, || read_events_for_replay(session_id, path))?;
+    let mut replay = replay_events(session_id, &source.entries);
+    replay.event_count = source.total_events;
+    Ok(replay)
 }
 
 pub fn export_events_to_path(session_id: &str, target: &Path) -> Result<(), String> {
@@ -674,15 +967,30 @@ pub fn export_wire_to_path(session_id: &str, target: &Path) -> Result<(), String
     runtime::write_file_atomically(target, data).map_err(|error| error.to_string())
 }
 
+/// Read a session's event log, optionally narrowed to the kinds the caller
+/// consumes.
+///
+/// Async on purpose: Tauri runs a blocking command on the main thread, and a
+/// session log is unbounded, so decoding one there is a window the OS marks as
+/// not responding rather than a slow load.
 #[tauri::command]
-pub fn chat_events_read(session_id: String) -> Result<Vec<ChatEventLogEntry>, String> {
-    read_events_for_session(&session_id)
+pub async fn chat_events_read(
+    session_id: String,
+    kinds: Option<Vec<String>>,
+) -> Result<Vec<ChatEventLogEntry>, String> {
+    crate::blocking::off_main_thread(move || {
+        let kinds = kinds
+            .as_ref()
+            .map(|kinds| kinds.iter().map(String::as_str).collect::<Vec<_>>());
+        read_events_for_session(&session_id, kinds.as_deref())
+    })
+    .await
 }
 
+/// See [`chat_events_read`] for why this is async.
 #[tauri::command]
-pub fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String> {
-    let events = read_events_for_session(&session_id)?;
-    Ok(replay_events(&session_id, &events))
+pub async fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String> {
+    crate::blocking::off_main_thread(move || replay_session_events(&session_id)).await
 }
 
 /// Build the bounded UI transcript from an explicitly scoped event stream.
@@ -1163,14 +1471,15 @@ fn append_delta_block(blocks: &mut Vec<Value>, kind: &str, field: &str, delta: &
         .and_then(Value::as_object_mut)
         .filter(|object| object.get("kind").and_then(Value::as_str) == Some(kind))
     {
-        let existing = object
-            .get(field)
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        object.insert(
-            field.to_string(),
-            Value::String(format!("{existing}{delta}")),
-        );
+        // Grow the existing string in place. Rebuilding it per delta is
+        // quadratic in the block's length, and a stopped turn can replay
+        // hundreds of thousands of deltas into one block.
+        match object.get_mut(field) {
+            Some(Value::String(existing)) => existing.push_str(delta),
+            _ => {
+                object.insert(field.to_string(), Value::String(delta.to_string()));
+            }
+        }
         return;
     }
     blocks.push(json!({ "kind": kind, field: delta }));

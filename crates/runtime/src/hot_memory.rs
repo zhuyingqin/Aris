@@ -123,6 +123,9 @@ pub fn project_scope(workspace: &Path) -> String {
             return format!("project:{project_id}");
         }
     }
+    // Deliberately the raw canonical form, not `crate::canonicalize`: this
+    // string is hashed into a storage key that nothing ever displays, and
+    // normalizing it now would rename every existing project's hot memory.
     let canonical = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());

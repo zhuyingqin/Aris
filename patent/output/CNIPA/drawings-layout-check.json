@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "documents": [
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\说明书附图.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 5,
+        "body_font_mm": [],
+        "line_gap_mm": [],
+        "min_bottom_mm": 15.403,
+        "line_gap_samples": 0
+      }
+    }
+  ],
+  "scope": "PDF layout only; XML validation and substantive patent review are separate"
+}

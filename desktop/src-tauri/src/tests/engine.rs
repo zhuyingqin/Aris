@@ -212,6 +212,81 @@ fn ordinary_chat_routes_the_real_registry_to_a_small_recoverable_schema_set() {
     assert!(!plan.deferred_names.is_empty());
 }
 
+/// Routing against the registry the desktop actually ships, using messages from
+/// a session that spent 148 tool calls editing a website without ever being
+/// offered a file editor. `aris-chat`'s own routing tests use a stand-in
+/// catalog; this is the one that would have caught it in production.
+#[test]
+fn real_registry_offers_file_editors_for_ordinary_edit_requests() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    for prompt in [
+        "到2026就停，不要循环跳",
+        "刷新还有，你删一下",
+        "这个Logo背景色弄成透明，所有的颜色弄为白色",
+        "Posters Xiaoou 的文件夹，你将这个里面的海报，全部按照Posters的命名方式重命名后放到文件夹，并且显示到网页上",
+    ] {
+        let plan =
+            aris_chat::route_chat_tools(prompt, &specs, aris_chat::ToolRoutingMode::Active);
+        for name in ["edit_file", "multi_edit"] {
+            assert!(
+                plan.active_names.contains(name),
+                "{name} missing for {prompt:?}: {:?}",
+                plan.active_names
+            );
+        }
+    }
+}
+
+/// The literature bundle used to land on a logo-recoloring turn, because the
+/// attachment boilerplate the desktop appends contains the word "searching".
+#[test]
+fn real_registry_does_not_route_an_attachment_notice_to_literature_tools() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "这个Logo背景色弄成透明，所有的颜色弄为白色\n\n\
+         [Attached image: image.png; local path: .somniq/uploads/1789526116789808800-0-image.png]\n\
+         The image is included directly in this message. Inspect it directly instead of searching \
+         the workspace for it. Use the local path only when a tool requires a file path.",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert!(
+        !plan.active_names.contains("LiteratureSearch"),
+        "{:?}",
+        plan.active_names
+    );
+    assert!(plan.active_names.contains("edit_file"), "{plan:?}");
+}
+
+/// A resume after the second compaction, against the registry the desktop ships
+/// and in the exact wording `compact.rs` emits when the compacted range holds no
+/// user message of its own. Routing on the whole document instead pinned
+/// `WebSearch`/`WebFetch` onto a turn that only changes a year — the intent came
+/// from the literal section header `## Current Focus`.
+#[test]
+fn real_registry_resumes_on_a_goal_carried_over_from_a_prior_compaction() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "This session is being continued from a previous conversation that ran out of context.\n\n\
+         <summary>\n\
+         ## Current Focus\n\
+         - Active user goal from prior compacted state: 把首页的年份改成 2026\n\
+         - Aris internal continuation/compaction prompts are resume metadata, not user tasks.\n\n\
+         ## Main-line Check\n\
+         - failure repeated 2 times: mcp__playwright__browser_navigate: ### error\n\
+         </summary>",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert_eq!(plan.profile, "core+code", "{plan:?}");
+    for name in ["WebSearch", "WebFetch"] {
+        assert!(!plan.pinned_names.contains(name), "pinned {name}: {plan:?}");
+    }
+    assert!(plan.pinned_names.contains("edit_file"), "{plan:?}");
+}
+
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
     let assistant = tool_name.map_or_else(
         || {
@@ -1528,26 +1603,31 @@ fn batch_write_paths_are_all_visible_to_latex_repair_guard() {
     );
 }
 
+fn debug_event(seq: u64, kind: &str, payload: Value) -> crate::chat_events::ChatEventLogEntry {
+    crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq,
+        ts: seq,
+        session_id: "summary-test".to_string(),
+        kind: kind.to_string(),
+        payload,
+    }
+}
+
 #[test]
 fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
-    let mut session = Session::new();
-    session.messages.push(ConversationMessage::assistant(vec![
-        ContentBlock::ToolUse {
-            id: "write-1".to_string(),
-            name: "write_file".to_string(),
-            input: "{}".to_string(),
-        },
-    ]));
-    session.messages.push(ConversationMessage {
-        role: runtime::MessageRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
-            tool_use_id: "write-1".to_string(),
-            tool_name: "write_file".to_string(),
-            output: "ok".to_string(),
-            is_error: false,
-        }],
-        usage: None,
-    });
+    let events = vec![
+        debug_event(
+            1,
+            "tool_call",
+            json!({ "id": "write-1", "name": "write_file" }),
+        ),
+        debug_event(
+            2,
+            "tool_result",
+            json!({ "id": "write-1", "name": "write_file", "isError": false, "output": "ok" }),
+        ),
+    ];
     let usage = serde_json::json!({
         "createdAt": 1,
         "sessionId": "summary-test",
@@ -1597,13 +1677,64 @@ fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
     fs::write(&wire_path, format!("{wire}\n")).expect("wire fixture");
 
     let summary =
-        build_debug_performance_summary(&session, &usage, Some(&wire_path), &[]).expect("summary");
+        build_debug_performance_summary(&events, &usage, Some(&wire_path), &[]).expect("summary");
     assert_eq!(summary["model"]["requestCount"], 1);
     assert_eq!(summary["model"]["peakPromptTokens"], 140);
     assert_eq!(summary["tools"]["callCount"], 1);
     assert_eq!(summary["context"]["checkpointCount"], 1);
     assert_eq!(summary["context"]["estimatedTokensRemoved"], 400);
     let _ = fs::remove_file(wire_path);
+}
+
+/// The whole point of sourcing tool stats from the event log: a compaction
+/// deletes messages from the live session, and counting there reports only what
+/// survived. Every call below is compacted away in the session sense — none of
+/// them would be visible to the old implementation.
+#[test]
+fn debug_performance_summary_counts_tools_a_compaction_removed() {
+    let events = vec![
+        debug_event(1, "tool_call", json!({ "id": "a", "name": "ReadMediaFile" })),
+        debug_event(
+            2,
+            "tool_result",
+            json!({ "id": "a", "name": "ReadMediaFile", "isError": true, "output": "failed to resolve" }),
+        ),
+        debug_event(3, "tool_call", json!({ "id": "b", "name": "bash" })),
+        debug_event(
+            4,
+            "tool_result",
+            json!({ "id": "b", "name": "bash", "isError": false, "output": "{}" }),
+        ),
+        // The question card's second `tool_call` for the same id: one call.
+        debug_event(
+            5,
+            "tool_call",
+            json!({ "id": "c", "name": "AskUserQuestion" }),
+        ),
+        debug_event(
+            6,
+            "tool_call",
+            json!({ "id": "c", "name": "AskUserQuestion", "ready": true }),
+        ),
+        debug_event(
+            7,
+            "tool_result",
+            json!({ "id": "c", "name": "AskUserQuestion", "isError": false, "output": "A" }),
+        ),
+        debug_event(
+            8,
+            "session_compaction",
+            json!({ "compaction": { "summary_source": "fallback", "removed_message_count": 6 } }),
+        ),
+    ];
+    let summary = build_debug_performance_summary(&events, "", None, &[]).expect("summary");
+
+    assert_eq!(summary["tools"]["callCount"], 3, "{summary:#}");
+    assert_eq!(summary["tools"]["uniqueToolCount"], 3, "{summary:#}");
+    assert_eq!(summary["tools"]["failureCount"], 1, "{summary:#}");
+    assert_eq!(summary["tools"]["byName"]["ReadMediaFile"], 1);
+    assert_eq!(summary["context"]["persistedCompactionCount"], 1);
+    assert_eq!(summary["context"]["compactionSummarySources"]["fallback"], 1);
 }
 
 #[test]

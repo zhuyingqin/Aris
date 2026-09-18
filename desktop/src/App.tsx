@@ -880,7 +880,7 @@ export default function App() {
     if (updateStateRef.current === "downloading" || updateStateRef.current === "ready") return;
     updateCheckInFlightRef.current = true;
     try {
-      const result = await appUpdateCheck();
+      const result = await appUpdateCheck(language === "cn");
       if (result.available) {
         setUpdateInfo(result);
         setUpdateProgress(null);
@@ -897,7 +897,7 @@ export default function App() {
     } finally {
       updateCheckInFlightRef.current = false;
     }
-  }, []);
+  }, [language]);
   useEffect(() => {
     void checkForAppUpdate();
     const timer = window.setInterval(() => {
@@ -1030,7 +1030,7 @@ export default function App() {
     setUpdateState("downloading");
     setUpdateProgress(null);
     try {
-      const result = await appUpdateDownloadAndInstall((progress) => {
+      const result = await appUpdateDownloadAndInstall(language === "cn", (progress) => {
         setUpdateProgress(progress);
       });
       if (result.installed) {
