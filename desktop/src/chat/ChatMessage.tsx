@@ -9,6 +9,7 @@ import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
+import { useDisclosure } from "./disclosureState";
 import { useOpenChatFile } from "./openChatFile";
 import { displayLocalFilePath } from "./localFileLinks";
 import {
@@ -159,7 +160,10 @@ function ToolProgressLog({
 }
 
 function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
-  const [open, setOpen] = useState(false);
+  // Kept outside the component so a row that scrolls past the virtual window's
+  // overscan margin and comes back remounts at the height it had, instead of
+  // collapsing and shrinking the transcript's total height under the reader.
+  const [open, setOpen] = useDisclosure(block.id && `tool:${block.id}`);
   const change = useMemo(() => diffFromTool(block), [block]);
   const evidenceSearch = useMemo(() => evidenceSearchSummaryFromTool(block), [block]);
   const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
@@ -520,8 +524,9 @@ function displayDiffPaths(diff: string): string {
 export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary }) {
   const language = useStore((state) => state.language);
   const openChatFile = useOpenChatFile();
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  const summaryKey = summary.changeIds[0] ?? summary.files[0]?.path ?? "";
+  const [reviewOpen, setReviewOpen] = useDisclosure(summaryKey && `edited-review:${summaryKey}`);
+  const [showAll, setShowAll] = useDisclosure(summaryKey && `edited-all:${summaryKey}`);
   const [selectedPath, setSelectedPath] = useState(summary.files[0]?.path ?? "");
   const [revertState, setRevertState] = useState<ChangeRevertState>({ phase: "idle" });
   const visibleLimit = 3;
@@ -665,7 +670,7 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
  * the individual calls, each still independently expandable.
  */
 function ToolGroup({ blocks }: { blocks: Extract<ChatBlock, { kind: "tool" }>[] }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(blocks[0]?.id && `tool-group:${blocks[0].id}`);
   const total = blocks.length;
   const done = blocks.filter((b) => b.output !== undefined).length;
   const running = done < total;
@@ -715,7 +720,7 @@ function PermissionCall({
   block: Extract<ChatBlock, { kind: "permission" }>;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(`permission:${block.id}`);
   const pending = !block.status || block.status === "pending";
   const status = block.status === "allowed" ? "Continued" : block.status === "skipped" ? "Skipped" : "Waiting";
   return (

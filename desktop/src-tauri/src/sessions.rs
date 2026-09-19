@@ -342,10 +342,18 @@ fn remove_client_chat_ui_fields(session: &mut Value) {
     }
 }
 
+/// A preview stand-in for a turn too large to inline. Saving one must never
+/// overwrite the real turn on disk.
+///
+/// The client keeps `omittedTurnIndex` on a slot after it loads the real turn,
+/// because that index is the stable key its transcript virtualizer measures the
+/// row by; `omittedHydrated` is what marks the slot as carrying real content
+/// again, so the index alone no longer means "this is a placeholder".
 fn is_large_turn_placeholder(turn: &Value) -> bool {
     turn.get("omittedTurnIndex")
         .and_then(Value::as_u64)
         .is_some()
+        && turn.get("omittedHydrated").and_then(Value::as_bool) != Some(true)
 }
 
 /// Read the summary index that backs the sidebar list. One entry per started

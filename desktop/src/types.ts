@@ -1613,7 +1613,15 @@ export interface ChatTurn {
   blocks: ChatBlock[];
   /** Product-owned transcript entries are visible but cannot be edited/retried. */
   readOnly?: boolean;
+  /**
+   * Absolute index of a turn the quick preview omitted because it was too large
+   * (`large_turn_placeholder` in sessions.rs). It survives hydration so the
+   * virtualizer's measurement cache keeps one stable key for the slot — see
+   * `turnVirtualKey`. `omittedHydrated` is what distinguishes "still a
+   * placeholder" from "already loaded in place".
+   */
   omittedTurnIndex?: number;
+  omittedHydrated?: boolean;
   omittedBytes?: number;
   streaming?: boolean;
   error?: string;

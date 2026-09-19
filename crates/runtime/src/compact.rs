@@ -767,17 +767,6 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
         );
     }
 
-    if !prior_compaction_summaries.is_empty() {
-        lines.push(String::new());
-        lines.push("## Prior Compaction Summary".to_string());
-        for summary in &prior_compaction_summaries {
-            lines.push("- Rolled forward from an earlier context compaction:".to_string());
-            for line in summary.lines() {
-                lines.push(format!("  {line}"));
-            }
-        }
-    }
-
     lines.push(String::new());
     lines.push("## Environment".to_string());
     let key_files = collect_key_files(messages);
@@ -805,7 +794,21 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
 
     lines.push(String::new());
     lines.push("## Active Issues".to_string());
-    let pending_work = infer_pending_work(messages);
+    let mut pending_work = infer_pending_work(messages);
+    for issue in prior_compaction_summaries
+        .iter()
+        .rev()
+        .flat_map(|summary| summary_section_items(summary, "## Active Issues", 3))
+    {
+        if !issue.contains("No explicit pending/todo markers")
+            && !pending_work.iter().any(|existing| existing == &issue)
+        {
+            pending_work.push(issue);
+        }
+        if pending_work.len() >= 3 {
+            break;
+        }
+    }
     if pending_work.is_empty() {
         lines.push("- No explicit pending/todo markers detected.".to_string());
     } else {
@@ -1635,6 +1638,7 @@ fn is_internal_user_text(text: &str) -> bool {
         || trimmed.starts_with(BLANK_RESPONSE_CONTINUATION_PREFIX)
         || trimmed.starts_with(LEGACY_BLANK_RESPONSE_CONTINUATION_PREFIX)
         || trimmed.starts_with(DIRECT_COMPACTION_TASK_PREFIX)
+        || trimmed.starts_with(crate::conversation::DELIVERY_CHECKPOINT_PROMPT_PREFIX)
 }
 
 fn collect_prior_compaction_summaries(messages: &[ConversationMessage]) -> Vec<String> {
@@ -1651,7 +1655,7 @@ fn collect_prior_compaction_summaries(messages: &[ConversationMessage]) -> Vec<S
         .collect()
 }
 
-fn extract_prior_compaction_summary(text: &str) -> Option<String> {
+pub(crate) fn extract_prior_compaction_summary(text: &str) -> Option<String> {
     let trimmed = text.trim_start();
     if !trimmed.starts_with(COMPACTION_CONTINUATION_PREFIX) {
         return None;
@@ -1680,7 +1684,8 @@ fn extract_prior_compaction_summary(text: &str) -> Option<String> {
         }
     }
 
-    let summary = collapse_blank_lines(summary).trim().to_string();
+    let summary = canonicalize_prior_compaction_summary(summary);
+    let summary = collapse_blank_lines(&summary).trim().to_string();
     if summary.is_empty() {
         None
     } else {
@@ -1689,6 +1694,58 @@ fn extract_prior_compaction_summary(text: &str) -> Option<String> {
             MAX_PRIOR_COMPACTION_SUMMARY_CHARS,
         ))
     }
+}
+
+/// Old continuations embedded the previous summary under this heading on every
+/// compaction, producing a recursive tree. Retain the current canonical
+/// sections and discard that legacy nested archive.
+fn canonicalize_prior_compaction_summary(summary: &str) -> String {
+    let mut lines = Vec::new();
+    let mut skipping_prior = false;
+    for line in summary.lines() {
+        if line == "## Prior Compaction Summary" {
+            skipping_prior = true;
+            continue;
+        }
+        if skipping_prior {
+            if line.starts_with("## ") {
+                skipping_prior = false;
+            } else {
+                continue;
+            }
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn summary_section_items(summary: &str, heading: &str, limit: usize) -> Vec<String> {
+    let mut in_section = false;
+    let mut items = Vec::new();
+    for line in summary.lines() {
+        if line == heading {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            break;
+        }
+        if !in_section {
+            continue;
+        }
+        let item = line
+            .trim()
+            .strip_prefix("- ")
+            .map(str::trim)
+            .filter(|item| !item.is_empty());
+        if let Some(item) = item {
+            push_unique_request(&mut items, truncate_summary(item, 350));
+            if items.len() == limit {
+                break;
+            }
+        }
+    }
+    items
 }
 
 fn extract_prior_current_focus(summary: &str) -> Option<String> {

@@ -112,7 +112,7 @@ fn debug_export_rebuilds_empty_cancelled_session_from_event_log() {
         .expect("read diagnostics");
     let diagnostics: serde_json::Value =
         serde_json::from_str(&diagnostics).expect("diagnostics JSON");
-    assert_eq!(diagnostics["schemaVersion"], 1);
+    assert_eq!(diagnostics["schemaVersion"], 2);
     let mut manifest = String::new();
     archive
         .by_name("manifest.json")
@@ -1510,6 +1510,26 @@ fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
 }
 
 #[test]
+fn ask_user_question_parse_failure_names_the_expected_shape() {
+    // A flat payload that ends with the closing punctuation of a
+    // `{"questions": [...]}` wrapper: the retry has to drop the stray closers,
+    // so the error must rule out adding the wrapper instead.
+    let trailing_wrapper_closers =
+        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
+    let message = validate_question_input(trailing_wrapper_closers)
+        .expect_err("trailing closers should fail")
+        .to_string();
+    assert!(
+        message.contains("trailing characters"),
+        "parse position should survive into the message: {message}"
+    );
+    assert!(
+        message.contains("not an array of questions"),
+        "message should rule out the wrapper shape: {message}"
+    );
+}
+
+#[test]
 fn a_paired_device_can_only_answer_a_question_from_the_session_it_is_viewing() {
     let state = ChatState::default();
     let (sender, receiver) = mpsc::channel::<String>();
@@ -1615,7 +1635,52 @@ fn debug_event(seq: u64, kind: &str, payload: Value) -> crate::chat_events::Chat
 }
 
 #[test]
+fn unsupported_summarizer_opens_and_reset_clears_the_session_circuit() {
+    let session_id = format!("summary-circuit-{}", current_time_millis());
+    let event_dir = std::env::temp_dir().join(&session_id);
+    fs::create_dir_all(&event_dir).expect("event dir");
+    let event_guard = crate::chat_events::bind_session_event_dir(&session_id, event_dir.clone())
+        .expect("bind event dir");
+    forget_session_summarizer_circuit(&session_id);
+    assert!(!session_summarizer_circuit_open(&session_id));
+
+    let mut sink = DesktopRuntimeEventSink {
+        session_id: session_id.clone(),
+    };
+    runtime::EventSink::emit(
+        &mut sink,
+        &runtime::RuntimeEvent {
+            timestamp: runtime::now_iso8601(),
+            session_id: session_id.clone(),
+            event_type: runtime::EventType::CompactionSummaryFallback {
+                reason: "summarizer_model_unavailable".to_string(),
+            },
+        },
+    );
+    assert!(session_summarizer_circuit_open(&session_id));
+
+    forget_session_summarizer_circuit(&session_id);
+    assert!(!session_summarizer_circuit_open(&session_id));
+    drop(event_guard);
+    let _ = fs::remove_dir_all(event_dir);
+}
+
+#[test]
 fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse {
+            id: "write-1".to_string(),
+            name: "write_file".to_string(),
+            input: "{}".to_string(),
+        },
+    ]));
+    session.messages.push(ConversationMessage::tool_result(
+        "write-1",
+        "write_file",
+        "ok",
+        false,
+    ));
     let events = vec![
         debug_event(
             1,
@@ -1651,7 +1716,7 @@ fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
         crate::chat_events::ChatEventLogEntry {
             version: 1,
             seq: 1,
-            ts: 1,
+            ts: 2_000,
             session_id: "summary-test".to_string(),
             kind: "llm.request".to_string(),
             payload: json!({}),
@@ -1659,7 +1724,7 @@ fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
         crate::chat_events::ChatEventLogEntry {
             version: 1,
             seq: 2,
-            ts: 2,
+            ts: 3_000,
             session_id: "summary-test".to_string(),
             kind: "context.checkpoint".to_string(),
             payload: json!({
@@ -1676,9 +1741,23 @@ fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
     .join("\n");
     fs::write(&wire_path, format!("{wire}\n")).expect("wire fixture");
 
-    let summary =
-        build_debug_performance_summary(&events, &usage, Some(&wire_path), &[]).expect("summary");
+    let summary = build_debug_performance_summary(
+        &session,
+        &events,
+        &usage,
+        Some(&wire_path),
+        &[],
+    )
+    .expect("summary");
     assert_eq!(summary["model"]["requestCount"], 1);
+    assert_eq!(summary["model"]["successfulCallCount"], 1);
+    assert_eq!(summary["model"]["tracedRequestCount"], 1);
+    assert_eq!(summary["model"]["coverage"]["usageStartMs"], 1_000);
+    assert_eq!(summary["model"]["coverage"]["wireStartMs"], 2_000);
+    assert_eq!(
+        summary["model"]["coverage"]["wireTraceTruncated"],
+        true
+    );
     assert_eq!(summary["model"]["peakPromptTokens"], 140);
     assert_eq!(summary["tools"]["callCount"], 1);
     assert_eq!(summary["context"]["checkpointCount"], 1);
@@ -1686,12 +1765,40 @@ fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
     let _ = fs::remove_file(wire_path);
 }
 
-/// The whole point of sourcing tool stats from the event log: a compaction
-/// deletes messages from the live session, and counting there reports only what
-/// survived. Every call below is compacted away in the session sense — none of
-/// them would be visible to the old implementation.
+/// Archived compaction messages are the durable whole-session tool source; the
+/// narrowed event log only fills an in-flight tail.
 #[test]
 fn debug_performance_summary_counts_tools_a_compaction_removed() {
+    let archived = vec![
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "a".to_string(),
+            name: "ReadMediaFile".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("a", "ReadMediaFile", "failed to resolve", true),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "b".to_string(),
+            name: "bash".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("b", "bash", "{}", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "c".to_string(),
+            name: "AskUserQuestion".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("c", "AskUserQuestion", "A", false),
+    ];
+    let mut session = Session::new();
+    session.compactions.push(runtime::SessionCompactionRecord {
+        summary: "archived".to_string(),
+        messages: archived,
+        removed_message_count: 6,
+        preserved_message_count: 0,
+        tokens_before: 100,
+        tokens_after: 20,
+        summary_source: "fallback".to_string(),
+    });
     let events = vec![
         debug_event(1, "tool_call", json!({ "id": "a", "name": "ReadMediaFile" })),
         debug_event(
@@ -1721,16 +1828,18 @@ fn debug_performance_summary_counts_tools_a_compaction_removed() {
             "tool_result",
             json!({ "id": "c", "name": "AskUserQuestion", "isError": false, "output": "A" }),
         ),
+        // Export raced this call before the updated session snapshot landed.
         debug_event(
             8,
-            "session_compaction",
-            json!({ "compaction": { "summary_source": "fallback", "removed_message_count": 6 } }),
+            "tool_call",
+            json!({ "id": "d", "name": "browser_snapshot" }),
         ),
     ];
-    let summary = build_debug_performance_summary(&events, "", None, &[]).expect("summary");
+    let summary =
+        build_debug_performance_summary(&session, &events, "", None, &[]).expect("summary");
 
-    assert_eq!(summary["tools"]["callCount"], 3, "{summary:#}");
-    assert_eq!(summary["tools"]["uniqueToolCount"], 3, "{summary:#}");
+    assert_eq!(summary["tools"]["callCount"], 4, "{summary:#}");
+    assert_eq!(summary["tools"]["uniqueToolCount"], 4, "{summary:#}");
     assert_eq!(summary["tools"]["failureCount"], 1, "{summary:#}");
     assert_eq!(summary["tools"]["byName"]["ReadMediaFile"], 1);
     assert_eq!(summary["context"]["persistedCompactionCount"], 1);

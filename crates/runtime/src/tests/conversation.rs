@@ -5,8 +5,7 @@ use super::{
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     CompactionFlightKey, ConversationRuntime, DynamicToolRouting, DynamicToolRoutingState,
     RuntimeError, StaticToolExecutor, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
-    ToolMedia, ToolOutput, TurnSummary,
-    DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+    ToolMedia, ToolOutput, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
 
@@ -498,7 +497,8 @@ fn repeated_browser_backend_timeout_stops_before_another_remote_call() {
         PermissionPolicy::new(PermissionMode::Allow),
         vec!["system".to_string()],
     )
-    .with_focus_nudge(false);
+    .with_focus_nudge(false)
+    .with_evidence_guard_mode(crate::EvidenceGuardMode::Off);
 
     let error = runtime
         .run_turn("search the web", None)
@@ -2933,6 +2933,92 @@ fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
     );
 }
 
+#[test]
+fn unsupported_summarizer_opens_a_runtime_circuit_after_one_call() {
+    #[derive(Clone)]
+    struct UnsupportedSummaryApi {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ApiClient for UnsupportedSummaryApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(RuntimeError::new(
+                "Requested model Qwen3.8-Flash-Next not supported",
+            ))
+        }
+    }
+    struct FallbackSink {
+        reasons: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl crate::EventSink for FallbackSink {
+        fn emit(&mut self, event: &crate::RuntimeEvent) {
+            if let crate::EventType::CompactionSummaryFallback { reason } = &event.event_type {
+                self.reasons.lock().expect("reasons").push(reason.clone());
+            }
+        }
+    }
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reasons = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let unsupported = UnsupportedSummaryApi {
+        calls: std::sync::Arc::clone(&calls),
+    };
+    let mut runtime = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        unsupported.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(unsupported)
+    .with_event_sink(Box::new(FallbackSink {
+        reasons: std::sync::Arc::clone(&reasons),
+    }));
+
+    runtime.compact(CompactionConfig {
+        preserve_recent_messages: 2,
+        max_estimated_tokens: 1,
+        ..CompactionConfig::default()
+    });
+    runtime
+        .session
+        .messages
+        .extend(preloaded_session_over_budget().messages);
+    runtime.compact(CompactionConfig {
+        preserve_recent_messages: 2,
+        max_estimated_tokens: 1,
+        ..CompactionConfig::default()
+    });
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        *reasons.lock().expect("reasons"),
+        vec![
+            "summarizer_model_unavailable".to_string(),
+            "summarizer_circuit_open".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn summarizer_transcript_uses_only_the_canonical_prior_summary() {
+    let continuation = crate::compact::get_compact_continuation_message(
+        "<summary>\n## Current Focus\n- canonical focus\n\n## Prior Compaction Summary\n- stale recursive copy\n\n## Active Issues\n- current issue\n</summary>",
+        true,
+        false,
+    );
+    let segments = super::build_transcript_segments(&[ConversationMessage::user_text(
+        continuation,
+    )]);
+    let transcript = segments.join("\n");
+
+    assert!(transcript.contains("canonical focus"));
+    assert!(transcript.contains("current issue"));
+    assert!(!transcript.contains("This session is being continued"));
+    assert!(!transcript.contains("Prior Compaction Summary"));
+    assert!(!transcript.contains("stale recursive copy"));
+}
+
 /// Records each summary request body and how many summary calls were made, and
 /// returns a scripted summary (optionally flagged truncated via `stop_reason`).
 /// Serves as both the main client ("done" for normal turns) and the summarizer.
@@ -4416,10 +4502,8 @@ fn the_main_line_reminder_can_be_switched_off() {
         .all(|block| !matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("Main-line check"))));
 }
 
-/// The desktop Chat loop used to run with `usize::MAX` iterations and no
-/// wall-clock at all: a turn that never converged had no system-level stop
-/// other than the user pressing it. A runtime built the ordinary way — nobody
-/// calls `with_max_iterations` on the Chat path — must terminate on its own.
+/// A non-converging ordinary turn enters a bounded delivery phase and returns
+/// visible status instead of surfacing an internal budget error.
 #[test]
 fn an_unconverging_turn_stops_on_its_own_without_a_configured_limit() {
     struct NeverFinishesClient;
@@ -4436,7 +4520,12 @@ fn an_unconverging_turn_stops_on_its_own_without_a_configured_limit() {
         }
     }
 
-    let tools = StaticToolExecutor::new().register("retry", |_| Ok("same failure".to_string()));
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_executions = std::sync::Arc::clone(&executions);
+    let tools = StaticToolExecutor::new().register("retry", move |_| {
+        observed_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("same failure".to_string())
+    });
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         NeverFinishesClient,
@@ -4444,21 +4533,27 @@ fn an_unconverging_turn_stops_on_its_own_without_a_configured_limit() {
         PermissionPolicy::new(PermissionMode::Allow),
         vec!["system".to_string()],
     )
-    .with_focus_nudge(false);
+    .with_focus_nudge(false)
+    .with_evidence_guard_mode(crate::EvidenceGuardMode::Off);
 
-    let error = runtime
+    let summary = runtime
         .run_turn("keep going forever", None)
-        .expect_err("an unbounded turn must be stopped by the runtime");
-    let message = error.to_string();
-    assert!(message.contains("stopped by Aris"), "{message}");
-    assert!(message.contains("model iterations"), "{message}");
+        .expect("the runtime should deliver preserved status");
+    let message = assistant_text_from_turn_summary(&summary);
+    assert!(message.contains("delivery checkpoint"), "{message}");
+    assert!(summary.iterations <= 42, "{}", summary.iterations);
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        40,
+        "delivery attempts must not execute more tools"
+    );
     // The partial work stays in the session, so the user can resume rather than
     // lose the turn.
     assert!(!runtime.session().messages.is_empty());
 }
 
 #[test]
-fn forty_tool_calls_create_a_soft_checkpoint_and_continue_the_turn() {
+fn forty_tool_calls_enter_delivery_without_running_more_tools() {
     struct LongButFiniteClient {
         calls: usize,
     }
@@ -4482,7 +4577,12 @@ fn forty_tool_calls_create_a_soft_checkpoint_and_continue_the_turn() {
         }
     }
 
-    let tools = StaticToolExecutor::new().register("step", |input| Ok(input.to_string()));
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_executions = std::sync::Arc::clone(&executions);
+    let tools = StaticToolExecutor::new().register("step", move |input| {
+        observed_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(input.to_string())
+    });
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         LongButFiniteClient { calls: 0 },
@@ -4495,14 +4595,23 @@ fn forty_tool_calls_create_a_soft_checkpoint_and_continue_the_turn() {
 
     let summary = runtime
         .run_turn("complete a long finite workflow", None)
-        .expect("soft checkpoint must not stop the turn");
-    assert_eq!(assistant_text_from_turn_summary(&summary), "completed after checkpoint");
-    assert!(summary.auto_compaction.is_some());
-    assert!(!runtime.session().compactions.is_empty());
+        .expect("delivery checkpoint must return a result");
+    assert_eq!(
+        assistant_text_from_turn_summary(&summary),
+        "completed after checkpoint"
+    );
+    assert!(summary.auto_compaction.is_none());
+    assert!(summary.tool_results.iter().any(|message| message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("delivery checkpoint")))));
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        40
+    );
 }
 
-/// Iteration count does not bound elapsed time: a handful of slow tool calls
-/// can hold one turn open for hours without ever approaching the ceiling.
+/// Wall-clock exhaustion uses the same bounded delivery phase.
 #[test]
 fn a_slow_turn_stops_on_the_wall_clock_budget() {
     struct SlowLoopClient;
@@ -4533,12 +4642,11 @@ fn a_slow_turn_stops_on_the_wall_clock_budget() {
     .with_focus_nudge(false)
     .with_max_turn_duration(Some(std::time::Duration::from_millis(50)));
 
-    let error = runtime
+    let summary = runtime
         .run_turn("take your time", None)
-        .expect_err("the wall-clock budget must stop the turn");
-    let message = error.to_string();
-    assert!(message.contains("stopped by Aris"), "{message}");
-    assert!(message.contains("minutes"), "{message}");
+        .expect("the wall-clock checkpoint should deliver preserved status");
+    let message = assistant_text_from_turn_summary(&summary);
+    assert!(message.contains("delivery checkpoint"), "{message}");
 }
 
 /// Both budgets stay overridable, including off, so an operator running a
@@ -4666,8 +4774,50 @@ fn routing_state(active: &[&str], pinned: &[&str], max_active: usize) -> Dynamic
         max_active,
         last_used: std::collections::BTreeMap::new(),
         tick: 0,
-        deferred_but_used: std::collections::BTreeSet::new(),
+        used_this_turn: std::collections::BTreeSet::new(),
     }
+}
+
+#[test]
+fn active_but_unused_browser_tool_is_not_carried_to_the_next_turn() {
+    struct DoneClient;
+    impl ApiClient for DoneClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let routing = DynamicToolRouting {
+        catalog: ["ToolSearch", "browser_snapshot"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        active: ["ToolSearch", "browser_snapshot"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        pinned: ["ToolSearch"].into_iter().map(str::to_string).collect(),
+        max_active: 24,
+    };
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        DoneClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_dynamic_tool_routing(routing);
+
+    runtime
+        .run_turn("answer without browsing", None)
+        .expect("turn");
+
+    assert!(!runtime
+        .dynamic_tool_routing_carry_forward()
+        .contains("browser_snapshot"));
 }
 
 #[test]
@@ -4694,7 +4844,11 @@ fn dynamic_tool_routing_evicts_the_least_recently_used_unpinned_tool() {
 
 #[test]
 fn dynamic_tool_routing_never_evicts_a_pinned_tool() {
-    let mut state = routing_state(&["ToolSearch", "read_file"], &["ToolSearch", "read_file"], 2);
+    let mut state = routing_state(
+        &["ToolSearch", "read_file"],
+        &["ToolSearch", "read_file"],
+        2,
+    );
 
     let (activated, evicted) = state.activate(vec![
         "browser_click".to_string(),
@@ -4801,7 +4955,9 @@ fn calling_a_deferred_tool_does_not_rewrite_the_tool_array_mid_turn() {
     let history = history.lock().expect("history");
     assert_eq!(history.len(), 2);
     assert!(
-        history.iter().all(|active| !active.contains("browser_snapshot")),
+        history
+            .iter()
+            .all(|active| !active.contains("browser_snapshot")),
         "the array must be identical across the turn: {history:?}"
     );
     // But the next turn starts with it visible, so the capability is not lost.

@@ -2501,11 +2501,9 @@ fn advertises_cheap_tier(name: &str) -> bool {
 
 /// Pick a summarization model out of the gateway's own catalog.
 ///
-/// Preference order: the executor itself when it is already a cheap tier (the
-/// summary is then exactly as cheap as the turn that triggered it), then a
-/// cheap model from the same vendor, then any cheap model. Deterministic given
-/// the same catalog, so a session does not swap summarizers between
-/// compactions.
+/// Preference order: the executor itself when it is already a cheap tier, then
+/// a cheap model from the same vendor. A cross-vendor catalog entry is not
+/// evidence that the executor endpoint accepts it.
 fn cheap_model_from_catalog(model: &str, known_models: &[String]) -> Option<String> {
     if advertises_cheap_tier(model) {
         return Some(model.to_string());
@@ -2520,7 +2518,6 @@ fn cheap_model_from_catalog(model: &str, known_models: &[String]) -> Option<Stri
     candidates
         .iter()
         .find(|name| !vendor.is_empty() && model_vendor_prefix(name) == vendor)
-        .or_else(|| candidates.first())
         .map(|name| (*name).to_string())
 }
 

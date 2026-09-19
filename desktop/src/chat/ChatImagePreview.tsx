@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { fileAssetUrl, fileOpen, fileReadBytes, isTauri } from "../api/tauri";
 import ImageLightbox from "../ImageLightbox";
 import { imageMimeType } from "../imageFiles";
+import { readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#].*)?$/i;
 const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/)/i;
@@ -140,9 +141,21 @@ export default function ChatImagePreview({
     );
   }
 
+  // An image has no size until its bytes arrive, so a transcript row containing
+  // one measures three different heights (loading badge, empty img, loaded img)
+  // and grows under the reader twice. Replaying the height this image rendered at
+  // last time means the row measures its final height on the first paint.
+  const reserved = readRenderedHeight(normalizedSrc);
+  const reserveStyle: CSSProperties | undefined = reserved && !imgLoaded
+    ? { minHeight: reserved }
+    : undefined;
+
   if (!displaySrc) {
     return (
-      <span className={`chat-image-loading${className ? ` ${className}` : ""}`}>
+      <span
+        className={`chat-image-loading${className ? ` ${className}` : ""}`}
+        style={reserveStyle}
+      >
         {title ?? alt ?? "Loading image..."}
       </span>
     );
@@ -155,7 +168,11 @@ export default function ChatImagePreview({
       alt={alt ?? title ?? ""}
       loading="lazy"
       decoding="async"
-      onLoad={() => setImgLoaded(true)}
+      style={reserveStyle}
+      onLoad={(event) => {
+        rememberRenderedHeight(normalizedSrc, event.currentTarget.offsetHeight);
+        setImgLoaded(true);
+      }}
       onError={() => setFailed(true)}
     />
   );

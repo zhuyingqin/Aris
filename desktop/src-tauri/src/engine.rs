@@ -89,6 +89,7 @@ static PROJECT_ACTIVITY_REVIEWS: OnceLock<Mutex<HashSet<String>>> = OnceLock::ne
 /// `runtime::ConversationRuntime::dynamic_tool_routing_carry_forward`.
 static SESSION_TOOL_CARRY_FORWARD: OnceLock<Mutex<HashMap<String, BTreeSet<String>>>> =
     OnceLock::new();
+static SESSION_SUMMARIZER_CIRCUITS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn session_tool_carry_forward(session_id: &str) -> BTreeSet<String> {
     SESSION_TOOL_CARRY_FORWARD
@@ -118,6 +119,35 @@ fn record_session_tool_carry_forward(session_id: &str, tools: BTreeSet<String>) 
 pub(crate) fn forget_session_tool_carry_forward(session_id: &str) {
     if let Ok(mut map) = SESSION_TOOL_CARRY_FORWARD.get_or_init(Default::default).lock() {
         map.remove(session_id);
+    }
+}
+
+fn session_summarizer_circuit_open(session_id: &str) -> bool {
+    SESSION_SUMMARIZER_CIRCUITS
+        .get_or_init(Default::default)
+        .lock()
+        .is_ok_and(|sessions| sessions.contains(session_id))
+}
+
+fn open_session_summarizer_circuit(session_id: &str) {
+    let Ok(mut sessions) = SESSION_SUMMARIZER_CIRCUITS
+        .get_or_init(Default::default)
+        .lock()
+    else {
+        return;
+    };
+    if sessions.len() >= MAX_CACHED_CHAT_SESSIONS * 8 && !sessions.contains(session_id) {
+        sessions.clear();
+    }
+    sessions.insert(session_id.to_string());
+}
+
+fn forget_session_summarizer_circuit(session_id: &str) {
+    if let Ok(mut sessions) = SESSION_SUMMARIZER_CIRCUITS
+        .get_or_init(Default::default)
+        .lock()
+    {
+        sessions.remove(session_id);
     }
 }
 
@@ -1692,8 +1722,18 @@ fn latex_compile_input_path(input: &str) -> Option<String> {
 }
 
 fn validate_question_input(input: &str) -> Result<Value, ToolError> {
-    let value = serde_json::from_str::<Value>(input)
-        .map_err(|_| ToolError::new("AskUserQuestion input must be valid JSON."))?;
+    // Naming the expected shape matters as much as reporting the parse
+    // position. The observed failure is a payload carrying the flat fields but
+    // the closing punctuation of a `{"questions": [...]}` wrapper, and a bare
+    // "must be valid JSON" invites a retry that adds the wrapper instead of
+    // dropping the stray closers.
+    let value = serde_json::from_str::<Value>(input).map_err(|error| {
+        ToolError::new(format!(
+            "AskUserQuestion input must be valid JSON: {error}. Expected one object shaped \
+             {{\"question\": \"...\", \"options\": [{{\"label\": \"...\"}}]}}, not an array of \
+             questions."
+        ))
+    })?;
     let object = value.as_object().ok_or_else(|| {
         ToolError::new("AskUserQuestion input must be an object with `question` and `options`.")
     })?;
@@ -2428,6 +2468,9 @@ impl runtime::EventSink for DesktopRuntimeEventSink {
                 }),
             ),
             runtime::EventType::CompactionSummaryFallback { reason } => {
+                if reason == "summarizer_model_unavailable" {
+                    open_session_summarizer_circuit(&self.session_id);
+                }
                 crate::chat_events::record_wire_event(
                     &self.session_id,
                     "context.summary_fallback",
@@ -4017,6 +4060,9 @@ fn compact_session_with_runtime(
         summarizer_config,
     )?;
     Ok(runtime
+        .with_event_sink(Box::new(DesktopRuntimeEventSink {
+            session_id: session_id.to_string(),
+        }))
         .with_compaction_session_id(session_id)
         .compact(compaction))
 }
@@ -4592,7 +4638,11 @@ pub fn chat_run_command(
         SlashCommand::Compact { instruction } => {
             let (model, _provider, executor_config) = resolve_executor()?;
             let config_obj = crate::config::load_object();
-            let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+            let summarizer_model = if session_summarizer_circuit_open(&session_id) {
+                Some("off".to_string())
+            } else {
+                config_object_string(&config_obj, "summarizer_model")
+            };
             let summarizer_config = match resolve_summarizer_config(&config_obj) {
                 Ok(config) => config,
                 Err(error) => {
@@ -4657,6 +4707,8 @@ pub fn chat_run_command(
             let fresh = Session::new();
             store_chat_session(&state, session_id.clone(), fresh.clone())?;
             clear_retrieval_continuation(&state, &session_id);
+            forget_session_tool_carry_forward(&session_id);
+            forget_session_summarizer_circuit(&session_id);
             crate::chat_events::record_event(
                 &session_id,
                 "reset",
@@ -7954,7 +8006,11 @@ async fn run_chat_turn_with_context(
     // retain the configured compaction/summarizer behavior instead of forcing
     // a slower, different remote-only fallback.
     let config_obj = crate::config::load_object();
-    let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+    let summarizer_model = if session_summarizer_circuit_open(&session_id) {
+        Some("off".to_string())
+    } else {
+        config_object_string(&config_obj, "summarizer_model")
+    };
     let summarizer_config = match resolve_summarizer_config(&config_obj) {
         Ok(config) => config,
         Err(error) => {
@@ -8077,6 +8133,13 @@ async fn run_chat_turn_with_context(
     if cancelled.load(Ordering::SeqCst) {
         return Err("interrupted by user".to_string());
     }
+    // Preflight compaction can be the call that discovers an unsupported
+    // summary model. Honor that circuit immediately in the turn runtime.
+    let summarizer_model = if session_summarizer_circuit_open(&session_id) {
+        Some("off".to_string())
+    } else {
+        summarizer_model
+    };
     // A paired device continues the selected desktop session rather than
     // getting an independent permission profile. The session's local policy
     // remains the authority for every tool call.
@@ -8448,6 +8511,13 @@ async fn run_chat_turn_with_context(
             message: error.to_string(),
             session: Some(build_failure_session),
         })?;
+        let runtime = if worker_work_task.is_some() || autonomous_workflow {
+            runtime
+                .with_max_iterations(runtime::autonomous_max_turn_iterations_from_env())
+                .with_max_turn_duration(runtime::autonomous_max_turn_duration_from_env())
+        } else {
+            runtime
+        };
         let runtime = if let Some(routing) = tool_routing
             .filter(|routing| routing.mode == aris_chat::ToolRoutingMode::Active)
         {
@@ -9374,6 +9444,8 @@ pub async fn chat_set_context(
     let tokens = runtime::estimate_session_tokens(&next) as u64;
     store_chat_session(&state, session_id.clone(), next.clone())?;
     clear_retrieval_continuation(&state, &session_id);
+    forget_session_tool_carry_forward(&session_id);
+    forget_session_summarizer_circuit(&session_id);
     crate::chat_events::record_event(
         &session_id,
         "context_set",
@@ -9407,6 +9479,7 @@ pub fn chat_delete(
         .remove(&session_id);
     clear_retrieval_continuation(&state, &session_id);
     forget_session_tool_carry_forward(&session_id);
+    forget_session_summarizer_circuit(&session_id);
     let path = match project_id {
         Some(project_id) => {
             if !crate::state::valid_project_id(&project_id) {
@@ -10387,6 +10460,7 @@ fn export_debug_zip(
         &rotated_wire_log_paths,
     )?;
     let diagnostics = build_debug_performance_summary(
+        &export_session,
         &events,
         &session_usage_log,
         wire_log_path.as_deref(),
@@ -10512,29 +10586,86 @@ fn export_debug_zip(
 
 /// Summarize a session for the debug bundle.
 ///
-/// Tool statistics come from `events`, the append-only event log, and not from
-/// the live `Session`. The session is the *surviving* projection: compaction
-/// removes messages from it, so counting there reports whatever happened since
-/// the last compaction and calls it the session. One exported bundle claimed 35
-/// calls across 7 tools with zero failures for a session whose own event log,
-/// shipped in the same zip, recorded 72 calls across 13 tools with three
-/// failures — and the tools it dropped entirely were the ones the user was
-/// trying to debug.
+/// Tool statistics merge the session's compaction archive and live messages;
+/// the event log contributes only ids not yet present in that snapshot. Model
+/// success totals come from usage, while wire errors and coverage describe the
+/// retained trace window.
+#[derive(Default)]
+struct DebugToolStats {
+    call_count: usize,
+    failure_count: usize,
+    by_name: BTreeMap<String, usize>,
+    staged_write_calls: usize,
+    direct_write_calls: usize,
+    no_new_evidence_blocks: usize,
+    use_ids: HashSet<String>,
+    result_ids: HashSet<String>,
+}
+
+impl DebugToolStats {
+    fn record_use(&mut self, id: Option<&str>, name: &str) {
+        if id.is_some_and(|id| !self.use_ids.insert(id.to_string())) {
+            return;
+        }
+        self.call_count += 1;
+        *self.by_name.entry(name.to_string()).or_default() += 1;
+        if matches!(
+            name,
+            "begin_large_write" | "append_write_chunk" | "commit_large_write"
+        ) {
+            self.staged_write_calls += 1;
+        }
+        if matches!(name, "write_file" | "write_files") {
+            self.direct_write_calls += 1;
+        }
+    }
+
+    fn record_result(&mut self, id: Option<&str>, output: &str, is_error: bool) {
+        if id.is_some_and(|id| !self.result_ids.insert(id.to_string())) {
+            return;
+        }
+        self.failure_count += usize::from(is_error);
+        self.no_new_evidence_blocks += usize::from(output.contains("no_new_evidence_loop"));
+    }
+
+    fn record_messages(&mut self, messages: &[ConversationMessage]) {
+        for block in messages.iter().flat_map(|message| message.blocks.iter()) {
+            match block {
+                ContentBlock::ToolUse { id, name, .. } => self.record_use(Some(id), name),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output,
+                    is_error,
+                    ..
+                } => self.record_result(Some(tool_use_id), output, *is_error),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn build_debug_performance_summary(
+    session: &Session,
     events: &[crate::chat_events::ChatEventLogEntry],
     usage_log: &str,
     wire_log_path: Option<&Path>,
     rotated_wire_log_paths: &[PathBuf],
 ) -> Result<Value, String> {
-    let mut tool_calls = 0_usize;
-    let mut tool_failures = 0_usize;
-    let mut tool_counts = BTreeMap::<String, usize>::new();
-    let mut staged_write_calls = 0_usize;
-    let mut direct_write_calls = 0_usize;
-    let mut no_new_evidence_blocks = 0_usize;
-    let mut compaction_count = 0_usize;
+    let mut tool_stats = DebugToolStats::default();
+    for compaction in &session.compactions {
+        tool_stats.record_messages(&compaction.messages);
+    }
+    tool_stats.record_messages(&session.messages);
+
+    let compaction_count = session.compactions.len();
     let mut compaction_summary_sources = BTreeMap::<String, usize>::new();
-    let mut counted_tool_uses = HashSet::<String>::new();
+    for compaction in &session.compactions {
+        *compaction_summary_sources
+            .entry(compaction.summary_source.clone())
+            .or_default() += 1;
+    }
+    // The session snapshot is authoritative for persisted history. The event
+    // tail only contributes calls/results not yet captured when export ran.
     for event in events {
         let payload = &event.payload;
         match event.kind.as_str() {
@@ -10542,48 +10673,18 @@ fn build_debug_performance_summary(
                 let Some(name) = payload.get("name").and_then(Value::as_str) else {
                     continue;
                 };
-                // `AskUserQuestion` emits a second `tool_call` carrying
-                // `ready: true` once its answer channel is registered, so the
-                // log legitimately holds two events for one call. Dedupe on the
-                // tool-use id rather than teaching this one tool's name.
-                if let Some(id) = payload.get("id").and_then(Value::as_str) {
-                    if !counted_tool_uses.insert(id.to_string()) {
-                        continue;
-                    }
-                }
-                tool_calls += 1;
-                *tool_counts.entry(name.to_string()).or_default() += 1;
-                if matches!(
-                    name,
-                    "begin_large_write" | "append_write_chunk" | "commit_large_write"
-                ) {
-                    staged_write_calls += 1;
-                }
-                if matches!(name, "write_file" | "write_files") {
-                    direct_write_calls += 1;
-                }
+                tool_stats.record_use(payload.get("id").and_then(Value::as_str), name);
             }
             "tool_result" => {
-                tool_failures +=
-                    usize::from(payload.get("isError").and_then(Value::as_bool) == Some(true));
-                if payload
+                let output = payload
                     .get("output")
                     .and_then(Value::as_str)
-                    .is_some_and(|output| output.contains("no_new_evidence_loop"))
-                {
-                    no_new_evidence_blocks += 1;
-                }
-            }
-            "session_compaction" => {
-                compaction_count += 1;
-                let source = payload
-                    .get("compaction")
-                    .and_then(|compaction| compaction.get("summary_source"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                *compaction_summary_sources
-                    .entry(source.to_string())
-                    .or_default() += 1;
+                    .unwrap_or_default();
+                tool_stats.record_result(
+                    payload.get("id").and_then(Value::as_str),
+                    output,
+                    payload.get("isError").and_then(Value::as_bool) == Some(true),
+                );
             }
             _ => {}
         }
@@ -10598,11 +10699,16 @@ fn build_debug_performance_summary(
     let mut total_cache_read_tokens = 0_u64;
     let mut peak_prompt_tokens = 0_u64;
     let mut total_duration_ms = 0_u64;
+    let mut usage_start_ms = None::<u64>;
+    let mut usage_end_ms = None::<u64>;
     for line in usage_log.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(entry) = serde_json::from_str::<crate::usage_log::UsageLogEntry>(line) else {
             continue;
         };
         usage_entries += 1;
+        let created_at_ms = entry.created_at.saturating_mul(1_000);
+        usage_start_ms = Some(usage_start_ms.map_or(created_at_ms, |old| old.min(created_at_ms)));
+        usage_end_ms = Some(usage_end_ms.map_or(created_at_ms, |old| old.max(created_at_ms)));
         executor_usage_entries += usize::from(entry.role == "executor");
         reviewer_usage_entries += usize::from(entry.role == "reviewer");
         let prompt = u64::from(entry.input_tokens)
@@ -10635,6 +10741,8 @@ fn build_debug_performance_summary(
     let mut summary_fallback_reasons = BTreeMap::<String, usize>::new();
     let mut observed_models = BTreeMap::<String, usize>::new();
     let mut observed_base_urls = BTreeSet::<String>::new();
+    let mut wire_start_ms = None::<u64>;
+    let mut wire_end_ms = None::<u64>;
     let mut wire_paths = rotated_wire_log_paths.to_vec();
     if let Some(path) = wire_log_path {
         wire_paths.push(path.to_path_buf());
@@ -10650,6 +10758,8 @@ fn build_debug_performance_summary(
             else {
                 continue;
             };
+            wire_start_ms = Some(wire_start_ms.map_or(event.ts, |old| old.min(event.ts)));
+            wire_end_ms = Some(wire_end_ms.map_or(event.ts, |old| old.max(event.ts)));
             match event.kind.as_str() {
                 "llm.request" => {
                     model_requests += 1;
@@ -10720,10 +10830,20 @@ fn build_debug_performance_summary(
 
     let checkpoint_tokens_saved =
         checkpoint_tokens_before.saturating_sub(checkpoint_tokens_after);
+    let estimated_model_calls = usage_entries.saturating_add(model_errors);
+    let wire_begins_after_usage = wire_start_ms
+        .zip(usage_start_ms)
+        .is_some_and(|(wire, usage)| wire > usage);
     Ok(json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "model": {
-            "requestCount": model_requests,
+            // Kept for compatibility, but now reflects all observable calls
+            // rather than only the retained wire window.
+            "requestCount": estimated_model_calls,
+            "estimatedTotalCallCount": estimated_model_calls,
+            "successfulCallCount": usage_entries,
+            "failedCallCount": model_errors,
+            "tracedRequestCount": model_requests,
             "errorCount": model_errors,
             "retryCount": model_retries,
             "observedModels": observed_models,
@@ -10740,15 +10860,23 @@ fn build_debug_performance_summary(
             // waiting on the model. Not session wall-clock: it excludes tool
             // execution and thinking time between turns.
             "totalRequestDurationMs": total_duration_ms,
+            "coverage": {
+                "usageStartMs": usage_start_ms,
+                "usageEndMs": usage_end_ms,
+                "wireStartMs": wire_start_ms,
+                "wireEndMs": wire_end_ms,
+                "wireBeginsAfterUsage": wire_begins_after_usage,
+                "wireTraceTruncated": wire_begins_after_usage,
+            },
         },
         "tools": {
-            "callCount": tool_calls,
-            "failureCount": tool_failures,
-            "uniqueToolCount": tool_counts.len(),
-            "byName": tool_counts,
-            "directWriteCalls": direct_write_calls,
-            "stagedWriteProtocolCalls": staged_write_calls,
-            "noNewEvidenceBlocks": no_new_evidence_blocks,
+            "callCount": tool_stats.call_count,
+            "failureCount": tool_stats.failure_count,
+            "uniqueToolCount": tool_stats.by_name.len(),
+            "byName": tool_stats.by_name,
+            "directWriteCalls": tool_stats.direct_write_calls,
+            "stagedWriteProtocolCalls": tool_stats.staged_write_calls,
+            "noNewEvidenceBlocks": tool_stats.no_new_evidence_blocks,
         },
         "context": {
             "checkpointCount": checkpoints,
@@ -10781,11 +10909,12 @@ fn build_debug_performance_summary(
             "noNewObservationCount": evidence_observations.saturating_sub(evidence_new),
         },
         "limitations": [
-            "Model request counts require wire tracing; zero may mean tracing was disabled.",
-            "Token totals come from the session-scoped usage log and exclude requests whose provider returned no usage.",
+            "Successful model calls come from usage rows; failed attempts come from retained wire errors. estimatedTotalCallCount is their sum.",
+            "tracedRequestCount covers only the retained wire window; coverage timestamps and wireTraceTruncated show when rotation omitted earlier requests.",
+            "Token totals come from the session-scoped usage log and exclude failed requests or successes whose provider returned no usage.",
             "Checkpoint token savings are heuristic live-context estimates, not billing-token savings.",
             "Checkpoint token figures are request-scoped (messages plus system prompt and tool schemas); the session compaction records count messages only, so the two differ by contextOverheadTokens.",
-            "Tool counts come from the event log and so cover the whole session, including calls a compaction later removed from the live session."
+            "Tool counts merge the compaction archive and live session, then add unseen in-flight event ids; events without stable ids cannot be deduplicated."
         ]
     }))
 }

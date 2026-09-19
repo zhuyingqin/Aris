@@ -1,5 +1,84 @@
 # ARIS-Code Changelog
 
+## v0.4.71 (2026-09-19)
+
+- **Chat transcript virtualisation: scrollbar that does not
+  jump** — `desktop/src/chat/transcriptMetrics.ts` (new) gives
+  every block kind a per-kind height estimate so an unmeasured
+  virtualizer row starts within a line or two of its real
+  height instead of an order of magnitude off. The constants
+  are the rendered chrome of each block:
+  `TURN_CHROME = 48`, `COLLAPSED_TOOL_ROW = 34`,
+  `RUNNING_TOOL_ROW = 120`, `TOOL_IMAGE_BLOCK = 240`,
+  `ATTACHMENT_ROW = 30`, `NOTICE_ROW = 34`, `REVIEW_ROW = 52`,
+  `PERMISSION_CARD = 96`, `COLLAPSED_THINKING_ROW = 32`,
+  `LINE_HEIGHT = 23`, `TEXT_COLUMNS = 92`. The flat-estimate
+  scrollbar is what the reader was seeing as a "jumping
+  scrollbar"; this ships the per-kind table that makes the
+  scrollbar a true reflection of measured + estimated height.
+- **Disclosure state survives virtualisation** —
+  `desktop/src/chat/disclosureState.ts` (new) keeps the
+  expand/collapse state of tool cards, tool groups,
+  permission cards, and the edited-files review in a
+  process-local `Map<blockId, boolean>` bounded to 4 000
+  entries (oldest-first eviction). A virtualized row used to
+  be unmounted once it passed the overscan margin, so
+  scrolling out and back remounted it collapsed — losing the
+  reader's expansion AND shrinking the row's measured height
+  from (say) 1 200px to 200px, yanking everything below it
+  upward. Keyed by block id, so a row remounts at exactly the
+  height it had.
+- **Late-render height cache for images and Mermaid** —
+  `desktop/src/chat/renderSizeCache.ts` (new) records the
+  last-rendered height of content that cannot know its own
+  size until it has rendered once: images (no intrinsic size
+  until the bytes arrive) and Mermaid diagrams (rendered
+  asynchronously, then scaled to fit the column). Replaying
+  the previous height as `min-height` means the row measures
+  its final height on first paint instead of growing into it.
+  Heights depend on the column width — stable within a
+  session, not across window resizes — so a stale value is
+  only ever a starting point. `MermaidDiagram.tsx` is the
+  first consumer; `ChatImagePreview.tsx` ships the matching
+  surface.
+- **`ChatThread.tsx` virtualiser rewrite** —
+  `desktop/src/chat/ChatThread.tsx` (+361 / −) integrates
+  the three modules above into the transcript. The previous
+  flat-estimate scrollbar, the row unmount/remount expand
+  loss, and the image/Mermaid row height re-grow are all
+  resolved at this surface. `tests/ChatThread.test.tsx`
+  (+159) covers the new behaviour.
+- **Chat UI polish** — `desktop/src/chat/ChatMessage.tsx`
+  (+15), `model.ts` (+3), `useChatSessions.ts` (+12),
+  `desktop/src/types.ts` (+8), `styles.css` (+34 / −)
+  carry the small surface fixes the virtualisation pass
+  depends on.
+- **Runtime hardening pass** —
+  `crates/chat/src/lib.rs` + tests, plus
+  `crates/runtime/src/{compact,conversation,focus_trace,lib}.rs`
+  and the matching tests pin the runtime surface the chat
+  rewrite depends on.
+- **Tauri surface wiring** —
+  `desktop/src-tauri/src/{engine,sessions,system_prompt}.rs`
+  and the matching tests (`tests/engine.rs`,
+  `tests/sessions.rs`) wire the IPC + state changes the
+  chat rewrite and runtime hardening expose.
+- **Design doc: TencentDB-Agent-Memory three-layer
+  derivation** — `docs/development-logic/tencentdb-three-layer-derivation.md`
+  (new) is a source-read of
+  `TencentCloud/TencentDB-Agent-Memory` (pinned at
+  `0b7bc097f9`, branch `feat/server_team`, 2026-09-17).
+  The headline finding: it is actually four layers, not
+  three — L0 is the raw JSONL log (no LLM call), and L1/L2/L3
+  are the derived projections. The doc records the L0 →
+  L1 → L2 → L3 pipeline, which hook fires each transition,
+  and which `agent_end` / `context_limit` / `compaction`
+  events drive each layer, all from the upstream source —
+  no deployment, no run, no effect claim.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.71.
+
 ## v0.4.70 (2026-09-17)
 
 - **Tauri auto-updater: dual-endpoint China / Global** —

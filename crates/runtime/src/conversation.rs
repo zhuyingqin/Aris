@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use crate::compact::{
     assemble_compacted_session_with_usage, bound_fallback_summary, estimate_session_tokens,
-    estimate_text_tokens, get_compact_continuation_message, plan_compaction, summarize_messages,
-    CompactionConfig, CompactionResult, CompactionSummarySource, CompactionTokenEstimateSource,
+    estimate_text_tokens, extract_prior_compaction_summary, get_compact_continuation_message,
+    plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
+    CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
@@ -29,17 +30,26 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
 const MAIN_LINE_CHECK_ENV_VAR: &str = "ARIS_MAIN_LINE_CHECK";
-/// Iterations one turn may run before the runtime calls it abnormal. Each
-/// iteration is a full model round trip, so an honest complex task lands well
-/// inside this; a turn that passes it is looping, not working. Deliberately
-/// generous: the cost of a false stop is one Retry, and the turn is preserved.
-const DEFAULT_MAX_TURN_ITERATIONS: usize = 300;
+/// Ordinary interactive Chat should deliver before an autonomous work-task
+/// budget would be appropriate. The desktop explicitly restores the larger
+/// autonomous limits for Work Tasks and controller-driven workflow turns.
+const DEFAULT_MAX_TURN_ITERATIONS: usize = 40;
 const MAX_TURN_ITERATIONS_ENV_VAR: &str = "ARIS_MAX_TURN_ITERATIONS";
 /// Wall-clock a turn may occupy. Iteration count alone does not bound this: a
 /// handful of long tool calls can hold a turn open for hours, and the model has
 /// no sense of elapsed time at all. `0` in either env var disables that budget.
-const DEFAULT_MAX_TURN_SECONDS: u64 = 2 * 60 * 60;
+const DEFAULT_MAX_TURN_SECONDS: u64 = 20 * 60;
 const MAX_TURN_SECONDS_ENV_VAR: &str = "ARIS_MAX_TURN_SECONDS";
+const DEFAULT_AUTONOMOUS_MAX_TURN_ITERATIONS: usize = 300;
+const AUTONOMOUS_MAX_TURN_ITERATIONS_ENV_VAR: &str = "ARIS_AUTONOMOUS_MAX_TURN_ITERATIONS";
+const DEFAULT_AUTONOMOUS_MAX_TURN_SECONDS: u64 = 2 * 60 * 60;
+const AUTONOMOUS_MAX_TURN_SECONDS_ENV_VAR: &str = "ARIS_AUTONOMOUS_MAX_TURN_SECONDS";
+const MAX_DELIVERY_CHECKPOINT_ATTEMPTS: usize = 2;
+pub(crate) const DELIVERY_CHECKPOINT_PROMPT_PREFIX: &str = "Runtime delivery checkpoint reached.";
+const DELIVERY_CHECKPOINT_TOOL_RESULT: &str =
+    "Runtime delivery checkpoint reached. Do not call more tools. Deliver the current result, clearly separating completed verification from remaining or unverified work.";
+const DELIVERY_CHECKPOINT_PLACEHOLDER: &str =
+    "This turn reached its delivery checkpoint. Work completed so far is preserved, but some requested work or verification may remain unfinished.";
 const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
@@ -76,8 +86,7 @@ const SOFT_CHECKPOINT_TOOL_CALLS_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_TOOL_CALL
 const DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO: f64 = 0.60;
 const SOFT_CHECKPOINT_CONTEXT_RATIO_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_CONTEXT_RATIO";
 const DEFAULT_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO: f64 = 0.20;
-const SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO_ENV_VAR: &str =
-    "ARIS_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO";
+const SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO";
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
@@ -621,6 +630,10 @@ pub struct ConversationRuntime<C, T> {
     /// second `ExecutorClient` pointed at a small model). `None` falls back to
     /// the deterministic text-assembly summary.
     summarizer: Option<C>,
+    /// A permanent provider/model rejection disables further summary calls in
+    /// this runtime. The desktop also remembers it for the rest of the session.
+    summarizer_circuit_open: bool,
+    summarizer_failure_event_pending: bool,
     /// Stable identity used to coalesce concurrent attempts to summarize the
     /// same archived slice. Desktop supplies its real chat/session id; direct
     /// runtimes receive a process-unique fallback to avoid cross-session reuse.
@@ -685,10 +698,9 @@ struct DynamicToolRoutingState {
     /// Monotonic use counter per tool; absent means "not used yet this turn".
     last_used: BTreeMap<String, u64>,
     tick: u64,
-    /// Tools this turn executed while their schema was routed away. Not
-    /// activated mid-turn — that would invalidate the provider's prompt prefix
-    /// — but handed to the next turn's plan so it starts with them visible.
-    deferred_but_used: BTreeSet<String>,
+    /// Exact tools that executed this turn. Only these cross the next turn
+    /// boundary; an unused browser family therefore expires after one turn.
+    used_this_turn: BTreeSet<String>,
 }
 
 impl DynamicToolRoutingState {
@@ -712,9 +724,6 @@ impl DynamicToolRoutingState {
             if self.active.insert(name.clone()) {
                 activated.push(name.clone());
             }
-            // It is visible again, so it no longer needs carrying to the next
-            // turn on the deferred-but-used list.
-            self.deferred_but_used.remove(&name);
             self.touch(&name);
         }
         let just_activated = activated.iter().cloned().collect::<BTreeSet<_>>();
@@ -800,6 +809,8 @@ where
             context_overhead_estimated_tokens,
             event_sink: Box::new(NoopEventSink),
             summarizer: None,
+            summarizer_circuit_open: false,
+            summarizer_failure_event_pending: false,
             compaction_session_id,
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
@@ -837,7 +848,7 @@ where
             max_active,
             last_used: BTreeMap::new(),
             tick: 0,
-            deferred_but_used: BTreeSet::new(),
+            used_this_turn: BTreeSet::new(),
         });
         self
     }
@@ -1050,6 +1061,9 @@ where
         self.browser_timeout_requests.clear();
         self.evidence_ledger = EvidenceLedger::default();
         self.evidence_observed_tool_uses.clear();
+        if let Some(routing) = self.dynamic_tool_routing.as_mut() {
+            routing.used_this_turn.clear();
+        }
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
@@ -1066,43 +1080,58 @@ where
         let soft_checkpoint_context_ratio = soft_checkpoint_context_ratio_from_env();
         let soft_checkpoint_token_growth_ratio = soft_checkpoint_token_growth_ratio_from_env();
         let turn_started = std::time::Instant::now();
+        let mut delivery_checkpoint_active = false;
+        let mut delivery_checkpoint_attempts = 0_usize;
 
         loop {
             // Check for Ctrl+C or caller-provided cancellation between iterations.
             if self.cancellation_requested() {
                 return Err(Self::interrupted_error());
             }
-            iterations += 1;
-            if iterations > self.max_iterations {
-                if let Some(event) = self.soft_checkpoint(
-                    iterations,
-                    turn_tool_calls,
-                    "iteration_budget",
-                ) {
-                    merge_auto_compaction_event(&mut auto_compaction, event);
-                }
-                return Err(Self::turn_budget_error(&format!(
-                    "ran {iterations} model iterations (limit {})",
-                    self.max_iterations
-                )));
+            if delivery_checkpoint_active
+                && delivery_checkpoint_attempts >= MAX_DELIVERY_CHECKPOINT_ATTEMPTS
+            {
+                let placeholder = ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: DELIVERY_CHECKPOINT_PLACEHOLDER.to_string(),
+                }]);
+                self.session.messages.push(placeholder.clone());
+                assistant_messages.push(placeholder);
+                break;
             }
-            // Nothing else in the loop is time-aware: a turn held open by a
-            // handful of slow tool calls never trips the iteration ceiling, and
-            // the model itself has no sense of elapsed time.
-            if let Some(budget) = self.max_turn_duration {
-                let elapsed = turn_started.elapsed();
-                if elapsed >= budget {
-                    if let Some(event) =
-                        self.soft_checkpoint(iterations, turn_tool_calls, "duration_budget")
-                    {
-                        merge_auto_compaction_event(&mut auto_compaction, event);
-                    }
-                    return Err(Self::turn_budget_error(&format!(
-                        "ran for {} minutes (limit {} minutes)",
-                        elapsed.as_secs() / 60,
-                        budget.as_secs() / 60
-                    )));
-                }
+            iterations += 1;
+            let iteration_budget_reached =
+                !delivery_checkpoint_active && iterations > self.max_iterations;
+            let duration_budget_reached = !delivery_checkpoint_active
+                && self
+                    .max_turn_duration
+                    .is_some_and(|budget| turn_started.elapsed() >= budget);
+            if iteration_budget_reached || duration_budget_reached {
+                let reason = if iteration_budget_reached {
+                    "iteration_budget"
+                } else {
+                    "duration_budget"
+                };
+                let checkpoint_tokens = self.estimated_request_tokens();
+                self.event_sink.emit(&RuntimeEvent {
+                    timestamp: now_iso8601(),
+                    session_id: String::new(),
+                    event_type: EventType::ContextCheckpoint {
+                        reason: reason.to_string(),
+                        iteration: iterations,
+                        tool_calls: turn_tool_calls,
+                        tokens_before: checkpoint_tokens,
+                        tokens_after: checkpoint_tokens,
+                        context_overhead_tokens: self.context_overhead_estimated_tokens,
+                        removed_messages: 0,
+                    },
+                });
+                self.session.messages.push(ConversationMessage::user_text(
+                    DELIVERY_CHECKPOINT_TOOL_RESULT,
+                ));
+                delivery_checkpoint_active = true;
+            }
+            if delivery_checkpoint_active {
+                delivery_checkpoint_attempts += 1;
             }
 
             let estimated_tokens = self.estimated_request_tokens();
@@ -1119,7 +1148,7 @@ where
                 && (last_soft_checkpoint_tokens == 0
                     || estimated_tokens.saturating_sub(last_soft_checkpoint_tokens)
                         >= token_growth.max(1));
-            if calls_due || tokens_due {
+            if !delivery_checkpoint_active && (calls_due || tokens_due) {
                 let reason = if calls_due {
                     "tool_call_interval"
                 } else {
@@ -1290,6 +1319,33 @@ where
                     }
                 }
                 break;
+            }
+
+            // The finalization allowance is delivery-only. Answer every
+            // requested tool_use so provider history remains valid, but do not
+            // let the model restart work after the checkpoint.
+            if delivery_checkpoint_active {
+                let result_message = ConversationMessage {
+                    role: MessageRole::Tool,
+                    blocks: pending_tool_uses
+                        .into_iter()
+                        .map(|(tool_use_id, tool_name, _)| ContentBlock::ToolResult {
+                            tool_use_id,
+                            tool_name,
+                            output: DELIVERY_CHECKPOINT_TOOL_RESULT.to_string(),
+                            is_error: true,
+                        })
+                        .collect(),
+                    usage: None,
+                };
+                if let Some(listener) = self.tool_result_listener.as_mut() {
+                    for block in &result_message.blocks {
+                        listener(block);
+                    }
+                }
+                self.session.messages.push(result_message.clone());
+                tool_results.push(result_message);
+                continue;
             }
 
             // When the user cancels mid-tool-loop we must NOT throw away the
@@ -1673,7 +1729,12 @@ where
             // resolved" issues no request, so downstream a wire log cannot tell
             // it apart from a provider failure — and the user only sees a
             // summary that reads like scraped terminal output.
-            let reason = if self.summarizer.is_none() {
+            let reason = if self.summarizer_failure_event_pending {
+                self.summarizer_failure_event_pending = false;
+                "summarizer_model_unavailable"
+            } else if self.summarizer_circuit_open {
+                "summarizer_circuit_open"
+            } else if self.summarizer.is_none() {
                 "no_summarizer_model_configured"
             } else {
                 "summarizer_call_failed"
@@ -1758,19 +1819,6 @@ where
             crate::clear_interrupt();
         }
         RuntimeError::new("interrupted by user")
-    }
-
-    /// A turn that exhausted its budget. Stated as work-done rather than as an
-    /// internal limit, because the user has to decide whether to resume: the
-    /// session keeps the partial turn, so continuing costs one message.
-    fn turn_budget_error(detail: &str) -> RuntimeError {
-        RuntimeError::new(format!(
-            "This turn was stopped by Aris because it {detail} without finishing. \
-             The work so far is preserved — review it and say how to continue, \
-             or ask for a summary of what was tried. \
-             Raise `{MAX_TURN_ITERATIONS_ENV_VAR}` / `{MAX_TURN_SECONDS_ENV_VAR}` \
-             (`0` disables) if the task genuinely needs a longer run."
-        ))
     }
 
     fn finish_tool_invocation(
@@ -2036,14 +2084,13 @@ where
         if !routing.catalog.contains(tool_name) {
             return;
         }
+        routing.used_this_turn.insert(tool_name.to_string());
         routing.touch(tool_name);
-        if !routing.active.contains(tool_name) {
-            routing.deferred_but_used.insert(tool_name.to_string());
-        }
     }
 
-    /// Tools the next turn should start with active: everything this turn had
-    /// active plus everything it actually reached for while deferred.
+    /// Tools the next turn should start with active: only tools this turn
+    /// actually executed. An unused carried browser schema therefore expires
+    /// after one turn.
     ///
     /// Without this, each user turn re-planned from the prompt text alone and
     /// threw away what the session had already paid to publish — one observed
@@ -2053,13 +2100,7 @@ where
     pub fn dynamic_tool_routing_carry_forward(&self) -> BTreeSet<String> {
         self.dynamic_tool_routing
             .as_ref()
-            .map(|routing| {
-                routing
-                    .active
-                    .union(&routing.deferred_but_used)
-                    .cloned()
-                    .collect()
-            })
+            .map(|routing| routing.used_this_turn.clone())
             .unwrap_or_default()
     }
 
@@ -2487,15 +2528,22 @@ where
         if *remaining_calls == 0 {
             return None;
         }
-        let summarizer = self.summarizer.as_mut()?;
         let mut current = request;
         for _attempt in 0..2 {
             if *remaining_calls == 0 {
                 return None;
             }
             *remaining_calls -= 1;
-            let Ok(events) = summarizer.stream(current.clone()) else {
-                continue;
+            let response = self.summarizer.as_mut()?.stream(current.clone());
+            let events = match response {
+                Ok(events) => events,
+                Err(error) if is_permanent_summarizer_error(&error) => {
+                    self.summarizer = None;
+                    self.summarizer_circuit_open = true;
+                    self.summarizer_failure_event_pending = true;
+                    return None;
+                }
+                Err(_) => continue,
             };
             let (text, output_tokens, stop_reason) = collect_summary_output(&events);
             if text.trim().is_empty() {
@@ -2527,6 +2575,19 @@ where
         }
         None
     }
+}
+
+fn is_permanent_summarizer_error(error: &RuntimeError) -> bool {
+    if error.is_model_unavailable() {
+        return true;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    (message.contains("requested model") && message.contains("not supported"))
+        || message.contains("model_not_found")
+        || message.contains("model not found")
+        || message.contains("unknown model")
+        || message.contains("unsupported model")
+        || (message.contains("model") && message.contains("does not exist"))
 }
 
 fn is_browser_backend_timeout(output: &str) -> bool {
@@ -2765,6 +2826,16 @@ fn build_summary_request(
 fn build_transcript_segments(removed: &[ConversationMessage]) -> Vec<String> {
     let mut segments = Vec::with_capacity(removed.len());
     for message in removed {
+        if message.role == MessageRole::User {
+            let canonical_prior = message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => extract_prior_compaction_summary(text),
+                _ => None,
+            });
+            if let Some(summary) = canonical_prior {
+                segments.push(format!("user: {summary}"));
+                continue;
+            }
+        }
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
@@ -3031,6 +3102,34 @@ pub fn max_turn_duration_from_env() -> Option<std::time::Duration> {
         Some(0) => return None,
         Some(seconds) => seconds,
         None => DEFAULT_MAX_TURN_SECONDS,
+    };
+    Some(std::time::Duration::from_secs(seconds))
+}
+
+/// Autonomous work retains the former high budget while ordinary Chat uses a
+/// delivery checkpoint. Separate environment variables keep the policies
+/// independently configurable.
+#[must_use]
+pub fn autonomous_max_turn_iterations_from_env() -> usize {
+    match std::env::var(AUTONOMOUS_MAX_TURN_ITERATIONS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    {
+        Some(0) => usize::MAX,
+        Some(limit) => limit,
+        None => DEFAULT_AUTONOMOUS_MAX_TURN_ITERATIONS,
+    }
+}
+
+#[must_use]
+pub fn autonomous_max_turn_duration_from_env() -> Option<std::time::Duration> {
+    let seconds = match std::env::var(AUTONOMOUS_MAX_TURN_SECONDS_ENV_VAR)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    {
+        Some(0) => return None,
+        Some(seconds) => seconds,
+        None => DEFAULT_AUTONOMOUS_MAX_TURN_SECONDS,
     };
     Some(std::time::Duration::from_secs(seconds))
 }

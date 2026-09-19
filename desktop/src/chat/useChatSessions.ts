@@ -1003,9 +1003,13 @@ export function useChatSessions(projectId?: string | null) {
       if (session.id !== id) return session;
       let replaced = false;
       const turns = session.turns.map((item) => {
-        if (item.omittedTurnIndex !== turnIndex) return item;
+        if (item.omittedTurnIndex !== turnIndex || item.omittedHydrated) return item;
         replaced = true;
-        return turn;
+        // The slot keeps the index it was omitted at. The loaded turn carries a
+        // different id from the placeholder, and letting the id change swapped
+        // the virtualizer's measurement key at the exact moment the row grew
+        // from a one-line notice into the full turn.
+        return { ...turn, omittedTurnIndex: turnIndex, omittedHydrated: true };
       });
       return replaced ? { ...session, turns, turnsLoaded: true } : session;
     }));
@@ -1023,8 +1027,10 @@ export function useChatSessions(projectId?: string | null) {
         return true;
       });
       const turns = [...prefix, ...session.turns];
+      // A hydrated slot keeps `omittedTurnIndex` for its measurement key, so
+      // "still partial" has to test the hydration flag rather than the index.
       const turnsPartial = startIndex > 0
-        || turns.some((turn) => turn.omittedTurnIndex != null);
+        || turns.some((turn) => turn.omittedTurnIndex != null && !turn.omittedHydrated);
       const turnCount = Math.max(session.turnCount ?? session.turns.length, turns.length);
       const loadedQuestionCount = prefix.filter((turn) => turn.role === "user").length;
       const loadedTurnStartIndex = turnsPartial ? startIndex : 0;

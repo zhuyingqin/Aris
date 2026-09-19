@@ -77,6 +77,7 @@ pub use config::{
 };
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
+    autonomous_max_turn_duration_from_env, autonomous_max_turn_iterations_from_env,
     max_turn_duration_from_env, max_turn_iterations_from_env,
     soft_checkpoint_context_ratio_from_env, soft_checkpoint_token_growth_ratio_from_env,
     soft_checkpoint_tool_call_interval_from_env,

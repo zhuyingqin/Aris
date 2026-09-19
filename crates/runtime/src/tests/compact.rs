@@ -568,6 +568,9 @@ fn latest_user_request_ignores_internal_resume_messages() {
         ConversationMessage::user_text(
             "Your latest assistant message is empty. Otherwise continue the work now.",
         ),
+        ConversationMessage::user_text(
+            "Runtime delivery checkpoint reached. Deliver the current result.",
+        ),
         ConversationMessage::user_text(prior),
     ]);
 
@@ -591,10 +594,31 @@ fn fallback_summary_rolls_forward_prior_compaction_focus() {
         }]),
     ]);
 
-    assert!(summary.contains("## Prior Compaction Summary"));
+    assert!(!summary.contains("## Prior Compaction Summary"));
     assert!(summary.contains("repair Aris context compression focus loss"));
+    assert!(summary.contains("Fallback summary may lose the old focus"));
     assert!(summary.contains("Active user goal from prior compacted state"));
     assert!(!summary.contains("Active user goal: This session is being continued"));
+}
+
+#[test]
+fn legacy_recursive_prior_summary_is_canonicalized_to_one_layer() {
+    let prior = get_compact_continuation_message(
+        "<summary>\n## Current Focus\n- Active user goal: keep the canonical state.\n\n## Prior Compaction Summary\n- Rolled forward:\n  ## Current Focus\n  - stale nested focus\n  ## Prior Compaction Summary\n  - older nested copy\n\n## Environment\n- Key files referenced: crates/runtime/src/compact.rs.\n\n## Active Issues\n- Preserve the current issue without nesting history.\n</summary>",
+        true,
+        false,
+    );
+    let summary = summarize_messages(&[
+        ConversationMessage::user_text(prior),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Continuing from the canonical state.".to_string(),
+        }]),
+    ]);
+
+    assert!(!summary.contains("## Prior Compaction Summary"));
+    assert!(!summary.contains("stale nested focus"));
+    assert!(summary.contains("keep the canonical state"));
+    assert!(summary.contains("Preserve the current issue without nesting history"));
 }
 
 #[test]

@@ -15833,7 +15833,14 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-scroll {
   position: relative;
-  padding: 26px 24px 20px;
+  /* Horizontal only. The transcript's vertical air is owned by the virtualizer
+     (`TRANSCRIPT_TOP_INSET` / the composer inset become its paddingStart and
+     paddingEnd) so that `getTotalSize()` equals this box's real `scrollHeight`:
+     with the padding out here instead, every offset the virtualizer computed was
+     off by the padding, and the composer resizing rewrote `scrollHeight` behind a
+     viewport the virtualizer thought it had anchored. `.chat-welcome` carries its
+     own vertical padding for the no-transcript states. */
+  padding: 0 24px;
   background: var(--bg);
   overflow-anchor: none;
 }
@@ -18504,6 +18511,9 @@ body.somniq-resizing-col {
      reachable by scrolling — the app mark disappeared under the header below
      ~724px of window height. `safe` falls back to `start` when it overflows. */
   justify-content: safe center;
+  /* `.chat-scroll` no longer carries vertical padding (the virtualizer owns the
+     transcript's air), so the no-transcript states declare their own. */
+  padding: 26px 0 20px;
 }
 
 .chat-virtual-list {
@@ -18946,14 +18956,20 @@ body.somniq-resizing-col {
 
 /* The question rail is an overlay so it can stay fixed while the transcript
    scrolls. At split-pane widths the centered 820px message column reaches the
-   rail, so reserve only the left space needed to keep the two from crossing.
-   The adaptive term falls back to the normal 24px gutter on wide panes. */
-.chat-thread.has-question-timeline .chat-scroll {
-  padding-left: clamp(24px, calc(992px - 100%), 76px);
+   rail, so reserve the space needed to keep the two from crossing. The adaptive
+   term falls back to the normal 24px gutter on wide panes.
+   Reserved unconditionally, and on both edges: gating it on
+   `.has-question-timeline` meant the gutter appeared the moment a reader sent
+   their second message, which rewrapped every message in the transcript and
+   invalidated every measured row height at once — a guaranteed jump. Both edges
+   because a one-sided gutter shifts the centered message column sideways, which
+   is the same reason `scrollbar-gutter` is `stable both-edges`. */
+.chat-thread .chat-scroll {
+  padding-inline: clamp(24px, calc(992px - 100%), 76px);
 }
 
-.chat-root.chat-project-brief-open .chat-thread.has-question-timeline .chat-scroll {
-  padding-left: 76px;
+.chat-root.chat-project-brief-open .chat-thread .chat-scroll {
+  padding-inline: 76px;
 }
 
 .chat-question-timeline-rail {
@@ -20161,8 +20177,8 @@ button.chat-workflow-file-path:hover {
     padding-inline: 12px;
   }
 
-  .chat-thread.has-question-timeline .chat-scroll {
-    padding-left: 12px;
+  .chat-thread .chat-scroll {
+    padding-inline: 12px;
   }
 
   .chat-question-timeline {

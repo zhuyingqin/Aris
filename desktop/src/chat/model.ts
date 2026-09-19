@@ -126,6 +126,9 @@ export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): C
     omittedTurnIndex: typeof raw.omittedTurnIndex === "number" && Number.isFinite(raw.omittedTurnIndex)
       ? raw.omittedTurnIndex
       : undefined,
+    // Carried through so a session that round-trips through storage does not
+    // come back looking like an un-hydrated placeholder.
+    omittedHydrated: raw.omittedHydrated ? true : undefined,
     omittedBytes: typeof raw.omittedBytes === "number" && Number.isFinite(raw.omittedBytes)
       ? raw.omittedBytes
       : undefined,

@@ -683,14 +683,10 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
     );
 }
 
-/// Returning `None` for every unrecognized model family is not a safe default.
-///
-/// It disables LLM summarization for the whole session without one request or
-/// one log line, and every compaction then ships the deterministic summary —
-/// the one that lists ANSI-coloured build output as "key files". The gateway
-/// already publishes what it serves, so look there before giving up.
+/// An OpenAI-compatible catalog can list models routed through different
+/// vendors. That does not mean credentials/endpoints are interchangeable.
 #[test]
-fn an_unfamiliar_model_takes_a_cheap_summarizer_from_the_gateway_catalogue() {
+fn an_unfamiliar_model_only_takes_a_same_vendor_summarizer() {
     let managed = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://gateway.test/v1".into(),
@@ -712,11 +708,10 @@ fn an_unfamiliar_model_takes_a_cheap_summarizer_from_the_gateway_catalogue() {
         Some("deepseek-v4.1-flash".to_string()),
     );
 
-    // An expensive executor borrows the cheapest served model instead of
-    // silently disabling summarization.
+    // A cross-vendor cheap model is not attempted with the executor's route.
     assert_eq!(
         resolve_summarizer_model(&managed, "claude-opus-5", Some("auto")),
-        Some("Qwen3.8-Flash-Next".to_string()),
+        None,
     );
 
     // Same vendor wins when the catalogue offers a choice.

@@ -1,8 +1,9 @@
 use super::{
     append_remote_chat_text_turns, chat_ui_first_user_title, chat_ui_preview_session,
     chat_ui_preview_session_from_turn_slice, chat_ui_preview_turns,
-    chat_ui_session_review_checkpoint, find_turns_array_bounds, is_retrieval_status_title,
-    merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
+    chat_ui_session_review_checkpoint, find_turns_array_bounds, is_large_turn_placeholder,
+    is_retrieval_status_title, merge_missing_remote_chat_ui_turns, partition_chat_ui_index,
+    preserve_remote_chat_updated_at,
     project_conversation_corpus_from_sessions, project_conversation_corpus_from_sessions_since,
     remote_chat_new_session_value, remote_chat_session_summary_for_project,
     remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
@@ -533,6 +534,33 @@ fn regular_preview_omits_an_older_huge_turn_but_keeps_the_newest() {
     assert_eq!(preview[0]["omittedTurnIndex"], json!(0));
     assert!(preview[1].get("omittedTurnIndex").is_none());
     assert_eq!(preview[1]["blocks"][0]["text"], json!("final answer"));
+}
+
+#[test]
+fn a_hydrated_omitted_slot_is_no_longer_a_placeholder() {
+    // The client keeps `omittedTurnIndex` on a slot after loading the real turn,
+    // because that index is the stable key its transcript virtualizer measures
+    // the row by — letting the id change there swapped the measurement key at the
+    // exact moment the row grew from a one-line notice into the full turn. So the
+    // index alone can no longer mean "this is a preview stand-in": only a slot
+    // without `omittedHydrated` may be skipped on save.
+    let placeholder = json!({
+        "id": "chat-1-large-turn-4",
+        "role": "assistant",
+        "omittedTurnIndex": 4,
+        "blocks": [{"kind": "notice", "message": "A large saved turn was omitted."}],
+    });
+    let hydrated = json!({
+        "id": "turn-4",
+        "role": "assistant",
+        "omittedTurnIndex": 4,
+        "omittedHydrated": true,
+        "blocks": [{"kind": "text", "text": "the real content"}],
+    });
+
+    assert!(is_large_turn_placeholder(&placeholder));
+    assert!(!is_large_turn_placeholder(&hydrated));
+    assert!(!is_large_turn_placeholder(&text_turn(0, "ordinary")));
 }
 
 #[test]
