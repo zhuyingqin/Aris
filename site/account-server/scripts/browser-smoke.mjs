@@ -68,6 +68,10 @@ export async function browserSmoke({ origin, password, stopCompute, scratch }) {
       return { status: response.status, value: await response.json() };
     }, { path, method, data });
     await exerciseMembership(memberCall, initial.user.id);
+    await page.goto(origin + '/?lang=en#pricing');
+    await page.waitForSelector('[data-testid="membership-plan-go"]');
+    assert.ok((await page.$eval('[data-testid="membership-plan-go"]', e => e.textContent)).includes('29'));
+    assert.ok((await page.$eval('[data-testid="membership-plan-pro"]', e => e.textContent)).includes('99'));
     await page.goto(origin + '/pricing.html?lang=en');
     await page.waitForSelector('[data-testid="membership-plan-pro"]');
     assert.ok((await page.$eval('[data-testid="membership-plan-pro"]', e => e.textContent)).includes('99'));
