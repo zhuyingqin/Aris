@@ -1992,9 +1992,8 @@ fn planning_a_protocol_is_not_retrieval() {
 /// full candidate-evidence preamble onto the result.
 #[test]
 fn a_local_url_is_not_external_retrieval() {
-    let bash = |command: &str| {
-        is_network_tool_call("bash", &json!({ "command": command }).to_string())
-    };
+    let bash =
+        |command: &str| is_network_tool_call("bash", &json!({ "command": command }).to_string());
 
     for command in [
         "curl -s http://localhost:5180/",
@@ -2029,7 +2028,10 @@ fn a_local_url_is_not_external_retrieval() {
 #[test]
 fn url_host_strips_scheme_userinfo_and_port() {
     assert_eq!(url_host("http://localhost:5180/x"), Some("localhost"));
-    assert_eq!(url_host("https://user:pw@example.com/p?q=1"), Some("example.com"));
+    assert_eq!(
+        url_host("https://user:pw@example.com/p?q=1"),
+        Some("example.com")
+    );
     assert_eq!(url_host("http://[::1]:8080/api"), Some("::1"));
     assert_eq!(url_host("http://[::1]"), Some("::1"));
     assert_eq!(url_host("https://example.com"), Some("example.com"));

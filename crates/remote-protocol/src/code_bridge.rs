@@ -184,7 +184,9 @@ mod tests {
     #[test]
     fn host_messages_round_trip() {
         for message in [
-            HostToBridge::Welcome { protocol_version: 1 },
+            HostToBridge::Welcome {
+                protocol_version: 1,
+            },
             HostToBridge::SaveAll,
             HostToBridge::ReloadFromDisk {
                 paths: vec!["a.rs".into()],
@@ -236,7 +238,10 @@ mod tests {
             is_notebook: false,
         };
         let json = serde_json::to_string(&message).expect("serialize");
-        assert!(json.contains("\"type\":\"active-editor-changed\""), "{json}");
+        assert!(
+            json.contains("\"type\":\"active-editor-changed\""),
+            "{json}"
+        );
         assert_eq!(
             serde_json::from_str::<BridgeToHost>(&json).expect("deserialize"),
             message

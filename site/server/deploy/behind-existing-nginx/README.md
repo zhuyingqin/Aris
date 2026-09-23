@@ -8,7 +8,7 @@ coturn container publishes STUN on 3478/UDP and 3478/TCP.
 ```text
 phone HTTPS/WSS
       |
-existing Nginx (TLS, 80/443 or 8443) -- private Docker network --> Caddy (:8080)
+existing Nginx (HTTP/HTTPS, 80/443) -- private Docker network --> Caddy (:8080)
                                                                      |
                                                                 gateway (:8787)
 
@@ -41,9 +41,8 @@ desktop. Do not route Nginx directly to port 8787 or publish inner Caddy.
    This creates the homepage and dashboard in `site/dist/`, the remote PWA in
    `site/dist/remote/`, and the local release gateway binary.
 
-5. Open TCP 80/443 (or the documented IP-only 8443), UDP 3478, and TCP 3478
-   in the cloud security group and Ubuntu firewall. Do not open 8787 or a TURN
-   relay port range.
+5. Open TCP 80/443, UDP 3478, and TCP 3478 in the cloud security group and
+   Ubuntu firewall. Do not open 8787 or a TURN relay port range.
 
 ## Create the private Docker network and certificate paths
 
@@ -179,53 +178,23 @@ Validate from a phone before pairing:
 
 ## Fixed public IPv4 without a domain
 
-Let's Encrypt supports public IP-address certificates. They are intentionally
-short-lived (about six days), require HTTP-01 or TLS-ALPN-01 validation, and
-must be renewed automatically. Use this only with a stable public IP and an
-exact Nginx edge; DNS-01 cannot validate an IP.
+For a site-only fixed-IP entry, use the existing Nginx HTTP vhost on standard
+port **80** and configure the URL as `http://<public-ip>`. Do not add the old
+IP-only `8443` overlay or TLS vhost.
 
-Use the dedicated IP-only HTTPS port **8443** so an existing application's
-443 default vhost is not changed. Configure the desktop gateway URL as
-`https://<public-ip>:8443`.
+This plain HTTP entry is not a secure context: phone pairing, camera QR scan,
+and browser WSS require the trusted HTTPS hostname variant documented above.
+Build and publish the site as usual, then verify it with:
 
-1. Build the unified site:
+```bash
+curl --fail --silent --show-error http://<public-ip>/
+```
 
-   ~~~bash
-   cd site
-   npm run build
-   ~~~
-
-2. Install `11-somniq-ip-acme.server.conf.template` with `<public-ip>`
-   replaced and load it. It exposes only the ACME webroot on port 80.
-3. Issue the IP certificate with Certbot 5.4 or newer (use staging first):
-
-   ```bash
-   docker run --rm \
-     -v /opt/somniq-remote/acme:/var/www/certbot \
-     -v /opt/somniq-remote/certificates:/etc/letsencrypt \
-     certbot/certbot certonly --webroot \
-     --webroot-path /var/www/certbot \
-     --preferred-profile shortlived \
-     --ip-address <public-ip> \
-     --cert-name somniq-ipv4 \
-     --agree-tos --register-unsafely-without-email --non-interactive
-   ```
-
-4. Replace the ACME-only file with an instantiated
-   `21-somniq-ip-remote.server.conf.template`, using the issued certificate.
-   Copy `nginx.ipv4-port.compose.override.yml.template` into the Nginx Compose
-   project so only Nginx publishes TCP 8443.
-5. Open TCP 8443, UDP 3478, and TCP 3478 in the cloud security group and host
-   firewall. Do not expose Caddy, the gateway, or TURN relay ports.
-6. Install the two `systemd/` templates after replacing their placeholders,
-   then enable the timer. It runs `certbot renew` every six hours and reloads
-   only the existing Nginx container after a successful renewal check:
-
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now somniq-ip-cert-renew.timer
-   systemctl list-timers somniq-ip-cert-renew.timer
-   ```
+The `11-somniq-ip-acme.server.conf.template`,
+`21-somniq-ip-remote.server.conf.template`, and
+`nginx.ipv4-port.compose.override.yml.template` files are retained only for
+legacy IP-certificate deployments and must not be enabled for this port-80
+configuration.
 
 This remains a single-instance pilot. `gateway_state` keeps completed device
 credential hashes and pairing relations across normal restarts; unfinished QR

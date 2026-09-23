@@ -914,8 +914,7 @@ fn interrupted_batch_journal_rolls_back_only_recorded_after_revisions() {
     let second = root.join("second.txt");
     fs::write(&first, "new first\n").expect("published first");
     fs::write(&second, "old second\n").expect("unpublished second");
-    let journal_root =
-        crate::somniq_project_tmp_dir(&root).join(BATCH_WRITE_JOURNAL_DIR_NAME);
+    let journal_root = crate::somniq_project_tmp_dir(&root).join(BATCH_WRITE_JOURNAL_DIR_NAME);
     fs::create_dir_all(&journal_root).expect("journal root");
     let journal = BatchWriteJournal {
         version: 1,
@@ -1539,7 +1538,10 @@ fn missing_read_path_error_names_the_broken_component_and_siblings() {
         message.contains("exists but `chapters` does not"),
         "{message}"
     );
-    assert!(message.contains("Ch1/") && message.contains("Ch3/"), "{message}");
+    assert!(
+        message.contains("Ch1/") && message.contains("Ch3/"),
+        "{message}"
+    );
     assert!(
         message.contains("Found `ch3_missing_data.tex` at: Ch3/ch3_missing_data.tex"),
         "{message}"

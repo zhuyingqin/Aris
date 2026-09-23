@@ -31,6 +31,57 @@ npm --prefix site run build
 网关。静态产物统一位于 `site/dist/`，其中远程页在 `site/dist/remote/`；
 服务端 release 二进制位于 `site/server/target/release/`。
 
+## 用户服务协议
+
+`user-service-agreement.html` 的中、英、西三语正文在 `src/userServiceAgreement.ts`，
+由 `src/LegalApp.tsx` 渲染目录、重要条款和主体信息。
+`src/agreementConfig.ts` 中的 `USER_SERVICE_AGREEMENT_VERSION` 同时用于正文展示和支付授权请求；发布修订时同步维护版本及
+更新日期，并由账户服务保留注册时实际接受的版本、同意记录和对应正文快照。
+
+运营主体默认全称为“重庆应算科技有限公司”，可通过 `VITE_SOMNIQ_MERCHANT_LEGAL_NAME`
+覆盖；联系地址通过 `VITE_SOMNIQ_MERCHANT_ADDRESS` 配置。缺失的信息保留“待确认”，不能据此认定已完成
+对外经营主体披露。正文没有代替完整的隐私告知，也没有实现退款、注销或支付服务；
+相关实际处理流程须与发布条款一致。
+
+本次条款核对参考：[民法典](https://www.court.gov.cn/zixun/xiangqing/233181.html)、
+[消费者权益保护法实施条例](https://www.samr.gov.cn/zw/zfxxgk/fdzdgknr/bgt/art/2024/art_0aea188276a44f0baf940ab95ee00e0a.html)、
+[个人信息保护法](https://www.cac.gov.cn/2021-08/20/c_1631050028355286.htm)。
+
+## 自动续费接入
+
+公开定价页仅展示套餐信息。用户注册须在注册弹窗中单独勾选《用户服务协议》；
+登录后的 `dashboard.html?tab=plan` 展示自动续费金额、周期、取消路径与默认不勾选的代扣授权框。
+统一使用 `user-service-agreement.html`：第九至十一章包含购买、扣款授权、取消和退款规则。
+购买确认及会员管理链接直达 `#legal-auto-renewal`，不再要求接受第二份协议。
+旧地址 `auto-renew-agreement.html` 仅用于兼容跳转，保留语言参数，不包含独立协议正文。
+`auto-renew-result.html` 仅在服务端查到有效签约记录后显示成功。控制台
+`dashboard.html?tab=plan` 从服务端读取签约状态，并提供关闭前确认。账户分组或算力
+余额不能作为自动扣款授权的依据。
+
+当前控制台另外展示的「千研科研 Pro」¥199/月是独立方案，入口改为咨询，
+不会跳到 ¥79/月的 SomniQ Studio 专业版自动续费签约。注册协议勾选目前由前端校验；
+账户服务还需保存协议版本、勾选时间与账号关联记录，才能形成可核验的注册同意记录。
+
+目前本仓库只有网站和远程网关，没有支付渠道签约、订单、代扣通知或解约服务。
+`VITE_SOMNIQ_AUTO_RENEW_SIGN_ENABLED` 默认为关闭，必须在支付链路完整接入后才设
+为 `true`，并确认默认主体“重庆应算科技有限公司”与支付渠道登记的商户全称一致；
+如需覆盖主体名称，使用 `VITE_SOMNIQ_MERCHANT_LEGAL_NAME` 配置。
+签约页显示的计划金额和周期由 `src/billingConfig.ts` 定义；启用前须与服务端及支付
+渠道的实际配置逐项核对。商户全称被显式配置为空时，协议页显示待确认，签约保持关闭。
+
+需要由账户／支付服务实现并记录以下同源接口（现有 `/v1/user/*` 路由转发到该服务）：
+
+| 接口 | 约定 |
+| --- | --- |
+| `GET /v1/user/auto-renew` | 返回 `{success:true,data:{status:"none"}}`，或含 `status:"active"/"cancelled"`、`plan_name`、`current_period_end`、`currency:"CNY"`；有效签约另含 `next_charge_at`、`next_charge_fen`。状态必须来自支付签约记录。 |
+| `POST /v1/user/auto-renew/sign` | 验证登录身份、计划与协议版本，记录用户主动授权及协议快照；返回 `sign_url`、`amount_fen`、`currency`、`period`、`merchant_name`，与页面展示一致后才跳往 HTTPS 支付渠道签约。 |
+| `POST /v1/user/auto-renew/cancel` | 撤销支付渠道代扣授权，服务端确认后返回 `status:"cancelled"` 和当前权益截止日期；失败不能在页面上显示“已关闭”。 |
+
+支付回调需校验签名并更新签约／订单状态；支付渠道回跳地址可指向
+`auto-renew-result.html`，该页会重新查询服务端记录。
+每次自动扣款前还需通知用户扣款时间、金额和取消路径。不要通过浏览器本地状态
+模拟签约成功或关闭成功。
+
 ## 结构 / Layout
 
 ```

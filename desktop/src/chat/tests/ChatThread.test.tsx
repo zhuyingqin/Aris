@@ -15,11 +15,20 @@ import {
   nextOmittedTurnToReveal,
   questionMarkersFromTurns,
   questionPreviewFromTurn,
+  rowsNeedingReestimate,
   scrollBottomLabel,
   shouldIgnoreProgrammaticScroll,
   shouldLoadEarlierTurnsAtTop,
 } from "../ChatThread";
-import { estimateTurnSize, turnVirtualKey } from "../transcriptMetrics";
+import {
+  clearTurnMeasurements,
+  estimateTurnSize,
+  readTurnMeasurements,
+  setMessageColumns,
+  textColumnsForWidth,
+  turnVirtualKey,
+  writeTurnMeasurements,
+} from "../transcriptMetrics";
 
 describe("ChatThread scroll and timeline helpers", () => {
   it("localizes the return-to-bottom control", () => {
@@ -243,5 +252,53 @@ describe("ChatThread scroll and timeline helpers", () => {
       blocks: [{ kind: "text", text: "中".repeat(400) }],
     });
     expect(chinese).toBeGreaterThan(latin);
+  });
+
+  it("estimates against the column width the transcript actually has", () => {
+    // A transcript sharing the window with the side panel wraps the same message
+    // into far more lines. Estimating it at the full-width column left every
+    // unmeasured row short, which is a jump waiting for the reader to scroll.
+    const turn: ChatTurn = {
+      id: "wide-vs-narrow",
+      role: "assistant",
+      blocks: [{ kind: "text", text: "word ".repeat(300) }],
+    };
+    const full = textColumnsForWidth(820);
+    const split = textColumnsForWidth(420);
+    expect(full).toBeGreaterThan(split);
+    expect(estimateTurnSize(turn, split)).toBeGreaterThan(estimateTurnSize(turn, full));
+
+    // A wider pane than the message column cannot make the column wider, and a
+    // width that is missing or absurd falls back to the full column.
+    expect(textColumnsForWidth(2_000)).toBe(full);
+    expect(textColumnsForWidth(0)).toBe(full);
+    expect(textColumnsForWidth(Number.NaN)).toBe(full);
+    expect(textColumnsForWidth(10)).toBeGreaterThan(0);
+  });
+
+  it("only replays a session's measured heights at the width they were taken at", () => {
+    // The snapshot exists so reopening a conversation does not start from
+    // estimates. Replaying heights measured at another width is worse than an
+    // estimate: every one of them is wrong, and none of them can notice.
+    const items = [{ index: 0, key: "turn-0", start: 0, end: 120, size: 120, lane: 0 }];
+    setMessageColumns(textColumnsForWidth(820));
+    writeTurnMeasurements("session-a", items);
+    expect(readTurnMeasurements("session-a")).toHaveLength(1);
+
+    setMessageColumns(textColumnsForWidth(420));
+    expect(readTurnMeasurements("session-a")).toHaveLength(0);
+
+    setMessageColumns(textColumnsForWidth(820));
+    expect(readTurnMeasurements("session-a")).toHaveLength(1);
+    clearTurnMeasurements("session-a");
+    expect(readTurnMeasurements("session-a")).toHaveLength(0);
+  });
+
+  it("re-estimates every row a width change left unmeasurable", () => {
+    // The mounted rows are excluded: the browser has already re-measured them
+    // through the virtualizer's own ResizeObserver.
+    expect(rowsNeedingReestimate(6, [2, 3, 4])).toEqual([0, 1, 5]);
+    expect(rowsNeedingReestimate(3, [])).toEqual([0, 1, 2]);
+    expect(rowsNeedingReestimate(0, [0])).toEqual([]);
   });
 });

@@ -22,11 +22,10 @@ use runtime::{
     read_file_with_images, record_text_file_change, revert_file_change,
     write_file_with_context_expected, write_files_with_context_expected, ApiClient, ApiRequest,
     AssistantEvent, BashCommandInput, BatchWriteRequest, ConversationRuntime, FileChangeGetInput,
-    FileChangeListInput, FileChangeOperation,
-    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput,
-    MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
-    StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
-    MAX_FILE_TOOL_PAYLOAD_BYTES,
+    FileChangeListInput, FileChangeOperation, FileChangeRecord, FileChangeRevertInput,
+    FileMutationContext, GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy,
+    RuntimeError, Session, StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor,
+    ToolInvocation, MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1873,11 +1872,9 @@ fn run_write_files(input: WriteFilesInput, context: &ToolRunContext) -> Result<S
             expected_revision: file.expected_revision,
         })
         .collect::<Vec<_>>();
-    let output = write_files_with_context_expected(
-        &requests,
-        &context.mutation_context("write_files"),
-    )
-    .map_err(io_to_string)?;
+    let output =
+        write_files_with_context_expected(&requests, &context.mutation_context("write_files"))
+            .map_err(io_to_string)?;
     let mut results = Vec::with_capacity(output.files.len());
     for file in output.files {
         let output = file;
@@ -4567,10 +4564,7 @@ pub fn rank_tool_search_candidates(
         .iter()
         .filter_map(|candidate| {
             let index = ToolSearchIndex::new(candidate);
-            if required
-                .iter()
-                .any(|term| index.match_tier(term).is_none())
-            {
+            if required.iter().any(|term| index.match_tier(term).is_none()) {
                 return None;
             }
             let term_tiers = terms
@@ -4581,7 +4575,12 @@ pub fn rank_tool_search_candidates(
             if matched_terms == 0 && !terms.is_empty() {
                 return None;
             }
-            let tier = term_tiers.iter().flatten().copied().max().unwrap_or_default();
+            let tier = term_tiers
+                .iter()
+                .flatten()
+                .copied()
+                .max()
+                .unwrap_or_default();
             // The position of the term that earned the best tier, not of any
             // term that happened to match. `edit_file` mentions `write_file` in
             // its description; that must not make it answer term 0 first.

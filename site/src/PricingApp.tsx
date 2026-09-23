@@ -37,6 +37,17 @@ function PricingContent({
   const remaining = user?.quota || 0;
   const used = user?.used_quota || 0;
   const usdValue = (remaining / 500000).toFixed(2);
+  const openPlanRegistration = () => {
+    try {
+      sessionStorage.setItem(
+        "somniq_auth_return_to_v1",
+        new URL(`./dashboard.html?lang=${lang}&tab=plan`, window.location.href).href,
+      );
+    } catch {
+      // Registration still works when the browser blocks session storage.
+    }
+    openAuthModal("register");
+  };
 
   const renderLogo = (id: string) => {
     if (id === "gpt") return <OpenAILogo width={24} height={24} className="model-logo-svg model-logo-svg--openai" />;
@@ -76,22 +87,22 @@ function PricingContent({
             </div>
 
             {hasActivePlan ? (
-              /* Active new-api Subscription Card */
-              <article className="pricing-plan" aria-label={isZh ? "当前已生效订阅" : isEs ? "Suscripción Activa" : "Active Subscription"}>
+              /* Account quota is not proof of a recurring-payment mandate. */
+              <article className="pricing-plan" aria-label={isZh ? "当前算力账户" : isEs ? "Cuenta de cómputo" : "Current compute account"}>
                 <div className="pricing-plan-head">
                   <div>
                     <p className="pricing-plan-name">
                       {user?.group === "千研"
                         ? isZh
-                          ? "千研科研 Pro 会员"
+                          ? "千研科研 Pro 算力账户"
                           : isEs
-                          ? "Membresía Pro Mil Investigaciones"
-                          : "Thousand Research Pro"
+                          ? "Cuenta de cómputo Pro Mil Investigaciones"
+                          : "Thousand Research Pro compute account"
                         : isZh
-                        ? "SomniQ 科研专业版"
+                        ? "SomniQ 算力账户"
                         : isEs
-                        ? "SomniQ Nivel Pro"
-                        : "SomniQ Pro Tier"}
+                        ? "Cuenta de cómputo SomniQ"
+                        : "SomniQ compute account"}
                     </p>
                     <p style={{ color: "var(--cyan)", fontSize: "13px" }}>
                       {isZh
@@ -102,7 +113,7 @@ function PricingContent({
                     </p>
                   </div>
                   <span className="pricing-plan-badge" style={{ background: "#10b981", color: "#000" }}>
-                    {isZh ? "● 履约中" : isEs ? "● Activo" : "● Active"}
+                    {isZh ? "● 算力可用" : isEs ? "● Cómputo disponible" : "● Quota available"}
                   </span>
                 </div>
 
@@ -121,7 +132,7 @@ function PricingContent({
                 </div>
 
                 <div className="pricing-actions" style={{ gap: "10px", marginTop: "24px" }}>
-                  <a className="btn btn--primary" href={`./dashboard.html?lang=${lang}`}>
+                  <a className="btn btn--primary" href={`./dashboard.html?lang=${lang}&tab=plan`}>
                     <CheckIcon width={16} height={16} />
                     {isZh ? "进入控制台管理算力" : isEs ? "Ir a la Consola de Cómputo" : "Go to Dashboard"}
                     <ArrowIcon className="btn-arrow" width={16} height={16} />
@@ -160,16 +171,24 @@ function PricingContent({
                 </div>
 
                 <div className="pricing-actions">
-                  <button
-                    type="button"
-                    className="btn btn--primary btn--lg"
-                    onClick={() => openAuthModal("register")}
-                    style={{ width: "100%", justifyContent: "center" }}
-                  >
-                    <SparklesIcon width={17} height={17} />
-                    {isZh ? "立即开通 Pro 会员" : isEs ? "Activar Suscripción Pro" : "Subscribe to Pro"}
-                    <ArrowIcon className="btn-arrow" width={17} height={17} />
-                  </button>
+                  {user ? (
+                    <a className="btn btn--primary btn--lg" href={`./dashboard.html?lang=${lang}&tab=plan`} style={{ width: "100%", justifyContent: "center" }}>
+                      <SparklesIcon width={17} height={17} />
+                      {isZh ? "进入我的会员" : isEs ? "Ir a mi membresía" : "Go to my membership"}
+                      <ArrowIcon className="btn-arrow" width={17} height={17} />
+                    </a>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn--primary btn--lg"
+                      onClick={openPlanRegistration}
+                      style={{ width: "100%", justifyContent: "center" }}
+                    >
+                      <SparklesIcon width={17} height={17} />
+                      {isZh ? "注册账号，查看会员方案" : isEs ? "Crear cuenta para ver el plan" : "Create an account to view the plan"}
+                      <ArrowIcon className="btn-arrow" width={17} height={17} />
+                    </button>
+                  )}
                 </div>
               </article>
             )}
@@ -250,7 +269,7 @@ function PricingContent({
         </section>
       </main>
 
-      <Footer copy={copy} hideCta />
+      <Footer />
 
       <AuthModal copy={copy} />
       <UserDashboard copy={copy} />

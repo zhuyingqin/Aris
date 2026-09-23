@@ -315,10 +315,7 @@ fn a_repeated_failure_nudge_demands_a_change_not_a_statement() {
     let nudge = FocusSignals::from_messages(&messages)
         .nudge()
         .expect("nudge past the error-repeat threshold");
-    assert!(
-        nudge.contains("Do not retry the same failure"),
-        "{nudge}"
-    );
+    assert!(nudge.contains("Do not retry the same failure"), "{nudge}");
     assert!(nudge.contains("Change mechanism once"), "{nudge}");
     assert!(nudge.contains("what remains blocked"), "{nudge}");
 }

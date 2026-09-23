@@ -8,6 +8,7 @@ import {
   TRANSCRIPT_TOP_INSET,
   compensateAboveViewportResize,
   isNearBottom,
+  rowsNeedingReestimate,
 } from "../ChatThread";
 
 /**
@@ -227,6 +228,35 @@ describe("transcript virtualizer contract", () => {
 
     expect(isNearBottom(element)).toBe(true);
     expect(element.scrollHeight - element.scrollTop - element.clientHeight).toBe(0);
+  });
+
+  it("keeps the reader still when a width change re-estimates the rows it cannot see", () => {
+    // Opening the side panel (or dragging its divider) rewraps every message.
+    // Only the mounted rows get a ResizeObserver callback for the new width; the
+    // rest keep heights measured in the old layout until the reader scrolls them
+    // into view, which is where the jumping came from. Re-estimating them through
+    // `resizeItem` is what lets the virtualizer compensate as it goes.
+    const { virtualizer, measureAll, commit } = buildVirtualizer(keyRange(0, 40), element);
+    measureAll();
+
+    element.scrollTo({ top: 6_000 });
+    commit();
+    const anchor = virtualizer.measurementsCache.find((item) => item.end > element.scrollTop);
+    expect(anchor).toBeDefined();
+    const offsetWithinAnchor = element.scrollTop - anchor!.start;
+
+    const mounted = virtualizer.getVirtualItems().map((item) => item.index);
+    const stale = rowsNeedingReestimate(virtualizer.options.count, mounted);
+    expect(stale).not.toContain(anchor!.index);
+    for (const index of stale) {
+      virtualizer.resizeItem(index, Math.round(rowSize(index) * 1.4));
+    }
+    commit();
+
+    const moved = virtualizer.measurementsCache.find((item) => item.key === anchor!.key);
+    expect(moved).toBeDefined();
+    expect(moved!.start).not.toBe(anchor!.start);
+    expect(element.scrollTop - moved!.start).toBe(offsetWithinAnchor);
   });
 
   it("resolves the last row's end alignment to the true bottom", () => {

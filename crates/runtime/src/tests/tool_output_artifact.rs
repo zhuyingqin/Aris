@@ -29,26 +29,16 @@ fn large_output_is_persisted_and_projected_as_a_retrievable_reference() {
     );
     assert_eq!(value["status"], "referenced");
     assert_eq!(value["persistedOutputPath"], artifact.path);
-    assert_eq!(
-        value["sha256"].as_str(),
-        artifact.sha256.as_deref()
-    );
+    assert_eq!(value["sha256"].as_str(), artifact.sha256.as_deref());
     assert!(value["preview"].as_str().unwrap().contains("begin"));
     assert!(value["preview"].as_str().unwrap().contains("end"));
     assert!(projected.chars().count() < TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS);
 
-    let low_budget = project_tool_output(
-        output,
-        &artifact,
-        MIN_TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS,
-    );
+    let low_budget =
+        project_tool_output(output, &artifact, MIN_TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS);
     let low_budget: Value = serde_json::from_str(&low_budget).expect("low-budget envelope");
     assert!(
-        low_budget["preview"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count()
+        low_budget["preview"].as_str().unwrap().chars().count()
             <= MIN_TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS
     );
 }

@@ -496,7 +496,10 @@ fn imports_zotero_children_collections_and_common_publication_fields() {
     );
     assert_eq!(paper["pdfAnnotations"][0]["page"], 4);
     assert_eq!(paper["pdfAnnotations"][0]["style"], "strikethrough");
-    assert_eq!(paper["pdfAnnotations"][0]["annotationType"], "strikethrough");
+    assert_eq!(
+        paper["pdfAnnotations"][0]["annotationType"],
+        "strikethrough"
+    );
     assert_eq!(paper["pdfAnnotations"][0]["position"]["pageIndex"], 3);
     assert_eq!(paper["pdfAnnotations"][0]["sortIndex"], 7);
     assert_eq!(paper["pdfAnnotations"][0]["author"], "Ada");
@@ -585,12 +588,20 @@ fn zotero_relations_round_trip_through_the_normalized_item_graph() {
     let library = library_load_at(&base).expect("load normalized projection");
     let source = library["papers"]
         .as_array()
-        .and_then(|papers| papers.iter().find(|paper| paper["title"] == "Relation source"))
+        .and_then(|papers| {
+            papers
+                .iter()
+                .find(|paper| paper["title"] == "Relation source")
+        })
         .expect("source paper");
     assert_eq!(source["relations"][0]["predicate"], "dc:relation");
     let target_id = library["papers"]
         .as_array()
-        .and_then(|papers| papers.iter().find(|paper| paper["title"] == "Relation target"))
+        .and_then(|papers| {
+            papers
+                .iter()
+                .find(|paper| paper["title"] == "Relation target")
+        })
         .and_then(|paper| paper["id"].as_str())
         .expect("target id");
     assert_eq!(source["relations"][0]["target"], target_id);
@@ -689,10 +700,7 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
     assert_eq!(items[0]["type"], "article-journal");
     assert_eq!(items[0]["DOI"], "10.1000/export");
     assert_eq!(items[0]["editor"][0]["family"], "Hopper");
-    assert_eq!(
-        items[0]["x-creator-roles"][3]["role"],
-        "institution"
-    );
+    assert_eq!(items[0]["x-creator-roles"][3]["role"], "institution");
 
     let zotero = export("zotero-json");
     let zotero_root: Value = serde_json::from_str(&zotero.content).expect("valid Zotero JSON");
@@ -1351,7 +1359,9 @@ fn browser_download_task_for_url_covers_every_supported_publisher() {
 fn browser_download_task_for_url_does_not_invent_a_publisher_route() {
     // A trailing digits-then-`.pdf` shape is what `parse_ieee_arnumber` keys on,
     // so an unhosted match here would send every arXiv PDF through IEEE.
-    assert!(browser_download_task_for_url("https://arxiv.org/pdf/2301.12345.pdf", "x.pdf").is_none());
+    assert!(
+        browser_download_task_for_url("https://arxiv.org/pdf/2301.12345.pdf", "x.pdf").is_none()
+    );
     assert!(browser_download_task_for_url("https://example.com/paper/pdf", "x.pdf").is_none());
 }
 
@@ -2443,7 +2453,10 @@ fn continuation_cursors_preserve_exhausted_and_retryable_query_streams() {
 fn protocol_result_bound_is_distributed_across_query_variants_by_weight() {
     let weights = [4, 2, 2, 1];
     assert_eq!(distribute_variant_budget(10, &weights), vec![4, 2, 2, 2]);
-    assert_eq!(distribute_variant_budget(9, &weights).iter().sum::<usize>(), 9);
+    assert_eq!(
+        distribute_variant_budget(9, &weights).iter().sum::<usize>(),
+        9
+    );
     assert!(distribute_variant_budget(9, &weights)[0] > distribute_variant_budget(9, &weights)[3]);
     assert_eq!(distribute_variant_budget(4, &weights), vec![1, 1, 1, 1]);
     assert_eq!(distribute_variant_budget(3, &weights), vec![1, 1, 1]);
@@ -2489,7 +2502,9 @@ fn a_question_gets_no_exact_phrase_stream_but_a_title_does() {
         "How does retrieval augmented generation improve factuality?",
         "openalex",
     );
-    assert!(!question.iter().any(|variant| variant.kind == "exact_phrase"));
+    assert!(!question
+        .iter()
+        .any(|variant| variant.kind == "exact_phrase"));
 
     let title = plan_source_query_variants("Attention Is All You Need", "openalex");
     let phrase = title
@@ -2514,7 +2529,12 @@ fn synonym_expansion_widens_one_term_instead_of_disjoining_all_of_them() {
         synonym.query
     );
     assert!(synonym.query.contains(" AND "), "{}", synonym.query);
-    assert_eq!(synonym.query.matches(" OR ").count(), 1, "{}", synonym.query);
+    assert_eq!(
+        synonym.query.matches(" OR ").count(),
+        1,
+        "{}",
+        synonym.query
+    );
 }
 
 /// Crossref and Semantic Scholar parse neither phrases nor boolean operators,
@@ -3174,7 +3194,13 @@ fn literature_citations_traverses_the_incoming_edge_and_persists_a_run() {
     let _ = std::fs::remove_dir_all(base);
 }
 
-fn remote(id: &str, title: &str, doi: Option<&str>, arxiv_id: Option<&str>, source: &str) -> RemotePaper {
+fn remote(
+    id: &str,
+    title: &str,
+    doi: Option<&str>,
+    arxiv_id: Option<&str>,
+    source: &str,
+) -> RemotePaper {
     RemotePaper {
         id: id.to_string(),
         title: title.to_string(),
@@ -3211,7 +3237,13 @@ fn an_arxiv_doi_matches_the_arxiv_record_whatever_its_capitalisation() {
         );
         let merged = dedupe(vec![
             from_index,
-            remote("arxiv:2301.12345", "A Paper", None, Some("2301.12345"), "arXiv"),
+            remote(
+                "arxiv:2301.12345",
+                "A Paper",
+                None,
+                Some("2301.12345"),
+                "arXiv",
+            ),
         ]);
         assert_eq!(merged.len(), 1, "{doi} must merge into one record");
         assert!(merged[0].source.contains("Crossref") && merged[0].source.contains("arXiv"));
@@ -3337,7 +3369,11 @@ fn re_ranking_lifts_the_on_topic_paper_over_a_round_robin_tie() {
     let features = BTreeMap::from([
         (
             "doi:10.1002/9781394374717.fmatter".to_string(),
-            feature("Advanced Retrieval-Augmented Generation", Some(2026), Some(0)),
+            feature(
+                "Advanced Retrieval-Augmented Generation",
+                Some(2026),
+                Some(0),
+            ),
         ),
         (
             "doi:10.48550/arxiv.2312.10997".to_string(),
@@ -3348,8 +3384,17 @@ fn re_ranking_lifts_the_on_topic_paper_over_a_round_robin_tie() {
             ),
         ),
     ]);
-    let terms = RankingTerms::from_question("retrieval augmented generation for large language models");
-    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+    let terms =
+        RankingTerms::from_question("retrieval augmented generation for large language models");
+    apply_fused_ranking(
+        &mut run,
+        &ids,
+        &ranks,
+        &BTreeMap::new(),
+        &terms,
+        &features,
+        2026,
+    );
 
     assert_eq!(run.record_ids[0], "doi:10.48550/arxiv.2312.10997");
     // Fusion still says they are equal; re-ranking is what separates them.
@@ -3360,8 +3405,17 @@ fn re_ranking_lifts_the_on_topic_paper_over_a_round_robin_tie() {
     assert!(
         run.ranked_records[0].ranking_score_micros > run.ranked_records[1].ranking_score_micros
     );
-    assert_eq!(run.ranked_records[0].ranking_signals.title_coverage_millis, 1_000);
-    assert!(run.ranked_records[0].ranking_signals.impact_millis.unwrap_or(0) > 0);
+    assert_eq!(
+        run.ranked_records[0].ranking_signals.title_coverage_millis,
+        1_000
+    );
+    assert!(
+        run.ranked_records[0]
+            .ranking_signals
+            .impact_millis
+            .unwrap_or(0)
+            > 0
+    );
     assert_eq!(run.ranked_records[1].ranking_signals.impact_millis, Some(0));
 }
 
@@ -3384,12 +3438,28 @@ fn an_unreported_citation_count_is_unknown_rather_than_zero() {
     let features = BTreeMap::from([
         (
             "arxiv:2312.10997".to_string(),
-            feature("Retrieval-Augmented Generation for Large Language Models", Some(2023), None),
+            feature(
+                "Retrieval-Augmented Generation for Large Language Models",
+                Some(2023),
+                None,
+            ),
         ),
-        ("doi:stub".to_string(), feature("Large Language Models", Some(2026), Some(0))),
+        (
+            "doi:stub".to_string(),
+            feature("Large Language Models", Some(2026), Some(0)),
+        ),
     ]);
-    let terms = RankingTerms::from_question("retrieval augmented generation for large language models");
-    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+    let terms =
+        RankingTerms::from_question("retrieval augmented generation for large language models");
+    apply_fused_ranking(
+        &mut run,
+        &ids,
+        &ranks,
+        &BTreeMap::new(),
+        &terms,
+        &features,
+        2026,
+    );
 
     assert_eq!(run.record_ids[0], "arxiv:2312.10997");
     assert_eq!(run.ranked_records[0].ranking_signals.impact_millis, None);
@@ -3438,7 +3508,15 @@ fn provider_agreement_still_decides_between_equally_relevant_records() {
         ("doi:one".to_string(), feature(title, Some(2024), Some(10))),
     ]);
     let terms = RankingTerms::from_question("retrieval augmented generation");
-    apply_fused_ranking(&mut run, &ids, &ranks, &BTreeMap::new(), &terms, &features, 2026);
+    apply_fused_ranking(
+        &mut run,
+        &ids,
+        &ranks,
+        &BTreeMap::new(),
+        &terms,
+        &features,
+        2026,
+    );
     assert_eq!(run.record_ids[0], "doi:both");
 }
 
@@ -3557,11 +3635,18 @@ fn renaming_attachments_previews_before_it_moves_anything() {
     // PDF for a file that is sitting right there.
     let paper = projected_paper(&base, &record_id);
     assert_eq!(paper["pdf"]["path"], applied.renamed[0].to.as_str());
-    assert_eq!(paper["attachments"][0]["path"], applied.renamed[0].to.as_str());
+    assert_eq!(
+        paper["attachments"][0]["path"],
+        applied.renamed[0].to.as_str()
+    );
 
     // Running it again is a no-op rather than producing " (2)" copies.
     let again = library_rename_attachments_at(&base, &[], false).expect("second run");
-    assert!(again.renamed.is_empty(), "second run renamed {:?}", again.renamed);
+    assert!(
+        again.renamed.is_empty(),
+        "second run renamed {:?}",
+        again.renamed
+    );
     assert!(again
         .skipped
         .iter()

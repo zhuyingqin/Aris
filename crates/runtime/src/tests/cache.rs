@@ -133,7 +133,10 @@ fn full_bundle_extracts_including_non_ascii_keys() {
     let _ = std::fs::remove_dir_all(&tmp);
 
     let (extracted, failed) = try_extract_to(&tmp).expect("create cache dir");
-    assert!(failed.is_empty(), "per-file extraction failures: {failed:?}");
+    assert!(
+        failed.is_empty(),
+        "per-file extraction failures: {failed:?}"
+    );
     assert_eq!(
         extracted.len(),
         crate::BUNDLED_RESOURCES.len(),

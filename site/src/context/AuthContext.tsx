@@ -94,14 +94,17 @@ function localDashboardPreviewUser(): UserProfile | null {
   };
 }
 
-function consumeRemoteAuthReturnTo(): string | null {
+function consumeAuthReturnTo(): string | null {
   if (typeof window === "undefined") return null;
   try {
     const stored = sessionStorage.getItem(AUTH_RETURN_TO_KEY);
     sessionStorage.removeItem(AUTH_RETURN_TO_KEY);
     if (!stored) return null;
     const target = new URL(stored, window.location.href);
-    return target.origin === window.location.origin && target.pathname.startsWith("/remote/")
+    const pricingPath = new URL("./pricing.html", window.location.href).pathname;
+    const dashboardPath = new URL("./dashboard.html", window.location.href).pathname;
+    return target.origin === window.location.origin
+      && (target.pathname.startsWith("/remote/") || target.pathname === pricingPath || target.pathname === dashboardPath)
       ? target.href
       : null;
   } catch {
@@ -160,6 +163,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * shell whose every request fails.
    */
   const abandonSession = useCallback(() => {
+    // The explicit local preview has no account token; API probes must not
+    // turn its sample profile into a login prompt.
+    if (localDashboardPreviewUser()) return;
     clearAccountSession();
     setUser(null);
   }, []);
@@ -380,9 +386,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           // A remote QR secret stays only in same-origin sessionStorage; it
           // never enters a return_to query parameter or a server access log.
-          const remoteReturnTo = consumeRemoteAuthReturnTo();
-          if (remoteReturnTo) {
-            window.location.href = remoteReturnTo;
+          const authReturnTo = consumeAuthReturnTo();
+          if (authReturnTo) {
+            window.location.href = authReturnTo;
           } else if (typeof window !== "undefined" && !window.location.pathname.includes("dashboard")) {
             window.location.href = "./dashboard.html";
           }
@@ -471,6 +477,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const closeAuthModal = useCallback(() => {
     setAuthModalOpen(false);
+    try {
+      sessionStorage.removeItem(AUTH_RETURN_TO_KEY);
+    } catch {
+      // The auth modal can close even when session storage is unavailable.
+    }
   }, []);
 
   const openDashboard = useCallback(() => {

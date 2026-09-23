@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import type { Copy } from "../i18n";
 import { CloseIcon, LockIcon, SparklesIcon, UserIcon } from "./icons";
@@ -24,6 +24,11 @@ export default function AuthModal({ copy }: Props) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [acceptedUserAgreement, setAcceptedUserAgreement] = useState(false);
+
+  useEffect(() => {
+    if (!authModalOpen) setAcceptedUserAgreement(false);
+  }, [authModalOpen]);
 
   if (!authModalOpen) return null;
 
@@ -48,6 +53,12 @@ export default function AuthModal({ copy }: Props) {
 
     if (isRegister && password !== confirmPassword) {
       setErrorMsg(auth.passwordMismatch);
+      return;
+    }
+
+    if (isRegister && !acceptedUserAgreement) {
+      setErrorMsg(auth.userAgreementRequired);
+      document.getElementById("auth-user-agreement")?.focus();
       return;
     }
 
@@ -78,8 +89,11 @@ export default function AuthModal({ copy }: Props) {
   const switchMode = (mode: "login" | "register") => {
     setErrorMsg("");
     setSuccessMsg("");
+    setAcceptedUserAgreement(false);
     openAuthModal(mode);
   };
+
+  const lang = copy.htmlLang === "zh-CN" ? "zh" : copy.htmlLang === "es" ? "es" : "en";
 
   return (
     <div className="auth-overlay" onClick={closeAuthModal}>
@@ -212,6 +226,28 @@ export default function AuthModal({ copy }: Props) {
                   required
                   disabled={loading}
                 />
+              </div>
+            </div>
+          )}
+
+          {isRegister && (
+            <div className="auth-agreement-row">
+              <input
+                id="auth-user-agreement"
+                type="checkbox"
+                checked={acceptedUserAgreement}
+                aria-label={`${auth.userAgreementConsent} ${auth.userAgreementLink}`}
+                onChange={(event) => {
+                  setAcceptedUserAgreement(event.target.checked);
+                  if (event.target.checked && errorMsg === auth.userAgreementRequired) setErrorMsg("");
+                }}
+                disabled={loading}
+              />
+              <div>
+                <label htmlFor="auth-user-agreement">{auth.userAgreementConsent}</label>{" "}
+                <a href={`./user-service-agreement.html?lang=${lang}`} target="_blank" rel="noopener noreferrer">
+                  {auth.userAgreementLink}
+                </a>
               </div>
             </div>
           )}

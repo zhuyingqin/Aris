@@ -607,34 +607,50 @@ impl ResearchMemoryV2Store {
         outbox_id: &str,
     ) -> Result<Vec<(String, ResearchMemoryV2Extraction)>, String> {
         let connection = self.open()?;
-        let mut query = connection.prepare(
-            "SELECT id, source_kind, source_quote, statement, kind, subject,
+        let mut query = connection
+            .prepare(
+                "SELECT id, source_kind, source_quote, statement, kind, subject,
                     target_layer, scope, ttl_days, reason
              FROM memory_v2_candidates WHERE outbox_id=?1
                AND status IN ('awaiting_promotion', 'remote_pending')
              ORDER BY created_at, id",
-        ).map_err(|error| error.to_string())?;
-        let rows = query.query_map([outbox_id], |row| {
-            let layer: String = row.get(6)?;
-            Ok((row.get(0)?, ResearchMemoryV2Extraction {
-                source: row.get(1)?, source_quote: row.get(2)?, statement: row.get(3)?,
-                kind: row.get(4)?, subject: row.get(5)?,
-                target_layer: ResearchMemoryV2Layer::parse(&layer)
-                    .ok_or(rusqlite::Error::InvalidQuery)?,
-                scope: row.get(7)?, ttl_days: row.get(8)?, reason: row.get(9)?,
-            }))
-        }).map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = query
+            .query_map([outbox_id], |row| {
+                let layer: String = row.get(6)?;
+                Ok((
+                    row.get(0)?,
+                    ResearchMemoryV2Extraction {
+                        source: row.get(1)?,
+                        source_quote: row.get(2)?,
+                        statement: row.get(3)?,
+                        kind: row.get(4)?,
+                        subject: row.get(5)?,
+                        target_layer: ResearchMemoryV2Layer::parse(&layer)
+                            .ok_or(rusqlite::Error::InvalidQuery)?,
+                        scope: row.get(7)?,
+                        ttl_days: row.get(8)?,
+                        reason: row.get(9)?,
+                    },
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     }
 
     /// A retry after extraction must resume persisted decisions, not call the
     /// extractor again (which could invent a second batch for the same turn).
     pub fn has_extractions(&self, outbox_id: &str) -> Result<bool, String> {
         let connection = self.open()?;
-        connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM memory_v2_candidates WHERE outbox_id=?1)",
-            [outbox_id], |row| row.get(0),
-        ).map_err(|error| error.to_string())
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_v2_candidates WHERE outbox_id=?1)",
+                [outbox_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn finish_reviewed_outbox(&self, outbox_id: &str) -> Result<(), String> {
@@ -692,7 +708,8 @@ impl ResearchMemoryV2Store {
         remote_required: bool,
     ) -> Result<Option<ResearchMemoryV2Atom>, String> {
         let mut database = self.open()?;
-        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let connection = database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let candidate = load_candidate_row(&connection, candidate_id)?;
         let Some(candidate) = candidate else {
@@ -742,7 +759,9 @@ impl ResearchMemoryV2Store {
             return Err("R3 only accepts user_preference or constraint candidates".to_string());
         }
         let expires_at = expiry_from_source(&connection, &candidate.outbox_id, candidate.ttl_days)?;
-        let expired = expires_at.as_ref().is_some_and(|expiry| expiry <= &now_iso8601());
+        let expired = expires_at
+            .as_ref()
+            .is_some_and(|expiry| expiry <= &now_iso8601());
         let status = if expired {
             "expired"
         } else if candidate.layer == ResearchMemoryV2Layer::R3 {
@@ -817,7 +836,8 @@ impl ResearchMemoryV2Store {
     /// deliberately refuses every other layer.
     pub fn activate_remote_r2(&self, atom_id: &str) -> Result<bool, String> {
         let mut database = self.open()?;
-        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let connection = database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let outbox_id = connection
             .query_row(
@@ -900,7 +920,8 @@ impl ResearchMemoryV2Store {
             return Err("project_id and confirmed_by are required".to_string());
         }
         let mut database = self.open()?;
-        let connection = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let connection = database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let changed = connection
             .execute(
@@ -912,11 +933,13 @@ impl ResearchMemoryV2Store {
             .map_err(|error| error.to_string())?;
         if changed > 0 {
             supersede_for_active_atom(&connection, atom_id)?;
-            connection.execute(
-                "UPDATE memory_v2_candidates SET status='active', updated_at=?2
+            connection
+                .execute(
+                    "UPDATE memory_v2_candidates SET status='active', updated_at=?2
                  WHERE id=(SELECT candidate_id FROM memory_v2_atoms WHERE id=?1)",
-                params![atom_id, now_millis()],
-            ).map_err(|error| error.to_string())?;
+                    params![atom_id, now_millis()],
+                )
+                .map_err(|error| error.to_string())?;
             if let Some(outbox_id) = connection
                 .query_row(
                     "SELECT c.outbox_id FROM memory_v2_atoms a
@@ -967,21 +990,31 @@ impl ResearchMemoryV2Store {
         ).optional().map_err(|error| error.to_string())?
             .ok_or_else(|| "inline suggestion requires an existing captured turn".to_string())?;
         if write.source_event_ids != item.capture.source_event_ids {
-            return Err("inline suggestion source events differ from the captured turn".to_string());
+            return Err(
+                "inline suggestion source events differ from the captured turn".to_string(),
+            );
         }
         let source = [
             ("user", &item.capture.user_text),
             ("tool", &item.capture.tool_trace),
             ("assistant", &item.capture.assistant_text),
-        ].into_iter().find(|(source, text)| {
+        ]
+        .into_iter()
+        .find(|(source, text)| {
             (validated.layer != ResearchMemoryV2Layer::R3 || *source == "user")
                 && text.contains(&validated.evidence)
-        }).map(|(source, _)| source)
-            .ok_or_else(|| "inline evidence must quote an exact captured source span".to_string())?;
+        })
+        .map(|(source, _)| source)
+        .ok_or_else(|| "inline evidence must quote an exact captured source span".to_string())?;
         let extraction = ResearchMemoryV2Extraction {
-            source: source.to_string(), source_quote: validated.evidence,
-            statement: validated.statement, kind: validated.kind, subject: validated.subject,
-            target_layer: validated.layer, scope: validated.scope, ttl_days: validated.ttl_days,
+            source: source.to_string(),
+            source_quote: validated.evidence,
+            statement: validated.statement,
+            kind: validated.kind,
+            subject: validated.subject,
+            target_layer: validated.layer,
+            scope: validated.scope,
+            ttl_days: validated.ttl_days,
             reason: validated.origin,
         };
         self.record_extractions(&item, &[extraction], "inline-author")?;
@@ -1055,7 +1088,13 @@ impl ResearchMemoryV2Store {
                     params![id, now_millis()],
                 )
                 .map_err(|error| error.to_string())?;
-            record_audit(&transaction, &id, "rescreen_requeued", "policy update", None)?;
+            record_audit(
+                &transaction,
+                &id,
+                "rescreen_requeued",
+                "policy update",
+                None,
+            )?;
             requeued += 1;
         }
         transaction.commit().map_err(|error| error.to_string())?;
@@ -1459,7 +1498,10 @@ pub fn tool_episodes_for_turn(messages: &[crate::ConversationMessage]) -> Vec<To
             statement: format!(
                 "{tool}({args}) failed: {digest} — {tool}({recovery_args}) succeeded instead"
             ),
-            evidence: format!("[{}] {tool}({args}) {TOOL_TRACE_FAILURE_MARKER}: {digest}", index + 1),
+            evidence: format!(
+                "[{}] {tool}({args}) {TOOL_TRACE_FAILURE_MARKER}: {digest}",
+                index + 1
+            ),
         });
     }
     episodes
@@ -1636,7 +1678,11 @@ fn validate_extraction(
     // captured for this turn.  Nothing outside the turn is ever admissible.
     let grounded = if source == "tool" {
         statement_is_grounded_in_any(
-            &[&capture.tool_trace, &capture.assistant_text, &capture.user_text],
+            &[
+                &capture.tool_trace,
+                &capture.assistant_text,
+                &capture.user_text,
+            ],
             statement,
         )
     } else {
@@ -1856,23 +1902,40 @@ fn supersede_same_subject(
 
 /// Only an active replacement can retire the previous usable fact.
 fn supersede_for_active_atom(connection: &Connection, atom_id: &str) -> Result<usize, String> {
-    let atom = connection.query_row(
-        "SELECT project_id, layer, kind, subject, scope, session_id, status
+    let atom = connection
+        .query_row(
+            "SELECT project_id, layer, kind, subject, scope, session_id, status
          FROM memory_v2_atoms WHERE id=?1",
-        [atom_id],
-        |row| Ok((
-            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?, row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-        )),
-    ).optional().map_err(|error| error.to_string())?;
+            [atom_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     let Some((project_id, layer, kind, subject, scope, session_id, status)) = atom else {
         return Ok(0);
     };
-    if status != "active" { return Ok(0); }
+    if status != "active" {
+        return Ok(0);
+    }
     supersede_same_subject(
-        connection, &project_id, &layer, &kind, &subject, &scope, &session_id, atom_id,
+        connection,
+        &project_id,
+        &layer,
+        &kind,
+        &subject,
+        &scope,
+        &session_id,
+        atom_id,
     )
 }
 
@@ -1881,13 +1944,19 @@ fn expiry_from_source(
     outbox_id: &str,
     ttl_days: Option<i64>,
 ) -> Result<Option<String>, String> {
-    let Some(days) = ttl_days else { return Ok(None); };
-    let expiry = connection.query_row(
-        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', occurred_at, printf('+%d days', ?2))
+    let Some(days) = ttl_days else {
+        return Ok(None);
+    };
+    let expiry = connection
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', occurred_at, printf('+%d days', ?2))
          FROM memory_v2_outbox WHERE id=?1",
-        params![outbox_id, days.clamp(1, 365)],
-        |row| row.get::<_, Option<String>>(0),
-    ).optional().map_err(|error| error.to_string())?.flatten();
+            params![outbox_id, days.clamp(1, 365)],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .flatten();
     expiry.map(Some).ok_or_else(|| {
         "memory candidate has no valid source occurrence time for TTL calculation".to_string()
     })
@@ -2128,8 +2197,8 @@ fn migrate_l1_taxonomy(connection: &Connection) -> Result<(), String> {
         if L1_KINDS.contains(&kind.as_str()) {
             continue;
         }
-        let ephemeral =
-            legacy_kind_is_ephemeral(&kind) || statement.trim().chars().count() < MIN_STATEMENT_CHARS;
+        let ephemeral = legacy_kind_is_ephemeral(&kind)
+            || statement.trim().chars().count() < MIN_STATEMENT_CHARS;
         let (status, new_kind) = if ephemeral {
             archived += 1;
             ("archived_legacy_kind", kind.clone())
@@ -2650,8 +2719,7 @@ mod tests {
     fn capture_with_failed_tool() -> ResearchMemoryV2Capture {
         let mut item = capture();
         item.user_text = "把规划 tex 编译成 PDF".to_string();
-        item.assistant_text =
-            "latexmk 直接跑会失败，改用 xelatex 才能编译成 PDF。".to_string();
+        item.assistant_text = "latexmk 直接跑会失败，改用 xelatex 才能编译成 PDF。".to_string();
         item.tool_trace = "[1] Bash(latexmk 规划.tex) FAILED: Package inputenc Error: Unicode character not set up for use with LaTeX\n\
              [2] Bash(xelatex 规划.tex) ok: Output written on PDF\n"
             .to_string();
@@ -2753,13 +2821,26 @@ mod tests {
     fn a_recovered_tool_failure_becomes_an_episode_with_no_model_call() {
         let episodes = tool_episodes_for_turn(&turn(vec![
             tool_use("a", "bash", "latexmk main.tex"),
-            tool_result("a", "bash", r#"{"returnCodeInterpretation":"exit_code:1"}"#, true),
+            tool_result(
+                "a",
+                "bash",
+                r#"{"returnCodeInterpretation":"exit_code:1"}"#,
+                true,
+            ),
             tool_use("b", "bash", "xelatex main.tex"),
             tool_result("b", "bash", "Output written", false),
         ]));
         assert_eq!(episodes.len(), 1);
-        assert!(episodes[0].statement.contains("latexmk main.tex"), "{:?}", episodes[0]);
-        assert!(episodes[0].statement.contains("xelatex main.tex"), "{:?}", episodes[0]);
+        assert!(
+            episodes[0].statement.contains("latexmk main.tex"),
+            "{:?}",
+            episodes[0]
+        );
+        assert!(
+            episodes[0].statement.contains("xelatex main.tex"),
+            "{:?}",
+            episodes[0]
+        );
         assert!(episodes[0].evidence.contains(TOOL_TRACE_FAILURE_MARKER));
     }
 
@@ -2840,7 +2921,11 @@ mod tests {
         assert!(!item.capture.tool_trace.contains("different"));
     }
 
-    fn inline(layer: ResearchMemoryV2Layer, kind: &str, statement: &str) -> ResearchMemoryV2InlineWrite {
+    fn inline(
+        layer: ResearchMemoryV2Layer,
+        kind: &str,
+        statement: &str,
+    ) -> ResearchMemoryV2InlineWrite {
         ResearchMemoryV2InlineWrite {
             project_id: "project-a".to_string(),
             session_id: "chat-a".to_string(),
@@ -2922,7 +3007,11 @@ mod tests {
         // 93 atoms once produced 63 distinct kinds, 59 of them used once. A
         // category invented per row cannot be grouped, so R2/R3 had nothing to
         // aggregate from.
-        for invented in ["active_task", "completion_state_tex_pdf", "chapter_plan_decision"] {
+        for invented in [
+            "active_task",
+            "completion_state_tex_pdf",
+            "chapter_plan_decision",
+        ] {
             assert!(
                 store
                     .record_extractions(&queued, &[candidate(invented)], "extractor")
@@ -2997,7 +3086,10 @@ mod tests {
             first,
             vec![
                 ("finding".to_string(), "active".to_string()),
-                ("active_task".to_string(), "archived_legacy_kind".to_string()),
+                (
+                    "active_task".to_string(),
+                    "archived_legacy_kind".to_string()
+                ),
             ]
         );
         // Second open must not touch them. `finding` contains none of the
@@ -3108,8 +3200,8 @@ mod tests {
                 "latexmk 在本项目失败，改用 xelatex",
             ),
         )
-            .expect("inline write")
-            .expect("atom");
+        .expect("inline write")
+        .expect("atom");
         assert_eq!(atom.layer, ResearchMemoryV2Layer::R2);
         assert_eq!(atom.status, "active");
         assert_eq!(store.stats("project-a").expect("stats").r2_active, 1);
@@ -3131,7 +3223,11 @@ mod tests {
     fn the_same_lesson_learned_twice_is_one_memory() {
         let root = tempdir().expect("temp");
         let store = ResearchMemoryV2Store::new(root.path().join("v2.sqlite"));
-        let first = inline(ResearchMemoryV2Layer::R2, "tool_lesson", "latexmk 失败，改用 xelatex");
+        let first = inline(
+            ResearchMemoryV2Layer::R2,
+            "tool_lesson",
+            "latexmk 失败，改用 xelatex",
+        );
         inline_atom(&store, &first).expect("first");
         // A later session hits the same wall and records it again.
         let mut again = first.clone();
@@ -3154,8 +3250,8 @@ mod tests {
                 "回答一律用中文",
             ),
         )
-            .expect("inline write")
-            .expect("atom");
+        .expect("inline write")
+        .expect("atom");
         assert_eq!(atom.status, "pending_user_confirmation");
         let stats = store.stats("project-a").expect("stats");
         assert_eq!(stats.r3_confirmed, 0);
@@ -3215,7 +3311,10 @@ mod tests {
         store.enqueue_capture(&item).expect("enqueue");
         let queued = store.due_outbox(1).expect("due").pop().expect("item");
         assert!(
-            queued.capture.tool_trace.contains(TOOL_TRACE_FAILURE_MARKER),
+            queued
+                .capture
+                .tool_trace
+                .contains(TOOL_TRACE_FAILURE_MARKER),
             "the trace must survive the round trip through SQLite"
         );
         // The lesson is not a substring of any single quote: it joins the failed

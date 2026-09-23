@@ -76,7 +76,7 @@ import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./Pro
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
 import SideTaskPanel, { clearStoredSideTaskState } from "./SideTaskPanel";
 import SideFileViewer from "./SideFileViewer";
-import { sideFileTitle, type SidePanelMetadata } from "./sidePanelFiles";
+import { sideFileTitle, sidePanelHandoff, type SidePanelMetadata } from "./sidePanelFiles";
 import { useOpenChatFile } from "./openChatFile";
 import IndependentReviewPanel from "./IndependentReviewPanel";
 import ImageWorkflowPanel from "./ImageWorkflowPanel";
@@ -1835,7 +1835,15 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
             ]}
             action={activeSideTask?.handoff
-              ? { label: navigationCopy.handoff, onClick: () => sendHandoffToMain(activeSideTask.handoff!) }
+              ? {
+                label: navigationCopy.handoff,
+                // Read at click time: a reading tab keeps its live text (a PDF's
+                // current page) out of state so scrolling it cannot re-render the
+                // chat. `handoff` in state is the persisted fallback.
+                onClick: () => sendHandoffToMain(
+                  sidePanelHandoff(activeSideTask.id, activeSideTask.handoff) ?? activeSideTask.handoff!,
+                ),
+              }
               : undefined}
             onSelect={setActiveSideTaskId}
             onClose={closeSideTask}

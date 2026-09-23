@@ -760,9 +760,7 @@ fn every_tool_is_triaged_for_external_retrieval() {
 
     let undecided: Vec<&String> = inventory
         .iter()
-        .filter(|name| {
-            !runtime::performs_retrieval(name) && !NO_RETRIEVAL.contains(&name.as_str())
-        })
+        .filter(|name| !runtime::performs_retrieval(name) && !NO_RETRIEVAL.contains(&name.as_str()))
         .collect();
     assert!(
         undecided.is_empty(),
@@ -777,7 +775,10 @@ fn every_tool_is_triaged_for_external_retrieval() {
         .iter()
         .filter(|name| !inventory.contains(**name))
         .collect();
-    assert!(stale.is_empty(), "exempted tools that no longer exist: {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "exempted tools that no longer exist: {stale:?}"
+    );
 
     // And nothing may be claimed by both lists.
     let contradictory: Vec<&&str> = NO_RETRIEVAL

@@ -1233,8 +1233,7 @@ pub fn write_files_with_context_expected(
         )?;
 
         let mut published = 0_usize;
-        for (index, ((path, _), (_, content))) in
-            prepared.iter().zip(snapshots.iter()).enumerate()
+        for (index, ((path, _), (_, content))) in prepared.iter().zip(snapshots.iter()).enumerate()
         {
             if let Err(error) = replace_file_contents_unlocked(path, content) {
                 let mut rollback_errors = Vec::new();
@@ -1245,10 +1244,8 @@ pub fn write_files_with_context_expected(
                         None => fs::remove_file(rollback_path),
                     };
                     if let Err(rollback_error) = rollback {
-                        rollback_errors.push(format!(
-                            "{}: {rollback_error}",
-                            display_path(rollback_path)
-                        ));
+                        rollback_errors
+                            .push(format!("{}: {rollback_error}", display_path(rollback_path)));
                     }
                 }
                 let rollback_note = if rollback_errors.is_empty() {
@@ -1273,11 +1270,8 @@ pub fn write_files_with_context_expected(
             let file_path = display_path(path);
             let structured_patch = make_patch(original.as_deref().unwrap_or(""), content);
             let changes = make_file_changes(&file_path, original.as_deref(), Some(content));
-            let unified_diff = make_unified_diff(
-                &file_path,
-                original.as_deref().unwrap_or(""),
-                content,
-            );
+            let unified_diff =
+                make_unified_diff(&file_path, original.as_deref().unwrap_or(""), content);
             let operation = if original.is_some() {
                 FileChangeOperation::Update
             } else {
@@ -1295,7 +1289,12 @@ pub fn write_files_with_context_expected(
             )?
             .map(|record| record.change_id);
             files.push(WriteFileOutput {
-                kind: if original.is_some() { "update" } else { "create" }.to_string(),
+                kind: if original.is_some() {
+                    "update"
+                } else {
+                    "create"
+                }
+                .to_string(),
                 file_path,
                 changes,
                 content: content.clone(),
@@ -1350,19 +1349,22 @@ pub fn recover_pending_batch_writes_at(workspace: &Path) -> io::Result<BatchWrit
             continue;
         }
         output.scanned += 1;
-        let journal = match fs::read(&journal_path)
-            .and_then(|bytes| serde_json::from_slice::<BatchWriteJournal>(&bytes).map_err(io::Error::other))
-        {
+        let journal = match fs::read(&journal_path).and_then(|bytes| {
+            serde_json::from_slice::<BatchWriteJournal>(&bytes).map_err(io::Error::other)
+        }) {
             Ok(journal) if journal.version == 1 => journal,
             Ok(journal) => {
                 output.errors.push(format!(
                     "{}: unsupported batch journal version {}",
-                    journal_path.display(), journal.version
+                    journal_path.display(),
+                    journal.version
                 ));
                 continue;
             }
             Err(error) => {
-                output.errors.push(format!("{}: {error}", journal_path.display()));
+                output
+                    .errors
+                    .push(format!("{}: {error}", journal_path.display()));
                 continue;
             }
         };

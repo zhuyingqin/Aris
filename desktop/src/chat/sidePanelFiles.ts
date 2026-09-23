@@ -89,3 +89,27 @@ export function fileHandoff(
     ? `[侧栏摘录 · ${location}]\n\n"""\n${quote}\n"""`
     : `[Side panel excerpt · ${location}]\n\n"""\n${quote}\n"""`;
 }
+
+/**
+ * The live handoff text of an open reading tab, keyed by tab id.
+ *
+ * The page a PDF reader is showing changes on every few hundred pixels of
+ * scrolling. Folding it into the tab's stored `handoff` made each of those a
+ * state change in `Chat`, so scrolling a PDF re-rendered the whole chat tree and
+ * rewrote the side panel's localStorage entry at scroll frequency. The page is
+ * only ever needed at the moment the reader presses "send to main task", so the
+ * tab registers a getter here instead and `handoff` in state stays stable.
+ */
+const liveHandoffs = new Map<string, () => string>();
+
+export function registerSidePanelHandoff(tabId: string, build: () => string): () => void {
+  liveHandoffs.set(tabId, build);
+  return () => {
+    if (liveHandoffs.get(tabId) === build) liveHandoffs.delete(tabId);
+  };
+}
+
+/** The live text if the tab is still mounted, else the value persisted with it. */
+export function sidePanelHandoff(tabId: string, stored: string | null): string | null {
+  return liveHandoffs.get(tabId)?.() ?? stored;
+}

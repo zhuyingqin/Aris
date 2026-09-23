@@ -283,7 +283,10 @@ fn git_diff_snapshot_is_capped_and_says_so() {
             .expect("git setup should run");
     }
     fs::write(root.join("tracked.txt"), "seed\n").expect("write tracked file");
-    for args in [vec!["add", "tracked.txt"], vec!["commit", "-m", "init", "--quiet"]] {
+    for args in [
+        vec!["add", "tracked.txt"],
+        vec!["commit", "-m", "init", "--quiet"],
+    ] {
         std::process::Command::new("git")
             .args(args)
             .current_dir(&root)

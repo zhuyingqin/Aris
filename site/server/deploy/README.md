@@ -175,18 +175,17 @@ The base Caddy stack is hostname-oriented. Do **not** set
 `SOMNIQ_GATEWAY_DOMAIN` to an IP and rely on an untrusted/internal certificate:
 phones will reject it or lose secure-context features such as camera QR scan.
 
-The existing managed deployment at `106.53.28.124` uses a separate Nginx path
-on **HTTPS 8443** with a publicly trusted IP-address certificate. The desktop
-default `https://106.53.28.124:8443` is therefore intentional and must route
-through that Nginx edge, not the base Caddy 443 mapping. Its certificate is
-short-lived, so renewal is an operational requirement.
+The existing managed deployment at `106.53.28.124` serves the site on the
+standard **HTTP 80** and **HTTPS 443** listeners. The old HTTPS `8443` alias
+has been retired. Use `https://somni.chat` for the secure PWA and remote
+gateway; `http://106.53.28.124` is the plain port-80 site entry.
 
 For another fixed-IP deployment, use
 [behind-existing-nginx/README.md](behind-existing-nginx/README.md#fixed-public-ipv4-without-a-domain).
-It documents the HTTP-01 webroot, IP-address certificate, Nginx 8443 vhost,
-and automated renewal. Open **TCP 8443**, **UDP 3478**, and **TCP 3478** in
-both the cloud security group and Ubuntu firewall. Do not substitute raw HTTP
-or `tls internal` for a publicly trusted certificate on phones.
+Keep the public web entry on **TCP 80/443** and open **UDP 3478** plus
+**TCP 3478** in both the cloud security group and Ubuntu firewall. Raw HTTP
+is suitable only for the site itself; phone pairing and the PWA still require
+the trusted HTTPS hostname.
 
 ## Operations and incident response
 

@@ -1,12 +1,9 @@
 use super::{
     decode_shell_output, execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput,
 };
-use crate::{
-    managed_processes_snapshot,
-    sandbox::FilesystemIsolationMode,
-};
 #[cfg(windows)]
 use crate::sandbox::SandboxStatus;
+use crate::{managed_processes_snapshot, sandbox::FilesystemIsolationMode};
 use encoding_rs::GBK;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -46,7 +43,10 @@ fn executes_simple_command() {
     // ~600-character constant that the model would otherwise be charged for on
     // every shell call of the session.
     assert!(
-        output.sandbox_status.as_ref().is_none_or(sandbox_constrained),
+        output
+            .sandbox_status
+            .as_ref()
+            .is_none_or(sandbox_constrained),
         "{:?}",
         output.sandbox_status
     );
@@ -326,7 +326,10 @@ fn unavailable_filesystem_sandbox_does_not_redirect_home_or_create_placeholder_d
     // sandbox module's own tests; what matters here is that HOME was not
     // redirected and no placeholder directories were created.
     assert!(
-        output.sandbox_status.as_ref().is_none_or(sandbox_constrained),
+        output
+            .sandbox_status
+            .as_ref()
+            .is_none_or(sandbox_constrained),
         "{:?}",
         output.sandbox_status
     );

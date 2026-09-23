@@ -727,9 +727,7 @@ impl RetrievalGuard {
             .iter()
             .map(|(tool_name, state)| (tool_name.as_str(), state))
             .collect::<Vec<_>>();
-        refusals.sort_by_key(|(tool_name, state)| {
-            (std::cmp::Reverse(state.refusals), *tool_name)
-        });
+        refusals.sort_by_key(|(tool_name, state)| (std::cmp::Reverse(state.refusals), *tool_name));
         refusals
     }
 
@@ -2485,8 +2483,9 @@ enum RetrievalKind {
 /// of them should consume a retrieval budget or be deduplicated.
 fn retrieval_role(tool_name: &str) -> Option<RetrievalRole> {
     Some(match tool_name {
-        "WebSearch" | "LiteratureSearch" | "LiteratureCitations"
-        | "LiteratureSearchExecute" => RetrievalRole::Discovery,
+        "WebSearch" | "LiteratureSearch" | "LiteratureCitations" | "LiteratureSearchExecute" => {
+            RetrievalRole::Discovery
+        }
         "WebFetch" | "LiteraturePdfDownload" => RetrievalRole::Verification,
         "bash" | "PowerShell" | "REPL" | "NotebookExecute" => RetrievalRole::NetworkDependent,
         _ => return None,
@@ -2957,11 +2956,15 @@ fn url_host(url: &str) -> Option<&str> {
         .split(['/', '?', '#'])
         .next()
         .unwrap_or(after_scheme);
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, rest)| rest);
     let host = match authority.strip_prefix('[') {
         // IPv6 literal: the port, if any, follows the closing bracket.
         Some(rest) => rest.split_once(']').map_or(rest, |(inside, _)| inside),
-        None => authority.split_once(':').map_or(authority, |(host, _)| host),
+        None => authority
+            .split_once(':')
+            .map_or(authority, |(host, _)| host),
     };
     (!host.is_empty()).then_some(host)
 }

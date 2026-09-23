@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,7 +34,7 @@ vi.mock("../../editor/SharedEditor", () => ({
 
 import { useStore } from "../../store";
 import SideFileViewer from "../SideFileViewer";
-import { fileHandoff, sideFileKind, sideFileTitle } from "../sidePanelFiles";
+import { fileHandoff, sideFileKind, sideFileTitle, sidePanelHandoff } from "../sidePanelFiles";
 
 describe("sidePanelFiles", () => {
   it("routes a path to the viewer that can render it", () => {
@@ -127,6 +127,39 @@ describe("SideFileViewer", () => {
       sourceKind: "path",
       readOnly: true,
     });
+  });
+
+  it("keeps a scrolling PDF out of chat state and still sends the current page", async () => {
+    // The reader reports a new page every few hundred pixels. Folding that into
+    // the tab's stored handoff made every one of them a `Chat` state change — a
+    // full chat re-render plus a synchronous localStorage write, at scroll
+    // frequency. The page is only needed when the reader presses send.
+    const onMetadataChange = vi.fn();
+    render(
+      <SideFileViewer
+        tabId="tab-scroll"
+        path="F:/project/papers/draft.pdf"
+        onOpenInWorkspace={() => undefined}
+        onMetadataChange={onMetadataChange}
+      />,
+    );
+
+    await screen.findByTestId("pdf-reader");
+    await waitFor(() => expect(onMetadataChange).toHaveBeenCalled());
+    const calls = onMetadataChange.mock.calls.length;
+    const stored = onMetadataChange.mock.calls.at(-1)?.[1].handoff as string;
+
+    const onPageChange = pdfMocks.props.at(-1)?.onPageChange as (page: number) => void;
+    expect(onPageChange).toBeTypeOf("function");
+    act(() => { for (const page of [2, 3, 4, 5, 6, 7]) onPageChange(page); });
+
+    expect(onMetadataChange).toHaveBeenCalledTimes(calls);
+    expect(sidePanelHandoff("tab-scroll", stored)).toContain("第 7 页");
+    expect(stored).not.toContain("第 7 页");
+
+    // A closed tab falls back to the text it was persisted with.
+    cleanup();
+    expect(sidePanelHandoff("tab-scroll", stored)).toBe(stored);
   });
 
   it("jumps to cited evidence and passes a focused read-only highlight", async () => {

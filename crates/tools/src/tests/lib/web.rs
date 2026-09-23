@@ -186,7 +186,10 @@ fn bocha_results_are_extracted_correctly() {
     assert_eq!(hits[0].title, "深度学习科研实践指南");
     assert_eq!(hits[0].url, "https://example.com/guide");
     assert_eq!(hits[0].snippet, "这是一篇关于深度学习的全面科研指南。");
-    assert_eq!(hits[0].published_date.as_deref(), Some("2025-01-15T08:00:00Z"));
+    assert_eq!(
+        hits[0].published_date.as_deref(),
+        Some("2025-01-15T08:00:00Z")
+    );
     assert_eq!(hits[0].source_rank, 1);
 }
 
@@ -218,10 +221,7 @@ fn chinese_searches_add_zhihu_when_general_results_are_sparse() {
         language: Some("zh".to_string()),
     };
     let general = WebProvider::DuckDuckGo;
-    let candidates = vec![
-        WebProvider::DuckDuckGo,
-        WebProvider::SomniqGatewayZhihu,
-    ];
+    let candidates = vec![WebProvider::DuckDuckGo, WebProvider::SomniqGatewayZhihu];
     assert!(should_supplement_chinese_with_zhihu(
         &input,
         &general,

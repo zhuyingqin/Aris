@@ -23,6 +23,12 @@ const COLLAPSED_THINKING_ROW = 32;
 const LINE_HEIGHT = 23;
 /** Columns in the 820px message body at the transcript's own font size. */
 const TEXT_COLUMNS = 92;
+/** Width of one column, from the pair above. */
+const COLUMN_WIDTH = 820 / TEXT_COLUMNS;
+/** `.chat-turn` is `width: min(100%, 820px)`, so the column never grows past this. */
+const MESSAGE_COLUMN_MAX = 820;
+/** Below this the estimate is guesswork either way; keeps the arithmetic safe. */
+const MIN_TEXT_COLUMNS = 24;
 const MIN_TURN_SIZE = 56;
 /** Beyond this the estimate stops helping; the real measurement lands anyway. */
 const MAX_TURN_SIZE = 4_000;
@@ -74,14 +80,40 @@ function looksLikeImageTool(output: string | undefined): boolean {
   return /\.(?:png|jpe?g|gif|webp|bmp)\b/i.test(output.slice(0, 2_000));
 }
 
-export function estimateTurnSize(turn: ChatTurn | undefined): number {
+/**
+ * How wide the message body currently is, in columns.
+ *
+ * A row's height depends on it: the same turn is half again as tall in a
+ * side-panel-width transcript as in a full-width one. It lives here rather than
+ * in `ChatThread`'s state so `estimateSize` can stay referentially stable —
+ * virtual-core memoises its whole measurement pass on that function's identity.
+ * One transcript is mounted at a time, which is what makes a module-level value
+ * safe (the writing companion runs in its own window, and so its own module).
+ */
+let messageColumns = TEXT_COLUMNS;
+
+export function textColumnsForWidth(contentWidth: number): number {
+  if (!Number.isFinite(contentWidth) || contentWidth <= 0) return TEXT_COLUMNS;
+  const columns = Math.round(Math.min(contentWidth, MESSAGE_COLUMN_MAX) / COLUMN_WIDTH);
+  return Math.max(MIN_TEXT_COLUMNS, Math.min(TEXT_COLUMNS, columns));
+}
+
+export function setMessageColumns(columns: number): void {
+  messageColumns = columns;
+}
+
+export function currentMessageColumns(): number {
+  return messageColumns;
+}
+
+export function estimateTurnSize(turn: ChatTurn | undefined, columns = messageColumns): number {
   if (!turn) return FALLBACK_TURN_SIZE;
   let height = TURN_CHROME;
   height += (turn.attachments?.length ?? 0) * ATTACHMENT_ROW;
   for (const block of turn.blocks) {
     switch (block.kind) {
       case "text":
-        height += wrappedTextHeight(block.text);
+        height += wrappedTextHeight(block.text, columns);
         break;
       case "thinking":
         // Collapsed once the turn settles; while streaming it is revealed but
@@ -89,7 +121,7 @@ export function estimateTurnSize(turn: ChatTurn | undefined): number {
         height += COLLAPSED_THINKING_ROW;
         break;
       case "notice":
-        height += NOTICE_ROW + wrappedTextHeight(block.message);
+        height += NOTICE_ROW + wrappedTextHeight(block.message, columns);
         break;
       case "review":
         height += REVIEW_ROW;
@@ -134,18 +166,22 @@ export function turnVirtualKey(turn: ChatTurn | undefined, index: number): strin
  * app run would be worse than an estimate.
  */
 const SESSION_LIMIT = 12;
-const snapshots = new Map<string, VirtualItem[]>();
+const snapshots = new Map<string, { columns: number; items: VirtualItem[] }>();
 
+/** Heights are only valid at the width they were measured at, so a snapshot
+ *  taken in a full-width transcript is discarded rather than replayed into a
+ *  transcript that now shares the window with the side panel. */
 export function readTurnMeasurements(sessionId: string): VirtualItem[] {
   const stored = snapshots.get(sessionId);
+  if (!stored || stored.columns !== messageColumns) return [];
   // A copy: the virtualizer adopts this array as its own measurement cache.
-  return stored ? stored.map((item) => ({ ...item })) : [];
+  return stored.items.map((item) => ({ ...item }));
 }
 
 export function writeTurnMeasurements(sessionId: string, items: VirtualItem[]): void {
   if (items.length === 0) return;
   snapshots.delete(sessionId);
-  snapshots.set(sessionId, items);
+  snapshots.set(sessionId, { columns: messageColumns, items });
   while (snapshots.size > SESSION_LIMIT) {
     const oldest = snapshots.keys().next().value;
     if (oldest === undefined) break;

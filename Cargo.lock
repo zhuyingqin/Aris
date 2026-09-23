@@ -2136,6 +2136,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "somni-host"
+version = "0.4.15"
+dependencies = [
+ "runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -8,9 +8,10 @@
   "claims_count": 14,
   "independent_claims": 3,
   "dependent_claims": 11,
-  "abstract_chars": 299,
+  "abstract_chars": 276,
   "figures": 5,
   "status": "completed",
+  "revision_note": "本轮重构将 A1 主轴收束为证据身份跨表示保持不变、可重放观察记录与执行前状态门控；候选冻结、证据矩阵与动态比较前沿另列为 B1 专利候选，见 docs/CORE-INNOVATION-REVIEW.md。",
   "toolchain": "xelatex (TeX Live) + ctex/xeCJK + TikZ + pdfpages; 单一来源在 patent/tex/，PDF 由 patent/tex/build.cjs 编译",
   "external_review_run": false,
   "external_review_skipped_reason": "codex MCP server failed to connect (-32000 Connection closed); /patent-review not executed",
@@ -31,15 +32,16 @@
     "build": "patent/tex/build.cjs",
     "readme": "patent/README.md",
     "abstract_figure": "patent/tex/abstract-figure.tex",
-    "combined": "patent/tex/combined.tex"
+    "combined": "patent/tex/combined.tex",
+    "innovation_review": "patent/docs/CORE-INNOVATION-REVIEW.md"
   },
   "pdf": {
     "dir": "patent/output/CNIPA",
     "filing_set": {
       "说明书摘要.pdf": 1,
       "摘要附图.pdf": 1,
-      "权利要求书.pdf": 4,
-      "说明书.pdf": 10,
+      "权利要求书.pdf": 3,
+      "说明书.pdf": 11,
       "说明书附图.pdf": 5
     },
     "working_set": {
@@ -57,7 +59,7 @@
     "runner": "node patent/tex/build.cjs --check",
     "output_manifest": "patent/output/CNIPA/build-manifest.json",
     "missing_characters": "pass (0; 缺字会让字符在 PDF 里静默消失，故当作构建失败)",
-    "abstract_chars": "pass (299 <= 300)",
+    "abstract_chars": "pass (276 <= 300)",
     "figure_numeral_cross_check": "pass (12 个标记，说明书与五幅附图双向一致)",
     "page_size": "pass (9 份全部 A4)",
     "markdown_to_latex_equivalence": "pass (迁移时逐字比对 6 份文档全部一致，比对脚本用后即删)",
@@ -70,7 +72,7 @@
     "abstract_elements": "pass (名称/领域/问题/要点/用途 五项齐全)",
     "orphan_headings": "pass (\needspace 硬约束 + pdftotext 复查，已反向验证闸门有效)"
   },
-  "timestamp": "2026-09-15T02:52:05-06:00",
+  "timestamp": "2026-09-20T17:12:48-06:00",
   "electronic_submission": "自 2026-01-01 起电子办理须提交符合 CNIPA 数据标准的 XML，PDF/Word 仅作纸面核对或对应附件，见官网 2025-11-12 XML 通知。",
   "filing_order": "请求书(官方表格,未生成) → 说明书摘要 → 摘要附图 → 权利要求书 → 说明书 → 说明书附图（专利审查指南第一部分第一章）",
   "known_deviation": "背景技术未引证现有技术文献号（审查指南 2.2.3 要求尽可能引证）。原因：检索结果由申请人提供、未独立复核；文献清单在 notes-prior-art，待代理人核实后决定是否补入。"

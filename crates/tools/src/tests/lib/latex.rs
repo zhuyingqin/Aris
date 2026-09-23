@@ -62,7 +62,9 @@ fn latex_diagnostics_keep_failed_builds_visible_when_warnings_are_present() {
 
     assert_eq!(diagnostics[0].severity, "error");
     assert_eq!(diagnostics[0].code, "compile_failed");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == "warning"));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "warning"));
 }
 
 #[test]

@@ -1,7 +1,4 @@
-use super::{
-    activated_canonical_skill_name, registered_skill, SkillLifecycle,
-    SKILL_REGISTRY,
-};
+use super::{activated_canonical_skill_name, registered_skill, SkillLifecycle, SKILL_REGISTRY};
 use std::collections::BTreeSet;
 
 #[test]
@@ -75,7 +72,8 @@ fn merged_patent_stages_redirect_to_their_new_stage() {
         ("patent-review", "patent-draft", "review"),
         ("jurisdiction-format", "patent-draft", "format"),
     ] {
-        let resolution = registered_skill(legacy).unwrap_or_else(|| panic!("{legacy} unregistered"));
+        let resolution =
+            registered_skill(legacy).unwrap_or_else(|| panic!("{legacy} unregistered"));
         assert_eq!(resolution.canonical_name, canonical, "{legacy}");
         assert_eq!(resolution.profile, Some(profile), "{legacy}");
         assert_eq!(

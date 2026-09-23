@@ -40,6 +40,21 @@ describe("transcript scroll geometry", () => {
     expect(appStyles).not.toMatch(/\.chat-thread\.has-question-timeline \.chat-scroll/);
   });
 
+  it("keeps the transcript out from under an open project summary", () => {
+    // The summary is an overlay at desktop widths. Its selector must be at
+    // least as specific as the question-rail gutter declared later in the
+    // stylesheet, otherwise `padding-inline` silently resets the reservation.
+    expect(appStyles).toMatch(
+      /\.chat-root\.chat-project-brief-open \.chat-thread \.chat-scroll\s*\{[^}]*padding-left:\s*76px;[^}]*padding-right:\s*calc\(var\(--project-brief-lane-w\) \+ 38px\);/s,
+    );
+  });
+
+  it("restores symmetric transcript gutters when the summary stacks on mobile", () => {
+    expect(appStyles).toMatch(
+      /@media \(max-width: 720px\)[\s\S]*?\.chat-root\.chat-project-brief-open \.chat-thread \.chat-scroll\s*\{[^}]*padding-inline:\s*12px;/,
+    );
+  });
+
   it("gives the no-transcript states their own vertical padding", () => {
     // `.chat-welcome` and the loading state are not virtualized, so they cannot
     // rely on the insets `ChatThread` hands to the virtualizer.

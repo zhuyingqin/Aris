@@ -67,6 +67,8 @@ node patent/tex/build.cjs --check
 
 ## 正文怎么改
 
+本轮重构的技术判断和第二项专利候选见 [`docs/CORE-INNOVATION-REVIEW.md`](docs/CORE-INNOVATION-REVIEW.md)。当前递交件 A1 以“证据身份跨表示保持不变 + 可重放证据账本 + 执行前状态门控”为主轴；产品中的候选冻结、证据矩阵和动态比较前沿没有硬塞入 A1，而是单列为 B1 候选，便于后续独立检索和分案。
+
 | 要改的东西 | 改哪里 |
 |---|---|
 | 说明书某一段 | `description.tex` 里对应的 `\p{...}`；默认输出首行缩进，需要段号校阅稿时给 `cnipa` 加 `numbered-paragraphs` |

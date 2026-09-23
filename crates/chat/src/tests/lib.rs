@@ -196,7 +196,10 @@ fn dynamic_tool_router_pins_core_tools_within_the_hard_cap() {
         assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS, "{plan:?}");
         assert!(MAX_ROUTED_TOOLS <= MAX_ACTIVE_TOOLS);
         assert!(plan.pinned_names.is_subset(&plan.active_names), "{plan:?}");
-        assert!(plan.pinned_names.len() < plan.active_names.len(), "{plan:?}");
+        assert!(
+            plan.pinned_names.len() < plan.active_names.len(),
+            "{plan:?}"
+        );
         // Without ToolSearch the model cannot recover anything that was routed
         // away, so it is never evictable.
         assert!(plan.pinned_names.contains("ToolSearch"), "{plan:?}");
@@ -246,7 +249,10 @@ fn a_browser_task_needs_at_most_one_tool_search_for_the_whole_family() {
         "mcp__pw__browser_type",
         "mcp__pw__browser_take_screenshot",
     ] {
-        assert!(reachable.contains(name), "{name} unreachable: {reachable:?}");
+        assert!(
+            reachable.contains(name),
+            "{name} unreachable: {reachable:?}"
+        );
     }
 }
 
@@ -447,7 +453,10 @@ fn dynamic_tool_router_resumes_on_the_latest_pinned_request_only() {
     // A stated goal wins outright; the pinned block is not consulted at all.
     let stated = resume("- Active user goal: 把 logo 的背景改成白色");
     assert_eq!(stated.profile, "core+code", "{stated:?}");
-    assert!(!stated.pinned_names.contains("LiteratureSearch"), "{stated:?}");
+    assert!(
+        !stated.pinned_names.contains("LiteratureSearch"),
+        "{stated:?}"
+    );
 
     // With no stated goal, the newest pinned request stands in for it — not the
     // whole list, whose oldest entry outlives the intent it came from.
@@ -474,7 +483,10 @@ fn dynamic_tool_router_does_not_read_an_edit_intent_into_ordinary_prose() {
         assert!(!plan.profile.contains("code"), "{prompt:?}: {plan:?}");
         assert!(!plan.profile.contains("deploy"), "{prompt:?}: {plan:?}");
         // Still able to edit, because the editors are pinned rather than earned.
-        assert!(plan.pinned_names.contains("edit_file"), "{prompt:?}: {plan:?}");
+        assert!(
+            plan.pinned_names.contains("edit_file"),
+            "{prompt:?}: {plan:?}"
+        );
     }
 }
 
@@ -787,15 +799,9 @@ fn routing_carries_the_previous_turns_tools_across_a_turn_boundary() {
     let stale = ["a_tool_that_no_longer_exists".to_string()]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let plan = super::route_chat_tools_with_carry_forward(
-        "继续",
-        &specs,
-        ToolRoutingMode::Active,
-        &stale,
-    );
-    assert!(!plan
-        .active_names
-        .contains("a_tool_that_no_longer_exists"));
+    let plan =
+        super::route_chat_tools_with_carry_forward("继续", &specs, ToolRoutingMode::Active, &stale);
+    assert!(!plan.active_names.contains("a_tool_that_no_longer_exists"));
 }
 
 #[test]
@@ -1538,8 +1544,9 @@ fn the_multi_tool_browser_query_that_used_to_return_nothing_returns_everything()
 fn tool_search_does_not_advertise_a_tool_this_turn_blocked() {
     let catalog = BTreeMap::from([("read_file".to_string(), "Read a text file.".to_string())]);
     // The kernel searches its whole tool list, including names this turn removed.
-    let output = json!({"matches": ["bash", "read_file"], "query": "read", "total_deferred_tools": 40})
-        .to_string();
+    let output =
+        json!({"matches": ["bash", "read_file"], "query": "read", "total_deferred_tools": 40})
+            .to_string();
 
     let merged = merge_mcp_tool_search_results(output, r#"{"query":"read"}"#, &catalog, &[]);
     let merged: Value = serde_json::from_str(&merged).expect("merged search output");

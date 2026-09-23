@@ -4,9 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
     compare_and_replace_text_file, file_changes_for_turn, get_file_change, list_file_changes,
-    record_text_file_change, revert_file_change,
-    FileChangeGetInput, FileChangeListInput, FileChangeOperation, FileChangeRevertInput,
-    FileChangeStatus, FileMutationContext,
+    record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeListInput,
+    FileChangeOperation, FileChangeRevertInput, FileChangeStatus, FileMutationContext,
 };
 
 struct EnvGuard {
@@ -30,14 +29,27 @@ fn turn_query_keeps_append_order_and_cas_rejects_later_bytes() {
     for (before, after) in [(None, "one"), (Some("one"), "two")] {
         std::fs::write(&path, after).expect("write content");
         record_text_file_change(
-            &context, &path,
-            if before.is_none() { FileChangeOperation::Create } else { FileChangeOperation::Update },
-            before, Some(after), Vec::new(), String::new(), None,
-        ).expect("record");
+            &context,
+            &path,
+            if before.is_none() {
+                FileChangeOperation::Create
+            } else {
+                FileChangeOperation::Update
+            },
+            before,
+            Some(after),
+            Vec::new(),
+            String::new(),
+            None,
+        )
+        .expect("record");
     }
     let records = file_changes_for_turn(&root, "chat-session", "durable-turn").expect("turn");
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0].after.content_hash, records[1].before.content_hash);
+    assert_eq!(
+        records[0].after.content_hash,
+        records[1].before.content_hash
+    );
 
     std::fs::write(&path, "user edit").expect("later edit");
     let conflict = compare_and_replace_text_file(&path, Some(b"two"), Some(b"one"), &context)

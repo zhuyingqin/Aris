@@ -3007,9 +3007,8 @@ fn summarizer_transcript_uses_only_the_canonical_prior_summary() {
         true,
         false,
     );
-    let segments = super::build_transcript_segments(&[ConversationMessage::user_text(
-        continuation,
-    )]);
+    let segments =
+        super::build_transcript_segments(&[ConversationMessage::user_text(continuation)]);
     let transcript = segments.join("\n");
 
     assert!(transcript.contains("canonical focus"));
@@ -4605,10 +4604,7 @@ fn forty_tool_calls_enter_delivery_without_running_more_tools() {
         .blocks
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("delivery checkpoint")))));
-    assert_eq!(
-        executions.load(std::sync::atomic::Ordering::SeqCst),
-        40
-    );
+    assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 40);
 }
 
 /// Wall-clock exhaustion uses the same bounded delivery phase.

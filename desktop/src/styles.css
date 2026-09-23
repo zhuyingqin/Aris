@@ -15874,10 +15874,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 15px;
 }
 
-.chat-root.chat-project-brief-open .chat-scroll {
-  padding-right: calc(var(--project-brief-lane-w) + 38px);
-}
-
 .chat-root.chat-project-brief-open .chat-input-wrap {
   right: calc(var(--project-brief-lane-w) + 14px);
 }
@@ -18969,7 +18965,11 @@ body.somniq-resizing-col {
 }
 
 .chat-root.chat-project-brief-open .chat-thread .chat-scroll {
-  padding-inline: 76px;
+  /* Keep the question rail's left gutter while reserving the complete summary
+     lane on the right. `padding-inline: 76px` used to override the earlier
+     summary rule, so the transcript remained centred beneath the open card. */
+  padding-left: 76px;
+  padding-right: calc(var(--project-brief-lane-w) + 38px);
 }
 
 .chat-question-timeline-rail {
@@ -20199,8 +20199,10 @@ button.chat-workflow-file-path:hover {
     box-sizing: border-box;
   }
 
-  .chat-root.chat-project-brief-open .chat-scroll {
-    padding-right: 12px;
+  .chat-root.chat-project-brief-open .chat-thread .chat-scroll {
+    /* The summary becomes a separate bottom row here, so it no longer owns a
+       right-hand lane. Match the base mobile transcript gutter on both sides. */
+    padding-inline: 12px;
   }
 
   .chat-root.chat-project-brief-open .chat-input-wrap {

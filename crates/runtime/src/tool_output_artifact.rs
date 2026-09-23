@@ -103,10 +103,7 @@ fn existing_artifact(
         path: absolute_display_path(&canonical_path),
         bytes,
         chars: pristine_output.chars().count(),
-        sha256: Some(format!(
-            "{:x}",
-            Sha256::digest(pristine_output.as_bytes())
-        )),
+        sha256: Some(format!("{:x}", Sha256::digest(pristine_output.as_bytes()))),
     })
 }
 
@@ -239,7 +236,10 @@ fn summarize_changes(changes: &Value) -> Value {
                     summary.insert(field.to_string(), value.clone());
                 }
             }
-            summary.insert("lines".to_string(), Value::String(change_line_delta(change)));
+            summary.insert(
+                "lines".to_string(),
+                Value::String(change_line_delta(change)),
+            );
             (path.clone(), Value::Object(summary))
         })
         .collect::<serde_json::Map<_, _>>()

@@ -441,12 +441,7 @@ const PINNED_CORE_TOOLS: &[&str] = &[
 
 /// Visible from the first request but evictable once the turn's real shape is
 /// known.
-const SECONDARY_CORE_TOOLS: &[&str] = &[
-    "AskUserQuestion",
-    "session_search",
-    "memory",
-    "TodoWrite",
-];
+const SECONDARY_CORE_TOOLS: &[&str] = &["AskUserQuestion", "session_search", "memory", "TodoWrite"];
 
 /// Upper bound on pins, so the LRU always keeps rotating slots for whatever the
 /// turn turns out to need.
@@ -661,7 +656,10 @@ pub fn route_chat_tools_with_carry_forward(
         .cloned()
         .collect::<Vec<_>>();
     if !carried.is_empty() {
-        reasons.push(format!("carried from previous turn: {}", carried.join(", ")));
+        reasons.push(format!(
+            "carried from previous turn: {}",
+            carried.join(", ")
+        ));
         active_names.extend(carried);
     }
     for name in resolve_named(&catalog_names, SECONDARY_CORE_TOOLS) {
@@ -795,8 +793,21 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     if contains_any(
         lowered,
         &[
-            "create", "new file", "generate", "scaffold", "draft", "新建", "创建", "生成", "新增",
-            "写一个", "写个", "做一个", "做个", "弄一个", "加一个",
+            "create",
+            "new file",
+            "generate",
+            "scaffold",
+            "draft",
+            "新建",
+            "创建",
+            "生成",
+            "新增",
+            "写一个",
+            "写个",
+            "做一个",
+            "做个",
+            "弄一个",
+            "加一个",
         ],
     ) {
         groups.push(ToolGroup {
@@ -1806,10 +1817,7 @@ fn merge_mcp_tool_search_results(
     );
     let candidates = search_tools
         .iter()
-        .map(|(name, description)| tools::ToolSearchCandidate {
-            name,
-            description,
-        })
+        .map(|(name, description)| tools::ToolSearchCandidate { name, description })
         .collect::<Vec<_>>();
     let mut matches = tools::rank_tool_search_candidates(&query, &candidates, max_results);
 

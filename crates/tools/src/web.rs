@@ -482,24 +482,44 @@ pub fn probe_somniq_research_provider(provider: &str) -> Result<String, String> 
         "bocha" => {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            );
             let body = serde_json::to_vec(&json!({
                 "query": "SomniQ connectivity",
                 "count": 1,
                 "page": 1,
             }))
             .map_err(|error| error.to_string())?;
-            (Method::POST, somniq_research_gateway_url("bocha")?, headers, Some(body))
+            (
+                Method::POST,
+                somniq_research_gateway_url("bocha")?,
+                headers,
+                Some(body),
+            )
         }
         "zhihu" => {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("application/json"));
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            );
             let body = serde_json::to_vec(&json!({ "Query": "SomniQ connectivity", "Count": 1 }))
                 .map_err(|error| error.to_string())?;
-            (Method::POST, somniq_research_gateway_url("zhihu")?, headers, Some(body))
+            (
+                Method::POST,
+                somniq_research_gateway_url("zhihu")?,
+                headers,
+                Some(body),
+            )
         }
-        _ => return Err(format!("unsupported built-in research provider: {provider}")),
+        _ => {
+            return Err(format!(
+                "unsupported built-in research provider: {provider}"
+            ))
+        }
     };
     let response = send_web_request(
         method,

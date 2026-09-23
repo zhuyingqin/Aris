@@ -5,10 +5,10 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use super::{
-    literature_root_for, open_literature_store_at, CanonicalRecord, CitationLocator,
-    DecisionActor, EvidenceCard, EvidenceStrength, RecordIdentifiers, RecordProvenance,
-    ScreenDecision, ScreeningOutcome, SearchCoverage, SearchProtocolDraft, SearchRunStatus,
-    SourceAttempt, SourceAttemptStatus, LITERATURE_SCHEMA_VERSION,
+    literature_root_for, open_literature_store_at, CanonicalRecord, CitationLocator, DecisionActor,
+    EvidenceCard, EvidenceStrength, RecordIdentifiers, RecordProvenance, ScreenDecision,
+    ScreeningOutcome, SearchCoverage, SearchProtocolDraft, SearchRunStatus, SourceAttempt,
+    SourceAttemptStatus, LITERATURE_SCHEMA_VERSION,
 };
 
 fn draft() -> SearchProtocolDraft {
@@ -292,7 +292,13 @@ fn imports_the_legacy_library_once_without_inventing_screening() {
 fn normalizes_zotero_relationships_and_round_trips_them() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut store = open_literature_store_at(workspace.path()).expect("open store");
-    let record = test_record("doi:10.1000/relations", "A Relational Library", None, None, None);
+    let record = test_record(
+        "doi:10.1000/relations",
+        "A Relational Library",
+        None,
+        None,
+        None,
+    );
     store
         .upsert_canonical_record(&record)
         .expect("insert record");
@@ -345,11 +351,20 @@ fn normalizes_zotero_relationships_and_round_trips_them() {
 
     let snapshot = store.library_relation_snapshot().expect("snapshot");
     let item = snapshot.items.get(&record.id).expect("item relations");
-    assert_eq!(item.collection_ids, vec!["collection:review", "collection:read"]);
+    assert_eq!(
+        item.collection_ids,
+        vec!["collection:review", "collection:read"]
+    );
     assert_eq!(item.tags, vec!["Evidence", "methods"]);
     assert_eq!(item.attachments.len(), 1);
-    assert_eq!(item.annotations[0].attachment_id.as_deref(), Some("attachment:pdf"));
-    assert_eq!(item.notes[0].annotation_id.as_deref(), Some("annotation:one"));
+    assert_eq!(
+        item.annotations[0].attachment_id.as_deref(),
+        Some("attachment:pdf")
+    );
+    assert_eq!(
+        item.notes[0].annotation_id.as_deref(),
+        Some("annotation:one")
+    );
     assert_eq!(snapshot.collections.len(), 2);
 
     let relation_rows: i64 = store
@@ -493,9 +508,18 @@ fn complete_library_snapshot_preserves_creator_roles_and_clears_removed_fields()
         .find(|item| item.item.id == record.id)
         .expect("normalized item");
     assert_eq!(item.item.item_type, "bookSection");
-    assert_eq!(item.fields.get("title").map(String::as_str), Some("Edited title"));
-    assert_eq!(item.fields.get("archiveLocation").map(String::as_str), Some("Box 7"));
-    assert_eq!(item.fields.get("customNumeric").map(String::as_str), Some("42"));
+    assert_eq!(
+        item.fields.get("title").map(String::as_str),
+        Some("Edited title")
+    );
+    assert_eq!(
+        item.fields.get("archiveLocation").map(String::as_str),
+        Some("Box 7")
+    );
+    assert_eq!(
+        item.fields.get("customNumeric").map(String::as_str),
+        Some("42")
+    );
     assert!(!item.fields.contains_key("abstractNote"));
     assert!(!item.fields.contains_key("publicationTitle"));
     assert!(!item.fields.contains_key("DOI"));
@@ -503,7 +527,10 @@ fn complete_library_snapshot_preserves_creator_roles_and_clears_removed_fields()
     assert_eq!(item.creators[0].creator_type, "author");
     assert_eq!(item.creators[0].field_mode, "twoField");
     assert_eq!(item.creators[1].creator_type, "editor");
-    assert_eq!(item.creators[1].name.as_deref(), Some("Applied Mathematics Institute"));
+    assert_eq!(
+        item.creators[1].name.as_deref(),
+        Some("Applied Mathematics Institute")
+    );
 
     let canonical = store
         .load_canonical_record(&record.id)
@@ -514,7 +541,10 @@ fn complete_library_snapshot_preserves_creator_roles_and_clears_removed_fields()
     assert!(canonical.venue.is_empty());
     assert!(canonical.identifiers.doi.is_none());
     assert_eq!(canonical.authors, vec!["Ada Lovelace"]);
-    assert_eq!(canonical.metadata["legacyLibrary"]["creators"][1]["creatorType"], "editor");
+    assert_eq!(
+        canonical.metadata["legacyLibrary"]["creators"][1]["creatorType"],
+        "editor"
+    );
 
     let mut edited_fields = item.fields.clone();
     edited_fields.remove("archiveLocation");
@@ -532,9 +562,15 @@ fn complete_library_snapshot_preserves_creator_roles_and_clears_removed_fields()
         .load_canonical_record(&record.id)
         .expect("load cleared canonical")
         .expect("cleared canonical record");
-    assert!(cleared.metadata["legacyLibrary"].get("archiveLocation").is_none());
-    assert!(cleared.metadata["legacyLibrary"].get("customNumeric").is_none());
-    assert!(cleared.metadata["legacyLibrary"].get("metadataFields").is_none());
+    assert!(cleared.metadata["legacyLibrary"]
+        .get("archiveLocation")
+        .is_none());
+    assert!(cleared.metadata["legacyLibrary"]
+        .get("customNumeric")
+        .is_none());
+    assert!(cleared.metadata["legacyLibrary"]
+        .get("metadataFields")
+        .is_none());
 }
 
 #[test]
@@ -556,9 +592,14 @@ fn scopes_synthetic_primary_pdf_attachments_per_record() {
         None,
     );
     store.upsert_canonical_record(&first).expect("insert first");
-    store.upsert_canonical_record(&second).expect("insert second");
+    store
+        .upsert_canonical_record(&second)
+        .expect("insert second");
 
-    for (record, path) in [(&first, "papers/primary-one.pdf"), (&second, "papers/primary-two.pdf")] {
+    for (record, path) in [
+        (&first, "papers/primary-one.pdf"),
+        (&second, "papers/primary-two.pdf"),
+    ] {
         store
             .update_legacy_library_paper(
                 &record.id,
@@ -572,7 +613,10 @@ fn scopes_synthetic_primary_pdf_attachments_per_record() {
             .expect("materialize primary PDF");
     }
 
-    for (record, path) in [(&first, "papers/primary-one.pdf"), (&second, "papers/primary-two.pdf")] {
+    for (record, path) in [
+        (&first, "papers/primary-one.pdf"),
+        (&second, "papers/primary-two.pdf"),
+    ] {
         let (attachment_id, stored_path): (String, String) = store
             .connection
             .query_row(
@@ -581,12 +625,17 @@ fn scopes_synthetic_primary_pdf_attachments_per_record() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read primary PDF attachment");
-        assert_eq!(attachment_id, format!("attachment-primary-pdf:{}", record.id));
+        assert_eq!(
+            attachment_id,
+            format!("attachment-primary-pdf:{}", record.id)
+        );
         assert_eq!(stored_path, path);
     }
     let attachment_count: i64 = store
         .connection
-        .query_row("SELECT COUNT(*) FROM library_attachments", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM library_attachments", [], |row| {
+            row.get(0)
+        })
         .expect("count primary PDF attachments");
     assert_eq!(attachment_count, 2);
 }
@@ -610,7 +659,9 @@ fn upgrades_legacy_global_primary_pdf_ids_without_cross_record_overwrite() {
         None,
     );
     store.upsert_canonical_record(&first).expect("insert first");
-    store.upsert_canonical_record(&second).expect("insert second");
+    store
+        .upsert_canonical_record(&second)
+        .expect("insert second");
     let legacy_id = "attachment-primary-pdf";
     let first_paper = json!({
         "pdf": { "status": "downloaded", "path": "papers/legacy-primary-one.pdf" },
@@ -647,7 +698,10 @@ fn upgrades_legacy_global_primary_pdf_ids_without_cross_record_overwrite() {
             .connection
             .execute(
                 "UPDATE canonical_records SET payload = ?1 WHERE id = ?2",
-                params![super::encode_payload(&legacy_record).expect("encode legacy record"), record.id],
+                params![
+                    super::encode_payload(&legacy_record).expect("encode legacy record"),
+                    record.id
+                ],
             )
             .expect("write legacy payload");
     }
@@ -697,10 +751,15 @@ fn upgrades_legacy_global_primary_pdf_ids_without_cross_record_overwrite() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read upgraded primary PDF");
-        assert_eq!(attachment_id, format!("attachment-primary-pdf:{}", record.id));
+        assert_eq!(
+            attachment_id,
+            format!("attachment-primary-pdf:{}", record.id)
+        );
         assert_eq!(stored_path, path);
     }
-    let relations = reopened.library_relation_snapshot().expect("upgraded relations");
+    let relations = reopened
+        .library_relation_snapshot()
+        .expect("upgraded relations");
     let second_relations = relations.items.get(&second.id).expect("second relations");
     assert_eq!(
         second_relations.annotations[0].attachment_id.as_deref(),
@@ -724,7 +783,13 @@ fn upgrades_legacy_global_primary_pdf_ids_without_cross_record_overwrite() {
 fn materializes_the_local_zotero_item_model_and_recoverable_trash() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut store = open_literature_store_at(workspace.path()).expect("open store");
-    let record = test_record("doi:10.1000/model", "A Unified Library Item", Some("10.1000/model"), None, None);
+    let record = test_record(
+        "doi:10.1000/model",
+        "A Unified Library Item",
+        Some("10.1000/model"),
+        None,
+        None,
+    );
     store
         .upsert_canonical_record(&record)
         .expect("insert record");
@@ -858,7 +923,9 @@ fn materializes_the_local_zotero_item_model_and_recoverable_trash() {
         model
             .items
             .iter()
-            .filter(|snapshot| snapshot.item.parent_item_id.as_deref() == Some("attachment:model-pdf"))
+            .filter(
+                |snapshot| snapshot.item.parent_item_id.as_deref() == Some("attachment:model-pdf")
+            )
             .count(),
         2
     );
@@ -868,7 +935,10 @@ fn materializes_the_local_zotero_item_model_and_recoverable_trash() {
         .find(|snapshot| snapshot.item.id == "annotation:model")
         .expect("annotation item");
     assert_eq!(
-        annotation.source_payload.as_ref().and_then(|payload| payload["key"].as_str()),
+        annotation
+            .source_payload
+            .as_ref()
+            .and_then(|payload| payload["key"].as_str()),
         Some("ANN01")
     );
     assert!(annotation.full_text.is_none());
@@ -934,11 +1004,13 @@ fn materializes_the_local_zotero_item_model_and_recoverable_trash() {
     store
         .restore_library_items(&[record.id.clone()])
         .expect("restore parent");
-    assert!(!store
-        .library_item("doi:10.1000/model")
-        .expect("read restored parent")
-        .expect("restored parent exists")
-        .trashed);
+    assert!(
+        !store
+            .library_item("doi:10.1000/model")
+            .expect("read restored parent")
+            .expect("restored parent exists")
+            .trashed
+    );
 
     store
         .set_record_attachment_text(
@@ -1030,7 +1102,9 @@ fn deduplicates_creator_relations_during_record_import_and_library_edit() {
             }),
         )
         .expect("duplicate rich creators must not abort a library edit");
-    let updated = store.library_model_snapshot().expect("updated model snapshot");
+    let updated = store
+        .library_model_snapshot()
+        .expect("updated model snapshot");
     let parent = updated
         .items
         .iter()
@@ -1765,9 +1839,27 @@ fn ranks_duplicate_candidates_by_identifier_strength() {
     // way in. The ids run counter to identifier strength, so a candidate list
     // that fell back to id order would name the wrong primary.
     for (id, title, doi, arxiv, scopus) in [
-        ("record:a-scopus", "Indexed Only By Scopus", None, None, Some("2-s2.0-strength")),
-        ("record:b-doi", "Published With A DOI", Some("10.1000/strength"), None, None),
-        ("record:c-arxiv", "Posted To arXiv", None, Some("2501.00001"), None),
+        (
+            "record:a-scopus",
+            "Indexed Only By Scopus",
+            None,
+            None,
+            Some("2-s2.0-strength"),
+        ),
+        (
+            "record:b-doi",
+            "Published With A DOI",
+            Some("10.1000/strength"),
+            None,
+            None,
+        ),
+        (
+            "record:c-arxiv",
+            "Posted To arXiv",
+            None,
+            Some("2501.00001"),
+            None,
+        ),
     ] {
         store
             .upsert_canonical_record(&test_record(id, title, doi, arxiv, scopus))
@@ -1784,7 +1876,10 @@ fn ranks_duplicate_candidates_by_identifier_strength() {
         .expect("insert unique record");
     assert_eq!(store.canonical_record_count().expect("record count"), 4);
     assert_eq!(store.search_run_count().expect("run count"), 0);
-    assert!(store.duplicate_candidates().expect("no duplicates yet").is_empty());
+    assert!(store
+        .duplicate_candidates()
+        .expect("no duplicates yet")
+        .is_empty());
 
     // They only collide once a local edit gives them one title — which is how
     // records carrying different kinds of strong identifier end up as
@@ -1888,7 +1983,13 @@ fn an_arxiv_doi_resolves_to_the_arxiv_identity_alias() {
 
     // A revised submission is the same preprint, so the version suffix cannot
     // create a second identity.
-    let versioned = test_record("arxiv:2301.12345v3", "A Preprint", None, Some("2301.12345v3"), None);
+    let versioned = test_record(
+        "arxiv:2301.12345v3",
+        "A Preprint",
+        None,
+        Some("2301.12345v3"),
+        None,
+    );
     assert!(super::record_identity_aliases(&versioned).contains("arxiv:2301.12345"));
 }
 
@@ -1896,8 +1997,17 @@ fn an_arxiv_doi_resolves_to_the_arxiv_identity_alias() {
 fn renders_zotero_style_attachment_names_and_survives_missing_fields() {
     let template = crate::literature::DEFAULT_ATTACHMENT_NAME_TEMPLATE;
 
-    let mut record = test_record("arxiv:1", "Reinforcement Learning: An Introduction", None, None, None);
-    record.authors = vec!["Richard S. Sutton".to_string(), "Andrew G. Barto".to_string()];
+    let mut record = test_record(
+        "arxiv:1",
+        "Reinforcement Learning: An Introduction",
+        None,
+        None,
+        None,
+    );
+    record.authors = vec![
+        "Richard S. Sutton".to_string(),
+        "Andrew G. Barto".to_string(),
+    ];
     record.year = Some(1998);
     assert_eq!(
         crate::render_attachment_stem(&record, template),
@@ -1932,7 +2042,11 @@ fn renders_zotero_style_attachment_names_and_survives_missing_fields() {
     cjk.year = Some(2026);
     let stem = crate::render_attachment_stem(&cjk, template);
     assert!(stem.starts_with("张三 - 2026 - 深度强化学习"));
-    assert!(stem.chars().count() <= 120, "stem was {} chars", stem.chars().count());
+    assert!(
+        stem.chars().count() <= 120,
+        "stem was {} chars",
+        stem.chars().count()
+    );
 
     // A template that resolves to nothing still yields a usable, safe name.
     let mut bare = test_record("doi:10.1/x", "", None, None, None);

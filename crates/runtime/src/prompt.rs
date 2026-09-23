@@ -1209,10 +1209,7 @@ fn render_permissions_summary(value: &crate::json::JsonValue) -> Vec<String> {
         } else {
             format!(" ({breakdown})")
         };
-        lines.push(format!(
-            "    - {bucket}: {} rule(s){suffix}",
-            rules.len()
-        ));
+        lines.push(format!("    - {bucket}: {} rule(s){suffix}", rules.len()));
     }
     lines
 }

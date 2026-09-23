@@ -397,7 +397,9 @@ fn compaction_is_a_no_op_for_a_log_with_no_dead_rows() {
     let path = temp_session_path("compact-noop");
     let event_path = path.with_extension("events.jsonl");
     let mut session = Session::new();
-    session.messages.push(ConversationMessage::user_text("only"));
+    session
+        .messages
+        .push(ConversationMessage::user_text("only"));
     session.save_to_path(&path).expect("save");
     let before = fs::read_to_string(&event_path).expect("event log");
 

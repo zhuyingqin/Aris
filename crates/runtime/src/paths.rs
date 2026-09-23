@@ -94,7 +94,9 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
 #[cfg(windows)]
 fn is_drive_absolute(value: &str) -> bool {
     let mut characters = value.chars();
-    characters.next().is_some_and(|drive| drive.is_ascii_alphabetic())
+    characters
+        .next()
+        .is_some_and(|drive| drive.is_ascii_alphabetic())
         && characters.next() == Some(':')
         && characters.next() == Some('\\')
 }
@@ -126,7 +128,9 @@ fn is_reserved_device_name(component: &str) -> bool {
     }
     NUMBERED.iter().any(|prefix| {
         stem.len() == prefix.len() + 1
-            && stem.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            && stem
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
             && stem
                 .chars()
                 .next_back()

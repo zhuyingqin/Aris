@@ -112,22 +112,22 @@ export default function Pricing({ copy }: Props) {
       {/* ── 2. Pro Subscription Card & Actions ── */}
       <div className="pricing-plan-wrapper" data-reveal style={{ marginTop: "36px" }}>
         {hasActivePlan ? (
-          /* Active User Subscription Card */
-          <article className="pricing-plan" aria-label={isZh ? "当前已生效订阅" : isEs ? "Suscripción Activa" : "Active Subscription"}>
+          /* Account quota is not proof of a recurring-payment mandate. */
+          <article className="pricing-plan" aria-label={isZh ? "当前算力账户" : isEs ? "Cuenta de cómputo" : "Current compute account"}>
             <div className="pricing-plan-head">
               <div>
                 <p className="pricing-plan-name">
                   {user?.group === "千研"
                     ? isZh
-                      ? "千研科研 Pro 会员"
+                      ? "千研科研 Pro 算力账户"
                       : isEs
-                      ? "Membresía Pro Mil Investigaciones"
-                      : "Thousand Research Pro"
+                      ? "Cuenta de cómputo Pro Mil Investigaciones"
+                      : "Thousand Research Pro compute account"
                     : isZh
-                    ? "SomniQ 科研专业版"
+                    ? "SomniQ 算力账户"
                     : isEs
-                    ? "SomniQ Nivel Pro"
-                    : "SomniQ Pro Tier"}
+                    ? "Cuenta de cómputo SomniQ"
+                    : "SomniQ compute account"}
                 </p>
                 <p style={{ color: "var(--cyan)", fontSize: "13px" }}>
                   {isZh
@@ -138,7 +138,7 @@ export default function Pricing({ copy }: Props) {
                 </p>
               </div>
               <span className="pricing-plan-badge" style={{ background: "#10b981", color: "#000" }}>
-                {isZh ? "● 履约中" : isEs ? "● Activo" : "● Active"}
+                {isZh ? "● 算力可用" : isEs ? "● Cómputo disponible" : "● Quota available"}
               </span>
             </div>
 

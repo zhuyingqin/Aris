@@ -568,7 +568,10 @@ fn a_read_revision_is_accepted_by_the_next_mutation_for_every_file_shape() {
     // stay on the ordinary path but differ in encoding and line endings.
     let cases: Vec<(&str, String)> = vec![
         ("lf.tex", "\\section{Reply}\nalpha\nbeta\n".to_string()),
-        ("crlf.tex", "\\section{Reply}\r\nalpha\r\nbeta\r\n".to_string()),
+        (
+            "crlf.tex",
+            "\\section{Reply}\r\nalpha\r\nbeta\r\n".to_string(),
+        ),
         (
             "bom-cjk.tex",
             "\u{feff}\\section{审稿意见}\n评审人一：alpha\n评审人二：beta\n".to_string(),
@@ -623,7 +626,9 @@ fn a_read_revision_is_accepted_by_the_next_mutation_for_every_file_shape() {
                 "new_string": "BETA"
             }),
         )
-        .unwrap_or_else(|error| panic!("{name}: chained edit rejected the issued revision: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("{name}: chained edit rejected the issued revision: {error}")
+        });
     }
 
     // Line endings survive the round trip; a rewritten file would also have
@@ -1016,7 +1021,10 @@ fn batch_write_preflights_every_revision_before_publishing() {
     .expect_err("a stale item rejects the whole batch");
     assert!(rejected.contains("No files were changed"));
     assert!(!root.join("new.txt").exists());
-    assert_eq!(fs::read_to_string(root.join("existing.txt")).unwrap(), "current\n");
+    assert_eq!(
+        fs::read_to_string(root.join("existing.txt")).unwrap(),
+        "current\n"
+    );
 
     let current = runtime::read_file("existing.txt", None, None).expect("read revision");
     let written = execute_file_tool(

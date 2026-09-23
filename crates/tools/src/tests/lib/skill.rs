@@ -373,7 +373,13 @@ fn tool_search_can_recover_a_routed_away_core_tool() {
     // Dynamic routing decides visibility per turn, so no tool may be statically
     // excluded from the search corpus: the model would ask for the one tool it
     // needs and be told it does not exist.
-    for name in ["write_file", "edit_file", "multi_edit", "read_files", "bash"] {
+    for name in [
+        "write_file",
+        "edit_file",
+        "multi_edit",
+        "read_files",
+        "bash",
+    ] {
         let output = execute_tool("ToolSearch", &json!({"query": format!("select:{name}")}))
             .expect("ToolSearch should succeed");
         let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");

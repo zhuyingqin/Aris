@@ -84,7 +84,7 @@ export default function App() {
           <Vision copy={copy} />
         </main>
 
-        <Footer copy={copy} />
+        <Footer />
 
         <AuthModal copy={copy} />
         <UserDashboard copy={copy} />

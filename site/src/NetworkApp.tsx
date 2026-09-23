@@ -506,7 +506,7 @@ function NetworkContent({
         </section>
       </main>
 
-      <Footer copy={copy} hideCta />
+      <Footer />
       <AuthModal copy={copy} />
       <UserDashboard copy={copy} />
     </div>

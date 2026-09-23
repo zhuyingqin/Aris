@@ -146,6 +146,24 @@ export default function UserDashboard({ copy }: Props) {
             </div>
           </div>
 
+          <div className="dashboard-card dashboard-card--membership">
+            <div className="card-header">
+              <span className="card-kicker">
+                {isZh ? "我的会员" : copy.htmlLang === "es" ? "Mi membresía" : "My membership"}
+              </span>
+            </div>
+            <p className="token-desc">
+              {isZh
+                ? "查询签约状态、下次扣款时间与金额，并管理自动续费。"
+                : copy.htmlLang === "es"
+                ? "Consulta la autorización de pago, el próximo cobro y la renovación automática."
+                : "Check your payment mandate, next charge, and auto-renewal settings."}
+            </p>
+            <a className="btn btn--outline" href={`./dashboard.html?lang=${isZh ? "zh" : copy.htmlLang === "es" ? "es" : "en"}&tab=plan`}>
+              {isZh ? "自动续费管理" : copy.htmlLang === "es" ? "Gestionar renovación" : "Manage auto-renewal"}
+            </a>
+          </div>
+
           {/* Remote Workbench Card */}
           <div className="dashboard-card dashboard-card--remote">
             <div className="card-header">

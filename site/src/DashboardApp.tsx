@@ -7,6 +7,8 @@ import { FULL_SCREEN_REMOTE_QUERY, buildRemoteWorkspaceUrl } from "./remoteHando
 import { COPY, detectTheme, persistTheme, useAutoLang, type Lang, type Theme, APP_VERSION, RELEASES_URL } from "./i18n";
 import { CONSOLE_COPY } from "./consoleI18n";
 import AuthModal from "./components/AuthModal";
+import AutoRenewManagement from "./components/AutoRenewManagement";
+import AutoRenewOffer from "./components/AutoRenewOffer";
 import LanguageSelector from "./components/LanguageSelector";
 import PwaInstallBanner from "./components/PwaInstallBanner";
 import QrCodeSvg from "./components/QrCodeSvg";
@@ -358,7 +360,9 @@ function DashboardContent({
   const { user, isAuthenticated, isLoading, logout, refreshUser, fetchUserLogs, openAuthModal, closeAuthModal, formatTokens: authFormatTokens } = useAuth();
   const isLoggingOutRef = useRef(false);
   const [activeTab, setActiveTab] = useState<"activity" | "usage" | "plan" | "remote">(
-    () => isLocalDashboardPreview() ? "remote" : "activity",
+    () => new URLSearchParams(window.location.search).get("tab") === "plan"
+      ? "plan"
+      : isLocalDashboardPreview() ? "remote" : "activity",
   );
   const [refreshing, setRefreshing] = useState(false);
   const [userLogs, setUserLogs] = useState<any>(null);
@@ -1939,7 +1943,7 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                         </ul>
                       </div>
                       <a
-                        href={`./pricing.html?lang=${lang}`}
+                        href="mailto:support@somni.chat?subject=SomniQ%20Thousand%20Research%20Pro"
                         className="btn btn--primary"
                         style={{ width: "100%", textAlign: "center", justifyContent: "center" }}
                       >
@@ -1984,6 +1988,12 @@ const DAILY_CALLS_MAP: Record<number, number> = {
                   </div>
                 </>
               )}
+              {isAuthenticated ? (
+                <>
+                  <AutoRenewOffer lang={lang} />
+                  <AutoRenewManagement lang={lang} />
+                </>
+              ) : null}
             </div>
           ) : (
             <div className="console-canvas-inner">

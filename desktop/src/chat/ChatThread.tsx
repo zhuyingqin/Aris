@@ -7,8 +7,11 @@ import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
 import {
+  currentMessageColumns,
   estimateTurnSize,
   readTurnMeasurements,
+  setMessageColumns,
+  textColumnsForWidth,
   turnVirtualKey,
   writeTurnMeasurements,
 } from "./transcriptMetrics";
@@ -70,6 +73,25 @@ export function isScrollNavigationKey(key: string): boolean {
     || key === "PageDown"
     || key === "End"
     || key === " ";
+}
+
+/**
+ * Which rows have to be re-estimated after the transcript's column width changed.
+ *
+ * A measured height is only true at the width it was measured at, and only rows
+ * that are still mounted get a ResizeObserver callback for the new width. Every
+ * other row keeps a height from the old layout until the reader scrolls it into
+ * view, where it lands as a jump — so those rows are handed a fresh estimate
+ * instead. Going through `resizeItem` (rather than dropping the cache) is what
+ * keeps the reader still: the virtualizer compensates each above-viewport change.
+ */
+export function rowsNeedingReestimate(count: number, mountedIndexes: Iterable<number>): number[] {
+  const mounted = new Set(mountedIndexes);
+  const rows: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    if (!mounted.has(index)) rows.push(index);
+  }
+  return rows;
 }
 
 /** Only the growth direction needs compensating when the composer resizes.
@@ -386,6 +408,9 @@ export default function ChatThread({
   onOpenIndependentReview,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The message column, which is what row heights actually depend on: the
+  // scroller's own width also counts its (reserved) scrollbar gutters.
+  const listRef = useRef<HTMLDivElement>(null);
   // The transcript is reader-controlled. New messages and layout changes must
   // never move its viewport; only explicit user navigation may do that.
   const [following, setFollowing] = useState(false);
@@ -408,6 +433,7 @@ export default function ChatThread({
   turnsRef.current = turns;
 
   const bottomInset = composerHeight + TRANSCRIPT_BOTTOM_GAP;
+  const hasTurns = turns.length > 0;
   const getItemKey = useCallback(
     (index: number) => turnVirtualKey(turnsRef.current[index], index),
     [],
@@ -571,6 +597,55 @@ export default function ChatThread({
     element.scrollTop += adjustment;
   }, [bottomInset, markProgrammaticScroll]);
 
+  // The transcript's column width changes whenever the side panel opens, its
+  // divider is dragged, the project brief lane appears, or the window is
+  // resized. Every row's height changes with it, but only the rows still mounted
+  // are observed, so the rest keep heights from the old layout and surface them
+  // as a jump the next time the reader scrolls them into view.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    let frame: number | null = null;
+    // The list when there is one; otherwise the scroller minus the gutters it
+    // reserves, which its own `clientWidth` still counts.
+    const contentWidth = () => {
+      const list = listRef.current;
+      if (list) return list.clientWidth;
+      const style = window.getComputedStyle(element);
+      const gutters = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      return element.clientWidth - gutters;
+    };
+    const applyWidth = () => {
+      frame = null;
+      const columns = textColumnsForWidth(contentWidth());
+      if (columns === currentMessageColumns()) return;
+      setMessageColumns(columns);
+      const mounted = virtualizer.getVirtualItems().map((item) => item.index);
+      const stale = rowsNeedingReestimate(turnsRef.current.length, mounted);
+      if (stale.length === 0) return;
+      // The compensation these produce is the virtualizer's, not the reader's.
+      markProgrammaticScroll();
+      for (const index of stale) {
+        virtualizer.resizeItem(index, estimateTurnSize(turnsRef.current[index], columns));
+      }
+    };
+    applyWidth();
+    // Coalesced: dragging the side panel divider crosses a column boundary every
+    // few pixels, and each pass walks every turn in the conversation.
+    const observer = new ResizeObserver(() => {
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(applyWidth);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+    // `hasTurns` re-runs this the moment the list mounts, so the first
+    // transcript of a session is measured against the list rather than the
+    // welcome screen's box.
+  }, [hasTurns, markProgrammaticScroll, virtualizer]);
+
   // Hand the measured heights to the next mount of this conversation so
   // reopening it does not start from estimates again.
   useEffect(() => () => {
@@ -696,7 +771,11 @@ export default function ChatThread({
             </div>
           </div>
         ) : (
-          <div className="chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
+          <div
+            className="chat-virtual-list"
+            ref={listRef}
+            style={{ height: virtualizer.getTotalSize() }}
+          >
             {virtualItems.map((item) => {
               const turn = turns[item.index];
               if (!turn) return null;
