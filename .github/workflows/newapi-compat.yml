@@ -1,0 +1,138 @@
+name: New API account compatibility
+
+on:
+  pull_request:
+    paths: ['site/**', 'deploy/newapi/**', '.github/workflows/newapi-compat.yml']
+  push:
+    branches: ['codex/somniq-identity']
+    paths: ['site/**', 'deploy/newapi/**', '.github/workflows/newapi-compat.yml']
+  workflow_dispatch:
+  schedule:
+    - cron: '31 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: newapi-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate: ${{ steps.upstream.outputs.candidate }}
+      tag: ${{ steps.upstream.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Discover candidate without changing production lock
+        id: upstream
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node deploy/newapi/check-updates.mjs --write
+      - name: Update policy tests
+        run: node --test deploy/newapi/check-updates.test.mjs
+      - name: Account security tests and build
+        run: |
+          cargo fmt --manifest-path site/account-server/Cargo.toml --check
+          cargo test --locked --manifest-path site/account-server/Cargo.toml
+          cargo clippy --locked --manifest-path site/account-server/Cargo.toml --all-targets -- -D warnings
+          cargo build --locked --manifest-path site/account-server/Cargo.toml
+      - name: Site tests and both account modes
+        run: |
+          npm ci --prefix site
+          npm ci --prefix site/remote
+          cd site
+          npx --prefix remote vitest run --root .
+          npm run build:web
+          VITE_ACCOUNT_MODE=independent npm run build
+      - name: Verify real releases with isolated databases
+        run: |
+          node --input-type=module <<'JS'
+          import {readFile} from 'node:fs/promises';
+          import {spawnSync} from 'node:child_process';
+          const current=JSON.parse(await readFile('deploy/newapi/version.lock.json','utf8'));
+          const candidate=await readFile('deploy/newapi/candidate.json','utf8').then(JSON.parse).catch(()=>null);
+          for(const tag of new Set([current.tag,candidate?.tag].filter(Boolean))) {
+            if(!/^v\d+\.\d+\.\d+(?:-rc\.\d+)?$/.test(tag)) throw new Error('Invalid release tag');
+            const result=spawnSync(process.execPath,['site/account-server/scripts/live-compat.mjs'],{stdio:'inherit',env:{...process.env,NEWAPI_TEST_TAG:tag}});
+            if(result.status!==0) process.exit(result.status||1);
+          }
+          JS
+      - name: Real identity provider and browser flow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import {mkdir,writeFile} from 'node:fs/promises';
+          import {createHash} from 'node:crypto';
+          const metadata=await fetch('https://api.github.com/repos/keycloak/keycloak/releases/tags/26.7.4',{headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`}});
+          if(!metadata.ok) throw new Error('Keycloak metadata unavailable');
+          const asset=(await metadata.json()).assets.find(a=>a.name==='keycloak-26.7.4.zip');
+          if(!asset?.digest?.startsWith('sha256:')) throw new Error('Published checksum missing');
+          const response=await fetch(asset.browser_download_url);
+          if(!response.ok) throw new Error('Keycloak download failed');
+          const bytes=Buffer.from(await response.arrayBuffer());
+          if(`sha256:${createHash('sha256').update(bytes).digest('hex')}`!==asset.digest) throw new Error('Keycloak checksum mismatch');
+          await mkdir('.codex/identity-tools',{recursive:true});
+          await writeFile('.codex/identity-tools/keycloak.zip',bytes);
+          JS
+          unzip -q .codex/identity-tools/keycloak.zip -d .codex/identity-tools
+          SOMNIQ_KEYCLOAK_HOME="$PWD/.codex/identity-tools/keycloak-26.7.4" node site/account-server/scripts/live-compat.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newapi-compatibility
+          # Only reports and candidate metadata: raw logs and databases may
+          # contain disposable credentials and must not enter CI artifacts.
+          path: |
+            .tmp-account-compat-*/validation.json
+            deploy/newapi/candidate.json
+          include-hidden-files: true
+
+  propose:
+    needs: verify
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.verify.outputs.candidate == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: newapi-compatibility
+          path: verified-candidate
+      - name: Propose verified candidate for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          branch="codex/newapi-${TAG}"
+          existing=$(gh pr list --head "$branch" --state all --json number --jq 'length')
+          if [ "$existing" != "0" ]; then exit 0; fi
+          cp verified-candidate/deploy/newapi/candidate.json deploy/newapi/candidate.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add deploy/newapi/candidate.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: validate New API ${TAG} candidate"
+          git push origin "HEAD:refs/heads/$branch"
+          cat > /tmp/newapi-update-body.md <<EOF
+          New API ${TAG} passed the account adapter tests and the real-release compatibility harness with isolated test databases.
+
+          Validation: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          This updates candidate metadata only. The production version lock is unchanged. Existing database migration, Keycloak deployment, and rollback review remain required before promotion.
+          EOF
+          gh pr create --draft --head "$branch" --title "New API ${TAG} compatibility candidate" --body-file /tmp/newapi-update-body.md

@@ -3,6 +3,7 @@ import { useAuth } from "../context/AuthContext";
 import { LANGUAGES, type Copy, type Lang, type Theme } from "../i18n";
 import { ArrowIcon, GlobeIcon, MoonIcon, SparklesIcon, SunIcon, UserIcon } from "./icons";
 import LanguageSelector from "./LanguageSelector";
+import { independentAccountsEnabled } from "../independentAccount";
 
 type Props = {
   copy: Copy;
@@ -148,7 +149,7 @@ export default function Nav({
                 }}
               >
                 <UserIcon width={16} height={16} />
-                <span>{copy.nav.login}</span>
+                <span>{independentAccountsEnabled ? copy.nav.userCenter : copy.nav.login}</span>
               </button>
             )}
           </div>
@@ -175,7 +176,7 @@ export default function Nav({
               title={copy.auth.loginTitle}
             >
               <UserIcon width={14} height={14} />
-              <span>{copy.nav.login}</span>
+              <span>{independentAccountsEnabled ? copy.nav.userCenter : copy.nav.login}</span>
             </button>
           )}
 

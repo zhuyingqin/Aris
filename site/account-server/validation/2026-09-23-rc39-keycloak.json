@@ -1,0 +1,21 @@
+{
+  "tag": "v1.0.0-rc.39",
+  "binarySha256": "cbfeb7590d0819c85da051cfbd50e9284dcd7818f31051727af1a9946136fda5",
+  "passed": true,
+  "identityProvider": "Keycloak 26.7.4, native isolated development database",
+  "modelChannel": "local fixture (no paid calls)",
+  "checks": [
+    "real Keycloak login + PKCE",
+    "registration/recovery links",
+    "Site explicit agreement",
+    "real New API OIDC account and model key",
+    "browser HttpOnly account session",
+    "streamed model response",
+    "quota display",
+    "desktop/mobile layout",
+    "repeat connection",
+    "logout and stable re-login",
+    "Site identity survives New API outage"
+  ],
+  "testedAt": "2026-09-23T07:53:06.035Z"
+}

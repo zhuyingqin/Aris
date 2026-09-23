@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import puppeteer from 'puppeteer';
+
+export async function browserSmoke({ origin, password, stopCompute, scratch }) {
+  const browser = await puppeteer.launch({ headless: true, args: process.env.CI ? ['--no-sandbox'] : [] });
+  let page;
+  try {
+    page = await browser.newPage();
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.setViewport({ width: 1280, height: 1000 });
+    await page.goto(`${origin}/account.html?lang=en`);
+    await page.select('select[aria-label="Language"]', 'en');
+    await page.waitForSelector('a[href="/v2/account/login"]');
+    await page.click('a[href="/v2/account/login"]');
+    await page.waitForSelector('#username');
+    assert.ok(await page.$('a[href*="registration"]'), 'Keycloak offers registration');
+    assert.ok(await page.$('a[href*="reset-credentials"]'), 'Keycloak offers account recovery');
+    await page.type('#username', 'alice'); await page.type('#password', password);
+    await page.click('#kc-login');
+    await page.waitForSelector('[data-testid="account-name"]');
+    const me = () => page.evaluate(async () => (await fetch('/v2/account/me')).json());
+    const initial = await me();
+    assert.equal(initial.user.email, 'alice@example.invalid');
+    assert.equal(initial.agreement_required, true);
+    assert.match(initial.user.id, /^[a-f0-9-]{36}$/);
+    await page.waitForSelector('.identity-checkbox input');
+    await page.click('.identity-checkbox input');
+    await page.click('.identity-card .identity-primary');
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.includes('Connect compute')));
+    const click = async text => page.evaluate(text => [...document.querySelectorAll('button')].find(b => b.textContent.includes(text)).click(), text);
+    await click('Connect compute');
+    await page.waitForSelector('.identity-metrics');
+    assert.equal((await me()).compute_connected, true);
+    const result = await page.evaluate(async () => {
+      const models = await (await fetch('/v1/models')).json();
+      const stream = await fetch('/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Compatibility test' }], stream: true }) });
+      return { models: models.data.map(m => m.id), status: stream.status, text: await stream.text(), storageKeys: Object.keys(localStorage) };
+    });
+    assert.ok(result.models.includes('gpt-4o-mini')); assert.equal(result.status, 200); assert.ok(result.text.includes('[DONE]'));
+    assert.ok(result.storageKeys.every(key => !/token|account_profile|access/i.test(key)), 'browser stores no account or upstream credentials');
+    await page.screenshot({ path: join(scratch, 'site-account-desktop.png'), fullPage: true });
+    await page.setViewport({ width: 390, height: 844 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'mobile has no horizontal overflow');
+    await page.screenshot({ path: join(scratch, 'site-account-mobile.png'), fullPage: true });
+    // Wait for the redirect chain to finish: the old page still has its usage
+    // panel briefly while the connection request is in flight.
+    await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 }), click('Reconnect')]);
+    await page.waitForSelector('.identity-metrics');
+    await click('Sign out this session'); await page.waitForSelector('a[href="/v2/account/login"]');
+    assert.equal(await page.evaluate(async () => (await fetch('/v2/account/me')).status), 401);
+    await page.click('a[href="/v2/account/login"]'); await page.waitForSelector('.identity-metrics');
+    const again = await me(); assert.equal(again.user.id, initial.user.id); assert.equal(again.agreement_required, false);
+    await stopCompute();
+    await page.reload(); await page.waitForSelector('[data-testid="account-name"]');
+    assert.equal((await me()).user.id, initial.user.id);
+    await page.waitForFunction(() => document.body.textContent.includes('Compute is temporarily unavailable'));
+    assert.deepEqual(errors, []);
+    return ['real Keycloak login + PKCE', 'registration/recovery links', 'Site explicit agreement', 'real New API OIDC account and model key', 'browser HttpOnly account session', 'streamed model response', 'quota display', 'desktop/mobile layout', 'repeat connection', 'logout and stable re-login', 'Site identity survives New API outage'];
+  } catch (error) {
+    if (page) {
+      await page.screenshot({ path: join(scratch, 'browser-failure.png'), fullPage: true });
+      await writeFile(join(scratch, 'browser-failure.txt'), await page.evaluate(() => `${location.origin}${location.pathname}\n${document.body.innerText}`));
+    }
+    throw error;
+  } finally { await browser.close(); }
+}

@@ -74,6 +74,8 @@ export default defineConfig(({ mode }) => {
   // account clients listed here are the real ones. Point it at a local
   // `site/server` run when working on the gateway itself.
   const apiUpstream = env.SOMNIQ_DEV_API_UPSTREAM || "https://somni.chat";
+  const independent = env.VITE_ACCOUNT_MODE === "independent";
+  const accountUpstream = env.SOMNIQ_DEV_ACCOUNT_UPSTREAM || "http://127.0.0.1:8800";
 
   return {
     plugins: [react(), remotePublicAssets()],
@@ -86,10 +88,15 @@ export default defineConfig(({ mode }) => {
       port: 5180,
       strictPort: true,
       proxy: {
+        // Preview mode must never fall back to the production legacy account API.
+        ...(independent ? {
+          "^/(v2/account|oauth/oidc|account)([/?]|$)": { target: accountUpstream, changeOrigin: true },
+          "^/v1/(models|chat/completions)([?]|$)": { target: accountUpstream, changeOrigin: true },
+        } : {}),
         // `ws` also covers /v1/signal, /v1/relay and the two /v1/browser-*
         // sockets the PWA upgrades to after claiming a ticket.
         "^/(v1|healthz)(/|$)": {
-          target: apiUpstream,
+          target: independent ? accountUpstream : apiUpstream,
           changeOrigin: true,
           ws: true,
         },
@@ -97,7 +104,7 @@ export default defineConfig(({ mode }) => {
         // refresh cookie is scoped to it. Deliberately narrow: everything
         // else under /api belongs to the account backend's admin surface.
         "^/api/user/auth/(refresh|logout)$": {
-          target: apiUpstream,
+          target: independent ? accountUpstream : apiUpstream,
           changeOrigin: true,
         },
       },
@@ -110,6 +117,7 @@ export default defineConfig(({ mode }) => {
           main: "index.html",
           pricing: "pricing.html",
           dashboard: "dashboard.html",
+          account: "account.html",
           network: "network.html",
           legacyAgreementRedirect: "auto-renew-agreement.html",
           userServiceAgreement: "user-service-agreement.html",

@@ -12,6 +12,7 @@ import {
   extractAuthSessionId,
 } from "../../remote/src/accountToken";
 import { detectLang } from "../i18n";
+import { independentAccountsEnabled } from "../independentAccount";
 
 export interface UserProfile {
   id: number;
@@ -175,7 +176,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // device list polls on its own while pairing. Routing that verdict back
     // here is what turns it into a login prompt instead of an error banner on
     // a shell that still claims to be signed in.
-    accountTokens().onExpired(abandonSession);
+    if (!independentAccountsEnabled) accountTokens().onExpired(abandonSession);
   }, [abandonSession]);
 
   const formatTokens = useCallback((quota: number, customUnit?: string): string => {
@@ -201,6 +202,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const fetchSelf = useCallback(async () => {
+    if (independentAccountsEnabled) return;
     try {
       const res = await accountTokens().fetchWithSession((session) =>
         fetch("./v1/user/self", {
@@ -315,6 +317,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Initial load
   useEffect(() => {
+    if (independentAccountsEnabled) { setIsLoading(false); return; }
     const previewUser = localDashboardPreviewUser();
     if (previewUser) {
       setUser(previewUser);
@@ -338,6 +341,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (username: string, password: string): Promise<{ success: boolean; message?: string }> => {
+      if (independentAccountsEnabled) { window.location.assign("./account.html"); return { success: true }; }
       try {
         const res = await fetch("./v1/auth/login", {
           method: "POST",
@@ -416,6 +420,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password: string,
       email?: string
     ): Promise<{ success: boolean; message?: string }> => {
+      if (independentAccountsEnabled) { window.location.assign("./account.html"); return { success: true }; }
       try {
         const payload: Record<string, string> = {
           username: username.trim(),
@@ -471,6 +476,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openAuthModal = useCallback((mode: "login" | "register" = "login") => {
+    if (independentAccountsEnabled) { window.location.assign("./account.html"); return; }
     setAuthModalMode(mode);
     setAuthModalOpen(true);
   }, []);
@@ -485,6 +491,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openDashboard = useCallback(() => {
+    if (independentAccountsEnabled) { window.location.assign("./account.html"); return; }
     setDashboardOpen(true);
   }, []);
 

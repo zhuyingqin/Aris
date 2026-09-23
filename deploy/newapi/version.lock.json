@@ -1,0 +1,12 @@
+{
+  "repository": "QuantumNous/new-api",
+  "tag": "v1.0.0-rc.39",
+  "commit": "9978ee1e25a647bfe004e96c8719a2cb62c24732",
+  "image": "calciumion/new-api",
+  "digest": "sha256:219b0cecfd7d1aaeacc1d1d0f4bf51615b64260ac1fe73b89937efa469a6d57f",
+  "channel": "rc",
+  "automaticProductionDeployment": false,
+  "adapterContract": 1,
+  "baselineObservedAt": "2026-09-23",
+  "baselineSource": "Read-only inspection of the existing production container; no deployment performed"
+}

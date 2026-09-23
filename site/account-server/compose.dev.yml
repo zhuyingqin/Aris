@@ -1,0 +1,30 @@
+name: somniq-identity-dev
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.4
+    command: ['start-dev', '--import-realm']
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: localadmin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?run scripts/dev.mjs up}
+      KC_HOSTNAME: http://127.0.0.1:18882
+    ports:
+      - '127.0.0.1:18882:8080'
+    volumes:
+      - ./.local/somniq-realm.json:/opt/keycloak/data/import/somniq-realm.json:ro
+      - keycloak_data:/opt/keycloak/data
+    mem_limit: 1g
+  newapi:
+    image: ${NEWAPI_IMAGE:?run scripts/dev.mjs up}
+    environment:
+      SESSION_SECRET: ${NEWAPI_SESSION_SECRET:?run scripts/dev.mjs up}
+      SESSION_COOKIE_SECURE: 'false'
+      SQLITE_PATH: /data/new-api.db
+      TZ: UTC
+    ports:
+      - '127.0.0.1:18881:3000'
+    volumes:
+      - newapi_data:/data
+    mem_limit: 768m
+volumes:
+  keycloak_data:
+  newapi_data:
