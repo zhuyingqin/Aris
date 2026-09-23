@@ -19,12 +19,16 @@ Implemented:
 - Serialized upstream refresh and key provisioning, account/usage projection,
   and streaming OpenAI chat proxy using the server-held model key.
 - A separate `/account/` prototype page for testing the complete flow.
-- A branded, responsive Site `/account.html` page behind `VITE_ACCOUNT_MODE=independent`.
-  It uses the independent UUID/cookie contract and never loads legacy credentials.
+- Site `/dashboard.html` and `/account.html` behind `VITE_ACCOUNT_MODE=independent`
+  reuse the original console header, sidebar, cards and light/dark theme.
+  They use the independent UUID/cookie contract and never load legacy credentials.
 - Go ¥29/month, Plus ¥49/month and Pro ¥99/month, with exact per-plan model lists,
   default Executor/Reviewer models, expiring administrator grants and audit history.
-- An authenticated `/admin.html` interface for plan configuration, model discovery,
+- An authenticated `/admin.html` interface inside that same console, accessible
+  from its administrator sidebar item, for plan configuration, model discovery,
   member search, membership changes, reconciliation retries and audit records.
+- The original landing page structure is preserved. Pricing uses its existing
+  two-column offer layout and comparison table with the Go/Plus/Pro catalog.
 - Model enforcement before forwarding, revisioned policy changes, persistent
   reconciliation jobs and verified New API token allowlists.
 
@@ -83,10 +87,12 @@ $env:VITE_ACCOUNT_MODE = 'independent'
 npm run dev
 ```
 
-Open `http://127.0.0.1:5180/account.html`. The landing-page account buttons and
-`dashboard.html` use the new center in this mode. The new profile is deliberately
-separate from the numeric legacy user contract, so legacy remote-device and
-subscription panels are not rendered in this preview. Its development proxy
+Open `http://127.0.0.1:5180/dashboard.html` (`account.html` remains an alias).
+The landing-page account buttons retain the original console entry point.
+This mode shares the existing visual layout but keeps independent UUID profiles
+separate from the numeric legacy user contract. The plan tab shows Go/Plus/Pro;
+the remote tab links to the existing remote workspace until device migration.
+Its development proxy
 does not fall back to production APIs. Leave the build flag unset for the current
 Site behavior. Production/static previews additionally need the same-origin
 routes shown in `deploy/nginx.preview.conf.example`; do not use the Vite server

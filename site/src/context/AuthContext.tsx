@@ -341,7 +341,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (username: string, password: string): Promise<{ success: boolean; message?: string }> => {
-      if (independentAccountsEnabled) { window.location.assign("./account.html"); return { success: true }; }
+      if (independentAccountsEnabled) { window.location.assign("./dashboard.html"); return { success: true }; }
       try {
         const res = await fetch("./v1/auth/login", {
           method: "POST",
@@ -420,7 +420,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password: string,
       email?: string
     ): Promise<{ success: boolean; message?: string }> => {
-      if (independentAccountsEnabled) { window.location.assign("./account.html"); return { success: true }; }
+      if (independentAccountsEnabled) { window.location.assign("./dashboard.html"); return { success: true }; }
       try {
         const payload: Record<string, string> = {
           username: username.trim(),
@@ -476,7 +476,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openAuthModal = useCallback((mode: "login" | "register" = "login") => {
-    if (independentAccountsEnabled) { window.location.assign("./account.html"); return; }
+    if (independentAccountsEnabled) { window.location.assign("./dashboard.html"); return; }
     setAuthModalMode(mode);
     setAuthModalOpen(true);
   }, []);
@@ -491,7 +491,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openDashboard = useCallback(() => {
-    if (independentAccountsEnabled) { window.location.assign("./account.html"); return; }
+    if (independentAccountsEnabled) { window.location.assign("./dashboard.html"); return; }
     setDashboardOpen(true);
   }, []);
 

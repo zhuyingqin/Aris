@@ -4,19 +4,12 @@ import { RELEASES_URL } from "../i18n";
 import Section from "./Section";
 import { ArrowIcon, CheckIcon, DeepSeekLogo, MiniMaxLogo, OpenAILogo, SparklesIcon, WindowsIcon } from "./icons";
 import { useAuth } from "../context/AuthContext";
-import { independentAccountsEnabled } from "../independentAccount";
-import MembershipPlans from "./MembershipPlans";
 
 type Props = {
   copy: Copy;
 };
 
 export default function Pricing({ copy }: Props) {
-  if (independentAccountsEnabled) return <MembershipPlans lang={copy.htmlLang === "zh-CN" ? "zh" : copy.htmlLang === "es" ? "es" : "en"} />;
-  return <LegacyPricing copy={copy} />;
-}
-
-function LegacyPricing({ copy }: Props) {
   const { pricing } = copy;
   const { user, formatTokens: authFormatTokens } = useAuth();
   const isZh = copy.htmlLang === "zh-CN";

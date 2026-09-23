@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
-import { useAutoLang } from "./i18n";
+import { detectTheme, persistTheme, useAutoLang, type Theme } from "./i18n";
+import { CONSOLE_COPY } from "./consoleI18n";
+import ConsoleShell, { type ConsoleTab } from "./components/ConsoleShell";
+import AdminPanel from "./AdminApp";
+import { loadEntitlements, type Entitlements } from "./membership";
 import {
   acceptAccountAgreement, beginComputeConnection, independentAccountsEnabled,
   IndependentAccountError,
   loadAccountAgreement, loadComputeUsage, loadIndependentAccount, logoutIndependentAccount,
   type AccountAgreement, type ComputeUsage, type IndependentAccount,
 } from "./independentAccount";
-import "./independentAccount.css";
+import "./membership.css";
 import MembershipPlans, { MembershipSummary } from "./components/MembershipPlans";
 
 const words = {
@@ -48,12 +52,16 @@ const words = {
   },
 };
 
-export default function IndependentAccountApp() {
+export default function IndependentAccountApp({ initialTab }: { initialTab?: ConsoleTab }) {
   const [lang, setLang] = useAutoLang();
   const c = words[lang];
+  const consoleCopy = CONSOLE_COPY[lang];
+  const [theme, setTheme] = useState<Theme>(detectTheme);
+  const [tab, setTab] = useState<ConsoleTab>(() => initialTab || (new URLSearchParams(window.location.search).get("tab") === "plan" ? "plan" : "activity"));
   const [account, setAccount] = useState<IndependentAccount | null>(null);
   const [agreement, setAgreement] = useState<AccountAgreement | null>(null);
   const [usage, setUsage] = useState<ComputeUsage | null>(null);
+  const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
   const [accepted, setAccepted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -74,53 +82,72 @@ export default function IndependentAccountApp() {
     setLoading(true); setFailed(false);
     try {
       const next = await loadIndependentAccount();
-      setAccount(next); setUsage(null); setAgreement(null); setAccepted(false);
-      // Account loading does not wait for a potentially unavailable compute service.
+      setAccount(next); setUsage(null); setAgreement(null); setAccepted(false); setEntitlements(null);
+      if (next) void loadEntitlements().then(setEntitlements).catch(() => {});
       if (next?.agreement_required) setAgreement(await loadAccountAgreement());
       if (next?.compute_connected && !next.agreement_required) void refreshUsage();
     } catch { setFailed(true); }
     finally { setLoading(false); }
   }, [refreshUsage]);
   useEffect(() => { if (independentAccountsEnabled) void refreshAccount(); }, [refreshAccount]);
-  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-CN" : lang; document.title = `${c.title} · SomniQ`; }, [lang, c.title]);
-
+  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-CN" : lang; document.title = consoleCopy.docTitle; }, [lang, consoleCopy.docTitle]);
+  useEffect(() => { persistTheme(theme); document.documentElement.setAttribute("data-theme", theme); }, [theme]);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const follow = (event: MediaQueryListEvent) => { if (!localStorage.getItem("somniq-site-theme")) setTheme(event.matches ? "light" : "dark"); };
+    media.addEventListener("change", follow); return () => media.removeEventListener("change", follow);
+  }, []);
   async function action(work: () => Promise<void>) {
     setBusy(true); setOperationFailed(false);
     try { await work(); }
     catch (error) {
-      if (error instanceof IndependentAccountError && error.status === 401) { setAccount(null); setUsage(null); }
+      if (error instanceof IndependentAccountError && error.status === 401) { setAccount(null); setUsage(null); setEntitlements(null); }
       else setOperationFailed(true);
     } finally { setBusy(false); }
   }
   if (!independentAccountsEnabled) { window.location.replace("./dashboard.html"); return null; }
 
-  return <div className="identity-page">
-    <header className="identity-nav"><a href={`./?lang=${lang}`} className="identity-brand"><img src="./app-logo.png" alt="" width="32" height="32" />SomniQ Studio</a>
-      <div><select aria-label="Language" value={lang} onChange={e => setLang(e.target.value as typeof lang)}><option value="zh">中文</option><option value="en">English</option><option value="es">Español</option></select><a href={`./?lang=${lang}`}>{c.home}</a></div>
-    </header>
-    <main className="identity-main">
-      <div className="identity-heading"><span className="identity-kicker">{c.preview}</span><h1>{c.title}</h1><p>{c.intro}</p></div>
-      {loading ? <p role="status">{c.loading}</p> : failed ? <section className="identity-card" role="alert"><p>{c.failed}</p><button onClick={() => void refreshAccount()}>{c.retry}</button></section> : !account ?
-        <section className="identity-card identity-welcome"><h2>{c.login}</h2><p>{c.loginHint}</p><a className="identity-primary" href="/v2/account/login">{c.login} →</a><p className="identity-note">{c.oldAccount}</p></section> : <>
-          <section className="identity-card" aria-labelledby="identity-profile-title"><div className="identity-card-header"><h2 id="identity-profile-title">{c.profile}</h2><span className="identity-status">{c.signedIn}</span></div>
-            <h3 data-testid="account-name">{account.user.display_name}</h3><dl className="identity-details"><div><dt>{c.email}</dt><dd>{account.user.email}</dd></div><div><dt>{c.identity}</dt><dd className="identity-id">{account.user.id}</dd></div></dl>
-            <button disabled={busy} onClick={() => void action(async () => { await logoutIndependentAccount(); setAccount(null); setUsage(null); setAgreement(null); })}>{c.logout}</button>
-          </section>
-          {account.agreement_required && agreement ? <section className="identity-card" aria-labelledby="identity-agreement-title"><h2 id="identity-agreement-title">{c.agreement}</h2><p className="identity-note">{agreement.version}</p><pre className="identity-agreement">{agreement.text}</pre>
-            <label className="identity-checkbox"><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)} />{c.accept}</label>
-            <button className="identity-primary" disabled={busy || !accepted} onClick={() => void action(async () => { await acceptAccountAgreement(agreement); await refreshAccount(); })}>{c.continue}</button>
-          </section> : null}
-          {!account.agreement_required && <section className="identity-card" aria-labelledby="identity-compute-title"><div className="identity-card-header"><h2 id="identity-compute-title">{c.compute}</h2><span className={account.compute_connected ? "identity-status" : "identity-status identity-pending"}>{account.compute_connected ? c.connected : c.pending}</span></div>
-            {computeFailed && <p role="status" className="identity-note">{c.computeFailed}</p>}
-            {usage && <><dl className="identity-metrics"><div><dt>{c.quota}</dt><dd>{usage.quota.toLocaleString(lang)}<small>{c.unit}</small></dd></div><div><dt>{c.used}</dt><dd>{usage.used_quota.toLocaleString(lang)}<small>{c.unit}</small></dd></div><div><dt>{c.requests}</dt><dd>{usage.request_count.toLocaleString(lang)}</dd></div></dl><p className="identity-note">{c.unitHint}</p></>}
-            {!account.compute_connected && <><p>{c.pendingHint}</p><p className="identity-note">{c.oldAccount}</p></>}
-            <div className="identity-actions">{account.compute_connected && <button disabled={busy} onClick={() => void action(refreshUsage)}>{c.refresh}</button>}<button className={account.compute_connected ? "" : "identity-primary"} disabled={busy} onClick={() => void action(async () => { window.location.assign(await beginComputeConnection()); })}>{account.compute_connected ? c.reconnect : c.connect} →</button></div>
-          </section>}
-        </>}
-      {account && <MembershipSummary key={account.user.id} lang={lang} isAdmin={!!account.is_admin} />}
-      <MembershipPlans key={account?.user.id || "anonymous"} lang={lang} />
-      {operationFailed && <p role="alert" className="identity-error">{c.operationFailed}</p>}
-      <p className="identity-footer">{c.scope}</p>
-    </main>
+  const remaining = usage?.quota || 0;
+  const total = remaining + (usage?.used_quota || 0);
+  const showMetrics = usage && <div className="console-grid-metrics" data-testid="compute-metrics">
+    {[[c.quota, usage.quota], [c.used, usage.used_quota]].map(([label, value]) => <section className={"console-card " + (label === c.quota ? "console-card--balance" : "console-card--usage")} key={label}>
+      <div className="console-card-header"><span className="console-kicker">{label}</span></div>
+      <div className="console-metric-val"><span className="console-number-huge">{Number(value).toLocaleString(lang)}</span><span className="console-number-usd">{c.unit}</span></div>
+      {label === c.quota ? <div className="console-progress-track"><div className="console-progress-fill" style={{width: (total > 0 ? remaining / total * 100 : 0) + "%"}} /></div> : <p className="console-card-desc">{consoleCopy.activity.cumulativeUsageDesc(usage.request_count.toLocaleString(lang))}</p>}
+    </section>)}
   </div>;
+  const compute = <section className="console-card">
+    <div className="console-card-header"><h2>{c.compute}</h2><span className="console-tag">{account?.compute_connected ? c.connected : c.pending}</span></div>
+    {computeFailed && <p role="status" className="console-membership-note">{c.computeFailed}</p>}
+    <p className="console-membership-note">{account?.compute_connected ? c.unitHint : c.pendingHint}</p>
+    <div className="console-membership-actions">
+      {account?.compute_connected && <button className="btn btn--outline" disabled={busy} onClick={() => void action(refreshUsage)}>{c.refresh}</button>}
+      <button className="btn btn--primary" disabled={busy} onClick={() => void action(async () => { window.location.assign(await beginComputeConnection()); })}>{account?.compute_connected ? c.reconnect : c.connect} →</button>
+    </div>
+  </section>;
+  return <ConsoleShell lang={lang} theme={theme} onSelectLang={setLang} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")}
+    user={account ? {id: account.user.id, username: account.user.display_name} : null} activeTab={tab} onSelectTab={setTab}
+    onLogout={() => void action(async () => { await logoutIndependentAccount(); setAccount(null); setUsage(null); setAgreement(null); setEntitlements(null); })}
+    onRefresh={() => void action(refreshAccount)} refreshing={busy || loading} quotaLabel={usage ? remaining.toLocaleString(lang) : "—"}
+    balanceLabel={c.unit} remainingPercent={total > 0 ? remaining / total * 100 : 0}
+    tierName={entitlements?.active ? entitlements.plan?.name : undefined} isAdmin={!!account?.is_admin} showInstallBanner={false}>
+    <div className="console-canvas-inner console-membership-content">
+      {operationFailed && <p role="alert" className="console-membership-error">{c.operationFailed}</p>}
+      {loading ? <p role="status">{c.loading}</p> : failed ? <section className="console-card" role="alert"><p>{c.failed}</p><button className="btn btn--outline" onClick={() => void refreshAccount()}>{c.retry}</button></section> : !account ?
+        <section className="console-card"><div className="console-hero"><h1 className="console-greeting">{c.login}</h1><p className="console-subtitle">{c.loginHint}</p></div><a className="btn btn--primary" href="/v2/account/login">{c.login} →</a></section> : <>
+          {tab !== "admin" && <div className="console-hero"><h1 className="console-greeting">{tab === "plan" ? consoleCopy.nav.planFull : tab === "usage" ? consoleCopy.usage.heroTitle : tab === "remote" ? consoleCopy.nav.remoteFull : consoleCopy.nav.activityFull}</h1><p className="console-subtitle" data-testid="account-name">{account.user.display_name} · {account.user.email}</p><div className="console-tags"><span className="console-tag">{entitlements?.active ? entitlements.plan?.name : c.signedIn}</span><span className="console-tag">{consoleCopy.activity.tagReviewer}</span></div></div>}
+          {account.agreement_required && agreement && <section className="console-card"><h2>{c.agreement}</h2><p className="console-membership-note">{agreement.version}</p><pre className="console-agreement">{agreement.text}</pre>
+            <label className="console-agreement-check"><input data-testid="agreement-checkbox" type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)} />{c.accept}</label>
+            <button data-testid="accept-agreement" className="btn btn--primary" disabled={busy || !accepted} onClick={() => void action(async () => { await acceptAccountAgreement(agreement); await refreshAccount(); })}>{c.continue}</button>
+          </section>}
+          {tab === "admin" ? <AdminPanel account={account} /> : tab === "remote" ? <section className="console-card console-remote-handoff-card"><span className="console-kicker">{consoleCopy.remote.kicker}</span><h2>{consoleCopy.remote.mobileTitle}</h2><p className="console-membership-note">{lang === "zh" ? "已有设备请继续使用原账号登录远程工作台。新账号的设备关联尚未开放。" : lang === "es" ? "Usa tu cuenta existente para abrir tus dispositivos. La vinculación de dispositivos para cuentas nuevas aún no está disponible." : "Use your existing account to open paired devices. Device linking for new accounts is not yet available."}</p><a className="btn btn--primary" href="./remote/" target="_blank" rel="noreferrer">{consoleCopy.remote.openInNewTabBtn}</a></section> : tab === "plan" ? <>
+            <MembershipSummary key={account.user.id} lang={lang} isAdmin={!!account.is_admin} />
+            <MembershipPlans lang={lang} />
+          </> : <>
+            {!account.agreement_required && <>{showMetrics}{compute}</>}
+            {tab === "activity" && <><MembershipSummary key={account.user.id} lang={lang} isAdmin={!!account.is_admin} /><section className="console-card"><div className="console-card-header"><h2>{c.profile}</h2></div><dl className="console-member-details"><div><dt>{c.email}</dt><dd>{account.user.email}</dd></div><div><dt>{c.identity}</dt><dd>{account.user.id}</dd></div></dl></section></>}
+          </>}
+        </>}
+    </div>
+  </ConsoleShell>;
 }

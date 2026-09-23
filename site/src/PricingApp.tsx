@@ -6,7 +6,7 @@ import Footer from "./components/Footer";
 import AuthModal from "./components/AuthModal";
 import UserDashboard from "./components/UserDashboard";
 import PwaInstallBanner from "./components/PwaInstallBanner";
-import MembershipPlans from "./components/MembershipPlans";
+import { MembershipOffer, MembershipModelTable } from "./components/MembershipPlans";
 import { independentAccountsEnabled } from "./independentAccount";
 import { ArrowIcon, CheckIcon, DeepSeekLogo, MiniMaxLogo, OpenAILogo, SparklesIcon } from "./components/icons";
 
@@ -57,10 +57,6 @@ function PricingContent({
     return <DeepSeekLogo width={24} height={24} className="model-logo-svg model-logo-svg--deepseek" />;
   };
 
-  if (independentAccountsEnabled) return <div className={"page pricing-page lang-" + lang + " theme-" + theme}>
-    <Nav copy={copy} theme={theme} currentLang={lang} onSelectLang={onSelectLang} onToggleLang={onToggleLang} onToggleTheme={onToggleTheme} />
-    <main style={{ paddingTop: 70 }}><MembershipPlans lang={lang} /></main><Footer />
-  </div>;
 
   return (
     <div className={`page pricing-page lang-${lang} theme-${theme}`}>
@@ -86,14 +82,14 @@ function PricingContent({
             <div className="pricing-copy">
               <p className="section-kicker">{pricing.kicker}</p>
               <h1>{pricing.title}</h1>
-              <p className="pricing-lede">{pricing.lede}</p>
+              <p className="pricing-lede">{independentAccountsEnabled ? (isZh ? "Go、Plus、Pro 三种月度会员，为你的研究选择合适的模型。" : isEs ? "Elige los modelos para tu investigación con Go, Plus o Pro." : "Choose the right research models with Go, Plus or Pro monthly membership.") : pricing.lede}</p>
               <a className="pricing-back" href={`./?lang=${lang}`}>
                 {pricing.backHome}
                 <ArrowIcon className="btn-arrow" width={16} height={16} />
               </a>
             </div>
 
-            {hasActivePlan ? (
+            {independentAccountsEnabled ? <MembershipOffer lang={lang} /> : hasActivePlan ? (
               /* Account quota is not proof of a recurring-payment mandate. */
               <article className="pricing-plan" aria-label={isZh ? "当前算力账户" : isEs ? "Cuenta de cómputo" : "Current compute account"}>
                 <div className="pricing-plan-head">
@@ -203,7 +199,7 @@ function PricingContent({
         </section>
 
         {/* ── Model Quota Matrix & Clarification Section on Pricing Page ── */}
-        <section className="pricing-details-section">
+        {independentAccountsEnabled ? <MembershipModelTable lang={lang} /> : <section className="pricing-details-section">
           <div className="container">
             <div className="pricing-table-section" style={{ marginTop: 0 }}>
               <div className="pricing-models-head">
@@ -273,7 +269,7 @@ function PricingContent({
               <p className="pricing-table-footnote">{pricing.tableFooterNote}</p>
             </div>
           </div>
-        </section>
+        </section>}
       </main>
 
       <Footer />

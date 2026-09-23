@@ -31,9 +31,9 @@ flowchart LR
 
 ## 已实现的入口
 
-- 官网主页与价格页：独立模式下读取同一份后端目录，展示 Go/Plus/Pro 月度报价、可用模型和默认模型。
-- 账户中心 `/account.html`：展示当前会员、有效期、模型权限与原有算力余额；管理员可进入后台。
-- 管理员 `/admin.html`：配置三档模型、从 New API 读取候选模型、启用/停用套餐，搜索用户、开通/修改/撤销限期会员，查看最近审计并重试同步。
+- 官网主页保留原有结构与入口；价格页在原左右布局和对比表中展示 Go/Plus/Pro 月度报价、可用模型和默认模型。
+- 账户中心 `/dashboard.html`（兼容 `/account.html`）：复用原控制台顶栏、侧栏、卡片与主题，会员区域读取后端目录，展示当前会员、有效期、模型权限与原有算力余额。
+- 管理员 `/admin.html`：使用相同控制台外壳，侧栏新增管理员入口。配置三档模型、从 New API 读取候选模型、启用/停用套餐，搜索用户、开通/修改/撤销限期会员，查看最近审计并重试同步。
 - `GET /v2/account/entitlements`：提供唯一的当前权益，不从旧的 group、quota、role 推算会员。
 - `/v1/models`：返回有效会员白名单和当前上游列表的交集。
 - Chat Completions、Responses、Messages：统一校验模型再转发，支持流式输出；未列明的接口不做通用透传。
@@ -69,7 +69,8 @@ flowchart LR
 | `site/account-server/src/membership_http.rs` | 管理员与公开目录接口，服务端权限校验 |
 | `site/account-server/src/http.rs`、`src/newapi.rs` | 模型请求授权、过滤、固定路径转发、上游 Key 核验与同步 |
 | `site/src/AdminApp.tsx`、`membership.ts` | 管理页面及 Cookie API 客户端 |
-| `site/src/components/MembershipPlans.tsx` | 主页/价格页共享套餐卡片和账户权益 |
+| `site/src/components/ConsoleShell.tsx` | 新旧账号模式共享原控制台布局，不混用身份契约 |
+| `site/src/components/MembershipPlans.tsx` | 原控制台套餐卡片、原价格页报价与对比表、账户权益 |
 | `site/account-server/scripts/membership-compat.mjs`、`browser-smoke.mjs` | 官方 New API 与真实浏览器回归 |
 
 ## 验证与上线边界

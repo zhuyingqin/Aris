@@ -3,7 +3,7 @@ import { useAuth } from "../context/AuthContext";
 import { LANGUAGES, type Copy, type Lang, type Theme } from "../i18n";
 import { ArrowIcon, GlobeIcon, MoonIcon, SparklesIcon, SunIcon, UserIcon } from "./icons";
 import LanguageSelector from "./LanguageSelector";
-import { independentAccountsEnabled, loadIndependentAccount } from "../independentAccount";
+import { independentAccountsEnabled, loadIndependentAccount, loadComputeUsage, logoutIndependentAccount, type IndependentAccount, type ComputeUsage } from "../independentAccount";
 
 type Props = {
   copy: Copy;
@@ -24,14 +24,29 @@ export default function Nav({
 }: Props) {
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [account, setAccount] = useState<IndependentAccount | null>(null);
+  const [usage, setUsage] = useState<ComputeUsage | null>(null);
   useEffect(() => {
     if (!independentAccountsEnabled) return;
     let live = true;
-    loadIndependentAccount().then(account => { if (live) setIsAdmin(!!account?.is_admin); }).catch(() => {});
+    loadIndependentAccount().then(async value => {
+      if (!live) return;
+      setAccount(value);
+      if (value?.compute_connected && !value.agreement_required) {
+        const next = await loadComputeUsage();
+        if (live) setUsage(next);
+      }
+    }).catch(() => {});
     return () => { live = false; };
   }, []);
-  const { user, isAuthenticated, logout, openAuthModal, formatTokens: authFormatTokens } = useAuth();
+  const { user, isAuthenticated, logout: legacyLogout, openAuthModal, formatTokens: authFormatTokens } = useAuth();
+  const signedIn = independentAccountsEnabled ? !!account : isAuthenticated && !!user;
+  const displayName = independentAccountsEnabled ? account?.user.display_name : user?.display_name || user?.username;
+  const logout = () => {
+    if (!independentAccountsEnabled) { legacyLogout(); return; }
+    void logoutIndependentAccount().then(() => { setAccount(null); setUsage(null); })
+      .catch(() => window.location.assign("./dashboard.html"));
+  };
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
@@ -45,6 +60,9 @@ export default function Nav({
   const isZh = effectiveLang === "zh";
   const formatTokens = (quota: number, customUnit?: string) =>
     authFormatTokens(quota, customUnit ?? (isZh ? " 词元" : " Tokens"));
+  const quotaLabel = independentAccountsEnabled
+    ? usage ? usage.quota.toLocaleString(effectiveLang) + (isZh ? " 额度单位" : " quota units") : "—"
+    : formatTokens(user?.quota || 0);
   const homeHref = `./?lang=${effectiveLang}`;
   const dashboardHref = `./dashboard.html?lang=${effectiveLang}`;
 
@@ -111,17 +129,17 @@ export default function Nav({
 
           {/* Mobile drawer user account card */}
           <div className="nav-drawer-user-section">
-            {isAuthenticated && user ? (
+            {signedIn ? (
               <div className="nav-drawer-user-card">
                 <div className="nav-drawer-user-info">
                   <div className="nav-user-avatar">
                     <UserIcon width={16} height={16} />
                   </div>
                   <div className="nav-drawer-user-meta">
-                    <span className="nav-drawer-username">{user.display_name || user.username}</span>
+                    <span className="nav-drawer-username">{displayName}</span>
                     <span className="nav-drawer-quota">
                       <SparklesIcon width={12} height={12} />
-                      {formatTokens(user.quota)}
+                      {quotaLabel}
                     </span>
                   </div>
                 </div>
@@ -156,15 +174,15 @@ export default function Nav({
                 }}
               >
                 <UserIcon width={16} height={16} />
-                <span>{independentAccountsEnabled ? copy.nav.userCenter : copy.nav.login}</span>
+                <span>{copy.nav.login}</span>
               </button>
             )}
           </div>
         </nav>
 
         <div className="nav-actions">
-          {isAdmin && <a href="./admin.html" className="membership-admin-link">{isZh ? "管理后台" : "Admin"}</a>}
-          {isAuthenticated && user ? (
+
+          {signedIn ? (
             <a
               href={dashboardHref}
               className="nav-user-pill"
@@ -173,8 +191,8 @@ export default function Nav({
               <div className="nav-user-avatar">
                 <UserIcon width={14} height={14} />
               </div>
-              <span className="nav-user-name">{user.display_name || user.username}</span>
-              <span className="nav-user-quota">{formatTokens(user.quota)}</span>
+              <span className="nav-user-name">{displayName}</span>
+              <span className="nav-user-quota">{quotaLabel}</span>
             </a>
           ) : (
             <button
@@ -184,7 +202,7 @@ export default function Nav({
               title={copy.auth.loginTitle}
             >
               <UserIcon width={14} height={14} />
-              <span>{independentAccountsEnabled ? copy.nav.userCenter : copy.nav.login}</span>
+              <span>{copy.nav.login}</span>
             </button>
           )}
 

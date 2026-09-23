@@ -13,8 +13,6 @@ import Footer from "./components/Footer";
 import AuthModal from "./components/AuthModal";
 import UserDashboard from "./components/UserDashboard";
 import PwaInstallBanner from "./components/PwaInstallBanner";
-import MembershipPlans from "./components/MembershipPlans";
-import { independentAccountsEnabled } from "./independentAccount";
 import { useReveal } from "./useReveal";
 
 export default function App() {
@@ -84,7 +82,6 @@ export default function App() {
           <Benchmark copy={copy} />
           <Memory copy={copy} />
           <Vision copy={copy} />
-          {independentAccountsEnabled && <MembershipPlans lang={lang} />}
         </main>
 
         <Footer />
