@@ -6,6 +6,8 @@ import Footer from "./components/Footer";
 import AuthModal from "./components/AuthModal";
 import UserDashboard from "./components/UserDashboard";
 import PwaInstallBanner from "./components/PwaInstallBanner";
+import MembershipPlans from "./components/MembershipPlans";
+import { independentAccountsEnabled } from "./independentAccount";
 import { ArrowIcon, CheckIcon, DeepSeekLogo, MiniMaxLogo, OpenAILogo, SparklesIcon } from "./components/icons";
 
 function PricingContent({
@@ -54,6 +56,11 @@ function PricingContent({
     if (id === "minimax") return <MiniMaxLogo width={24} height={24} className="model-logo-svg model-logo-svg--minimax" />;
     return <DeepSeekLogo width={24} height={24} className="model-logo-svg model-logo-svg--deepseek" />;
   };
+
+  if (independentAccountsEnabled) return <div className={"page pricing-page lang-" + lang + " theme-" + theme}>
+    <Nav copy={copy} theme={theme} currentLang={lang} onSelectLang={onSelectLang} onToggleLang={onToggleLang} onToggleTheme={onToggleTheme} />
+    <main style={{ paddingTop: 70 }}><MembershipPlans lang={lang} /></main><Footer />
+  </div>;
 
   return (
     <div className={`page pricing-page lang-${lang} theme-${theme}`}>

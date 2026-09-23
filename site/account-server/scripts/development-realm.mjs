@@ -11,7 +11,7 @@ export function developmentRealm(config, origins = ['http://127.0.0.1:8800', 'ht
       { clientId: 'newapi', name: 'SomniQ Compute', enabled: true, protocol: 'openid-connect', publicClient: false, secret: config.newapiSecret,
         standardFlowEnabled: true, directAccessGrantsEnabled: false, redirectUris: origins.map(origin => `${origin}/oauth/oidc`), defaultClientScopes: ['profile', 'email'] },
     ],
-    users: [{ username: 'alice', enabled: true, email: 'alice@example.invalid', emailVerified: true, firstName: 'Alice', lastName: 'Local',
+    users: [{ id: config.testSubject, username: 'alice', enabled: true, email: 'alice@example.invalid', emailVerified: true, firstName: 'Alice', lastName: 'Local',
       credentials: [{ type: 'password', value: config.testPassword, temporary: false }] }],
   };
 }

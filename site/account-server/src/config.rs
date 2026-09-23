@@ -17,6 +17,7 @@ pub struct Config {
     pub agreement_text: String,
     pub secure: bool,
     pub home_path: String,
+    pub admin_subjects: Vec<String>,
 }
 
 impl Config {
@@ -60,6 +61,13 @@ impl Config {
             issuer,
             secure,
             home_path,
+            admin_subjects: env::var("SOMNIQ_ACCOUNT_ADMIN_SUBJECTS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
             client_id: required("SOMNIQ_OIDC_CLIENT_ID")?,
             client_secret: required("SOMNIQ_OIDC_CLIENT_SECRET")?,
             newapi_url,

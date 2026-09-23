@@ -7,6 +7,7 @@ import {
   type AccountAgreement, type ComputeUsage, type IndependentAccount,
 } from "./independentAccount";
 import "./independentAccount.css";
+import MembershipPlans, { MembershipSummary } from "./components/MembershipPlans";
 
 const words = {
   zh: {
@@ -116,6 +117,8 @@ export default function IndependentAccountApp() {
             <div className="identity-actions">{account.compute_connected && <button disabled={busy} onClick={() => void action(refreshUsage)}>{c.refresh}</button>}<button className={account.compute_connected ? "" : "identity-primary"} disabled={busy} onClick={() => void action(async () => { window.location.assign(await beginComputeConnection()); })}>{account.compute_connected ? c.reconnect : c.connect} →</button></div>
           </section>}
         </>}
+      {account && <MembershipSummary key={account.user.id} lang={lang} isAdmin={!!account.is_admin} />}
+      <MembershipPlans key={account?.user.id || "anonymous"} lang={lang} />
       {operationFailed && <p role="alert" className="identity-error">{c.operationFailed}</p>}
       <p className="identity-footer">{c.scope}</p>
     </main>

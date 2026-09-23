@@ -32,6 +32,12 @@ pub struct ComputeAccount {
     pub session_id: String,
     pub expires_at: i64,
     pub model_key: Option<String>,
+    #[serde(default)]
+    pub model_token_id: Option<i64>,
+    #[serde(default)]
+    pub model_policy_hash: Option<String>,
+    #[serde(default)]
+    pub policy_checked_at: i64,
 }
 
 pub struct Store {
@@ -77,7 +83,7 @@ impl Store {
         })
     }
 
-    fn db(&self) -> Result<MutexGuard<'_, Connection>, String> {
+    pub(crate) fn db(&self) -> Result<MutexGuard<'_, Connection>, String> {
         self.connection
             .lock()
             .map_err(|_| "account database unavailable".into())
@@ -227,6 +233,11 @@ impl Store {
             return Err("compute identity changed; recovery required".into());
         }
         tx.execute("INSERT INTO compute_accounts(user_id,instance,newapi_user_id,sealed) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id,instance) DO UPDATE SET sealed=excluded.sealed", params![user,instance,account.user_id,sealed]).map_err(db_error)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO membership_sync(user_id) VALUES(?1)",
+            [user],
+        )
+        .map_err(db_error)?;
         tx.commit().map_err(db_error)
     }
 
@@ -252,6 +263,6 @@ impl Store {
     }
 }
 
-fn db_error(_: rusqlite::Error) -> String {
+pub(crate) fn db_error(_: rusqlite::Error) -> String {
     "account database operation failed".into()
 }

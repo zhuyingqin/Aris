@@ -21,3 +21,26 @@ CREATE TABLE IF NOT EXISTS compute_accounts (
     user_id TEXT NOT NULL REFERENCES users(id), instance TEXT NOT NULL, newapi_user_id INTEGER NOT NULL,
     sealed TEXT NOT NULL, PRIMARY KEY(user_id,instance), UNIQUE(instance,newapi_user_id)
 );
+CREATE TABLE IF NOT EXISTS membership_plans (
+    id TEXT PRIMARY KEY CHECK(id IN ('go','plus','pro')),
+    models TEXT NOT NULL DEFAULT '[]',
+    default_executor TEXT, default_reviewer TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1
+);
+INSERT OR IGNORE INTO membership_plans(id) VALUES ('go'),('plus'),('pro');
+CREATE TABLE IF NOT EXISTS memberships (
+    user_id TEXT PRIMARY KEY REFERENCES users(id),
+    plan_id TEXT REFERENCES membership_plans(id), expires_at INTEGER,
+    revision INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS membership_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL, target TEXT NOT NULL,
+    before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+    reason TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS membership_sync (
+    user_id TEXT PRIMARY KEY REFERENCES users(id),
+    due_at INTEGER NOT NULL DEFAULT 0, last_error TEXT
+);
+INSERT OR IGNORE INTO membership_sync(user_id) SELECT user_id FROM compute_accounts;

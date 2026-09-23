@@ -19,6 +19,9 @@ use std::sync::{
 };
 use tower::ServiceExt;
 
+#[path = "membership_tests.rs"]
+mod membership_tests;
+
 fn config(path: &std::path::Path, upstream: &str) -> Config {
     Config {
         bind: "127.0.0.1:0".into(),
@@ -35,6 +38,7 @@ fn config(path: &std::path::Path, upstream: &str) -> Config {
         agreement_text: "Test agreement snapshot".into(),
         secure: false,
         home_path: "/account/".into(),
+        admin_subjects: vec!["admin".into()],
     }
 }
 
@@ -77,6 +81,9 @@ fn compute_account(id: i64, subject: &str) -> store::ComputeAccount {
         session_id: "sid".into(),
         expires_at: now() + 900,
         model_key: Some("sk-private-model-key".into()),
+        model_token_id: Some(1),
+        model_policy_hash: None,
+        policy_checked_at: 0,
     }
 }
 
@@ -395,11 +402,42 @@ async fn proxy_uses_mapped_key_and_streams_without_forwarding_client_credentials
     let (user, token) = signed_in(&app, "a");
     accept(&app, &user);
     app.store
-        .save_compute(
+        .update_plan(
             &user.id,
-            &app.config.newapi_instance,
-            &compute_account(17, "a"),
+            "go",
+            crate::membership::PlanUpdate {
+                models: vec!["basic".into()],
+                default_executor: Some("basic".into()),
+                default_reviewer: Some("basic".into()),
+                enabled: true,
+                expected_revision: 1,
+            },
+            now(),
         )
+        .unwrap();
+    app.store
+        .grant_membership(
+            &user.id,
+            &user.id,
+            crate::membership::GrantUpdate {
+                plan_id: Some("go".into()),
+                expires_at: Some(now() + 3600),
+                expected_revision: 0,
+                reason: "Proxy test".into(),
+            },
+            now(),
+        )
+        .unwrap();
+    let mut ready_account = compute_account(17, "a");
+    ready_account.model_policy_hash = Some(
+        app.store
+            .entitlements(&user.id, now())
+            .unwrap()
+            .fingerprint(),
+    );
+    ready_account.policy_checked_at = now();
+    app.store
+        .save_compute(&user.id, &app.config.newapi_instance, &ready_account)
         .unwrap();
     let response = router(app)
         .oneshot(
@@ -410,7 +448,7 @@ async fn proxy_uses_mapped_key_and_streams_without_forwarding_client_credentials
                 .header("cookie", format!("somniq_session={token}"))
                 .header("authorization", "Bearer malicious-other-key")
                 .header("x-forwarded-host", "evil.invalid")
-                .body(Body::from("{\"stream\":true}"))
+                .body(Body::from("{\"model\":\"basic\",\"stream\":true}"))
                 .unwrap(),
         )
         .await

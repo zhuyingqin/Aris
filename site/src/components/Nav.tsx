@@ -3,7 +3,7 @@ import { useAuth } from "../context/AuthContext";
 import { LANGUAGES, type Copy, type Lang, type Theme } from "../i18n";
 import { ArrowIcon, GlobeIcon, MoonIcon, SparklesIcon, SunIcon, UserIcon } from "./icons";
 import LanguageSelector from "./LanguageSelector";
-import { independentAccountsEnabled } from "../independentAccount";
+import { independentAccountsEnabled, loadIndependentAccount } from "../independentAccount";
 
 type Props = {
   copy: Copy;
@@ -24,6 +24,13 @@ export default function Nav({
 }: Props) {
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    if (!independentAccountsEnabled) return;
+    let live = true;
+    loadIndependentAccount().then(account => { if (live) setIsAdmin(!!account?.is_admin); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   const { user, isAuthenticated, logout, openAuthModal, formatTokens: authFormatTokens } = useAuth();
 
   useEffect(() => {
@@ -156,6 +163,7 @@ export default function Nav({
         </nav>
 
         <div className="nav-actions">
+          {isAdmin && <a href="./admin.html" className="membership-admin-link">{isZh ? "管理后台" : "Admin"}</a>}
           {isAuthenticated && user ? (
             <a
               href={dashboardHref}

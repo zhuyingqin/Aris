@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, Error>;
-pub struct Error(StatusCode, &'static str);
+pub struct Error(pub(crate) StatusCode, pub(crate) &'static str);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error":{"code":self.1}}))).into_response()
@@ -36,6 +36,7 @@ fn unauthorized() -> Error {
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
+        .merge(crate::membership_http::routes())
         .route("/healthz", get(|| async { Json(json!({"status":"ok"})) }))
         .route(
             "/account/",
@@ -61,6 +62,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v2/account/compute", get(compute))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/responses", post(responses))
+        .route("/v1/messages", post(messages))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn(headers))
         .with_state(app)
@@ -102,12 +105,12 @@ fn set_cookie(app: &App, name: &str, value: &str, max_age: i64) -> HeaderValue {
     ))
     .unwrap()
 }
-fn user(app: &App, headers: &HeaderMap) -> Result<(User, String)> {
+pub(crate) fn user(app: &App, headers: &HeaderMap) -> Result<(User, String)> {
     let token = cookie(headers, app.config.session_cookie()).ok_or_else(unauthorized)?;
     let user = app.store.session(&token, now())?.ok_or_else(unauthorized)?;
     Ok((user, token))
 }
-fn origin(app: &App, headers: &HeaderMap) -> Result<()> {
+pub(crate) fn origin(app: &App, headers: &HeaderMap) -> Result<()> {
     if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
         != Some(app.config.origin().as_str())
     {
@@ -115,7 +118,7 @@ fn origin(app: &App, headers: &HeaderMap) -> Result<()> {
     }
     Ok(())
 }
-fn consented(app: &App, user: &User) -> Result<()> {
+pub(crate) fn consented(app: &App, user: &User) -> Result<()> {
     if !app.store.has_consent(
         &user.id,
         &app.config.agreement_version,
@@ -194,7 +197,8 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Json<Valu
         .compute(&user.id, &app.config.newapi_instance)?
         .is_some();
     Ok(Json(
-        json!({"user":{"id":user.id,"email":user.email,"display_name":user.display_name},"agreement_required":!accepted,"compute_connected":connected}),
+        json!({"user":{"id":user.id,"email":user.email,"display_name":user.display_name},"agreement_required":!accepted,"compute_connected":connected,
+            "is_admin":crate::membership_http::is_admin(&app,&user)}),
     ))
 }
 async fn agreement(State(app): State<Arc<App>>) -> Json<Value> {
@@ -319,6 +323,50 @@ async fn models(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Respo
 async fn chat(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Result<Response> {
     proxy(app, headers, "v1/chat/completions", Some(body)).await
 }
+async fn responses(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
+    proxy(app, headers, "v1/responses", Some(body)).await
+}
+async fn messages(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
+    proxy(app, headers, "v1/messages", Some(body)).await
+}
+
+// Parse once and forward the validated representation. Duplicate root fields
+// could otherwise authorize one model while the upstream parser selects another.
+struct CheckedBody(Value);
+impl<'de> Deserialize<'de> for CheckedBody {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CheckedBody;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a model request object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<CheckedBody, A::Error> {
+                let mut fields = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    if fields.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom("duplicate request field"));
+                    }
+                }
+                Ok(CheckedBody(Value::Object(fields)))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
 async fn proxy(
     app: Arc<App>,
     headers: HeaderMap,
@@ -330,16 +378,42 @@ async fn proxy(
     }
     let (user, _) = user(&app, &headers)?;
     consented(&app, &user)?;
-    // Inference does not require a live New API dashboard session. Its user
-    // quota and account status are checked by New API on every model call.
-    let account = app
-        .store
-        .compute(&user.id, &app.config.newapi_instance)?
-        .ok_or(Error(StatusCode::CONFLICT, "compute_not_connected"))?;
+    let _policy_guard = app.policy_lock.read().await;
+    let policy = app.store.entitlements(&user.id, now())?;
+    let request_body = body
+        .map(|bytes| -> Result<Value> {
+            let value = serde_json::from_slice::<CheckedBody>(&bytes)
+                .map_err(|_| Error(StatusCode::BAD_REQUEST, "invalid_model_request"))?
+                .0;
+            let model = value["model"]
+                .as_str()
+                .filter(|m| crate::membership::valid_model(m))
+                .ok_or(Error(StatusCode::BAD_REQUEST, "invalid_model"))?;
+            if !policy.models.iter().any(|m| m == model) {
+                return Err(Error(StatusCode::FORBIDDEN, "model_not_allowed"));
+            }
+            if ["group", "channel_id"]
+                .iter()
+                .any(|key| value.get(key).is_some())
+                || value["background"].as_bool() == Some(true)
+            {
+                return Err(Error(StatusCode::BAD_REQUEST, "unsupported_routing_option"));
+            }
+            Ok(value)
+        })
+        .transpose()?;
+    if request_body.is_none() && policy.models.is_empty() {
+        return Ok(Json(json!({"object":"list","data":[]})).into_response());
+    }
+    let account = newapi::model_account(&app, &user, false).await?;
+    // Expiry may have passed while synchronizing an upstream token.
+    if app.store.entitlements(&user.id, now())?.fingerprint() != policy.fingerprint() {
+        return Err(Error(StatusCode::FORBIDDEN, "membership_changed"));
+    }
     let key = account
         .model_key
         .ok_or(Error(StatusCode::CONFLICT, "compute_not_ready"))?;
-    let method = if body.is_some() {
+    let method = if request_body.is_some() {
         reqwest::Method::POST
     } else {
         reqwest::Method::GET
@@ -349,15 +423,34 @@ async fn proxy(
         .request(method, newapi::endpoint(&app, path))
         .bearer_auth(key)
         .timeout(std::time::Duration::from_secs(300));
-    if let Some(body) = body {
-        request = request
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(body);
+    if path == "v1/messages" {
+        request = request.header("anthropic-version", "2023-06-01");
     }
-    let upstream = request
-        .send()
+    if let Some(value) = &request_body {
+        request = request.json(value);
+    }
+    let upstream = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
         .await
+        .map_err(|_| "model service timed out".to_string())?
         .map_err(|_| "model service unavailable".to_string())?;
+    if request_body.is_none() {
+        if !upstream.status().is_success() {
+            return Err(Error(StatusCode::BAD_GATEWAY, "model_catalog_unavailable"));
+        }
+        let mut value: Value = upstream
+            .json()
+            .await
+            .map_err(|_| "invalid upstream model list".to_string())?;
+        let data = value["data"]
+            .as_array_mut()
+            .ok_or(Error(StatusCode::BAD_GATEWAY, "invalid_model_catalog"))?;
+        data.retain(|item| {
+            item["id"]
+                .as_str()
+                .is_some_and(|id| policy.models.iter().any(|m| m == id))
+        });
+        return Ok(Json(json!({"object":"list","data":data})).into_response());
+    }
     let status = upstream.status();
     let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
     let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));

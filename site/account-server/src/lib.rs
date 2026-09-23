@@ -1,6 +1,8 @@
 pub mod config;
 pub mod crypto;
 mod http;
+mod membership;
+mod membership_http;
 mod newapi;
 mod oidc;
 pub mod store;
@@ -20,6 +22,9 @@ pub struct App {
     // First delivery is deliberately single-instance. A bounded set of locks
     // serializes each account's refresh/key provisioning without unbounded maps.
     locks: Vec<tokio::sync::Mutex<()>>,
+    // Mutations wait for already-authorized requests to receive upstream
+    // headers. Streams then finish independently; new requests see new policy.
+    policy_lock: tokio::sync::RwLock<()>,
 }
 
 impl App {
@@ -37,7 +42,25 @@ impl App {
             store,
             client,
             locks: (0..64).map(|_| tokio::sync::Mutex::new(())).collect(),
+            policy_lock: tokio::sync::RwLock::new(()),
         }))
+    }
+
+    pub fn start_membership_sync(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let app = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(users) = app.store.pending_sync(&app.config.newapi_instance, now()) {
+                    for user in users {
+                        let _policy = app.policy_lock.read().await;
+                        let result = newapi::model_account(&app, &user, true).await;
+                        let error = result.err().map(|_| "upstream_sync_failed");
+                        let _ = app.store.finish_sync(&user.id, now() + 30, error);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        })
     }
 
     pub async fn account_lock(&self, id: &str) -> tokio::sync::MutexGuard<'_, ()> {

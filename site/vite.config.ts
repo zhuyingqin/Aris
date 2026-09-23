@@ -90,7 +90,7 @@ export default defineConfig(({ mode }) => {
       proxy: {
         // Preview mode must never fall back to the production legacy account API.
         ...(independent ? {
-          "^/(v2/account|oauth/oidc|account)([/?]|$)": { target: accountUpstream, changeOrigin: true },
+          "^/(v2/(account|admin|catalog)|oauth/oidc|account)([/?]|$)": { target: accountUpstream, changeOrigin: true },
           "^/v1/(models|chat/completions)([?]|$)": { target: accountUpstream, changeOrigin: true },
         } : {}),
         // `ws` also covers /v1/signal, /v1/relay and the two /v1/browser-*
@@ -118,6 +118,7 @@ export default defineConfig(({ mode }) => {
           pricing: "pricing.html",
           dashboard: "dashboard.html",
           account: "account.html",
+          admin: "admin.html",
           network: "network.html",
           legacyAgreementRedirect: "auto-renew-agreement.html",
           userServiceAgreement: "user-service-agreement.html",

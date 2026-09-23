@@ -138,7 +138,7 @@ try {
     const home = join(scratch, 'keycloak');
     await cp(resolve(keycloakHome), home, { recursive: true });
     await mkdir(join(home, 'data/import'), { recursive: true });
-    await writeFile(join(home, 'data/import/somniq-realm.json'), JSON.stringify(developmentRealm({ oidcSecret: clientSecrets['somniq-web'], newapiSecret: clientSecrets.newapi, testPassword }, [accountOrigin])));
+    await writeFile(join(home, 'data/import/somniq-realm.json'), JSON.stringify(developmentRealm({ testSubject: '11111111-2222-4333-8444-555555555555', oidcSecret: clientSecrets['somniq-web'], newapiSecret: clientSecrets.newapi, testPassword }, [accountOrigin])));
     const keycloakOrigin = `http://127.0.0.1:${await freePort()}`;
     issuer = `${keycloakOrigin}/realms/somniq`;
     authorizationEndpoint = `${issuer}/protocol/openid-connect/auth`;
@@ -166,10 +166,10 @@ try {
     const response = await fetch(`${newapiOrigin}/api/option/`, { method: 'PUT', headers: { 'content-type': 'application/json', authorization: `Bearer ${rootSession.access_token}` }, body: JSON.stringify({ key, value }) });
     const data = await response.json(); assert.ok(data.success, `Configure ${key}: ${data.message}`);
   }
-  await request(newapiOrigin, '/api/channel/', { mode: 'single', channel: { type: 1, key: 'fixture-model-key', name: 'compat-model', base_url: `${identityOrigin}/model`, models: 'gpt-4o-mini', group: 'default', status: 1 } }, rootSession.access_token);
+  await request(newapiOrigin, '/api/channel/', { mode: 'single', channel: { type: 1, key: 'fixture-model-key', name: 'compat-model', base_url: `${identityOrigin}/model`, models: 'gpt-4o-mini,gpt-4o,gpt-4', group: 'default', status: 1 } }, rootSession.access_token);
   const agreementFile = join(scratch, 'agreement.txt'); await writeFile(agreementFile, 'SomniQ local integration test agreement.');
   const accountBinary = process.env.SOMNIQ_ACCOUNT_BINARY || join(root, 'site/account-server/target/debug', `somniq-account-server${windows ? '.exe' : ''}`);
-  const account = await launch(accountBinary, [], { SOMNIQ_ACCOUNT_BIND: `127.0.0.1:${new URL(accountBackend).port}`, SOMNIQ_ACCOUNT_PUBLIC_URL: accountOrigin, SOMNIQ_ACCOUNT_HOME_PATH: keycloakHome ? '/account.html' : '/account/', SOMNIQ_OIDC_ISSUER: issuer, SOMNIQ_OIDC_CLIENT_ID: 'somniq-web', SOMNIQ_OIDC_CLIENT_SECRET: clientSecrets['somniq-web'], SOMNIQ_NEWAPI_URL: newapiOrigin, SOMNIQ_NEWAPI_OIDC_CLIENT_ID: 'newapi', SOMNIQ_NEWAPI_INSTANCE_ID: 'compat', SOMNIQ_ACCOUNT_DATABASE: join(scratch, 'accounts.sqlite3'), SOMNIQ_ACCOUNT_KEY: secret(), SOMNIQ_AGREEMENT_VERSION: 'compat-v1', SOMNIQ_AGREEMENT_FILE: agreementFile, RUST_LOG: 'warn' }, 'account');
+  const account = await launch(accountBinary, [], { SOMNIQ_ACCOUNT_ADMIN_SUBJECTS: keycloakHome ? '11111111-2222-4333-8444-555555555555' : 'compat-alice', SOMNIQ_ACCOUNT_BIND: `127.0.0.1:${new URL(accountBackend).port}`, SOMNIQ_ACCOUNT_PUBLIC_URL: accountOrigin, SOMNIQ_ACCOUNT_HOME_PATH: keycloakHome ? '/account.html' : '/account/', SOMNIQ_OIDC_ISSUER: issuer, SOMNIQ_OIDC_CLIENT_ID: 'somniq-web', SOMNIQ_OIDC_CLIENT_SECRET: clientSecrets['somniq-web'], SOMNIQ_NEWAPI_URL: newapiOrigin, SOMNIQ_NEWAPI_OIDC_CLIENT_ID: 'newapi', SOMNIQ_NEWAPI_INSTANCE_ID: 'compat', SOMNIQ_ACCOUNT_DATABASE: join(scratch, 'accounts.sqlite3'), SOMNIQ_ACCOUNT_KEY: secret(), SOMNIQ_AGREEMENT_VERSION: 'compat-v1', SOMNIQ_AGREEMENT_FILE: agreementFile, RUST_LOG: 'warn' }, 'account');
   await waitFor(`${accountBackend}/healthz`, account);
   if (keycloakHome) {
     const site = await launch(process.execPath, [join(root,'site/node_modules/vite/bin/vite.js'), join(root,'site'), '--host', '127.0.0.1', '--port', new URL(accountOrigin).port, '--strictPort'], { VITE_ACCOUNT_MODE: 'independent', SOMNIQ_DEV_ACCOUNT_UPSTREAM: accountBackend }, 'site');
@@ -196,11 +196,19 @@ try {
   const connect = await connectResponse.json();
   const finish = await redirects(connect.authorization_url); assert.equal(finish.status, 200, `New API OIDC connection (${await finish.text()})`);
   const connected = await (await browser('/v2/account/me')).json(); assert.equal(connected.compute_connected, true);
+  const { configureMembership, exerciseMembership } = await import('./membership-compat.mjs');
+  const memberCall = async (path, method = 'GET', value) => {
+    const response = await browser(path, { method, headers: { origin: accountOrigin, 'content-type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
+    return { status: response.status, value: await response.json() };
+  };
+  await configureMembership(memberCall, me.user.id);
+  await exerciseMembership(memberCall, me.user.id);
+  const previousCalls = modelCalls.length;
   const models = await (await browser('/v1/models')).json(); assert.ok(models.data.some(model => model.id === 'gpt-4o-mini'), 'model entitlement');
   const chat = await action('/v1/chat/completions', { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Test' }], stream: true });
   const stream = await chat.text();
   if (chat.status !== 200) await writeFile(join(scratch, 'model-failure.json'), stream);
-  assert.equal(chat.status, 200); assert.ok(stream.includes('[DONE]')); assert.ok(stream.includes('SomniQ compatibility verified.')); assert.equal(modelCalls.length, 1);
+  assert.equal(chat.status, 200); assert.ok(stream.includes('[DONE]')); assert.ok(stream.includes('SomniQ compatibility verified.')); assert.equal(modelCalls.length, previousCalls + 1);
   const quota = await (await browser('/v2/account/compute')).json(); assert.equal(quota.unit, 'newapi_quota');
   assert.equal((await action('/v2/account/logout', {})).status, 204);
   assert.equal((await browser('/v2/account/me')).status, 401);
@@ -209,7 +217,7 @@ try {
   const reconnect = await (await action('/v2/account/compute/connect', {})).json(); assert.equal((await redirects(reconnect.authorization_url)).status, 200);
   newapi.kill(); await once(newapi, 'exit');
   assert.equal((await browser('/v2/account/me')).status, 200, 'own account survives upstream outage');
-  const report = { tag, binarySha256: expectedHash, passed: true, identityProvider: 'local RSA/OIDC fixture (not Keycloak)', modelChannel: 'local fixture (no paid calls)', checks: ['OIDC + PKCE login', 'independent UUID', 'consent snapshot', 'real New API OIDC account creation', 'real per-user model key', 'streamed model response', 'quota projection', 'logout', 'stable identity after re-login', 'repeat connection', 'New API outage isolation'], testedAt: new Date().toISOString() };
+  const report = { tag, binarySha256: expectedHash, passed: true, identityProvider: 'local RSA/OIDC fixture (not Keycloak)', modelChannel: 'local fixture (no paid calls)', checks: ['OIDC + PKCE login', 'independent UUID', 'consent snapshot', 'real New API OIDC account creation', 'real per-user model key', 'streamed model response', 'Go/Plus/Pro membership matrix', 'real upstream allowlist synchronization', 'downgrade and revocation', 'quota projection', 'logout', 'stable identity after re-login', 'repeat connection', 'New API outage isolation'], testedAt: new Date().toISOString() };
   await writeFile(join(scratch, 'validation.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify({ tag, passed: true, checks: report.checks, report: join(scratch, 'validation.json') }, null, 2));
   }

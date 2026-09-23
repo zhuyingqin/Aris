@@ -1,7 +1,7 @@
 # SomniQ independent account service
 
-First implementation milestone: a standalone account service and a New API
-compatibility prototype, with an opt-in Site account center. The default Site
+Independent accounts and Go/Plus/Pro membership administration, with a New API
+compatibility harness and an opt-in Site account center. The default Site
 build, PWA, Desktop login, remote gateway and production containers still use
 their existing contracts. This service does not automatically migrate them.
 
@@ -21,6 +21,12 @@ Implemented:
 - A separate `/account/` prototype page for testing the complete flow.
 - A branded, responsive Site `/account.html` page behind `VITE_ACCOUNT_MODE=independent`.
   It uses the independent UUID/cookie contract and never loads legacy credentials.
+- Go ¥29/month, Plus ¥49/month and Pro ¥99/month, with exact per-plan model lists,
+  default Executor/Reviewer models, expiring administrator grants and audit history.
+- An authenticated `/admin.html` interface for plan configuration, model discovery,
+  member search, membership changes, reconciliation retries and audit records.
+- Model enforcement before forwarding, revisioned policy changes, persistent
+  reconciliation jobs and verified New API token allowlists.
 
 The first milestone uses SQLite/WAL and one service process. It does not support
 multiple replicas. The fixed 24-hour web session requires a fresh OIDC login
@@ -101,6 +107,7 @@ The process reads environment variables; it does not implicitly load `.env` file
 | `SOMNIQ_NEWAPI_OIDC_CLIENT_ID` | New API's distinct OIDC client in the same identity realm |
 | `SOMNIQ_NEWAPI_INSTANCE_ID` | Stable identifier for that New API database/tenant |
 | `SOMNIQ_ACCOUNT_DATABASE` | SQLite path; default `data/accounts.sqlite3` |
+| `SOMNIQ_ACCOUNT_ADMIN_SUBJECTS` | Comma-separated OIDC subjects authorized for SomniQ administration; empty authorizes nobody |
 | `SOMNIQ_ACCOUNT_KEY` | Base64url without padding, encoding 32 random bytes; back up separately |
 | `SOMNIQ_AGREEMENT_FILE` | UTF-8 snapshot displayed to the user and stored with acceptance |
 | `SOMNIQ_AGREEMENT_VERSION` | Version identifying the supplied snapshot |
@@ -130,15 +137,76 @@ Old-account binding needs a separate migration implementation and acceptance run
 | `POST /v2/account/compute/connect` | Start New API OIDC flow for the signed-in user |
 | `GET /oauth/oidc` | Complete upstream connection; compare upstream `oidc_id` with the SomniQ subject |
 | `GET /v2/account/compute` | Numeric compute quota and usage, explicitly in `newapi_quota` units |
-| `GET /v1/models` | Models available to the mapped user's model key |
-| `POST /v1/chat/completions` | Authenticated chat proxy with streaming and disconnect propagation |
+| `GET /v2/catalog/plans` | Go/Plus/Pro offers and published model lists; checkout is unavailable |
+| `GET /v2/account/entitlements` | Current membership, expiry, effective models and defaults |
+| `GET /v1/models` | Intersection of current membership and upstream key's model list |
+| `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | Membership-checked streaming proxies |
+| `GET /v2/admin/plans`, `PUT /v2/admin/plans/{id}` | Read/edit three plans with an expected revision |
+| `GET /v2/admin/models` | Read configured models using the administrator's own compute session |
+| `GET /v2/admin/users` | Search members, 50 per page, using q and offset |
+| `PUT /v2/admin/users/{id}/membership` | Grant/change/revoke a membership with expiry, reason and revision |
+| `POST /v2/admin/users/{id}/sync` | Queue an upstream reconciliation retry |
+| `GET /v2/admin/audit` | Latest 100 audited changes |
 
 The model routes currently accept the browser session, not an arbitrary bearer
 token from a desktop or an OpenAI SDK. Requests are limited to 2 MiB and model
 streams to five minutes. Responses do not expose upstream refresh cookies or
 model keys. Current-session logout intentionally does not revoke another device.
-Global session revocation, account administration, product entitlements and
-payment integration remain later milestones.
+Global session revocation, native device sessions, payment integration, automatic
+renewal and monthly compute grants remain later milestones. Responses background
+jobs, WebSocket and other unlisted model routes are not exposed.
+
+## Membership administrator setup
+
+1. Configure `SOMNIQ_ACCOUNT_ADMIN_SUBJECTS` on the account server with one or more
+   comma-separated OIDC subjects from the configured Keycloak realm, then restart.
+   A subject is the user's immutable Keycloak user ID (`sub`), not an email,
+   username, SomniQ UUID or New API numeric ID. An empty setting authorizes nobody.
+   The issuer is checked as well. New API roles do not grant SomniQ administration.
+2. Build the Site with `VITE_ACCOUNT_MODE=independent`, configure the additional
+   `/v2/admin/`, `/v2/catalog/` and model routes shown in the preview Nginx example,
+   and visit `/account.html` to log in, consent and connect compute.
+3. The administrator link appears in the homepage navigation and account center.
+   Open `/admin.html`, read the New API model list, select exact models and defaults
+   for each plan, then save and enable. Manual IDs are supported when the upstream
+   catalog is incomplete; confirm those models and the users' routing groups in
+   New API. Model discovery is configuration inventory, not a channel health test.
+4. In the members tab, choose a user and plan, set an explicit future expiry and
+   record the reason. This does not charge money or increase the compute balance.
+   Two administrators editing the same revision receive a conflict rather than
+   silently overwriting each other. Disabling a plan blocks its models immediately.
+
+Fresh plans start disabled with empty model lists. New users and existing preview
+accounts have no paid membership until explicitly granted; a balance or old group
+does not create one. Prices are fixed server-side offers in CNY cents, billed
+monthly (2900/4900/9900); no checkout, payment verification or automatic renewal is
+implemented. API/model grants are independent of New API's wallet balance.
+
+The model entry checks current membership for every request, rejects duplicate
+model fields and unregistered names, and forwards only through fixed upstream
+paths. Its service keys have model restrictions enabled even when the allowlist
+is empty. Key IDs, owners and applied settings are verified. A finite token cap
+manually applied to a dedicated service key must be reconciled by an operator;
+the adapter will not read/overwrite a concurrently consumed finite budget.
+New API's user wallet remains responsible for consumption.
+
+The single-process server holds policy changes against requests awaiting upstream
+headers; an already admitted bounded stream can finish. Further calls see the
+new policy. A durable queue retries reconciliation and periodically rechecks keys.
+When policy changes, a request must synchronize and verify the current allowlist
+before forwarding. Missing/failed synchronization never grants a higher model.
+The queue is scoped to the configured New API instance and survives restarts.
+
+Keep New API model and ordinary-user management endpoints behind the trusted
+gateway for migrated accounts. The legacy Desktop/PWA and old raw keys still
+need their separate migration; this preview does not constrain those old paths.
+Do not deploy the preview Nginx file over a shared production virtual host without
+the planned migration. The official New API source and image are unchanged.
+
+Fresh `dev.mjs init` configurations seed an immutable test subject and authorize
+that development user. Existing local realms keep their old ID: set
+`SOMNIQ_ACCOUNT_ADMIN_SUBJECTS` explicitly from that realm instead of replacing
+its data or reusing a subject from a different installation.
 
 ## Verification
 
@@ -174,8 +242,10 @@ node site/account-server/scripts/live-compat.mjs
 
 This mode copies a **clean distribution** into a disposable directory, imports
 the same development realm, and verifies real browser login, explicit consent,
-New API connection, streaming, logout/re-login, responsive layout and outage
-isolation. Never point it at a production Keycloak installation or data directory.
+New API connection, the administrator editor, user grants, monthly prices,
+three-tier allowlists, downgrade/revocation/expiry, streaming, logout/re-login,
+responsive layout and outage isolation. Model channels are local fixtures.
+Never point it at a production Keycloak installation or data directory.
 Registration and recovery links are checked, but SMTP delivery, email verification
 and password recovery are not covered by the seeded-user browser test.
 

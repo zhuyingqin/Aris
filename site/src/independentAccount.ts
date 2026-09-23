@@ -6,6 +6,7 @@ export interface IndependentAccount {
   user: { id: string; email: string; display_name: string };
   agreement_required: boolean;
   compute_connected: boolean;
+  is_admin?: boolean;
 }
 export interface AccountAgreement { version: string; text: string; content_hash: string }
 export interface ComputeUsage { quota: number; used_quota: number; request_count: number; unit: "newapi_quota" }
@@ -31,7 +32,8 @@ export async function loadIndependentAccount(): Promise<IndependentAccount | nul
     const value = await api<IndependentAccount>("me");
     if (typeof value.user?.id !== "string" || !/^[a-f0-9-]{36}$/i.test(value.user.id)
       || typeof value.user.email !== "string" || typeof value.user.display_name !== "string"
-      || typeof value.agreement_required !== "boolean" || typeof value.compute_connected !== "boolean") {
+      || typeof value.agreement_required !== "boolean" || typeof value.compute_connected !== "boolean"
+      || (value.is_admin !== undefined && typeof value.is_admin !== "boolean")) {
       throw new IndependentAccountError("invalid_account", 502);
     }
     return value;
