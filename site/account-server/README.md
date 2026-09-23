@@ -197,7 +197,10 @@ an RC deployment to an older stable release.
 only validation reports, and can propose a draft PR after successful scheduled
 or manual checks. Scheduled runs become active only when the workflow is on the
 repository's default branch. Creating draft PRs also requires the repository
-setting permitting Actions to create pull requests. There is no automatic
+setting permitting Actions to create pull requests and the repository Actions
+variable `NEWAPI_UPDATE_DRAFT_PRS=true`. Draft proposals default to off; release
+discovery, compatibility checks and artifacts do not depend on that switch.
+There is no automatic
 production deployment. Existing database migration and rollback review must
 precede changing the production lock or service.
 
