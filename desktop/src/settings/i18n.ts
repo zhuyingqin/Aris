@@ -149,19 +149,11 @@ export interface SettingsGeneralCopy {
   updateMsgInstalled: string;
   updateMsgNoUpdateToInstall: string;
   updateDownloaded: (size: string) => string;
-  groupLabel: string;
-  groupHint: string;
-  groupSave: string;
-  groupSaving: string;
-  groupLoading: string;
-  groupEmpty: string;
   previewConfigPath: string;
   previewDisplayName: string;
   previewSubscriptionName: string;
   previewSubscriptionDescription: string;
   previewStandardGroupDescription: string;
-  previewResearchGroupDescription: string;
-  previewPremiumGroupDescription: string;
   previewUsageType: string;
   previewSystemPrompt: string;
   previewUserPrompt: string;
@@ -778,19 +770,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       updateMsgInstalled: "更新已安装，重启后生效",
       updateMsgNoUpdateToInstall: "没有可安装的更新",
       updateDownloaded: (size) => `已下载 ${size}`,
-      groupLabel: "调用分组",
-      groupHint: "切换后会把桌面端令牌改到该分组，按新倍率计费，并重新同步额度与模型。",
-      groupSave: "保存分组",
-      groupSaving: "保存中...",
-      groupLoading: "正在加载分组...",
-      groupEmpty: "暂无可选分组",
       previewConfigPath: "浏览器预览 — 未加载 Tauri 配置",
       previewDisplayName: "预览用户",
       previewSubscriptionName: "团队套餐",
       previewSubscriptionDescription: "浏览器预览数据",
       previewStandardGroupDescription: "标准分组",
-      previewResearchGroupDescription: "研究路由",
-      previewPremiumGroupDescription: "高级路由",
       previewUsageType: "消耗",
       previewSystemPrompt: "# 系统\n预览模式：Tauri 未连接，因此无法显示实时系统提示词。\n\n# 环境上下文\n - 模型：MiniMax-M3\n - 工作目录：浏览器预览\n\n# 桌面对话\n完整工具注册表：已启用。",
       previewUserPrompt: "预览模式：此面板显示最近一次从对话输入框发送的用户提示词。",
@@ -1428,19 +1412,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       updateMsgInstalled: "Update installed. Restart to apply.",
       updateMsgNoUpdateToInstall: "No update available to install",
       updateDownloaded: (size) => `${size} downloaded`,
-      groupLabel: "Routing group",
-      groupHint: "Saving routes this desktop's token through that group, bills at its rate, then refreshes quota and models.",
-      groupSave: "Save group",
-      groupSaving: "Saving...",
-      groupLoading: "Loading groups...",
-      groupEmpty: "No groups available",
       previewConfigPath: "Browser preview — Tauri configuration is not loaded",
       previewDisplayName: "Preview user",
       previewSubscriptionName: "Team plan",
       previewSubscriptionDescription: "Browser preview data",
       previewStandardGroupDescription: "Standard group",
-      previewResearchGroupDescription: "Research routing",
-      previewPremiumGroupDescription: "Premium routing",
       previewUsageType: "Consume",
       previewSystemPrompt: "# System\nPreview mode: Tauri is not connected, so the live system prompt is unavailable.\n\n# Environment context\n - Model: MiniMax-M3\n - Working directory: browser preview\n\n# Desktop Chat\nFull tool registry: enabled.",
       previewUserPrompt: "Preview mode: this panel shows the most recent user prompt sent from the Chat composer.",

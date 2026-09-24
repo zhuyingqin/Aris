@@ -735,12 +735,6 @@ export interface NewApiUsageLogPage {
   pageSize: number;
 }
 
-export interface NewApiGroupOption {
-  name: string;
-  desc: string;
-  ratio: string;
-}
-
 export interface NewApiAccount {
   username: string;
   displayName: string;
@@ -798,9 +792,6 @@ export const newapiBootstrap = (): Promise<NewApiAccount> => {
   }
   return newapiBootstrapInFlight;
 };
-export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
-export const newapiUpdateGroup = (group: string) =>
-  invoke<NewApiAccount>("newapi_update_group", { group });
 export const newapiUsageLogs = (page: number, pageSize: number) =>
   invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
 

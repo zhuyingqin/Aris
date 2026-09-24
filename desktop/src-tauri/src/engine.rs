@@ -1284,6 +1284,9 @@ impl ToolExecutor for KernelToolExecutor {
         if is_blocked_tool(tool_name, self.extra_blocked_tools) {
             return Err(ToolError::new(denied_tool_message(tool_name)));
         }
+        if let Some(message) = crate::membership::denied_tool_message(tool_name) {
+            return Err(ToolError::new(message));
+        }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }

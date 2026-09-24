@@ -1,4 +1,4 @@
-import type { NewApiAccount, NewApiGroupOption, NewApiUsageLogPage } from "../api/tauri";
+import type { NewApiAccount, NewApiUsageLogPage } from "../api/tauri";
 import type { Language } from "../store";
 import type { ConfigView, SystemPromptView, UserPromptView } from "../types";
 import { SETTINGS_COPY, type SettingsGeneralCopy } from "./i18n";
@@ -9,7 +9,6 @@ export const USAGE_LOG_PAGE_SIZE = 12;
 export interface PreviewSettingsData {
   configView: ConfigView;
   account: NewApiAccount;
-  groupOptions: NewApiGroupOption[];
   usageLogs: NewApiUsageLogPage;
   systemPrompt: SystemPromptView;
   userPrompt: UserPromptView;
@@ -78,11 +77,6 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
     model: "MiniMax-M3",
   };
-  const groupOptions: NewApiGroupOption[] = [
-    { name: "default", desc: copy.previewStandardGroupDescription, ratio: "1" },
-    { name: "research", desc: copy.previewResearchGroupDescription, ratio: "0.8" },
-    { name: "premium", desc: copy.previewPremiumGroupDescription, ratio: "1.5" },
-  ];
   const usageLogs: NewApiUsageLogPage = {
     page: 1,
     pageSize: USAGE_LOG_PAGE_SIZE,
@@ -151,7 +145,7 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     characters: copy.previewUserPrompt.length,
     prompt: copy.previewUserPrompt,
   };
-  return { configView, account, groupOptions, usageLogs, systemPrompt, userPrompt };
+  return { configView, account, usageLogs, systemPrompt, userPrompt };
 }
 
 export const PREVIEW_SETTINGS_DATA: Record<Language, PreviewSettingsData> = {

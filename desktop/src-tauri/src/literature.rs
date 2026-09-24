@@ -1476,6 +1476,9 @@ pub async fn literature_add_identifier(
     projects_state: State<'_, ProjectState>,
     identifier: String,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::external_literature_denial() {
+        return Err(message);
+    }
     let identifier = identifier.trim().to_string();
     let is_doi = identifier.to_ascii_lowercase().starts_with("10.");
     let isbn_digits = identifier.chars().filter(char::is_ascii_digit).count();
@@ -2163,6 +2166,9 @@ pub fn literature_search_protocol_create(
     projects_state: State<ProjectState>,
     protocol: runtime::SearchProtocolDraft,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     tools::literature::literature_search_protocol_create_at(
         &project_base(&projects_state)?,
         tools::literature::LiteratureSearchProtocolCreateInput { protocol },
@@ -2174,6 +2180,9 @@ pub fn literature_search_protocol_preview(
     projects_state: State<ProjectState>,
     protocol_id: String,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     tools::literature::literature_search_preview_at(
         &project_base(&projects_state)?,
         tools::literature::LiteratureSearchPreviewInput { protocol_id },
@@ -2190,6 +2199,9 @@ pub async fn literature_search_protocol_execute(
     variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
     request_id: Option<String>,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     let base = project_base(&projects_state)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {

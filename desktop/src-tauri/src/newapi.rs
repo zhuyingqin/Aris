@@ -26,16 +26,26 @@ use std::{
 
 /// Token name we create/look for under the user's account.
 const TOKEN_NAME: &str = "somniq-desktop";
-/// Managed New API gateway used by Aris internal builds.
-const DEFAULT_BASE_URL: &str = "http://106.53.28.124:18080";
+/// Release builds use the shared candidate endpoint. A build-time override is
+/// accepted only when it is HTTPS (or a loopback HTTP development server).
+const MANAGED_NEWAPI_CONFIG: &str = include_str!("../../managed-newapi.json");
 /// Default executor model when the caller doesn't pin one. Must match a model
 /// the new-api MiniMax channel exposes.
 const DEFAULT_MODEL: &str = "MiniMax-M3";
 const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
-/// Locally stored routing group pick. new-api keeps `user.group` admin-owned,
-/// so the desktop's group switch lives on the managed token instead and this
-/// key is the only record of what the user chose.
-const SELECTED_GROUP_KEY: &str = "newapi_group";
+/// Routing group written onto the managed token. Empty means "the account's
+/// group", which new-api resolves on every request: membership tiers are user
+/// groups that subscriptions switch, so an upgrade or an expiry applies to the
+/// very next call. A token pinned to a named group would keep routing through
+/// it until the desktop happened to refresh, and is refused outright once that
+/// group stops being usable.
+const MANAGED_TOKEN_GROUP: &str = "";
+/// Group pick persisted by releases that let Settings choose a routing group.
+/// Only read to delete it: the tier now decides the group.
+const LEGACY_SELECTED_GROUP_KEY: &str = "newapi_group";
+/// Account group the last bootstrap reported. Membership tiers are groups, and
+/// the features this desktop gates itself (see `membership`) read it offline.
+const ACCOUNT_GROUP_KEY: &str = "newapi_account_group";
 /// Current new-api browser-session contract. Only this HttpOnly cookie is a
 /// refresh credential; other cookies can be issued by legacy gateways,
 /// reverse proxies, or unrelated middleware.
@@ -86,21 +96,56 @@ pub struct NewApiAuthStatus {
     pub privacy_policy_enabled: bool,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewApiGroupOption {
-    pub name: String,
-    pub desc: String,
-    pub ratio: String,
+fn secure_base(base: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(base.trim())
+        .map_err(|_| "请配置有效的 HTTPS 账号服务器地址".to_string())?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("账号服务器必须使用 HTTPS（本机回环地址除外）".to_string());
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
-fn trim_base(base: &str) -> String {
-    let trimmed = base.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        DEFAULT_BASE_URL.to_string()
-    } else {
-        trimmed.to_string()
+pub(crate) fn configured_managed_base() -> Result<String, String> {
+    let fallback: Value = serde_json::from_str(MANAGED_NEWAPI_CONFIG)
+        .map_err(|_| "托管账号服务器构建配置无效".to_string())?;
+    let candidate = option_env!("VITE_MANAGED_NEWAPI_URL")
+        .or_else(|| fallback.get("baseUrl").and_then(Value::as_str))
+        .ok_or_else(|| "托管账号服务器未配置".to_string())?;
+    let base = secure_base(candidate)?;
+    if !cfg!(debug_assertions) && !base.starts_with("https://") {
+        return Err("发布版托管账号服务器必须使用 HTTPS".to_string());
     }
+    Ok(base)
+}
+
+fn approved_managed_base(base: &str) -> Result<String, String> {
+    let base = if base.trim().is_empty() {
+        configured_managed_base()
+    } else {
+        secure_base(base)
+    }?;
+    let official = configured_managed_base()?;
+    let loopback = reqwest::Url::parse(&base)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]")))
+        .unwrap_or(false);
+    if base == official || (cfg!(debug_assertions) && loopback) {
+        Ok(base)
+    } else {
+        Err("托管账号只能连接此构建指定的官方 HTTPS 服务器".to_string())
+    }
+}
+
+pub(crate) fn is_approved_managed_base(base: &str) -> bool {
+    approved_managed_base(base).is_ok()
 }
 
 fn api_ok(body: &Value) -> bool {
@@ -619,6 +664,17 @@ fn delete_refresh_session(base: &str) -> Result<(), String> {
     }
 }
 
+/// One-time retirement of the previous public HTTP managed gateway. The
+/// refresh cookie is origin-bound and must never be copied to a new hostname.
+pub(crate) fn retire_legacy_managed_session() -> Result<bool, String> {
+    let retired = config::retire_legacy_managed_http()?;
+    if retired {
+        forget_access_token(config::LEGACY_MANAGED_NEWAPI_BASE_URL);
+        let _ = delete_refresh_session(config::LEGACY_MANAGED_NEWAPI_BASE_URL);
+    }
+    Ok(retired)
+}
+
 fn request_origin(base: &str) -> Option<String> {
     reqwest::Url::parse(base)
         .ok()
@@ -694,12 +750,6 @@ fn get_config_string(key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn managed_base_url() -> String {
-    get_config_string("newapi_executor_base_url")
-        .or_else(|| get_config_string("executor_base_url"))
-        .unwrap_or_else(|| format!("{DEFAULT_BASE_URL}/v1"))
-}
-
 const SESSION_EXPIRED_MESSAGE: &str = "Login expired. Please sign in again.";
 
 fn is_invalid_session_error(message: &str) -> bool {
@@ -743,13 +793,20 @@ fn has_stored_session() -> bool {
         .get("newapi_base_url")
         .and_then(Value::as_str)
         .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
+        .is_some_and(is_approved_managed_base);
     let has_user = obj.get("newapi_user_id").and_then(value_as_i64).is_some();
     has_base && has_user
 }
 
+/// Group of the signed-in managed account as of the last bootstrap: `None` when
+/// this desktop has no managed account, `Some("")` until a bootstrap reports one.
+pub(crate) fn managed_account_group() -> Option<String> {
+    has_stored_session().then(|| get_config_string(ACCOUNT_GROUP_KEY).unwrap_or_default())
+}
+
 pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -889,25 +946,10 @@ async fn create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
-    group: &str,
 ) -> Result<Option<TokenCandidate>, String> {
     let generated_key = generate_token_key();
     let response = with_session(client.post(format!("{base}/api/token/")), session)
-        .json(&serde_json::json!({
-            "name": TOKEN_NAME,
-            "key": generated_key.clone(),
-            "amount": 0,
-            "expire_time": 0,
-            "expired_time": -1,            // never expires
-            "remain_quota": 0,
-            "unlimited_quota": true,       // bounded by the user's own quota
-            "model_limits_enabled": false,
-            "model_limits": "",
-            // A token's group, not the account's UI selection, controls actual
-            // channel routing. Never let the gateway infer a stale distributor
-            // group here: bind it to the account's current group explicitly.
-            "group": group,
-        }))
+        .json(&managed_token_create_payload(&generated_key))
         .send()
         .await
         .map_err(|error| format!("创建令牌失败: {error}"))?;
@@ -921,12 +963,42 @@ async fn create_token(
         .unwrap_or(TokenCandidate {
             id: None,
             key: None,
-            group: Some(group.to_string()),
+            group: None,
         });
     if candidate.key.is_none() {
         candidate.key = normalize_downstream_key(&generated_key);
     }
     Ok(Some(candidate))
+}
+
+fn managed_token_create_payload(key: &str) -> Value {
+    serde_json::json!({
+        "name": TOKEN_NAME,
+        "key": key,
+        "amount": 0,
+        "expire_time": 0,
+        "expired_time": -1,            // never expires
+        "remain_quota": 0,
+        "unlimited_quota": true,       // bounded by the user's own quota
+        "model_limits_enabled": false,
+        "model_limits": "",
+        "group": MANAGED_TOKEN_GROUP,
+    })
+}
+
+/// A managed token created by an older release carries the group it was pinned
+/// to; it must be cleared so routing follows the account's membership tier.
+/// `None` is either an already-unpinned token or a bare id whose group the
+/// gateway did not report, and neither warrants a write.
+fn token_needs_unpinning(token: &TokenCandidate) -> bool {
+    token.group.is_some()
+}
+
+/// Drop the Settings group pick older releases stored; nothing reads it now.
+fn forget_legacy_group_pick() {
+    if get_config_string(LEGACY_SELECTED_GROUP_KEY).is_some() {
+        let _ = config::remove_values(&[LEGACY_SELECTED_GROUP_KEY]);
+    }
 }
 
 fn account_group(data: &Value) -> Result<String, String> {
@@ -938,67 +1010,6 @@ fn account_group(data: &Value) -> Result<String, String> {
         .ok_or_else(|| {
             "Current New API account group is missing. Choose a group and try again.".to_string()
         })
-}
-
-fn group_is_usable(usable: &Value, group: &str) -> bool {
-    usable
-        .as_object()
-        .is_some_and(|groups| groups.contains_key(group))
-}
-
-/// Whether the managed token may route through `selected`, given the account's
-/// usable groups.
-///
-/// `None` means the gateway did answer and does not list the group, so the
-/// token would be rejected at request time with "无权访问 X 分组". An
-/// empty/absent list means the best-effort lookup failed, which is not evidence
-/// of anything: the group is treated as routable so a transient outage neither
-/// blocks a switch nor silently undoes an earlier one.
-fn resolve_routing_group(selected: &str, usable: &Value) -> Option<String> {
-    if group_is_usable(usable, selected) {
-        return Some(selected.to_string());
-    }
-    match usable.as_object() {
-        Some(groups) if !groups.is_empty() => None,
-        _ => Some(selected.to_string()),
-    }
-}
-
-/// The group the managed token should route through, given already-fetched
-/// usable groups. Falls back to the account group whenever there is no local
-/// pick, or the pick has been revoked.
-fn apply_group_preference(account_group: String, usable: &Value) -> String {
-    let Some(selected) = get_config_string(SELECTED_GROUP_KEY) else {
-        return account_group;
-    };
-    if selected == account_group {
-        return account_group;
-    }
-    match resolve_routing_group(&selected, usable) {
-        Some(group) => group,
-        None => {
-            let _ = config::remove_values(&[SELECTED_GROUP_KEY]);
-            account_group
-        }
-    }
-}
-
-/// Same as [`apply_group_preference`], but fetches the usable groups only when
-/// a local pick actually exists, so the common case costs no extra request.
-async fn routing_group(
-    client: &reqwest::Client,
-    base: &str,
-    session: &NewApiSession,
-    account: &Value,
-) -> Result<String, String> {
-    let account_group = account_group(account)?;
-    match get_config_string(SELECTED_GROUP_KEY) {
-        Some(selected) if selected != account_group => {
-            let usable = user_groups(client, base, session).await;
-            Ok(apply_group_preference(account_group, &usable))
-        }
-        _ => Ok(account_group),
-    }
 }
 
 /// Build the complete update payload required by new-api's PUT /api/token/
@@ -1243,19 +1254,18 @@ async fn get_or_create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
-    group: &str,
 ) -> Result<(String, Option<i64>), String> {
     let token = match find_token(client, base, session).await? {
         Some(token) => {
-            if token.group.as_deref() != Some(group) {
+            if token_needs_unpinning(&token) {
                 let token_id = token.id.ok_or_else(|| {
                     "Managed token has no id, so its group cannot be synchronized.".to_string()
                 })?;
-                update_token_group(client, base, session, token_id, group).await?;
+                update_token_group(client, base, session, token_id, MANAGED_TOKEN_GROUP).await?;
             }
             token
         }
-        None => match create_token(client, base, session, group).await? {
+        None => match create_token(client, base, session).await? {
             Some(token) => token,
             None => find_token(client, base, session)
                 .await?
@@ -1286,6 +1296,7 @@ fn stored_session() -> Result<(String, NewApiSession), String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .ok_or_else(|| "尚未登录 New API".to_string())?;
+    let base = approved_managed_base(&base)?;
     let user_id = obj
         .get("newapi_user_id")
         .and_then(value_as_i64)
@@ -1390,6 +1401,7 @@ pub(crate) async fn account_ownership_credential(
         return Ok(None);
     }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -1437,10 +1449,10 @@ async fn refresh_downstream_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
-    group: &str,
     model: &str,
 ) -> Result<String, String> {
-    let (token, token_id) = get_or_create_token(client, base, session, group).await?;
+    forget_legacy_group_pick();
+    let (token, token_id) = get_or_create_token(client, base, session).await?;
     let executor_base_url = format!("{base}/v1");
     config::persist_newapi_executor_credentials(&executor_base_url, &token, token_id)?;
     let model = model.trim();
@@ -1453,8 +1465,9 @@ async fn refresh_downstream_token(
 
 #[tauri::command]
 pub async fn newapi_auth_status(base_url: String) -> Result<NewApiAuthStatus, String> {
-    let base = trim_base(&base_url);
+    let base = approved_managed_base(&base_url)?;
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -1481,6 +1494,7 @@ pub async fn newapi_logout() -> Result<(), String> {
     if let Some((base, refresh_session)) = revoke {
         if let Ok(cookie) = refresh_cookie_header(&refresh_session.cookies) {
             if let Ok(client) = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(20))
                 .build()
@@ -1511,15 +1525,13 @@ pub async fn newapi_login(
     username: String,
     password: String,
 ) -> Result<NewApiLogin, String> {
-    let base = trim_base(&base_url);
-    if base.is_empty() {
-        return Err("服务器地址不能为空".to_string());
-    }
+    let base = approved_managed_base(&base_url)?;
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
         return Err("请输入账号和密码".to_string());
     }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .cookie_store(true)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
@@ -1534,15 +1546,13 @@ pub async fn newapi_login(
         forget_access_token(&base);
         return Err(error);
     }
-    let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-    let group = routing_group(&client, &base, &session, &account).await?;
     let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
     let requested_model = resolve_model_from_list(&entitled_models, &model);
     let executor_base_url = format!("{base}/v1");
     let token = clear_session_if_invalid(
-        refresh_downstream_token(&client, &base, &session, &group, &requested_model).await,
+        refresh_downstream_token(&client, &base, &session, &requested_model).await,
     )?;
     let models = downstream_models(&client, &base, &token).await?;
     config::persist_managed_models(&models)?;
@@ -1598,13 +1608,14 @@ fn insert_optional_payload_field(
 
 #[tauri::command]
 pub async fn newapi_send_verification(input: NewApiVerificationInput) -> Result<(), String> {
-    let base = trim_base(&input.base_url);
+    let base = approved_managed_base(&input.base_url)?;
     let email = input.email.trim().to_string();
     if email.is_empty() {
         return Err("请先输入邮箱".to_string());
     }
     let turnstile = optional_payload_value(input.turnstile).unwrap_or_default();
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1632,7 +1643,7 @@ pub async fn newapi_send_verification(input: NewApiVerificationInput) -> Result<
 /// users back to the sign-in flow after account creation.
 #[tauri::command]
 pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
-    let base = trim_base(&input.base_url);
+    let base = approved_managed_base(&input.base_url)?;
     let username = input.username.trim().to_string();
     let password = input.password;
     if username.is_empty() || password.is_empty() {
@@ -1644,6 +1655,7 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
     }
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1949,71 +1961,6 @@ fn ratio_to_string(value: &Value) -> String {
     }
 }
 
-fn group_options_from_user_groups(groups: &Value) -> Vec<NewApiGroupOption> {
-    let Some(object) = groups.as_object() else {
-        return Vec::new();
-    };
-    let mut options = object
-        .iter()
-        .map(|(name, detail)| NewApiGroupOption {
-            name: name.trim().to_string(),
-            desc: detail
-                .get("desc")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_string(),
-            ratio: detail.get("ratio").map(ratio_to_string).unwrap_or_default(),
-        })
-        .filter(|option| !option.name.is_empty())
-        .collect::<Vec<_>>();
-    options.sort_by(|left, right| left.name.cmp(&right.name));
-    options
-}
-
-fn group_options_from_admin_groups(groups: &Value, user_groups: &Value) -> Vec<NewApiGroupOption> {
-    let user_options = group_options_from_user_groups(user_groups);
-    let detail_for = |name: &str| {
-        user_options
-            .iter()
-            .find(|option| option.name == name)
-            .map(|option| (option.desc.clone(), option.ratio.clone()))
-            .unwrap_or_default()
-    };
-    let mut options = groups
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(value_as_string)
-                .map(|name| {
-                    let (desc, ratio) = detail_for(&name);
-                    NewApiGroupOption { name, desc, ratio }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    options.sort_by(|left, right| left.name.cmp(&right.name));
-    options.dedup_by(|left, right| left.name == right.name);
-    options
-}
-
-async fn admin_groups(
-    client: &reqwest::Client,
-    base: &str,
-    session: &NewApiSession,
-) -> Result<Value, String> {
-    let response = with_session(client.get(format!("{base}/api/group/")), session)
-        .send()
-        .await
-        .map_err(|error| format!("获取后台分组失败: {error}"))?;
-    let body = parse_json(response, "后台分组").await?;
-    if !api_ok(&body) {
-        return Err(session_api_error(&body, "获取后台分组失败"));
-    }
-    Ok(body.get("data").cloned().unwrap_or(Value::Null))
-}
-
 /// Fetch the user's usable groups with their ratio + description. Best
 /// effort: any failure yields `Null` so bootstrap still returns core account
 /// state.
@@ -2148,6 +2095,7 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         return Err(SESSION_EXPIRED_MESSAGE.to_string());
     }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -2162,11 +2110,13 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
             .trim()
             .to_string()
     };
-    let account_group = account_group(&data)?;
+    // The managed token follows the account group, so the account group is
+    // exactly what every request routes through.
+    let group = account_group(&data)?;
+    if get_config_string(ACCOUNT_GROUP_KEY).as_deref() != Some(group.as_str()) {
+        let _ = config::persist_values(&[(ACCOUNT_GROUP_KEY, Value::String(group.clone()))]);
+    }
     let groups = user_groups(&client, &base, &session).await;
-    // What the token routes through, which is the account group only when the
-    // user has not picked something else in Settings.
-    let group = apply_group_preference(account_group.clone(), &groups);
     let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
@@ -2175,21 +2125,18 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         &get_config_string("executor_model").unwrap_or_default(),
     );
     let token = clear_session_if_invalid(
-        refresh_downstream_token(&client, &base, &session, &group, &requested_model).await,
+        refresh_downstream_token(&client, &base, &session, &requested_model).await,
     )?;
     let models = downstream_models(&client, &base, &token).await?;
     config::persist_managed_models(&models)?;
     let model = resolve_model_from_list(&models, &requested_model);
-    let group_desc_of = |name: &str| {
-        groups
-            .get(name)
-            .and_then(|entry| entry.get("desc"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let group_desc = group_desc_of(&group);
+    let group_desc = groups
+        .get(group.as_str())
+        .and_then(|entry| entry.get("desc"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let group_ratio = groups
         .get(group.as_str())
         .and_then(|entry| entry.get("ratio"))
@@ -2205,14 +2152,7 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         .into_iter()
         .filter_map(|key| data.get(key).and_then(value_as_string))
         .find(|value| has_admin_marker(value));
-    // Privilege is a property of the account group a gateway assigned, never of
-    // the routing group the user picked for themselves.
-    let is_admin = user_is_admin_marker(
-        role,
-        role_text,
-        &account_group,
-        &group_desc_of(&account_group),
-    );
+    let is_admin = user_is_admin_marker(role, role_text, &group, &group_desc);
     let subscription_data = user_subscription_self(&client, &base, &session).await;
     let plan_data = subscription_plans(&client, &base, &session).await;
     let (subscription_name, subscription_desc, subscription_quota, subscription_used_quota) =
@@ -2237,122 +2177,6 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
     })
 }
 
-#[tauri::command]
-pub async fn newapi_groups() -> Result<Vec<NewApiGroupOption>, String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-    let user_group_data = user_groups(&client, &base, &session).await;
-    let mut options = match admin_groups(&client, &base, &session).await {
-        Ok(admin_group_data) => {
-            group_options_from_admin_groups(&admin_group_data, &user_group_data)
-        }
-        Err(_) => group_options_from_user_groups(&user_group_data),
-    };
-    if options.is_empty() {
-        let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-        if let Some(group) = account
-            .get("group")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            options.push(NewApiGroupOption {
-                name: group.to_string(),
-                desc: String::new(),
-                ratio: String::new(),
-            });
-        }
-    }
-    Ok(options)
-}
-
-/// Switch the group every managed request is routed through.
-///
-/// new-api gates `PUT /api/user/` behind `AdminAuth`, and even an admin cannot
-/// edit a row whose role is not below their own, so an ordinary account can
-/// never change its own `user.group` — that field is admin-assigned. What a
-/// user *can* change is their token's group, which overrides the account group
-/// for every request as long as it stays inside the account's usable groups.
-/// So the pick is stored locally and pushed onto the managed token, and the
-/// admin-only account update is attempted only for a group the token override
-/// cannot reach.
-#[tauri::command]
-pub async fn newapi_update_group(group: String) -> Result<AccountState, String> {
-    let group = group.trim().to_string();
-    if group.is_empty() {
-        return Err("分组不能为空".to_string());
-    }
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-    let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-    let current_group = account
-        .get("group")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if current_group == group {
-        // The account group is the fallback new-api uses for a group-less
-        // token, so returning to it means dropping the override entirely.
-        config::remove_values(&[SELECTED_GROUP_KEY])?;
-        return newapi_bootstrap().await;
-    }
-    let usable = user_groups(&client, &base, &session).await;
-    if resolve_routing_group(&group, &usable).is_some() {
-        config::persist_values(&[(SELECTED_GROUP_KEY, Value::String(group))])?;
-        return newapi_bootstrap().await;
-    }
-    let field = |key: &str| {
-        account
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let payload = serde_json::json!({
-        "id": session.user_id,
-        "username": field("username"),
-        "display_name": field("display_name"),
-        "group": group,
-        "role": account
-            .get("role")
-            .or_else(|| account.get("user_role"))
-            .or_else(|| account.get("userRole"))
-            .and_then(value_as_i64)
-            .unwrap_or_default(),
-        "remark": field("remark"),
-    });
-    // Only reachable for a group outside the account's usable set, which a
-    // token override cannot route to: the gateway rejects such a token at
-    // request time. Changing the account group itself is the sole remaining
-    // path, and new-api grants it to admins over lower-role accounts only.
-    let response = with_session(client.put(format!("{base}/api/user/")), &session)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("更新后台分组失败: {error}"))?;
-    let body = parse_json(response, "后台分组更新").await?;
-    if !api_ok(&body) {
-        let detail = session_api_error(&body, "更新后台分组失败");
-        if is_invalid_session_error(&detail) {
-            return Err(detail);
-        }
-        return Err(format!(
-            "无法切换到分组「{group}」：当前账号没有该分组的使用权限，需要由管理员分配。({detail})"
-        ));
-    }
-    config::remove_values(&[SELECTED_GROUP_KEY])?;
-    newapi_bootstrap().await
-}
-
 async fn parse_usage_log_json(response: reqwest::Response) -> Result<Value, String> {
     parse_json(response, "调用明细").await
 }
@@ -2373,6 +2197,7 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
     let page = page.max(1);
     let page_size = page_size.clamp(1, 100);
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -2417,69 +2242,123 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
 /// gateway base URL or API key.
 #[tauri::command]
 pub async fn newapi_models() -> Result<Vec<String>, String> {
-    let mut api_key = get_config_string("newapi_executor_api_key")
-        .or_else(|| get_config_string("executor_api_key"))
-        .ok_or_else(|| "尚未登录 New API，无法获取模型列表".to_string())?;
-    let base_url = managed_base_url();
+    if !has_stored_session() {
+        return Err("尚未登录 New API，无法获取模型列表".to_string());
+    }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    if has_stored_session() {
-        let (base, session) =
-            clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-        let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-        let group = routing_group(&client, &base, &session, &account).await?;
-        let model =
-            get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        api_key = clear_session_if_invalid(
-            refresh_downstream_token(&client, &base, &session, &group, &model).await,
-        )?;
-        let models = downstream_models(&client, &base, &api_key).await?;
-        config::persist_managed_models(&models)?;
-        return Ok(models);
-    }
-    let response = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|_| "获取模型列表失败，请稍后重试".to_string())?;
-    let body = parse_json(response, "模型列表").await?;
-    if body.get("error").is_some() || body.get("success").and_then(Value::as_bool) == Some(false) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "获取模型列表失败".to_string()
-        } else {
-            message
-        });
-    }
-    let mut models = Vec::new();
-    if let Some(data) = body.get("data") {
-        collect_model_ids(data, &mut models);
-    }
-    models.sort();
-    models.dedup();
+    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
+    let model = get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let api_key = clear_session_if_invalid(
+        refresh_downstream_token(&client, &base, &session, &model).await,
+    )?;
+    let models = downstream_models(&client, &base, &api_key).await?;
+    config::persist_managed_models(&models)?;
     Ok(models)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        account_group, group_is_usable, is_invalid_session_error, login, parse_json_bytes,
-        parse_refresh_cookie, persisted_user_token, refresh_cookie_header, resolve_routing_group,
-        response_preview, session_api_error, token_candidate, token_group_update_payload,
-        with_session, NewApiRefreshCookie, NewApiRefreshSession, NewApiSession,
-        NEWAPI_REFRESH_COOKIE_NAME,
+        account_group, approved_managed_base, is_invalid_session_error, login, managed_token_create_payload,
+        newapi_login,
+        parse_json_bytes, parse_refresh_cookie, persisted_user_token, refresh_cookie_header,
+        response_preview, secure_base, session_api_error, token_candidate, token_group_update_payload,
+        token_needs_unpinning, with_session, NewApiRefreshCookie, NewApiRefreshSession,
+        NewApiSession, MANAGED_TOKEN_GROUP, NEWAPI_REFRESH_COOKIE_NAME,
     };
     use serde_json::json;
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
+
+    #[test]
+    fn managed_account_endpoint_requires_https_or_loopback() {
+        assert_eq!(
+            secure_base("https://somni.ensuanx.com/").unwrap(),
+            "https://somni.ensuanx.com"
+        );
+        assert_eq!(
+            secure_base("http://127.0.0.1:18080").unwrap(),
+            "http://127.0.0.1:18080"
+        );
+        assert!(secure_base("http://106.53.28.124:18080").is_err());
+        assert!(secure_base("http://public.example").is_err());
+        assert!(secure_base("https://user:secret@somni.ensuanx.com").is_err());
+        assert!(secure_base("https://somni.ensuanx.com/api").is_err());
+        assert!(approved_managed_base("https://other.example").is_err());
+    }
+
+    #[test]
+    fn managed_login_does_not_follow_a_redirect_to_another_origin() {
+        let destination = TcpListener::bind("127.0.0.1:0").expect("bind redirect destination");
+        let destination_addr = destination.local_addr().expect("destination address");
+        destination
+            .set_nonblocking(true)
+            .expect("set destination nonblocking");
+        let capture = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                match destination.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_request(&mut stream);
+                        write_json_response(
+                            &mut stream,
+                            r#"{"success":false,"message":"redirect followed"}"#,
+                            false,
+                        );
+                        return Some(request);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return None;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept redirect destination: {error}"),
+                }
+            }
+        });
+
+        let gateway = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+        let gateway_addr = gateway.local_addr().expect("gateway address");
+        let original = thread::spawn(move || {
+            let (mut stream, _) = gateway.accept().expect("accept login");
+            let request = read_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{destination_addr}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write redirect response");
+            request
+        });
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let result = runtime.block_on(newapi_login(
+            format!("http://{gateway_addr}"),
+            "MiniMax-M3".to_string(),
+            "test-user".to_string(),
+            "test-password".to_string(),
+        ));
+
+        assert!(result.is_err(), "a redirect cannot complete managed login");
+        assert!(original
+            .join()
+            .expect("mock gateway finishes")
+            .starts_with("POST /api/user/login HTTP/1.1"));
+        assert!(
+            capture.join().expect("redirect destination finishes").is_none(),
+            "managed login followed the 302 to another origin"
+        );
+    }
 
     fn read_request(stream: &mut TcpStream) -> String {
         stream
@@ -2813,40 +2692,47 @@ mod tests {
     }
 
     #[test]
-    fn routing_group_keeps_a_pick_the_account_can_still_use() {
-        let usable = json!({
-            "default": { "ratio": 1, "desc": "标准" },
-            "千研": { "ratio": 1.5, "desc": "高速" },
-        });
+    fn new_managed_tokens_follow_the_account_group() {
+        // An empty group is resolved by new-api per request, so a membership
+        // upgrade or expiry reaches the very next call.
+        let payload = managed_token_create_payload("sk-test");
 
-        assert!(group_is_usable(&usable, "千研"));
-        assert_eq!(
-            resolve_routing_group("千研", &usable).as_deref(),
-            Some("千研")
-        );
+        assert_eq!(MANAGED_TOKEN_GROUP, "");
+        assert_eq!(payload["group"], "");
+        assert_eq!(payload["name"], "somniq-desktop");
+        assert_eq!(payload["unlimited_quota"], true);
+        assert_eq!(payload["model_limits_enabled"], false);
     }
 
     #[test]
-    fn routing_group_drops_a_pick_the_gateway_no_longer_grants() {
-        // Losing access upstream must fall back to the account group instead of
-        // failing every later request with "无权访问 X 分组".
-        let usable = json!({ "default": { "ratio": 1, "desc": "标准" } });
+    fn tokens_pinned_by_older_releases_are_unpinned() {
+        let pinned = token_candidate(&json!({ "id": 9, "group": "千研" })).expect("pinned");
+        let following = token_candidate(&json!({ "id": 9, "group": "" })).expect("following");
+        let bare_id = token_candidate(&json!(9)).expect("bare id");
 
-        assert!(!group_is_usable(&usable, "千研"));
-        assert_eq!(resolve_routing_group("千研", &usable), None);
+        assert!(token_needs_unpinning(&pinned));
+        assert!(!token_needs_unpinning(&following));
+        // A bare id says nothing about its group; writing it blindly would
+        // cost a management call on every refresh.
+        assert!(!token_needs_unpinning(&bare_id));
     }
 
     #[test]
-    fn routing_group_survives_an_unanswered_group_lookup() {
-        // `user_groups` is best-effort; a transient failure must not silently
-        // reset the user's routing choice.
-        assert_eq!(
-            resolve_routing_group("千研", &json!(null)).as_deref(),
-            Some("千研")
-        );
-        assert_eq!(
-            resolve_routing_group("千研", &json!({})).as_deref(),
-            Some("千研")
-        );
+    fn unpinning_keeps_every_other_token_setting() {
+        let payload = token_group_update_payload(
+            &json!({
+                "id": 9,
+                "name": "somniq-desktop",
+                "remain_quota": 50,
+                "unlimited_quota": false,
+                "group": "千研",
+            }),
+            MANAGED_TOKEN_GROUP,
+        )
+        .expect("payload");
+
+        assert_eq!(payload["group"], "");
+        assert_eq!(payload["remain_quota"], 50);
+        assert_eq!(payload["unlimited_quota"], false);
     }
 }

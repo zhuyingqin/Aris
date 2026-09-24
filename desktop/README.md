@@ -141,13 +141,22 @@ npm run build:internal
 The temporary bundled `internal-config.json` is removed after the build script
 finishes and is ignored by git.
 
-## GitHub Updater Releases
+## Desktop updater releases
 
-SomniQ Studio uses the Tauri updater plugin and checks:
+SomniQ Studio uses the Tauri updater plugin. Global installations check the
+GitHub release; China-region installations check the signed server mirror:
 
 ```text
-https://github.com/zhuyingqin/SomniQ/releases/latest/download/latest.json
+https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json
+https://somni.ensuanx.com/releases/latest.json
 ```
+
+After publishing a signed GitHub release, run `site/scripts/sync_release.cjs` from the separate [SomniQ-Site](https://github.com/zhuyingqin/SomniQ-Site) repository
+to copy the release and rewrite the mirror manifest's download URLs to
+`somni.ensuanx.com`. Existing China-region builds still contain the old
+`somni.chat` updater address. If that address is unavailable, users need to
+install the new version manually from the new mirror once; subsequent updates
+will use the new address.
 
 The updater public key is embedded in `src-tauri/tauri.conf.json`. Keep the matching private key out of git and set it as the GitHub repository secret `TAURI_SIGNING_PRIVATE_KEY` before publishing tagged releases. Store the private key as one line with whitespace removed. If the key was generated with a password, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 

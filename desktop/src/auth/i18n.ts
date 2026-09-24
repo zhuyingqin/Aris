@@ -30,6 +30,7 @@ export const LOGIN_COPY: Record<Language, {
   submitLoggingIn: string;
   submitRegistering: string;
   fetchStatusFailed: (message: string) => string;
+  gatewayUnavailable: string;
   errorEmailRequired: string;
   errorTurnstileRequired: string;
   noticeCodeSent: string;
@@ -75,6 +76,7 @@ export const LOGIN_COPY: Record<Language, {
     submitLoggingIn: "登录中...",
     submitRegistering: "注册中...",
     fetchStatusFailed: (message) => `获取服务器状态失败: ${message}`,
+    gatewayUnavailable: "此安装包未配置可用的 HTTPS 托管账号服务器。请联系发布者更新安装包。",
     errorEmailRequired: "请先输入邮箱后再获取验证码",
     errorTurnstileRequired: "请先完成人机验证后再获取验证码",
     noticeCodeSent: "验证码已发送，请查收",
@@ -120,6 +122,7 @@ export const LOGIN_COPY: Record<Language, {
     submitLoggingIn: "Logging in...",
     submitRegistering: "Signing up...",
     fetchStatusFailed: (message) => `Could not read the server's registration settings: ${message}`,
+    gatewayUnavailable: "This build has no valid HTTPS managed account server. Please request an updated installer.",
     errorEmailRequired: "Please enter your email first",
     errorTurnstileRequired: "This server has bot verification enabled. Please complete registration on the web first",
     noticeCodeSent: "Verification code sent, please check your inbox",

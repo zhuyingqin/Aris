@@ -21,6 +21,7 @@ import { isTypesetPreviewMode } from "./api/browserPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
 import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
 import { isMacOS } from "./platform";
+import { MANAGED_NEWAPI_BASE_URL, approvedManagedNewApiBaseUrl } from "./managedNewApi";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -220,7 +221,7 @@ const AUTH_FLAG_KEY = "somniq-auth-v1";
 const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
 const AUTH_SERVER_KEY = "somniq-auth-server-v1";
 const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
-export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
+export const DEFAULT_AUTH_SERVER = MANAGED_NEWAPI_BASE_URL;
 const DEFAULT_MODEL = "MiniMax-M3";
 
 export function isManagedAuthInvalidError(error: unknown): boolean {
@@ -236,9 +237,11 @@ export function isManagedAuthInvalidError(error: unknown): boolean {
 
 function readStoredServer(): string {
   try {
-    return localStorage.getItem(AUTH_SERVER_KEY)
-      ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY)
-      ?? DEFAULT_AUTH_SERVER;
+    const stored = localStorage.getItem(AUTH_SERVER_KEY)
+      ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY);
+    // Previous releases saved a public HTTP address. Keep its credentials
+    // dormant until the user signs in again through a verified HTTPS host.
+    return stored ? approvedManagedNewApiBaseUrl(stored) || DEFAULT_AUTH_SERVER : DEFAULT_AUTH_SERVER;
   } catch {
     return DEFAULT_AUTH_SERVER;
   }
@@ -247,7 +250,10 @@ function readStoredServer(): string {
 function initialAuthed(): boolean {
   if (!isTauri()) return true;
   try {
-    return (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
+    const stored = localStorage.getItem(AUTH_SERVER_KEY)
+      ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY);
+    return !!stored && !!approvedManagedNewApiBaseUrl(stored)
+      && (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
   } catch {
     return false;
   }
@@ -427,8 +433,8 @@ export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
   authServer: readStoredServer(),
   login: async (server, username, password) => {
-    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
-    if (!trimmedServer) throw new Error("请输入服务器地址");
+    const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
+    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
     const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
     await persistManagedAuthResult(result, get().language);
     markAuthed(trimmedServer);
@@ -448,8 +454,8 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   register: async (server, username, password, options = {}) => {
-    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
-    if (!trimmedServer) throw new Error("请输入服务器地址");
+    const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
+    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
     await newapiRegister({
       baseUrl: trimmedServer,
       username,

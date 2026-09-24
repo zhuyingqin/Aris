@@ -16,6 +16,44 @@ jobs:
       release_unix_timestamp: ${{ steps.timestamp.outputs.release_unix_timestamp }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release version and managed gateway TLS
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          with open("desktop/package.json", encoding="utf-8") as source:
+              package_version = json.load(source)["version"]
+          with open("desktop/src-tauri/tauri.conf.json", encoding="utf-8") as source:
+              tauri_version = json.load(source)["version"]
+          tag = os.environ["RELEASE_TAG"]
+          if package_version != tauri_version or tag != f"v{package_version}":
+              raise SystemExit(f"Release version mismatch: tag={tag}, package={package_version}, tauri={tauri_version}")
+
+          with open("desktop/managed-newapi.json", encoding="utf-8") as source:
+              base_url = json.load(source)["baseUrl"].rstrip("/")
+          parsed = urllib.parse.urlsplit(base_url)
+          if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
+              raise SystemExit(f"Managed New API must be a public HTTPS origin: {base_url}")
+          status_url = base_url + "/api/status"
+          request = urllib.request.Request(status_url, headers={"Accept": "application/json"})
+          with urllib.request.urlopen(request, timeout=15) as response:
+              if response.geturl() != status_url or response.status != 200:
+                  raise SystemExit(f"Managed New API redirected or returned HTTP {response.status}")
+              if "application/json" not in response.headers.get("Content-Type", ""):
+                  raise SystemExit("Managed New API status did not return JSON")
+              status = json.load(response)
+          if status.get("success") is not True:
+              raise SystemExit("Managed New API status did not report success")
+          print(f"Verified {base_url} with trusted TLS and a healthy New API response")
+          PY
+
       - name: Capture release upload timestamp
         id: timestamp
         shell: bash

@@ -71,6 +71,12 @@ export default function Login() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!resolvedServer) {
+      setAuthStatus(null);
+      setStatusBusy(false);
+      setStatusError(copy.gatewayUnavailable);
+      return;
+    }
     setStatusBusy(true);
     setStatusError(null);
     const timer = window.setTimeout(() => {
@@ -122,6 +128,7 @@ export default function Login() {
 
   const submitDisabled =
     busy ||
+    !resolvedServer ||
     statusBusy ||
     (mode === "login" && !passwordLoginEnabled) ||
     (mode === "register" &&
@@ -364,7 +371,7 @@ export default function Login() {
             </>
           )}
 
-          {statusError && mode === "register" && (
+          {statusError && (
             <div role="alert" className="sq-alert sq-alert-warn">
               {statusError}
             </div>

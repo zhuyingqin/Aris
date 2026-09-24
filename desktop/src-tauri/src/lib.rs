@@ -20,6 +20,7 @@ mod knowledge;
 mod literature;
 mod mail;
 mod mcp;
+mod membership;
 mod memory;
 mod newapi;
 mod oracle_web;
@@ -701,6 +702,11 @@ pub fn run() {
         .manage(screenshot::ScreenshotState::default())
         .setup(|app| {
             register_screenshot_shortcut(app.handle());
+            // Retire the old HTTP account before bundled settings can be
+            // merged; this also removes its URL-scoped Keyring refresh cookie.
+            if let Err(error) = newapi::retire_legacy_managed_session() {
+                eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
+            }
             let registered_projects =
                 projects::registered_projects(app.state::<projects::ProjectState>().inner())
                     .map(|(projects, _)| projects)
@@ -713,6 +719,9 @@ pub fn run() {
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
                 }
+            }
+            if let Err(error) = newapi::retire_legacy_managed_session() {
+                eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
             }
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
@@ -973,8 +982,6 @@ pub fn run() {
             newapi::newapi_send_verification,
             newapi::newapi_models,
             newapi::newapi_bootstrap,
-            newapi::newapi_groups,
-            newapi::newapi_update_group,
             newapi::newapi_usage_logs,
             profile::profile_stats,
             work_task::commands::work_task_list,

@@ -1,6 +1,7 @@
 import type { Language } from "../store";
 import type { ConfigView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
+import { LEGACY_MANAGED_NEWAPI_BASE_URL, MANAGED_NEWAPI_BASE_URL, isLegacyManagedNewApiUrl } from "../managedNewApi";
 
 export interface PresetOption {
   label: string;
@@ -18,7 +19,7 @@ interface ProviderMeta {
   baseUrls?: PresetOption[];
 }
 
-export const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
+export const MANAGED_MODEL_SERVER_BASE_URL = MANAGED_NEWAPI_BASE_URL;
 
 export const EXECUTOR_MODELS: PresetOption[] = [
   { label: "Claude Opus 4.7", value: "claude-opus-4-7", hintKey: "anthropic" },
@@ -58,7 +59,9 @@ export const OPENAI_COMPAT_URLS: PresetOption[] = [
   // Label is a language-agnostic fallback; PresetTextInput swaps it for
   // `copy.managedModelServerLabel` when rendering (this URL always matches
   // `isManagedModelServerUrl`).
-  { label: "", value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`, copyKey: "managedModelServer" },
+  ...(MANAGED_MODEL_SERVER_BASE_URL
+    ? [{ label: "", value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`, copyKey: "managedModelServer" as const }]
+    : []),
   { label: "OpenAI", value: "https://api.openai.com/v1" },
   { label: "MiniMax", value: "https://api.minimaxi.com/v1" },
   { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai" },
@@ -206,13 +209,10 @@ export function detectProtocol(url: string): string {
 }
 
 export function isManagedModelServerUrl(value: string | null | undefined): boolean {
-  const normalized = (value ?? "")
-    .trim()
-    .replace(/\/+$/, "")
-    .replace(/^https?:\/\//i, "")
-    .toLowerCase();
-  return normalized === "106.53.28.124:18080"
-    || normalized === "106.53.28.124:18080/v1";
+  if (isLegacyManagedNewApiUrl(value)) return true;
+  const normalized = (value ?? "").trim().replace(/\/+$/, "").toLowerCase();
+  const managed = MANAGED_MODEL_SERVER_BASE_URL.toLowerCase();
+  return !!managed && (normalized === managed || normalized === `${managed}/v1`);
 }
 
 export function displayServerValue(value: string, language: Language): string {
@@ -220,7 +220,11 @@ export function displayServerValue(value: string, language: Language): string {
 }
 
 export function hideManagedServerAddress(value: string, language: Language): string {
-  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, SETTINGS_COPY[language].providers.managedModelServerLabel);
+  const escaped = [MANAGED_MODEL_SERVER_BASE_URL, LEGACY_MANAGED_NEWAPI_BASE_URL]
+    .filter(Boolean)
+    .map((base) => base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (escaped.length === 0) return value;
+  return value.replace(new RegExp(`(?:${escaped.join("|")})(?:/v1)?`, "gi"), SETTINGS_COPY[language].providers.managedModelServerLabel);
 }
 
 export function suggestModels(url: string): string[] {
