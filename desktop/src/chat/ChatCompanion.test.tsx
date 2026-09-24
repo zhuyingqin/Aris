@@ -29,4 +29,10 @@ describe("Chat companion theme contract", () => {
       /:root\[data-theme="light"\] \.chat-root\s*{[^}]*--chat-sidebar-bg:\s*#f8fafc;/s,
     );
   });
+
+  it("keeps the send button high-contrast on hover in light theme instead of turning white", () => {
+    expect(appStyles).toMatch(
+      /:root\[data-theme="light"\] \.chat-send-btn:hover:not\(:disabled\)\s*{[^}]*background:\s*#111827;[^}]*color:\s*#ffffff;/s,
+    );
+  });
 });

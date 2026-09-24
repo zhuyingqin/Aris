@@ -1,4 +1,9 @@
 import type { Language } from "../store";
+import type {
+  PptMasterCheck,
+  PptMasterError,
+  PptMasterErrorCode,
+} from "../types";
 
 export const EXTENSIONS_COPY: Record<Language, {
   title: string;
@@ -30,6 +35,29 @@ export const EXTENSIONS_COPY: Record<Language, {
   skillsHeading: string;
   skillsSubtitle: string;
   noSkillsFound: string;
+  managedSkillsHeading: string;
+  managedSkillsSubtitle: string;
+  pptMasterDescription: string;
+  openPptPreview: string;
+  installPptMaster: string;
+  updatePptMaster: string;
+  repairPptMaster: string;
+  removePptMaster: string;
+  installingPptMaster: string;
+  removingPptMaster: string;
+  pptMasterReady: string;
+  pptMasterNeedsRepair: string;
+  pptMasterUnmanaged: string;
+  pptMasterVersion: (version: string) => string;
+  removePptMasterConfirm: string;
+  /** One sentence per backend error code. Kept exhaustive by the Rust test
+   *  `installer_error_codes_are_exhaustive`. */
+  pptMasterErrors: Record<PptMasterErrorCode, (params: Record<string, string>) => string>;
+  pptMasterChecks: Record<string, string>;
+  pptMasterEvidence: string;
+  pptMasterFixOpenUrl: string;
+  pptMasterFixRevealPath: string;
+  pptMasterFixRetry: string;
   argumentHintPrefix: (hint: string) => string;
   view: string;
   skillDetailsAria: string;
@@ -119,6 +147,57 @@ export const EXTENSIONS_COPY: Record<Language, {
     skillsHeading: "技能",
     skillsSubtitle: "点击一个技能查看说明、路径和完整 SKILL.md。",
     noSkillsFound: "未发现可用技能",
+    managedSkillsHeading: "受管技能",
+    managedSkillsSubtitle: "由 SomniQ 固定版本、隔离运行时并显式管理更新。",
+    pptMasterDescription: "生成、重构和编辑原生可修改的 PPTX，并提供 SVG 逐页预览。",
+    openPptPreview: "幻灯片预览",
+    installPptMaster: "安装",
+    updatePptMaster: "更新",
+    repairPptMaster: "修复运行时",
+    removePptMaster: "卸载",
+    installingPptMaster: "正在安装依赖…",
+    removingPptMaster: "正在卸载…",
+    pptMasterReady: "Skill 与独立 Python 环境已就绪",
+    pptMasterNeedsRepair: "Python 环境不完整",
+    pptMasterUnmanaged: "检测到同名本地 Skill，SomniQ 不会覆盖",
+    pptMasterVersion: (version) => `固定版本 v${version}`,
+    removePptMasterConfirm: "卸载 SomniQ 管理的 PPT Master 及其独立 Python 环境？",
+    pptMasterErrors: {
+      unmanaged: (p) => `检测到来自其他来源的 ppt-master 技能（${p.path ?? "路径未知"}），SomniQ 不会覆盖或删除它。请先移走它再安装。`,
+      pythonMissing: (p) => `找不到 Python 解释器（在 PATH 中查找 ${p.command ?? "python"}）。安装 Python 后重试，或用 SOMNIQ_PYTHON 环境变量指定路径。`,
+      venvFailed: (p) =>
+        p.reason === "silentlyIncomplete"
+          ? `Python 报告创建成功，但独立环境不完整——${p.path ?? ""} 不存在。`
+          : "创建独立 Python 环境失败。",
+      dependenciesFailed: () =>
+        "安装 Python 依赖失败（pip install -r requirements.txt）。常见原因是网络不通或缺少编译工具链。",
+      attributionFailed: () => "上游的署名与执行门禁校验未通过，安装包可能不完整或被改动过。",
+      downloadFailed: () => "下载固定版本的发布包失败，请检查网络后重试。",
+      checksumMismatch: (p) =>
+        `发布包校验和不匹配：期望 ${p.expected ?? ""}，实际 ${p.actual ?? ""}。上游产物可能已变动，重试无法解决。`,
+      archiveRejected: (p) => {
+        if (p.reason === "size") return `发布包超过安装器的大小上限（${p.limitMb ?? ""} MB）。`;
+        if (p.reason === "extractedSize") return `解压后的文件超过安装器的大小上限（${p.limitMb ?? ""} MB）。`;
+        if (p.reason === "fileCount") return `发布包内文件数超过上限（${p.limit ?? ""}）。`;
+        if (p.reason === "symlink") return "发布包内含符号链接，安装器拒绝解压。";
+        if (p.reason === "unsafePath") return "发布包内含越界路径，安装器拒绝解压。";
+        return "发布包未通过安装器的安全检查。";
+      },
+      packageIncomplete: (p) =>
+        p.missing === "identity"
+          ? `安装包的身份信息与固定清单不符（期望版本 ${p.expectedVersion ?? ""}）。`
+          : `安装包缺少 ${p.missing ?? "必需文件"}。`,
+      filesystemFailed: (p) => `文件操作失败（${p.operation ?? ""}）：${p.path ?? ""}`,
+      notReady: (p) => `安装流程未报错，但结果仍不可用（状态：${p.state ?? "未知"}）。`,
+    },
+    pptMasterChecks: {
+      python: "Python 解释器",
+      skillSlot: "技能安装位置",
+    },
+    pptMasterEvidence: "原始输出",
+    pptMasterFixOpenUrl: "前往下载",
+    pptMasterFixRevealPath: "在文件管理器中打开",
+    pptMasterFixRetry: "重试",
     argumentHintPrefix: (hint) => `参数：${hint}`,
     view: "查看",
     skillDetailsAria: "技能详情",
@@ -209,6 +288,57 @@ export const EXTENSIONS_COPY: Record<Language, {
     skillsHeading: "Skills",
     skillsSubtitle: "Click a skill to view its description, path, and full SKILL.md.",
     noSkillsFound: "No skills found",
+    managedSkillsHeading: "Managed skills",
+    managedSkillsSubtitle: "Pinned versions, isolated runtimes, and explicit updates managed by SomniQ.",
+    pptMasterDescription: "Generate, reconstruct, and edit native editable PPTX decks with per-slide SVG previews.",
+    openPptPreview: "Slide preview",
+    installPptMaster: "Install",
+    updatePptMaster: "Update",
+    repairPptMaster: "Repair runtime",
+    removePptMaster: "Uninstall",
+    installingPptMaster: "Installing dependencies…",
+    removingPptMaster: "Uninstalling…",
+    pptMasterReady: "Skill and private Python environment are ready",
+    pptMasterNeedsRepair: "Python environment is incomplete",
+    pptMasterUnmanaged: "A same-name local Skill exists; SomniQ will not overwrite it",
+    pptMasterVersion: (version) => `Pinned version v${version}`,
+    removePptMasterConfirm: "Uninstall the SomniQ-managed PPT Master Skill and its private Python environment?",
+    pptMasterErrors: {
+      unmanaged: (p) => `A ppt-master Skill from another source is active (${p.path ?? "unknown path"}). SomniQ will not overwrite or remove it — move it aside first.`,
+      pythonMissing: (p) => `No Python interpreter found (looked for ${p.command ?? "python"} on PATH). Install Python and retry, or point SOMNIQ_PYTHON at one.`,
+      venvFailed: (p) =>
+        p.reason === "silentlyIncomplete"
+          ? `Python reported success but the private environment is incomplete — ${p.path ?? ""} does not exist.`
+          : "Could not create the private Python environment.",
+      dependenciesFailed: () =>
+        "Installing the Python dependencies failed (pip install -r requirements.txt). Usually a network problem or a missing build toolchain.",
+      attributionFailed: () => "The upstream attribution and execution-gate check failed; the package may be incomplete or modified.",
+      downloadFailed: () => "Could not download the pinned release. Check the network and retry.",
+      checksumMismatch: (p) =>
+        `Release checksum mismatch: expected ${p.expected ?? ""}, received ${p.actual ?? ""}. The upstream artifact changed; retrying will not help.`,
+      archiveRejected: (p) => {
+        if (p.reason === "size") return `The release archive exceeds the installer size limit (${p.limitMb ?? ""} MB).`;
+        if (p.reason === "extractedSize") return `The extracted files exceed the installer size limit (${p.limitMb ?? ""} MB).`;
+        if (p.reason === "fileCount") return `The archive holds more files than the installer allows (${p.limit ?? ""}).`;
+        if (p.reason === "symlink") return "The archive contains a symbolic link; the installer refused to extract it.";
+        if (p.reason === "unsafePath") return "The archive contains an out-of-tree path; the installer refused to extract it.";
+        return "The archive failed the installer's safety checks.";
+      },
+      packageIncomplete: (p) =>
+        p.missing === "identity"
+          ? `The package identity does not match the pinned manifest (expected version ${p.expectedVersion ?? ""}).`
+          : `The package is missing ${p.missing ?? "a required file"}.`,
+      filesystemFailed: (p) => `A file operation failed (${p.operation ?? ""}): ${p.path ?? ""}`,
+      notReady: (p) => `Every step reported success, but the result is still unusable (state: ${p.state ?? "unknown"}).`,
+    },
+    pptMasterChecks: {
+      python: "Python interpreter",
+      skillSlot: "Skill install location",
+    },
+    pptMasterEvidence: "Raw output",
+    pptMasterFixOpenUrl: "Open download page",
+    pptMasterFixRevealPath: "Show in file manager",
+    pptMasterFixRetry: "Retry",
     argumentHintPrefix: (hint) => `Args: ${hint}`,
     view: "View",
     skillDetailsAria: "Skill details",
@@ -270,3 +400,61 @@ export const EXTENSIONS_COPY: Record<Language, {
     },
   },
 };
+
+type ExtensionsCopyTable = (typeof EXTENSIONS_COPY)[Language];
+
+/**
+ * Recover the structured error from a Tauri rejection.
+ *
+ * `invoke` rejects with whatever the command's error type serialized to, so a
+ * `PptMasterError` arrives as a plain object. Callers used to run the rejection
+ * through `String(error)`, which turns that object into `"[object Object]"` —
+ * strictly worse than the English string it replaced. This narrows instead.
+ */
+export function asPptMasterError(error: unknown): PptMasterError | null {
+  if (typeof error !== "object" || error === null) return null;
+  const candidate = error as Partial<PptMasterError>;
+  if (typeof candidate.code !== "string") return null;
+  return {
+    code: candidate.code,
+    params: candidate.params ?? {},
+    detail: typeof candidate.detail === "string" ? candidate.detail : "",
+    fix: candidate.fix ?? null,
+  };
+}
+
+/**
+ * Localized sentence for an installer failure.
+ *
+ * An unknown code cannot happen while the Rust test
+ * `installer_error_codes_are_exhaustive` and this table agree, but a stale
+ * frontend against a newer backend still degrades to the raw evidence rather
+ * than to an empty toast.
+ */
+export function pptMasterErrorText(
+  error: PptMasterError,
+  copy: ExtensionsCopyTable,
+): string {
+  const render = copy.pptMasterErrors[error.code];
+  if (!render) return error.detail || error.code;
+  return render(error.params);
+}
+
+/** Label for the one action a failure offers, or `null` when it offers none. */
+export function pptMasterFixLabel(
+  error: Pick<PptMasterError, "fix">,
+  copy: ExtensionsCopyTable,
+): string | null {
+  if (!error.fix) return null;
+  if (error.fix.kind === "openUrl") return copy.pptMasterFixOpenUrl;
+  if (error.fix.kind === "revealPath") return copy.pptMasterFixRevealPath;
+  return copy.pptMasterFixRetry;
+}
+
+/** Localized label for a preflight check row. */
+export function pptMasterCheckLabel(
+  check: PptMasterCheck,
+  copy: ExtensionsCopyTable,
+): string {
+  return copy.pptMasterChecks[check.id] ?? check.id;
+}

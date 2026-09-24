@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use runtime::{clear_oauth_credentials, save_oauth_credentials, OAuthConfig};
 
 use crate::client::{
-    anthropic_betas_for_model, now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
+    anthropic_betas_for_model, apply_opencode_session_header, is_opencode_base_url,
+    now_unix_timestamp, oauth_token_is_expired, resolve_saved_oauth_token,
     resolve_startup_auth_source, AnthropicClient, AuthSource, OAuthTokenSet,
 };
 use crate::types::{ContentBlockDelta, MessageRequest};
@@ -40,6 +41,60 @@ fn sample_oauth_config(token_url: String) -> OAuthConfig {
         manual_redirect_url: Some("https://console.test/oauth/callback".to_string()),
         scopes: vec!["org:read".to_string(), "user:write".to_string()],
     }
+}
+
+#[test]
+fn opencode_session_header_is_scoped_to_opencode_hosts() {
+    assert!(is_opencode_base_url("https://opencode.ai/zen/go/v1"));
+    assert!(is_opencode_base_url("https://api.opencode.ai/v1"));
+    assert!(!is_opencode_base_url("https://opencode.ai.example/v1"));
+    assert!(!is_opencode_base_url("https://example.com/v1"));
+
+    let client = reqwest::Client::new();
+    let opencode = apply_opencode_session_header(
+        client.post("https://opencode.ai/zen/go/v1/responses"),
+        "https://opencode.ai/zen/go/v1",
+        Some("chat-stable-123"),
+    )
+    .build()
+    .expect("OpenCode request");
+    assert_eq!(
+        opencode
+            .headers()
+            .get(super::OPENCODE_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("chat-stable-123")
+    );
+
+    let other = apply_opencode_session_header(
+        client.post("https://example.com/v1/messages"),
+        "https://example.com/v1",
+        Some("chat-stable-123"),
+    )
+    .build()
+    .expect("non-OpenCode request");
+    assert!(other
+        .headers()
+        .get(super::OPENCODE_SESSION_HEADER)
+        .is_none());
+}
+
+#[test]
+fn opencode_session_header_safely_encodes_custom_session_ids() {
+    let request = apply_opencode_session_header(
+        reqwest::Client::new().post("https://opencode.ai/zen/go/v1/responses"),
+        "https://opencode.ai/zen/go/v1",
+        Some("研究会话\ninvalid-header"),
+    )
+    .build()
+    .expect("unsafe custom session IDs should be normalized");
+    let value = request
+        .headers()
+        .get(super::OPENCODE_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .expect("routing header");
+    assert!(value.starts_with("aris-"));
+    assert_eq!(value.len(), 21);
 }
 
 fn spawn_token_server(response_body: &'static str) -> String {
@@ -314,8 +369,9 @@ fn current_one_million_token_models_do_not_request_a_legacy_context_beta() {
             "{model} has a default 1M context window and must not request the retired beta"
         );
     }
-    assert!(!anthropic_betas_for_model("claude-haiku-4-5-20251001")
-        .contains(&"context-1m-2025-08-07"));
+    assert!(
+        !anthropic_betas_for_model("claude-haiku-4-5-20251001").contains(&"context-1m-2025-08-07")
+    );
 }
 
 #[test]

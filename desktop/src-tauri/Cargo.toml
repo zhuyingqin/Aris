@@ -49,7 +49,6 @@ urlencoding = "2"
 native-tls = "0.2"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 postgres-native-tls = "0.5"
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 # Coordination kernel + session/skills primitives + chat engine building
 # blocks — reused as libraries, no business logic duplicated.
 tools = { path = "../../crates/tools" }
@@ -81,6 +80,15 @@ regex = "1.12.3"
 async-trait = "0.1"
 # `aris-devserver` only. Optional so the shipped app never builds an HTTP stack.
 axum = { version = "0.8", optional = true }
+
+# Win32 calls behind `#[cfg(windows)]`: the stray-console guard and taskbar
+# icon (`lib.rs`), `ReplaceFileW` (`mail/atomic_file.rs`), and the Chromium
+# profile-lock probe (`oracle_web.rs`). Declared per-target rather than in
+# `[dependencies]` so a non-Windows host can resolve and build this crate at
+# all — an unconditional `windows-sys` fails to compile everywhere else, which
+# would block any future Linux/container build of the desktop backend.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # Hosts the AppCtx-ported commands over loopback HTTP for browser-based

@@ -2970,6 +2970,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
             helper_report.as_ref(),
             active_skill_dir.as_deref(),
         );
+        let prompt = inject_managed_skill_runtime(&prompt, skill_path.parent());
         return Ok(SkillOutput {
             skill: input.skill,
             path: forward_slash(&skill_path.display().to_string()),
@@ -3137,6 +3138,54 @@ fn inject_resolver_preamble(
     preamble.push_str("\n---\n\n");
     preamble.push_str(prompt);
     preamble
+}
+
+/// Apply host-owned execution settings for a managed filesystem Skill without
+/// modifying its upstream `SKILL.md`.  Installers may place this small manifest
+/// beside the Skill to select an isolated Python and an auditable artifact
+/// root.  An invalid manifest is ignored; the Skill remains ordinary local
+/// user content rather than gaining partially trusted host instructions.
+fn inject_managed_skill_runtime(prompt: &str, skill_dir: Option<&std::path::Path>) -> String {
+    let Some(skill_dir) = skill_dir else {
+        return prompt.to_string();
+    };
+    let Ok(raw) = std::fs::read_to_string(skill_dir.join(".somniq-runtime.json")) else {
+        return prompt.to_string();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return prompt.to_string();
+    };
+    let Some(python) = manifest.get("python").and_then(serde_json::Value::as_str) else {
+        return prompt.to_string();
+    };
+    let Some(artifact_root) = manifest
+        .get("artifactRoot")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return prompt.to_string();
+    };
+    if python.trim().is_empty()
+        || artifact_root.trim().is_empty()
+        || python.chars().any(char::is_control)
+        || artifact_root.chars().any(char::is_control)
+    {
+        return prompt.to_string();
+    }
+
+    let python_path = std::path::PathBuf::from(python);
+    let python = forward_slash(python);
+    let runtime_state = if python_path.is_file() {
+        format!(
+            "Use `{python}` as the exact interpreter for every Python command in this Skill, including commands written as `python3` or `python`."
+        )
+    } else {
+        format!(
+            "The required managed interpreter `{python}` is missing. Stop before running this Skill and ask the user to repair it from Extensions > Skills."
+        )
+    };
+    format!(
+        "# SomniQ managed Skill runtime\n\n{runtime_state}\nCreate all new working projects and exported artifacts under `<project_root>/{artifact_root}/<run-id>/` unless the user explicitly selected another project-local destination. Keep the upstream integrity checks, phase gates, and attribution requirements unchanged.\n\n---\n\n{prompt}"
+    )
 }
 
 fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {

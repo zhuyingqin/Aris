@@ -770,6 +770,17 @@ fn paired_remote_runtime_uses_desktop_execution_with_a_safe_mobile_mirror() {
 }
 
 #[test]
+fn work_task_runtime_streams_into_an_open_read_only_transcript() {
+    let work_task = ChatTurnRuntime::WorkTask(WorkTaskRuntimeContext {
+        worktree: PathBuf::from("worktree"),
+    });
+
+    assert_eq!(work_task.event_delivery(), ChatEventDelivery::Desktop);
+    assert!(work_task.emits_desktop_chat_events());
+    assert_eq!(work_task.surface(), "Work task");
+}
+
+#[test]
 fn remote_chat_target_requires_a_project_and_valid_session_id() {
     assert_eq!(
         validate_remote_chat_target("", "desktop-chat"),

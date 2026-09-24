@@ -5455,6 +5455,40 @@ pub async fn run_background_prompt(
     .await
 }
 
+/// Run one unattended work-task turn inside the task's own git worktree.
+///
+/// The single entry point the work-task engine uses. Unlike
+/// [`run_background_prompt`] it redirects the workspace and swaps the blocking
+/// permission prompt for an immediate decision, which together are what let an
+/// autonomous turn write files without either hanging or touching the user's
+/// checkout.
+pub(crate) async fn run_work_task_turn(
+    app: AppHandle,
+    session_id: String,
+    project_id: String,
+    worktree: PathBuf,
+    prompt: String,
+    model_override: Option<String>,
+    cancellation: Arc<AtomicBool>,
+) -> Result<String, String> {
+    let state_app = app.clone();
+    let state = state_app.state::<ChatState>();
+    run_chat_turn_with_context(
+        app.clone(),
+        state.inner(),
+        session_id,
+        ConversationMessage::user_text(prompt),
+        model_override,
+        Some(project_id),
+        false,
+        false,
+        ChatTurnRuntime::WorkTask(WorkTaskRuntimeContext { worktree }),
+        false,
+        Some(cancellation),
+    )
+    .await
+}
+
 /// Runs one turn inside a workflow-owned persistent Chat session.  This is the
 /// only entry point Workflow uses for executor reasoning and user discussion;
 /// it selects the restricted runtime rather than the ordinary desktop Chat
@@ -5656,10 +5690,31 @@ enum ChatTurnRuntime {
     /// drove by typing into the workflow's Chat is an ordinary Chat turn that
     /// happens to be bound to this session.
     Workflow(WorkflowRuntimeContext),
+    /// A board work task, running unattended in its own git worktree.
+    ///
+    /// The opposite trade from an autonomous workflow action: that one has no
+    /// user to answer a permission prompt and so runs read-only, while a work
+    /// task must be able to write.  It buys that with containment instead of
+    /// with a prompt — the turn runs inside a throwaway checkout on a throwaway
+    /// branch, and [`crate::work_task::permission::WorktreePermissionPrompter`]
+    /// decides immediately rather than blocking on a human who is not there.
+    WorkTask(WorkTaskRuntimeContext),
+}
+
+/// Everything a work-task turn needs that an ordinary Chat turn does not.
+#[derive(Clone)]
+pub(crate) struct WorkTaskRuntimeContext {
+    /// The task's isolated checkout. Replaces the project directory as the
+    /// turn's workspace, so every tool call resolves against it.
+    pub(crate) worktree: PathBuf,
 }
 
 impl ChatTurnRuntime {
     fn emits_desktop_chat_events(&self) -> bool {
+        // Background workflow turns are projected by their own controller.
+        // Work-task transcripts, however, can be opened while the task is
+        // running, so they use the ordinary desktop stream as a live read-only
+        // view. Listeners safely ignore events for sessions that are not open.
         !matches!(
             self,
             Self::Workflow(WorkflowRuntimeContext {
@@ -5685,6 +5740,9 @@ impl ChatTurnRuntime {
             // cannot help with the problem that stalled the run.
             Self::Workflow(workflow) if workflow.background => (&[], false),
             Self::Workflow(_) => (DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, true),
+            // A task is asked to do real work, so it gets Chat's registry. The
+            // narrowing that keeps it safe is the worktree, not the tool list.
+            Self::WorkTask(_) => (DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, true),
         }
     }
 
@@ -5708,6 +5766,7 @@ impl ChatTurnRuntime {
             Self::RemoteApproved => ChatEventDelivery::DesktopAndRemote,
             Self::Workflow(workflow) if workflow.background => ChatEventDelivery::Workflow,
             Self::Workflow(_) => ChatEventDelivery::Desktop,
+            Self::WorkTask(_) => ChatEventDelivery::Desktop,
         }
     }
 
@@ -5721,13 +5780,23 @@ impl ChatTurnRuntime {
             Self::RemoteApproved => "Paired mobile",
             Self::Workflow(workflow) if workflow.background => "Review workflow Executor",
             Self::Workflow(_) => "Review workflow discussion",
+            Self::WorkTask(_) => "Work task",
         }
     }
 
     fn workflow(&self) -> Option<&WorkflowRuntimeContext> {
         match self {
             Self::Workflow(workflow) => Some(workflow),
-            Self::Desktop { .. } | Self::RemoteApproved => None,
+            Self::Desktop { .. } | Self::RemoteApproved | Self::WorkTask(_) => None,
+        }
+    }
+
+    /// The task's isolated checkout, when this turn belongs to one. Drives both
+    /// the workspace override and the choice of permission prompter.
+    fn work_task(&self) -> Option<&WorkTaskRuntimeContext> {
+        match self {
+            Self::WorkTask(task) => Some(task),
+            Self::Desktop { .. } | Self::RemoteApproved | Self::Workflow(_) => None,
         }
     }
 }
@@ -7240,6 +7309,7 @@ async fn run_chat_turn_with_context(
 ) -> Result<String, String> {
     let turn_started = std::time::Instant::now();
     let emit_desktop_chat_events = turn_runtime.emits_desktop_chat_events();
+    let work_task_runtime = turn_runtime.work_task().cloned();
     let workflow_runtime = turn_runtime.workflow().cloned();
     let workflow_mode = workflow_runtime.is_some();
     // "Bound to a workflow session" and "started by the controller" are
@@ -7601,9 +7671,18 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
-    let worker_workspace = project_binding
+    // A work task's workspace is its own checkout, not the project directory.
+    // Taking priority here rather than at the binding is deliberate: the task
+    // still belongs to its project for session storage and model settings, and
+    // only tool execution is redirected.
+    let worker_workspace = work_task_runtime
         .as_ref()
-        .map(|binding| binding.workspace.clone())
+        .map(|task| task.worktree.clone())
+        .or_else(|| {
+            project_binding
+                .as_ref()
+                .map(|binding| binding.workspace.clone())
+        })
         .or_else(|| {
             workflow_runtime
                 .as_ref()
@@ -7628,6 +7707,7 @@ async fn run_chat_turn_with_context(
     let capture_project_id = worker_project_id.clone();
     let capture_user_text = worker_user_text.clone();
     let capture_workspace = worker_workspace.clone();
+    let worker_work_task = work_task_runtime.clone();
     let worker_project_context =
         match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
             Ok(context) => context,
@@ -7919,14 +7999,38 @@ async fn run_chat_turn_with_context(
             }
         });
         emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
-        let mut permission_prompter = DesktopPermissionPrompter {
+        // `DesktopPermissionPrompter` blocks until a human answers. A work task
+        // was queued by someone who then walked away, so it gets the prompter
+        // that decides on the spot; the worktree is what makes that safe.
+        let mut task_prompter = worker_work_task.as_ref().map(|task| {
+            crate::work_task::permission::WorktreePermissionPrompter::new(
+                task.worktree.to_string_lossy().to_string(),
+            )
+        });
+        let mut desktop_prompter = task_prompter.is_none().then(|| DesktopPermissionPrompter {
             app: worker_app.clone(),
             session_id: worker_session_id.clone(),
             prompts: permission_prompts,
             cancelled: worker_cancelled.clone(),
-        };
+        });
+        // `run_turn_message` takes `&mut dyn` and is called again on the
+        // independent-review revision path below, so this is a macro rather
+        // than a binding: each use re-borrows whichever of the two prompters
+        // this turn built, instead of moving it into the first call.
+        macro_rules! permission_prompter {
+            () => {
+                task_prompter
+                    .as_mut()
+                    .map(|prompter| prompter as &mut dyn runtime::PermissionPrompter)
+                    .or_else(|| {
+                        desktop_prompter
+                            .as_mut()
+                            .map(|prompter| prompter as &mut dyn runtime::PermissionPrompter)
+                    })
+            };
+        }
         let review_user_anchor = user_message.clone();
-        let summary_result = runtime.run_turn_message(user_message, Some(&mut permission_prompter));
+        let summary_result = runtime.run_turn_message(user_message, permission_prompter!());
         let summary = match summary_result {
             Ok(summary) => summary,
             Err(error) => {
@@ -8087,7 +8191,7 @@ async fn run_chat_turn_with_context(
                 );
                 let revision_summary = match runtime.run_turn_message(
                     revision_prompt(&review, review_revision_count),
-                    Some(&mut permission_prompter),
+                    permission_prompter!(),
                 ) {
                     Ok(summary) => summary,
                     Err(error) => {

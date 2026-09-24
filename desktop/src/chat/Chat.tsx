@@ -17,12 +17,17 @@ import {
   chatTasksGet,
   chatUiTurnLoad,
   computePeersList,
+  gitBranchCreate,
+  gitBranchSwitch,
+  gitInitialize,
   isTauri,
   onComputePeerEvent,
+  onWorkTaskChanged,
   remoteAgentSessionOpen,
   remoteAgentSessionCreate,
   remoteAgentSessions,
   remoteAgentWorkspace,
+  workTaskList,
 } from "../api/tauri";
 import {
   useStore,
@@ -38,7 +43,12 @@ import type {
   RemoteAgentSessions,
   RemoteAgentTranscript,
   RemoteAgentWorkspace,
+  WorkTask,
 } from "../types";
+import { publishGitWorkspaceStatus } from "../git/workspaceStatusEvents";
+import { TASKS_COPY } from "../tasks/i18n";
+
+const Tasks = lazy(() => import("../tasks/Tasks"));
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
@@ -282,6 +292,34 @@ function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHan
   // into the composer. A real user draft is always left untouched.
   if (!session.draft.trim() || session.draft === previousSnapshot) return handoff.draft;
   return session.draft;
+}
+
+function workTaskStatusDescription(task: WorkTask | null, language: Language): string {
+  if (!task) return language === "cn" ? "正在读取任务状态…" : "Loading task status...";
+  if (language === "cn") {
+    switch (task.status) {
+      case "todo": return "任务尚未开始。";
+      case "queued": return "任务正在排队，等待执行名额。";
+      case "preparing": return "正在准备独立工作树。";
+      case "running": return "任务正在后台继续执行，会话内容会实时更新。";
+      case "review": return "执行已完成，等待你确认并决定是否合并。";
+      case "merging": return "正在将确认的改动合并到当前分支。";
+      case "done": return "任务已完成并合并。";
+      case "failed": return task.lastError ? `执行已停止：${task.lastError}` : "执行失败，已停止自动推进。";
+      case "canceled": return "任务已停止。";
+    }
+  }
+  switch (task.status) {
+    case "todo": return "The task has not started.";
+    case "queued": return "The task is queued and waiting for an execution slot.";
+    case "preparing": return "Preparing the isolated worktree.";
+    case "running": return "The task is continuing in the background; this transcript updates live.";
+    case "review": return "Execution finished and is waiting for your confirmation before merge.";
+    case "merging": return "Merging the confirmed changes into the current branch.";
+    case "done": return "The task is complete and merged.";
+    case "failed": return task.lastError ? `Execution stopped: ${task.lastError}` : "Execution failed and stopped.";
+    case "canceled": return "The task has been stopped.";
+  }
 }
 
 /**
@@ -707,6 +745,39 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     switchProject,
   ]);
 
+  const openWorkTaskSession = useCallback((task: WorkTask) => {
+    if (!currentProject) return;
+    if (!task.sessionId) return;
+    setCurrentId(task.sessionId);
+    if (!allSessions.some((session) => session.id === task.sessionId)) {
+      restoreSession({
+        id: task.sessionId,
+        projectId: currentProject.id,
+        title: task.title,
+        ownerKind: "work_task",
+        turns: [],
+        draft: "",
+        draftAttachments: [],
+        pinned: false,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      });
+    }
+    setTab("chat");
+  }, [currentProject, restoreSession, setCurrentId, setTab]);
+
+  const initializeGitWorkspace = useCallback(async () => {
+    publishGitWorkspaceStatus(await gitInitialize());
+  }, []);
+
+  const switchGitBranch = useCallback(async (branch: string) => {
+    publishGitWorkspaceStatus(await gitBranchSwitch(branch));
+  }, []);
+
+  const createGitBranch = useCallback(async (branch: string) => {
+    publishGitWorkspaceStatus(await gitBranchCreate(branch));
+  }, []);
+
   const selectRemoteProject = useCallback((nodeId: string, projectId: string) => (
     changeAgentTarget(remoteAgentHistoryTargetValue(nodeId, projectId))
   ), [changeAgentTarget]);
@@ -1040,6 +1111,36 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     currentSession?.ownerKind === "review_workflow"
     || currentSession?.workflowContextKey?.startsWith("review-workflow:"),
   );
+  const workTaskSession = Boolean(
+    (currentSession ?? allSessions.find((session) => session.id === currentId))?.ownerKind === "work_task",
+  );
+  const [currentWorkTask, setCurrentWorkTask] = useState<WorkTask | null>(null);
+  useEffect(() => {
+    if (!isTauri() || !workTaskSession || !currentProject) {
+      setCurrentWorkTask(null);
+      return;
+    }
+    let active = true;
+    const refresh = async () => {
+      try {
+        const tasks = await workTaskList();
+        if (active) setCurrentWorkTask(tasks.find((task) => task.sessionId === currentId) ?? null);
+      } catch {
+        // The transcript remains readable if the board store is temporarily
+        // unavailable; the next task event or fallback poll retries it.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 3_000);
+    const unlisten = onWorkTaskChanged((event) => {
+      if (event.projectId === currentProject.id) void refresh();
+    });
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      void unlisten.then((stop) => stop());
+    };
+  }, [currentId, currentProject, workTaskSession]);
   const { editingTurnId, focusComposer, setEditingTurnId } = composer;
   const { status, activeModel } = run;
   // Remote phone turns are rendered from the encrypted bridge rather than the
@@ -1081,6 +1182,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   useEffect(() => {
     const wasBusy = wasChatBusyRef.current;
     wasChatBusyRef.current = currentChatBusy;
+    if (wasBusy && !currentChatBusy) void projectBrief.refresh();
     if (!wasBusy || currentChatBusy || workflowFileChanges.length === 0) return;
     setSideFileReloadGenerations((current) => {
       let changed = false;
@@ -1094,7 +1196,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       }
       return changed ? next : current;
     });
-  }, [currentChatBusy, currentProject?.path, sideTaskTabs, workflowFileChanges]);
+  }, [currentChatBusy, currentProject?.path, projectBrief.refresh, sideTaskTabs, workflowFileChanges]);
 
   const workflowFileChangeSummary = useMemo(
     () => fileChangeSummaryFromTurns(turns),
@@ -1344,21 +1446,25 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         busy={projectBusy}
         sessionsHydrated={sessionsHydrated}
         onClose={() => sessionCtl.setSidebarOpen(false)}
-        onNew={async (projectId) => {
+        onNew={async (projectId, prompt = "") => {
           setSidebarWorkspaceNodeId(null);
           composer.setEditingTurnId(null);
-          if (tab === "scheduled") setTab("chat");
+          if (tab !== "chat") setTab("chat");
+          let createdSessionId: string;
           if (!projectId || projectId === currentProject?.id) {
-            setCurrentId(newSession());
+            createdSessionId = newSession();
+            setCurrentId(createdSessionId);
           } else {
             try {
               await switchProject(projectId);
               const fresh = createSessionInProject(projectId);
-              setCurrentId(fresh.id);
+              createdSessionId = fresh.id;
+              setCurrentId(createdSessionId);
             } catch {
               return;
             }
           }
+          if (prompt.trim()) setDraft(createdSessionId, prompt.trim());
           sessionCtl.setSidebarOpen(false);
         }}
         onOpen={async (id) => {
@@ -1372,7 +1478,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             }
           }
           composer.setEditingTurnId(null);
-          if (tab === "scheduled") setTab("chat");
+          if (tab !== "chat") setTab("chat");
           setCurrentId(id);
           sessionCtl.setSidebarOpen(false);
         }}
@@ -1542,6 +1648,10 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         )}
         {tab === "scheduled" ? (
           <ScheduledTasks />
+        ) : tab === "tasks" ? (
+          <Suspense fallback={<div className="tasks-empty"><span className="app-loading-spinner" /></div>}>
+            <Tasks onOpenSession={openWorkTaskSession} />
+          </Suspense>
         ) : (
           <>
         <ChatThread
@@ -1550,7 +1660,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           language={language}
           turns={turns}
           loading={currentSessionLoading}
-          composerHeight={composer.composerHeight}
+          composerHeight={workTaskSession ? 64 : composer.composerHeight}
           starters={starters}
           welcomeTitle={welcomeCopy.title}
           welcomeDescription={welcomeCopy.description}
@@ -1576,7 +1686,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             todos={workflowTodos}
             fileChanges={workflowFileChanges}
             fileChangeSummary={workflowFileChangeSummary}
-            bottomOffset={composer.composerHeight + 14}
+            bottomOffset={(workTaskSession ? 68 : composer.composerHeight) + 14}
             active={currentChatBusy}
             onOpenFile={openWorkflowFile}
           />
@@ -1592,6 +1702,39 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             }}
           />
         )}
+        {workTaskSession ? (
+          <div className="chat-input-wrap work-task-chat-wrap">
+            <div
+              className={`work-task-chat-notice${currentWorkTask ? ` work-task-chat-notice-${currentWorkTask.status}` : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              <div className="work-task-chat-state">
+                <span className="work-task-chat-dot" aria-hidden="true">
+                  <i />
+                </span>
+                <div className="work-task-chat-texts">
+                  <div className="work-task-chat-title">
+                    <strong>{language === "cn" ? "任务状态：" : "Task status: "}</strong>
+                    <span className="work-task-chat-badge">
+                      {currentWorkTask ? TASKS_COPY[language].statuses[currentWorkTask.status] : (language === "cn" ? "读取中" : "Loading")}
+                    </span>
+                  </div>
+                  <small className="work-task-chat-desc">{workTaskStatusDescription(currentWorkTask, language)}</small>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="work-task-chat-back-btn"
+                onClick={() => setTab("tasks")}
+                aria-label={language === "cn" ? "返回待办任务" : "Back to To-dos"}
+              >
+                <SvgIcon name="chevronLeft" size={13} />
+                <span>{language === "cn" ? "返回待办任务" : "Back to To-dos"}</span>
+              </button>
+            </div>
+          </div>
+        ) : (
         <ChatComposer
           input={composer.input}
           commands={commands.desktopCommands}
@@ -1623,11 +1766,18 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
           attachmentsEnabled={!currentSession?.remoteAgent && !workflowSession}
+          gitWorkspace={!currentSession?.remoteAgent && currentProject ? projectBrief.repository : undefined}
+          onOpenGit={addCodeReview}
+          onRefreshGit={async () => { await projectBrief.refresh(); }}
+          onInitializeGit={initializeGitWorkspace}
+          onSwitchGitBranch={switchGitBranch}
+          onCreateGitBranch={createGitBranch}
           onSubmit={submitComposer}
           onStop={stopComposer}
           onCancelEdit={cancelEdit}
           onHeightChange={composer.setComposerHeight}
         />
+        )}
           </>
         )}
       </main>
