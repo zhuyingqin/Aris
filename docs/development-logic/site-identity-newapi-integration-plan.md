@@ -1,8 +1,10 @@
 # SomniQ 独立账号与 New API 集成方案
 
-日期：2026-09-23。状态：设计提案，尚未实施或部署。
+日期：2026-09-23。状态：第一阶段已开始实施；生产账号尚未切换。实现与验收范围见 [阶段记录](site-identity-phase1.md)。
 
 用户已明确目标：SomniQ 拥有独立账号体系；New API 作为算力、额度和用量服务，并可持续跟进 GitHub 上游更新。
+
+后续用户已确认 Go ¥29/月、Plus ¥49/月、Pro ¥99/月，由官网管理员配置模型。实现范围与后续阶段见[会员档位与模型权限后续方案](site-membership-model-access-plan.md)。
 
 ## 目标与验收标准
 
@@ -28,7 +30,7 @@
 | `site/src/components/AuthModal.tsx`、`site/README.md` | 协议接受目前是前端校验；后端同意记录仍待实现 | 同意记录应归 SomniQ 账号服务 |
 | `site/src/autoRenew.ts`、`site/README.md` | 前端存在续费接口约定，仓库未提供完整签约、订单与支付回调服务 | 账号分离不能被当作支付接入已完成 |
 
-本次核查范围是当前工作树与公开上游源码。没有登录生产服务器；实际运行的 New API 镜像、版本、数据库、已有 fork 差异和线上 Nginx 配置仍需在实施第一步盘点。仓库部署模板不能证明线上状态。
+设计核查覆盖工作树与公开上游源码。实施开始后另做了生产只读盘点：New API 当前为 `calciumion/new-api:v1.0.0-rc.39`，配合 PostgreSQL 15 与 Redis 8；实际镜像 digest 记录在 `deploy/newapi/version.lock.json`。未变更生产容器、配置或数据。数据库恢复与版本升级演练尚未完成，仓库部署模板不能替代线上验收。
 
 ## 推荐结构
 

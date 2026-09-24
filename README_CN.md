@@ -412,8 +412,8 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 
 | 路径 | 作用 |
 |------|------|
-| `site/server/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
-| `site/remote/` | 手机远程 PWA（React + Vite）|
+| [SomniQ-Site: site/server](https://github.com/zhuyingqin/SomniQ-Site/tree/main/site/server) | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
+| [SomniQ-Site: site/remote](https://github.com/zhuyingqin/SomniQ-Site/tree/main/site/remote) | 手机远程 PWA（React + Vite）|
 
 > **设计铁律：** 产品外壳绝不 spawn 或解析另一个外壳——每个外壳都以库调用方式直接进入同一份共享 runtime。
 > 参见 [shell-runtime-architecture.md](docs/development-logic/shell-runtime-architecture.md)。
