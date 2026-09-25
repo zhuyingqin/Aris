@@ -1,16 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  fileReveal,
   isTauri,
   mcpConfigGet,
   mcpConfigSet,
   mcpConfigTest,
+  openExternalUrl,
+  pptMasterInstall,
+  pptMasterStatus,
+  pptMasterUninstall,
   skillView,
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import OracleWebSettings from "../settings/OracleWebSettings";
-import { EXTENSIONS_COPY } from "./i18n";
+import {
+  EXTENSIONS_COPY,
+  asPptMasterError,
+  pptMasterErrorText,
+  pptMasterFixLabel,
+} from "./i18n";
+import PptMasterPreview from "./PptMasterPreview";
 import type {
   McpConfigView,
   ManagedMcpServerSummary,
@@ -18,6 +29,9 @@ import type {
   McpPresetSummary,
   McpStdioServerInput,
   McpTestResult,
+  PptMasterError,
+  PptMasterFix,
+  PptMasterStatus,
   SkillMeta,
 } from "../types";
 
@@ -90,19 +104,19 @@ function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
       id: "codex",
       name: "Codex",
       description: copy.catalog.codexDescription,
-      icon: "graph",
+      icon: "openai",
     },
     {
       id: "claude",
       name: "Claude Code",
       description: copy.catalog.claudeDescription,
-      icon: "sparkle",
+      icon: "claude",
     },
     {
       id: "playwright",
       name: "Playwright",
       description: copy.catalog.playwrightDescription,
-      icon: "externalLink",
+      icon: "playwright",
     },
   ];
 }
@@ -127,7 +141,15 @@ export default function Extensions() {
   // Skills state
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
+  const [skillSearch, setSkillSearch] = useState("");
   const [skillContent, setSkillContent] = useState("");
+  const [pptMaster, setPptMaster] = useState<PptMasterStatus | null>(null);
+  const [pptMasterAction, setPptMasterAction] = useState<"install" | "remove" | null>(null);
+  // Rendered inline on the PPT Master card rather than through `setError`: the
+  // failure belongs to one row, and the shared banner cannot host the
+  // remediation button a structured error carries.
+  const [pptMasterFailure, setPptMasterFailure] = useState<PptMasterError | null>(null);
+  const [pptPreviewOpen, setPptPreviewOpen] = useState(false);
 
   const isNew = selectedKey === NEW_KEY;
 
@@ -148,23 +170,26 @@ export default function Extensions() {
       })
       .catch((error) => setError(String(error)));
     skillsList().then(setSkills).catch((error) => setError(String(error)));
+    pptMasterStatus().then(setPptMaster).catch((error) => setError(String(error)));
   }, [currentProject?.id, setError]);
 
   // ── Skill content lazy-load ──────────────────────────────────────────────────
+  const activeSkillName = selectedSkill ?? (skills.length > 0 ? skills[0].name : null);
+
   useEffect(() => {
-    if (!selectedSkill) {
+    if (!activeSkillName) {
       setSkillContent("");
       return;
     }
     let cancelled = false;
     setSkillContent(copy.loadingSkillContent);
-    skillView(selectedSkill)
+    skillView(activeSkillName)
       .then((value) => !cancelled && setSkillContent(value))
       .catch((error) => !cancelled && setSkillContent(`Error: ${error}`));
     return () => {
       cancelled = true;
     };
-  }, [selectedSkill]);
+  }, [activeSkillName, copy.loadingSkillContent]);
 
   const servers = useMemo<DisplayMcpServer[]>(
     () => view ? [...view.mergedServers, ...view.managedServers] : [],
@@ -277,6 +302,58 @@ export default function Extensions() {
     }
   };
 
+  // A `PptMasterError` rejection is an object; `String(error)` would render it
+  // as "[object Object]". Narrow first, and only fall back to the shared error
+  // banner for rejections that are not ours (a transport failure, say).
+  const reportPptMasterFailure = (error: unknown) => {
+    const structured = asPptMasterError(error);
+    if (structured) setPptMasterFailure(structured);
+    else setError(String(error));
+  };
+
+  const installManagedPptMaster = async () => {
+    setPptMasterAction("install");
+    setPptMasterFailure(null);
+    try {
+      const status = await pptMasterInstall();
+      setPptMaster(status);
+      setSkills(await skillsList());
+      setSelectedSkill("ppt-master");
+    } catch (error) {
+      reportPptMasterFailure(error);
+      setPptMaster(await pptMasterStatus().catch(() => pptMaster));
+    } finally {
+      setPptMasterAction(null);
+    }
+  };
+
+  const removeManagedPptMaster = async () => {
+    if (!window.confirm(copy.removePptMasterConfirm)) return;
+    setPptMasterAction("remove");
+    setPptMasterFailure(null);
+    try {
+      const status = await pptMasterUninstall();
+      setPptMaster(status);
+      setSkills(await skillsList());
+      if (selectedSkill === "ppt-master") setSelectedSkill(null);
+    } catch (error) {
+      reportPptMasterFailure(error);
+      setPptMaster(await pptMasterStatus().catch(() => pptMaster));
+    } finally {
+      setPptMasterAction(null);
+    }
+  };
+
+  const runPptMasterFix = async (fix: PptMasterFix) => {
+    try {
+      if (fix.kind === "retry") await installManagedPptMaster();
+      else if (fix.kind === "openUrl") await openExternalUrl(fix.url);
+      else await fileReveal(fix.path);
+    } catch (error) {
+      setError(String(error));
+    }
+  };
+
   const showForm = isNew || (selectedGlobalServer !== null && draft !== null);
 
   const shownConnected = servers;
@@ -285,10 +362,20 @@ export default function Extensions() {
     () => new Map((view?.presets ?? []).map((preset) => [preset.id, preset])),
     [view?.presets],
   );
-  const shownSkills = skills;
+  const shownSkills = useMemo(() => {
+    if (!skillSearch.trim()) return skills;
+    const q = skillSearch.toLowerCase().trim();
+    return skills.filter(
+      (skill) =>
+        skill.name.toLowerCase().includes(q)
+        || (skill.description && skill.description.toLowerCase().includes(q))
+        || (skill.argument_hint && skill.argument_hint.toLowerCase().includes(q)),
+    );
+  }, [skills, skillSearch]);
+
   const selectedSkillMeta = useMemo(
-    () => (selectedSkill ? skills.find((skill) => skill.name === selectedSkill) ?? null : null),
-    [selectedSkill, skills],
+    () => (activeSkillName ? skills.find((skill) => skill.name === activeSkillName) ?? null : null),
+    [activeSkillName, skills],
   );
   const draftDirty = useMemo(() => {
     if (!draft) return false;
@@ -372,16 +459,7 @@ export default function Extensions() {
             <>
               <section className="ext-section">
                 <div className="ext-section-head">
-                  <div>
-                    <h2>{copy.configuredHeading}</h2>
-                    <p className="ext-section-sub">{copy.configuredSubtitle}</p>
-                  </div>
-                  <span className="ext-section-count">{servers.length}</span>
-                </div>
-                <div className="ext-config-path" title={view.configPath}>
-                  <SvgIcon name="code" size={13} />
-                  <span>{copy.globalConfigPath}</span>
-                  <code>{view.configPath}</code>
+                  <h2>{copy.configuredHeading}</h2>
                 </div>
                 {shownConnected.length === 0 ? (
                   <div className="ext-empty">{copy.noConnectedPlugins}</div>
@@ -427,23 +505,22 @@ export default function Extensions() {
                       const added = configuredNames.has(item.id);
                       const preset = presetById.get(item.id);
                       return (
-                        <div className="ext-card" key={item.id}>
-                          <span className="ext-card-icon" aria-hidden="true">
-                            <SvgIcon name={item.icon} size={19} />
+                        <div
+                          className={`ext-card ext-card-${item.id}`}
+                          key={item.id}
+                          title={[preset?.message, preset?.installPath].filter(Boolean).join("\n")}
+                        >
+                          <span className={`ext-card-icon ext-card-icon-${item.id}`} aria-hidden="true">
+                            <SvgIcon name={item.icon} size={22} />
                           </span>
                           <div className="ext-card-copy">
-                            <strong>{item.name}</strong>
+                            <div className="ext-card-title">
+                              <strong>{item.name}</strong>
+                              <span className={`ext-preset-availability ${preset?.available ? "available" : "unavailable"}`}>
+                                {preset?.available ? copy.available : copy.unavailable}
+                              </span>
+                            </div>
                             <span>{item.description}</span>
-                            <span className={`ext-preset-availability ${preset?.available ? "available" : "unavailable"}`} title={preset?.message}>
-                              {preset?.available ? copy.available : copy.unavailable}
-                              {preset?.message ? ` · ${preset.message}` : ""}
-                            </span>
-                            {preset?.installPath && (
-                              <div className="ext-preset-path" title={preset.installPath}>
-                                <span>{copy.bundledInstallPath}</span>
-                                <code>{preset.installPath}</code>
-                              </div>
-                            )}
                           </div>
                           <button
                             type="button"
@@ -451,7 +528,19 @@ export default function Extensions() {
                             disabled={added || saving || !preset?.available}
                             onClick={() => void addCatalog(item, preset)}
                           >
-                            {added ? copy.added : preset?.available ? copy.add : copy.unavailable}
+                            {added ? (
+                              <>
+                                <SvgIcon name="check" size={13} />
+                                {copy.added}
+                              </>
+                            ) : preset?.available ? (
+                              <>
+                                <SvgIcon name="plus" size={13} />
+                                {copy.add}
+                              </>
+                            ) : (
+                              copy.unavailable
+                            )}
                           </button>
                         </div>
                       );
@@ -463,6 +552,100 @@ export default function Extensions() {
           )
         ) : (
           <section className="ext-section ext-skills-section">
+            <div className="ext-managed-skills">
+              <div className="ext-section-head">
+                <div>
+                  <h2>{copy.managedSkillsHeading}</h2>
+                  <p className="ext-section-sub">{copy.managedSkillsSubtitle}</p>
+                </div>
+              </div>
+              <div className="ext-card ext-managed-skill-card">
+                <span className="ext-card-icon ext-card-icon-managed" aria-hidden="true">
+                  <SvgIcon name="sparkle" size={20} />
+                </span>
+                <div className="ext-card-copy">
+                  <div className="ext-managed-skill-title-row">
+                    <strong>PPT Master</strong>
+                    <span className={`ext-managed-skill-pill ${pptMaster?.status === "ready" ? "ready" : "normal"}`}>
+                      {pptMaster ? copy.pptMasterVersion(pptMaster.availableVersion) : copy.loadingMcp}
+                      {pptMaster?.status === "ready" ? ` · ${copy.pptMasterReady}` : ""}
+                      {pptMaster?.status === "broken" ? ` · ${copy.pptMasterNeedsRepair}` : ""}
+                      {pptMaster?.status === "unmanaged" ? ` · ${copy.pptMasterUnmanaged}` : ""}
+                    </span>
+                  </div>
+                  <span className="ext-managed-skill-desc">{copy.pptMasterDescription}</span>
+                  {pptMaster?.skillPath && (
+                    <div className="ext-managed-skill-path-row">
+                      <span>{copy.pathLabel}</span>
+                      <code title={pptMaster.skillPath}>{pptMaster.skillPath}</code>
+                    </div>
+                  )}
+                  {pptMasterFailure && (
+                    <div className="ext-managed-skill-failure" role="alert">
+                      <p className="ext-managed-skill-failure-text">
+                        {pptMasterErrorText(pptMasterFailure, copy)}
+                      </p>
+                      {/* Untranslated subprocess output, folded away. It is
+                          evidence for a bug report, not the explanation — the
+                          sentence above already carries that. */}
+                      {pptMasterFailure.detail && (
+                        <details className="ext-managed-skill-failure-detail">
+                          <summary>{copy.pptMasterEvidence}</summary>
+                          <pre>{pptMasterFailure.detail}</pre>
+                        </details>
+                      )}
+                      {pptMasterFailure.fix && (
+                        <button
+                          type="button"
+                          className="ext-secondary-btn"
+                          disabled={pptMasterAction !== null}
+                          onClick={() => void runPptMasterFix(pptMasterFailure.fix as PptMasterFix)}
+                        >
+                          {pptMasterFixLabel(pptMasterFailure, copy)}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="ext-managed-skill-actions">
+                  <button
+                    type="button"
+                    className="ext-secondary-btn"
+                    onClick={() => setPptPreviewOpen(true)}
+                  >
+                    <SvgIcon name="image" size={14} />
+                    {copy.openPptPreview}
+                  </button>
+                  {pptMaster?.managed && pptMaster.installed && (
+                    <button
+                      type="button"
+                      className="ext-remove-btn"
+                      disabled={pptMasterAction !== null}
+                      onClick={() => void removeManagedPptMaster()}
+                    >
+                      {pptMasterAction === "remove" ? copy.removingPptMaster : copy.removePptMaster}
+                    </button>
+                  )}
+                  {pptMaster?.installSupported && pptMaster.status !== "ready" && (
+                    <button
+                      type="button"
+                      className="ext-primary-btn"
+                      disabled={pptMasterAction !== null}
+                      onClick={() => void installManagedPptMaster()}
+                    >
+                      {pptMasterAction === "install"
+                        ? copy.installingPptMaster
+                        : pptMaster.status === "updateAvailable"
+                          ? copy.updatePptMaster
+                          : pptMaster.status === "broken"
+                            ? copy.repairPptMaster
+                            : copy.installPptMaster}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <div className="ext-section-head">
               <div>
                 <h2>{copy.skillsHeading}</h2>
@@ -470,39 +653,67 @@ export default function Extensions() {
               </div>
               <span className="ext-section-count">{skills.length}</span>
             </div>
-            {shownSkills.length === 0 ? (
+
+            {skills.length === 0 ? (
               <div className="ext-empty">{copy.noSkillsFound}</div>
             ) : (
               <div className="ext-skills-layout">
-                <div className="ext-catalog ext-skills-list" role="list">
-                  {shownSkills.map((skill) => (
-                    <button
-                      type="button"
-                      className={`ext-card ext-card-btn ext-skill-card${
-                        selectedSkill === skill.name ? " active" : ""
-                      }`}
-                      key={skill.name}
-                      onClick={() => setSelectedSkill(skill.name)}
-                      aria-pressed={selectedSkill === skill.name}
-                    >
-                      <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
-                        <SvgIcon name="code" size={18} />
-                      </span>
-                      <div className="ext-card-copy">
-                        <strong>/{skill.name}</strong>
-                        {skill.description && <span>{skill.description}</span>}
-                        {skill.argument_hint && (
-                          <span className="ext-card-muted">
-                            {copy.argumentHintPrefix(skill.argument_hint)}
-                          </span>
-                        )}
+                <div className="ext-skills-sidebar">
+                  <div className="ext-skills-search-bar">
+                    <SvgIcon name="search" size={14} />
+                    <input
+                      type="text"
+                      value={skillSearch}
+                      onChange={(e) => setSkillSearch(e.target.value)}
+                      placeholder={language === "cn" ? `搜索 ${skills.length} 个技能...` : `Search ${skills.length} skills...`}
+                    />
+                    {skillSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setSkillSearch("")}
+                        className="ext-skills-search-clear"
+                        aria-label="clear"
+                      >
+                        <SvgIcon name="close" size={12} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="ext-skills-list" role="list">
+                    {shownSkills.length === 0 ? (
+                      <div className="ext-empty" style={{ padding: "20px 12px" }}>
+                        {language === "cn" ? "未找到匹配技能" : "No matching skills"}
                       </div>
-                      <span className="ext-card-stack">
-                        <span className="ext-card-tag">{skillSourceLabel(skill, copy)}</span>
-                        <span className="ext-card-action">{copy.view}</span>
-                      </span>
-                    </button>
-                  ))}
+                    ) : (
+                      shownSkills.map((skill) => (
+                        <button
+                          type="button"
+                          className={`ext-card-btn ext-skill-card${
+                            activeSkillName === skill.name ? " active" : ""
+                          }`}
+                          key={skill.name}
+                          onClick={() => setSelectedSkill(skill.name)}
+                          aria-pressed={activeSkillName === skill.name}
+                        >
+                          <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
+                            <SvgIcon name="code" size={15} />
+                          </span>
+                          <div className="ext-card-copy">
+                            <div className="ext-skill-card-top">
+                              <strong>/{skill.name}</strong>
+                              <span className="ext-card-tag">{skillSourceLabel(skill, copy)}</span>
+                            </div>
+                            {skill.description && <span>{skill.description}</span>}
+                            {skill.argument_hint && (
+                              <span className="ext-card-muted">
+                                {copy.argumentHintPrefix(skill.argument_hint)}
+                              </span>
+                            )}
+                          </div>
+                          <SvgIcon name="chevronRight" size={13} className="ext-skill-chevron" />
+                        </button>
+                      ))
+                    )}
+                  </div>
                 </div>
 
                 {selectedSkillMeta ? (
@@ -542,6 +753,7 @@ export default function Extensions() {
                   </aside>
                 ) : (
                   <aside className="ext-skill-placeholder" aria-label={copy.skillDetailsAria}>
+                    <SvgIcon name="code" size={28} className="ext-skill-placeholder-icon" />
                     <strong>{copy.selectASkill}</strong>
                     <span>{copy.selectSkillHint}</span>
                   </aside>
@@ -704,6 +916,8 @@ export default function Extensions() {
           </aside>
         </>
       )}
+
+      {pptPreviewOpen && <PptMasterPreview onClose={() => setPptPreviewOpen(false)} />}
 
     </div>
   );

@@ -27,6 +27,7 @@ import {
 import { SvgIcon } from "../SvgIcon";
 import { useStore, type Language } from "../store";
 import { highlightReviewLine } from "./reviewSyntax";
+import { publishGitWorkspaceStatus } from "./workspaceStatusEvents";
 import "./GitWorkspace.css";
 
 type DiffMode = "working" | "staged";
@@ -621,6 +622,7 @@ export default function GitWorkspace({ embedded = false }: { embedded?: boolean 
 
   const acceptSnapshot = useCallback((next: GitWorkspaceSnapshot) => {
     setSnapshot((current) => sameReviewSnapshot(current, next) ? current : next);
+    publishGitWorkspaceStatus(next);
     setBranchSelection(next.branch ?? "");
     setSelectedPath((current) => {
       // Keep the current selection across refreshes. The merged local ledger

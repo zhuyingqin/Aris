@@ -1,0 +1,64 @@
+% ==== 图 3　执行前阻断判定流程图 ====
+%
+% 框里只写动作名，细节由说明书 [0057]–[0065] 承载。
+% 菱形内手写 \\ 控制断行，不靠自动折行（自动折行会把中文断在词中间）。
+% 三条「否」分支并入 x = 5.6 的竖直通道，通向出口 A。通道取 5.6 是因为
+% 处理框半宽约 4.3、最宽的菱形 S305 半宽约 3.7，都能让开。
+% ====================================
+\begin{tikzpicture}[x=1cm,y=1cm,node distance=6mm]
+
+  \node[pterm] (start) {收到模型生成的一次新的工具调用};
+
+  \node[pdia=2.4, below=of start] (s301)
+    {S301\\ 处于阻断模式？};
+
+  \node[pbox=8.0cm, below=of s301] (s302)
+    {S302\quad 确定连续计数阈值\\ 轮询类工具取其整数倍};
+
+  \node[pdia=2.4, below=of s302] (s303)
+    {S303\\ 连续计数达阈值？};
+
+  \node[pbox=8.0cm, below=of s303] (s304)
+    {S304\quad 取出该调用的调用指纹计数与同结果计数};
+
+  \node[pdia=2.2, below=of s304] (s305)
+    {S305\\ 调用计数与同结果计数\\ 均达各自阈值？};
+
+  \node[pbox=8.0cm, below=of s305] (s306)
+    {S306\quad 合成拒绝结果，标记为失败};
+
+  \node[pbox=8.0cm, below=of s306] (s307)
+    {S307\quad 拒绝结果不计入账本};
+
+  \node[pterm, below=of s307] (exitb) {出口 B：不执行该次调用};
+
+  % ---- 主干 ----
+  \draw[pl] (start) -- (s301);
+  \draw[pl] (s301)  -- (s302);
+  \draw[pl] (s302)  -- (s303);
+  \draw[pl] (s303)  -- (s304);
+  \draw[pl] (s304)  -- (s305);
+  \draw[pl] (s305)  -- (s306);
+  \draw[pl] (s306)  -- (s307);
+  \draw[pl] (s307)  -- (exitb);
+
+  % ---- 出口 A 与三条「否」分支 ----
+  \node[pterm] (exita) at (5.6,0 |- exitb) {出口 A\\ 执行该次调用};
+
+  % 用 -| （先横后纵）直接落到 exita.north。写成 -- (5.6,0 |- exita) --
+  % (exita.north) 会先走到节点**中心**的高度再折回北锚点，等于在框上画了
+  % 一道竖线穿过「出口 A」的文字。
+  \draw[pl]  (s301.east) -| (exita.north);
+  \draw[pll] (s303.east) -- (5.6,0 |- s303);
+  \draw[pll] (s305.east) -- (5.6,0 |- s305);
+
+  \node[plab, anchor=south west] at ($(s301.east)+(0.1,0.02)$) {否};
+  \node[plab, anchor=south west] at ($(s303.east)+(0.1,0.02)$) {否};
+  \node[plab, anchor=south west] at ($(s305.east)+(0.1,0.02)$) {否};
+
+  % ---- 「是」分支 ----
+  \node[plab, anchor=west] at ($(s301.south)!0.5!(s302.north)+(0.12,0)$) {是};
+  \node[plab, anchor=west] at ($(s303.south)!0.5!(s304.north)+(0.12,0)$) {是};
+  \node[plab, anchor=west] at ($(s305.south)!0.5!(s306.north)+(0.12,0)$) {是};
+
+\end{tikzpicture}

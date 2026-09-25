@@ -369,6 +369,7 @@ describe("project chat grouping", () => {
 
   it("migrates legacy chats to the default project", () => {
     expect(migrateSession({ title: "Legacy" }).projectId).toBe("default");
+    expect(migrateSession({ ownerKind: "work_task" }).ownerKind).toBe("work_task");
   });
 
   it("keeps a valid persisted backend context estimate", () => {

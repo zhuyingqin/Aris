@@ -1,0 +1,5 @@
+# 生成产物，由 scripts/ 下的脚本重新生成
+*.pdf
+源程序.html
+源程序-收录清单.txt
+.chrome-profile/

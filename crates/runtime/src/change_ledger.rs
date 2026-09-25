@@ -358,11 +358,21 @@ pub fn compare_and_replace_text_file(
             Err(error) => return Err(error),
         };
         if current.as_deref() != expected {
-            return Err(io::Error::other("review conflict: file changed after verification"));
+            return Err(io::Error::other(
+                "review conflict: file changed after verification",
+            ));
         }
-        if current.as_deref() == desired { return Ok(false); }
-        expected.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
-        desired.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+        if current.as_deref() == desired {
+            return Ok(false);
+        }
+        expected
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(io::Error::other)?;
+        desired
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(io::Error::other)?;
         if let Some(bytes) = desired {
             crate::atomic_file::write_replace_unlocked(path, bytes)?;
         } else {
@@ -370,12 +380,26 @@ pub fn compare_and_replace_text_file(
         }
         Ok(true)
     })?;
-    if !changed { return Ok(false); }
-    let before = expected.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
-    let after = desired.map(std::str::from_utf8).transpose().map_err(io::Error::other)?;
+    if !changed {
+        return Ok(false);
+    }
+    let before = expected
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(io::Error::other)?;
+    let after = desired
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(io::Error::other)?;
     if let Err(error) = record_text_file_change(
-        context, path, FileChangeOperation::Revert, before, after,
-        Vec::new(), String::new(), None,
+        context,
+        path,
+        FileChangeOperation::Revert,
+        before,
+        after,
+        Vec::new(),
+        String::new(),
+        None,
     ) {
         let rollback = crate::atomic_file::with_path_lock(path, || {
             let current = fs::read(path).ok();
@@ -388,7 +412,9 @@ pub fn compare_and_replace_text_file(
                 fs::remove_file(path)
             }
         });
-        return Err(io::Error::other(format!("could not record reviewed write: {error}; rollback: {rollback:?}")));
+        return Err(io::Error::other(format!(
+            "could not record reviewed write: {error}; rollback: {rollback:?}"
+        )));
     }
     Ok(true)
 }
@@ -695,14 +721,20 @@ fn load_snapshot_content(
         .as_ref()
         .ok_or_else(|| io::Error::other("snapshot blob is unavailable"))?;
     if blob_ref.len() != 64 || !blob_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid snapshot blob reference"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid snapshot blob reference",
+        ));
     }
     let path = session_change_dir(ledger_root, session_id)
         .join(BLOBS_DIR_NAME)
         .join(blob_ref);
     let content = fs::read_to_string(path)?;
     if snapshot.content_hash.as_deref() != Some(sha256_hex(content.as_bytes()).as_str()) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "snapshot hash mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "snapshot hash mismatch",
+        ));
     }
     Ok(Some(content))
 }

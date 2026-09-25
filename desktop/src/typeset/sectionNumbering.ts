@@ -194,13 +194,28 @@ export function advanceSectionNumber(
   if (rank === SECTION_RANKS.part) {
     // A part opens a division but resets nothing below it — LaTeX keeps
     // counting chapters straight through, so Part II is followed by Chapter 2.
-    return romanNumeral(state.counters[rank]);
+    return sectionNumberLabel(state, rank, rules);
   }
   for (let deeper = rank + 1; deeper <= MAX_SECTION_RANK; deeper += 1) state.counters[deeper] = 0;
+  return sectionNumberLabel(state, rank, rules);
+}
 
+/**
+ * The number LaTeX currently prints for the counter at `rank`, without stepping
+ * anything. `advanceSectionNumber` formats through it, and theorem numbering
+ * reads it to build the `2.1` in "Theorem 2.1" from the same counter state, so
+ * the two can never disagree about what section the reader is in.
+ */
+export function sectionNumberLabel(
+  state: SectionNumberingState,
+  rank: number,
+  rules: Pick<SectionNumberingRules, "hasParts">,
+): string {
+  const clamped = Math.max(1, Math.min(MAX_SECTION_RANK, rank));
+  if (clamped === SECTION_RANKS.part) return romanNumeral(state.counters[clamped] ?? 0);
   const start = rules.hasParts ? SECTION_RANKS.chapter : SECTION_RANKS.part;
   const digits: number[] = [];
-  for (let scan = Math.min(start, rank); scan <= rank; scan += 1) digits.push(state.counters[scan] ?? 0);
+  for (let scan = Math.min(start, clamped); scan <= clamped; scan += 1) digits.push(state.counters[scan] ?? 0);
   // A document may open with unchaptered front matter, or be an article that
   // never uses the levels above \section. Those counters are still 0, and LaTeX's
   // literal "0.1" is noise in an editor, so the leading zeros are dropped.

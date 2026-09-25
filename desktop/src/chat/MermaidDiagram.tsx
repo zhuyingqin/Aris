@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type Theme } from "../store";
+import { mermaidSizeKey, readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
 type RenderState =
   | { status: "idle"; svg: string; error: string; width: number; height: number }
@@ -266,6 +267,12 @@ export default function MermaidDiagram({
 
   const showSource = sourceOpen || state.status === "error";
   const hasDiagram = Boolean(svg) && state.status === "ready";
+  const sizeKey = useMemo(() => mermaidSizeKey(code), [code]);
+  const reservedHeight = readRenderedHeight(sizeKey);
+
+  useEffect(() => {
+    if (hasDiagram) rememberRenderedHeight(sizeKey, stageHeight);
+  }, [hasDiagram, sizeKey, stageHeight]);
 
   return (
     <div className={`md-mermaid${state.status === "error" ? " has-error" : ""}`}>
@@ -325,7 +332,14 @@ export default function MermaidDiagram({
           </div>
         </div>
       </div>
-      <div className="md-mermaid-canvas" ref={canvasRef}>
+      {/* A diagram is rendered asynchronously and then scaled to fit the column,
+          so the row it sits in measures short and grows twice. Replaying the
+          height this source rendered at last time keeps the transcript still. */}
+      <div
+        className="md-mermaid-canvas"
+        ref={canvasRef}
+        style={reservedHeight && !hasDiagram ? { minHeight: reservedHeight } : undefined}
+      >
         {state.status === "loading" && !svg && (
           <div className="md-mermaid-placeholder">Rendering diagram...</div>
         )}

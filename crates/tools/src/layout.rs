@@ -23,6 +23,19 @@ pub const REPORTS_DIR: &str = "reports";
 pub const LEGACY_NOTEBOOKS_DIR: &str = "experiments";
 pub const EXPERIMENTS_DIR: &str = "experiments";
 pub const RUNS_SUBDIR: &str = "runs";
+/// Staging area for deliverables a work task produces that do not belong to
+/// the project's own files — a report, a deck, an export.
+///
+/// Inside the task's isolated checkout but deliberately never committed: the
+/// contents are copied into SomniQ's managed artifact store when the run
+/// settles, so getting a generated PDF out of a task does not require merging
+/// a commit into the user's repository.
+pub const TASK_OUTPUT_DIR: &str = "task-output";
+
+/// Where a work task writes its standalone deliverables.
+pub fn task_output_dir_at(base: &Path) -> PathBuf {
+    project_data_dir_at(base).join(TASK_OUTPUT_DIR)
+}
 
 pub const ROOT_DISPLAY_ORDER: &[&str] = &[
     SLIDES_DIR,
@@ -146,42 +159,47 @@ pub fn is_noisy_walk_dir(name: &str) -> bool {
 
 pub fn layout_json() -> Value {
     json!({
-        "version": 1,
-        // The rules below are read *after* the call, when the model is about to
-        // choose a path, so the source-code boundary has to travel with them.
-        // Stating it only in the tool description leaves the payload reading as
-        // an unconditional "put generated things here" table.
-        "scope": "Generated research artifacts only. .somniq/ is hidden and usually git-ignored, so source files belonging to the project's own build — modules, components, stylesheets, tests, build and config files — go in the project source tree at their conventional path, never under .somniq/.",
-        "rules": [
+        "version": 2,
+        // This payload is read when the model is choosing a path. Keep the
+        // distinction between user-owned output and application-owned state in
+        // the payload itself; a tool description alone is too easy to lose.
+        "scope": "Path policy for files created in a project workspace. User-facing files belong at their existing path, a conventional visible project path, or a destination explicitly chosen by the user. Never default a paper, report, slide deck, poster, export, or other standalone deliverable to .somniq/.",
+        "outputPolicy": {
+            "projectModification": "Create project-owned source, tests, configuration, documentation, and other build inputs in the visible project tree at their conventional path.",
+            "standaloneDeliverable": "Preserve an explicit user destination. If no destination or clear visible project convention was supplied, ask the user where to export the file before writing it; never use .somniq/ as the default.",
+            "workTaskStaging": format!("Only the work-task runtime may stage standalone deliverables under {PROJECT_DATA_DIR}/task-output/. It imports them into the application-managed library before the turn completes; ordinary chat and other workflows must not use this staging path."),
+            "runtimeData": format!("Application-owned indexes, library attachments, execution records, caches, and temporary intermediates may live under {PROJECT_DATA_DIR}/. They are not the default destination for user-facing files.")
+        },
+        "managedInternalRoots": [
             {
                 "kind": "paper",
                 "directory": format!("{PROJECT_DATA_DIR}/{PAPERS_DIR}"),
-                "description": "LaTeX paper sources, rendered PDFs, and literature-library attachments."
+                "description": "Application-managed literature attachments and legacy paper records; not a destination for a newly requested paper."
             },
             {
                 "kind": "slides",
                 "directory": format!("{PROJECT_DATA_DIR}/{SLIDES_DIR}"),
-                "description": "Slide/PPT/PDF deck sources and rendered deck outputs."
+                "description": "Existing application-managed or legacy slide records; not a default export directory."
             },
             {
                 "kind": "poster",
                 "directory": format!("{PROJECT_DATA_DIR}/{POSTER_DIR}"),
-                "description": "Poster sources and rendered poster outputs."
+                "description": "Existing application-managed or legacy poster records; not a default export directory."
             },
             {
                 "kind": "report",
                 "directory": format!("{PROJECT_DATA_DIR}/{REPORTS_DIR}"),
-                "description": "LaTeX research report sources and rendered PDFs."
+                "description": "Existing application-managed or legacy report records; not a default export directory."
             },
             {
                 "kind": "web",
                 "directory": format!("{PROJECT_DATA_DIR}/{WEB_DIR}/<name>"),
-                "description": "Interactive web apps with index.html plus local CSS/assets."
+                "description": "Existing application-managed or legacy web artifacts; project web applications belong in the visible source tree."
             },
             {
                 "kind": "notebook",
                 "directory": format!("{PROJECT_DATA_DIR}/{NOTEBOOKS_DIR}"),
-                "description": "Source Jupyter notebooks opened and edited by Lab."
+                "description": "Application-managed notebooks opened and edited by Lab."
             },
             {
                 "kind": "run",
@@ -197,7 +215,7 @@ pub fn layout_json() -> Value {
         "legacy": {
             "projectDataDirectory": PROJECT_DATA_DIR,
             "artifactRoots": [PAPERS_DIR, SLIDES_DIR, POSTER_DIR, WEB_DIR, NOTEBOOKS_DIR, REPORTS_DIR, EXPERIMENTS_DIR],
-            "note": "Existing root-level artifact folders remain readable, but newly generated artifacts are stored under .somniq/."
+            "note": "Existing managed and legacy artifact roots remain readable for compatibility. Their presence does not authorize placing newly requested user-facing deliverables under .somniq/."
         }
     })
 }

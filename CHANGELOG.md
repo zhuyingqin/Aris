@@ -1,5 +1,482 @@
 # ARIS-Code Changelog
 
+## v0.4.71 (2026-09-19)
+
+- **Chat transcript virtualisation: scrollbar that does not
+  jump** — `desktop/src/chat/transcriptMetrics.ts` (new) gives
+  every block kind a per-kind height estimate so an unmeasured
+  virtualizer row starts within a line or two of its real
+  height instead of an order of magnitude off. The constants
+  are the rendered chrome of each block:
+  `TURN_CHROME = 48`, `COLLAPSED_TOOL_ROW = 34`,
+  `RUNNING_TOOL_ROW = 120`, `TOOL_IMAGE_BLOCK = 240`,
+  `ATTACHMENT_ROW = 30`, `NOTICE_ROW = 34`, `REVIEW_ROW = 52`,
+  `PERMISSION_CARD = 96`, `COLLAPSED_THINKING_ROW = 32`,
+  `LINE_HEIGHT = 23`, `TEXT_COLUMNS = 92`. The flat-estimate
+  scrollbar is what the reader was seeing as a "jumping
+  scrollbar"; this ships the per-kind table that makes the
+  scrollbar a true reflection of measured + estimated height.
+- **Disclosure state survives virtualisation** —
+  `desktop/src/chat/disclosureState.ts` (new) keeps the
+  expand/collapse state of tool cards, tool groups,
+  permission cards, and the edited-files review in a
+  process-local `Map<blockId, boolean>` bounded to 4 000
+  entries (oldest-first eviction). A virtualized row used to
+  be unmounted once it passed the overscan margin, so
+  scrolling out and back remounted it collapsed — losing the
+  reader's expansion AND shrinking the row's measured height
+  from (say) 1 200px to 200px, yanking everything below it
+  upward. Keyed by block id, so a row remounts at exactly the
+  height it had.
+- **Late-render height cache for images and Mermaid** —
+  `desktop/src/chat/renderSizeCache.ts` (new) records the
+  last-rendered height of content that cannot know its own
+  size until it has rendered once: images (no intrinsic size
+  until the bytes arrive) and Mermaid diagrams (rendered
+  asynchronously, then scaled to fit the column). Replaying
+  the previous height as `min-height` means the row measures
+  its final height on first paint instead of growing into it.
+  Heights depend on the column width — stable within a
+  session, not across window resizes — so a stale value is
+  only ever a starting point. `MermaidDiagram.tsx` is the
+  first consumer; `ChatImagePreview.tsx` ships the matching
+  surface.
+- **`ChatThread.tsx` virtualiser rewrite** —
+  `desktop/src/chat/ChatThread.tsx` (+361 / −) integrates
+  the three modules above into the transcript. The previous
+  flat-estimate scrollbar, the row unmount/remount expand
+  loss, and the image/Mermaid row height re-grow are all
+  resolved at this surface. `tests/ChatThread.test.tsx`
+  (+159) covers the new behaviour.
+- **Chat UI polish** — `desktop/src/chat/ChatMessage.tsx`
+  (+15), `model.ts` (+3), `useChatSessions.ts` (+12),
+  `desktop/src/types.ts` (+8), `styles.css` (+34 / −)
+  carry the small surface fixes the virtualisation pass
+  depends on.
+- **Runtime hardening pass** —
+  `crates/chat/src/lib.rs` + tests, plus
+  `crates/runtime/src/{compact,conversation,focus_trace,lib}.rs`
+  and the matching tests pin the runtime surface the chat
+  rewrite depends on.
+- **Tauri surface wiring** —
+  `desktop/src-tauri/src/{engine,sessions,system_prompt}.rs`
+  and the matching tests (`tests/engine.rs`,
+  `tests/sessions.rs`) wire the IPC + state changes the
+  chat rewrite and runtime hardening expose.
+- **Design doc: TencentDB-Agent-Memory three-layer
+  derivation** — `docs/development-logic/tencentdb-three-layer-derivation.md`
+  (new) is a source-read of
+  `TencentCloud/TencentDB-Agent-Memory` (pinned at
+  `0b7bc097f9`, branch `feat/server_team`, 2026-09-17).
+  The headline finding: it is actually four layers, not
+  three — L0 is the raw JSONL log (no LLM call), and L1/L2/L3
+  are the derived projections. The doc records the L0 →
+  L1 → L2 → L3 pipeline, which hook fires each transition,
+  and which `agent_end` / `context_limit` / `compaction`
+  events drive each layer, all from the upstream source —
+  no deployment, no run, no effect claim.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.71.
+
+## v0.4.70 (2026-09-17)
+
+- **Tauri auto-updater: dual-endpoint China / Global** —
+  `desktop/src-tauri/src/updater.rs` (157 lines, new) wires
+  `tauri_plugin_updater` against two endpoints:
+  `https://somni.chat/releases/latest.json` for the China
+  mirror and
+  `https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json`
+  for Global. The plugin emits `AppUpdateInfo`,
+  `AppUpdateInstallResult`, and `AppUpdateProgress` (the last
+  via `tauri::ipc::Channel` so the desktop can render a live
+  progress bar without polling). `desktop/src-tauri/src/lib.rs`
+  (+3), `engine.rs` (+8), and the matching capability diff in
+  `capabilities/default.json` register the commands and
+  permissions; `desktop/src/api/tauri.ts` (+57) exposes the
+  IPC surface; `App.tsx` (+6), `SvgIcon.tsx` (+49), and
+  `settings/AboutSettings.tsx` (+4) carry the UI hook into
+  the titlebar and the About page.
+- **In-app ImageLightbox (no more OS-default hand-off)** —
+  `desktop/src/ImageLightbox.{tsx,css}` and `imageFiles.ts`
+  (new) keep image previews inside SomniQ with the zoom /
+  100% / fit controls the LaTeX figure preview already
+  offers. The system viewer is demoted to an explicit action;
+  previously every figure, screenshot, or paper supplement
+  launched a separate program on top of the app. Wired into
+  `chat/ChatImagePreview.tsx` (+ tests).
+- **Tool output Tauri command surface** —
+  `desktop/src-tauri/src/tool_output.rs` (+39, new) and
+  `tests/tool_output.rs` (+42, new) are the Tauri command
+  layer over the v0.4.69 `crates/runtime/src/tool_output_artifact.rs`.
+- **Independent review controller hardening** —
+  `desktop/src/chat/useIndependentReview.ts` and its test
+  carry the controller changes the audit
+  `[[project_independent_review_loop_analysis]]` flagged;
+  combined with `crates/runtime/src/retrieval_guard.rs`
+  (plus its test) which now matches the
+  `[[project_retrieval_guard_refusal_contract]]` (counts +
+  clearable, candidate_workflow fail-open, retrieval_role
+  is the sole outbound allowlist).
+- **Runtime paths module + tests** —
+  `crates/runtime/src/paths.rs` (+110, new) and
+  `tests/paths.rs` (+67, new) centralise the runtime path
+  helpers that file_ops, tool_output_artifact, and the
+  evidence ledger all reach for. `crates/runtime/build.rs`
+  (+2) ships the matching build-script wiring.
+- **soft-copyright skill: 中国软件著作权登记材料** —
+  `crates/runtime/assets/skills/soft-copyright/` ships the
+  bundled runtime skill: `SKILL.md` (183) plus
+  `scripts/check-fields.cjs`,
+  `scripts/gen-source-listing.cjs`,
+  `scripts/render-pdf.cjs`, `scripts/verify-pdf.cjs`,
+  `scripts/config.example.json`, two `references/` notes,
+  and an `assets/` HTML form template. The skill produces
+  the 中国版权保护中心 application-form field content
+  (each field already adjusted to the word limit), the
+  60-page source-code listing PDF (first 30 + last 30
+  pages, 50 lines per page), the 60-page user manual PDF,
+  and the inclusion listing. Trigger keywords: 写软著,
+  软件著作权, 软著登记, 申请软著, software copyright
+  registration, 软著材料. The `docs/copyright/` mirror
+  carries the same content for the docs site
+  (`README.md`, scripts, references, plus an `out/.gitignore`
+  so generated PDFs do not get committed).
+- **Patent A1 application materials** —
+  `patent/` lands the A1 evidence-ledger patent dossier in
+  the repo (see `[[project_patent_a1_evidence_ledger]]`):
+  `README.md` (the only authoritative description, LaTeX is
+  the single source of truth per project convention),
+  `PATENT_STATE.json` for `/patent-pipeline` resume,
+  `docs/CNIPA-TEMPLATE.md` reference, the `tex/` sources,
+  the `references/`, and the `output/CNIPA/` build artefacts
+  (权利要求书 / 说明书 / 摘要附图 / 现有技术检索记录 /
+  发明构建书 / 合订本 PDFs plus `build-manifest.json` /
+  `layout-check.json` / `drawings-layout-check.json`).
+- **Extensions page overhaul** —
+  `desktop/src/extensions/Extensions.tsx` (+208 / −),
+  `Extensions.test.tsx` (+6), `i18n.ts` (+17), and
+  `desktop/src/styles.css` (+672) ship the rewritten
+  extensions surface that pairs with the v0.4.68 screenshot
+  subsystem and the v0.4.69 evidence ledger.
+- **Profile / sessions / workflow / usage_log + memory +
+  retrieval_guard hardening** —
+  `desktop/src-tauri/src/profile.rs` (+ tests/profile.rs +
+  tests/usage_log.rs), `sessions.rs`, `workflow.rs`,
+  `memory.rs`, `usage_log.rs` carry the Tauri-side changes
+  that align with the runtime hardening pass. Session +
+  retrieval guard + memory (research_memory + hot_memory +
+  cache tests + session tests) follow.
+- **Literature + Chat runtime polish** —
+  `desktop/src/literature/Literature.tsx` (+ tests), the
+  chat runtime hardening pass (`crates/chat/src/lib.rs`
+  + tests + `useChatRun` and image preview consumers), and
+  the executor tests for OpenAI transport complete the
+  surface.
+- **Site + sync_release** —
+  `site/scripts/sync_release.cjs` (+34) and
+  `site/src/i18n.ts` (+6) carry the matching marketing-site
+  sync and translations.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.70.
+
+## v0.4.69 (2026-09-13)
+
+- **Evidence ledger: per-turn tool-loop novelty tracking** —
+  `crates/runtime/src/evidence_ledger.rs` (new module) tracks
+  whether each tool call returned a *new* observation or another
+  copy of one the turn already has. Tool-call count is not
+  progress: several differently phrased calls can keep
+  returning the same page, status, empty result, or failure.
+  The ledger uses deterministic `sha256` fingerprints of the
+  tool name + arguments + outcome, exposes
+  `EvidenceGuardMode`, and nudges the model after
+  `NO_NEW_EVIDENCE_NUDGE_CALLS = 4` calls without new evidence
+  and blocks after `NO_NEW_EVIDENCE_BLOCK_CALLS = 6`. Polling
+  patterns (3+ identical invocations or 3+ identical outcomes)
+  also block. The ledger never judges whether the evidence is
+  good; it only records whether it is new.
+- **Tool output artifact: project-local persistence for large
+  results** — `crates/runtime/src/tool_output_artifact.rs`
+  (new module) keeps tool outputs above
+  `TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS = 32_000` under
+  `.somniq/tmp/tool-output` keyed by `sha256`, and replaces
+  them in the transcript with a bounded
+  `TOOL_OUTPUT_REFERENCE_PREVIEW_CHARS = 12_000` preview plus
+  the file path the model can read selectively. The transcript
+  stays a working projection; the durable copy lives outside
+  the conversation state so context-window pressure no longer
+  forces the model to lose the page it just spent a turn
+  fetching. `crates/runtime/src/tests/tool_output_artifact.rs`
+  pins the round-trip.
+- **Runtime hardening pass** — `crates/runtime/src/atomic_file.rs`,
+  `bash.rs`, `compact.rs`, `conversation.rs`, `event_sink.rs`,
+  `file_ops.rs`, `focus_trace.rs`, `lib.rs`, `mcp_stdio.rs`,
+  `process_registry.rs`, `tool_outcome.rs` (plus tests for
+  `compact`, `conversation`, `file_ops`, `process_registry`)
+  carry the matching surface fixes the two new modules depend
+  on. `focus_trace.rs` is new wiring that names the production
+  evidence sources the evidence ledger records. The changes
+  are deliberately scoped to the existing module surfaces —
+  no new public API outside `evidence_ledger.rs` and
+  `tool_output_artifact.rs`.
+- **Chat event wire trace + event versioning** —
+  `desktop/src-tauri/src/chat_events.rs` is the rewritten
+  chat event emitter with `EVENT_VERSION = 1`, per-session
+  `EventSeqState` registries (`EVENT_SEQS`, `WIRE_SEQS`),
+  and a rotation policy of `DEFAULT_WIRE_TRACE_ROTATIONS = 3`
+  capped at `MAX_WIRE_TRACE_ROTATIONS = 10` with a
+  `DEFAULT_WIRE_TRACE_MAX_BYTES = 50 MiB` budget and
+  `DEFAULT_WIRE_TRACE_MAX_STRING_CHARS = 64_000`. `engine.rs`,
+  `lib.rs`, `state.rs`, `system_prompt.rs`, and
+  `tests/chat_events.rs` carry the matching wiring.
+- **Typeset visual editor → PDF render-window sync** —
+  `desktop/src/typeset/pdfGeometry.ts` (+14) introduces
+  `stablePdfRenderRange` (retains the pressed page while a
+  drag-scroll expands into later pages; compacts to the visible
+  window once the pointer gesture ends). `PdfPage.tsx` (+26),
+  `TypesetVisualEditor.tsx` (+118), `TypesetPdfPreview.tsx`
+  (+63), and the matching `Typeset.css` rewrite (-21 / re-add)
+  wire the editor ↔ preview sync. `pdfRenderWindow.test.ts`
+  (new) pins the stability contract;
+  `TypesetVisualEditorSync.test.tsx` (new) exercises the
+  CodeMirror transaction path the sync rides on.
+- **OpenAI executor + chat runtime + tools polish** —
+  `crates/executor/src/openai.rs` (+ lib.rs + tests/lib.rs),
+  `crates/chat/src/lib.rs` (+ tests), and
+  `crates/tools/src/lib.rs` (+ tests/lib/{file_ops,misc,skill})
+  carry the small surface fixes the runtime hardening and the
+  evidence ledger depend on.
+- **Design docs** — four new notes under
+  `docs/development-logic/`:
+  `batched-io-browser-acceptance-service-reuse.md`,
+  `dynamic-tool-routing.md`, `evidence-ledger.md`, and
+  `working-context-and-tool-artifacts.md`. `docs/mcp.md`
+  (+21) is the matching MCP integration reference.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.69.
+
+## v0.4.68 (2026-09-12)
+
+- **Global-hotkey region screenshot → chat composer** —
+  `desktop/src-tauri/src/screenshot.rs` (1227 lines) wires
+  `CmdOrCtrl+Shift+A` to a full-monitor capture followed by a
+  borderless overlay webview that shows the just-frozen pixels;
+  the user drags a rectangle and the crop lands in the chat
+  composer as an image attachment via the `chat-screenshot`
+  event. The capture happens *before* the overlay appears, so
+  what the user selects is exactly what was on screen when the
+  hotkey fired and the overlay chrome can never end up inside
+  its own screenshot. The overlay windows are labelled
+  `screenshot-overlay-<index>` and gated by
+  `capabilities/screenshot-overlay.json` /
+  `screenshot-pin.json`; a 2-second `OVERLAY_READY_TIMEOUT`
+  exists so a broken frontend leaves the user an overlay they
+  can Escape rather than an invisible window that swallows the
+  hotkey.
+- **Screenshot UI: overlay + pin + toolbar + annotations** —
+  `desktop/src/screenshot/ScreenshotOverlay.tsx` (717) renders
+  the frozen capture and the selection rect;
+  `ScreenshotPin.tsx` (135) ships the pin surface; the new
+  `ScreenshotToolbar.tsx` (241) carries the crop controls.
+  `desktop/src/screenshot/annotations.ts` (292) and
+  `screenshotSelection.ts` (234) with their tests
+  (`annotations.test.ts`, `screenshotSelection.test.ts`)
+  formalise the geometry primitives; `decodeImage.ts`,
+  `overlayMain.tsx`, `screenshotPreview.ts`, and
+  `usePendingScreenshot.ts` carry the small surfaces the
+  overlay needs. Vite now has two entries (`main` and
+  `overlay`) so the overlay paints without parsing the
+  workspace bundle first.
+- **Work-task overhaul: artifacts module + generation/staging
+  plumbing** — `desktop/src-tauri/src/work_task/artifacts.rs`
+  (398 lines, new) stages standalone deliverables a task
+  produces (reports, decks, exports) inside the task's
+  isolated checkout without committing them; the contents are
+  copied into SomniQ's managed library when the run settles.
+  `commands.rs` (+356), `engine.rs` (+1270), `model.rs`
+  (+634), `store.rs` (+180), `worktree.rs` (+341) carry the
+  matching command surface, ticker, model, store, and
+  worktree lifecycle changes; `tests/work_task.rs` covers the
+  new flow. The 0.4.67 generation race fix (`run_seq`) is
+  preserved end-to-end through the artifacts import.
+- **Tools `layout.rs` v1→v2 path policy** —
+  `crates/tools/src/layout.rs` distinguishes user-facing
+  deliverables from application-owned state in the JSON
+  payload itself (the old `version: 1` flat `rules` table is
+  gone). The new payload has `outputPolicy`
+  (`projectModification`, `standaloneDeliverable`,
+  `workTaskStaging`, `runtimeData`), `managedInternalRoots`
+  with explicit `kind`/`directory`/`policy` entries, and the
+  new `TASK_OUTPUT_DIR = "task-output"` constant + helper
+  `task_output_dir_at(base)`. The model is told never to
+  default a paper/report/slide/poster/export to `.somniq/` —
+  it must either follow a visible project convention, pick an
+  explicit user-supplied destination, or ask.
+- **Typeset visual editor reads `\newtheorem{...}` declarations**
+  — `desktop/src/typeset/theoremEnvironments.ts` (229) and
+  `sectionNumbering.ts` (19) replace the visual editor's
+  hardcoded amsthm list with a parser of
+  `\newtheorem{env}{Heading}[counter]` /
+  `\newtheorem*{env}{Heading}` declarations. Numbers are only
+  emitted for environments whose declaration was actually
+  found; guessing a counter layout for an undeclared
+  `theorem` would print a number the PDF disagrees with.
+  `Typeset.tsx` (+12), `TypesetVisualEditor.tsx` (+52),
+  `visualDecorations.ts` (+189), and
+  `tests/TypesetVisualEditor.test.ts` (+124) pin the new
+  behaviour. Pure functions only: no CodeMirror, no React,
+  no file access in the parser itself.
+- **Chat composer + thread overhaul (image + sidebar)** —
+  `desktop/src/chat/ChatComposer.tsx`,
+  `ChatImagePreview.tsx`, `ChatSidebar.tsx`,
+  `ChatThread.tsx`, `ChatMessage.tsx`, `Chat.tsx`,
+  `chatRunHelpers.ts`, `useChatComposer.ts`, `i18n.ts` and
+  their tests (`Chat.test.tsx`, `ChatComposer.test.tsx`,
+  `ChatImagePreview.test.tsx`, `ChatSidebar.test.tsx`,
+  `ChatThread.test.tsx`, `chatRunHelpers.test.ts`) carry the
+  surface changes the screenshot subsystem needs: image
+  attachments flow from the `chat-screenshot` event through
+  the composer, sidebar reflects the new task dialog state,
+  and the thread renders inline previews.
+- **Task Review Panel** —
+  `desktop/src/tasks/TaskReviewPanel.tsx` (315 lines, new) is
+  the review surface the work-task generation/artifact changes
+  feed into.
+- **Engine + scheduled + system_prompt + codeserver + files
+  surface fixes** — `desktop/src-tauri/src/engine.rs`,
+  `scheduled.rs`, `system_prompt.rs`, `codeserver.rs`,
+  `files.rs`, `lib.rs` and their tests (`tests/engine.rs`,
+  `tests/codeserver.rs`, `tests/files.rs`,
+  `tests/system_prompt.rs`) wire the global-hotkey registration
+  and the screenshot capability surface the desktop Tauri
+  runtime needs. `desktop/src-tauri/capabilities/default.json`
+  is the matching capability diff.
+- **Design docs** —
+  `docs/development-logic/work-task-runtime-implementation-plan.md`
+  is the new design note for the work-task overhaul;
+  `docs/development-logic/vscode-code-tab.md` (+13) pins the
+  vite multi-entry addition.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.68. `Cargo.lock`
+  picks up `xcap` and its transitive deps.
+
+## v0.4.67 (2026-09-10)
+
+- **Work-task engine: generation race fix + worktree isolation** —
+  `desktop/src-tauri/src/work_task/engine.rs` (+261) introduces
+  a `run_seq` per launch that is carried through to the settle:
+  a settle that finds a different `run_seq` on disk writes
+  nothing. This is the whole cancel-race story the v0.4.66 release
+  flagged — a cancel that lands while a turn is finishing bumps
+  the generation, so the completing turn resolves into a no-op
+  instead of dragging a card the user just dropped back into
+  review. `desktop/src-tauri/src/work_task/worktree.rs` (+171)
+  adds the matching Git worktree lifecycle: each task gets its
+  own checkout + branch (`somniq/task/<task-id>`) under
+  `<config>/desktop-runtime/work-trees/<project-id>/<task-id>`,
+  outside the repository, so `git status` in the user's checkout
+  never shows them and the agent can write freely without
+  prompting. `work_task/commands.rs` (+35) and
+  `tests/work_task.rs` (+60) pin the surface; `engine.rs` (+16)
+  on the Tauri side re-exports the new ticker.
+- **OpenAI executor: OpenCode Go routing-session header cache** —
+  `crates/executor/src/openai.rs` (+113) and `tests/openai.rs`
+  (+254) add a static `OnceLock<Mutex<HashSet>>` registry of
+  `(gateway, model)` pairs that need the OpenCode routing
+  `X-Session-Id` header. The registry is populated from
+  OpenCode's explicit `MissingSessionID` response so a generic
+  OpenAI-compatible gateway fronting OpenCode stops failing the
+  first turn of every new client. Only OpenCode's explicit
+  failure is matched — generic 400s mentioning a missing session
+  are ignored so unrelated gateways don't get the header they
+  never asked for.
+- **Build script: comctl32 v6 manifest dependency for `cargo test`**
+  — `desktop/src-tauri/build.rs` (+33) emits
+  `/MANIFESTDEPENDENCY` for `Microsoft.Windows.Common-Controls`
+  6.0.0.0 via `rustc-link-arg` so the desktop test binaries
+  bind against the same comctl32 version the app binary already
+  declares (the v0.4.x test-binary `STATUS_ENTRYPOINT_NOT_FOUND`
+  crash). The flag goes through the catch-all `rustc-link-arg`,
+  not `rustc-link-arg-tests`, so it reaches the lib target in
+  test mode (where `cargo test --lib` links); `rustc-link-arg-tests`
+  would only have reached integration targets.
+- **Chat runtime + API client polish** —
+  `crates/chat/src/lib.rs` (+31), `tests/lib.rs` (+32),
+  `crates/api/src/client.rs` (+15), `lib.rs` (+8),
+  `tests/client.rs` (+21) carry the small surface fixes the
+  work-task engine depends on (turn-id plumbing, IPC params).
+- **Task board UI integration** —
+  `desktop/src/tasks/boardColumns.ts` (+11), `i18n.ts` (+12),
+  and `boardColumns.test.ts` (+8) wire the new work-task
+  statuses (running / settled / dropped) into the board
+  columns; `desktop/src/chat/Chat.tsx` (+4) carries the
+  matching new-task dialog wiring the v0.4.66 chat fix
+  requires.
+- **Version bumps** — `desktop/package.json`,
+  `desktop/src-tauri/tauri.conf.json`, and
+  `desktop/src-tauri/Cargo.toml` move to 0.4.67 (Cargo.toml
+  was previously stranded at 0.4.65).
+
+## v0.4.66 (2026-09-10)
+
+- **Literature progress events become testable** —
+  `desktop/src-tauri/src/literature.rs` introduces a `ProgressSink`
+  enum with `Tauri(AppHandle)` and a `cfg(test)` `Recorder`
+  variant. The streaming command no longer holds an `AppHandle`
+  directly and calls `app.emit`; it goes through the sink so the
+  terminal-phase contract (the failure of which leaves the UI
+  spinning forever on a request that already finished) is
+  reachable from a test. The new `tests/literature.rs` (+236 / −)
+  pins every phase transition: queued, started, per-batch
+  progress, completed, errored, and the reset on `run_id`
+  collisions. A second host (server build serving browsers over
+  WebSocket) becomes a one-variant addition.
+- **Work-task engine + git worktree** — `desktop/src-tauri/src/
+  engine.rs` ships `run_work_task_turn`, the single entry point
+  the work-task engine uses for an unattended turn. Unlike
+  `run_background_prompt` it redirects the workspace and swaps
+  the blocking permission prompt for an immediate decision, so an
+  autonomous turn can write files without hanging or touching the
+  user's checkout. `desktop/src-tauri/src/work_task/worktree.rs`
+  (+147 / −) owns the per-turn workspace + branch lifecycle and
+  the new `git_worktree_pre_rebase_check` guard that fails a
+  turn cleanly when the source branch has moved forward.
+- **API client stream parsing + retry headers** —
+  `crates/api/src/client.rs` (+73) and `crates/api/src/lib.rs`
+  carry the streaming-response parser behind a single
+  `parse_sse_stream` function, and the retry layer reads
+  `Retry-After` / `X-RateLimit-Reset` from the response header
+  set. The new `crates/api/src/tests/client.rs` (+62 / −) pins
+  both paths.
+- **Chat: task dialog + Git workspace panel** —
+  `desktop/src/chat/ChatComposer.tsx` (+211 / −) gains the new
+  work-task dialog (the "new task" entry point the Composer
+  toolbar exposes), wired through a new `gitWorkspace` snapshot.
+  `desktop/src/git/GitWorkspace.tsx` ships the matching panel
+  surface: current branch, upstream, ahead / behind, file-tree
+  root, init / refresh / branch-create / branch-switch.
+- **Knowledge desktop surface** — `desktop/src-tauri/src/
+  knowledge.rs` (+76 / −) carries the knowledge-base query
+  Tauri command + the matching tests (`tests/knowledge.rs`
+  +134). Sits next to the literature surface; both go through
+  the same off-main-thread pool.
+- **Conversation: model retry state surface** —
+  `crates/runtime/src/conversation.rs` (+17 / −) and
+  `crates/executor/src/openai.rs` (+50 / −) carry the per-turn
+  retry state the previous release's `model_retry_event_payload`
+  test now asserts against: phase, attempt, max_attempts,
+  backoff_ms. The payload contract keeps content free.
+- **Skill registry: tests + Zhihu integration** —
+  `crates/tools/src/lib.rs` (+49 /) and the matching
+  `tests/lib/skill.rs` (+51) add the registry's per-skill
+  ability-fallback path (a skill can declare the secondary
+  providers it falls back to when the primary is unavailable)
+  and the Zhihu-language coverage test.
+
 ## v0.4.65 (2026-09-07)
 
 - **macOS PDF reader rendering fix** — PDF canvas rendering no longer fails

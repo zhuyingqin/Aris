@@ -401,11 +401,7 @@ impl ResearchMemoryStore {
         self.drain_outbox_scoped(Some(project_id), limit)
     }
 
-    fn drain_outbox_scoped(
-        &self,
-        project_id: Option<&str>,
-        limit: usize,
-    ) -> Result<usize, String> {
+    fn drain_outbox_scoped(&self, project_id: Option<&str>, limit: usize) -> Result<usize, String> {
         let mut connection = self.open()?;
         let items = load_outbox(&connection, project_id, limit.clamp(1, 100))?;
         let mut completed = 0;
@@ -946,7 +942,9 @@ impl ResearchMemoryStore {
         );
         let mut values = vec![rusqlite::types::Value::from(project_id.to_string())];
         values.extend(atom_ids.iter().cloned().map(rusqlite::types::Value::from));
-        let mut statement = connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(rusqlite::params_from_iter(values), |row| {
                 let kind = row.get::<_, String>(2)?;
@@ -973,10 +971,7 @@ impl ResearchMemoryStore {
             let provenance = row.map_err(|error| error.to_string())?;
             by_id.insert(provenance.atom_id.clone(), provenance);
         }
-        Ok(atom_ids
-            .iter()
-            .filter_map(|id| by_id.remove(id))
-            .collect())
+        Ok(atom_ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
     pub fn dead_letters(
@@ -1007,10 +1002,7 @@ impl ResearchMemoryStore {
 
     /// The terms this project keeps returning to, with how much evidence backs
     /// each. Inspection surface for the derived subject identity.
-    pub fn project_subjects(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<ResearchMemorySubject>, String> {
+    pub fn project_subjects(&self, project_id: &str) -> Result<Vec<ResearchMemorySubject>, String> {
         validate_project(project_id)?;
         let connection = self.open()?;
         list_subjects_conn(&connection, project_id)
@@ -1018,11 +1010,7 @@ impl ResearchMemoryStore {
 
     /// The subject one atom is keyed to, or `None` while no term it mentions
     /// has reached [`SUBJECT_MIN_SESSIONS`].
-    pub fn atom_subject(
-        &self,
-        project_id: &str,
-        atom_id: &str,
-    ) -> Result<Option<String>, String> {
+    pub fn atom_subject(&self, project_id: &str, atom_id: &str) -> Result<Option<String>, String> {
         validate_project(project_id)?;
         let connection = self.open()?;
         connection
@@ -1437,7 +1425,7 @@ fn ensure_outbox_next_attempt_column(connection: &Connection) -> Result<(), Stri
 /// references untouched.
 #[must_use]
 pub fn canonicalize_research_memory_text(workspace: &Path, text: &str) -> String {
-    let Ok(canonical_workspace) = workspace.canonicalize() else {
+    let Ok(canonical_workspace) = crate::canonicalize(workspace) else {
         return text.to_string();
     };
     let mut replacements = Vec::new();
@@ -1448,7 +1436,7 @@ pub fn canonicalize_research_memory_text(workspace: &Path, text: &str) -> String
         } else {
             canonical_workspace.join(path)
         };
-        let Ok(canonical) = candidate.canonicalize() else {
+        let Ok(canonical) = crate::canonicalize(&candidate) else {
             continue;
         };
         let Ok(relative) = canonical.strip_prefix(&canonical_workspace) else {
@@ -2479,10 +2467,7 @@ fn refresh_episode_card(
     members.truncate(EPISODE_MAX_ATOMS);
     let (title_prefix, kind) = episode_title(&members);
     let title_anchor = episode_title_anchor(&members);
-    let title = format!(
-        "{title_prefix} · {}",
-        truncate_chars(&title_anchor, 72)
-    );
+    let title = format!("{title_prefix} · {}", truncate_chars(&title_anchor, 72));
     let atom_ids = members
         .iter()
         .map(|atom| atom.id.clone())
@@ -2923,11 +2908,7 @@ fn recall_atoms_by_subject(
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    map_atoms(
-        &mut statement,
-        rusqlite::params_from_iter(values),
-        false,
-    )
+    map_atoms(&mut statement, rusqlite::params_from_iter(values), false)
 }
 
 fn atom_meets_overlap(
@@ -3018,11 +2999,7 @@ fn recall_atoms_like(
         rusqlite::types::Value::from(i64::try_from(limit).unwrap_or(i64::MAX)),
     ];
     values.extend(terms.iter().map(|term| like_pattern(term).into()));
-    map_atoms(
-        &mut statement,
-        rusqlite::params_from_iter(values),
-        false,
-    )
+    map_atoms(&mut statement, rusqlite::params_from_iter(values), false)
 }
 
 /// Gated card recall; see [`recall_atoms_conn`].
@@ -3196,8 +3173,7 @@ fn like_search_atoms(
     } else {
         "('superseded', 'deleted', 'conflict')"
     };
-    let (matches, relevance) =
-        like_clauses("(recall_text || ' ' || kind)", terms.len(), 3);
+    let (matches, relevance) = like_clauses("(recall_text || ' ' || kind)", terms.len(), 3);
     let sql = format!(
         "SELECT id, project_id, kind, statement, normalized_key, scope,
                 confidence_millis, status, source_session_id, source_event_ids,
@@ -3545,8 +3521,7 @@ fn extract_candidates(capture: &ResearchMemoryCapture) -> Vec<ExtractedCandidate
             760_i64,
         ),
     ] {
-        let reply_draft_context =
-            role == "assistant" && looks_like_reply_draft_context(text);
+        let reply_draft_context = role == "assistant" && looks_like_reply_draft_context(text);
         for raw_sentence in split_sentences(text) {
             let Some(sentence) = clean_candidate_sentence(&raw_sentence) else {
                 continue;
@@ -3936,8 +3911,7 @@ fn clean_candidate_sentence(value: &str) -> Option<String> {
         .trim_matches(|character: char| matches!(character, '*' | '_' | '`'))
         .trim();
     if plain.is_empty()
-        || (plain.chars().count() <= 100
-            && (plain.ends_with(':') || plain.ends_with('：')))
+        || (plain.chars().count() <= 100 && (plain.ends_with(':') || plain.ends_with('：')))
         || looks_like_table_row(plain)
         || looks_like_raw_json(plain)
     {
@@ -4076,8 +4050,20 @@ fn normalized_candidate_opening(value: &str) -> &str {
             character.is_whitespace()
                 || matches!(
                     character,
-                    '*' | '_' | '`' | '>' | '"' | '\'' | '“' | '”' | '‘' | '’'
-                        | '(' | '（' | '[' | '【' | '{'
+                    '*' | '_'
+                        | '`'
+                        | '>'
+                        | '"'
+                        | '\''
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '('
+                        | '（'
+                        | '['
+                        | '【'
+                        | '{'
                 )
         })
         .trim_start()
@@ -4304,10 +4290,7 @@ fn extract_artifact_paths(value: &str) -> Vec<String> {
     raw_candidates.extend(
         value
             .split_whitespace()
-            .filter(|candidate| {
-                !candidate.contains(['`', '<', '>'])
-                    && !candidate.contains("](")
-            })
+            .filter(|candidate| !candidate.contains(['`', '<', '>']) && !candidate.contains("]("))
             .map(ToOwned::to_owned),
     );
 
@@ -4398,7 +4381,10 @@ fn normalize_artifact_candidate(value: &str) -> Option<String> {
     }
     if let Some(anchor) = candidate.rfind('#') {
         let suffix = &candidate[anchor + 1..];
-        if suffix.starts_with('L') || suffix.starts_with('l') || suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        if suffix.starts_with('L')
+            || suffix.starts_with('l')
+            || suffix.chars().all(|ch| ch.is_ascii_digit())
+        {
             candidate.truncate(anchor);
         }
     }
@@ -4488,16 +4474,95 @@ const SUBJECT_MAX_TERM_CHARS: usize = 60;
 /// unrelated facts onto a single key, which is the failure
 /// [`SUPERSEDABLE_SUBJECTS`] documents.
 const SUBJECT_STOPWORDS: &[&str] = &[
-    "abstract", "all", "and", "any", "appendix", "april", "are", "august", "can",
-    "chapter", "com", "conclusion", "data", "default", "december", "error", "example",
-    "false", "february", "figure", "final", "first", "for", "from", "has", "have",
-    "however", "http", "https", "initial", "input", "introduction", "its", "january",
-    "july", "june", "key", "last", "main", "march", "may", "method", "methods",
-    "model", "models", "new", "next", "none", "not", "note", "november", "null",
-    "october", "old", "one", "only", "org", "output", "overview", "paper", "papers",
-    "pdf", "result", "results", "section", "september", "state", "such", "summary",
-    "table", "text", "that", "the", "then", "they", "this", "todo", "total", "true",
-    "two", "version", "warning", "with", "www", "you", "your", "e.g", "i.e", "et.al",
+    "abstract",
+    "all",
+    "and",
+    "any",
+    "appendix",
+    "april",
+    "are",
+    "august",
+    "can",
+    "chapter",
+    "com",
+    "conclusion",
+    "data",
+    "default",
+    "december",
+    "error",
+    "example",
+    "false",
+    "february",
+    "figure",
+    "final",
+    "first",
+    "for",
+    "from",
+    "has",
+    "have",
+    "however",
+    "http",
+    "https",
+    "initial",
+    "input",
+    "introduction",
+    "its",
+    "january",
+    "july",
+    "june",
+    "key",
+    "last",
+    "main",
+    "march",
+    "may",
+    "method",
+    "methods",
+    "model",
+    "models",
+    "new",
+    "next",
+    "none",
+    "not",
+    "note",
+    "november",
+    "null",
+    "october",
+    "old",
+    "one",
+    "only",
+    "org",
+    "output",
+    "overview",
+    "paper",
+    "papers",
+    "pdf",
+    "result",
+    "results",
+    "section",
+    "september",
+    "state",
+    "such",
+    "summary",
+    "table",
+    "text",
+    "that",
+    "the",
+    "then",
+    "they",
+    "this",
+    "todo",
+    "total",
+    "true",
+    "two",
+    "version",
+    "warning",
+    "with",
+    "www",
+    "you",
+    "your",
+    "e.g",
+    "i.e",
+    "et.al",
     "vs",
 ];
 
@@ -4620,9 +4685,9 @@ fn ascii_runs(text: &str) -> Vec<(String, bool)> {
     // full stop that ends a sentence. Trim it back off and let it close the
     // sentence, or every word after a period reads as mid-sentence.
     let flush = |current: &mut String,
-                     initial: bool,
-                     boundary: &mut bool,
-                     runs: &mut Vec<(String, bool)>| {
+                 initial: bool,
+                 boundary: &mut bool,
+                 runs: &mut Vec<(String, bool)>| {
         if current.is_empty() {
             return;
         }
@@ -4642,7 +4707,12 @@ fn ascii_runs(text: &str) -> Vec<(String, bool)> {
             current.push(character);
             continue;
         }
-        flush(&mut current, current_initial, &mut sentence_boundary, &mut runs);
+        flush(
+            &mut current,
+            current_initial,
+            &mut sentence_boundary,
+            &mut runs,
+        );
         if ".!?\n\u{3002}\u{ff01}\u{ff1f}\u{ff1b};:\u{ff1a}".contains(character) {
             sentence_boundary = true;
         } else if !character.is_whitespace()
@@ -4651,7 +4721,12 @@ fn ascii_runs(text: &str) -> Vec<(String, bool)> {
             sentence_boundary = false;
         }
     }
-    flush(&mut current, current_initial, &mut sentence_boundary, &mut runs);
+    flush(
+        &mut current,
+        current_initial,
+        &mut sentence_boundary,
+        &mut runs,
+    );
     runs
 }
 
@@ -4677,8 +4752,7 @@ fn looks_like_identifier(word: &str, sentence_initial: bool) -> bool {
     if !word.starts_with(|c: char| c.is_ascii_uppercase()) {
         return false;
     }
-    !sentence_initial
-        || tail.contains(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit())
+    !sentence_initial || tail.contains(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 fn file_like(word: &str) -> Option<String> {
@@ -4878,21 +4952,8 @@ fn looks_like_question(value: &str) -> bool {
         || contains_any(
             &value.to_ascii_lowercase(),
             &[
-                "what ",
-                "why ",
-                "how ",
-                "which ",
-                "where ",
-                "when ",
-                "who ",
-                "什么",
-                "如何",
-                "怎么",
-                "为何",
-                "是否",
-                "能否",
-                "可否",
-                "哪一",
+                "what ", "why ", "how ", "which ", "where ", "when ", "who ", "什么", "如何",
+                "怎么", "为何", "是否", "能否", "可否", "哪一",
             ],
         )
 }
@@ -4918,9 +4979,7 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 }
 
 fn contains_any_keyword(value: &str, needles: &[&str]) -> bool {
-    needles
-        .iter()
-        .any(|needle| contains_keyword(value, needle))
+    needles.iter().any(|needle| contains_keyword(value, needle))
 }
 
 fn contains_keyword(value: &str, needle: &str) -> bool {
@@ -5009,9 +5068,10 @@ fn episode_title_anchor(atoms: &[&ResearchMemoryAtom]) -> String {
     if let Some((_, display)) = subject_terms(&combined).into_iter().next() {
         return display;
     }
-    atoms
-        .first()
-        .map_or_else(|| "Research activity".to_string(), |atom| atom.statement.clone())
+    atoms.first().map_or_else(
+        || "Research activity".to_string(),
+        |atom| atom.statement.clone(),
+    )
 }
 
 fn recall_moment(query: &str) -> RecallMoment {
@@ -5257,10 +5317,7 @@ fn push_cjk_terms(run: &mut Vec<char>, terms: &mut Vec<String>) {
 /// True when the term set is mostly CJK bigrams, which are matched and gated
 /// differently from words.
 fn is_cjk_dominant(terms: &[String]) -> bool {
-    let cjk = terms
-        .iter()
-        .filter(|term| term.chars().any(is_cjk))
-        .count();
+    let cjk = terms.iter().filter(|term| term.chars().any(is_cjk)).count();
     cjk * 2 > terms.len()
 }
 

@@ -62,7 +62,9 @@ fn latex_diagnostics_keep_failed_builds_visible_when_warnings_are_present() {
 
     assert_eq!(diagnostics[0].severity, "error");
     assert_eq!(diagnostics[0].code, "compile_failed");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == "warning"));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "warning"));
 }
 
 #[test]
@@ -239,9 +241,70 @@ fn latex_workspace_paths_cannot_escape_workspace() {
         resolve_existing_workspace_path(&absolute_outside.display().to_string(), &workspace)
             .expect_err("absolute path outside workspace should be rejected");
     assert!(error.contains("outside the current workspace"));
+    // This rejection is the first thing a model sees when it asks to compile a
+    // file outside the workspace, and it used to name both paths in Windows'
+    // `\\?\` form. A model that copies one into a shell command loses a
+    // backslash to the quoting rules and gets exit 127 from `\?\...`.
+    assert!(
+        !error.contains(r"\\?\"),
+        "rejection leaked a path no shell can quote: {error}"
+    );
 
     let _ = fs::remove_dir_all(workspace);
     let _ = fs::remove_file(absolute_outside);
+}
+
+#[test]
+fn latex_compile_rejection_hands_back_a_path_a_shell_can_actually_run() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = temp_path("latex-reject-workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &workspace);
+
+    // The reported failure: a paper outside the workspace, whose rejection the
+    // model then worked around by shelling out to the path the rejection named.
+    let outside = temp_path("latex-reject-outside");
+    fs::create_dir_all(&outside).expect("outside");
+    let paper = outside.join("Response_to_Reviewers.tex");
+    fs::write(&paper, b"\\documentclass{article}").expect("paper");
+
+    let error = execute_tool("LaTeXCompile", &json!({ "inputPath": paper }))
+        .expect_err("a paper outside the workspace must be rejected");
+
+    assert!(error.contains("outside the current workspace"), "{error}");
+    // Both real paths are named, so the check below is about their spelling
+    // rather than an empty message that trivially contains no prefix.
+    assert!(error.contains("Response_to_Reviewers.tex"), "{error}");
+    assert!(error.contains("latex-reject-workspace"), "{error}");
+    assert!(
+        !error.contains(r"\\?\") && !error.contains("//?/"),
+        "rejection named a path that dies in a shell as `\\?\\...`: {error}"
+    );
+
+    let _ = fs::remove_dir_all(workspace);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[cfg(windows)]
+#[test]
+fn latex_workspace_boundary_ignores_which_path_spelling_the_caller_holds() {
+    let workspace = temp_path("latex-verbatim-workspace");
+    fs::create_dir_all(workspace.join("papers")).expect("workspace");
+    let paper = workspace.join("papers").join("main.tex");
+    fs::write(&paper, b"\\documentclass{article}").expect("paper");
+    let canonical = runtime::canonicalize(&workspace).expect("canonical workspace");
+
+    // A caller holding the verbatim spelling of the root must still recognize
+    // its own children; comparing mixed forms would reject every one of them.
+    let verbatim_root = PathBuf::from(format!(r"\\?\{}", canonical.display()));
+    let resolved = resolve_existing_workspace_path(&paper.display().to_string(), &verbatim_root)
+        .expect("a file inside the workspace must resolve whichever spelling the root uses");
+    assert!(resolved.ends_with("main.tex"));
+    assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+
+    let _ = fs::remove_dir_all(workspace);
 }
 
 #[test]
@@ -250,7 +313,7 @@ fn latex_output_parent_traversal_is_rejected_before_create() {
     let workspace = root.join("workspace");
     let outside = root.join("outside");
     fs::create_dir_all(workspace.join("papers")).expect("workspace");
-    let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+    let workspace = runtime::canonicalize(&workspace).expect("canonical workspace");
 
     let escaped = workspace
         .join("papers")

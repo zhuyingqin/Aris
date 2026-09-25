@@ -342,10 +342,18 @@ fn remove_client_chat_ui_fields(session: &mut Value) {
     }
 }
 
+/// A preview stand-in for a turn too large to inline. Saving one must never
+/// overwrite the real turn on disk.
+///
+/// The client keeps `omittedTurnIndex` on a slot after it loads the real turn,
+/// because that index is the stable key its transcript virtualizer measures the
+/// row by; `omittedHydrated` is what marks the slot as carrying real content
+/// again, so the index alone no longer means "this is a placeholder".
 fn is_large_turn_placeholder(turn: &Value) -> bool {
     turn.get("omittedTurnIndex")
         .and_then(Value::as_u64)
         .is_some()
+        && turn.get("omittedHydrated").and_then(Value::as_bool) != Some(true)
 }
 
 /// Read the summary index that backs the sidebar list. One entry per started
@@ -1858,8 +1866,18 @@ pub struct SessionSummary {
     pub modified_epoch_secs: u64,
 }
 
+/// Summarize every runtime session on disk.
+///
+/// Async on purpose: this walks the whole session directory, and Tauri would
+/// run a blocking command on the main thread.
 #[tauri::command]
-pub fn sessions_list() -> Vec<SessionSummary> {
+pub async fn sessions_list() -> Vec<SessionSummary> {
+    crate::blocking::off_main_thread(|| Ok(sessions_list_blocking()))
+        .await
+        .unwrap_or_default()
+}
+
+fn sessions_list_blocking() -> Vec<SessionSummary> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(state::sessions_dir()) else {
         return out;
@@ -1886,8 +1904,14 @@ pub fn sessions_list() -> Vec<SessionSummary> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or_default();
-        let message_count = Session::load_from_path(&path)
-            .map(|s| s.logical_message_count())
+        // The manifest publishes this count. Falling back to a full load means
+        // replaying that session's whole event log for one number.
+        let message_count = runtime::session_manifest_logical_message_count(&path)
+            .or_else(|| {
+                Session::load_from_path(&path)
+                    .map(|session| session.logical_message_count())
+                    .ok()
+            })
             .unwrap_or_default();
         let id = path
             .file_stem()

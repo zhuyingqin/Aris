@@ -16,12 +16,35 @@ const SHELL_DEFAULT_TIMEOUT_ENV: &str = "ARIS_SHELL_DEFAULT_TIMEOUT_MS";
 /// Told to the caller (and so to the model) when a shell backgrounded a process
 /// that kept this command's output pipe open. Without the hint, the truncated
 /// output looks like the service failed to print anything.
+/// Appended when a process the shell started still holds the output pipe, but
+/// the capture had already settled — the output above is complete, and only the
+/// advice is worth saying.
 pub const BACKGROUND_PIPE_NOTE: &str = concat!(
-    "Note: the shell exited but a process it started still holds this command's output pipe, ",
-    "so the captured output above may be incomplete. ",
+    "Note: the shell exited but a process it started still holds this command's output pipe. ",
     "Start long-running services with `run_in_background: true` instead of a shell `&`: ",
     "that captures their output to a log file you can read, and returns a pid."
 );
+
+/// The same situation, except output was still arriving when the drain deadline
+/// passed. Re-running can genuinely reveal more here, so this is the only
+/// variant that says the capture is incomplete — the unconditional version of
+/// that claim sent the model back to re-run commands that had printed
+/// everything they were ever going to print.
+pub const BACKGROUND_PIPE_TRUNCATED_NOTE: &str = concat!(
+    "Note: the shell exited but a process it started still holds this command's output pipe, ",
+    "and output was still arriving when the command returned, so the capture above is incomplete. ",
+    "Start long-running services with `run_in_background: true` instead of a shell `&`: ",
+    "that captures their output to a log file you can read, and returns a pid."
+);
+
+#[must_use]
+pub fn background_pipe_note(truncated: bool) -> &'static str {
+    if truncated {
+        BACKGROUND_PIPE_TRUNCATED_NOTE
+    } else {
+        BACKGROUND_PIPE_NOTE
+    }
+}
 
 /// Appended when the registry took ownership of a service the shell left behind.
 #[must_use]
@@ -56,34 +79,86 @@ pub struct BashCommandInput {
     pub allowed_mounts: Option<Vec<String>>,
 }
 
+/// The bash tool's result envelope.
+///
+/// Every optional field is omitted when absent rather than serialized as
+/// `null`. The model pays for this envelope on every single shell call, and an
+/// explicit `null` costs the same tokens as a real value while carrying no
+/// information: on one measured session the always-null keys alone were ~7,000
+/// characters per request. Absence and `null` already mean the same thing to
+/// every consumer, and `default` keeps older persisted envelopes readable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BashCommandOutput {
     pub stdout: String,
     pub stderr: String,
-    #[serde(rename = "rawOutputPath")]
+    #[serde(
+        rename = "rawOutputPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub raw_output_path: Option<String>,
     pub interrupted: bool,
-    #[serde(rename = "isImage")]
+    #[serde(rename = "isImage", default, skip_serializing_if = "Option::is_none")]
     pub is_image: Option<bool>,
-    #[serde(rename = "backgroundTaskId")]
+    #[serde(
+        rename = "backgroundTaskId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub background_task_id: Option<String>,
-    #[serde(rename = "backgroundedByUser")]
+    #[serde(
+        rename = "backgroundedByUser",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub backgrounded_by_user: Option<bool>,
-    #[serde(rename = "assistantAutoBackgrounded")]
+    #[serde(
+        rename = "assistantAutoBackgrounded",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub assistant_auto_backgrounded: Option<bool>,
-    #[serde(rename = "dangerouslyDisableSandbox")]
+    #[serde(
+        rename = "dangerouslyDisableSandbox",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dangerously_disable_sandbox: Option<bool>,
-    #[serde(rename = "returnCodeInterpretation")]
+    #[serde(
+        rename = "returnCodeInterpretation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub return_code_interpretation: Option<String>,
-    #[serde(rename = "noOutputExpected")]
+    #[serde(
+        rename = "noOutputExpected",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub no_output_expected: Option<bool>,
-    #[serde(rename = "structuredContent")]
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub structured_content: Option<Vec<serde_json::Value>>,
-    #[serde(rename = "persistedOutputPath")]
+    #[serde(
+        rename = "persistedOutputPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub persisted_output_path: Option<String>,
-    #[serde(rename = "persistedOutputSize")]
+    #[serde(
+        rename = "persistedOutputSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub persisted_output_size: Option<u64>,
-    #[serde(rename = "sandboxStatus")]
+    #[serde(
+        rename = "sandboxStatus",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub sandbox_status: Option<SandboxStatus>,
 }
 
@@ -120,6 +195,34 @@ pub fn execute_bash_with_cancel_and_progress(
     }
 
     if input.run_in_background.unwrap_or(false) {
+        let service_key = crate::background_service_key(&cwd, &input.command);
+        if let Some(process) = crate::reusable_background_service(&service_key) {
+            let log_path = process.log_path.clone();
+            return Ok(BashCommandOutput {
+                stdout: format!(
+                    "Reused running background service {} for this workspace, command, and port.",
+                    process.pid
+                ),
+                stderr: String::new(),
+                raw_output_path: log_path.clone(),
+                interrupted: false,
+                is_image: None,
+                background_task_id: Some(process.pid.to_string()),
+                backgrounded_by_user: Some(false),
+                assistant_auto_backgrounded: Some(false),
+                dangerously_disable_sandbox: input.dangerously_disable_sandbox,
+                return_code_interpretation: None,
+                no_output_expected: Some(false),
+                structured_content: Some(vec![serde_json::json!({
+                    "type": "background_service_reused",
+                    "pid": process.pid,
+                    "persistedOutputPath": log_path
+                })]),
+                persisted_output_path: process.log_path,
+                persisted_output_size: None,
+                sandbox_status: reportable_sandbox_status(sandbox_status),
+            });
+        }
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
         let log = crate::background_log::create(&cwd, &input.command);
         child.stdin(Stdio::null());
@@ -134,10 +237,11 @@ pub fn execute_bash_with_cancel_and_progress(
         let log_path = log
             .as_ref()
             .map(crate::background_log::BackgroundLog::display);
-        let pid = crate::spawn_managed_background(
+        let pid = crate::spawn_managed_background_service(
             &mut child,
             format!("bash background: {}", truncate_label(&input.command)),
             log_path.clone(),
+            service_key,
         )?;
 
         return Ok(BashCommandOutput {
@@ -155,7 +259,7 @@ pub fn execute_bash_with_cancel_and_progress(
             structured_content: None,
             persisted_output_path: log_path,
             persisted_output_size: Some(0),
-            sandbox_status: Some(sandbox_status),
+            sandbox_status: reportable_sandbox_status(sandbox_status),
         });
     }
 
@@ -182,7 +286,10 @@ fn execute_bash_blocking(
 
     let stderr_with_notes = |stderr: String| {
         let stderr = if result.output_pipe_held {
-            append_status_message(stderr, String::from(BACKGROUND_PIPE_NOTE))
+            append_status_message(
+                stderr,
+                String::from(background_pipe_note(result.output_truncated)),
+            )
         } else {
             stderr
         };
@@ -243,7 +350,7 @@ fn execute_bash_blocking(
         structured_content: None,
         persisted_output_path: None,
         persisted_output_size: None,
-        sandbox_status: Some(sandbox_status),
+        sandbox_status: reportable_sandbox_status(sandbox_status),
     })
 }
 
@@ -294,8 +401,26 @@ fn interrupted_output(
         structured_content: None,
         persisted_output_path: None,
         persisted_output_size: None,
-        sandbox_status: Some(sandbox_status),
+        sandbox_status: reportable_sandbox_status(sandbox_status),
     }
+}
+
+/// The sandbox status worth spending tokens on, which is only the status that
+/// constrained *this* call.
+///
+/// A status whose every `*_active` flag is false describes the platform, not
+/// the command: on Windows it is a ~600-character constant saying that no
+/// isolation backend exists, repeated on every shell call for the length of the
+/// session. `fallback_reason` deliberately does not qualify — "namespace
+/// isolation unavailable (requires Linux with `unshare`)" is the same
+/// platform-capability statement, true before the command ran and unchanged by
+/// it. Capability belongs in the system prompt, said once.
+fn reportable_sandbox_status(status: SandboxStatus) -> Option<SandboxStatus> {
+    let constrained = status.active
+        || status.namespace_active
+        || status.network_active
+        || status.filesystem_active;
+    constrained.then_some(status)
 }
 
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
@@ -379,6 +504,24 @@ fn set_test_foreground_shell_timeout_ms(timeout_ms: u64) {
     TEST_FOREGROUND_SHELL_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Make a Windows child process default to UTF-8 for Python I/O.
+///
+/// Without this, CPython picks its encoding from the active code page (CP936 on
+/// a Chinese Windows), so printing any character outside GBK raises
+/// `UnicodeEncodeError` and the whole call has to be re-run with the encoding
+/// set by hand. The same root cause has already cost us a pip failure that
+/// needed `PYTHONUTF8=1` to install at all.
+///
+/// A value the caller set explicitly always wins: a command that opts into a
+/// legacy encoding on purpose must keep it.
+fn apply_windows_utf8_env(prepared: &mut Command) {
+    for (key, value) in [("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")] {
+        if env::var_os(key).is_none() {
+            prepared.env(key, value);
+        }
+    }
+}
+
 fn prepare_command(
     command: &str,
     cwd: &std::path::Path,
@@ -418,6 +561,7 @@ fn prepare_command(
             // such as git, node, and Python.
             prepared.env("PATH", windows_posix_path());
         }
+        apply_windows_utf8_env(&mut prepared);
         return prepared;
     }
 

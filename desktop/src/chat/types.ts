@@ -23,7 +23,7 @@ export interface ChatSession {
   /** Rust ledger run that owns this append-only workflow conversation. */
   workflowRunId?: string;
   /** Prevent generic Chat lifecycle controls from deleting a live workflow runtime. */
-  ownerKind?: "review_workflow";
+  ownerKind?: "review_workflow" | "work_task";
   /** Last generated snapshot, used to refresh context without losing user draft text. */
   workflowContextSnapshot?: string;
   /** Turns controlled by the workflow projection rather than by Chat execution. */

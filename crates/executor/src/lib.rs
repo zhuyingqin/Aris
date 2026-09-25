@@ -14,7 +14,21 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+static NEXT_ROUTING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn new_routing_session_id() -> String {
+    format!(
+        "aris-{}-{}",
+        std::process::id(),
+        NEXT_ROUTING_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 mod openai;
 pub mod reasoning_effort;
@@ -45,6 +59,17 @@ impl ExecutorToolSpec {
             input_schema,
         }
     }
+}
+
+fn projected_tool_specs(
+    tool_specs: &[ExecutorToolSpec],
+    active_tool_names: Option<&BTreeSet<String>>,
+) -> Vec<ExecutorToolSpec> {
+    tool_specs
+        .iter()
+        .filter(|spec| active_tool_names.is_none_or(|names| names.contains(&spec.name)))
+        .cloned()
+        .collect()
 }
 
 pub trait StreamObserver: Send {
@@ -385,6 +410,20 @@ impl ApiClient for ExecutorClient {
         }
     }
 
+    fn set_session_id(&mut self, session_id: &str) {
+        match self {
+            Self::Anthropic(client) => client.set_session_id(session_id),
+            Self::OpenAI(client) => client.set_session_id(session_id),
+        }
+    }
+
+    fn set_active_tools(&mut self, tool_names: Option<&BTreeSet<String>>) {
+        match self {
+            Self::Anthropic(client) => client.set_active_tools(tool_names),
+            Self::OpenAI(client) => client.set_active_tools(tool_names),
+        }
+    }
+
     fn on_session_compacted(&mut self, removed_count: usize) {
         match self {
             Self::Anthropic(_) => {}
@@ -399,6 +438,7 @@ pub struct AnthropicRuntimeClient {
     model: String,
     enable_tools: bool,
     tool_specs: Vec<ExecutorToolSpec>,
+    active_tool_names: Option<BTreeSet<String>>,
     max_tokens: u32,
     observer: Box<dyn StreamObserver>,
     base_url: String,
@@ -417,14 +457,17 @@ impl AnthropicRuntimeClient {
         max_tokens: u32,
         observer: Box<dyn StreamObserver>,
     ) -> Result<Self, String> {
+        let routing_session_id = new_routing_session_id();
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             client: AnthropicClient::from_auth(auth)
                 .with_base_url(base_url.clone())
-                .with_send_betas(send_betas),
+                .with_send_betas(send_betas)
+                .with_routing_session_id(routing_session_id),
             model,
             enable_tools,
             tool_specs,
+            active_tool_names: None,
             max_tokens,
             observer,
             base_url,
@@ -469,8 +512,21 @@ fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingCon
 }
 
 impl ApiClient for AnthropicRuntimeClient {
+    fn set_session_id(&mut self, session_id: &str) {
+        self.client = self
+            .client
+            .clone()
+            .with_routing_session_id(session_id.to_string());
+    }
+
+    fn set_active_tools(&mut self, tool_names: Option<&BTreeSet<String>>) {
+        self.active_tool_names = tool_names.cloned();
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let active_tool_specs =
+            projected_tool_specs(&self.tool_specs, self.active_tool_names.as_ref());
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
@@ -493,7 +549,7 @@ impl ApiClient for AnthropicRuntimeClient {
                 }]))
             },
             tools: self.enable_tools.then(|| {
-                self.tool_specs
+                active_tool_specs
                     .iter()
                     .map(|spec| ToolDefinition {
                         name: spec.name.clone(),
@@ -514,8 +570,8 @@ impl ApiClient for AnthropicRuntimeClient {
                 "provider": "anthropic",
                 "model": &self.model,
                 "enabled": self.enable_tools,
-                "toolCount": self.tool_specs.len(),
-                "tools": tool_specs_to_value(&self.tool_specs),
+                "toolCount": active_tool_specs.len(),
+                "tools": tool_specs_to_value(&active_tool_specs),
             }),
         );
         trace_record(

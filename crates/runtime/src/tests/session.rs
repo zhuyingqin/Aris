@@ -221,8 +221,13 @@ fn restores_and_repairs_event_logs_with_malformed_telemetry_rows() {
     session.save_to_path(&path).expect("save repairs event log");
 
     let repaired = fs::read_to_string(&event_path).expect("read repaired event log");
-    assert!(repaired.contains(r#""kind":"assistant_delta""#));
     assert!(!repaired.contains("orphan"));
+    // The repair restarts the session behind a fresh `session_reset`, so the
+    // telemetry row it preserved is now superseded and collected with the rest
+    // of the dead generation. Telemetry only has to outlive a repair, not the
+    // rewrite that follows it.
+    assert!(!repaired.contains("telemetry"));
+    assert_eq!(repaired.matches(r#""kind":"session_reset""#).count(), 1);
     for line in repaired.lines().filter(|line| !line.trim().is_empty()) {
         let value = serde_json::from_str::<serde_json::Value>(line)
             .expect("every repaired event row is valid JSON");
@@ -274,6 +279,163 @@ fn concurrent_session_saves_leave_a_parseable_event_log() {
     }
     let restored = Session::load_from_path(&path).expect("concurrent event log restores");
     assert_eq!(restored.messages.len(), 1);
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+fn temp_session_path(label: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("runtime-session-{label}-{nanos}.json"))
+}
+
+/// A session that no longer shares a prefix with its log is rewritten behind a
+/// `session_reset`. Everything before that reset is unreachable, and letting it
+/// accumulate is what grew real logs to 98 MB.
+#[test]
+fn a_rewritten_session_leaves_one_generation_in_its_event_log() {
+    let path = temp_session_path("compact-generation");
+    let event_path = path.with_extension("events.jsonl");
+
+    let mut session = Session::new();
+    for index in 0..40 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!("message {index}")));
+    }
+    session.save_to_path(&path).expect("first save");
+    let first_len = fs::metadata(&event_path).expect("event log").len();
+
+    // Diverge from the stored prefix, the way a compaction or a rewind does.
+    session.messages = vec![ConversationMessage::user_text("after compaction")];
+    session.compactions.push(SessionCompactionRecord {
+        summary: "archived".to_string(),
+        messages: (0..40)
+            .map(|index| ConversationMessage::user_text(format!("message {index}")))
+            .collect(),
+        removed_message_count: 40,
+        preserved_message_count: 1,
+        tokens_before: 100,
+        tokens_after: 10,
+        summary_source: "model".to_string(),
+    });
+    session.save_to_path(&path).expect("rewriting save");
+
+    let events = fs::read_to_string(&event_path).expect("event log");
+    assert_eq!(events.matches(r#""kind":"session_reset""#).count(), 1);
+    assert!(
+        fs::metadata(&event_path).expect("event log").len() < first_len * 2,
+        "a rewrite must not leave the previous generation behind it",
+    );
+    assert_eq!(
+        Session::load_from_path(&path).expect("session restores"),
+        session
+    );
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+/// Streaming rows are only needed until a checkpoint folds their turn into the
+/// canonical stream.
+#[test]
+fn compaction_drops_streaming_rows_a_checkpoint_superseded() {
+    let path = temp_session_path("compact-checkpoint");
+    let event_path = path.with_extension("events.jsonl");
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("durable"));
+    session.save_to_path(&path).expect("save");
+
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(&event_path)
+        .expect("open event log");
+    writeln!(
+        log,
+        r#"{{"version":1,"seq":90,"ts":1,"sessionId":"x","kind":"assistant_delta","payload":{{"text":"superseded"}}}}"#
+    )
+    .expect("write delta");
+    writeln!(
+        log,
+        r#"{{"version":1,"seq":91,"ts":1,"sessionId":"x","kind":"session_checkpoint","payload":{{"messageCount":1}}}}"#
+    )
+    .expect("write checkpoint");
+    writeln!(
+        log,
+        r#"{{"version":1,"seq":92,"ts":1,"sessionId":"x","kind":"assistant_delta","payload":{{"text":"in flight"}}}}"#
+    )
+    .expect("write in-flight delta");
+    // A row from another writer, in a shape this cannot classify.
+    writeln!(log, r#"{{"seq":93,"note":"foreign"}}"#).expect("write foreign row");
+    log.flush().expect("flush");
+    drop(log);
+
+    let outcome = crate::compact_session_event_log(&event_path).expect("compact");
+    assert_eq!(outcome.removed_lines, 1);
+
+    let events = fs::read_to_string(&event_path).expect("event log");
+    assert!(!events.contains("superseded"), "{events}");
+    assert!(events.contains("in flight"));
+    assert!(events.contains("foreign"), "unclassifiable rows are kept");
+    assert!(events.contains(r#""kind":"session_message""#));
+    assert_eq!(
+        Session::load_from_path(&path).expect("session restores"),
+        session
+    );
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+#[test]
+fn compaction_is_a_no_op_for_a_log_with_no_dead_rows() {
+    let path = temp_session_path("compact-noop");
+    let event_path = path.with_extension("events.jsonl");
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("only"));
+    session.save_to_path(&path).expect("save");
+    let before = fs::read_to_string(&event_path).expect("event log");
+
+    let outcome = crate::compact_session_event_log(&event_path).expect("compact");
+    assert_eq!(outcome, crate::EventLogCompaction::default());
+    assert_eq!(fs::read_to_string(&event_path).expect("event log"), before);
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+/// Listing sessions needs the visible message count; replaying the event log
+/// for it is what made the list command expensive.
+#[test]
+fn the_manifest_publishes_the_logical_message_count() {
+    let path = temp_session_path("manifest-count");
+    let event_path = path.with_extension("events.jsonl");
+    let mut session = Session::new();
+    session.compactions.push(SessionCompactionRecord {
+        summary: "archived".to_string(),
+        messages: vec![ConversationMessage::user_text("archived question")],
+        removed_message_count: 1,
+        preserved_message_count: 1,
+        tokens_before: 10,
+        tokens_after: 5,
+        summary_source: "model".to_string(),
+    });
+    session
+        .messages
+        .push(ConversationMessage::user_text("current question"));
+    session.save_to_path(&path).expect("save");
+
+    assert_eq!(
+        crate::session_manifest_logical_message_count(&path),
+        Some(session.logical_message_count()),
+    );
 
     fs::remove_file(path).expect("remove manifest");
     fs::remove_file(event_path).expect("remove event log");

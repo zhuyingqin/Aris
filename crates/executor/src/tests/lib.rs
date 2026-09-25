@@ -4,9 +4,31 @@ use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
 use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
 
 use super::{
-    convert_messages, merge_anthropic_stream_usage, push_text_event, response_to_events,
-    StreamObserver,
+    convert_messages, merge_anthropic_stream_usage, projected_tool_specs, push_text_event,
+    response_to_events, ExecutorToolSpec, StreamObserver,
 };
+
+#[test]
+fn provider_tool_projection_preserves_catalog_order_and_hides_deferred_schemas() {
+    let specs = ["read_file", "ToolSearch", "browser_snapshot"]
+        .into_iter()
+        .map(|name| ExecutorToolSpec::new(name, name, serde_json::json!({"type": "object"})))
+        .collect::<Vec<_>>();
+    let active = ["ToolSearch", "browser_snapshot"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    let projected = projected_tool_specs(&specs, Some(&active));
+    assert_eq!(
+        projected
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ToolSearch", "browser_snapshot"]
+    );
+    assert_eq!(projected_tool_specs(&specs, None).len(), specs.len());
+}
 
 struct RecordingObserver {
     deltas: Arc<Mutex<Vec<String>>>,

@@ -70,6 +70,57 @@ fn skill_loads_local_skill_prompt() {
 }
 
 #[test]
+fn managed_skill_runtime_injects_private_python_and_artifact_root() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = temp_path("managed-skill-runtime");
+    let _ = fs::remove_dir_all(&home);
+    let _home = EnvGuard::set("HOME", &home);
+    let _userprofile = EnvGuard::set("USERPROFILE", &home);
+    let _codex_home = EnvGuard::unset("CODEX_HOME");
+    let skill_dir = home
+        .join(".config")
+        .join("SomniQ")
+        .join("skills")
+        .join("managed-presentation");
+    fs::create_dir_all(&skill_dir).expect("skill dir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: managed-presentation\n---\n\n# Managed presentation\n",
+    )
+    .expect("skill");
+    let python = home.join("runtime").join(if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python"
+    });
+    fs::create_dir_all(python.parent().expect("python parent")).expect("runtime");
+    fs::write(&python, b"").expect("python");
+    fs::write(
+        skill_dir.join(".somniq-runtime.json"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "python": python,
+            "artifactRoot": ".somniq/slides/ppt-master"
+        }))
+        .expect("runtime manifest"),
+    )
+    .expect("runtime manifest");
+
+    let result = execute_tool("Skill", &json!({ "skill": "managed-presentation" }))
+        .expect("managed Skill should load");
+    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    let prompt = output["prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("# SomniQ managed Skill runtime"));
+    assert!(prompt.contains("exact interpreter"));
+    assert!(prompt.contains(".somniq/slides/ppt-master/<run-id>/"));
+    assert!(prompt.contains("# Managed presentation"));
+
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn claude_skills_require_explicit_compat_flag() {
     let _guard = env_lock()
         .lock()
@@ -160,6 +211,12 @@ fn bundled_skill_is_discoverable_and_invokable() {
         .as_str()
         .expect("prompt")
         .contains("legacy alias `research-lit`"));
+
+    // /soft-copyright is the first bundled skill whose helpers are Node, not
+    // Python. Its scripts only reach the model through the cache path in the
+    // resolver preamble, so pin that the skill resolves and names them.
+    let soft_copyright = skill_markdown("soft-copyright").expect("soft-copyright markdown");
+    assert!(soft_copyright.contains("skills/soft-copyright/scripts/gen-source-listing.cjs"));
 
     let literature_search = skill_markdown("literature-search").expect("canonical skill markdown");
     assert!(literature_search.contains("# Literature Search"));
@@ -292,4 +349,56 @@ fn tool_search_supports_keyword_and_select_queries() {
         serde_json::from_str(&selected_with_alias).expect("valid json");
     assert_eq!(selected_with_alias_output["matches"][0], "Agent");
     assert_eq!(selected_with_alias_output["matches"][1], "Skill");
+}
+
+#[test]
+fn tool_search_ranks_named_tools_above_tools_that_merely_mention_them() {
+    // Every one of these tools describes the others, so a scorer that sums
+    // keyword hits ranks `append_file` above the three tools actually named.
+    let output = execute_tool(
+        "ToolSearch",
+        &json!({"query": "write_file edit_file multi_edit"}),
+    )
+    .expect("ToolSearch should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+    let matches = output["matches"].as_array().expect("matches");
+
+    assert_eq!(matches[0], "write_file");
+    assert_eq!(matches[1], "edit_file");
+    assert_eq!(matches[2], "multi_edit");
+}
+
+#[test]
+fn tool_search_can_recover_a_routed_away_core_tool() {
+    // Dynamic routing decides visibility per turn, so no tool may be statically
+    // excluded from the search corpus: the model would ask for the one tool it
+    // needs and be told it does not exist.
+    for name in [
+        "write_file",
+        "edit_file",
+        "multi_edit",
+        "read_files",
+        "bash",
+    ] {
+        let output = execute_tool("ToolSearch", &json!({"query": format!("select:{name}")}))
+            .expect("ToolSearch should succeed");
+        let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(output["matches"][0], name, "{name} must be recoverable");
+    }
+}
+
+#[test]
+fn tool_search_select_lists_are_not_truncated_below_what_was_asked_for() {
+    let output = execute_tool(
+        "ToolSearch",
+        &json!({
+            "query": "select:read_file,read_files,glob_search,grep_search,write_file,edit_file,multi_edit",
+            "max_results": 2
+        }),
+    )
+    .expect("ToolSearch should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+    let matches = output["matches"].as_array().expect("matches");
+
+    assert_eq!(matches.len(), 7, "{matches:?}");
 }

@@ -1,0 +1,24 @@
+/* A pinned crop. The window is sized to the image, so this file's only jobs
+   are to make the image fill it exactly and to draw the hairline that
+   distinguishes a pin from the desktop underneath it. */
+
+.screenshot-pin {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  /* The surface is the drag handle; a text selection would fight the gesture. */
+  user-select: none;
+  cursor: move;
+  /* Inset so the border never covers a pixel outside the crop, which would
+     make a pin a different size from what was selected. */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28), 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.screenshot-pin-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* The window's aspect ratio is the image's, so this only ever rescales. */
+  object-fit: fill;
+  -webkit-user-drag: none;
+}

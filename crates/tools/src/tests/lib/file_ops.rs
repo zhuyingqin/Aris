@@ -26,6 +26,60 @@ fn execute_file_tool(name: &str, input: &serde_json::Value) -> Result<String, St
 }
 
 #[test]
+fn batch_read_preserves_order_and_partial_success() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("batch-read");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    fs::write(&first, "alpha\nbeta\n").expect("write first");
+    fs::write(&second, "gamma\ndelta\n").expect("write second");
+
+    let output = execute_tool(
+        "read_files",
+        &json!({
+            "requests": [
+                { "path": first, "offset": 1, "limit": 1 },
+                { "path": root.join("missing.txt") },
+                { "path": second, "limit": 1 }
+            ]
+        }),
+    )
+    .expect("batch itself should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("batch json");
+
+    assert_eq!(output["requested"], 3);
+    assert_eq!(output["succeeded"], 2);
+    assert_eq!(output["failed"], 1);
+    assert!(!runtime::tool_output_reports_failure(
+        "read_files",
+        &output.to_string()
+    ));
+    assert_eq!(output["results"][0]["result"]["file"]["content"], "beta");
+    assert_eq!(output["results"][1]["ok"], false);
+    assert_eq!(output["results"][2]["result"]["file"]["content"], "gamma");
+    assert_eq!(tool_execution("read_files"), ToolExecution::Parallel);
+    assert!(mvp_tool_specs()
+        .iter()
+        .any(|spec| spec.name == "read_files"));
+
+    let all_failed = execute_tool(
+        "read_files",
+        &json!({ "requests": [{ "path": root.join("also-missing.txt") }] }),
+    )
+    .expect("batch payload should remain inspectable");
+    assert!(runtime::tool_output_reports_failure(
+        "read_files",
+        &all_failed
+    ));
+
+    fs::remove_dir_all(root).expect("remove root");
+}
+
+#[test]
 fn file_tools_cover_read_write_and_edit_behaviors() {
     let _guard = env_lock()
         .lock()
@@ -477,6 +531,265 @@ fn multi_edit_creates_one_revertible_audit_record() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Read the `revision` a tool result issued for `path`.
+fn issued_revision(output: &serde_json::Value) -> &str {
+    output["file"]["revision"]
+        .as_str()
+        .or_else(|| output["revision"].as_str())
+        .expect("tool result carries a revision")
+}
+
+fn conflict_payload(error: &str) -> serde_json::Value {
+    let start = error.find('{').expect("conflict error embeds json");
+    serde_json::from_str(&error[start..]).expect("conflict json")
+}
+
+/// The revision `read_file` hands out must be exactly the one a mutation
+/// validates against, for every file shape that reaches these tools.
+///
+/// The two sides hash independently — `read_file` over the bytes it just read,
+/// the mutation over the bytes it reads back under the path lock — and a file
+/// over 512 KiB is hashed by a third path, the streaming reader. Any spelling
+/// difference between them (a stripped BOM, a normalized line ending, a decoded
+/// string standing in for raw bytes) would make some class of file permanently
+/// unwritable: read, edit, conflict, re-read, conflict again.
+#[test]
+fn a_read_revision_is_accepted_by_the_next_mutation_for_every_file_shape() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("revision-roundtrip");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    // The last case crosses the 512 KiB streaming-read threshold; the others
+    // stay on the ordinary path but differ in encoding and line endings.
+    let cases: Vec<(&str, String)> = vec![
+        ("lf.tex", "\\section{Reply}\nalpha\nbeta\n".to_string()),
+        (
+            "crlf.tex",
+            "\\section{Reply}\r\nalpha\r\nbeta\r\n".to_string(),
+        ),
+        (
+            "bom-cjk.tex",
+            "\u{feff}\\section{审稿意见}\n评审人一：alpha\n评审人二：beta\n".to_string(),
+        ),
+        (
+            "streamed.tex",
+            format!("alpha\n{}beta\n", "填充行 padding line\n".repeat(40_000)),
+        ),
+    ];
+
+    for (name, content) in &cases {
+        fs::write(root.join(name), content).expect("write case file");
+        assert_eq!(
+            fs::read(root.join(name)).expect("read back").len(),
+            content.len(),
+            "{name}: the harness must not rewrite the bytes under test"
+        );
+
+        let read = execute_file_tool("read_file", &json!({ "path": name })).expect("read");
+        let read: serde_json::Value = serde_json::from_str(&read).expect("json");
+        let revision = issued_revision(&read).to_string();
+        assert_eq!(
+            revision,
+            runtime::file_revision(name).expect("revision on disk"),
+            "{name}: read_file issued a revision that is not the file's own"
+        );
+
+        // No re-read in between: this is the exact sequence that was failing.
+        let edited = execute_tool(
+            "edit_file",
+            &json!({
+                "path": name,
+                "expected_revision": revision,
+                "old_string": "alpha",
+                "new_string": "ALPHA"
+            }),
+        )
+        .unwrap_or_else(|error| panic!("{name}: edit rejected a fresh read revision: {error}"));
+        let edited: serde_json::Value = serde_json::from_str(&edited).expect("json");
+        assert_eq!(
+            issued_revision(&edited),
+            runtime::file_revision(name).expect("revision after edit"),
+            "{name}: the edit result's revision does not describe the bytes it wrote"
+        );
+        // A chained edit must work off that result alone.
+        execute_tool(
+            "edit_file",
+            &json!({
+                "path": name,
+                "expected_revision": issued_revision(&edited),
+                "old_string": "beta",
+                "new_string": "BETA"
+            }),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{name}: chained edit rejected the issued revision: {error}")
+        });
+    }
+
+    // Line endings survive the round trip; a rewritten file would also have
+    // silently changed its revision.
+    assert!(fs::read_to_string(root.join("crlf.tex"))
+        .expect("read crlf")
+        .contains("ALPHA\r\n"));
+    assert!(fs::read_to_string(root.join("bom-cjk.tex"))
+        .expect("read bom")
+        .starts_with('\u{feff}'));
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Both observed ways a model arrives at a bad token must fail the same
+/// legible way: rejected, file untouched, and told the revision the file
+/// actually has.
+///
+/// The stale case is what two same-path edits in one response produce — the
+/// first to land invalidates the token the second is already carrying. The
+/// invented case is what a model reaches for when a shell command has
+/// invalidated everything it holds.
+#[test]
+fn a_stale_or_invented_revision_is_rejected_without_touching_the_file() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("revision-conflict-shape");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("paper.tex"), "alpha\nbeta\ngamma\n").expect("write initial file");
+
+    let read = execute_file_tool("read_file", &json!({ "path": "paper.tex" })).expect("read");
+    let read: serde_json::Value = serde_json::from_str(&read).expect("json");
+    let stale = issued_revision(&read).to_string();
+
+    execute_tool(
+        "edit_file",
+        &json!({
+            "path": "paper.tex",
+            "expected_revision": stale,
+            "old_string": "alpha",
+            "new_string": "one"
+        }),
+    )
+    .expect("first edit should land");
+    let after_first = fs::read_to_string(root.join("paper.tex")).expect("read after first");
+
+    let invented = format!("sha256:{}", "d1cb4ea1".repeat(8));
+    for (label, bad) in [("stale", stale.as_str()), ("invented", invented.as_str())] {
+        let error = execute_tool(
+            "edit_file",
+            &json!({
+                "path": "paper.tex",
+                "expected_revision": bad,
+                "old_string": "beta",
+                "new_string": "two"
+            }),
+        )
+        .expect_err("a bad revision must be rejected");
+        let payload = conflict_payload(&error);
+        assert_eq!(payload["code"], "revision_conflict", "{label}");
+        assert_eq!(payload["expectedRevision"], bad, "{label}");
+        assert_eq!(
+            payload["currentRevision"],
+            runtime::file_revision("paper.tex").expect("current revision"),
+            "{label}: the error must report the file's real revision"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("paper.tex")).expect("read after reject"),
+            after_first,
+            "{label}: a rejected mutation must leave the file untouched"
+        );
+    }
+
+    // Recovery is a fresh read, and it works on the first try.
+    let reread = execute_file_tool("read_file", &json!({ "path": "paper.tex" })).expect("re-read");
+    let reread: serde_json::Value = serde_json::from_str(&reread).expect("json");
+    execute_tool(
+        "edit_file",
+        &json!({
+            "path": "paper.tex",
+            "expected_revision": issued_revision(&reread),
+            "old_string": "beta",
+            "new_string": "two"
+        }),
+    )
+    .expect("re-read revision should be accepted");
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A shell command that rewrites a file must hand back the revision the file
+/// now has. Without it the model holds only tokens the command invalidated, and
+/// its next edit either pays for a full re-read or ships an invented sha256 that
+/// can never pass the check.
+#[test]
+fn shell_file_writes_report_the_revision_the_next_edit_needs() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("bash-change-revision");
+    fs::create_dir_all(&root).expect("create root");
+    let original_dir = std::env::current_dir().expect("cwd");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let _session = EnvGuard::set("ARIS_SESSION_ID", "bash-change-revision-session");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("tracked.txt"), "alpha\nbeta\n").expect("write initial file");
+
+    let output = execute_tool_with_context(
+        "bash",
+        &json!({ "command": "printf 'alpha\\ngamma\\n' > tracked.txt" }),
+        ToolRunContext {
+            tool_use_id: Some("toolu-bash-revision-1".to_string()),
+            session_id: Some("bash-change-revision-session".to_string()),
+            turn_id: None,
+            max_output_tokens: None,
+            project_execution_context: None,
+        },
+    )
+    .expect("bash write should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    let changes = output["changes"].as_object().expect("changes");
+    let (_, change) = changes
+        .iter()
+        .find(|(path, _)| path.ends_with("tracked.txt"))
+        .expect("tracked.txt change");
+    let reported = change["revision"].as_str().expect("reported revision");
+    assert_eq!(
+        reported,
+        runtime::file_revision("tracked.txt").expect("revision on disk"),
+        "the reported revision must be the file's post-command revision"
+    );
+
+    // The token is only worth reporting if a mutation accepts it without a
+    // re-read in between.
+    execute_tool(
+        "edit_file",
+        &json!({
+            "path": "tracked.txt",
+            "expected_revision": reported,
+            "old_string": "gamma",
+            "new_string": "delta"
+        }),
+    )
+    .expect("edit using the bash-reported revision should be accepted");
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.txt"))
+            .expect("read edited file")
+            .replace("\r\n", "\n"),
+        "alpha\ndelta\n"
+    );
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn repl_file_writes_are_audited_and_revertible() {
     let _guard = env_lock()
@@ -687,6 +1000,87 @@ fn glob_and_grep_tools_cover_success_and_errors() {
 }
 
 #[test]
+fn batch_write_preflights_every_revision_before_publishing() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("batch-write-preflight");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("existing.txt"), "current\n").expect("seed file");
+
+    let rejected = execute_file_tool(
+        "write_files",
+        &json!({ "files": [
+            { "path": "new.txt", "content": "new\n", "expected_revision": "absent" },
+            { "path": "existing.txt", "content": "replacement\n", "expected_revision": "stale" }
+        ] }),
+    )
+    .expect_err("a stale item rejects the whole batch");
+    assert!(rejected.contains("No files were changed"));
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("existing.txt")).unwrap(),
+        "current\n"
+    );
+
+    let current = runtime::read_file("existing.txt", None, None).expect("read revision");
+    let written = execute_file_tool(
+        "write_files",
+        &json!({ "files": [
+            { "path": "new.txt", "content": "new\n", "expected_revision": "absent" },
+            { "path": "existing.txt", "content": "replacement\n", "expected_revision": current.file.revision }
+        ] }),
+    )
+    .expect("write batch");
+    let written: serde_json::Value = serde_json::from_str(&written).expect("batch json");
+    assert_eq!(written["written"], 2);
+    assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "new\n");
+    assert_eq!(
+        fs::read_to_string(root.join("existing.txt")).unwrap(),
+        "replacement\n"
+    );
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn small_staged_write_is_rejected_before_allocating_transaction_state() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("small-staged-write");
+    fs::create_dir_all(&root).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("set cwd");
+
+    let error = execute_file_tool(
+        "begin_large_write",
+        &json!({ "path": "small.md", "expected_revision": "absent", "estimated_bytes": 1024 }),
+    )
+    .expect_err("small file should use direct write");
+    assert!(error.contains("staged-write threshold"));
+    assert!(!root.join("small.md").exists());
+
+    let accepted = execute_file_tool(
+        "begin_large_write",
+        &json!({ "path": "model-limited.jsx", "expected_revision": "absent", "estimated_bytes": 9000 }),
+    )
+    .expect("9 KB output may require model-side chunking");
+    let accepted: serde_json::Value = serde_json::from_str(&accepted).expect("begin json");
+    let write_id = accepted["writeId"].as_str().expect("write id");
+    execute_file_tool("abort_large_write", &json!({ "write_id": write_id }))
+        .expect("abort fixture transaction");
+
+    std::env::set_current_dir(original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn oversized_write_recommends_atomic_staging_for_every_file_kind() {
     let oversized = "x".repeat(MAX_FILE_TOOL_PAYLOAD_BYTES + 1);
     let _guard = env_lock()
@@ -835,7 +1229,7 @@ fn staged_write_tools_publish_once_and_keep_tool_results_compact() {
 
     let begun = execute_file_tool(
         "begin_large_write",
-        &json!({ "path": ".somniq/papers/chapter.tex", "expected_revision": "absent" }),
+        &json!({ "path": ".somniq/papers/chapter.tex", "expected_revision": "absent", "estimated_bytes": 100_000 }),
     )
     .expect("begin staged write");
     let begun: serde_json::Value = serde_json::from_str(&begun).expect("begin json");

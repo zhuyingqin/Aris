@@ -26,45 +26,134 @@ pub struct UsageLogEntry {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
-    /// Wall-clock duration of the turn in milliseconds. `0` on legacy rows
-    /// written before this field existed (and on non-executor entries).
+    /// Wall-clock duration of **this request** in milliseconds — request sent
+    /// to response complete, retries included. `0` when the timing was not
+    /// captured (legacy rows, non-executor entries, or a turn whose request
+    /// count did not line up with its usage rows).
+    ///
+    /// It used to hold the whole *turn's* duration, stamped identically onto
+    /// every request row of that turn. Anything summing the column then counted
+    /// the same interval once per request: one 3.2-hour session reported 27
+    /// hours. Per-request is also the number worth having — a turn total says
+    /// nothing about which call was slow.
     #[serde(default)]
     pub duration_ms: u64,
     /// Reasoning effort applied for this turn (empty when not applicable or on
     /// legacy rows).
     #[serde(default)]
     pub reasoning_effort: String,
+    /// Which turn these rows belong to.
+    ///
+    /// Turn-level aggregates used to group by `(sessionId, createdAt)`, which
+    /// only held because every row of a turn was written with an identical
+    /// timestamp. Rows now carry their own request time, so the grouping has to
+    /// be named rather than inferred. Empty on legacy rows, where consumers
+    /// fall back to the old timestamp grouping.
+    #[serde(default)]
+    pub turn_id: String,
 }
 
-pub fn append_turn_usage(
+/// When and how long one model request took, captured from the wire trace.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelRequestTiming {
+    pub finished_at_secs: u64,
+    pub duration_ms: u64,
+}
+
+/// The rows a turn contributes to the log. Split out from the append so the
+/// attribution rules are testable without touching the real log file.
+#[allow(clippy::too_many_arguments)]
+fn build_usage_rows(
     session_id: &str,
+    turn_id: &str,
     role: &str,
     model: &str,
     provider: &str,
     server: &str,
     usages: &[TokenUsage],
-    duration_ms: u64,
+    timings: &[ModelRequestTiming],
+    turn_duration_ms: u64,
     reasoning_effort: &str,
-) -> Result<(), String> {
-    let entries = usages
+    now_secs: u64,
+) -> Vec<UsageLogEntry> {
+    let aligned = timings.len() == usages.len();
+    let mut entries = usages
         .iter()
         .copied()
-        .filter(has_billable_tokens)
-        .map(|usage| UsageLogEntry {
-            created_at: now_epoch_secs(),
-            session_id: session_id.to_string(),
-            role: role.to_string(),
-            server: server.to_string(),
-            model: model.to_string(),
-            provider: provider.to_string(),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-            duration_ms,
-            reasoning_effort: reasoning_effort.to_string(),
+        .enumerate()
+        .filter(|(_, usage)| has_billable_tokens(usage))
+        .map(|(index, usage)| {
+            let timing = if aligned {
+                timings[index]
+            } else {
+                ModelRequestTiming::default()
+            };
+            UsageLogEntry {
+                created_at: if timing.finished_at_secs > 0 {
+                    timing.finished_at_secs
+                } else {
+                    now_secs
+                },
+                session_id: session_id.to_string(),
+                role: role.to_string(),
+                server: server.to_string(),
+                model: model.to_string(),
+                provider: provider.to_string(),
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                duration_ms: timing.duration_ms,
+                reasoning_effort: reasoning_effort.to_string(),
+                turn_id: turn_id.to_string(),
+            }
         })
         .collect::<Vec<_>>();
+    if !aligned {
+        // One row carries the turn so the column still sums to real elapsed
+        // time; stamping all of them (the old behaviour) counted the same
+        // interval once per request.
+        if let Some(last) = entries.last_mut() {
+            last.duration_ms = turn_duration_ms;
+        }
+    }
+    entries
+}
+
+/// Append one row per billable request of a turn.
+///
+/// `timings` must be positionally aligned with `usages` — the *n*-th request's
+/// timing against the *n*-th request's usage. A length mismatch means the
+/// alignment cannot be trusted (an interleaved reviewer run, a request that
+/// returned no usage), and rather than mislabel every row the whole turn falls
+/// back to `turn_duration_ms` on its last row and zero on the rest. That keeps
+/// `sum(duration_ms)` equal to real elapsed time either way, which is the
+/// property every aggregate over this log depends on.
+pub fn append_turn_usage(
+    session_id: &str,
+    turn_id: &str,
+    role: &str,
+    model: &str,
+    provider: &str,
+    server: &str,
+    usages: &[TokenUsage],
+    timings: &[ModelRequestTiming],
+    turn_duration_ms: u64,
+    reasoning_effort: &str,
+) -> Result<(), String> {
+    let entries = build_usage_rows(
+        session_id,
+        turn_id,
+        role,
+        model,
+        provider,
+        server,
+        usages,
+        timings,
+        turn_duration_ms,
+        reasoning_effort,
+        now_epoch_secs(),
+    );
     if entries.is_empty() {
         return Ok(());
     }

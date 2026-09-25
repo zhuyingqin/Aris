@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { fileAssetUrl, fileOpen, fileReadBytes, isTauri } from "../api/tauri";
+import ImageLightbox from "../ImageLightbox";
+import { imageMimeType } from "../imageFiles";
+import { readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#].*)?$/i;
 const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/)/i;
@@ -40,13 +43,9 @@ export function isDirectImageSource(value: string | null | undefined): value is 
 }
 
 function mimeTypeFromPath(path: string): string {
-  const clean = stripLocationSuffix(path).toLowerCase();
-  if (clean.endsWith(".svg")) return "image/svg+xml";
-  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
-  if (clean.endsWith(".gif")) return "image/gif";
-  if (clean.endsWith(".webp")) return "image/webp";
-  if (clean.endsWith(".bmp")) return "image/bmp";
-  return "image/png";
+  // PNG rather than a generic binary type: the caller already decided this is
+  // an image, and an unknown extension is usually a staged screenshot.
+  return imageMimeType(stripLocationSuffix(path), "image/png");
 }
 
 function bytesToObjectUrl(bytes: ArrayBuffer, mimeType: string): string {
@@ -59,8 +58,20 @@ interface Props {
   alt?: string;
   title?: string;
   className?: string;
+  /**
+   * Local file behind the image. Clicking opens it in SomniQ's own viewer; the
+   * operating system's image application stays available from there, but is no
+   * longer what a plain click launches.
+   */
   openPath?: string;
   onClick?: () => void;
+  /**
+   * Declared type for callers that already know `src` is an image — chat
+   * attachments carry the browser's own MIME type. It overrides the extension
+   * sniffing, which is only a guess and is wrong for anything staged under a
+   * rewritten name (older uploads landed as `shot.png.pdf`).
+   */
+  mimeType?: string;
 }
 
 export default function ChatImagePreview({
@@ -70,13 +81,17 @@ export default function ChatImagePreview({
   className,
   openPath,
   onClick,
+  mimeType,
 }: Props) {
   const normalizedSrc = useMemo(() => decodeHref(src.trim()), [src]);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const declaredImageType = mimeType?.startsWith("image/") ? mimeType : null;
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
-  const previewableLocalPath = isPreviewableImagePath(normalizedSrc);
+  const previewableLocalPath = (declaredImageType !== null && normalizedSrc.length > 0)
+    || isPreviewableImagePath(normalizedSrc);
   const displaySrc = directSrc ?? objectUrl;
   const canOpen = Boolean(openPath || onClick);
 
@@ -84,14 +99,16 @@ export default function ChatImagePreview({
     setFailed(false);
     setObjectUrl(null);
     setImgLoaded(false);
+    setLightboxOpen(false);
     if (directSrc || !previewableLocalPath) return;
 
     let disposed = false;
     let url: string | null = null;
     const localPath = stripLocationSuffix(normalizedSrc);
+    const localType = declaredImageType ?? mimeTypeFromPath(localPath);
     const imageUrlPromise = isTauri()
-      ? fileAssetUrl(localPath, mimeTypeFromPath(localPath))
-      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, mimeTypeFromPath(localPath)));
+      ? fileAssetUrl(localPath, localType)
+      : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, localType));
     void imageUrlPromise
       .then((imageUrl) => {
         if (disposed) return;
@@ -106,7 +123,7 @@ export default function ChatImagePreview({
       disposed = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [directSrc, normalizedSrc, previewableLocalPath]);
+  }, [declaredImageType, directSrc, normalizedSrc, previewableLocalPath]);
 
   if (!directSrc && !previewableLocalPath) return null;
 
@@ -124,9 +141,21 @@ export default function ChatImagePreview({
     );
   }
 
+  // An image has no size until its bytes arrive, so a transcript row containing
+  // one measures three different heights (loading badge, empty img, loaded img)
+  // and grows under the reader twice. Replaying the height this image rendered at
+  // last time means the row measures its final height on the first paint.
+  const reserved = readRenderedHeight(normalizedSrc);
+  const reserveStyle: CSSProperties | undefined = reserved && !imgLoaded
+    ? { minHeight: reserved }
+    : undefined;
+
   if (!displaySrc) {
     return (
-      <span className={`chat-image-loading${className ? ` ${className}` : ""}`}>
+      <span
+        className={`chat-image-loading${className ? ` ${className}` : ""}`}
+        style={reserveStyle}
+      >
         {title ?? alt ?? "Loading image..."}
       </span>
     );
@@ -139,7 +168,11 @@ export default function ChatImagePreview({
       alt={alt ?? title ?? ""}
       loading="lazy"
       decoding="async"
-      onLoad={() => setImgLoaded(true)}
+      style={reserveStyle}
+      onLoad={(event) => {
+        rememberRenderedHeight(normalizedSrc, event.currentTarget.offsetHeight);
+        setImgLoaded(true);
+      }}
       onError={() => setFailed(true)}
     />
   );
@@ -149,17 +182,31 @@ export default function ChatImagePreview({
   }
 
   return (
-    <button
-      type="button"
-      className={`chat-image-preview chat-image-preview-button${className ? ` ${className}` : ""}`}
-      title={title ?? "Open image"}
-      onClick={() => {
-        onClick?.();
-        if (openPath) void fileOpen(openPath).catch(() => undefined);
-      }}
-    >
-      {image}
-      {title && <span className="chat-image-caption">{title}</span>}
-    </button>
+    <>
+      <button
+        type="button"
+        className={`chat-image-preview chat-image-preview-button${className ? ` ${className}` : ""}`}
+        title={title ?? "Open image"}
+        onClick={() => {
+          onClick?.();
+          if (openPath) setLightboxOpen(true);
+        }}
+      >
+        {image}
+        {title && <span className="chat-image-caption">{title}</span>}
+      </button>
+      {lightboxOpen && openPath && (
+        // Rendered as a sibling, not a child: a portal nested inside the button
+        // would still bubble its clicks back through the React tree and reopen
+        // the viewer the moment it is closed.
+        <ImageLightbox
+          src={displaySrc}
+          alt={alt}
+          title={title}
+          path={openPath}
+          onClose={() => setLightboxOpen(false)}
+        />
+      )}
+    </>
   );
 }

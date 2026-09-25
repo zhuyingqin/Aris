@@ -1,14 +1,44 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
 import { SvgIcon } from "../SvgIcon";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
+import {
+  currentMessageColumns,
+  estimateTurnSize,
+  readTurnMeasurements,
+  setMessageColumns,
+  textColumnsForWidth,
+  turnVirtualKey,
+  writeTurnMeasurements,
+} from "./transcriptMetrics";
 import type { Language } from "../store";
 
-export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
+/** One definition of "parked at the bottom", shared by the return-to-bottom
+ *  control and the virtualizer's own bottom anchoring (`scrollEndThreshold`).
+ *  When these two disagreed, the transcript could be sticky without the button
+ *  hiding, or drift while the button claimed the reader was following. */
+export const NEAR_BOTTOM_THRESHOLD = 140;
+
+/** Air above the first turn and below the last, owned by the virtualizer rather
+ *  than by the scroll container's CSS padding. Keeping it inside the virtual
+ *  coordinate space is what makes `item.start` a real scroll offset, so
+ *  `scrollToIndex` lands where it says and the first-visible-turn lookup needs
+ *  no fudge factor. The bottom inset also has to clear the floating composer. */
+export const TRANSCRIPT_TOP_INSET = 26;
+export const TRANSCRIPT_BOTTOM_GAP = 24;
+
+/** How long a real input event (wheel, key, touch, scrollbar drag) keeps
+ *  counting as reader intent. */
+const READER_INTENT_WINDOW_MS = 1_200;
+
+export function isNearBottom(
+  element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  threshold = NEAR_BOTTOM_THRESHOLD,
+) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
@@ -23,8 +53,83 @@ export function shouldIgnoreProgrammaticScroll(programmaticUntil: number, now: n
   return now <= programmaticUntil;
 }
 
+/**
+ * Whether a raw key event is the reader asking to move up through history.
+ * Intent has to come from input events: the virtualizer corrects `scrollTop`
+ * itself whenever a measured row changes size, and reading those corrections as
+ * "the reader scrolled up" used to unlock the omitted-turn reveal and fire a
+ * history fetch, whose unmeasured rows produced more corrections — a loop that
+ * walked the viewport on its own.
+ */
+export function isUpwardNavigationKey(key: string): boolean {
+  return key === "ArrowUp" || key === "PageUp" || key === "Home";
+}
+
+/** Keys that actually move a scroll container. Typing into a question card or a
+ *  code block inside a message is not a request to walk back through history. */
+export function isScrollNavigationKey(key: string): boolean {
+  return isUpwardNavigationKey(key)
+    || key === "ArrowDown"
+    || key === "PageDown"
+    || key === "End"
+    || key === " ";
+}
+
+/**
+ * Which rows have to be re-estimated after the transcript's column width changed.
+ *
+ * A measured height is only true at the width it was measured at, and only rows
+ * that are still mounted get a ResizeObserver callback for the new width. Every
+ * other row keeps a height from the old layout until the reader scrolls it into
+ * view, where it lands as a jump — so those rows are handed a fresh estimate
+ * instead. Going through `resizeItem` (rather than dropping the cache) is what
+ * keeps the reader still: the virtualizer compensates each above-viewport change.
+ */
+export function rowsNeedingReestimate(count: number, mountedIndexes: Iterable<number>): number[] {
+  const mounted = new Set(mountedIndexes);
+  const rows: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    if (!mounted.has(index)) rows.push(index);
+  }
+  return rows;
+}
+
+/** Only the growth direction needs compensating when the composer resizes.
+ *  Growing it hides the newest line behind the composer unless the viewport
+ *  follows; shrinking it is already handled by the browser clamping `scrollTop`,
+ *  and compensating again would drag the transcript down for no reason. */
+export function composerGrowthAdjustment(previousInset: number, nextInset: number): number {
+  const delta = nextInset - previousInset;
+  return delta > 0 ? delta : 0;
+}
+
 export function scrollBottomLabel(language: Language) {
   return language === "cn" ? "回到底部" : "Back to bottom";
+}
+
+/**
+ * Whether a row that just changed size should move the viewport with it.
+ *
+ * virtual-core reads this off the instance rather than from the options. Its
+ * default additionally requires `scrollDirection !== "backward"`, which is right
+ * for a feed of uniform cards and wrong for a transcript: a chat row is routinely
+ * many times its estimate, so scrolling up measured row after row, and each of
+ * those measurements shifted the content under the reader with nothing left to
+ * anchor it (`.chat-scroll` sets `overflow-anchor: none`, so the browser will not
+ * compensate either).
+ */
+export function compensateAboveViewportResize(
+  item: Pick<VirtualItem, "start">,
+  instance: {
+    scrollElement: { scrollTop: number } | null;
+    scrollOffset: number | null;
+  },
+): boolean {
+  // The live `scrollTop` rather than the virtualizer's last *observed* offset:
+  // corrections are applied by writing `scrollTop`, so within a burst of resizes
+  // in one frame the DOM is the only value already carrying the earlier ones.
+  const offset = instance.scrollElement?.scrollTop ?? instance.scrollOffset ?? 0;
+  return item.start < offset;
 }
 
 interface QuestionMarker {
@@ -92,12 +197,35 @@ export function chatThreadClassName(hasEarlierTurns: boolean, questionCount: num
 export function firstVisibleTurnIndexFromVirtualItems(
   items: readonly VirtualTurnPosition[],
   scrollTop: number,
-  topInset = 8,
+  topInset = 0,
 ): number {
   if (items.length === 0) return 0;
   const viewportTop = Math.max(0, scrollTop + topInset);
   const visible = items.find((item) => item.start + item.size > viewportTop);
   return visible?.index ?? items[items.length - 1].index;
+}
+
+/**
+ * Which omitted row to hydrate next. The reveal used to fire for every omitted
+ * row in the virtual window at once, and each of those is a *large* saved turn
+ * by definition — a one-line notice growing into thousands of pixels. One row
+ * per commit keeps each height change small enough for the virtualizer's anchor
+ * to absorb, and the row nearest the viewport is the one the reader is about to
+ * read.
+ */
+export function nextOmittedTurnToReveal(
+  rows: readonly { index: number; omittedTurnIndex: number | null; loading: boolean }[],
+  firstVisibleIndex: number,
+): number | null {
+  let best: { omittedTurnIndex: number; distance: number } | null = null;
+  for (const row of rows) {
+    if (row.omittedTurnIndex == null || row.loading) continue;
+    const distance = Math.abs(row.index - firstVisibleIndex);
+    if (!best || distance < best.distance) {
+      best = { omittedTurnIndex: row.omittedTurnIndex, distance };
+    }
+  }
+  return best?.omittedTurnIndex ?? null;
 }
 
 export interface ChatStarter {
@@ -280,6 +408,9 @@ export default function ChatThread({
   onOpenIndependentReview,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The message column, which is what row heights actually depend on: the
+  // scroller's own width also counts its (reserved) scrollbar gutters.
+  const listRef = useRef<HTMLDivElement>(null);
   // The transcript is reader-controlled. New messages and layout changes must
   // never move its viewport; only explicit user navigation may do that.
   const [following, setFollowing] = useState(false);
@@ -287,22 +418,57 @@ export default function ChatThread({
   const [historyRevealEnabled, setHistoryRevealEnabled] = useState(false);
   const programmaticScrollUntilRef = useRef(0);
   const navigationScrollUntilRef = useRef(0);
+  const readerIntentUntilRef = useRef(0);
   const previousScrollTopRef = useRef<number | null>(null);
   const historyRevealEnabledRef = useRef(false);
+  const landedSessionRef = useRef<string | null>(null);
   const earlierLoadInFlightRef = useRef(false);
-  const prependScrollRef = useRef<{
-    turnCount: number;
-    scrollTop: number;
-    scrollHeight: number;
-    visibleTurnId: string | null;
-  } | null>(null);
+  const followingRef = useRef(false);
+  const bottomInsetRef = useRef<number | null>(null);
+  // Row lookups the virtualizer performs must not re-enter through a prop that
+  // changes identity every render: `getItemKey` and `estimateSize` are memo
+  // dependencies inside virtual-core, so a fresh closure per render invalidated
+  // the whole measurement pass on every streaming token.
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+
+  const bottomInset = composerHeight + TRANSCRIPT_BOTTOM_GAP;
+  const hasTurns = turns.length > 0;
+  const getItemKey = useCallback(
+    (index: number) => turnVirtualKey(turnsRef.current[index], index),
+    [],
+  );
+  const estimateSize = useCallback(
+    (index: number) => estimateTurnSize(turnsRef.current[index]),
+    [],
+  );
+  const initialMeasurementsCache = useMemo(
+    () => readTurnMeasurements(sessionId),
+    [sessionId],
+  );
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 180,
+    estimateSize,
     overscan: 5,
-    getItemKey: (index) => turns[index]?.id ?? index,
+    getItemKey,
+    initialMeasurementsCache,
+    // The transcript's vertical air belongs to the virtual coordinate space, so
+    // `getTotalSize()` equals the scroller's real `scrollHeight` and every
+    // offset the virtualizer computes is a true `scrollTop`.
+    paddingStart: TRANSCRIPT_TOP_INSET,
+    paddingEnd: bottomInset,
+    // `end` anchoring is what a transcript actually wants, and it replaces two
+    // hand-rolled mechanisms: it captures an anchor whenever the row set's edge
+    // keys change (so prepending earlier history no longer needs a scrollTop
+    // snapshot to restore), and it keeps a reader who is parked at the bottom
+    // there as the streaming turn grows.
+    anchorTo: "end",
+    scrollEndThreshold: NEAR_BOTTOM_THRESHOLD,
   });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => (
+    compensateAboveViewportResize(item, instance)
+  );
   const virtualItems = virtualizer.getVirtualItems();
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems[virtualItems.length - 1];
@@ -314,6 +480,7 @@ export default function ChatThread({
   );
 
   const setFollowingValue = useCallback((next: boolean) => {
+    followingRef.current = next;
     setFollowing(next);
   }, []);
 
@@ -327,15 +494,24 @@ export default function ChatThread({
     programmaticScrollUntilRef.current = window.performance.now() + 180;
   }, []);
 
-  const scrollToBottom = useCallback((smooth = false, strategy?: "direct" | "virtual") => {
+  /** A real input event on the transcript. Everything that reveals history or
+   *  fetches more of it hangs off this rather than off a `scrollTop` delta. */
+  const noteReaderIntent = useCallback((upward: boolean) => {
+    readerIntentUntilRef.current = window.performance.now() + READER_INTENT_WINDOW_MS;
+    if (upward) markHistoryRevealEnabled();
+  }, [markHistoryRevealEnabled]);
+
+  const scrollToBottom = useCallback((smooth = false) => {
     if (turns.length === 0) return;
-    const mode = strategy ?? (smooth ? "virtual" : "direct");
     markProgrammaticScroll();
-    if (mode === "direct" && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    } else {
-      virtualizer.scrollToIndex(turns.length - 1, { align: "end", behavior: smooth ? "smooth" : "auto" });
-    }
+    // Always through the virtualizer: it special-cases the last row's `end`
+    // alignment to the live maximum scroll offset and then keeps re-targeting
+    // until the height stops moving, which a one-shot `scrollTop = scrollHeight`
+    // cannot do while rows are still being measured.
+    virtualizer.scrollToIndex(turns.length - 1, {
+      align: "end",
+      behavior: smooth ? "smooth" : "auto",
+    });
     setFollowingValue(true);
   }, [markProgrammaticScroll, setFollowingValue, turns.length, virtualizer]);
 
@@ -351,90 +527,179 @@ export default function ChatThread({
     setFirstVisibleTurnIndex((current) => current === next ? current : next);
   }, [virtualizer]);
 
+  // The prepended rows are anchored by the virtualizer (`anchorTo: "end"` takes
+  // an anchor whenever the edge keys change and restores it after the commit), so
+  // this only has to decide *when* to ask for more history — and that decision
+  // must come from a real input event, never from an inferred scroll delta.
   const loadEarlierAtTop = useCallback(() => {
     const element = scrollRef.current;
+    const now = window.performance.now();
     if (
       !element
       || !hasEarlierTurns
       || loadingEarlierTurns
       || earlierLoadInFlightRef.current
       || !onLoadEarlierTurns
-      || window.performance.now() <= navigationScrollUntilRef.current
+      || now <= navigationScrollUntilRef.current
+      || now > readerIntentUntilRef.current
       || !shouldLoadEarlierTurnsAtTop(element)
     ) return;
     earlierLoadInFlightRef.current = true;
-    const visibleTurnIndex = firstVisibleTurnIndexFromVirtualItems(
-      virtualizer.getVirtualItems(),
-      element.scrollTop,
-    );
-    prependScrollRef.current = {
-      turnCount: turns.length,
-      scrollTop: element.scrollTop,
-      scrollHeight: element.scrollHeight,
-      visibleTurnId: turns[visibleTurnIndex]?.id ?? null,
-    };
     Promise.resolve(onLoadEarlierTurns()).finally(() => {
       earlierLoadInFlightRef.current = false;
     });
-  }, [hasEarlierTurns, loadingEarlierTurns, onLoadEarlierTurns, turns, virtualizer]);
-
-  // Prepending rows changes the virtual list's total height. Restore the old
-  // viewport anchor after React commits the new rows, then once more after the
-  // browser measures their real heights so the reader does not jump.
-  useLayoutEffect(() => {
-    const pending = prependScrollRef.current;
-    const element = scrollRef.current;
-    if (!pending || !element) return;
-    if (turns.length <= pending.turnCount) {
-      if (!loadingEarlierTurns) prependScrollRef.current = null;
-      return;
-    }
-    prependScrollRef.current = null;
-    const visibleTurnIndex = pending.visibleTurnId == null
-      ? -1
-      : turns.findIndex((turn) => turn.id === pending.visibleTurnId);
-    if (visibleTurnIndex >= 0) setFirstVisibleTurnIndex(visibleTurnIndex);
-    const restore = () => {
-      const delta = element.scrollHeight - pending.scrollHeight;
-      element.scrollTop = pending.scrollTop + delta;
-    };
-    restore();
-    const frame = window.requestAnimationFrame(restore);
-    return () => window.cancelAnimationFrame(frame);
-  }, [firstVisibleTurnIndex, loadingEarlierTurns, turns]);
+  }, [hasEarlierTurns, loadingEarlierTurns, onLoadEarlierTurns]);
 
   // Omitted preview rows hydrate as they enter the virtual window. The full
   // saved turn remains local; the reader should not need a second click to see
-  // it after scrolling to that point in history.
+  // it after scrolling to that point in history. One row per commit: each of
+  // these is a large saved turn, and revealing a windowful at once produced a
+  // burst of multi-thousand-pixel height changes.
   useEffect(() => {
     if (!historyRevealEnabled || !onLoadOmittedTurn) return;
-    for (const item of virtualizer.getVirtualItems()) {
-      const omittedTurnIndex = turns[item.index]?.omittedTurnIndex;
-      if (omittedTurnIndex == null || isOmittedTurnLoading(omittedTurnIndex)) continue;
-      onLoadOmittedTurn(omittedTurnIndex);
-    }
-  }, [historyRevealEnabled, isOmittedTurnLoading, onLoadOmittedTurn, turns, virtualWindowKey, virtualizer]);
+    const rows = virtualizer.getVirtualItems().map((item) => {
+      const omittedTurnIndex = turns[item.index]?.omittedTurnIndex ?? null;
+      return {
+        index: item.index,
+        omittedTurnIndex: turns[item.index]?.omittedHydrated ? null : omittedTurnIndex,
+        loading: omittedTurnIndex != null && isOmittedTurnLoading(omittedTurnIndex),
+      };
+    });
+    const next = nextOmittedTurnToReveal(rows, firstVisibleTurnIndex);
+    if (next != null) onLoadOmittedTurn(next);
+  }, [
+    firstVisibleTurnIndex,
+    historyRevealEnabled,
+    isOmittedTurnLoading,
+    onLoadOmittedTurn,
+    turns,
+    virtualWindowKey,
+    virtualizer,
+  ]);
 
   useEffect(() => {
     syncFirstVisibleTurnIndex();
   }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
-  // Reset transient history state between conversations, but intentionally do
-  // not reposition the transcript. A user who is reading should never be
-  // pulled to the newest message by a session change or layout measurement.
+  // Growing the composer reserves more space at the end of the transcript, which
+  // slides the newest line behind it unless the viewport follows. Shrinking it is
+  // already handled by the browser clamping `scrollTop`, and only matters for a
+  // reader who is parked at the bottom — mid-transcript the right answer is to
+  // leave the viewport exactly where it is.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    const previous = bottomInsetRef.current;
+    bottomInsetRef.current = bottomInset;
+    if (!element || previous == null || !followingRef.current) return;
+    const adjustment = composerGrowthAdjustment(previous, bottomInset);
+    if (adjustment === 0) return;
+    markProgrammaticScroll();
+    element.scrollTop += adjustment;
+  }, [bottomInset, markProgrammaticScroll]);
+
+  // The transcript's column width changes whenever the side panel opens, its
+  // divider is dragged, the project brief lane appears, or the window is
+  // resized. Every row's height changes with it, but only the rows still mounted
+  // are observed, so the rest keep heights from the old layout and surface them
+  // as a jump the next time the reader scrolls them into view.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    let frame: number | null = null;
+    // The list when there is one; otherwise the scroller minus the gutters it
+    // reserves, which its own `clientWidth` still counts.
+    const contentWidth = () => {
+      const list = listRef.current;
+      if (list) return list.clientWidth;
+      const style = window.getComputedStyle(element);
+      const gutters = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      return element.clientWidth - gutters;
+    };
+    const applyWidth = () => {
+      frame = null;
+      const columns = textColumnsForWidth(contentWidth());
+      if (columns === currentMessageColumns()) return;
+      setMessageColumns(columns);
+      const mounted = virtualizer.getVirtualItems().map((item) => item.index);
+      const stale = rowsNeedingReestimate(turnsRef.current.length, mounted);
+      if (stale.length === 0) return;
+      // The compensation these produce is the virtualizer's, not the reader's.
+      markProgrammaticScroll();
+      for (const index of stale) {
+        virtualizer.resizeItem(index, estimateTurnSize(turnsRef.current[index], columns));
+      }
+    };
+    applyWidth();
+    // Coalesced: dragging the side panel divider crosses a column boundary every
+    // few pixels, and each pass walks every turn in the conversation.
+    const observer = new ResizeObserver(() => {
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(applyWidth);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+    // `hasTurns` re-runs this the moment the list mounts, so the first
+    // transcript of a session is measured against the list rather than the
+    // welcome screen's box.
+  }, [hasTurns, markProgrammaticScroll, virtualizer]);
+
+  // Hand the measured heights to the next mount of this conversation so
+  // reopening it does not start from estimates again.
+  useEffect(() => () => {
+    writeTurnMeasurements(sessionId, virtualizer.takeSnapshot());
+  }, [sessionId, virtualizer]);
+
+  // Reset transient history state between conversations. Opening a session is
+  // the one moment the transcript may be repositioned (see the landing effect
+  // below); once the reader is in a conversation, new messages and layout
+  // measurements must never pull the viewport.
   useEffect(() => {
     historyRevealEnabledRef.current = false;
     setHistoryRevealEnabled(false);
     previousScrollTopRef.current = null;
     navigationScrollUntilRef.current = 0;
+    readerIntentUntilRef.current = 0;
+    landedSessionRef.current = null;
     setFollowingValue(false);
   }, [sessionId, setFollowingValue]);
+
+  // Land on the newest turn once per conversation, as soon as its first turns
+  // render. `scrollToIndex` on the last row resolves to the live maximum scroll
+  // offset and virtual-core then re-targets it every frame until the height holds
+  // still, so measured rows arriving after the estimate no longer leave the
+  // reader partway up. Once it settles, `anchorTo: "end"` keeps the bottom pinned
+  // for as long as the reader stays there — there is no fixed budget to run out.
+  useEffect(() => {
+    if (turns.length === 0 || landedSessionRef.current === sessionId) return;
+    if (!scrollRef.current) return;
+    landedSessionRef.current = sessionId;
+    markProgrammaticScroll();
+    // Suppresses the top-edge history fetch while the height is still moving.
+    navigationScrollUntilRef.current = window.performance.now() + 240;
+    setFollowingValue(true);
+    virtualizer.scrollToIndex(turns.length - 1, { align: "end" });
+  }, [markProgrammaticScroll, sessionId, setFollowingValue, turns.length, virtualizer]);
 
   return (
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
       <div
         className="chat-scroll"
         ref={scrollRef}
+        onWheel={(event) => noteReaderIntent(event.deltaY < 0)}
+        onTouchStart={() => noteReaderIntent(false)}
+        onPointerDown={(event) => {
+          // Only the scroller itself, which is what a scrollbar press targets.
+          // Counting clicks on messages would make expanding a tool card look
+          // like a request to load more history.
+          if (event.target === event.currentTarget) noteReaderIntent(false);
+        }}
+        onKeyDown={(event) => {
+          if (!isScrollNavigationKey(event.key)) return;
+          noteReaderIntent(isUpwardNavigationKey(event.key));
+        }}
         onScroll={(event) => {
           const now = window.performance.now();
           const scrollTop = event.currentTarget.scrollTop;
@@ -443,8 +708,12 @@ export default function ChatThread({
           if (
             previousScrollTop != null
             && scrollTop < previousScrollTop - 1
+            && now <= readerIntentUntilRef.current
             && now > navigationScrollUntilRef.current
           ) {
+            // Secondary signal for touch drags and scrollbar drags, where the
+            // input event cannot tell us the direction. Gated on a recent input
+            // so a virtualizer height correction never reaches it.
             markHistoryRevealEnabled();
           }
           if (shouldIgnoreProgrammaticScroll(programmaticScrollUntilRef.current, now)) {
@@ -454,7 +723,6 @@ export default function ChatThread({
           setFollowingValue(isNearBottom(event.currentTarget));
           loadEarlierAtTop();
         }}
-        style={{ paddingBottom: composerHeight + 24 }}
       >
         {turns.length === 0 && loading ? (
           <div className="chat-thread-loading" aria-live="polite" aria-busy="true">
@@ -503,7 +771,11 @@ export default function ChatThread({
             </div>
           </div>
         ) : (
-          <div className="chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
+          <div
+            className="chat-virtual-list"
+            ref={listRef}
+            style={{ height: virtualizer.getTotalSize() }}
+          >
             {virtualItems.map((item) => {
               const turn = turns[item.index];
               if (!turn) return null;

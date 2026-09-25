@@ -1,0 +1,273 @@
+/* Region-screenshot overlay. Scoped to its own file rather than styles.css:
+   this surface is a separate borderless window and shares no cascade with the
+   workspace shell. */
+
+.screenshot-overlay {
+  position: fixed;
+  inset: 0;
+  /* The frozen capture is painted 1:1 over the monitor it was taken from. */
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  cursor: crosshair;
+  overflow: hidden;
+  /* A drag that leaves the selection would otherwise select the hint text. */
+  user-select: none;
+  color-scheme: dark;
+}
+
+.screenshot-overlay.is-loading {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Dimming bands around the selection; the selection itself is left untouched
+   so no second copy of the pixels has to stay in sync. */
+.screenshot-shade {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.screenshot-frame {
+  position: absolute;
+  pointer-events: none;
+  outline: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+/* A committed selection is the working surface, so it reads stronger than the
+   transient hover highlight over a window. */
+.screenshot-frame.is-committed {
+  outline: 2px solid var(--screenshot-accent, #0a84ff);
+  box-shadow: none;
+}
+
+.screenshot-size {
+  position: absolute;
+  top: -26px;
+  left: 0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(17, 17, 17, 0.86);
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* A selection drawn against the top edge has no room above it for the badge. */
+.screenshot-size.is-inset {
+  top: 4px;
+  left: 4px;
+}
+
+/* Annotations are painted here, exactly over the selection. Pointer events stay
+   on the overlay root, which owns the whole interaction state machine. */
+.screenshot-canvas {
+  position: absolute;
+  pointer-events: none;
+}
+
+.screenshot-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 2px;
+  background: var(--screenshot-accent, #0a84ff);
+  /* Left clickable so each dot carries its own resize cursor; the mousedown
+     bubbles to the overlay root, which owns the interaction state machine. */
+}
+
+/* Sized and positioned from the renderer's own metrics: `border` would shift
+   the text by a pixel, so the frame is drawn with an outline instead. */
+.screenshot-text-input {
+  position: absolute;
+  box-sizing: content-box;
+  min-width: 1ch;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 1px dashed rgba(120, 120, 120, 0.9);
+  outline-offset: 3px;
+  background: transparent;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-weight: 600;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+}
+
+.screenshot-hint {
+  position: absolute;
+  left: 50%;
+  top: 40px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(17, 17, 17, 0.82);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.screenshot-hint.is-subtle {
+  background: rgba(17, 17, 17, 0.55);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ toolbar */
+
+.screenshot-toolbar-anchor {
+  position: absolute;
+}
+
+.screenshot-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(28, 28, 30, 0.96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: #f2f2f7;
+  font-size: 13px;
+  cursor: default;
+}
+
+.screenshot-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.screenshot-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 3px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.screenshot-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.screenshot-tool svg {
+  width: 19px;
+  height: 19px;
+}
+
+.screenshot-tool:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.screenshot-tool.is-active {
+  background: var(--screenshot-accent, #0a84ff);
+  color: #fff;
+}
+
+.screenshot-tool:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.screenshot-width {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.screenshot-width i {
+  display: block;
+  border-radius: 50%;
+  background: currentColor;
+  color: #f2f2f7;
+}
+
+.screenshot-width:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.screenshot-width.is-active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.screenshot-color {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.screenshot-color.is-active {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+}
+
+.screenshot-action {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.screenshot-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.screenshot-action.is-primary {
+  border-color: transparent;
+  background: var(--screenshot-accent, #0a84ff);
+  color: #fff;
+  font-weight: 600;
+}
+
+.screenshot-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------- errors */
+
+.screenshot-overlay.is-error {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.screenshot-overlay-message {
+  position: absolute;
+  left: 50%;
+  top: 48px;
+  transform: translateX(-50%);
+  max-width: 70vw;
+  margin: 0;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(140, 24, 24, 0.92);
+  color: #fff;
+  font-size: 13px;
+}

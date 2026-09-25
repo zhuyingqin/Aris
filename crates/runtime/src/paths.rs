@@ -24,6 +24,120 @@ pub fn workspace_root_from_env() -> PathBuf {
         .unwrap_or_else(|| crate::execution_current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// The same path without Windows' extended-length (`\\?\`) prefix.
+///
+/// `std::fs::canonicalize` returns the *verbatim* form on Windows, so
+/// `F:\Agent\Aris` comes back as `\\?\F:\Agent\Aris`. Win32 accepts that, but
+/// it is a landmine everywhere a path becomes text. A POSIX shell collapses
+/// the leading `\\` to a single `\` inside double quotes, so a command built
+/// as `"\\?\F:\tool"` reaches `exec` as `\?\F:\tool` and dies with "No such
+/// file or directory" — the prefix cannot survive being quoted. Any path that
+/// reaches a model, an error message or an external program has to be in the
+/// ordinary form, and the cheapest way to guarantee that is to never let the
+/// verbatim form escape [`canonicalize`] in the first place.
+///
+/// The prefix is kept in the cases where dropping it would change which file
+/// the path names, because a verbatim path is passed to the filesystem
+/// unnormalized: reserved DOS device names (`CON`, `LPT1`), components with a
+/// trailing dot or space, `\\?\Volume{…}` paths that have no drive-letter
+/// spelling, and paths at or beyond `MAX_PATH`, which Win32 only resolves in
+/// the verbatim form. Those are all shapes `canonicalize` effectively never
+/// produces for a real workspace; keeping them verbatim is the safe default
+/// rather than a case worth optimizing.
+#[must_use]
+pub fn plain_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    #[cfg(windows)]
+    {
+        return strip_verbatim_prefix(path);
+    }
+    #[cfg(not(windows))]
+    path.to_path_buf()
+}
+
+/// [`std::fs::canonicalize`] that cannot return a `\\?\` path.
+///
+/// Prefer this over `std::fs::canonicalize` anywhere the result can be shown,
+/// logged, handed to a subprocess, or compared against another canonical path.
+/// Mixing the two forms is its own bug: `Path::starts_with` between a stripped
+/// root and a verbatim child is always false, which reads as a spurious
+/// "outside the workspace" rejection.
+pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    fs::canonicalize(path).map(plain_path)
+}
+
+/// Longest path Win32 resolves without the extended-length prefix.
+#[cfg(windows)]
+const MAX_PATH: usize = 260;
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    // `\\?\UNC\server\share` is the verbatim spelling of `\\server\share`.
+    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if !is_drive_absolute(rest) {
+            return path.to_path_buf();
+        }
+        rest.to_string()
+    } else {
+        return path.to_path_buf();
+    };
+
+    if plain.len() >= MAX_PATH || needs_verbatim_form(&plain) {
+        return path.to_path_buf();
+    }
+    PathBuf::from(plain)
+}
+
+#[cfg(windows)]
+fn is_drive_absolute(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|drive| drive.is_ascii_alphabetic())
+        && characters.next() == Some(':')
+        && characters.next() == Some('\\')
+}
+
+/// Whether Win32 would resolve this path differently once it is normalized.
+#[cfg(windows)]
+fn needs_verbatim_form(value: &str) -> bool {
+    // A verbatim path treats `/` as an ordinary character rather than a
+    // separator, so a path containing one does not survive the round trip.
+    value.contains('/')
+        || value.split('\\').any(|component| {
+            component.ends_with('.')
+                || component.ends_with(' ')
+                || is_reserved_device_name(component)
+        })
+}
+
+#[cfg(windows)]
+fn is_reserved_device_name(component: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    const NUMBERED: [&str; 2] = ["COM", "LPT"];
+
+    let stem = component.split('.').next().unwrap_or(component);
+    if RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    NUMBERED.iter().any(|prefix| {
+        stem.len() == prefix.len() + 1
+            && stem
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            && stem
+                .chars()
+                .next_back()
+                .is_some_and(|digit| digit.is_ascii_digit() && digit != '0')
+    })
+}
+
 /// Return whether a command can be resolved from the current process `PATH`.
 ///
 /// Windows resolution honours `PATHEXT` (so `gh` finds `gh.exe`); Unix also

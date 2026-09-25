@@ -586,7 +586,7 @@ describe("Typeset start page", () => {
 
     await waitForSourceOpen(container, "chapters/body.tex", "body.tex");
     expect(mocks.latexDocumentContext).toHaveBeenCalledWith("chapters/body.tex");
-    await waitFor(() => expect(screen.getByText("main.pdf")).toBeTruthy());
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("main.pdf"));
     await waitFor(() => expect(within(screen.getByLabelText("Document outline")).getByRole("button", { name: /Body/ })).toBeTruthy());
   });
 
@@ -597,7 +597,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("exports/chat-result.pdf"));
     expect(useStore.getState().pendingTypesetFilePath).toBeNull();
     expect(screen.getByLabelText("PDF preview")).toBeTruthy();
-    expect(screen.getByText("chat-result.pdf")).toBeTruthy();
+    expect(container.querySelector(".typeset-preview-file")).toBeNull();
     expect(container.querySelector(".typeset-preview-stack")).toBeTruthy();
   });
 
@@ -3405,7 +3405,7 @@ describe("Typeset start page", () => {
       null,
     ));
     expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("local.tex");
-    await waitFor(() => expect(container.querySelector(".typeset-preview-file")?.textContent).toBe("main.pdf"));
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("main.pdf"));
   });
 
   it("clears LaTeX cache and recompiles from the compile options menu", async () => {
@@ -4399,7 +4399,6 @@ describe("Typeset start page", () => {
     });
     await waitFor(() => {
       expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("other.tex");
-      expect(container.querySelector(".typeset-preview-file")?.textContent).not.toBe("local.pdf");
       expect(screen.queryByText("stale A result")).toBeNull();
     });
   });
@@ -4615,7 +4614,10 @@ describe("Typeset start page", () => {
 
     view.dispatch({ selection: { anchor: source.indexOf("\\begin{theorem}") } });
     await waitFor(() => {
-      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-label")?.textContent).toBe("Theorem 2");
+      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-label")?.textContent).toBe("Theorem");
+      // The bracketed title stays live document text, not part of the widget,
+      // so it can be read and retyped in the Visual view.
+      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-title")?.textContent).toBe("Theorem 2");
       expect(container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content")?.textContent).not.toContain("\\begin{theorem}");
     });
 

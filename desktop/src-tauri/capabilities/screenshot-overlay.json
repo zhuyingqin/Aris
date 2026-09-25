@@ -1,0 +1,13 @@
+{
+  "identifier": "screenshot-overlay",
+  "description": "Borderless selection overlays for the region screenshot. They only paint a frozen capture and report the chosen rectangle, so they get no window controls beyond closing themselves.",
+  "windows": [
+    "screenshot-overlay-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-set-focus"
+  ]
+}

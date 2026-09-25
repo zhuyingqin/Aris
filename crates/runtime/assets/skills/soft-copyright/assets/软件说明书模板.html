@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{{软件全称}} {{版本号}} 软件说明书</title>
+<!-- 页眉页脚由 render-pdf.cjs 经 DevTools 协议绘制，以获得真正递增的页码 -->
+<meta name="pdf-running" content="on">
+<meta name="pdf-header-left" content="{{软件全称}}">
+<meta name="pdf-header-right" content="{{版本号}}　软件说明书">
+<style>
+  @page { size: A4 portrait; margin: 20mm 18mm 18mm 20mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+    font-size: 11pt; line-height: 1.85; color: #000; background: #fff;
+  }
+
+  /* 页眉页脚由打印脚本绘制，页面内不再重复渲染 */
+  .running-head, .running-foot { display: none; }
+
+  h1 { font-size: 17pt; margin: 0 0 6mm; text-align: center; font-family: "SimHei", "Heiti SC", sans-serif; }
+  h2 {
+    font-size: 14pt; font-family: "SimHei", "Heiti SC", sans-serif;
+    margin: 8mm 0 3mm; padding-bottom: 1.5mm; border-bottom: 1pt solid #000;
+    page-break-before: always; break-before: page;
+  }
+  h2.no-break { page-break-before: auto; break-before: auto; }
+  h3 { font-size: 12pt; font-family: "SimHei", "Heiti SC", sans-serif; margin: 5mm 0 2mm; }
+  h4 { font-size: 11pt; font-family: "SimHei", "Heiti SC", sans-serif; margin: 4mm 0 1.5mm; }
+  p { margin: 0 0 2.5mm; text-align: justify; text-indent: 2em; }
+  p.noindent { text-indent: 0; }
+  ul, ol { margin: 0 0 3mm; padding-left: 8mm; }
+  li { margin-bottom: 1mm; text-align: justify; }
+
+  table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm; font-size: 10pt; page-break-inside: avoid; }
+  th, td { border: 0.5pt solid #000; padding: 1.5mm 2mm; text-align: left; vertical-align: top; }
+  th { background: #eee; font-family: "SimHei", "Heiti SC", sans-serif; font-weight: normal; }
+
+  .shot {
+    border: 0.75pt solid #000; margin: 3mm 0 2mm; padding: 0;
+    page-break-inside: avoid; background: #fafafa;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .cap { font-size: 9.5pt; text-align: center; padding: 1.5mm; }
+
+  .note {
+    border-left: 2.5pt solid #000; background: #f4f4f4;
+    padding: 2mm 3mm; margin: 3mm 0; font-size: 10pt;
+    page-break-inside: avoid;
+  }
+  .note p { text-indent: 0; margin: 0; }
+
+  .steps { counter-reset: step; padding-left: 0; list-style: none; }
+  .steps > li {
+    counter-increment: step; position: relative;
+    padding-left: 9mm; margin-bottom: 2mm; text-align: justify;
+  }
+  .steps > li::before {
+    content: "步骤" counter(step); position: absolute; left: 0; top: 0;
+    font-family: "SimHei", "Heiti SC", sans-serif; font-size: 9.5pt;
+  }
+
+  /* 封面 */
+  .cover { height: 250mm; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; page-break-after: always; break-after: page; }
+  .cover .c-kicker { font-size: 12pt; letter-spacing: 6pt; margin-bottom: 22mm; }
+  .cover .c-title { font-family: "SimHei", "Heiti SC", sans-serif; font-size: 26pt; line-height: 1.5; margin-bottom: 5mm; }
+  .cover .c-sub { font-size: 16pt; margin-bottom: 30mm; }
+  .cover .c-meta { font-size: 12pt; line-height: 2.1; }
+  .cover .c-rule { width: 70mm; border-top: 1pt solid #000; margin: 0 0 10mm; }
+
+  .toc { page-break-after: always; break-after: page; }
+  .toc ol { list-style: none; padding-left: 0; counter-reset: toc; }
+  .toc > ol > li { counter-increment: toc; margin-bottom: 1.2mm; font-family: "SimHei", "Heiti SC", sans-serif; font-size: 11pt; }
+  .toc > ol > li > ol { padding-left: 7mm; margin-top: 0.8mm; }
+  .toc > ol > li > ol > li { font-family: "SimSun", serif; font-size: 10pt; margin-bottom: 0.5mm; }
+
+  @media screen {
+    body { background: #eee; }
+    .sheet { width: 210mm; margin: 0 auto; background: #fff; padding: 20mm 18mm; box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+    .running-head, .running-foot { display: none; }
+  }
+  @media print { .sheet { padding: 0; } }
+</style>
+</head>
+<body>
+
+<div class="running-head">
+  <span class="rh-name">{{软件全称}}</span>
+  <span class="rh-ver">{{版本号}} &nbsp;软件说明书</span>
+</div>
+<div class="running-foot"></div>
+
+<div class="sheet">
+
+<!-- ══════════════════ 封面 ══════════════════ -->
+<div class="cover">
+  <div class="c-kicker">软 件 说 明 书</div>
+  <div class="c-rule"></div>
+  <div class="c-title">{{软件全称_主体}}<br><span style="font-size:17pt;">{{软件全称_括号部分}}</span></div>
+  <div class="c-sub">{{版本号}}</div>
+  <div class="c-meta">
+    <div>文档版本：{{版本号}}</div>
+    <div>编制日期：{{编制年月}}</div>
+  </div>
+</div>
+
+<!-- ══════════════════ 目录 ══════════════════ -->
+<div class="toc">
+<h1>目 录</h1>
+<!-- {{目录}}：按实际章节生成两级列表。示例：
+<ol>
+  <li>第一章　软件概述
+    <ol><li>1.1　软件简介</li><li>1.2　设计目标</li></ol>
+  </li>
+</ol>
+-->
+</div>
+
+
+
+<!-- ══════════════════════════════════════════════════════════════
+     以下为可用排版组件示例。照此结构撰写各章，写完删除本示例章。
+
+     章节层级：
+       <h2>                   章标题，自动另起一页
+       <h2 class="no-break">   第一章用这个，避免开头多一张空白页
+       <h3> / <h4>            节 / 小节
+
+     <p> 自动首行缩进两字；<p class="noindent"> 取消缩进。
+     ══════════════════════════════════════════════════════════════ -->
+
+<h2 class="no-break">第一章　组件示例（写完删除本章）</h2>
+
+<h3>1.1　段落与列表</h3>
+<p>正文段落自动首行缩进两个字符、两端对齐。软著说明书应以操作说明为主，避免营销式表述。</p>
+<p class="noindent">以下列举若干特性：</p>
+<ul>
+  <li><strong>要点加粗。</strong>说明文字。</li>
+  <li>普通条目。</li>
+</ul>
+
+<h3>1.2　表格</h3>
+<table>
+  <tr><th style="width:26%">项目</th><th>说明</th></tr>
+  <tr><td>硬件环境</td><td>表格自动避免跨页断裂</td></tr>
+  <tr><td>软件环境</td><td>表头灰底，内容左对齐上对齐</td></tr>
+</table>
+
+<h3>1.3　操作步骤</h3>
+<p class="noindent">需用户按顺序执行的操作用 ol.steps，自动编号为「步骤N」：</p>
+<ol class="steps">
+  <li>打开软件，等待主窗口出现。</li>
+  <li>在设置中完成必要配置。</li>
+  <li>点击「开始」执行。</li>
+</ol>
+
+<h3>1.4　提示框</h3>
+<div class="note"><p>用于补充说明、注意事项或限制条件。左侧竖线加灰底，不跨页断裂。</p></div>
+
+<h3>1.5　插图</h3>
+<p class="noindent">有真实截图时插入下列结构；没有截图就整块不写，纯文字说明书同样合规：</p>
+<div class="shot">
+  <img src="截图路径.png">
+  <div class="cap">图 1-1　主界面</div>
+</div>
+<div class="note"><p>截图中显示的软件名称必须与登记的软件全称对得上。界面是英文名而登记用纯中文名时，审查员可能要求说明——把全称登记成「中文名（English Name）」可一次性规避。</p></div>
+
+<!-- ══════════════════ 文末固定部分 ══════════════════ -->
+
+<h2>文档修订记录</h2>
+<table>
+  <tr><th style="width:18%">文档版本</th><th style="width:26%">日期</th><th>说明</th></tr>
+  <tr><td>{{版本号}}</td><td>{{编制年月}}</td><td>首次编制，与软件 {{版本号}} 版本对应</td></tr>
+</table>
+<p style="margin-top:10mm; text-align:center; text-indent:0;">—— 本说明书完 ——</p>
+
+</div>
+</body>
+</html>

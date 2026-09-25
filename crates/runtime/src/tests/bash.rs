@@ -1,12 +1,9 @@
 use super::{
     decode_shell_output, execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput,
 };
-use crate::{
-    managed_processes_snapshot,
-    sandbox::FilesystemIsolationMode,
-};
 #[cfg(windows)]
 use crate::sandbox::SandboxStatus;
+use crate::{managed_processes_snapshot, sandbox::FilesystemIsolationMode};
 use encoding_rs::GBK;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -41,7 +38,25 @@ fn executes_simple_command() {
 
     assert_eq!(output.stdout, "hello");
     assert!(!output.interrupted);
-    assert!(output.sandbox_status.is_some());
+    // The envelope reports the sandbox only when the sandbox constrained this
+    // call. An "everything is unavailable on this platform" status is a
+    // ~600-character constant that the model would otherwise be charged for on
+    // every shell call of the session.
+    assert!(
+        output
+            .sandbox_status
+            .as_ref()
+            .is_none_or(sandbox_constrained),
+        "{:?}",
+        output.sandbox_status
+    );
+}
+
+/// The contract [`super::reportable_sandbox_status`] enforces, written so the
+/// assertions hold on a Linux host with a working `unshare` as well as on
+/// Windows, where no backend exists at all.
+fn sandbox_constrained(status: &crate::sandbox::SandboxStatus) -> bool {
+    status.active || status.namespace_active || status.network_active || status.filesystem_active
 }
 
 #[test]
@@ -268,7 +283,14 @@ fn disables_sandbox_when_requested() {
     })
     .expect("bash command should execute");
 
-    assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    // A sandbox the caller turned off constrains nothing, so there is nothing
+    // to report. The resolution itself (`enabled == false`) is asserted where
+    // it is decided, in the sandbox module's own tests.
+    assert!(
+        output.sandbox_status.is_none(),
+        "{:?}",
+        output.sandbox_status
+    );
 }
 
 #[test]
@@ -297,12 +319,20 @@ fn unavailable_filesystem_sandbox_does_not_redirect_home_or_create_placeholder_d
     .expect("bash command should execute");
 
     assert_eq!(output.stdout, "hello");
-    let status = output.sandbox_status.expect("sandbox status");
-    assert!(!status.filesystem_active);
-    assert!(status
-        .fallback_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("filesystem isolation unavailable")));
+    // Filesystem isolation has no enforcing backend on any platform, so a
+    // request for it constrains nothing and is not reported on the envelope.
+    // That the resolution still records `filesystem_active == false` with the
+    // "filesystem isolation unavailable" fallback reason is asserted in the
+    // sandbox module's own tests; what matters here is that HOME was not
+    // redirected and no placeholder directories were created.
+    assert!(
+        output
+            .sandbox_status
+            .as_ref()
+            .is_none_or(sandbox_constrained),
+        "{:?}",
+        output.sandbox_status
+    );
     assert!(!root
         .join(".somniq")
         .join("tmp")
@@ -320,4 +350,75 @@ fn unavailable_filesystem_sandbox_does_not_redirect_home_or_create_placeholder_d
 
     std::env::set_current_dir(previous).expect("restore cwd");
     fs::remove_dir_all(root).expect("cleanup temp workspace");
+}
+
+/// The model is charged for this envelope on every shell call, so a field with
+/// nothing to say must not appear at all. Before this, a plain successful
+/// command serialized eleven `null`s and a ~600-character sandbox status
+/// describing the platform rather than the command.
+#[test]
+fn a_plain_result_envelope_carries_no_empty_fields() {
+    let _guard = crate::test_env_lock();
+    let output = execute_bash(BashCommandInput {
+        command: String::from("printf 'hello'"),
+        timeout: Some(5_000),
+        description: None,
+        run_in_background: Some(false),
+        dangerously_disable_sandbox: None,
+        namespace_restrictions: None,
+        isolate_network: None,
+        filesystem_mode: None,
+        allowed_mounts: None,
+    })
+    .expect("bash command should execute");
+
+    let value = serde_json::to_value(&output).expect("serialize envelope");
+    let object = value.as_object().expect("envelope is an object");
+    assert!(
+        object.values().all(|field| !field.is_null()),
+        "no field may serialize as null: {object:?}"
+    );
+    // The two always-present fields stay present even when empty: absence of
+    // `stdout` would be read as "no output was captured" rather than "the
+    // command printed nothing".
+    assert!(object.contains_key("stdout"), "{object:?}");
+    assert!(object.contains_key("interrupted"), "{object:?}");
+    assert!(!object.contains_key("rawOutputPath"), "{object:?}");
+    assert!(!object.contains_key("backgroundTaskId"), "{object:?}");
+    assert!(!object.contains_key("structuredContent"), "{object:?}");
+}
+
+/// Older persisted envelopes were written with explicit nulls, and a session
+/// log full of them still has to load.
+#[test]
+fn an_envelope_written_with_explicit_nulls_still_deserializes() {
+    let legacy = serde_json::json!({
+        "stdout": "hello",
+        "stderr": "",
+        "rawOutputPath": null,
+        "interrupted": false,
+        "isImage": null,
+        "backgroundTaskId": null,
+        "backgroundedByUser": null,
+        "assistantAutoBackgrounded": null,
+        "dangerouslyDisableSandbox": null,
+        "returnCodeInterpretation": null,
+        "noOutputExpected": null,
+        "structuredContent": null,
+        "persistedOutputPath": null,
+        "persistedOutputSize": null,
+        "sandboxStatus": null
+    });
+
+    let parsed: super::BashCommandOutput =
+        serde_json::from_value(legacy).expect("legacy envelope must still load");
+    assert_eq!(parsed.stdout, "hello");
+    assert!(parsed.sandbox_status.is_none());
+
+    // And so does one written after the change, with the keys simply absent.
+    let slim = serde_json::json!({ "stdout": "hello", "stderr": "", "interrupted": false });
+    let parsed: super::BashCommandOutput =
+        serde_json::from_value(slim).expect("slim envelope must load");
+    assert_eq!(parsed.stdout, "hello");
+    assert!(parsed.raw_output_path.is_none());
 }

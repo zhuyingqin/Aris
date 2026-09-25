@@ -20,6 +20,20 @@ export const PDF_ZOOM_MIN = 0.25;
 export const PDF_ZOOM_MAX = 4;
 export const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
 export const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
+export type PdfRenderRange = { start: number; end: number };
+
+/** Keep native-selection anchors mounted while a pointer drag scrolls the PDF. */
+export function stablePdfRenderRange(
+  current: PdfRenderRange,
+  visible: PdfRenderRange,
+  pointerActive: boolean,
+): PdfRenderRange {
+  if (!pointerActive) return visible;
+  return {
+    start: Math.min(current.start, visible.start),
+    end: Math.max(current.end, visible.end),
+  };
+}
 export type PdfTextObjectGeometry = {
   left: number;
   top: number;

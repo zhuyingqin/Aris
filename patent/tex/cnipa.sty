@@ -1,0 +1,124 @@
+% CNIPA 通用类 100001--100004 的 LaTeX 版式。
+% 官方原件、版本、参数差异与依据见 ../docs/CNIPA-TEMPLATE.md。
+% XeLaTeX + \documentclass[12pt,UTF8,fontset=none]{ctexart}
+% \usepackage[claims|description|abstract|drawings]{cnipa}
+% 本包生成纸面排版；2026 年电子申请另须符合 CNIPA 的 XML 标准。
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{cnipa}[2026/09/15 v2 CNIPA official form layout]
+
+\RequirePackage{iftex}
+\RequireXeTeX
+\def\cn@type{}
+\def\cn@heading{}
+\def\cn@tracking{4.5bp}
+\newif\ifcn@numbered
+\DeclareOption{claims}{\def\cn@type{claims}\def\cn@heading{权利要求书}}
+\DeclareOption{description}{\def\cn@type{description}\def\cn@heading{说明书}\def\cn@tracking{6.5bp}}
+\DeclareOption{abstract}{\def\cn@type{abstract}\def\cn@heading{说明书摘要}}
+\DeclareOption{drawings}{\def\cn@type{drawings}\def\cn@heading{说明书附图}}
+% 辅助预览：当前通用类目录无独立 100005 表格，不伪造官方表格代码。
+\DeclareOption{abstract-figure}{\def\cn@type{abstract-figure}\def\cn@heading{摘要附图}}
+% 仅在需要带段号的校阅稿时显式启用，官方空白表格正文默认不带段号。
+\DeclareOption{numbered-paragraphs}{\cn@numberedtrue}
+\DeclareOption*{\PackageError{cnipa}{Unknown option \CurrentOption}{Choose a document type listed in cnipa.sty.}}
+\ProcessOptions\relax
+\ifx\cn@type\@empty
+  \PackageError{cnipa}{Document type is required}{Use e.g. \string\usepackage[description]{cnipa}.}
+\fi
+
+\RequirePackage{geometry}
+\RequirePackage{fancyhdr}
+\RequirePackage{xcolor}
+\RequirePackage{needspace}
+\RequirePackage{graphicx}
+\RequirePackage{symbols}
+
+% 页眉位于上边距内，正文版心的首行距纸边约 25mm；页脚位于下边距内。
+% 这是官网 100001--100004 空白表格的结构：文件名称和横线是页眉，不能
+% 把页眉高度再次计入正文的 25mm 顶边。页码下沿仍保留至少 15mm 空白。
+\geometry{a4paper,portrait,twoside=false,
+  left=25mm,right=15mm,top=14mm,bottom=16mm,
+  includeheadfoot,headheight=7mm,headsep=4mm,footskip=9mm}
+
+% 正文采用宋体 12bp（Word 的 12 磅，4.233mm）。
+% 基线距 20.5bp，名义字框之间的净距 (20.5-12)bp = 2.999mm。
+% 用绝对值避免 ctex 的字号和 \linespread 相乘导致行距漂移。
+\setmainfont{SimSun}
+\setCJKmainfont{SimSun}[AutoFakeBold=2]
+\newCJKfontfamily\cnbf{SimSun}[AutoFakeBold=2]
+\newCJKfontfamily\cnheadfont{SimHei}
+\renewcommand\normalsize{\@setfontsize\normalsize{12bp}{20.5bp}}
+\linespread{1}\normalsize
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+\raggedbottom
+\AtBeginDocument{\color{black}\normalsize}
+
+% 官方模板的文件名属于页眉，不能当作正文标题。
+% 14 磅黑体、字间距：说明书 6.5 磅，其他表格 4.5 磅。
+\newcommand{\cn@header}{%
+  {\cnheadfont\fontsize{14bp}{17bp}\selectfont
+   \xeCJKsetup{CJKglue=\hskip\cn@tracking}\cn@heading}}
+% 左右边距不对称，版心中心为 110mm；页码另向左移 5mm，居纸张中心。
+\newcommand{\cn@footer}{%
+  \hspace*{-5mm}\makebox[0pt][c]{\normalfont\fontsize{12bp}{12bp}\selectfont\thepage}\hspace*{5mm}}
+\newcommand{\cn@pagestyle}{%
+  \fancyhf{}\fancyhead[C]{\cn@header}\fancyfoot[C]{\cn@footer}%
+  \renewcommand{\headrulewidth}{1bp}%
+  \renewcommand{\footrulewidth}{1bp}}
+\pagestyle{fancy}
+\cn@pagestyle
+\fancypagestyle{plain}{\cn@pagestyle}
+
+% 说明书的第一行「正文」是发明名称，与请求书完全一致。
+% 不带“发明名称”前缀；其后留一个正文行。页眉“说明书”不属于正文。
+\newcommand{\inventiontitle}[1]{%
+  \par\begingroup\centering{\cnbf #1}\par\endgroup
+  \vspace{\baselineskip}}
+
+\newcommand{\cn@keep}{\Needspace{4\baselineskip}}
+\newcommand{\cnsection}[1]{%
+  \par\cn@keep\addvspace{3mm}%
+  \noindent{\cnbf #1}\par\nopagebreak}
+\newcommand{\cnsubsection}[1]{%
+  \par\cn@keep\addvspace{2mm}%
+  \noindent\hspace*{2em}{\cnbf #1}\par\nopagebreak}
+\newcommand{\cnexample}[1]{%
+  \par\cn@keep\addvspace{2mm}%
+  \noindent{\cnbf #1}\par\nopagebreak}
+
+\newcounter{cnpara}
+\newcommand{\cnparanum}{%
+  \ifnum\value{cnpara}<1000 0\fi
+  \ifnum\value{cnpara}<100 0\fi
+  \ifnum\value{cnpara}<10 0\fi\arabic{cnpara}}
+\newcommand{\p}[1]{%
+  \par\refstepcounter{cnpara}%
+  \ifcn@numbered\noindent[\cnparanum]\hspace{0.7em}\else\indent\fi
+  \ignorespaces#1\par}
+
+% 每项编号连续；权项内部段落仍属同一项，只有末尾用句号。
+\newcounter{cnclaim}
+\newcommand{\claim}[1]{%
+  \par\refstepcounter{cnclaim}\indent
+  \arabic{cnclaim}.\hspace{0.35em}\ignorespaces#1\par}
+\newcommand{\claimpara}[1]{\par\indent\ignorespaces#1\par}
+\newcommand{\cnabstract}[1]{\par\indent\ignorespaces#1\par}
+
+% 不自动缩图：尺寸过大必须修图，防止把文字悄悄缩到不可读。
+\newsavebox{\cn@figurebox}
+\newcommand{\figpage}[2]{%
+  \clearpage\thispagestyle{fancy}%
+  \sbox{\cn@figurebox}{#2}%
+  \ifdim\wd\cn@figurebox>\linewidth
+    \PackageError{cnipa}{Drawing #1 exceeds the text width}{Resize the drawing layout.}%
+  \fi
+  \ifdim\dimexpr\ht\cn@figurebox+\dp\cn@figurebox+22mm\relax>\textheight
+    \PackageError{cnipa}{Drawing #1 exceeds the text height}{Resize the drawing layout.}%
+  \fi
+  \null\vfill
+  {\centering\noindent\usebox{\cn@figurebox}\par
+   \vspace{7mm}{\normalsize 图#1}\par}
+  \vfill\null}
+\endinput
+

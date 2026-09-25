@@ -7183,20 +7183,6 @@
   margin-left: 6px;
 }
 
-.typeset-pdf-panel-label {
-  display: inline-flex;
-  flex-shrink: 0;
-  height: 28px;
-  align-items: center;
-  margin-left: 0;
-  color: var(--ol-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
 /* 28px is the shared control height of this toolbar (icon buttons, zoom, page
    control). The compile group used to sit at 24px, which read as a misaligned
    row of differently sized boxes. */
@@ -8060,13 +8046,6 @@
        last resort that keeps it reachable instead of clipped. */
     overflow-x: auto;
     overflow-y: hidden;
-  }
-
-  /* Only the decorations go: every button that no longer fits is in the ⋯
-     menu, not gone. */
-  .typeset-pdf-panel-label,
-  .typeset-preview-file {
-    display: none;
   }
 
   /* One status line is all a narrow row can honestly show; the strip's tooltip

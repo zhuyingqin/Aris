@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types";
 import { useStore } from "../../store";
-import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "../ChatComposer";
+import ChatComposer, { attachmentFromFile, attachmentFromPath, resizeComposerTextarea } from "../ChatComposer";
+
+const gitComposerStyles = readFileSync(resolve(process.cwd(), "src/chat/ChatComposerGit.css"), "utf8");
 
 const attachmentApiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -113,15 +117,53 @@ describe("ChatComposer textarea and attachments", () => {
     expect(document.querySelector(".chat-attachment")).toBeNull();
   });
 
-  it("keeps image previews out of the prompt body", async () => {
+  it("keeps browser image previews as direct vision input without a stale fallback", async () => {
     const file = new File(["fake-png"], "shot.png", { type: "image/png" });
 
     const attachment = await attachmentFromFile(file);
 
     expect(attachment.kind).toBe("image");
     expect(attachment.preview).toMatch(/^data:image\/png;base64,/);
-    expect(attachment.content).toContain("Vision input is not supported");
-    expect(attachment.content).not.toMatch(/^data:/);
+    expect(attachment.content).toBeUndefined();
+  });
+
+  it("persists a pathless image in native chat so tools receive its exact path", async () => {
+    attachmentApiMocks.isTauri.mockReturnValue(true);
+    attachmentApiMocks.chatImportAttachmentData.mockResolvedValue({
+      path: ".somniq/uploads/456-shot.png",
+      name: "shot.png",
+      bytes: 8,
+    });
+    const file = new File(["fake-png"], "shot.png", { type: "image/png" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachmentApiMocks.chatImportAttachmentData).toHaveBeenCalledOnce();
+    expect(attachment).toMatchObject({
+      kind: "image",
+      name: "shot.png",
+      path: ".somniq/uploads/456-shot.png",
+      mimeType: "image/png",
+    });
+    expect(attachment.preview).toBeUndefined();
+  });
+
+  it("classifies a native image path as an image after importing it", async () => {
+    attachmentApiMocks.chatImportAttachment.mockResolvedValue({
+      path: ".somniq/uploads/789-diagram.webp",
+      name: "diagram.webp",
+      bytes: 12,
+    });
+
+    const attachment = await attachmentFromPath("C:\\Downloads\\diagram.webp");
+
+    expect(attachmentApiMocks.chatImportAttachment).toHaveBeenCalledWith("C:\\Downloads\\diagram.webp");
+    expect(attachment).toMatchObject({
+      kind: "image",
+      name: "diagram.webp",
+      path: ".somniq/uploads/789-diagram.webp",
+      mimeType: "image/webp",
+    });
   });
 
   it("allows the context compaction notice to be dismissed", async () => {
@@ -177,6 +219,80 @@ describe("ChatComposer textarea and attachments", () => {
     );
 
     expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows only Git below the composer and opens the branch action menu", async () => {
+    const user = userEvent.setup();
+    const onOpenGit = vi.fn();
+    const onSwitchGitBranch = vi.fn();
+    const onCreateGitBranch = vi.fn();
+    render(
+      <ChatComposer
+        input=""
+        commands={[]}
+        skills={[]}
+        attachments={[]}
+        busy={false}
+        ready
+        editing={false}
+        gitWorkspace={{
+          gitAvailable: true,
+          isRepository: true,
+          workspacePath: "F:\\Agent\\Aris",
+          repositoryRoot: "F:\\Agent\\Aris",
+          branch: "task/5",
+          detached: false,
+          ahead: 0,
+          behind: 0,
+          files: [{
+            path: "desktop/src/chat/Chat.tsx",
+            staged: false,
+            unstaged: true,
+            untracked: false,
+            conflicted: false,
+          }],
+          branches: [
+            { name: "task/5", current: true },
+            { name: "main", current: false },
+          ],
+          hasConflicts: false,
+        }}
+        onOpenGit={onOpenGit}
+        onRefreshGit={() => undefined}
+        onSwitchGitBranch={onSwitchGitBranch}
+        onCreateGitBranch={onCreateGitBranch}
+        onInputChange={() => undefined}
+        onAttachmentsChange={() => undefined}
+        onSubmit={() => undefined}
+        onStop={() => undefined}
+        onCancelEdit={() => undefined}
+        onHeightChange={() => undefined}
+      />,
+    );
+
+    const workspaceBar = screen.getByLabelText("Git workspace");
+    expect(gitComposerStyles).toMatch(/\.chat-workspace-bar\s*\{[^}]*display:\s*flex/s);
+    expect(within(workspaceBar).queryByText("Aris")).toBeNull();
+    expect(within(workspaceBar).getByText("task/5")).toBeTruthy();
+    expect(within(workspaceBar).getByText("1")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    expect(screen.getByRole("menu", { name: "Git actions" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("Search branches and actions")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /Local branches/ }));
+    await user.click(screen.getByRole("menuitem", { name: "main" }));
+    expect(onSwitchGitBranch).toHaveBeenCalledWith("main");
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    await user.click(screen.getByRole("menuitem", { name: "New branch…" }));
+    await user.type(screen.getByLabelText("New branch name"), "feature/menu");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(onCreateGitBranch).toHaveBeenCalledWith("feature/menu");
+
+    await user.click(screen.getByRole("button", { name: "Git menu, task/5" }));
+    await user.click(screen.getByRole("menuitem", { name: "View changes and commit…" }));
+    expect(onOpenGit).toHaveBeenCalledOnce();
   });
 });
 

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{
     collect_typeset_library, file_read, import_chat_attachment_at, import_chat_attachment_bytes_at,
     normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
-    strip_location_suffix, TypesetScan,
+    sanitize_chat_upload_name, strip_location_suffix, TypesetScan,
 };
 
 #[test]
@@ -48,6 +48,48 @@ fn pathless_chat_attachment_bytes_are_persisted_to_a_durable_workspace_path() {
     );
 
     let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn pasted_images_keep_their_own_extension_when_staged() {
+    let workspace = temp_path("image-chat-attachment-workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    let png = b"\x89PNG\r\n\x1a\npasted screenshot";
+
+    let imported = import_chat_attachment_bytes_at(&workspace, "screenshot 2026.png", png)
+        .expect("import pasted screenshot");
+
+    // A staged `.png.pdf` reads as a PDF to everything downstream, which is
+    // what stopped the chat thumbnail from rendering pasted screenshots.
+    assert!(
+        imported.path.ends_with(".png"),
+        "staged screenshot kept its extension: {}",
+        imported.path
+    );
+    assert_eq!(imported.name, "screenshot 2026.png");
+    assert_eq!(
+        std::fs::read(workspace.join(&imported.path)).expect("read staged attachment"),
+        png
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn chat_upload_names_are_path_safe_and_bounded() {
+    assert_eq!(
+        sanitize_chat_upload_name("../../etc/passwd").expect("sanitize traversal"),
+        "etc-passwd",
+    );
+    assert_eq!(
+        sanitize_chat_upload_name("图 1 结果.png").expect("sanitize non-ascii"),
+        "1---.png",
+    );
+    let long = sanitize_chat_upload_name(&format!("{}.png", "a".repeat(400)))
+        .expect("sanitize long name");
+    assert!(long.len() <= 120, "bounded length: {}", long.len());
+    assert!(long.ends_with(".png"), "extension survives truncation: {long}");
+    assert!(sanitize_chat_upload_name("...").is_err());
 }
 
 struct EnvGuard {

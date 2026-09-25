@@ -121,6 +121,9 @@ describe("useIndependentReview", () => {
       summary: "Verified.",
       independent: true,
     });
+    // A session log is mostly streaming deltas. Restoring the panel must ask
+    // for its own kind, not drag the whole log across the IPC boundary.
+    expect(mocks.chatEventsRead).toHaveBeenCalledWith("session-restored", ["independent_review"]);
   });
 
   it("merges restored history with a live round that arrives while the log is loading", async () => {

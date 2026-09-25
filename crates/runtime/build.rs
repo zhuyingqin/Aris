@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 const MAX_FILE_SIZE: u64 = 512 * 1024;
 const ALLOWED_EXTS: &[&str] = &[
-    "md", "py", "sh", "tex", "cls", "bst", "toml", "yaml", "yml", "json", "html",
+    "md", "py", "sh", "tex", "cls", "bst", "toml", "yaml", "yml", "json", "html", "cjs",
 ];
 const SHARED_RESOURCE_DIRS: &[&str] = &["shared-references", "shared-governance"];
 /// Skill directory name prefixes to exclude from bundling. v0.4.12 changed

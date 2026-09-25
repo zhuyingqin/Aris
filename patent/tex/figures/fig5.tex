@@ -1,0 +1,34 @@
+% ==== 图 5　上下文压缩时的账本重建流程图 ====
+%
+% 纯线性五步，无分支。框里只写动作名，细节由说明书 [0077]–[0082] 承载。
+% 要增删一步，只改相邻节点的 below 关系和底下那一列 \draw。
+% ============================================
+\begin{tikzpicture}[x=1cm,y=1cm,node distance=7mm]
+
+  \node[pterm] (start) {会话上下文超出预算，需要压缩};
+
+  \node[pbox=8.6cm, below=of start] (s501)
+    {S501\quad 确定重建范围：本用户回合内};
+
+  \node[pbox=8.6cm, below=of s501] (s502)
+    {S502\quad 记录工具调用块的工具名称与入参};
+
+  \node[pbox=8.6cm, below=of s502] (s503)
+    {S503\quad 按 S201 至 S208 的规则更新新建的账本};
+
+  \node[pbox=8.6cm, below=of s503] (s504)
+    {S504\quad 得到重建后的各计数与证据指纹集合};
+
+  \node[pbox=8.6cm, below=of s504] (s505)
+    {S505\quad 导出聚合事实，写入压缩产物};
+
+  \node[pterm, below=of s505] (end) {结束};
+
+  \draw[pl] (start) -- (s501);
+  \draw[pl] (s501)  -- (s502);
+  \draw[pl] (s502)  -- (s503);
+  \draw[pl] (s503)  -- (s504);
+  \draw[pl] (s504)  -- (s505);
+  \draw[pl] (s505)  -- (end);
+
+\end{tikzpicture}

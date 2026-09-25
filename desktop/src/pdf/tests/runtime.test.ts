@@ -96,3 +96,87 @@ describe("shared PDF.js runtime", () => {
     expect(request.disableAutoFetch).toBe(true);
   });
 });
+
+describe("cross-reference repair", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mocks.getDocument.mockReset();
+    apiMocks.fileReadBytes.mockReset();
+    apiMocks.fileReadBytesInfo.mockReset();
+    apiMocks.fileReadBytesRange.mockReset();
+  });
+
+  /** A trailer whose `startxref` offset is the thing a rebuild has to blank. */
+  const pdfWithTrailer = (offset: string) =>
+    new TextEncoder().encode(`%PDF-1.5\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\nstartxref\n${offset}\n%%EOF\n`);
+
+  it("recognises the failures a rebuilt table can fix", async () => {
+    const { isPdfXrefError } = await import("../runtime");
+
+    expect(isPdfXrefError(new Error("Bad (uncompressed) XRef entry: 1327R"))).toBe(true);
+    expect(isPdfXrefError({ name: "XRefEntryException", message: "Bad (compressed) XRef entry: 8R" })).toBe(true);
+    expect(isPdfXrefError("InvalidPDFException: Invalid PDF structure.")).toBe(true);
+    expect(isPdfXrefError(new Error("The PDF document contains no pages."))).toBe(false);
+    expect(isPdfXrefError(new Error("file is too large to preview (41943041 bytes)"))).toBe(false);
+  });
+
+  it("blanks the startxref offset in place so object offsets keep their bytes", async () => {
+    const { rebuildPdfXref } = await import("../runtime");
+    const original = pdfWithTrailer("0000000123");
+
+    const rebuilt = rebuildPdfXref(original);
+
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt!.byteLength).toBe(original.byteLength);
+    const text = new TextDecoder().decode(rebuilt!);
+    expect(text).toContain("startxref\n9999999999\n");
+    expect(text.slice(0, text.indexOf("startxref"))).toBe(
+      new TextDecoder().decode(original).slice(0, text.indexOf("startxref")),
+    );
+  });
+
+  it("leaves a file without a startxref alone", async () => {
+    const { rebuildPdfXref } = await import("../runtime");
+
+    expect(rebuildPdfXref(new TextEncoder().encode("%PDF-1.5\n1 0 obj\n<<>>\nendobj\n"))).toBeNull();
+  });
+
+  it("reopens a document that will not load because of its xref table", async () => {
+    const repaired = { destroy: vi.fn() };
+    apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
+    apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
+    mocks.getDocument
+      .mockReturnValueOnce({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) })
+      .mockReturnValueOnce({ promise: Promise.resolve(repaired) });
+
+    const { openPdfDocumentFromPath } = await import("../runtime");
+    const loaded = await openPdfDocumentFromPath("main.pdf");
+
+    expect(loaded).toBe(repaired);
+    const retried = mocks.getDocument.mock.calls[1][0] as { data: Uint8Array };
+    expect(new TextDecoder().decode(retried.data)).toContain("startxref\n9999999999\n");
+  });
+
+  it("reports the original failure when the rebuild cannot help either", async () => {
+    apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
+    apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
+    mocks.getDocument
+      .mockReturnValueOnce({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) })
+      .mockReturnValueOnce({ promise: Promise.reject(new Error("Invalid PDF structure.")) });
+
+    const { openPdfDocumentFromPath } = await import("../runtime");
+
+    await expect(openPdfDocumentFromPath("main.pdf")).rejects.toThrow("Bad (uncompressed) XRef entry: 1327R");
+  });
+
+  it("does not rebuild for failures that have nothing to do with the xref table", async () => {
+    apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
+    apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
+    mocks.getDocument.mockReturnValueOnce({ promise: Promise.reject(new Error("Password required")) });
+
+    const { openPdfDocumentFromPath } = await import("../runtime");
+
+    await expect(openPdfDocumentFromPath("main.pdf")).rejects.toThrow("Password required");
+    expect(mocks.getDocument).toHaveBeenCalledTimes(1);
+  });
+});

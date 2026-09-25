@@ -6,6 +6,7 @@ const LEGACY_CONFIG_HOME_DIR: &str = "aris";
 const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
+    "write_files",
     "append_file",
     "begin_large_write",
     "append_write_chunk",

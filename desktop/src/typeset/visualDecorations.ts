@@ -40,10 +40,17 @@ import {
   initialSectionNumberingState,
   sectionCounterResetFor,
   sectionDisplayLevel,
+  sectionNumberLabel,
   type SectionCounterReset,
   type SectionMatter,
   type SectionNumberingRules,
 } from "./sectionNumbering";
+import {
+  BUILTIN_THEOREM_ENVIRONMENTS,
+  assignTheoremNumbers,
+  theoremDefinitions,
+  type TheoremDefinition,
+} from "./theoremEnvironments";
 import { parseTable, type TableModel } from "./latexTable";
 import { buildTableGrid, isTableGridEvent } from "./tableWidget";
 import {
@@ -124,6 +131,23 @@ export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
  * numbers immediately instead of waiting for the debounced project analysis.
  */
 export const visualNumbering = Facet.define<SectionNumberingPrefix | null, SectionNumberingPrefix | null>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
+/**
+ * Theorem-like environments declared by the *root* file's preamble
+ * (`\newtheorem{requirement}{Requirement}`), supplied by `Typeset.tsx`.
+ *
+ * A chapter or section file `\input` from main.tex carries none of its own, so
+ * without this every custom environment in it would read as an undeclared one:
+ * no heading, no number, and — before this existed — no visible title at all.
+ * The open file's own declarations are parsed from the live buffer below and
+ * win over these, so editing a `\newtheorem` reflows its environments at once.
+ */
+export const visualTheorems = Facet.define<
+  ReadonlyMap<string, TheoremDefinition> | null,
+  ReadonlyMap<string, TheoremDefinition> | null
+>({
   combine: (values) => values[values.length - 1] ?? null,
 });
 
@@ -304,18 +328,6 @@ const activeMathSourceDisplay = Decoration.mark({ class: "cm-vis-active-math-sou
 const activeMathSourceInline = Decoration.mark({
   class: "cm-vis-active-math-source cm-vis-active-math-source-inline",
 });
-
-/** Theorem-like environment names that receive readable Visual chrome. */
-const THEOREM_ENVIRONMENTS = new Set([
-  "theorem",
-  "lemma",
-  "proposition",
-  "corollary",
-  "definition",
-  "remark",
-  "example",
-  "proof",
-]);
 
 const LIST_ENVIRONMENTS = new Set(["itemize", "enumerate"]);
 
@@ -559,10 +571,19 @@ class SectionLabelWidget extends WidgetType {
   ignoreEvent = blockIgnoreEvent;
 }
 
-/** Small theorem/lemma label in place of a LaTeX theorem environment marker. */
+/**
+ * The run-in heading a theorem-like environment prints — "Requirement 1" — in
+ * place of its `\begin{requirement}[` marker.
+ *
+ * The bracketed title is deliberately *not* part of this widget: it stays live
+ * document text carrying `cm-vis-theorem-title`, so it can be read and typed
+ * over in the Visual view. Only the chrome around it folds away.
+ */
 class TheoremLabelWidget extends WidgetType {
   constructor(
     private readonly label: string,
+    private readonly number: string,
+    private readonly opensTitle: boolean,
     private readonly sourceRange: Range,
     private readonly onJump: OpenCodeRange,
   ) {
@@ -570,13 +591,15 @@ class TheoremLabelWidget extends WidgetType {
   }
   eq(other: TheoremLabelWidget) {
     return other.label === this.label
+      && other.number === this.number
+      && other.opensTitle === this.opensTitle
       && other.sourceRange.from === this.sourceRange.from
       && other.sourceRange.to === this.sourceRange.to;
   }
   toDOM() {
     const el = document.createElement("span");
     el.className = `cm-vis-theorem-label ${BLOCK_TARGET_CLASS}`;
-    el.textContent = this.label;
+    el.textContent = this.number ? `${this.label} ${this.number}` : this.label;
     if (this.onJump) {
       el.classList.add("cm-vis-theorem-editable");
       el.title = "Double-click to edit theorem source in Code mode";
@@ -586,10 +609,42 @@ class TheoremLabelWidget extends WidgetType {
         this.onJump?.(this.sourceRange.from, this.sourceRange.to);
       });
     }
-    return el;
+    if (!this.opensTitle) return el;
+    const wrap = document.createElement("span");
+    wrap.className = "cm-vis-theorem-head";
+    wrap.append(el, theoremParen("("));
+    return wrap;
   }
   ignoreEvent = blockIgnoreEvent;
 }
+
+function theoremParen(text: string): HTMLElement {
+  const el = document.createElement("span");
+  el.className = "cm-vis-theorem-paren";
+  el.textContent = text;
+  return el;
+}
+
+/**
+ * The `)` closing a rendered theorem title, standing in for the `]` of
+ * `\begin{theorem}[…]`. A widget rather than a CSS `::after` on the title:
+ * CodeMirror splits a mark wherever another decoration starts, so a title
+ * holding `$x$` or `\emph{…}` would otherwise print one bracket per fragment.
+ */
+class TheoremTitleEndWidget extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    return theoremParen(")");
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+const theoremTitleMark = Decoration.mark({ class: "cm-vis-theorem-title" });
+const theoremBodyLine = Decoration.line({ class: "cm-vis-theorem-block" });
+const theoremBodyFirstLine = Decoration.line({ class: "cm-vis-theorem-block-first" });
+const theoremBodyLastLine = Decoration.line({ class: "cm-vis-theorem-block-last" });
 
 /**
  * The number LaTeX prints in front of a heading, rendered before its text.
@@ -1840,6 +1895,32 @@ function buildDecorations(
       pos = line.to + 1;
     }
   };
+  /**
+   * Give a theorem-like environment a visible extent: a tinted band with a rule
+   * down its left edge, from the heading row to the last row of its body.
+   *
+   * The `\end{…}` row is excluded on purpose — it folds to nothing and is then
+   * dropped entirely by the empty-row pass below, so closing the band on it
+   * would leave the rounded bottom edge on a row that is never drawn.
+   */
+  const markTheoremLines = (environment: { beginFrom: number; bodyFrom: number; bodyTo: number; endFrom: number; closed: boolean; to: number }) => {
+    const lastContent = environment.closed
+      ? Math.max(environment.bodyFrom, environment.endFrom - 1)
+      : environment.to;
+    let pos = environment.beginFrom;
+    const end = Math.min(Math.max(lastContent, environment.beginFrom), state.doc.length);
+    let isFirst = true;
+    while (pos <= end) {
+      const line = state.doc.lineAt(pos);
+      const isLast = line.to >= end;
+      marks.push({ from: line.from, to: line.from, value: theoremBodyLine });
+      if (isFirst) marks.push({ from: line.from, to: line.from, value: theoremBodyFirstLine });
+      if (isLast) marks.push({ from: line.from, to: line.from, value: theoremBodyLastLine });
+      if (isLast) break;
+      isFirst = false;
+      pos = line.to + 1;
+    }
+  };
 
   // --- Preamble: fold everything up to and including \begin{document} ---
   const documentEnvironment = structure.environments.find((environment) => environment.name === "document");
@@ -2171,6 +2252,26 @@ function buildDecorations(
     : initialSectionNumberingState();
   const continuedNumbering = numberingPrefix?.continued ?? false;
   const headingBraces: Range[] = [];
+  // What the sectioning counters read at a given offset, so a theorem declared
+  // `\newtheorem{thm}{Theorem}[section]` can print "Theorem 2.1" from the very
+  // same walk that numbers the headings. Seeded at -1 with the injected prefix:
+  // a chapter file's first theorem sits before any heading of its own, but the
+  // document has certainly reached a section number by then.
+  const sectionMilestones: Array<{ from: number; rank: number; label: string }> = [];
+  for (let rank = 1; rank <= SECTION_RANKS.subparagraph; rank += 1) {
+    if ((numbering.counters[rank] ?? 0) > 0) {
+      sectionMilestones.push({ from: -1, rank, label: sectionNumberLabel(numbering, rank, rules) });
+    }
+  }
+  const sectionNumberAt = (counter: string, position: number): string | null => {
+    const rank = SECTION_RANKS[counter as keyof typeof SECTION_RANKS];
+    if (!rank) return null;
+    for (let index = sectionMilestones.length - 1; index >= 0; index -= 1) {
+      const milestone = sectionMilestones[index];
+      if (milestone.rank === rank && milestone.from <= position) return milestone.label;
+    }
+    return null;
+  };
   for (const event of numberingEvents(structure, headings, scanEnd)) {
     if (event.kind === "matter") {
       applySectionMatter(numbering, event.matter);
@@ -2190,6 +2291,7 @@ function buildDecorations(
     const rank = SECTION_RANKS[heading.command];
     const level = sectionDisplayLevel(rank, rules);
     const label = advanceSectionNumber(numbering, { rank, starred: heading.starred }, rules);
+    if (label) sectionMilestones.push({ from: heading.from, rank, label });
     headingBraces.push({ from: heading.from, to: heading.to });
 
     const cmdStart = heading.from;
@@ -2240,20 +2342,55 @@ function buildDecorations(
     }
   }
 
-  // --- Theorem-like environments: readable label + hidden wrapper source ---
+  // --- Theorem-like environments: printed heading + editable title ---
   // Environment declarations are structural chrome rather than prose. Keep them
-  // visual even when the caret lands on the declaration; entering the theorem
-  // body still exposes ordinary source commands for direct editing.
-  for (const theorem of structure.environmentsNamed(THEOREM_ENVIRONMENTS)) {
-    if (theorem.from < bodyStart || theorem.from >= scanEnd) continue;
+  // visual even when the caret lands on the declaration; the bracketed title is
+  // left as live text so it can be read and retyped in place, and the body's
+  // own source commands stay ordinary editable LaTeX.
+  //
+  // Which names count is read from the document, not from a fixed amsthm list:
+  // `\newtheorem{requirement}{Requirement}` is as real as `theorem`, and before
+  // this its environments fell through to the generic "unknown environment"
+  // fold, which erased heading, number and title from the page at once.
+  const theoremDefs = new Map<string, TheoremDefinition>([
+    ...BUILTIN_THEOREM_ENVIRONMENTS,
+    ...(state.facet(visualTheorems) ?? []),
+    ...theoremDefinitions(text, ignoredAt),
+  ]);
+  const theorems = structure.environmentsNamed(new Set(theoremDefs.keys()))
+    .filter((theorem) => theorem.from >= bodyStart && theorem.from < scanEnd);
+  const theoremNumbers = assignTheoremNumbers(
+    theorems.map((theorem) => ({ environment: theorem.name, from: theorem.from })),
+    theoremDefs,
+    sectionNumberAt,
+  );
+  for (const theorem of theorems) {
+    const definition = theoremDefs.get(theorem.name);
     const fallback = theorem.name.charAt(0).toUpperCase() + theorem.name.slice(1);
-    const label = stripMarkup(theorem.optionalArguments[0]?.value.trim() || fallback) || fallback;
-    hide(
-      theorem.beginFrom,
-      theorem.beginTo,
-      Decoration.replace({ widget: new TheoremLabelWidget(label, theorem, state.facet(onOpenCodeRange)) }),
-    );
+    const label = stripMarkup(definition?.heading ?? fallback).trim() || fallback;
+    const number = theoremNumbers.get(theorem.from) ?? "";
+    const title = theorem.optionalArguments[0];
+    const jump = state.facet(onOpenCodeRange);
+    // A title made entirely of whitespace prints nothing; folding it whole
+    // avoids an empty pair of parentheses with a caret trap inside.
+    const hasTitle = Boolean(title && title.contentTo > title.contentFrom && title.value.trim());
+    if (hasTitle && title) {
+      hide(
+        theorem.beginFrom,
+        title.contentFrom,
+        Decoration.replace({ widget: new TheoremLabelWidget(label, number, true, theorem, jump) }),
+      );
+      marks.push({ from: title.contentFrom, to: title.contentTo, value: theoremTitleMark });
+      hide(title.contentTo, theorem.beginTo, Decoration.replace({ widget: new TheoremTitleEndWidget() }));
+    } else {
+      hide(
+        theorem.beginFrom,
+        theorem.beginTo,
+        Decoration.replace({ widget: new TheoremLabelWidget(label, number, false, theorem, jump) }),
+      );
+    }
     if (theorem.closed) hide(theorem.endFrom, theorem.endTo);
+    markTheoremLines(theorem);
   }
 
   // --- Footnotes: the marker the PDF prints, text on hover ---

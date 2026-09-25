@@ -149,6 +149,72 @@ fn fallback_summary_carries_latest_todowrite_state_and_forward_plan() {
 }
 
 #[test]
+fn fallback_summary_preserves_evidence_novelty_state() {
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("inspect the same source until it changes"),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "read-1".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"notes.md"}"#.to_string(),
+            }]),
+            ConversationMessage::tool_result("read-1", "read_file", "unchanged", false),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "read-2".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"notes.md"}"#.to_string(),
+            }]),
+            ConversationMessage::tool_result("read-2", "read_file", "unchanged", false),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let summary = summarize_messages(&session.messages);
+    let pinned = pinned_context_lines(&session.messages).join("\n");
+
+    assert!(summary.contains("## Evidence Ledger"));
+    assert!(summary.contains("1 distinct evidence result(s) across 2 completed tool call(s)"));
+    assert!(summary.contains("current no-new-evidence streak is 1 tool call(s)"));
+    assert!(pinned.contains("Evidence ledger: 1 distinct evidence result(s)"));
+}
+
+#[test]
+fn working_context_projection_keeps_large_output_artifact_addresses() {
+    let path = r"F:\project\.somniq\tmp\tool-output\abc-read.txt";
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("inspect the complete test output"),
+            ConversationMessage::tool_result(
+                "test-1",
+                "bash",
+                serde_json::json!({
+                    "status": "referenced",
+                    "preview": "3 tests failed",
+                    "persistedOutputPath": path,
+                    "persistedOutputSize": 182_000,
+                    "sha256": "abcdef1234567890abcdef1234567890"
+                })
+                .to_string(),
+                true,
+            ),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let summary = summarize_messages(&session.messages);
+    let pinned = pinned_context_lines(&session.messages).join("\n");
+
+    assert!(summary.contains("## Artifact References"));
+    assert!(summary.contains(path));
+    assert!(summary.contains("182000 bytes"));
+    assert!(summary.contains("sha256:abcdef1234567890"));
+    assert!(pinned.contains("Artifact reference:"));
+    assert!(pinned.contains(path));
+}
+
+#[test]
 fn continuation_treats_preserved_tail_as_authoritative() {
     let message = get_compact_continuation_message("<summary>old</summary>", true, true);
     assert!(message.contains("Recent messages are preserved verbatim and are authoritative"));
@@ -502,6 +568,9 @@ fn latest_user_request_ignores_internal_resume_messages() {
         ConversationMessage::user_text(
             "Your latest assistant message is empty. Otherwise continue the work now.",
         ),
+        ConversationMessage::user_text(
+            "Runtime delivery checkpoint reached. Deliver the current result.",
+        ),
         ConversationMessage::user_text(prior),
     ]);
 
@@ -525,10 +594,31 @@ fn fallback_summary_rolls_forward_prior_compaction_focus() {
         }]),
     ]);
 
-    assert!(summary.contains("## Prior Compaction Summary"));
+    assert!(!summary.contains("## Prior Compaction Summary"));
     assert!(summary.contains("repair Aris context compression focus loss"));
+    assert!(summary.contains("Fallback summary may lose the old focus"));
     assert!(summary.contains("Active user goal from prior compacted state"));
     assert!(!summary.contains("Active user goal: This session is being continued"));
+}
+
+#[test]
+fn legacy_recursive_prior_summary_is_canonicalized_to_one_layer() {
+    let prior = get_compact_continuation_message(
+        "<summary>\n## Current Focus\n- Active user goal: keep the canonical state.\n\n## Prior Compaction Summary\n- Rolled forward:\n  ## Current Focus\n  - stale nested focus\n  ## Prior Compaction Summary\n  - older nested copy\n\n## Environment\n- Key files referenced: crates/runtime/src/compact.rs.\n\n## Active Issues\n- Preserve the current issue without nesting history.\n</summary>",
+        true,
+        false,
+    );
+    let summary = summarize_messages(&[
+        ConversationMessage::user_text(prior),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Continuing from the canonical state.".to_string(),
+        }]),
+    ]);
+
+    assert!(!summary.contains("## Prior Compaction Summary"));
+    assert!(!summary.contains("stale nested focus"));
+    assert!(summary.contains("keep the canonical state"));
+    assert!(summary.contains("Preserve the current issue without nesting history"));
 }
 
 #[test]
@@ -1185,4 +1275,112 @@ fn compression_fidelity_benchmark() {
     assert!(tokens_after < tokens_before, "tokens must drop");
     // Don't assert on the score itself — that's the metric we're measuring.
     // Future LLM-summary upgrade should push this to 10/10.
+}
+
+/// The whole reason `MAX_CARRIED_USER_IMAGES` exists.
+///
+/// A reference image is the task input for "make it look like this". Before
+/// this, compaction reduced it to `[image: image/png, N base64 chars]` and the
+/// model spent the rest of the session unable to look at the thing it was
+/// asked to match — while the pinned user request kept asserting the image was
+/// right there in the message.
+#[test]
+fn compaction_carries_user_attached_images_into_the_compacted_session() {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![
+            ContentBlock::Text {
+                text: "make the poster page look like this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgoAAAA".repeat(64),
+            },
+        ],
+        usage: None,
+    });
+    for index in 0..20 {
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!(
+                    "step {index} of the rework, described at some length so \
+                     the session is worth compacting"
+                ),
+            }]));
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!("continue {index}")));
+    }
+
+    let result = compact_session_for_test(&session, CompactionConfig::overflow(4));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+
+    let carried = result.compacted_session.messages[0]
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .count();
+    assert_eq!(
+        carried, 1,
+        "the user's attachment must survive: {:#?}",
+        result.compacted_session.messages[0].blocks
+    );
+}
+
+/// Tool screenshots are regenerable evidence and are not carried; the summary
+/// must then say the image is gone rather than imply it is present.
+#[test]
+fn compaction_does_not_claim_a_dropped_image_is_still_present() {
+    let messages = vec![ConversationMessage {
+        role: MessageRole::Tool,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo".repeat(8),
+        }],
+        usage: None,
+    }];
+    let summary = summarize_messages(&messages);
+    assert!(
+        summary.contains("image omitted from summary"),
+        "summary must name the image as omitted: {summary}"
+    );
+}
+
+/// `data.len() / 4` charged a 2.1 MB screenshot 721k tokens against a measured
+/// ~1.7k, inflating one session's reported context 8.5x and making
+/// `should_compact` true from the first turn of any session with a pasted
+/// image.
+#[test]
+fn image_token_estimate_tracks_what_a_vision_model_actually_bills() {
+    let big = ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            // 2,886,208 base64 chars: the real attachment from the session that
+            // exposed this.
+            data: "A".repeat(2_886_208),
+        }],
+        usage: None,
+    };
+    let mut session = Session::new();
+    session.messages.push(big);
+    let estimate = estimate_session_tokens(&session);
+    assert!(
+        (256..=1_600).contains(&estimate),
+        "a single screenshot must not dominate the context estimate: {estimate}"
+    );
+
+    // Still monotonic in size, so a thumbnail is cheaper than a full page.
+    let mut small = Session::new();
+    small.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "A".repeat(4_000),
+        }],
+        usage: None,
+    });
+    assert!(estimate_session_tokens(&small) < estimate);
 }

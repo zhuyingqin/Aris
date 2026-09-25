@@ -1,6 +1,15 @@
-import { useState, type Dispatch, type SetStateAction } from "react";
-import { configSet, isTauri, systemPromptView, userPromptView } from "../api/tauri";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  configSet,
+  isTauri,
+  screenshotCaptureBegin,
+  screenshotShortcutStatus,
+  systemPromptView,
+  userPromptView,
+  type ScreenshotShortcutStatus,
+} from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
+import { isMacOS } from "../platform";
 import { SvgIcon } from "../SvgIcon";
 import { useStore, type Language } from "../store";
 import type { ConfigPatch, ConfigView, SystemPromptView, UserPromptView } from "../types";
@@ -40,6 +49,20 @@ export default function GeneralSettings({
   const setHideWorkflows = useStore((state) => state.setHideWorkflows);
   const setError = useStore((state) => state.setError);
   const copy = { ...SETTINGS_COPY[language].general, ...SETTINGS_COPY[language].providers };
+
+  const [screenshotShortcut, setScreenshotShortcut] = useState<ScreenshotShortcutStatus | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    void screenshotShortcutStatus()
+      .then((status) => {
+        if (!cancelled) setScreenshotShortcut(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [systemPrompt, setSystemPrompt] = useState<SystemPromptView | null>(() => isTauri() ? null : previewSystemPrompt);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
@@ -198,6 +221,37 @@ export default function GeneralSettings({
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="sp-update-section sp-general-screenshot">
+        <div className="sp-section-head sp-general-preference-row">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">{copy.screenshotTitle}</div>
+            <div className="sp-section-sub">{copy.screenshotSub}</div>
+          </div>
+          <div className="sp-screenshot-shortcut">
+            <kbd className="sp-shortcut-chip">
+              {(screenshotShortcut?.shortcut ?? "CmdOrCtrl+Shift+A")
+                .replace("CmdOrCtrl", isMacOS() ? "⌘" : "Ctrl")
+                .split("+")
+                .join(" + ")}
+            </kbd>
+            <button
+              type="button"
+              className="sp-theme-option"
+              onClick={() => {
+                if (isTauri()) void screenshotCaptureBegin();
+              }}
+            >
+              <span>{copy.screenshotTry}</span>
+            </button>
+          </div>
+        </div>
+        {screenshotShortcut && !screenshotShortcut.registered && (
+          <p className="sp-section-sub sp-screenshot-warning" role="alert">
+            {copy.screenshotUnavailable(screenshotShortcut.error ?? "")}
+          </p>
+        )}
       </div>
 
       <div className="sp-update-section sp-general-modules">

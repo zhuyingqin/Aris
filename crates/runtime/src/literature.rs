@@ -1131,10 +1131,7 @@ impl LiteratureStore {
     /// Decode only the requested canonical records, preserving the caller's
     /// order. Search result pages use this so a query never pays for the whole
     /// library.
-    pub fn load_canonical_records(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<CanonicalRecord>, String> {
+    pub fn load_canonical_records(&self, ids: &[String]) -> Result<Vec<CanonicalRecord>, String> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1370,9 +1367,8 @@ impl LiteratureStore {
             &json!({ "version": version }),
         )?;
         transaction.commit().map_err(to_error)?;
-        load_library_item_snapshot(&self.connection, item_id)?.ok_or_else(|| {
-            format!("library item disappeared after update: {item_id}")
-        })
+        load_library_item_snapshot(&self.connection, item_id)?
+            .ok_or_else(|| format!("library item disappeared after update: {item_id}"))
     }
 
     /// Move local Library items to the recoverable Trash view. Child items are
@@ -1459,16 +1455,10 @@ impl LiteratureStore {
                 )
                 .map_err(to_error)?;
             transaction
-                .execute(
-                    "DELETE FROM screen_decisions WHERE record_id = ?1",
-                    [id],
-                )
+                .execute("DELETE FROM screen_decisions WHERE record_id = ?1", [id])
                 .map_err(to_error)?;
             transaction
-                .execute(
-                    "DELETE FROM evidence_cards WHERE record_id = ?1",
-                    [id],
-                )
+                .execute("DELETE FROM evidence_cards WHERE record_id = ?1", [id])
                 .map_err(to_error)?;
             transaction
                 .execute(
@@ -2751,10 +2741,7 @@ impl LiteratureStore {
         {
             return Ok(());
         }
-        metadata.insert(
-            "extractedPdfText".to_string(),
-            Value::String(text.clone()),
-        );
+        metadata.insert("extractedPdfText".to_string(), Value::String(text.clone()));
         record.metadata = Value::Object(metadata);
         record.revision = stored_revision.saturating_add(1);
         record.updated_at = now_iso8601();
@@ -3169,11 +3156,27 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
     // already-existing relationship tables, so keep this migration explicit
     // and idempotent.
     for (table, column, definition) in [
-        ("library_collections", "library_id", "TEXT NOT NULL DEFAULT 'local'"),
+        (
+            "library_collections",
+            "library_id",
+            "TEXT NOT NULL DEFAULT 'local'",
+        ),
         ("library_collections", "item_key", "TEXT"),
-        ("library_collections", "order_index", "INTEGER NOT NULL DEFAULT 0"),
-        ("library_collections", "version", "INTEGER NOT NULL DEFAULT 1"),
-        ("library_collections", "deleted", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "library_collections",
+            "order_index",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "library_collections",
+            "version",
+            "INTEGER NOT NULL DEFAULT 1",
+        ),
+        (
+            "library_collections",
+            "deleted",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         ("library_tags", "tag_type", "INTEGER NOT NULL DEFAULT 0"),
         ("library_tags", "color", "TEXT"),
         ("library_attachments", "link_mode", "TEXT"),
@@ -3188,7 +3191,11 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
         ("library_annotations", "position", "TEXT"),
         ("library_annotations", "sort_index", "INTEGER"),
         ("library_annotations", "author", "TEXT"),
-        ("library_annotations", "is_external", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "library_annotations",
+            "is_external",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         ("library_annotations", "source_payload", "TEXT"),
         ("library_notes", "source_payload", "TEXT"),
     ] {
@@ -3355,10 +3362,7 @@ fn backfill_legacy_library_relations(connection: &mut Connection) -> Result<(), 
 
 fn replace_legacy_library_payload(record: &mut CanonicalRecord, paper: Value) {
     let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
-    if metadata
-        .get("legacyLibrary")
-        .is_some_and(Value::is_object)
-    {
+    if metadata.get("legacyLibrary").is_some_and(Value::is_object) {
         metadata.insert("legacyLibrary".to_string(), paper);
         record.metadata = Value::Object(metadata);
     } else {
@@ -3669,16 +3673,12 @@ fn value_string_from_object(object: Option<&Value>, keys: &[&str]) -> Option<Str
 }
 
 fn canonical_standard_observation(record: &CanonicalRecord) -> Option<&Value> {
-    record
-        .observations
-        .iter()
-        .rev()
-        .find_map(|observation| {
-            observation
-                .fields
-                .is_object()
-                .then_some(&observation.fields)
-        })
+    record.observations.iter().rev().find_map(|observation| {
+        observation
+            .fields
+            .is_object()
+            .then_some(&observation.fields)
+    })
 }
 
 fn canonical_legacy_library(record: &CanonicalRecord) -> Option<&Value> {
@@ -3720,7 +3720,11 @@ fn library_item_key_for_record(
     if collision.is_none() {
         return Ok(candidate);
     }
-    Ok(format!("{}-{}", candidate, stable_library_item_key(&record.id)))
+    Ok(format!(
+        "{}-{}",
+        candidate,
+        stable_library_item_key(&record.id)
+    ))
 }
 
 fn library_field_values_for_record(
@@ -3837,18 +3841,14 @@ fn scalar_string_from_value(value: &Value) -> Option<String> {
 }
 
 fn snapshot_value(snapshot: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        snapshot
-            .get(*key)
-            .and_then(scalar_string_from_value)
-    })
+    keys.iter()
+        .find_map(|key| snapshot.get(*key).and_then(scalar_string_from_value))
 }
 
 fn compatibility_snapshot_key(key: &str) -> bool {
     matches!(
         key,
-        "id"
-            | "recordId"
+        "id" | "recordId"
             | "key"
             | "itemKey"
             | "zoteroKey"
@@ -3958,8 +3958,16 @@ fn library_field_values_for_snapshot(snapshot: &Value) -> BTreeMap<String, Strin
     fields
 }
 
-fn creator_from_value(value: &Value, creator_type: &str, order_index: u32) -> Option<LibraryCreator> {
-    if let Some(literal) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
+fn creator_from_value(
+    value: &Value,
+    creator_type: &str,
+    order_index: u32,
+) -> Option<LibraryCreator> {
+    if let Some(literal) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let id = format!(
             "creator:{}",
             sha256_hex(format!("{creator_type}\u{1f}oneField\u{1f}{literal}").as_bytes())
@@ -4008,7 +4016,9 @@ fn creators_for_record(
 ) -> (Vec<LibraryCreator>, bool) {
     let standard = canonical_standard_observation(record);
     for source in [standard, legacy] {
-        if let Some(values) = source.and_then(|value| value.get("creators")).and_then(Value::as_array)
+        if let Some(values) = source
+            .and_then(|value| value.get("creators"))
+            .and_then(Value::as_array)
         {
             let creators = values
                 .iter()
@@ -4071,11 +4081,7 @@ fn creators_for_snapshot(snapshot: &Value) -> (Vec<LibraryCreator>, bool) {
         .flatten()
         .enumerate()
         .filter_map(|(index, value)| {
-            creator_from_value(
-                value,
-                "author",
-                u32::try_from(index).unwrap_or(u32::MAX),
-            )
+            creator_from_value(value, "author", u32::try_from(index).unwrap_or(u32::MAX))
         })
         .collect::<Vec<_>>();
     (creators, values.is_some())
@@ -4225,7 +4231,10 @@ fn replace_library_item_fields_in_transaction(
         .as_object()
         .ok_or_else(|| "library item fields must be a JSON object".to_string())?;
     transaction
-        .execute("DELETE FROM library_item_data WHERE item_id = ?1", [item_id])
+        .execute(
+            "DELETE FROM library_item_data WHERE item_id = ?1",
+            [item_id],
+        )
         .map_err(to_error)?;
     let normalized = object
         .iter()
@@ -4326,8 +4335,7 @@ fn deduplicate_library_creators(creators: &[LibraryCreator]) -> Vec<LibraryCreat
                 return None;
             }
             let mut creator = creator.clone();
-            creator.order_index =
-                u32::try_from(seen.len().saturating_sub(1)).unwrap_or(u32::MAX);
+            creator.order_index = u32::try_from(seen.len().saturating_sub(1)).unwrap_or(u32::MAX);
             Some(creator)
         })
         .collect()
@@ -4349,7 +4357,11 @@ fn replace_library_item_relations_in_transaction(
         .map_err(to_error)?;
     for value in values {
         let (predicate, target, target_kind) = if let Some(target) = value.as_str() {
-            ("related".to_string(), target.trim().to_string(), "item".to_string())
+            (
+                "related".to_string(),
+                target.trim().to_string(),
+                "item".to_string(),
+            )
         } else {
             (
                 value_string_from_object(Some(value), &["predicate", "relation"])
@@ -4365,14 +4377,24 @@ fn replace_library_item_relations_in_transaction(
         }
         let id = format!(
             "relation:{}",
-            sha256_hex(format!("{source_item_id}\u{1f}{predicate}\u{1f}{target}\u{1f}{target_kind}").as_bytes())
+            sha256_hex(
+                format!("{source_item_id}\u{1f}{predicate}\u{1f}{target}\u{1f}{target_kind}")
+                    .as_bytes()
+            )
         );
         transaction
             .execute(
                 "INSERT OR IGNORE INTO library_item_relations(
                    id, source_item_id, predicate, target, target_kind, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, source_item_id, predicate.trim(), target, target_kind.trim(), now_iso8601()],
+                params![
+                    id,
+                    source_item_id,
+                    predicate.trim(),
+                    target,
+                    target_kind.trim(),
+                    now_iso8601()
+                ],
             )
             .map_err(to_error)?;
     }
@@ -4401,8 +4423,14 @@ fn display_creator(creator: &LibraryCreator) -> String {
         return creator.name.clone().unwrap_or_default();
     }
     match (
-        creator.first_name.as_deref().filter(|value| !value.is_empty()),
-        creator.last_name.as_deref().filter(|value| !value.is_empty()),
+        creator
+            .first_name
+            .as_deref()
+            .filter(|value| !value.is_empty()),
+        creator
+            .last_name
+            .as_deref()
+            .filter(|value| !value.is_empty()),
     ) {
         (Some(first), Some(last)) => format!("{first} {last}"),
         (Some(first), None) => first.to_string(),
@@ -4466,14 +4494,8 @@ fn sync_canonical_record_from_library_item_in_transaction(
     // optional field therefore means "cleared", rather than "keep the last
     // provider value"; otherwise deleting a DOI/abstract/date would appear to
     // work until the next reload restored the old canonical value.
-    record.abstract_text = fields
-        .get("abstractNote")
-        .cloned()
-        .unwrap_or_default();
-    record.venue = fields
-        .get("publicationTitle")
-        .cloned()
-        .unwrap_or_default();
+    record.abstract_text = fields.get("abstractNote").cloned().unwrap_or_default();
+    record.venue = fields.get("publicationTitle").cloned().unwrap_or_default();
     record.url = fields
         .get("url")
         .filter(|value| !value.trim().is_empty())
@@ -4482,10 +4504,9 @@ fn sync_canonical_record_from_library_item_in_transaction(
         .get("DOI")
         .filter(|value| !value.trim().is_empty())
         .cloned();
-    record.year = fields.get("date").and_then(|date| {
-        date.get(0..4)
-            .and_then(|year| year.parse::<u32>().ok())
-    });
+    record.year = fields
+        .get("date")
+        .and_then(|date| date.get(0..4).and_then(|year| year.parse::<u32>().ok()));
     let author_names = creators
         .iter()
         .filter(|creator| creator.creator_type == "author")
@@ -4541,12 +4562,39 @@ fn sync_canonical_record_from_library_item_in_transaction(
     // removed DOI/volume/custom field cannot be resurrected by a later
     // projection or backfill.
     for key in [
-        "title", "abstract", "abstractNote", "date", "year",
-        "publicationTitle", "venue", "container-title", "bookTitle",
-        "DOI", "doi", "ISBN", "isbn", "url", "URL", "volume", "issue",
-        "number", "pages", "page", "publisher", "place", "publisher-place",
-        "location", "edition", "series", "collection-title", "language",
-        "accessDate", "accessed", "urldate", "citationKey", "citation-key",
+        "title",
+        "abstract",
+        "abstractNote",
+        "date",
+        "year",
+        "publicationTitle",
+        "venue",
+        "container-title",
+        "bookTitle",
+        "DOI",
+        "doi",
+        "ISBN",
+        "isbn",
+        "url",
+        "URL",
+        "volume",
+        "issue",
+        "number",
+        "pages",
+        "page",
+        "publisher",
+        "place",
+        "publisher-place",
+        "location",
+        "edition",
+        "series",
+        "collection-title",
+        "language",
+        "accessDate",
+        "accessed",
+        "urldate",
+        "citationKey",
+        "citation-key",
         "rating",
     ] {
         legacy.remove(key);
@@ -4555,12 +4603,40 @@ fn sync_canonical_record_from_library_item_in_transaction(
     legacy.remove("metadataFields");
     standard.remove("metadataFields");
     let legacy_control_keys = [
-        "id", "recordId", "key", "itemKey", "zoteroKey", "authors", "creators",
-        "itemType", "type", "tags", "collectionIds", "collections", "relations",
-        "attachments", "notes", "pdfAnnotations", "pdf", "evidence", "answerChains",
-        "workflowGrades", "searchIds", "stage", "starred", "unread", "source",
-        "addedAt", "dateAdded", "dateModified", "readAt", "verdict", "screenings",
-        "brief", "agentSummary", "citedBy",
+        "id",
+        "recordId",
+        "key",
+        "itemKey",
+        "zoteroKey",
+        "authors",
+        "creators",
+        "itemType",
+        "type",
+        "tags",
+        "collectionIds",
+        "collections",
+        "relations",
+        "attachments",
+        "notes",
+        "pdfAnnotations",
+        "pdf",
+        "evidence",
+        "answerChains",
+        "workflowGrades",
+        "searchIds",
+        "stage",
+        "starred",
+        "unread",
+        "source",
+        "addedAt",
+        "dateAdded",
+        "dateModified",
+        "readAt",
+        "verdict",
+        "screenings",
+        "brief",
+        "agentSummary",
+        "citedBy",
     ];
     for key in legacy.keys().cloned().collect::<Vec<_>>() {
         if !fields.contains_key(&key)
@@ -4574,7 +4650,10 @@ fn sync_canonical_record_from_library_item_in_transaction(
     }
     for key in standard.keys().cloned().collect::<Vec<_>>() {
         if !fields.contains_key(&key)
-            && !matches!(key.as_str(), "creators" | "itemType" | "key" | "itemKey" | "zoteroKey")
+            && !matches!(
+                key.as_str(),
+                "creators" | "itemType" | "key" | "itemKey" | "zoteroKey"
+            )
             && standard
                 .get(&key)
                 .is_some_and(|value| scalar_string_from_value(value).is_some())
@@ -4614,11 +4693,7 @@ fn sync_canonical_record_from_library_item_in_transaction(
         .rev()
         .find_map(|observation| observation.fields.as_object().cloned())
         .unwrap_or_default();
-    for key in local_observation_fields
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-    {
+    for key in local_observation_fields.keys().cloned().collect::<Vec<_>>() {
         let reserved = matches!(
             key.as_str(),
             "itemType"
@@ -4646,10 +4721,7 @@ fn sync_canonical_record_from_library_item_in_transaction(
         local_observation_fields.insert(field.clone(), Value::String(value.clone()));
     }
     local_observation_fields.insert("itemType".to_string(), Value::String(item_type.clone()));
-    local_observation_fields.insert(
-        "creators".to_string(),
-        Value::Array(creator_values),
-    );
+    local_observation_fields.insert("creators".to_string(), Value::Array(creator_values));
     let local_observation = RecordObservation {
         source: "local-edit".to_string(),
         external_id: None,
@@ -4722,11 +4794,7 @@ fn set_record_visibility_in_transaction(
     let mut record: CanonicalRecord = decode_payload(&payload)?;
     let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
     let hidden = !visible;
-    if metadata
-        .get("legacyLibraryHidden")
-        .and_then(Value::as_bool)
-        == Some(hidden)
-    {
+    if metadata.get("legacyLibraryHidden").and_then(Value::as_bool) == Some(hidden) {
         return Ok(());
     }
     metadata.insert("legacyLibraryHidden".to_string(), Value::Bool(hidden));
@@ -4747,7 +4815,9 @@ fn set_record_visibility_in_transaction(
         )
         .map_err(to_error)?;
     if changed == 0 {
-        return Err(format!("canonical record {record_id} changed during visibility update"));
+        return Err(format!(
+            "canonical record {record_id} changed during visibility update"
+        ));
     }
     upsert_full_text_index(transaction, &record)
 }
@@ -4821,7 +4891,11 @@ fn set_library_items_trash(
             &transaction,
             "library_item",
             id,
-            if trashed { "moved_to_trash" } else { "restored" },
+            if trashed {
+                "moved_to_trash"
+            } else {
+                "restored"
+            },
             &json!({}),
         )?;
     }
@@ -4911,7 +4985,12 @@ fn sync_library_saved_searches_in_transaction(
                     name,
                     query,
                     encode_payload(&sources)?,
-                    bool_to_sql(entry.get("dynamic").and_then(Value::as_bool).unwrap_or(false)),
+                    bool_to_sql(
+                        entry
+                            .get("dynamic")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    ),
                     version,
                     created_at,
                     updated_at,
@@ -4997,7 +5076,11 @@ fn child_item_key(
     if collision.is_none() {
         Ok(candidate)
     } else {
-        Ok(format!("{}-{}", candidate, stable_library_item_key(item_id)))
+        Ok(format!(
+            "{}-{}",
+            candidate,
+            stable_library_item_key(item_id)
+        ))
     }
 }
 
@@ -5082,7 +5165,10 @@ fn replace_library_item_fields_map_in_transaction(
     fields: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     transaction
-        .execute("DELETE FROM library_item_data WHERE item_id = ?1", [item_id])
+        .execute(
+            "DELETE FROM library_item_data WHERE item_id = ?1",
+            [item_id],
+        )
         .map_err(to_error)?;
     upsert_library_item_fields_in_transaction(transaction, item_id, fields)
 }
@@ -5114,9 +5200,7 @@ fn attachment_fields(attachment: &LibraryAttachment) -> BTreeMap<String, String>
 }
 
 fn note_fields(note: &LibraryNote) -> BTreeMap<String, String> {
-    let mut fields = BTreeMap::from([
-        ("note".to_string(), note.content.clone()),
-    ]);
+    let mut fields = BTreeMap::from([("note".to_string(), note.content.clone())]);
     if let Some(title) = &note.title {
         fields.insert("title".to_string(), title.clone());
     }
@@ -5127,8 +5211,20 @@ fn annotation_fields(annotation: &LibraryAnnotation) -> BTreeMap<String, String>
     let mut fields = BTreeMap::from([
         ("annotationText".to_string(), annotation.quote.clone()),
         ("annotationComment".to_string(), annotation.note.clone()),
-        ("annotationType".to_string(), annotation.annotation_type.clone().unwrap_or_else(|| annotation.kind.clone())),
-        ("annotationPageLabel".to_string(), annotation.page_label.clone().unwrap_or_else(|| annotation.page.to_string())),
+        (
+            "annotationType".to_string(),
+            annotation
+                .annotation_type
+                .clone()
+                .unwrap_or_else(|| annotation.kind.clone()),
+        ),
+        (
+            "annotationPageLabel".to_string(),
+            annotation
+                .page_label
+                .clone()
+                .unwrap_or_else(|| annotation.page.to_string()),
+        ),
     ]);
     if let Some(color) = &annotation.color {
         fields.insert("annotationColor".to_string(), color.clone());
@@ -5314,10 +5410,7 @@ fn sync_library_collections_in_transaction(
 }
 
 fn legacy_library_payload(metadata: &Value) -> Option<&Value> {
-    if metadata
-        .get("legacyLibrary")
-        .is_some_and(Value::is_object)
-    {
+    if metadata.get("legacyLibrary").is_some_and(Value::is_object) {
         return metadata.get("legacyLibrary");
     }
     let object = metadata.as_object()?;
@@ -5403,9 +5496,7 @@ fn normalize_legacy_primary_pdf_references(paper: &Value, record_id: &str) -> Va
                 Value::Array(
                     entries
                         .iter()
-                        .map(|entry| {
-                            remap_legacy_primary_pdf_id(entry, "attachmentId", &scoped_id)
-                        })
+                        .map(|entry| remap_legacy_primary_pdf_id(entry, "attachmentId", &scoped_id))
                         .collect(),
                 ),
             );
@@ -5437,7 +5528,8 @@ fn sync_library_item_relations_in_transaction(
                 [record_id],
             )
             .map_err(to_error)?;
-        for (order_index, collection_id) in relation_string_values(collections).into_iter().enumerate()
+        for (order_index, collection_id) in
+            relation_string_values(collections).into_iter().enumerate()
         {
             transaction
                 .execute(
@@ -5491,8 +5583,7 @@ fn sync_library_item_relations_in_transaction(
         }
     }
 
-    let should_sync_attachments =
-        paper.get("attachments").is_some() || paper.get("pdf").is_some();
+    let should_sync_attachments = paper.get("attachments").is_some() || paper.get("pdf").is_some();
     let previous_attachment_ids = if should_sync_attachments {
         existing_attachment_ids(transaction, record_id)?
     } else {
@@ -5572,10 +5663,7 @@ fn sync_library_item_relations_in_transaction(
 
     if let Some(notes) = paper.get("notes") {
         transaction
-            .execute(
-                "DELETE FROM library_notes WHERE item_id = ?1",
-                [record_id],
-            )
+            .execute("DELETE FROM library_notes WHERE item_id = ?1", [record_id])
             .map_err(to_error)?;
         for note in notes.as_array().into_iter().flatten() {
             insert_library_note_in_transaction(
@@ -5679,22 +5767,20 @@ fn insert_library_attachment_in_transaction(
     let Some(id) = relation_string_field(attachment, "id") else {
         return Ok(());
     };
-    let label = relation_string_field(attachment, "label").unwrap_or_else(|| "Attachment".to_string());
+    let label =
+        relation_string_field(attachment, "label").unwrap_or_else(|| "Attachment".to_string());
     let kind_value = relation_string_field(attachment, "kind");
     let kind = valid_library_attachment_kind(kind_value.as_deref().unwrap_or("externalLink"));
     let bytes = attachment
         .get("bytes")
         .and_then(Value::as_u64)
         .and_then(|bytes| i64::try_from(bytes).ok());
-    let mtime = attachment
-        .get("mtime")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            attachment
-                .get("mtime")
-                .and_then(Value::as_u64)
-                .and_then(|value| i64::try_from(value).ok())
-        });
+    let mtime = attachment.get("mtime").and_then(Value::as_i64).or_else(|| {
+        attachment
+            .get("mtime")
+            .and_then(Value::as_u64)
+            .and_then(|value| i64::try_from(value).ok())
+    });
     let source_payload = encode_payload(
         attachment
             .get("sourcePayload")
@@ -6335,10 +6421,7 @@ fn load_library_item_snapshots(
                     last_name: row.get(4)?,
                     name: row.get(5)?,
                     field_mode: row.get(6)?,
-                    order_index: row
-                        .get::<_, i64>(7)?
-                        .try_into()
-                        .unwrap_or_default(),
+                    order_index: row.get::<_, i64>(7)?.try_into().unwrap_or_default(),
                 };
                 Ok((item_id, creator))
             })
@@ -6473,11 +6556,9 @@ fn load_library_item_snapshots(
         }
     }
 
-    let attachment_source_payloads =
-        load_library_child_source_payloads(connection, "attachment")?;
+    let attachment_source_payloads = load_library_child_source_payloads(connection, "attachment")?;
     let note_source_payloads = load_library_child_source_payloads(connection, "note")?;
-    let annotation_source_payloads =
-        load_library_child_source_payloads(connection, "annotation")?;
+    let annotation_source_payloads = load_library_child_source_payloads(connection, "annotation")?;
 
     let mut snapshots = Vec::with_capacity(items.len());
     for item in items {
@@ -6493,9 +6574,7 @@ fn load_library_item_snapshots(
             fields: fields_by_item.remove(&item_id).unwrap_or_default(),
             creators: creators_by_item.remove(&item_id).unwrap_or_default(),
             tags: tags_by_item.remove(&item_id).unwrap_or_default(),
-            collection_ids: collection_ids_by_item
-                .remove(&item_id)
-                .unwrap_or_default(),
+            collection_ids: collection_ids_by_item.remove(&item_id).unwrap_or_default(),
             relations: generic_relations_by_item
                 .remove(&item_id)
                 .unwrap_or_default(),
@@ -6506,9 +6585,7 @@ fn load_library_item_snapshots(
     Ok(snapshots)
 }
 
-fn load_library_saved_searches(
-    connection: &Connection,
-) -> Result<Vec<LibrarySavedSearch>, String> {
+fn load_library_saved_searches(connection: &Connection) -> Result<Vec<LibrarySavedSearch>, String> {
     let rows = {
         let mut statement = connection
             .prepare(
@@ -6519,13 +6596,12 @@ fn load_library_saved_searches(
             .map_err(to_error)?;
         let rows = statement
             .query_map([], |row| {
-                let sources: Vec<String> = decode_payload(&row.get::<_, String>(3)?).map_err(
-                    |error| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(
-                            std::io::Error::other(error),
-                        ))
-                    },
-                )?;
+                let sources: Vec<String> =
+                    decode_payload(&row.get::<_, String>(3)?).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            error,
+                        )))
+                    })?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -6541,44 +6617,41 @@ fn load_library_saved_searches(
         rows.collect::<Result<Vec<_>, _>>().map_err(to_error)?
     };
     rows.into_iter()
-        .map(|(id, name, query, sources, dynamic, version, created_at, updated_at)| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT id, condition_index, field, operator, value, joiner
+        .map(
+            |(id, name, query, sources, dynamic, version, created_at, updated_at)| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT id, condition_index, field, operator, value, joiner
                      FROM library_saved_search_conditions
                      WHERE saved_search_id = ?1 ORDER BY condition_index",
-                )
-                .map_err(to_error)?;
-            let rows = statement
-                .query_map([&id], |row| {
-                    Ok(LibrarySearchCondition {
-                        id: row.get(0)?,
-                        condition_index: row
-                            .get::<_, i64>(1)?
-                            .try_into()
-                            .unwrap_or_default(),
-                        field: row.get(2)?,
-                        operator: row.get(3)?,
-                        value: row.get(4)?,
-                        joiner: row.get(5)?,
+                    )
+                    .map_err(to_error)?;
+                let rows = statement
+                    .query_map([&id], |row| {
+                        Ok(LibrarySearchCondition {
+                            id: row.get(0)?,
+                            condition_index: row.get::<_, i64>(1)?.try_into().unwrap_or_default(),
+                            field: row.get(2)?,
+                            operator: row.get(3)?,
+                            value: row.get(4)?,
+                            joiner: row.get(5)?,
+                        })
                     })
+                    .map_err(to_error)?;
+                let conditions = rows.collect::<Result<Vec<_>, _>>().map_err(to_error)?;
+                Ok(LibrarySavedSearch {
+                    id,
+                    name,
+                    query,
+                    sources,
+                    dynamic,
+                    version,
+                    conditions,
+                    created_at,
+                    updated_at,
                 })
-                .map_err(to_error)?;
-            let conditions = rows
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(to_error)?;
-            Ok(LibrarySavedSearch {
-                id,
-                name,
-                query,
-                sources,
-                dynamic,
-                version,
-                conditions,
-                created_at,
-                updated_at,
-            })
-        })
+            },
+        )
         .collect()
 }
 
@@ -6749,18 +6822,14 @@ fn load_library_annotations_for_sync(
                 .map(|payload| decode_payload::<Value>(&payload))
                 .transpose()
                 .map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                        error,
-                    )))
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
                 })?;
             let position = row
                 .get::<_, Option<String>>(15)?
                 .map(|payload| decode_payload::<Value>(&payload))
                 .transpose()
                 .map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                        error,
-                    )))
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
                 })?;
             Ok(LibraryAnnotation {
                 id: row.get(0)?,
@@ -6856,10 +6925,7 @@ fn load_library_item_relations_bulk(
         if scope.is_empty() {
             String::new()
         } else {
-            format!(
-                " WHERE {column} IN ({})",
-                vec!["?"; scope.len()].join(",")
-            )
+            format!(" WHERE {column} IN ({})", vec!["?"; scope.len()].join(","))
         }
     };
 
@@ -6959,10 +7025,7 @@ fn load_library_item_relations_bulk(
         for row in rows {
             let (record_id, attachment) = row.map_err(to_error)?;
             if items.contains_key(&record_id) {
-                attachments
-                    .entry(record_id)
-                    .or_default()
-                    .push(attachment);
+                attachments.entry(record_id).or_default().push(attachment);
             }
         }
     }
@@ -7033,10 +7096,7 @@ fn load_library_item_relations_bulk(
         for row in rows {
             let (record_id, annotation) = row.map_err(to_error)?;
             if items.contains_key(&record_id) {
-                annotations
-                    .entry(record_id)
-                    .or_default()
-                    .push(annotation);
+                annotations.entry(record_id).or_default().push(annotation);
             }
         }
     }
@@ -7211,9 +7271,11 @@ fn load_library_item_relations(
                     .get::<_, Option<String>>(9)?
                     .map(|payload| decode_payload::<Value>(&payload))
                     .transpose()
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(
-                        Box::new(std::io::Error::other(error)),
-                    ))?;
+                    .map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            error,
+                        )))
+                    })?;
                 Ok(LibraryAnnotation {
                     id: row.get(0)?,
                     record_id: record_id.to_string(),
@@ -7235,9 +7297,11 @@ fn load_library_item_relations(
                         .get::<_, Option<String>>(15)?
                         .map(|payload| decode_payload::<Value>(&payload))
                         .transpose()
-                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(
-                            Box::new(std::io::Error::other(error)),
-                        ))?,
+                        .map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(
+                                std::io::Error::other(error),
+                            ))
+                        })?,
                     sort_index: row
                         .get::<_, Option<i64>>(16)?
                         .and_then(|value| u32::try_from(value).ok()),
@@ -7942,7 +8006,11 @@ fn remap_record_references(
             [old_record_id],
         )
         .map_err(to_error)?;
-    for table in ["library_notes", "library_annotations", "library_attachments"] {
+    for table in [
+        "library_notes",
+        "library_annotations",
+        "library_attachments",
+    ] {
         transaction
             .execute(
                 &format!(
@@ -7954,7 +8022,11 @@ fn remap_record_references(
             )
             .map_err(to_error)?;
     }
-    for table in ["library_attachments", "library_annotations", "library_notes"] {
+    for table in [
+        "library_attachments",
+        "library_annotations",
+        "library_notes",
+    ] {
         transaction
             .execute(
                 &format!("UPDATE {table} SET item_id = ?2 WHERE item_id = ?1"),
@@ -8033,10 +8105,7 @@ fn remap_library_item_model(
         )
         .map_err(to_error)?;
     transaction
-        .execute(
-            "DELETE FROM library_items WHERE id = ?1",
-            [old_item_id],
-        )
+        .execute("DELETE FROM library_items WHERE id = ?1", [old_item_id])
         .map_err(to_error)?;
     Ok(())
 }
@@ -8123,7 +8192,13 @@ fn sync_library_attachment_full_text_in_transaction(
                text_hash = excluded.text_hash,
                status = excluded.status,
                updated_at = excluded.updated_at",
-            params![item_id, character_count, existing_version, text_hash, now_iso8601()],
+            params![
+                item_id,
+                character_count,
+                existing_version,
+                text_hash,
+                now_iso8601()
+            ],
         )
         .map_err(to_error)?;
     Ok(())
@@ -8772,11 +8847,7 @@ fn attachment_creator_segment(record: &CanonicalRecord) -> String {
     if let Some((family, _)) = first.split_once(',') {
         return family.trim().to_string();
     }
-    first
-        .split_whitespace()
-        .last()
-        .unwrap_or(first)
-        .to_string()
+    first.split_whitespace().last().unwrap_or(first).to_string()
 }
 
 /// Characters no Windows path component may contain, plus the control range.
@@ -8805,7 +8876,12 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_string();
     }
-    value.chars().take(limit).collect::<String>().trim_end().to_string()
+    value
+        .chars()
+        .take(limit)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// Render one attachment file stem from a template. Placeholders that resolve
@@ -8865,7 +8941,10 @@ pub fn render_attachment_stem(record: &CanonicalRecord, template: &str) -> Strin
         rendered.push_str(&pending_literal);
     }
 
-    let stem = truncate_chars(sanitize_path_component(&rendered).trim(), ATTACHMENT_STEM_CHARS);
+    let stem = truncate_chars(
+        sanitize_path_component(&rendered).trim(),
+        ATTACHMENT_STEM_CHARS,
+    );
     let stem = stem.trim_matches(|character: char| character == '.' || character.is_whitespace());
     if stem.is_empty() {
         // Never return an empty stem: the record id is always unique and safe.
@@ -8888,7 +8967,9 @@ fn strip_arxiv_version(id: &str) -> String {
     let id = id.trim();
     match id.rsplit_once('v') {
         Some((base, version))
-            if !base.is_empty() && !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()) =>
+            if !base.is_empty()
+                && !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit()) =>
         {
             base.to_string()
         }

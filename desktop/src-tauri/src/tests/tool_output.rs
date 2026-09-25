@@ -2,6 +2,48 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn a_collapsed_verbatim_prefix_is_named_as_a_quoting_failure() {
+    // The reported failure, verbatim: Git Bash ate one backslash of the quoted
+    // `\\?\` prefix, so `exec` looked for `\?\F:\...` and found nothing.
+    let output = json!({
+        "stderr": r"/usr/bin/bash: line 1: \?\F:\Agent\Aris\resources\bin\latexmk: No such file or directory",
+        "returnCodeInterpretation": "exit_code:127",
+    })
+    .to_string();
+
+    let hint = tool_recovery_hint("bash", &output).expect("a hint for the collapsed prefix");
+    assert!(hint.contains("quoting failure"), "{hint}");
+    assert!(hint.contains("on PATH"), "{hint}");
+    // The generic hint would send the model to debug a command that reads as
+    // correct, which is how this turned into repeated failed retries.
+    assert!(!hint.contains("exited non-zero"), "{hint}");
+}
+
+#[test]
+fn an_intact_verbatim_prefix_is_recognized_too() {
+    let output = json!({
+        "stderr": r"\\?\F:\Agent\Aris\tool: cannot execute",
+        "returnCodeInterpretation": "exit_code:126",
+    })
+    .to_string();
+
+    assert!(tool_recovery_hint("bash", &output)
+        .is_some_and(|hint| hint.contains("quoting failure")));
+}
+
+#[test]
+fn ordinary_shell_failures_keep_the_generic_hint() {
+    let output = json!({
+        "stderr": "error[E0425]: cannot find value `x` in this scope",
+        "returnCodeInterpretation": "exit_code:1",
+    })
+    .to_string();
+
+    let hint = tool_recovery_hint("bash", &output).expect("hint");
+    assert!(hint.contains("exited non-zero"), "{hint}");
+}
+
+#[test]
 fn ui_keeps_moderate_tool_output_intact() {
     let output = "x".repeat(10_000);
     let rendered = tool_output_for_ui(&output, None);
@@ -378,4 +420,52 @@ fn the_blocked_file_name_comes_from_the_tex_report() {
     let hint = tool_recovery_hint("LaTeXCompile", &output).expect("hint");
     assert!(hint.contains("ch2_foundations.aux"), "{hint}");
     assert!(!hint.contains("main.pdf"), "{hint}");
+}
+
+/// Why `finish_tool_execution_output` must let image results through untouched.
+///
+/// `ReadMediaFile` returns `{"type":"image", …,"base64":"…"}`, and the
+/// conversation runtime turns exactly that JSON into an image content block.
+/// Any shortening applied first — an artifact spill, an edge truncation —
+/// breaks the parse, and the model then receives 12k characters of base64 it
+/// cannot look at. That is what happened: three `ReadMediaFile` calls in one
+/// session and not one visible screenshot.
+#[test]
+fn shortening_an_image_result_destroys_the_image_the_model_would_have_seen() {
+    let image = json!({
+        "type": "image",
+        "filePath": r"C:\shot.png",
+        "mediaType": "image/png",
+        "bytes": 425_175,
+        "base64": "iVBORw0KGgoAAAANSUhEUg".repeat(30_000),
+    });
+    let raw = serde_json::to_string_pretty(&image).expect("image json");
+    assert!(raw.chars().count() > 64_000, "fixture must exceed the cap");
+
+    // Intact, the runtime recognizes it and can lift out the picture.
+    let parsed = runtime::parse_image_tool_output(&raw).expect("intact image parses");
+    assert_eq!(parsed.media_type, "image/png");
+
+    // After the generic shortening path it is unrecognizable — so the guard in
+    // the executor, not a larger budget, is the fix.
+    let shortened = compact_tool_output_for_context("ReadMediaFile", raw.clone(), None);
+    assert!(shortened.chars().count() < raw.chars().count());
+    assert!(
+        runtime::parse_image_tool_output(&shortened).is_none(),
+        "a truncated image payload must not still look like an image"
+    );
+}
+
+/// The predicate has to stay narrow: an ordinary text read is not an image, and
+/// exempting it from artifact persistence would put whole files into context.
+#[test]
+fn only_real_image_payloads_are_treated_as_images() {
+    let text_read = json!({
+        "type": "text",
+        "file": { "filePath": "a.rs", "content": "fn main() {}", "numLines": 1 },
+    })
+    .to_string();
+    assert!(runtime::parse_image_tool_output(&text_read).is_none());
+    assert!(runtime::parse_image_tool_output("not json at all").is_none());
+    assert!(runtime::parse_image_tool_output("{}").is_none());
 }

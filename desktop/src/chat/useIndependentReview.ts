@@ -7,6 +7,9 @@ import {
   type IndependentReviewResult,
 } from "../api/tauri";
 
+/** The only event-log kind this panel restores from. */
+const REVIEW_EVENT_KIND = "independent_review";
+
 export interface IndependentReviewState {
   sessionId: string;
   phase: IndependentReviewEvent["phase"];
@@ -117,13 +120,13 @@ export function useIndependentReview(sessionId: string) {
     if (!isTauri() || !sessionId || loadedSessions.current.has(sessionId)) return;
     loadedSessions.current.add(sessionId);
     let active = true;
-    void chatEventsRead(sessionId).then((events) => {
+    void chatEventsRead(sessionId, [REVIEW_EVENT_KIND]).then((events) => {
       if (!active) return;
       let restored: IndependentReviewState | undefined;
       let lastLogicalAttempt = 0;
       let activeLogicalAttempt: number | undefined;
       for (const entry of events) {
-        if (entry.kind !== "independent_review" || !isReviewEvent(entry.payload)) continue;
+        if (entry.kind !== REVIEW_EVENT_KIND || !isReviewEvent(entry.payload)) continue;
         if (entry.payload.phase === "cleared") {
           restored = undefined;
           lastLogicalAttempt = 0;

@@ -69,6 +69,7 @@ import {
   resolveTexPath,
   INCLUDE_MAX_FILES,
 } from "./outlineModel";
+import { theoremDefinitions } from "./theoremEnvironments";
 import { ToolIcon } from "./ToolIcon";
 import { isFigureImage } from "./latexFigure";
 import {
@@ -1088,6 +1089,16 @@ export default function Typeset() {
       ?? (sameWorkspacePath(rootPath, sourcePath) ? analysisDraft : "");
     return numberingPrefixFor(outline, sourcePath, rootSource);
   }, [analysisDraft, documentRootPath, outline, outlineSources, sourcePath]);
+  // `\newtheorem{requirement}{Requirement}` almost always lives in the root
+  // preamble while the environments it declares live in the chapter files, so
+  // the Visual editor is told about them from here. It re-reads the open file's
+  // own declarations from the live buffer, which is why only the root is passed.
+  const visualTheoremDefinitions = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    if (!rootPath) return null;
+    const rootSource = documentSourceForPath(outlineSources, rootPath)?.source;
+    return rootSource ? theoremDefinitions(rootSource) : null;
+  }, [documentRootPath, outlineSources, sourcePath]);
   // Counted over the whole document graph, so a thesis root reports the thesis
   // rather than the handful of words in its shell.
   const documentWordCount = useMemo(
@@ -4775,6 +4786,7 @@ export default function Typeset() {
                         diffLines={externalReviewDiffLines}
                         reviewHunks={externalReviewHunks}
                         numbering={visualNumbering}
+                        theorems={visualTheoremDefinitions}
                         pdfCursor={visualPdfCursor}
                         onChange={reviewSafeOnChange}
                         onVisibleLineChange={setCurrentSourceLine}

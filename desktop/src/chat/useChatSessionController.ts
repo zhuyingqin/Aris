@@ -55,13 +55,15 @@ export function useChatSessionController({
     const removed = removeSession(id);
     if (!removed) return;
     if (
-      removed.ownerKind === "review_workflow"
+      removed.ownerKind === "review_workflow" || removed.ownerKind === "work_task"
       || removed.workflowContextKey?.startsWith("review-workflow:")
     ) {
-      // The Rust ledger owns the runtime lifecycle. Hiding its transcript must
-      // not silently delete a live autonomous workflow or its audit trail.
+      // A Rust ledger owns this runtime lifecycle. Hiding its transcript must
+      // not silently delete a live autonomous workflow/task or its audit trail.
       restoreSession(removed);
-      setError("Workflow conversations are managed from Workflows and cannot be deleted from Chat.");
+      setError(removed.ownerKind === "work_task"
+        ? "Task conversations are managed from To-dos and cannot be deleted from Chat."
+        : "Workflow conversations are managed from Workflows and cannot be deleted from Chat.");
       return;
     }
     setDeleted(removed);

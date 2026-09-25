@@ -69,6 +69,21 @@ export function useChatComposer({
     focusComposer();
   }, [pendingChatInput, setDraft, setPendingChatInput, focusComposer, currentSessionRef]);
 
+  // Attachments queued while another tab was open (region screenshot). Same
+  // one-shot contract as `pendingChatInput`: drain once a session exists.
+  const pendingChatAttachments = useStore((state) => state.pendingChatAttachments);
+  const clearPendingChatAttachments = useStore((state) => state.clearPendingChatAttachments);
+  useEffect(() => {
+    const session = currentSessionRef.current;
+    if (pendingChatAttachments.length === 0 || !session) return;
+    updateSession(session.id, (item) => ({
+      ...item,
+      draftAttachments: [...(item.draftAttachments ?? []), ...pendingChatAttachments],
+    }));
+    clearPendingChatAttachments();
+    focusComposer();
+  }, [pendingChatAttachments, clearPendingChatAttachments, focusComposer, updateSession, currentSessionRef]);
+
   const setAttachments = useCallback((next: ChatAttachment[]) => {
     const session = currentSessionRef.current;
     if (!session) return;

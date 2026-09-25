@@ -152,7 +152,13 @@ impl Session {
 
         let event_path = session_event_log_path(path);
         crate::with_path_lock(&event_path, || -> Result<(), SessionError> {
-            append_canonical_session_events(path, &event_path, self)?;
+            let rewrote = append_canonical_session_events(path, &event_path, self)?;
+            // A rewrite leaves a whole dead generation behind it. Collect it
+            // now, while the lock is held, rather than letting the log grow by
+            // the size of the session on every compaction.
+            if rewrote {
+                compact_session_event_log_unlocked(&event_path)?;
+            }
             let manifest = session_manifest_json(path, self).render();
             crate::atomic_file::write_replace_unlocked(path, manifest.as_bytes())?;
             Ok(())
@@ -637,6 +643,112 @@ fn session_event_log_path(path: &Path) -> PathBuf {
     path.with_extension("events.jsonl")
 }
 
+/// Kinds that rebuild the session. Every other row in the log is a UI or
+/// telemetry record that a checkpoint has already folded into them.
+const CANONICAL_EVENT_KINDS: &[&str] = &[
+    "session_reset",
+    "session_message",
+    "session_compaction",
+    "session_usage",
+    "session_checkpoint",
+];
+const SESSION_RESET_KIND: &str = "session_reset";
+const SESSION_CHECKPOINT_KIND: &str = "session_checkpoint";
+
+/// What a compaction pass removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventLogCompaction {
+    pub removed_lines: usize,
+    pub removed_bytes: u64,
+    pub kept_bytes: u64,
+}
+
+fn line_kind_is(line: &str, kinds: &[&str]) -> bool {
+    kinds
+        .iter()
+        .any(|kind| line.contains(&format!("\"kind\":\"{kind}\"")))
+}
+
+/// Drop the rows of an event log that no reader can reach any more.
+///
+/// Two generations of dead weight accumulate here. A session that compacts or
+/// is rewound no longer shares a prefix with its log, so the whole session —
+/// including every archived message — is appended again behind a
+/// `session_reset`; replay restarts at that reset, so everything before it is
+/// unreachable. Separately, the streaming rows a turn emits are superseded
+/// once a checkpoint folds that turn into the canonical stream. On real logs
+/// this is the difference between 98 MB and 12 MB.
+///
+/// Rows this cannot classify — a foreign writer, a hand edit — are always
+/// kept. The caller must hold [`crate::with_path_lock`] for `path`.
+pub fn compact_session_event_log_unlocked(path: &Path) -> Result<EventLogCompaction, SessionError> {
+    let Some(file) = open_if_exists(path)? else {
+        return Ok(EventLogCompaction::default());
+    };
+    let (mut last_reset, mut last_checkpoint) = (None, None);
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line_kind_is(&line, &[SESSION_RESET_KIND]) {
+            last_reset = Some(index);
+        }
+        if line_kind_is(&line, &[SESSION_CHECKPOINT_KIND]) {
+            last_checkpoint = Some(index);
+        }
+    }
+    if last_reset.is_none() && last_checkpoint.is_none() {
+        return Ok(EventLogCompaction::default());
+    }
+
+    let Some(file) = open_if_exists(path)? else {
+        return Ok(EventLogCompaction::default());
+    };
+    let mut kept = Vec::new();
+    let mut removed_lines = 0usize;
+    let mut removed_bytes = 0u64;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Unclassifiable rows are never dropped.
+        let ours = line.contains("\"kind\":\"");
+        let before_reset = last_reset.is_some_and(|reset| index < reset);
+        let superseded = last_checkpoint.is_some_and(|checkpoint| index < checkpoint)
+            && !line_kind_is(&line, CANONICAL_EVENT_KINDS);
+        if ours && (before_reset || superseded) {
+            removed_lines += 1;
+            removed_bytes += line.len() as u64 + 1;
+            continue;
+        }
+        kept.extend_from_slice(line.as_bytes());
+        kept.push(b'\n');
+    }
+    if removed_lines == 0 {
+        return Ok(EventLogCompaction::default());
+    }
+    let kept_bytes = kept.len() as u64;
+    crate::atomic_file::write_replace_unlocked(path, &kept)?;
+    Ok(EventLogCompaction {
+        removed_lines,
+        removed_bytes,
+        kept_bytes,
+    })
+}
+
+/// [`compact_session_event_log_unlocked`] for a caller that does not already
+/// hold the path lock.
+pub fn compact_session_event_log(path: &Path) -> Result<EventLogCompaction, SessionError> {
+    crate::with_path_lock(path, || compact_session_event_log_unlocked(path))
+}
+
+fn open_if_exists(path: &Path) -> Result<Option<fs::File>, SessionError> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(SessionError::Io(error)),
+    }
+}
+
 fn session_id_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|value| value.to_str())
@@ -669,7 +781,29 @@ fn session_manifest_json(path: &Path, session: &Session) -> JsonValue {
         "compaction_count".to_string(),
         JsonValue::Number(usize_to_i64(session.compactions.len())),
     );
+    // Counting this the honest way replays the whole event log. Listing
+    // sessions only needs the number, so publish it with the manifest.
+    object.insert(
+        "logical_message_count".to_string(),
+        JsonValue::Number(usize_to_i64(session.logical_message_count())),
+    );
     JsonValue::Object(object)
+}
+
+/// Read the user-visible message count a session published when it was last
+/// saved. `None` for a session written before the manifest carried it, which
+/// leaves the caller to load the session the expensive way.
+pub fn session_manifest_logical_message_count(path: &Path) -> Option<usize> {
+    let contents = fs::read_to_string(path).ok()?;
+    let value = JsonValue::parse(&contents).ok()?;
+    if !is_session_event_manifest(&value) {
+        return None;
+    }
+    value
+        .as_object()?
+        .get("logical_message_count")?
+        .as_i64()
+        .and_then(|count| usize::try_from(count).ok())
 }
 
 fn is_session_event_manifest(value: &JsonValue) -> bool {
@@ -775,11 +909,14 @@ fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, Sessi
     })
 }
 
+/// Append this session's new canonical events. Returns whether the log was
+/// restarted with a `session_reset` rather than extended, which tells the
+/// caller a dead generation is now sitting in front of it.
 fn append_canonical_session_events(
     session_path: &Path,
     event_path: &Path,
     session: &Session,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     let mut replayed = replay_canonical_session_events(event_path)?;
     let needs_repair = replayed.invalid_line_count > 0;
     if needs_repair {
@@ -849,7 +986,7 @@ fn append_canonical_session_events(
     }
 
     if events.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(parent) = event_path.parent() {
         fs::create_dir_all(parent)?;
@@ -878,7 +1015,7 @@ fn append_canonical_session_events(
         file.write_all(&encoded)?;
     }
     file.flush()?;
-    Ok(())
+    Ok(!append_only)
 }
 
 /// Remove malformed JSONL rows while retaining valid canonical and UI events.

@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn generated_project_guidance_does_not_route_deliverables_into_internal_storage() {
+    let guidance = render_desktop_agents_md(Path::new("C:/Research"));
+
+    assert!(guidance.contains("Put project-owned files in the visible project tree"));
+    assert!(guidance.contains("ask for it when none is clear"));
+    assert!(guidance.contains("Never default user-facing output to `.somniq/`"));
+}
+
+#[test]
 fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
     let mut session = Session::new();
     session.messages = vec![
@@ -95,6 +104,25 @@ fn debug_export_rebuilds_empty_cancelled_session_from_event_log() {
     let mut archive = zip::ZipArchive::new(file).expect("valid debug zip");
     assert!(archive.by_name("app-events.jsonl").is_err());
     assert!(archive.by_name("usage-log.jsonl").is_err());
+    let mut diagnostics = String::new();
+    archive
+        .by_name("diagnostics.json")
+        .expect("diagnostics entry")
+        .read_to_string(&mut diagnostics)
+        .expect("read diagnostics");
+    let diagnostics: serde_json::Value =
+        serde_json::from_str(&diagnostics).expect("diagnostics JSON");
+    assert_eq!(diagnostics["schemaVersion"], 2);
+    let mut manifest = String::new();
+    archive
+        .by_name("manifest.json")
+        .expect("manifest entry")
+        .read_to_string(&mut manifest)
+        .expect("read manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).expect("manifest JSON");
+    assert_eq!(manifest["schemaVersion"], 4);
+    assert_eq!(manifest["files"]["diagnostics.json"], true);
+    assert!(manifest.get("performanceSummary").is_some());
     let mut runtime_session = String::new();
     archive
         .by_name("runtime-session.json")
@@ -166,6 +194,97 @@ fn builtin_tool_availability_reports_the_chat_registry() {
         .iter()
         .any(|tool| tool.name == "LiteratureSearch" && tool.available));
     assert_eq!(tools.len(), 2);
+}
+
+#[test]
+fn ordinary_chat_routes_the_real_registry_to_a_small_recoverable_schema_set() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "修复 React 界面并在浏览器验收",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert!(plan.catalog_names.len() > 20);
+    assert!(plan.active_names.len() <= 20);
+    assert!(plan.active_names.contains("ToolSearch"));
+    assert!(plan.active_names.contains("edit_file"));
+    assert!(!plan.deferred_names.is_empty());
+}
+
+/// Routing against the registry the desktop actually ships, using messages from
+/// a session that spent 148 tool calls editing a website without ever being
+/// offered a file editor. `aris-chat`'s own routing tests use a stand-in
+/// catalog; this is the one that would have caught it in production.
+#[test]
+fn real_registry_offers_file_editors_for_ordinary_edit_requests() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    for prompt in [
+        "到2026就停，不要循环跳",
+        "刷新还有，你删一下",
+        "这个Logo背景色弄成透明，所有的颜色弄为白色",
+        "Posters Xiaoou 的文件夹，你将这个里面的海报，全部按照Posters的命名方式重命名后放到文件夹，并且显示到网页上",
+    ] {
+        let plan =
+            aris_chat::route_chat_tools(prompt, &specs, aris_chat::ToolRoutingMode::Active);
+        for name in ["edit_file", "multi_edit"] {
+            assert!(
+                plan.active_names.contains(name),
+                "{name} missing for {prompt:?}: {:?}",
+                plan.active_names
+            );
+        }
+    }
+}
+
+/// The literature bundle used to land on a logo-recoloring turn, because the
+/// attachment boilerplate the desktop appends contains the word "searching".
+#[test]
+fn real_registry_does_not_route_an_attachment_notice_to_literature_tools() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "这个Logo背景色弄成透明，所有的颜色弄为白色\n\n\
+         [Attached image: image.png; local path: .somniq/uploads/1789526116789808800-0-image.png]\n\
+         The image is included directly in this message. Inspect it directly instead of searching \
+         the workspace for it. Use the local path only when a tool requires a file path.",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert!(
+        !plan.active_names.contains("LiteratureSearch"),
+        "{:?}",
+        plan.active_names
+    );
+    assert!(plan.active_names.contains("edit_file"), "{plan:?}");
+}
+
+/// A resume after the second compaction, against the registry the desktop ships
+/// and in the exact wording `compact.rs` emits when the compacted range holds no
+/// user message of its own. Routing on the whole document instead pinned
+/// `WebSearch`/`WebFetch` onto a turn that only changes a year — the intent came
+/// from the literal section header `## Current Focus`.
+#[test]
+fn real_registry_resumes_on_a_goal_carried_over_from_a_prior_compaction() {
+    let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
+    let plan = aris_chat::route_chat_tools(
+        "This session is being continued from a previous conversation that ran out of context.\n\n\
+         <summary>\n\
+         ## Current Focus\n\
+         - Active user goal from prior compacted state: 把首页的年份改成 2026\n\
+         - Aris internal continuation/compaction prompts are resume metadata, not user tasks.\n\n\
+         ## Main-line Check\n\
+         - failure repeated 2 times: mcp__playwright__browser_navigate: ### error\n\
+         </summary>",
+        &specs,
+        aris_chat::ToolRoutingMode::Active,
+    );
+
+    assert_eq!(plan.profile, "core+code", "{plan:?}");
+    for name in ["WebSearch", "WebFetch"] {
+        assert!(!plan.pinned_names.contains(name), "pinned {name}: {plan:?}");
+    }
+    assert!(plan.pinned_names.contains("edit_file"), "{plan:?}");
 }
 
 fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
@@ -767,6 +886,21 @@ fn paired_remote_runtime_uses_desktop_execution_with_a_safe_mobile_mirror() {
         full_tool_registry: true,
     }
     .emits_desktop_chat_events());
+}
+
+#[test]
+fn work_task_runtime_streams_into_an_open_read_only_transcript() {
+    let work_task = ChatTurnRuntime::WorkTask(WorkTaskRuntimeContext {
+        worktree: PathBuf::from("worktree"),
+        binding: crate::engine::WorkTaskTurnBinding {
+            task_id: "t1".to_string(),
+            run_seq: 1,
+        },
+    });
+
+    assert_eq!(work_task.event_delivery(), ChatEventDelivery::Desktop);
+    assert!(work_task.emits_desktop_chat_events());
+    assert_eq!(work_task.surface(), "Work task");
 }
 
 #[test]
@@ -1376,6 +1510,26 @@ fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
 }
 
 #[test]
+fn ask_user_question_parse_failure_names_the_expected_shape() {
+    // A flat payload that ends with the closing punctuation of a
+    // `{"questions": [...]}` wrapper: the retry has to drop the stray closers,
+    // so the error must rule out adding the wrapper instead.
+    let trailing_wrapper_closers =
+        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
+    let message = validate_question_input(trailing_wrapper_closers)
+        .expect_err("trailing closers should fail")
+        .to_string();
+    assert!(
+        message.contains("trailing characters"),
+        "parse position should survive into the message: {message}"
+    );
+    assert!(
+        message.contains("not an array of questions"),
+        "message should rule out the wrapper shape: {message}"
+    );
+}
+
+#[test]
 fn a_paired_device_can_only_answer_a_question_from_the_session_it_is_viewing() {
     let state = ChatState::default();
     let (sender, receiver) = mpsc::channel::<String>();
@@ -1452,6 +1606,244 @@ fn latex_repair_guard_no_longer_blocks_repeated_failures() {
     // is "no block, no notification"; tests asserting the old contract are
     // intentionally removed.
     let _guard = LatexRepairGuard::default();
+}
+
+#[test]
+fn batch_write_paths_are_all_visible_to_latex_repair_guard() {
+    let paths = edited_file_paths(
+        r#"{"files":[{"path":"paper/main.tex"},{"path":"paper/sections/results.tex"},{"path":"notes.md"}]}"#,
+    );
+    assert_eq!(
+        paths,
+        vec![
+            "notes.md".to_string(),
+            "paper/main.tex".to_string(),
+            "paper/sections/results.tex".to_string(),
+        ]
+    );
+}
+
+fn debug_event(seq: u64, kind: &str, payload: Value) -> crate::chat_events::ChatEventLogEntry {
+    crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq,
+        ts: seq,
+        session_id: "summary-test".to_string(),
+        kind: kind.to_string(),
+        payload,
+    }
+}
+
+#[test]
+fn unsupported_summarizer_opens_and_reset_clears_the_session_circuit() {
+    let session_id = format!("summary-circuit-{}", current_time_millis());
+    let event_dir = std::env::temp_dir().join(&session_id);
+    fs::create_dir_all(&event_dir).expect("event dir");
+    let event_guard = crate::chat_events::bind_session_event_dir(&session_id, event_dir.clone())
+        .expect("bind event dir");
+    forget_session_summarizer_circuit(&session_id);
+    assert!(!session_summarizer_circuit_open(&session_id));
+
+    let mut sink = DesktopRuntimeEventSink {
+        session_id: session_id.clone(),
+    };
+    runtime::EventSink::emit(
+        &mut sink,
+        &runtime::RuntimeEvent {
+            timestamp: runtime::now_iso8601(),
+            session_id: session_id.clone(),
+            event_type: runtime::EventType::CompactionSummaryFallback {
+                reason: "summarizer_model_unavailable".to_string(),
+            },
+        },
+    );
+    assert!(session_summarizer_circuit_open(&session_id));
+
+    forget_session_summarizer_circuit(&session_id);
+    assert!(!session_summarizer_circuit_open(&session_id));
+    drop(event_guard);
+    let _ = fs::remove_dir_all(event_dir);
+}
+
+#[test]
+fn debug_performance_summary_combines_session_usage_and_wire_metrics() {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse {
+            id: "write-1".to_string(),
+            name: "write_file".to_string(),
+            input: "{}".to_string(),
+        },
+    ]));
+    session.messages.push(ConversationMessage::tool_result(
+        "write-1",
+        "write_file",
+        "ok",
+        false,
+    ));
+    let events = vec![
+        debug_event(
+            1,
+            "tool_call",
+            json!({ "id": "write-1", "name": "write_file" }),
+        ),
+        debug_event(
+            2,
+            "tool_result",
+            json!({ "id": "write-1", "name": "write_file", "isError": false, "output": "ok" }),
+        ),
+    ];
+    let usage = serde_json::json!({
+        "createdAt": 1,
+        "sessionId": "summary-test",
+        "role": "executor",
+        "server": "local",
+        "model": "test",
+        "provider": "test",
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "cacheCreationInputTokens": 10,
+        "cacheReadInputTokens": 30,
+        "durationMs": 500,
+        "reasoningEffort": "low"
+    })
+    .to_string();
+    let wire_path = std::env::temp_dir().join(format!(
+        "somniq-debug-summary-{}.jsonl",
+        current_time_millis()
+    ));
+    let wire = [
+        crate::chat_events::ChatEventLogEntry {
+            version: 1,
+            seq: 1,
+            ts: 2_000,
+            session_id: "summary-test".to_string(),
+            kind: "llm.request".to_string(),
+            payload: json!({}),
+        },
+        crate::chat_events::ChatEventLogEntry {
+            version: 1,
+            seq: 2,
+            ts: 3_000,
+            session_id: "summary-test".to_string(),
+            kind: "context.checkpoint".to_string(),
+            payload: json!({
+                "reason": "tool_call_interval",
+                "tokensBefore": 1000,
+                "tokensAfter": 600,
+                "removedMessages": 12
+            }),
+        },
+    ]
+    .into_iter()
+    .map(|event| serde_json::to_string(&event).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    fs::write(&wire_path, format!("{wire}\n")).expect("wire fixture");
+
+    let summary = build_debug_performance_summary(
+        &session,
+        &events,
+        &usage,
+        Some(&wire_path),
+        &[],
+    )
+    .expect("summary");
+    assert_eq!(summary["model"]["requestCount"], 1);
+    assert_eq!(summary["model"]["successfulCallCount"], 1);
+    assert_eq!(summary["model"]["tracedRequestCount"], 1);
+    assert_eq!(summary["model"]["coverage"]["usageStartMs"], 1_000);
+    assert_eq!(summary["model"]["coverage"]["wireStartMs"], 2_000);
+    assert_eq!(
+        summary["model"]["coverage"]["wireTraceTruncated"],
+        true
+    );
+    assert_eq!(summary["model"]["peakPromptTokens"], 140);
+    assert_eq!(summary["tools"]["callCount"], 1);
+    assert_eq!(summary["context"]["checkpointCount"], 1);
+    assert_eq!(summary["context"]["estimatedTokensRemoved"], 400);
+    let _ = fs::remove_file(wire_path);
+}
+
+/// Archived compaction messages are the durable whole-session tool source; the
+/// narrowed event log only fills an in-flight tail.
+#[test]
+fn debug_performance_summary_counts_tools_a_compaction_removed() {
+    let archived = vec![
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "a".to_string(),
+            name: "ReadMediaFile".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("a", "ReadMediaFile", "failed to resolve", true),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "b".to_string(),
+            name: "bash".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("b", "bash", "{}", false),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "c".to_string(),
+            name: "AskUserQuestion".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("c", "AskUserQuestion", "A", false),
+    ];
+    let mut session = Session::new();
+    session.compactions.push(runtime::SessionCompactionRecord {
+        summary: "archived".to_string(),
+        messages: archived,
+        removed_message_count: 6,
+        preserved_message_count: 0,
+        tokens_before: 100,
+        tokens_after: 20,
+        summary_source: "fallback".to_string(),
+    });
+    let events = vec![
+        debug_event(1, "tool_call", json!({ "id": "a", "name": "ReadMediaFile" })),
+        debug_event(
+            2,
+            "tool_result",
+            json!({ "id": "a", "name": "ReadMediaFile", "isError": true, "output": "failed to resolve" }),
+        ),
+        debug_event(3, "tool_call", json!({ "id": "b", "name": "bash" })),
+        debug_event(
+            4,
+            "tool_result",
+            json!({ "id": "b", "name": "bash", "isError": false, "output": "{}" }),
+        ),
+        // The question card's second `tool_call` for the same id: one call.
+        debug_event(
+            5,
+            "tool_call",
+            json!({ "id": "c", "name": "AskUserQuestion" }),
+        ),
+        debug_event(
+            6,
+            "tool_call",
+            json!({ "id": "c", "name": "AskUserQuestion", "ready": true }),
+        ),
+        debug_event(
+            7,
+            "tool_result",
+            json!({ "id": "c", "name": "AskUserQuestion", "isError": false, "output": "A" }),
+        ),
+        // Export raced this call before the updated session snapshot landed.
+        debug_event(
+            8,
+            "tool_call",
+            json!({ "id": "d", "name": "browser_snapshot" }),
+        ),
+    ];
+    let summary =
+        build_debug_performance_summary(&session, &events, "", None, &[]).expect("summary");
+
+    assert_eq!(summary["tools"]["callCount"], 4, "{summary:#}");
+    assert_eq!(summary["tools"]["uniqueToolCount"], 4, "{summary:#}");
+    assert_eq!(summary["tools"]["failureCount"], 1, "{summary:#}");
+    assert_eq!(summary["tools"]["byName"]["ReadMediaFile"], 1);
+    assert_eq!(summary["context"]["persistedCompactionCount"], 1);
+    assert_eq!(summary["context"]["compactionSummarySources"]["fallback"], 1);
 }
 
 #[test]

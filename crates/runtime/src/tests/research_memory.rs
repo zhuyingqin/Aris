@@ -57,7 +57,9 @@ fn legacy_historical_capture_binds_to_the_authoritative_final_turn_once() {
         "Final/main.pdf compiled successfully to 153 pages.",
     );
     legacy.session_id = "chat-a".to_string();
-    store.enqueue_capture(&legacy).expect("enqueue legacy capture");
+    store
+        .enqueue_capture(&legacy)
+        .expect("enqueue legacy capture");
     store.drain_outbox(10).expect("drain legacy capture");
 
     assert!(store
@@ -145,15 +147,29 @@ fn current_artifact_facts_supersede_page_counts_and_resolved_build_failures() {
     assert_eq!(current_build.status, "derived", "{snapshot:?}");
 
     let current = store
-        .recall("project-a", "what is the current Final/main.pdf page count", 10, 2)
+        .recall(
+            "project-a",
+            "what is the current Final/main.pdf page count",
+            10,
+            2,
+        )
         .expect("current recall");
-    assert!(current.atoms.iter().any(|atom| atom.statement.contains("153 pages")));
+    assert!(current
+        .atoms
+        .iter()
+        .any(|atom| atom.statement.contains("153 pages")));
     assert!(!current
         .atoms
         .iter()
-        .any(|atom| atom.statement.contains("143 pages") || atom.statement.contains("Undefined control sequence")));
+        .any(|atom| atom.statement.contains("143 pages")
+            || atom.statement.contains("Undefined control sequence")));
     let historical = store
-        .recall("project-a", "on 2026-08-08 what was the Final/main.pdf page count", 10, 2)
+        .recall(
+            "project-a",
+            "on 2026-08-08 what was the Final/main.pdf page count",
+            10,
+            2,
+        )
         .expect("historical recall");
     assert!(historical
         .atoms
@@ -716,7 +732,9 @@ fn unrelated_subjects_no_longer_supersede_one_another() {
         "{active:?}"
     );
     assert!(
-        active.iter().any(|atom| atom.statement.contains("deepseek")),
+        active
+            .iter()
+            .any(|atom| atom.statement.contains("deepseek")),
         "{active:?}"
     );
 }
@@ -771,7 +789,14 @@ fn dead_letters_can_be_returned_to_the_queue() {
         .expect("cleared")
         .is_empty());
     assert_eq!(store.drain_outbox(10).expect("drain restored"), 1);
-    assert!(store.snapshot("project-a", 50).expect("snapshot").stats.atom_count > 0);
+    assert!(
+        store
+            .snapshot("project-a", 50)
+            .expect("snapshot")
+            .stats
+            .atom_count
+            > 0
+    );
 }
 
 #[test]
@@ -984,7 +1009,10 @@ fn the_upgrade_classifies_legacy_rows_and_rebuilds_stale_profiles() {
     assert_eq!(
         classes,
         vec![
-            ("atom-assistant".to_string(), "assistant_synthesis".to_string()),
+            (
+                "atom-assistant".to_string(),
+                "assistant_synthesis".to_string()
+            ),
             ("atom-user".to_string(), "user_asserted".to_string()),
         ]
     );
@@ -1099,7 +1127,10 @@ fn artifact_paths_are_not_classified_as_prose() {
     // `result.json` contains the English keyword "result"; a file name is not a
     // claim about an experiment.
     assert_eq!(atom.kind, "artifact_pointer", "{snapshot:?}");
-    assert_eq!(atom.artifact_paths, vec!["./reports/result.json".to_string()]);
+    assert_eq!(
+        atom.artifact_paths,
+        vec!["./reports/result.json".to_string()]
+    );
 }
 
 #[test]
@@ -1182,7 +1213,11 @@ fn rebuild_replays_captures_but_keeps_human_decisions() {
         .find(|atom| atom.statement.contains("p95"))
         .expect("result atom");
     store
-        .update_atom("project-a", &corrected.id, "决定采用 SQLite，且不再评估替代方案。")
+        .update_atom(
+            "project-a",
+            &corrected.id,
+            "决定采用 SQLite，且不再评估替代方案。",
+        )
         .expect("user correction");
     store
         .delete_atom("project-a", &removed.id)
@@ -1291,7 +1326,10 @@ fn a_term_becomes_a_subject_once_a_second_session_returns_to_it() {
         .find(|subject| subject.subject == "ident:must-c")
         .expect("subject row");
     assert_eq!(must_c.session_count, 2, "{must_c:?}");
-    assert_eq!(must_c.display, "MuST-C", "the surface form is kept for display");
+    assert_eq!(
+        must_c.display, "MuST-C",
+        "the surface form is kept for display"
+    );
 
     let snapshot = store.snapshot("project-a", 50).expect("snapshot");
     let keyed = snapshot
@@ -1446,14 +1484,19 @@ fn subject_terms_take_names_not_prose() {
     let found = terms(
         "第五章必须保留 `eq:admissible-set`，见 \\ref{sec:esp}，改 Final/ch5_sparse_extremes.tex 即可。",
     );
-    assert!(found.contains(&"ident:eq:admissible-set".to_string()), "{found:?}");
+    assert!(
+        found.contains(&"ident:eq:admissible-set".to_string()),
+        "{found:?}"
+    );
     assert!(found.contains(&"tex:sec:esp".to_string()), "{found:?}");
     assert!(
         found.contains(&"file:ch5_sparse_extremes.tex".to_string()),
         "{found:?}"
     );
     assert!(
-        !found.iter().any(|term| term.contains("必须") || term.contains("保留")),
+        !found
+            .iter()
+            .any(|term| term.contains("必须") || term.contains("保留")),
         "prose must not become a subject: {found:?}"
     );
     let found = terms("把“当前方案”保留在普通说明中，不是稳定对象。");
@@ -1474,7 +1517,10 @@ fn subject_terms_take_names_not_prose() {
     // top subjects.
     let found = terms("However, the run failed. Introduction needs work. ESN stays. Mamba wins.");
     assert!(!found.contains(&"ident:however".to_string()), "{found:?}");
-    assert!(!found.contains(&"ident:introduction".to_string()), "{found:?}");
+    assert!(
+        !found.contains(&"ident:introduction".to_string()),
+        "{found:?}"
+    );
     assert!(!found.contains(&"ident:mamba".to_string()), "{found:?}");
     assert!(
         found.contains(&"ident:esn".to_string()),
@@ -1579,7 +1625,11 @@ fn a_store_wide_replay_visits_projects_that_no_longer_yield_atoms() {
     drop(connection);
 
     let outcome = store.rebuild_all().expect("rebuild all");
-    assert_eq!(outcome.projects, vec!["project-a".to_string()], "{outcome:?}");
+    assert_eq!(
+        outcome.projects,
+        vec!["project-a".to_string()],
+        "{outcome:?}"
+    );
     assert_eq!(outcome.captures_replayed, 1, "{outcome:?}");
     assert!(outcome.atoms_written > 0, "{outcome:?}");
 }
@@ -1719,9 +1769,7 @@ fn v4_rejects_questions_placeholders_plans_drafts_and_prose_paths() {
     assert!(rejected.profile.is_none(), "{rejected:?}");
     assert!(!contains_keyword("经验证据与理论分析一致", "经验"));
     assert!(contains_keyword("这次的经验教训是先固定随机种子", "经验"));
-    assert!(
-        extract_artifact_paths("落地清单**：cas-sc-new.tex 的具体修改位置（7项）").is_empty()
-    );
+    assert!(extract_artifact_paths("落地清单**：cas-sc-new.tex 的具体修改位置（7项）").is_empty());
 
     let mut verified = capture(
         "project-a",
@@ -1856,13 +1904,11 @@ fn legacy_workflow_atoms_are_not_recalled_or_replayed() {
     drop(connection);
 
     // Governance remains able to show the legacy rows before migration.
-    assert!(
-        !store
-            .snapshot("project-a", 50)
-            .expect("governance snapshot")
-            .atoms
-            .is_empty()
-    );
+    assert!(!store
+        .snapshot("project-a", 50)
+        .expect("governance snapshot")
+        .atoms
+        .is_empty());
     let recall = store
         .recall("project-a", "实验完整来源 p95 延迟", 10, 5)
         .expect("isolated recall");
@@ -1870,7 +1916,9 @@ fn legacy_workflow_atoms_are_not_recalled_or_replayed() {
     assert!(recall.cards.is_empty(), "{recall:?}");
     assert!(recall.profile.is_none(), "{recall:?}");
 
-    let rebuilt = store.rebuild_derived("project-a").expect("isolated rebuild");
+    let rebuilt = store
+        .rebuild_derived("project-a")
+        .expect("isolated rebuild");
     assert_eq!(rebuilt.captures_replayed, 0, "{rebuilt:?}");
     assert!(rebuilt.atoms_removed > 0, "{rebuilt:?}");
     assert_eq!(rebuilt.atoms_written, 0, "{rebuilt:?}");

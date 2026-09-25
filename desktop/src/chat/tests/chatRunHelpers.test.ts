@@ -1,14 +1,51 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import {
   completedAssistantBlocks,
   contextForRetry,
   continueStoppedPrompt,
   needsBackendContextReset,
+  outgoingMessage,
   visibleTurnError,
 } from "../chatRunHelpers";
 
+const apiMocks = vi.hoisted(() => ({
+  fileReadBytes: vi.fn(),
+}));
+
+vi.mock("../../api/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/tauri")>()),
+  ...apiMocks,
+}));
+
+beforeEach(() => {
+  apiMocks.fileReadBytes.mockReset();
+});
+
 describe("chatRunHelpers", () => {
+  it("passes an uploaded image directly and exposes its exact tool path without inviting search", async () => {
+    apiMocks.fileReadBytes.mockResolvedValue(Uint8Array.from([102, 97, 107, 101]).buffer);
+    const message = await outgoingMessage("What is shown?", [{
+      id: "image-1",
+      kind: "image",
+      name: "shot.png",
+      path: ".somniq/uploads/456-shot.png",
+      mimeType: "image/png",
+    }]);
+
+    expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(".somniq/uploads/456-shot.png");
+    expect(message.images).toEqual([{
+      name: "shot.png",
+      mimeType: "image/png",
+      data: "data:image/png;base64,ZmFrZQ==",
+    }]);
+    expect(message.text).toContain("local path: .somniq/uploads/456-shot.png");
+    expect(message.text).toContain("included directly in this message");
+    expect(message.text).toContain("instead of searching the workspace");
+  });
+
   it("rebuilds stopped assistant turns into backend context with tool activity", async () => {
     const messages = await contextForRetry([
       { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Read README" }] },

@@ -14,6 +14,7 @@ import type {
   ChatTurn,
   ComputePeer,
   DesktopProject,
+  WorkTask,
 } from "../../types";
 
 const apiMocks = vi.hoisted(() => ({
@@ -93,6 +94,10 @@ const apiMocks = vi.hoisted(() => ({
   remoteAgentModelSet: vi.fn(),
   remoteAgentChatSend: vi.fn(),
   remoteAgentChatCancel: vi.fn(() => Promise.resolve()),
+  workTaskList: vi.fn<() => Promise<WorkTask[]>>(() => Promise.resolve([])),
+  onWorkTaskChanged: vi.fn<(
+    handler: (event: { projectId: string }) => void,
+  ) => Promise<() => void>>(() => Promise.resolve(() => undefined)),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
@@ -229,6 +234,7 @@ vi.mock("../ChatSidebar", () => ({
   default: ({
     sessions,
     onOpen,
+    onNew,
     remotePeers = [],
     remoteWorkspaces = {},
     remoteSessionLists = {},
@@ -240,6 +246,7 @@ vi.mock("../ChatSidebar", () => ({
   }: {
     sessions: { id: string; title: string }[];
     onOpen: (id: string) => void | Promise<void>;
+    onNew: (projectId?: string, prompt?: string) => void | Promise<void>;
     remotePeers?: Array<{ nodeId: string; displayName: string }>;
     remoteWorkspaces?: Record<string, {
       projects: Array<{ projectId: string; title: string }>;
@@ -256,6 +263,7 @@ vi.mock("../ChatSidebar", () => ({
     onOpenRemote?: (nodeId: string, projectId: string, sessionId: string) => void | Promise<void>;
   }) => (
     <aside data-testid="chat-sidebar">
+      <button onClick={() => void onNew()}>Start new chat</button>
       <button onClick={onLoadRemoteTargets}>Switch local or remote computer</button>
       {remotePeers.map((peer) => (
         <button key={peer.nodeId} onClick={() => onWorkspaceSelect?.(peer.nodeId)}>
@@ -360,6 +368,8 @@ describe("Chat export action", () => {
       return Promise.resolve(reasoningViewFor(model, storedEffort));
     });
     apiMocks.chatTasksGet.mockResolvedValue([]);
+    apiMocks.workTaskList.mockResolvedValue([]);
+    apiMocks.onWorkTaskChanged.mockImplementation(() => Promise.resolve(() => undefined));
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
@@ -416,6 +426,84 @@ describe("Chat export action", () => {
   it("does not portal head actions into the header when embedded", () => {
     render(<Chat embedded />);
     expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
+  it("keeps the host tab when an embedded Chat starts a session", async () => {
+    // Typeset's writing assistant embeds this Chat. Starting a new chat there
+    // used to switch the app to the Chat tab, throwing the user out of the
+    // document they were writing. Opening an existing session runs through the
+    // same helper.
+    useStore.setState({ tab: "typeset" });
+    render(<Chat embedded />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    expect(useStore.getState().tab).toBe("typeset");
+  });
+
+  it("switches to the Chat tab when a standalone Chat starts a session", async () => {
+    useStore.setState({ tab: "typeset" });
+    render(<Chat />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    await waitFor(() => expect(useStore.getState().tab).toBe("chat"));
+  });
+
+  it("shows the authoritative live status of an opened work-task transcript", async () => {
+    const changedHandlers: Array<(event: { projectId: string }) => void> = [];
+    apiMocks.onWorkTaskChanged.mockImplementation((handler) => {
+      changedHandlers.push(handler);
+      return Promise.resolve(() => undefined);
+    });
+    const session = {
+      ...makeSession("default"),
+      id: "work-task-task-a-1",
+      title: "Build survey",
+      ownerKind: "work_task" as const,
+    };
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...session,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...session,
+      turnsLoaded: true,
+    });
+    apiMocks.workTaskList.mockResolvedValue([{
+      id: "task-a",
+      title: session.title,
+      prompt: "Build it",
+      status: "running",
+      sortOrder: 0,
+      runSeq: 1,
+      sessionId: session.id,
+      createdAt: 1,
+      updatedAt: 2,
+    }]);
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain("Task status: Running");
+    expect(screen.getByText(/continuing in the background/)).toBeTruthy();
+
+    apiMocks.workTaskList.mockResolvedValue([{
+      id: "task-a",
+      title: session.title,
+      prompt: "Build it",
+      status: "review",
+      sortOrder: 0,
+      runSeq: 1,
+      sessionId: session.id,
+      createdAt: 1,
+      updatedAt: 3,
+    }]);
+    changedHandlers.forEach((handler) => handler({ projectId: "default" }));
+
+    await waitFor(() => expect(status.textContent).toContain("Task status: In review"));
+    expect(screen.getByText(/waiting for your confirmation/)).toBeTruthy();
   });
 
   it("restores the current session task plan when loaded turns contain no TodoWrite block", async () => {

@@ -363,8 +363,8 @@ shared crates as libraries.
 
 | Path | Role |
 |------|------|
-| `site/server/` | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
-| `site/remote/` | Mobile remote PWA (React + Vite) |
+| [SomniQ-Site: site/server](https://github.com/zhuyingqin/SomniQ-Site/tree/main/site/server) | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
+| [SomniQ-Site: site/remote](https://github.com/zhuyingqin/SomniQ-Site/tree/main/site/remote) | Mobile remote PWA (React + Vite) |
 
 > **Design rule:** a product shell never spawns or parses another shell — each one calls the same shared
 > runtime directly as a library. See

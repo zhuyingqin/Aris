@@ -1,0 +1,11 @@
+{
+  "identifier": "screenshot-pin",
+  "description": "Crops pinned to the desktop. A pin paints one image and is dragged around by its own surface, so beyond the defaults it only needs to start a drag; closing and resizing go through the app's own commands so the pixels behind them are released at the same time.",
+  "windows": [
+    "screenshot-pin-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

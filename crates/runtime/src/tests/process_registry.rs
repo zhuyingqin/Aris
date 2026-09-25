@@ -1,6 +1,7 @@
 use super::{
-    drain_reader, managed_processes_snapshot, read_stream_in_thread, run_managed_command,
-    run_managed_command_with_cancel, spawn_managed_background, terminate_managed_process_tree,
+    background_service_key, drain_reader, managed_processes_snapshot, read_stream_in_thread,
+    reusable_background_service, run_managed_command, run_managed_command_with_cancel,
+    spawn_managed_background, spawn_managed_background_service, terminate_managed_process_tree,
     unregister_managed_process, RollingLog,
 };
 
@@ -101,6 +102,41 @@ fn managed_background_is_registered_and_shutdown() {
         .any(|process| process.pid == pid));
 }
 
+#[test]
+fn background_service_identity_reuses_the_running_process() {
+    let cwd = std::env::current_dir().expect("cwd");
+    let key = background_service_key(&cwd, "dev-server   --port 4317");
+    assert_eq!(key, background_service_key(&cwd, "dev-server --port 4317"));
+    assert_ne!(key, background_service_key(&cwd, "dev-server --port 4318"));
+
+    let mut first = long_running_shell_command();
+    first
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let first_pid = spawn_managed_background_service(&mut first, "service one", None, key.clone())
+        .expect("first service should start");
+    let mut duplicate = long_running_shell_command();
+    let reused_pid =
+        spawn_managed_background_service(&mut duplicate, "service duplicate", None, key.clone())
+            .expect("duplicate should reuse");
+
+    assert_eq!(reused_pid, first_pid);
+    assert_eq!(
+        reusable_background_service(&key).map(|process| process.pid),
+        Some(first_pid)
+    );
+    assert_eq!(
+        managed_processes_snapshot()
+            .iter()
+            .filter(|process| process.pid == first_pid)
+            .count(),
+        1
+    );
+    terminate_managed_process_tree(first_pid);
+    unregister_managed_process(first_pid);
+}
+
 /// A stream that yields one chunk and then never reaches EOF, standing in for a
 /// pipe whose write end a backgrounded process still holds.
 struct PartialThenParked {
@@ -125,13 +161,39 @@ fn drain_reader_returns_partial_output_instead_of_waiting_for_eof() {
     let reader = read_stream_in_thread(PartialThenParked { sent: false });
     let started = Instant::now();
 
-    let (bytes, held) = drain_reader(Some(reader), Instant::now() + Duration::from_millis(400));
+    let drained = drain_reader(Some(reader), Instant::now() + Duration::from_millis(400));
 
-    assert!(held, "a pipe with no EOF must be reported as still held");
-    assert_eq!(bytes, b"partial");
+    assert!(
+        drained.held,
+        "a pipe with no EOF must be reported as still held"
+    );
+    assert_eq!(drained.bytes, b"partial");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "draining must respect the deadline instead of blocking on the reader"
+    );
+}
+
+/// A held pipe is not the same as a truncated capture. An idle service holds
+/// stdout open forever with nothing more to say, and telling the model its
+/// output "may be incomplete" there sends it to re-run a command that already
+/// printed everything.
+#[test]
+fn a_pipe_held_open_after_the_output_settles_is_not_reported_as_truncated() {
+    let reader = read_stream_in_thread(PartialThenParked { sent: false });
+
+    // Long enough past the settle window that the absence of new bytes is
+    // observable, unlike the deadline in the test above.
+    let drained = drain_reader(
+        Some(reader),
+        Instant::now() + super::READER_SETTLE_WINDOW + Duration::from_millis(400),
+    );
+
+    assert!(drained.held, "the pipe is still open");
+    assert_eq!(drained.bytes, b"partial");
+    assert!(
+        !drained.truncated,
+        "output stopped arriving well before the deadline"
     );
 }
 

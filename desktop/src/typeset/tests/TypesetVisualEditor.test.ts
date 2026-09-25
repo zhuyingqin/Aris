@@ -10,12 +10,14 @@ import {
   visualDecorations,
   visualDecorationsExtension,
   visualNumbering,
+  visualTheorems,
   VISUAL_REPARSE_IDLE_MS,
   visualPointerSelecting,
   figurePathCandidates,
   uniqueFigureSearchMatch,
 } from "../visualDecorations";
 import { numberingPrefixFor, outlineFor } from "../outlineModel";
+import { theoremDefinitions } from "../theoremEnvironments";
 import { applyHeadingLevel, insertLink, type EditorAdapter } from "../editorCommands";
 import { htmlClipboardToLatex } from "../latexHtmlPaste";
 import { useStore } from "../../store";
@@ -1484,3 +1486,125 @@ describe("visualDecorations", () => {
   });
 });
 
+
+describe("theorem-like environments", () => {
+  function theoremHeads(source: string, extensions: Extension[] = []) {
+    return visualDecorationRanges(source, source.length, source.length, extensions)
+      .map((range) => range.widget?.toDOM())
+      .map((element) => (element?.classList.contains("cm-vis-theorem-label")
+        ? element
+        : element?.querySelector<HTMLElement>(".cm-vis-theorem-label")))
+      .filter((element): element is HTMLElement => Boolean(element))
+      .map((element) => element.textContent);
+  }
+
+  function theoremTitles(source: string, extensions: Extension[] = []) {
+    return visualDecorationRanges(source, source.length, source.length, extensions)
+      .filter((range) => range.className === "cm-vis-theorem-title")
+      .map((range) => source.slice(range.from, range.to));
+  }
+
+  it("renders an environment the preamble declared, title and all", () => {
+    // Before this, `requirement` was not on the hard-coded amsthm list, so it
+    // fell through to the generic unknown-environment fold: the heading, the
+    // number and the bracketed title all vanished from the page at once.
+    const source = [
+      "\\documentclass{article}",
+      "\\newtheorem{requirement}{Requirement}",
+      "\\begin{document}",
+      "\\begin{requirement}[Regime resolution (R1)]",
+      "\\label{req:r1}",
+      "Each construction must resolve the condition.",
+      "\\end{requirement}",
+      "\\begin{requirement}[Physical admissibility (R2)]",
+      "Membership in the admissible set.",
+      "\\end{requirement}",
+      "\\end{document}",
+    ].join("\n");
+
+    expect(theoremHeads(source)).toEqual(["Requirement 1", "Requirement 2"]);
+    // The title is document text carrying a mark, not widget text, which is
+    // what makes it editable in place.
+    expect(theoremTitles(source)).toEqual(["Regime resolution (R1)", "Physical admissibility (R2)"]);
+  });
+
+  it("numbers within the sectioning counter the declaration names", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\newtheorem{thm}{Theorem}[section]",
+      "\\newtheorem{lem}[thm]{Lemma}",
+      "\\begin{document}",
+      "\\section{First}",
+      "\\begin{thm}Alpha\\end{thm}",
+      "\\begin{lem}Beta\\end{lem}",
+      "\\section{Second}",
+      "\\begin{thm}Gamma\\end{thm}",
+      "\\end{document}",
+    ].join("\n");
+
+    // `lem` borrows `thm`'s counter, so it continues it rather than restarting,
+    // and the shared counter restarts at each \section.
+    expect(theoremHeads(source)).toEqual(["Theorem 1.1", "Lemma 1.2", "Theorem 2.1"]);
+  });
+
+  it("prints no number for a starred declaration or an undeclared name", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\newtheorem*{remark}{Remark}",
+      "\\begin{document}",
+      "\\begin{remark}[On scope]Vacuous otherwise.\\end{remark}",
+      "\\begin{definition}A definition with no declaration in this file.\\end{definition}",
+      "\\end{document}",
+    ].join("\n");
+
+    // Guessing a counter for an undeclared `definition` would print a number
+    // the PDF disagrees with, so it prints the heading alone.
+    expect(theoremHeads(source)).toEqual(["Remark", "Definition"]);
+    expect(theoremTitles(source)).toEqual(["On scope"]);
+  });
+
+  it("reads declarations from the root preamble for an included chapter", () => {
+    const chapter = [
+      "\\begin{requirement}[Annotation economy (R3)]",
+      "No manual labels.",
+      "\\end{requirement}",
+    ].join("\n");
+    const root = [
+      "\\documentclass{book}",
+      "\\newtheorem{requirement}{Requirement}",
+      "\\begin{document}",
+      "\\input{ch2}",
+      "\\end{document}",
+    ].join("\n");
+
+    // Read alone the chapter has no idea `requirement` is a theorem at all —
+    // the name is the root preamble's invention — so nothing is rendered until
+    // the root's declarations reach the editor.
+    expect(theoremHeads(chapter)).toEqual([]);
+    expect(theoremHeads(chapter, [visualTheorems.of(theoremDefinitions(root))])).toEqual(["Requirement 1"]);
+  });
+
+  it("brackets the rendered title with widgets, not the source's own [ ]", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\newtheorem{requirement}{Requirement}",
+      "\\begin{document}",
+      "\\begin{requirement}[Tail accuracy]Controlled risk.\\end{requirement}",
+      "\\end{document}",
+    ].join("\n");
+
+    const widgets = visualDecorationRanges(source, source.length, source.length)
+      .map((range) => range.widget?.toDOM());
+    const opening = widgets
+      .flatMap((element) => Array.from(element?.querySelectorAll(".cm-vis-theorem-paren") ?? []))
+      .map((element) => element.textContent);
+    const closing = widgets
+      .filter((element) => element?.classList.contains("cm-vis-theorem-paren"))
+      .map((element) => element?.textContent);
+
+    expect(opening).toEqual(["("]);
+    expect(closing).toEqual([")"]);
+    // The source brackets themselves are folded away.
+    expect(source.slice(source.indexOf("[Tail"))).toContain("[Tail accuracy]");
+  });
+});

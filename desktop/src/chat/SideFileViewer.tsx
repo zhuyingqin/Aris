@@ -9,6 +9,7 @@ import MarkdownContent from "./MarkdownContent";
 import {
   fileHandoff,
   imageMimeType,
+  registerSidePanelHandoff,
   sideFileKind,
   sideFileTitle,
   type SidePanelMetadata,
@@ -131,7 +132,11 @@ export default function SideFileViewer({
   const [error, setError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
   const [selection, setSelection] = useState("");
-  const [pdfPage, setPdfPage] = useState(1);
+  // A ref, not state: the reader reports a new page every few hundred pixels of
+  // scrolling, and the page is only read when the handoff is actually sent. As
+  // state it turned every one of those into a `Chat` state change — a full chat
+  // re-render plus a synchronous localStorage write, at scroll frequency.
+  const pdfPageRef = useRef(1);
   const evidenceAnnotations = useMemo<PdfAnnotation[]>(() => (
     evidence?.quotes.map((quote, index) => ({
       id: `${evidence.requestKey}:${index}`,
@@ -191,7 +196,7 @@ export default function SideFileViewer({
   useEffect(() => {
     setShowSource(false);
     setSelection("");
-    setPdfPage(1);
+    pdfPageRef.current = 1;
   }, [path]);
 
   // ── Selection → handoff ───────────────────────────────────────────────────
@@ -220,12 +225,32 @@ export default function SideFileViewer({
     };
   }, []);
 
+  // The stored handoff is the fallback the tab is persisted with; the page it
+  // carries is whatever the reader was on when the title or selection last
+  // changed. The live text (with the current page) comes from the registry
+  // below, which the shell reads at the moment the reader presses send.
   useEffect(() => {
     onMetadataChange(tabId, {
       title: sideFileTitle(path),
-      handoff: fileHandoff(path, selection, language, kind === "pdf" ? pdfPage : null),
+      handoff: fileHandoff(path, selection, language, kind === "pdf" ? pdfPageRef.current : null),
     });
-  }, [kind, language, onMetadataChange, path, pdfPage, selection, tabId]);
+  }, [kind, language, onMetadataChange, path, selection, tabId]);
+
+  // Stable: `PdfReader` reports the page from an effect keyed on this callback,
+  // so a fresh identity per render would re-run it on every render.
+  const notePdfPage = useCallback((page: number) => { pdfPageRef.current = page; }, []);
+
+  const handoffInputsRef = useRef({ kind, language, path, selection });
+  handoffInputsRef.current = { kind, language, path, selection };
+  useEffect(() => registerSidePanelHandoff(tabId, () => {
+    const current = handoffInputsRef.current;
+    return fileHandoff(
+      current.path,
+      current.selection,
+      current.language,
+      current.kind === "pdf" ? pdfPageRef.current : null,
+    );
+  }), [tabId]);
 
   const openExternal = useCallback(() => {
     if (isTauri()) void fileOpen(path).catch(() => undefined);
@@ -273,7 +298,7 @@ export default function SideFileViewer({
               onUpdateAnnotation={() => undefined}
               onDeleteAnnotation={() => undefined}
               onRunAi={() => Promise.resolve("")}
-              onPageChange={setPdfPage}
+              onPageChange={notePdfPage}
             />
           </Suspense>
         </div>

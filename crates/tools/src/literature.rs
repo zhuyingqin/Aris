@@ -1344,8 +1344,8 @@ pub fn literature_search_execute_at_with_cancel(
             store.checkpoint_run(&mut run)?;
             continue;
         }
-        let continuation_cursor = continuation_attempt
-            .and_then(|attempt| attempt.coverage.next_cursor.clone());
+        let continuation_cursor =
+            continuation_attempt.and_then(|attempt| attempt.coverage.next_cursor.clone());
         if mark_interrupted_attempts(&mut run, &source) {
             store.checkpoint_run(&mut run)?;
             on_progress(&json!({
@@ -1484,8 +1484,7 @@ pub fn literature_search_execute_at_with_cancel(
     let variant_budget_overrides = input.variant_budgets.as_ref();
     let time_window = protocol.draft.time_window.clone();
     let sort_order = protocol.draft.sort_order.clone();
-    let mut outcomes: Vec<Result<AdapterSearchOutcome, String>> =
-        Vec::with_capacity(planned.len());
+    let mut outcomes: Vec<Result<AdapterSearchOutcome, String>> = Vec::with_capacity(planned.len());
     std::thread::scope(|scope| {
         let workers = planned
             .iter()
@@ -2518,22 +2517,74 @@ const STOPWORDS: &[&str] = &[
     "a", "about", "across", "after", "against", "all", "also", "among", "an", "and", "any", "are",
     "as", "at", "be", "been", "before", "being", "both", "but", "by", "can", "could", "did", "do",
     "does", "done", "during", "each", "for", "from", "had", "has", "have", "he", "her", "his",
-    "how", "i", "if", "in", "into", "is", "it", "its", "may", "me", "might", "more", "most", "much",
-    "must", "my", "no", "not", "of", "on", "only", "or", "other", "our", "over", "same", "shall",
-    "she", "should", "so", "some", "such", "than", "that", "the", "their", "them", "then", "there",
-    "these", "they", "this", "those", "to", "under", "until", "upon", "us", "use", "very", "was",
-    "we", "were", "what", "when", "where", "which", "while", "who", "why", "will", "with", "would",
-    "you", "your",
+    "how", "i", "if", "in", "into", "is", "it", "its", "may", "me", "might", "more", "most",
+    "much", "must", "my", "no", "not", "of", "on", "only", "or", "other", "our", "over", "same",
+    "shall", "she", "should", "so", "some", "such", "than", "that", "the", "their", "them", "then",
+    "there", "these", "they", "this", "those", "to", "under", "until", "upon", "us", "use", "very",
+    "was", "we", "were", "what", "when", "where", "which", "while", "who", "why", "will", "with",
+    "would", "you", "your",
 ];
 
 /// CJK particles and question scaffolding. The same role as [`STOPWORDS`], and
 /// also the anchor points segmentation falls back to: a particle is a reliable
 /// term boundary even when the words around it are not in the glossary.
 const CJK_STOPWORDS: &[&str] = &[
-    "的", "了", "和", "与", "及", "在", "对", "中", "是", "有", "为", "以", "上", "下", "之", "其",
-    "该", "这", "那", "等", "或", "并", "而", "也", "都", "被", "把", "给", "从", "到", "向", "于",
-    "个", "我", "你", "他", "她", "它", "们", "什么", "如何", "怎样", "怎么", "是否", "能否",
-    "可以", "进行", "使用", "基于", "关于", "通过", "一种", "一个", "哪些", "有没有", "请",
+    "的",
+    "了",
+    "和",
+    "与",
+    "及",
+    "在",
+    "对",
+    "中",
+    "是",
+    "有",
+    "为",
+    "以",
+    "上",
+    "下",
+    "之",
+    "其",
+    "该",
+    "这",
+    "那",
+    "等",
+    "或",
+    "并",
+    "而",
+    "也",
+    "都",
+    "被",
+    "把",
+    "给",
+    "从",
+    "到",
+    "向",
+    "于",
+    "个",
+    "我",
+    "你",
+    "他",
+    "她",
+    "它",
+    "们",
+    "什么",
+    "如何",
+    "怎样",
+    "怎么",
+    "是否",
+    "能否",
+    "可以",
+    "进行",
+    "使用",
+    "基于",
+    "关于",
+    "通过",
+    "一种",
+    "一个",
+    "哪些",
+    "有没有",
+    "请",
 ];
 
 /// Research vocabulary in the language the caller may write in, mapped to the
@@ -2906,8 +2957,27 @@ fn title_like_phrase(normalized: &str) -> Option<String> {
         .trim_matches(|character: char| !character.is_alphanumeric())
         .to_ascii_lowercase();
     const INTERROGATIVES: &[&str] = &[
-        "how", "what", "which", "who", "when", "where", "why", "is", "are", "do", "does", "did",
-        "can", "could", "should", "would", "find", "search", "compare", "explain", "summarize",
+        "how",
+        "what",
+        "which",
+        "who",
+        "when",
+        "where",
+        "why",
+        "is",
+        "are",
+        "do",
+        "does",
+        "did",
+        "can",
+        "could",
+        "should",
+        "would",
+        "find",
+        "search",
+        "compare",
+        "explain",
+        "summarize",
     ];
     if INTERROGATIVES.contains(&first.as_str()) {
         return None;
@@ -3080,10 +3150,12 @@ fn title_coverage_millis(title: &str, terms: &RankingTerms) -> u32 {
                 let normalized = collapse_whitespace(
                     &term
                         .chars()
-                        .map(|character| if character.is_alphanumeric() {
-                            character
-                        } else {
-                            ' '
+                        .map(|character| {
+                            if character.is_alphanumeric() {
+                                character
+                            } else {
+                                ' '
+                            }
                         })
                         .collect::<String>(),
                 );
@@ -3387,9 +3459,7 @@ pub fn library_relations_at(
 /// Read the complete local Zotero-shaped data plane, including child items,
 /// field rows, creator roles, generic relations, saved-search conditions and
 /// computed special collections.
-pub fn library_model_at(
-    base: &Path,
-) -> Result<runtime::literature::LibraryModelSnapshot, String> {
+pub fn library_model_at(base: &Path) -> Result<runtime::literature::LibraryModelSnapshot, String> {
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -3416,11 +3486,7 @@ fn refresh_library_projection(
 /// Apply a local object-level Item patch and return the updated normalized
 /// item plus the compatibility projection. This is the write boundary for
 /// fields/creators/relations; workflow decisions remain separate.
-pub fn library_update_item_at(
-    base: &Path,
-    item_id: &str,
-    patch: &Value,
-) -> Result<Value, String> {
+pub fn library_update_item_at(base: &Path, item_id: &str, patch: &Value) -> Result<Value, String> {
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -3533,10 +3599,7 @@ pub fn library_permanently_delete_items_at(
     Ok(json!({ "deletedIds": deleted_ids, "projection": projection }))
 }
 
-pub fn library_update_saved_searches_at(
-    base: &Path,
-    searches: &Value,
-) -> Result<Value, String> {
+pub fn library_update_saved_searches_at(base: &Path, searches: &Value) -> Result<Value, String> {
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -3630,7 +3693,10 @@ pub fn library_rename_attachments_at(
         .filter(|record| selected.is_empty() || selected.contains(record.id.as_str()))
         .collect::<Vec<_>>();
     let relations = store.library_relation_snapshot_for(
-        records.iter().map(|record| record.id.clone()).collect::<Vec<_>>(),
+        records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>(),
     )?;
 
     let papers_dir = crate::layout::papers_dir_at(base);
@@ -3654,13 +3720,19 @@ pub fn library_rename_attachments_at(
                 path: attachment.path.clone().unwrap_or_default(),
                 reason: reason.to_string(),
             };
-            let Some(relative) = attachment.path.as_deref().map(str::trim).filter(|path| !path.is_empty())
+            let Some(relative) = attachment
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
             else {
                 report.skipped.push(skip("attachment has no local file"));
                 continue;
             };
             if attachment.external_path.is_some() {
-                report.skipped.push(skip("linked external file is not ours to move"));
+                report
+                    .skipped
+                    .push(skip("linked external file is not ours to move"));
                 continue;
             }
             let source = base.join(relative.replace('\\', "/"));
@@ -3679,7 +3751,9 @@ pub fn library_rename_attachments_at(
             };
             // Only rename inside the project's own papers directory.
             if !parent.starts_with(&papers_dir) {
-                report.skipped.push(skip("file lives outside the papers directory"));
+                report
+                    .skipped
+                    .push(skip("file lives outside the papers directory"));
                 continue;
             }
 
@@ -3715,7 +3789,9 @@ pub fn library_rename_attachments_at(
                 continue;
             }
             if destination.to_string_lossy().chars().count() > MAX_ATTACHMENT_PATH_CHARS {
-                report.skipped.push(skip("resulting path would be too long"));
+                report
+                    .skipped
+                    .push(skip("resulting path would be too long"));
                 continue;
             }
             claimed.insert(destination.to_string_lossy().to_string());
@@ -3734,9 +3810,8 @@ pub fn library_rename_attachments_at(
             if dry_run {
                 continue;
             }
-            std::fs::rename(&source, &destination).map_err(|error| {
-                format!("could not rename {}: {error}", source.display())
-            })?;
+            std::fs::rename(&source, &destination)
+                .map_err(|error| format!("could not rename {}: {error}", source.display()))?;
             store.relocate_library_attachment(&attachment.id, &new_relative, &candidate)?;
             repoint_legacy_paper_paths(&mut store, &record.id, relative, &new_relative)?;
         }
@@ -3791,10 +3866,7 @@ fn repoint_legacy_paper_paths(
 
 /// Replace the normalized Zotero-style collection tree and refresh the
 /// compatibility projection used by older Desktop callers.
-pub fn library_update_collections_at(
-    base: &Path,
-    collections: &Value,
-) -> Result<Value, String> {
+pub fn library_update_collections_at(base: &Path, collections: &Value) -> Result<Value, String> {
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -4026,7 +4098,9 @@ pub fn library_index_attachment_text_for_record_at(
     let record_id = record_id.trim();
     let attachment_id = attachment_id.trim();
     if record_id.is_empty() || attachment_id.is_empty() {
-        return Err("attachment text indexing requires a canonical record and attachment id".to_string());
+        return Err(
+            "attachment text indexing requires a canonical record and attachment id".to_string(),
+        );
     }
     let mut store = runtime::open_literature_store_at(base)?;
     if store.load_canonical_record(record_id)?.is_none() {
@@ -4670,10 +4744,7 @@ fn append_zotero_export_children(
         .copied()
     {
         let child = &snapshots[index];
-        if child.item.deleted
-            || child.item.trashed
-            || !visited.insert(child.item.id.clone())
-        {
+        if child.item.deleted || child.item.trashed || !visited.insert(child.item.id.clone()) {
             continue;
         }
         output.push(zotero_export_child_item(
@@ -4868,7 +4939,8 @@ fn zotero_export_child_item(
     key_by_item_id: &BTreeMap<String, String>,
     fallback_parent_key: &str,
 ) -> Value {
-    let mut object = zotero_payload_object(snapshot.source_payload.clone().unwrap_or_else(|| json!({})));
+    let mut object =
+        zotero_payload_object(snapshot.source_payload.clone().unwrap_or_else(|| json!({})));
     zotero_insert_model_fields(&mut object, &snapshot.fields);
     object.insert(
         "itemType".to_string(),
@@ -4926,15 +4998,8 @@ fn zotero_export_creator(creator: &runtime::LibraryCreator) -> Value {
                 Value::String(first_name.to_string()),
             );
         }
-        if let Some(last_name) = creator
-            .last_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-        {
-            object.insert(
-                "lastName".to_string(),
-                Value::String(last_name.to_string()),
-            );
+        if let Some(last_name) = creator.last_name.as_deref().filter(|name| !name.is_empty()) {
+            object.insert("lastName".to_string(), Value::String(last_name.to_string()));
         }
         if !object.contains_key("firstName")
             && !object.contains_key("lastName")
@@ -5002,7 +5067,11 @@ struct PaperCreator {
 }
 
 fn creator_label(value: &Value) -> Option<(String, bool)> {
-    if let Some(label) = value.as_str().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(label) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         return Some((label.to_string(), false));
     }
     let object = value.as_object()?;
@@ -5219,7 +5288,9 @@ fn bibtex_creator_field(role: &str, biblatex: bool) -> String {
 
 fn bibtex_entry_type(item_type: &str, biblatex: bool) -> &'static str {
     match item_type {
-        "article" | "journalArticle" | "magazineArticle" | "newspaperArticle" | "blogPost" => "article",
+        "article" | "journalArticle" | "magazineArticle" | "newspaperArticle" | "blogPost" => {
+            "article"
+        }
         "book" => "book",
         "bookSection" => "incollection",
         "conferencePaper" => "inproceedings",
@@ -5265,10 +5336,7 @@ fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
             .push(bibtex_value(&creator.label));
     }
     for (field, creators) in creators_by_field {
-        fields.push(format!(
-            "  {field} = {{{}}}",
-            creators.join(" and ")
-        ));
+        fields.push(format!("  {field} = {{{}}}", creators.join(" and ")));
     }
     if let Some(year) = paper["year"].as_u64() {
         fields.push(if biblatex {
@@ -5712,9 +5780,15 @@ fn zotero_relation_values(item: &Value) -> Vec<Value> {
     };
     let mut normalized = Vec::new();
     for (predicate, targets) in object {
-        let targets = targets.as_array().cloned().unwrap_or_else(|| vec![targets.clone()]);
+        let targets = targets
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![targets.clone()]);
         for target in targets {
-            let Some(target) = target.as_str().map(str::trim).filter(|value| !value.is_empty())
+            let Some(target) = target
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
             else {
                 continue;
             };
@@ -6058,7 +6132,12 @@ fn zotero_annotation_value(item: &Value) -> Option<Value> {
         "#ff6666" => "red",
         _ => "yellow",
     };
-    let style = match item["annotationType"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
+    let style = match item["annotationType"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "underline" => "underline",
         "strikethrough" | "strikeout" | "strike-through" => "strikethrough",
         _ => "highlight",
@@ -6068,8 +6147,9 @@ fn zotero_annotation_value(item: &Value) -> Option<Value> {
         .map(ToOwned::to_owned)
         .unwrap_or_else(runtime::now_iso8601);
     let position = match &item["annotationPosition"] {
-        Value::String(value) => serde_json::from_str::<Value>(value)
-            .unwrap_or_else(|_| Value::String(value.clone())),
+        Value::String(value) => {
+            serde_json::from_str::<Value>(value).unwrap_or_else(|_| Value::String(value.clone()))
+        }
         value if !value.is_null() => value.clone(),
         _ => Value::Null,
     };
@@ -7032,12 +7112,37 @@ fn project_legacy_paper(
     // observation. The old legacy object is only a compatibility shell; it
     // must not win over a field that the user just cleared or edited.
     for key in [
-        "date", "year", "ISBN", "isbn", "DOI", "doi", "URL", "url",
-        "abstractNote", "publicationTitle", "container-title", "bookTitle",
-        "accessDate", "accessed", "urldate", "volume", "issue", "number",
-        "pages", "page", "publisher", "place", "publisher-place", "location",
-        "edition", "series", "collection-title", "language", "citationKey",
-        "citation-key", "rating",
+        "date",
+        "year",
+        "ISBN",
+        "isbn",
+        "DOI",
+        "doi",
+        "URL",
+        "url",
+        "abstractNote",
+        "publicationTitle",
+        "container-title",
+        "bookTitle",
+        "accessDate",
+        "accessed",
+        "urldate",
+        "volume",
+        "issue",
+        "number",
+        "pages",
+        "page",
+        "publisher",
+        "place",
+        "publisher-place",
+        "location",
+        "edition",
+        "series",
+        "collection-title",
+        "language",
+        "citationKey",
+        "citation-key",
+        "rating",
         "metadataFields",
     ] {
         paper.remove(key);
@@ -7048,9 +7153,11 @@ fn project_legacy_paper(
     paper.insert("year".to_string(), json!(record.year));
     paper.insert("doi".to_string(), json!(record.identifiers.doi));
     paper.insert("url".to_string(), json!(record.url));
-    let latest_fields = record.observations.iter().rev().find_map(|observation| {
-        observation.fields.as_object()
-    });
+    let latest_fields = record
+        .observations
+        .iter()
+        .rev()
+        .find_map(|observation| observation.fields.as_object());
     if let Some(fields) = latest_fields {
         if let Some(creators) = fields.get("creators").filter(|value| value.is_array()) {
             paper.insert("creators".to_string(), creators.clone());
@@ -7058,15 +7165,11 @@ fn project_legacy_paper(
         let metadata_fields = fields
             .iter()
             .filter_map(|(key, value)| {
-                projected_scalar_text(value)
-                    .map(|value| (key.clone(), Value::String(value)))
+                projected_scalar_text(value).map(|value| (key.clone(), Value::String(value)))
             })
             .collect::<serde_json::Map<_, _>>();
         if !metadata_fields.is_empty() {
-            paper.insert(
-                "metadataFields".to_string(),
-                Value::Object(metadata_fields),
-            );
+            paper.insert("metadataFields".to_string(), Value::Object(metadata_fields));
         }
         let promoted = [
             ("date", "date"),
@@ -7113,13 +7216,10 @@ fn project_legacy_paper(
                     .annotations
                     .iter()
                     .map(project_library_annotation)
-                .collect(),
+                    .collect(),
             ),
         );
-        paper.insert(
-            "relations".to_string(),
-            json!(relations.relations),
-        );
+        paper.insert("relations".to_string(), json!(relations.relations));
     }
     if paper
         .get("source")
@@ -7696,8 +7796,9 @@ fn send_provider_request(
                 if retry_after.is_some_and(|delay| delay > MAX_PROVIDER_RETRY_WAIT) {
                     return Ok(response);
                 }
-                let delay = retry_after
-                    .unwrap_or_else(|| Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt)));
+                let delay = retry_after.unwrap_or_else(|| {
+                    Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt))
+                });
                 std::thread::sleep(delay);
             }
             Err(error) => {
@@ -9065,9 +9166,8 @@ fn search_openalex(
             }
             params
         };
-        let response = send_provider_request("OpenAlex", || {
-            client.get(&works_url).query(&build_params())
-        })?;
+        let response =
+            send_provider_request("OpenAlex", || client.get(&works_url).query(&build_params()))?;
         requests.push(json!({
             "method": "GET",
             "url": works_url,

@@ -3020,17 +3020,46 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   justify-content: center;
   gap: 6px;
   min-height: 32px;
-  padding: 0 11px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
+  padding: 0 13px;
+  border-radius: 7px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  letter-spacing: 0.01em;
 }
 
-.ext-secondary-btn { background: var(--bg-2); }
-.ext-primary-btn { background: var(--accent); border-color: var(--accent); color: white; }
+.ext-secondary-btn {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.ext-secondary-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--text-dim) 55%, var(--border));
+  background: var(--bg-2);
+  color: var(--text);
+}
+.ext-secondary-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ext-primary-btn {
+  background: linear-gradient(180deg, #4fa5ff 0%, #2b7ce8 100%);
+  border: 1px solid #2072e2;
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(32, 114, 226, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.ext-primary-btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3f99ff 0%, #2071df 100%);
+  border-color: #1a64cb;
+  box-shadow: 0 3px 8px rgba(32, 114, 226, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.ext-primary-btn:active:not(:disabled) {
+  background: #2072e2;
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(32, 114, 226, 0.2);
+}
 .ext-head-actions button:disabled { opacity: .55; cursor: default; }
 
 /* Workflow remains mounted after its first visit so its autonomous loop and
@@ -3057,36 +3086,43 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .ext-tabs {
   display: flex;
-  gap: 22px;
+  gap: 3px;
   width: auto;
   margin: 0;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .ext-tab {
   position: relative;
-  padding: 4px 0 8px;
-  background: none;
+  min-width: 68px;
+  padding: 5px 14px;
+  background: transparent;
   border: none;
   color: var(--text-dim);
-  font-size: 14px;
-  font-weight: 600;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
   cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ext-tab:hover:not(.active) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-1) 60%, transparent);
 }
 
 .ext-tab.active {
   color: var(--text);
+  background: var(--bg-1);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.04);
 }
 
-.ext-tab.active::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--accent);
-}
+.ext-tab.active::after { display: none; }
 
 .ext-headline h1 {
   margin: 0;
@@ -3147,8 +3183,18 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .ext-section-head h2 {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 700;
+}
+
+.ext-section-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .06em;
+  text-transform: uppercase;
 }
 
 .ext-section-sub {
@@ -3252,22 +3298,30 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-catalog {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .ext-card {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 13px;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  align-items: start;
+  gap: 10px 12px;
   width: 100%;
-  padding: 13px 15px;
+  min-height: 142px;
+  padding: 15px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-1);
   text-align: left;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.ext-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.04);
 }
 
 .ext-card-btn {
@@ -3289,13 +3343,38 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .ext-card-icon {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 9px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
   background: var(--bg-3);
   color: var(--text);
   font-size: 18px;
   font-weight: 700;
+  border: 1px solid transparent;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.ext-card:hover .ext-card-icon {
+  transform: scale(1.04);
+}
+
+/* Authentic brand icon styling */
+.ext-card-icon-codex {
+  background: color-mix(in srgb, #10a37f 10%, var(--bg-2));
+  border-color: color-mix(in srgb, #10a37f 24%, var(--border));
+  color: #10a37f;
+}
+
+.ext-card-icon-claude {
+  background: color-mix(in srgb, #d97757 11%, var(--bg-2));
+  border-color: color-mix(in srgb, #d97757 26%, var(--border));
+  color: #d97757;
+}
+
+.ext-card-icon-playwright {
+  background: color-mix(in srgb, #2ead33 10%, var(--bg-2));
+  border-color: color-mix(in srgb, #2ead33 24%, var(--border));
+  color: #2ead33;
 }
 
 .ext-card-icon-skill {
@@ -3305,13 +3384,14 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .ext-card-copy {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
 .ext-card-copy strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 13.5px;
+  font-weight: 650;
 }
 
 .ext-card-copy span {
@@ -3319,7 +3399,18 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  line-height: 1.5;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ext-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .ext-card-copy .ext-card-muted {
@@ -3327,15 +3418,28 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-card-copy .ext-preset-availability {
-  margin-top: 2px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
   font-size: 10px;
-  line-height: 1.35;
+  font-weight: 650;
+  line-height: 1.4;
   white-space: normal;
-  overflow-wrap: anywhere;
+  -webkit-line-clamp: unset;
+  letter-spacing: 0.02em;
 }
 
-.ext-preset-availability.available { color: var(--green); }
-.ext-preset-availability.unavailable { color: var(--red); }
+.ext-preset-availability.available {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 28%, transparent);
+}
+.ext-preset-availability.unavailable {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 28%, transparent);
+}
 
 .ext-preset-path {
   display: grid;
@@ -3389,29 +3493,52 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .ext-add-btn {
-  padding: 6px 18px;
-  border: 1px solid var(--border);
+  display: inline-flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 16px;
   border-radius: 8px;
-  background: var(--bg-2);
-  color: var(--text);
+  background: linear-gradient(180deg, #4fa5ff 0%, #2b7ce8 100%);
+  border: 1px solid #2072e2;
+  color: #ffffff;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  box-shadow: 0 1px 2px rgba(32, 114, 226, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  letter-spacing: 0.01em;
 }
 
 .ext-add-btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--bg-3);
+  background: linear-gradient(180deg, #3f99ff 0%, #2071df 100%);
+  border-color: #1a64cb;
+  box-shadow: 0 3px 8px rgba(32, 114, 226, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.ext-add-btn:active:not(:disabled) {
+  background: #2072e2;
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(32, 114, 226, 0.2);
 }
 
 .ext-add-btn.added {
-  color: var(--text-dim);
+  color: color-mix(in srgb, var(--text) 70%, var(--text-dim));
+  border: 1px solid color-mix(in srgb, var(--green) 22%, var(--border));
+  background: color-mix(in srgb, var(--green) 6%, var(--bg-2));
+  box-shadow: none;
+  font-weight: 550;
   cursor: default;
 }
 
-.ext-add-btn:disabled {
-  opacity: 0.7;
+.ext-add-btn:disabled:not(.added) {
+  opacity: 0.6;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  box-shadow: none;
   cursor: default;
 }
 
@@ -3419,31 +3546,320 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   max-width: var(--settings-content-max-width, 960px);
 }
 
+/* ── Managed Skill (PPT Master) ─────────────────────────────────────────── */
+.ext-managed-skills {
+  margin-bottom: 24px;
+}
+
+.ext-managed-skill-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 14px 16px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+
+.ext-card-icon-managed {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  color: var(--accent);
+}
+
+.ext-managed-skill-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.ext-managed-skill-title-row strong {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ext-managed-skill-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+}
+
+.ext-managed-skill-pill.ready {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green) 30%, transparent);
+}
+
+.ext-managed-skill-desc {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.ext-managed-skill-path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ext-managed-skill-path-row code {
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 540px;
+}
+
+.ext-managed-skill-actions {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ext-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ext-remove-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
+.ext-remove-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* ── Skills Master-Detail Layout ────────────────────────────────────────── */
 .ext-skills-layout {
   display: grid;
-  grid-template-columns: minmax(340px, 0.88fr) minmax(380px, 1.12fr);
-  gap: 14px;
-  align-items: start;
+  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  height: calc(100vh - 210px);
+  min-height: 480px;
+}
+
+.ext-skills-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.ext-skills-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--text-dim);
+  transition: border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.ext-skills-search-bar:focus-within {
+  border-color: var(--accent);
+}
+
+.ext-skills-search-bar input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.ext-skills-search-clear {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ext-skills-search-clear:hover {
+  color: var(--text);
+  background: var(--bg-3);
 }
 
 .ext-skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.ext-skill-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: unset;
+  height: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-1);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ext-skill-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--bg-2);
+}
+
+.ext-skill-card.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-1));
+  box-shadow: inset 3px 0 0 var(--accent), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.ext-skill-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ext-skill-card .ext-card-icon-skill {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  color: var(--accent);
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.ext-skill-card .ext-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
+.ext-skill-card .ext-card-copy strong {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ext-skill-card.active .ext-card-copy strong {
+  color: var(--accent);
+}
+
+.ext-skill-card .ext-card-copy span {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
+  -webkit-line-clamp: 1;
+}
+
+.ext-skill-card .ext-card-copy .ext-card-muted {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-dim) 80%, transparent);
+}
+
+.ext-skill-chevron {
+  color: var(--text-dim);
+  opacity: 0.35;
+  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.ext-skill-card:hover .ext-skill-chevron {
+  opacity: 0.8;
+  transform: translateX(1px);
+}
+
+.ext-skill-card.active .ext-skill-chevron {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* Detail pane */
 .ext-skill-detail,
 .ext-skill-placeholder {
   min-width: 0;
+  height: 100%;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
 
 .ext-skill-detail {
-  position: sticky;
-  top: 0;
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 190px);
   overflow: hidden;
 }
 
@@ -3452,45 +3868,52 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
 }
 
 .ext-skill-detail-head h3 {
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: var(--text);
-  font-size: 18px;
-  line-height: 1.25;
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
 .ext-skill-description {
   margin: 0;
-  padding: 12px 16px 0;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.5;
+  padding: 12px 18px 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  flex-shrink: 0;
 }
 
 .ext-skill-meta {
   display: grid;
-  gap: 8px;
+  gap: 7px;
   margin: 0;
-  padding: 12px 16px;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
 }
 
 .ext-skill-meta div {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 56px minmax(0, 1fr);
   gap: 10px;
-  align-items: start;
+  align-items: baseline;
 }
 
 .ext-skill-meta dt {
   color: var(--text-dim);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 650;
 }
 
 .ext-skill-meta dd {
@@ -3504,30 +3927,48 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .ext-skill-content {
   flex: 1;
-  min-height: 260px;
+  min-height: 200px;
+  margin: 0;
+  padding: 14px 18px;
   overflow: auto;
   border: 0;
   border-radius: 0;
   background: var(--bg-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
 }
 
 .ext-skill-placeholder {
-  display: grid;
-  align-content: center;
-  gap: 7px;
-  min-height: 260px;
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
   color: var(--text-dim);
   text-align: center;
+}
+
+.ext-skill-placeholder-icon {
+  color: var(--text-dim);
+  opacity: 0.5;
+  margin-bottom: 4px;
 }
 
 .ext-skill-placeholder strong {
   color: var(--text);
   font-size: 14px;
+  font-weight: 600;
 }
 
 .ext-skill-placeholder span {
   font-size: 12px;
+  max-width: 280px;
+  line-height: 1.5;
 }
 
 @media (max-width: 900px) {
@@ -10692,9 +11133,22 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   line-height: 1;
 }
 
-.chat-send-btn:hover {
+.chat-send-btn:hover:not(:disabled) {
   background: #fff;
   border-color: transparent;
+}
+
+:root[data-theme="light"] .chat-send-btn:hover:not(:disabled) {
+  background: #111827;
+  color: #ffffff;
+}
+
+.chat-send-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+:root[data-theme="light"] .chat-send-btn:active:not(:disabled) {
+  background: #000000;
 }
 
 .chat-send-btn:disabled {
@@ -15164,6 +15618,43 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex-shrink: 0;
 }
 
+.chat-session-item.running .chat-session-title {
+  color: var(--text);
+}
+
+.chat-running-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  background: var(--green);
+  border-radius: 50%;
+  vertical-align: middle;
+  flex-shrink: 0;
+  animation: chat-running-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chat-running-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0.55;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-running-dot {
+    animation: none;
+  }
+}
+
 .chat-session-menu-btn {
   position: absolute;
   top: 50%;
@@ -15342,7 +15833,14 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-scroll {
   position: relative;
-  padding: 26px 24px 20px;
+  /* Horizontal only. The transcript's vertical air is owned by the virtualizer
+     (`TRANSCRIPT_TOP_INSET` / the composer inset become its paddingStart and
+     paddingEnd) so that `getTotalSize()` equals this box's real `scrollHeight`:
+     with the padding out here instead, every offset the virtualizer computed was
+     off by the padding, and the composer resizing rewrote `scrollHeight` behind a
+     viewport the virtualizer thought it had anchored. `.chat-welcome` carries its
+     own vertical padding for the no-transcript states. */
+  padding: 0 24px;
   background: var(--bg);
   overflow-anchor: none;
 }
@@ -15374,10 +15872,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   max-height: calc(100% - 28px);
   overflow-y: auto;
   border-radius: 15px;
-}
-
-.chat-root.chat-project-brief-open .chat-scroll {
-  padding-right: calc(var(--project-brief-lane-w) + 38px);
 }
 
 .chat-root.chat-project-brief-open .chat-input-wrap {
@@ -15865,25 +16359,53 @@ body.somniq-resizing-col {
 }
 
 .ext-config-path {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
   margin: -2px 0 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-2);
   color: var(--text-dim);
   font-size: 11px;
 }
 
+.ext-config-path summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  color: var(--text-dim);
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ext-config-path summary::after {
+  content: "›";
+  font-size: 14px;
+  transition: transform .15s ease;
+}
+
+.ext-config-path[open] summary::after { transform: rotate(90deg); }
+
 .ext-config-path code {
+  display: block;
   min-width: 0;
+  margin-top: 4px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-2);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 980px) {
+  .ext-catalog { grid-template-columns: 1fr; }
+  .ext-card {
+    min-height: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    align-items: center;
+  }
+  .ext-add-btn { grid-column: auto; min-width: 86px; }
 }
 
 .ext-server-list {
@@ -15901,17 +16423,24 @@ body.somniq-resizing-col {
   gap: 11px;
   width: 100%;
   min-height: 56px;
-  padding: 9px 13px;
+  padding: 10px 14px;
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
   color: var(--text-dim);
   text-align: left;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .ext-server-row:last-child { border-bottom: 0; }
-.ext-server-row:hover { background: var(--bg-2); }
+.ext-server-row:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+.ext-server-row:active {
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-2));
+}
 
 .ext-server-state {
   width: 9px;
@@ -15936,18 +16465,28 @@ body.somniq-resizing-col {
 .ext-server-main span { color: var(--text-dim); font-size: 11px; }
 
 .ext-status-badge {
-  padding: 3px 8px;
+  padding: 3px 9px;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 10.5px;
+  font-weight: 650;
   white-space: nowrap;
+  letter-spacing: 0.02em;
+  background: color-mix(in srgb, var(--text-dim) 8%, transparent);
 }
 
 .ext-status-badge.verified,
-.ext-status-badge.ready { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); color: var(--green); }
-.ext-status-badge.failed { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); color: var(--red); }
+.ext-status-badge.ready {
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 9%, transparent);
+}
+.ext-status-badge.failed {
+  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
 
 .image-workflow-body {
   position: relative;
@@ -17968,6 +18507,9 @@ body.somniq-resizing-col {
      reachable by scrolling — the app mark disappeared under the header below
      ~724px of window height. `safe` falls back to `start` when it overflows. */
   justify-content: safe center;
+  /* `.chat-scroll` no longer carries vertical padding (the virtualizer owns the
+     transcript's air), so the no-transcript states declare their own. */
+  padding: 26px 0 20px;
 }
 
 .chat-virtual-list {
@@ -18410,14 +18952,24 @@ body.somniq-resizing-col {
 
 /* The question rail is an overlay so it can stay fixed while the transcript
    scrolls. At split-pane widths the centered 820px message column reaches the
-   rail, so reserve only the left space needed to keep the two from crossing.
-   The adaptive term falls back to the normal 24px gutter on wide panes. */
-.chat-thread.has-question-timeline .chat-scroll {
-  padding-left: clamp(24px, calc(992px - 100%), 76px);
+   rail, so reserve the space needed to keep the two from crossing. The adaptive
+   term falls back to the normal 24px gutter on wide panes.
+   Reserved unconditionally, and on both edges: gating it on
+   `.has-question-timeline` meant the gutter appeared the moment a reader sent
+   their second message, which rewrapped every message in the transcript and
+   invalidated every measured row height at once — a guaranteed jump. Both edges
+   because a one-sided gutter shifts the centered message column sideways, which
+   is the same reason `scrollbar-gutter` is `stable both-edges`. */
+.chat-thread .chat-scroll {
+  padding-inline: clamp(24px, calc(992px - 100%), 76px);
 }
 
-.chat-root.chat-project-brief-open .chat-thread.has-question-timeline .chat-scroll {
+.chat-root.chat-project-brief-open .chat-thread .chat-scroll {
+  /* Keep the question rail's left gutter while reserving the complete summary
+     lane on the right. `padding-inline: 76px` used to override the earlier
+     summary rule, so the transcript remained centred beneath the open card. */
   padding-left: 76px;
+  padding-right: calc(var(--project-brief-lane-w) + 38px);
 }
 
 .chat-question-timeline-rail {
@@ -19625,8 +20177,8 @@ button.chat-workflow-file-path:hover {
     padding-inline: 12px;
   }
 
-  .chat-thread.has-question-timeline .chat-scroll {
-    padding-left: 12px;
+  .chat-thread .chat-scroll {
+    padding-inline: 12px;
   }
 
   .chat-question-timeline {
@@ -19647,8 +20199,10 @@ button.chat-workflow-file-path:hover {
     box-sizing: border-box;
   }
 
-  .chat-root.chat-project-brief-open .chat-scroll {
-    padding-right: 12px;
+  .chat-root.chat-project-brief-open .chat-thread .chat-scroll {
+    /* The summary becomes a separate bottom row here, so it no longer owns a
+       right-hand lane. Match the base mobile transcript gutter on both sides. */
+    padding-inline: 12px;
   }
 
   .chat-root.chat-project-brief-open .chat-input-wrap {
@@ -20463,7 +21017,7 @@ button.chat-workflow-file-path:hover {
 }
 
 .chat-send-btn {
-  transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
 }
 
 .chat-send-btn:hover:not(:disabled) {
@@ -21380,6 +21934,36 @@ body.chat-companion-window {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
+/* Screenshot Shortcut Card */
+.sp-general-screenshot {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sp-screenshot-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.sp-shortcut-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sp-screenshot-warning {
+  margin: 10px 0 0;
+  color: var(--danger, #d05252);
+}
+
 /* Local Behavior Card Control */
 .sp-general-behavior {
   min-width: 0;
@@ -22051,8 +22635,27 @@ body.chat-companion-window {
   height: 22px;
   place-items: center;
   border-radius: 6px;
-  background: color-mix(in srgb, #94a3b8 16%, transparent);
-  color: #cbd5e1;
+  background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+  color: var(--text);
+  transition: color 0.16s ease, background 0.16s ease;
+}
+
+:root[data-theme="light"] .chat-workspace-icon,
+:root[data-theme="light"] .chat-workspace-option-icon {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: #1e293b;
+}
+
+.chat-workspace-trigger:hover .chat-workspace-icon,
+.chat-workspace-trigger[aria-expanded="true"] .chat-workspace-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.chat-workspace-option:hover:not(:disabled) .chat-workspace-option-icon,
+.chat-workspace-option.active .chat-workspace-option-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .chat-workspace-trigger-copy {
@@ -22198,6 +22801,17 @@ body.chat-companion-window {
   color: var(--text-dim);
   font-size: 11px;
   text-align: center;
+}
+
+:root[data-theme="light"] .chat-workspace-menu {
+  background: var(--bg-1);
+  border-color: var(--border);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] .chat-workspace-option:hover:not(:disabled),
+:root[data-theme="light"] .chat-workspace-option.active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
 }
 
 .chat-remote-project-group.selected {
@@ -24045,4 +24659,260 @@ button.chat-remote-session-item:hover {
 :root[data-platform="macos"] .sp-settings-page select:disabled,
 :root[data-platform="macos"] .sp-settings-page .sp-settings-select:disabled {
   opacity: 0.62;
+}
+
+/* Read-only live status bar for a work-task transcript. The task engine owns
+   execution; Chat only observes it, so the state must remain visible where the
+   composer would normally be. */
+.work-task-chat-wrap {
+  pointer-events: none;
+}
+
+.work-task-chat-notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(100%, 860px);
+  margin: 0 auto;
+  padding: 10px 16px;
+  min-height: 54px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 14px;
+  background: var(--chat-composer-bg);
+  box-shadow: var(--chat-composer-shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.work-task-chat-state {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.work-task-chat-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--gray) 14%, transparent);
+}
+
+.work-task-chat-dot > i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+@keyframes work-task-dot-pulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.work-task-chat-notice-queued .work-task-chat-dot,
+.work-task-chat-notice-preparing .work-task-chat-dot,
+.work-task-chat-notice-running .work-task-chat-dot,
+.work-task-chat-notice-merging .work-task-chat-dot {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.work-task-chat-notice-queued .work-task-chat-dot > i,
+.work-task-chat-notice-preparing .work-task-chat-dot > i,
+.work-task-chat-notice-running .work-task-chat-dot > i,
+.work-task-chat-notice-merging .work-task-chat-dot > i {
+  background: var(--accent);
+  animation: work-task-dot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.work-task-chat-notice-review .work-task-chat-dot {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.work-task-chat-notice-review .work-task-chat-dot > i {
+  background: var(--amber);
+}
+
+.work-task-chat-notice-done .work-task-chat-dot {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.work-task-chat-notice-done .work-task-chat-dot > i {
+  background: var(--green);
+}
+
+.work-task-chat-notice-failed .work-task-chat-dot {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+}
+
+.work-task-chat-notice-failed .work-task-chat-dot > i {
+  background: var(--red);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-dot {
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-dot > i {
+  background: var(--text-dim);
+}
+
+.work-task-chat-texts {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.work-task-chat-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.work-task-chat-title strong {
+  font-weight: 600;
+}
+
+.work-task-chat-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 550;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.work-task-chat-notice-review .work-task-chat-badge {
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  color: var(--amber);
+}
+
+.work-task-chat-notice-done .work-task-chat-badge {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  color: var(--green);
+}
+
+.work-task-chat-notice-failed .work-task-chat-badge {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+}
+
+.work-task-chat-notice-canceled .work-task-chat-badge {
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  color: var(--text-dim);
+}
+
+.work-task-chat-desc {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-task-chat-back-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-2) 65%, transparent);
+  cursor: pointer;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.work-task-chat-back-btn svg {
+  color: var(--text-dim);
+  transition: color 0.16s ease, transform 0.16s ease;
+}
+
+.work-task-chat-back-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  color: var(--accent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.work-task-chat-back-btn:hover svg {
+  color: var(--accent);
+  transform: translateX(-2px);
+}
+
+.work-task-chat-back-btn:active {
+  transform: scale(0.97);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn {
+  background: var(--bg-1);
+  border-color: color-mix(in srgb, var(--border) 90%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn:hover {
+  background: #f0f7ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.1);
+}
+
+:root[data-theme="light"] .work-task-chat-back-btn:hover svg {
+  color: #1d4ed8;
+}
+
+@media (max-width: 540px) {
+  .work-task-chat-notice {
+    padding: 9px 12px;
+    gap: 10px;
+  }
+  .work-task-chat-desc {
+    max-width: 190px;
+  }
+  .work-task-chat-back-btn span {
+    display: none;
+  }
+  .work-task-chat-back-btn {
+    padding: 0 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-task-chat-notice-queued .work-task-chat-dot > i,
+  .work-task-chat-notice-preparing .work-task-chat-dot > i,
+  .work-task-chat-notice-running .work-task-chat-dot > i,
+  .work-task-chat-notice-merging .work-task-chat-dot > i {
+    animation: none !important;
+  }
 }

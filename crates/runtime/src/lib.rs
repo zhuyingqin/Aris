@@ -10,6 +10,7 @@ mod compact;
 mod config;
 mod conversation;
 pub mod event_sink;
+mod evidence_ledger;
 mod execution_context;
 mod file_ops;
 mod focus_trace;
@@ -43,23 +44,24 @@ mod session;
 mod session_index;
 pub mod skill_registry;
 mod tool_outcome;
+mod tool_output_artifact;
 mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
 pub use bash::{
-    adopted_background_note, execute_bash, execute_bash_with_cancel,
+    adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
-    BashCommandOutput, BACKGROUND_PIPE_NOTE,
+    BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
-    change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
-    get_file_change_for_workspace, file_changes_for_turn, file_snapshot_content_for_workspace,
-    compare_and_replace_text_file,
-    list_file_changes_for_workspace, record_text_file_change, revert_file_change,
-    FileChangeGetInput, FileChangeGetOutput, FileChangeListInput, FileChangeListOutput,
-    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileChangeRevertOutput,
-    FileChangeStatus, FileMutationContext, FileSnapshot,
+    change_ledger_root_for_path, change_ledger_root_from_env, compare_and_replace_text_file,
+    file_changes_for_turn, file_snapshot_content_for_workspace, get_file_change,
+    get_file_change_for_workspace, list_file_changes, list_file_changes_for_workspace,
+    record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
+    FileChangeListInput, FileChangeListOutput, FileChangeOperation, FileChangeRecord,
+    FileChangeRevertInput, FileChangeRevertOutput, FileChangeStatus, FileMutationContext,
+    FileSnapshot,
 };
 pub use compact::{
     estimate_session_tokens, estimate_text_tokens, format_compact_summary,
@@ -75,14 +77,21 @@ pub use config::{
 };
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
+    autonomous_max_turn_duration_from_env, autonomous_max_turn_iterations_from_env,
     max_turn_duration_from_env, max_turn_iterations_from_env,
-    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
-    AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecution, ToolExecutor, ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
+    soft_checkpoint_context_ratio_from_env, soft_checkpoint_token_growth_ratio_from_env,
+    soft_checkpoint_tool_call_interval_from_env, strip_trailing_internal_continuation_messages,
+    ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
+    DynamicToolRouting, RuntimeError, StaticToolExecutor, ToolError, ToolExecution, ToolExecutor,
+    ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
     JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
+};
+pub use evidence_ledger::{
+    evidence_guard_mode, EvidenceGuardMode, NO_NEW_EVIDENCE_BLOCK_CALLS,
+    NO_NEW_EVIDENCE_NUDGE_CALLS,
 };
 pub use execution_context::{
     execution_current_dir, execution_env_var_os, with_project_execution_context,
@@ -90,16 +99,19 @@ pub use execution_context::{
 };
 pub use file_ops::{
     abort_large_write, append_file, append_file_with_context, append_file_with_context_expected,
-    append_write_chunk, begin_large_write, commit_large_write, content_revision,
-    decode_process_text, edit_file, edit_file_with_context, edit_file_with_context_expected,
-    extract_pdf_text_from_bytes, file_revision, glob_search, grep_search, multi_edit_file,
-    multi_edit_file_with_context, multi_edit_file_with_context_expected, read_file,
-    read_file_with_images, write_file, write_file_with_context, write_file_with_context_expected,
-    AppendFileOutput, EditContextWindow, EditFileOutput, FileChange, FileRevisionConflictError,
-    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, LargeWriteAbortOutput,
-    LargeWriteBeginOutput, LargeWriteChunkOutput, MultiEditOperation, MultiEditOutput,
-    MultiEditValidationError, MultiEditValidationIssue, ReadFileOutput, ReadFileResult,
-    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput, ABSENT_FILE_REVISION,
+    append_write_chunk, begin_large_write, cleanup_stale_large_writes_at, commit_large_write,
+    content_revision, decode_process_text, edit_file, edit_file_with_context,
+    edit_file_with_context_expected, extract_pdf_text_from_bytes, file_revision, glob_search,
+    grep_search, multi_edit_file, multi_edit_file_with_context,
+    multi_edit_file_with_context_expected, parse_image_tool_output, read_file,
+    read_file_with_images, recover_pending_batch_writes_at, write_file, write_file_with_context,
+    write_file_with_context_expected, write_files_with_context_expected, AppendFileOutput,
+    BatchWriteOutput, BatchWriteRecoveryOutput, BatchWriteRequest, EditContextWindow,
+    EditFileOutput, FileChange, FileRevisionConflictError, GlobSearchOutput, GrepSearchInput,
+    GrepSearchOutput, LargeWriteAbortOutput, LargeWriteBeginOutput, LargeWriteChunkOutput,
+    MultiEditOperation, MultiEditOutput, MultiEditValidationError, MultiEditValidationIssue,
+    ReadFileOutput, ReadFileResult, ReadImageOutput, StagedWriteCleanupOutput, StructuredPatchHunk,
+    TextFilePayload, WriteFileOutput, ABSENT_FILE_REVISION, DEFAULT_STAGED_WRITE_MAX_AGE,
     MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 pub use focus_trace::{
@@ -156,12 +168,13 @@ pub use oauth::{
     PkceChallengeMethod, PkceCodePair,
 };
 pub use paths::{
-    command_exists, migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
-    project_run_state_dir_from_env, project_runtime_dir_for, project_runtime_dir_from_env,
-    project_sessions_dir_from_env, somniq_config_dir_from_env, workspace_root_from_env,
-    AGENTS_DIR_NAME, ARIS_AGENT_STORE_DIR_ENV, ARIS_RUNTIME_ROOT_ENV, ARIS_RUN_STATE_DIR_ENV,
-    ARIS_SESSIONS_DIR_ENV, ARIS_WORKSPACE_ROOT_ENV, CLAWD_AGENT_STORE_ENV, LEGACY_CLAUDE_DIR_NAME,
-    LEGACY_CLAWD_AGENTS_DIR_NAME, RUN_STATE_DIR_NAME, SESSIONS_DIR_NAME, SOMNIQ_RUNTIME_DIR_NAME,
+    canonicalize, command_exists, migrate_legacy_project_runtime_dirs, plain_path,
+    project_agent_store_dir_from_env, project_run_state_dir_from_env, project_runtime_dir_for,
+    project_runtime_dir_from_env, project_sessions_dir_from_env, somniq_config_dir_from_env,
+    workspace_root_from_env, AGENTS_DIR_NAME, ARIS_AGENT_STORE_DIR_ENV, ARIS_RUNTIME_ROOT_ENV,
+    ARIS_RUN_STATE_DIR_ENV, ARIS_SESSIONS_DIR_ENV, ARIS_WORKSPACE_ROOT_ENV, CLAWD_AGENT_STORE_ENV,
+    LEGACY_CLAUDE_DIR_NAME, LEGACY_CLAWD_AGENTS_DIR_NAME, RUN_STATE_DIR_NAME, SESSIONS_DIR_NAME,
+    SOMNIQ_RUNTIME_DIR_NAME,
 };
 pub use permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
@@ -169,9 +182,10 @@ pub use permissions::{
 };
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use process_registry::{
-    configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
-    run_managed_command, run_managed_command_with_cancel,
-    run_managed_command_with_cancel_and_progress, spawn_managed_background,
+    background_service_key, configure_managed_tokio_command, managed_processes_snapshot,
+    register_managed_process, reusable_background_service, run_managed_command,
+    run_managed_command_with_cancel, run_managed_command_with_cancel_and_progress,
+    spawn_managed_background, spawn_managed_background_service,
     spawn_managed_background_with_rolling_log, terminate_all_managed_processes,
     terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
     ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
@@ -211,18 +225,17 @@ pub use research_memory::{
     canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
     ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
     ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
-    ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild, ResearchMemoryRebuildSummary,
-    ResearchMemoryRecall, ResearchMemorySnapshot, ResearchMemoryStats, ResearchMemoryStore,
-    ResearchMemorySubject,
+    ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild,
+    ResearchMemoryRebuildSummary, ResearchMemoryRecall, ResearchMemorySnapshot,
+    ResearchMemoryStats, ResearchMemoryStore, ResearchMemorySubject,
     RESEARCH_MEMORY_EXCLUDED_SESSION_PREFIXES, RESEARCH_MEMORY_EXTRACTOR_VERSION,
 };
 pub use research_memory_v2::{
-    prefilter_v2, ResearchMemoryV2Atom, ResearchMemoryV2Capture,
-    ResearchMemoryV2Extraction, ResearchMemoryV2Layer, ResearchMemoryV2Mode,
-    ResearchMemoryV2OutboxItem, ResearchMemoryV2Prefilter, ResearchMemoryV2Promotion,
-    ResearchMemoryV2InlineWrite, ResearchMemoryV2Stats, ResearchMemoryV2Store, ToolEpisode,
-    tool_episodes_for_turn, tool_trace_for_turn, RESEARCH_MEMORY_V2_VERSION,
-    TOOL_TRACE_FAILURE_MARKER,
+    prefilter_v2, tool_episodes_for_turn, tool_trace_for_turn, ResearchMemoryV2Atom,
+    ResearchMemoryV2Capture, ResearchMemoryV2Extraction, ResearchMemoryV2InlineWrite,
+    ResearchMemoryV2Layer, ResearchMemoryV2Mode, ResearchMemoryV2OutboxItem,
+    ResearchMemoryV2Prefilter, ResearchMemoryV2Promotion, ResearchMemoryV2Stats,
+    ResearchMemoryV2Store, ToolEpisode, RESEARCH_MEMORY_V2_VERSION, TOOL_TRACE_FAILURE_MARKER,
 };
 pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{
@@ -243,7 +256,9 @@ pub use review_workflow_driver::{
     StageOutput, StageTransition, WorkflowAction, WorkflowNext, WorkflowStep,
 };
 pub use session::{
-    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,
+    compact_session_event_log, compact_session_event_log_unlocked,
+    session_manifest_logical_message_count, ContentBlock, ConversationMessage, EventLogCompaction,
+    MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
     index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
@@ -260,6 +275,7 @@ pub use skill_registry::{
 pub use tool_outcome::{
     classifies_failures, shell_output_reports_failure, tool_output_reports_failure,
 };
+pub use tool_output_artifact::{ToolOutputArtifact, TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };

@@ -1,0 +1,83 @@
+% ==== 图 2　双重指纹生成与账本更新流程图 ====
+%
+% 框里只写动作名，细节由说明书 [0040]–[0053] 承载——图是示意图，不是正文的
+% 转抄。每个框的文字都短到一行放得下；需要两行的手写 \\，不要让它自动折行
+% （自动折行会把中文断在词中间）。
+%
+% 主干用 positioning 串联（below=... of ...），插删一步只改相邻两个节点的
+% below 关系。两条侧向通道：
+%   S204 的「是」经右侧小框「取内容摘要值作规范化结果」后直接进 S206
+%   x = 7.6  S203 与 S206 的「空」：汇流并入 S207，按「空」处理
+% 分支说明用**方框**而不是浮动文字——浮动标注会压到汇流竖线上。
+% ============================================
+\begin{tikzpicture}[x=1cm,y=1cm,node distance=5mm]
+
+  \node[pterm] (start) {一次已完成的工具调用};
+
+  \node[pbox=8.0cm, below=of start] (s201)
+    {S201\quad 生成调用指纹：工具名称＋规范化入参};
+
+  \node[pbox=8.0cm, below=of s201] (s202)
+    {S202\quad 预处理输出：剥离内部提示，去首尾空白};
+
+  \node[pdia=2.4, below=of s202] (s203)
+    {S203\\ 输出为空？};
+
+  \node[pdia=2.4, below=of s203] (s204)
+    {S204\\ 是引用式结果？};
+
+  \node[pbox=8.0cm, below=of s204] (s205)
+    {S205\quad 生成规范化结果\\
+     失败：取错误签名\quad 成功：剔除易变字段};
+
+  \node[pdia=2.4, below=of s205] (s206)
+    {S206\\ 规范化结果为空？};
+
+  \node[pbox=8.0cm, below=of s206] (gen) {生成证据指纹};
+
+  \node[pbox=8.0cm, below=of gen] (s207)
+    {S207\quad 更新账本\\
+     新证据：连续计数清零\quad 重复或空：累加};
+
+  \node[pbox=8.0cm, below=of s207] (s208) {S208\quad 更新同结果计数};
+
+  \node[pbox=8.0cm, below=of s208] (s209) {S209\quad 输出元数据事件};
+
+  \node[pterm, below=of s209] (end) {结束};
+
+  % ---- 主干 ----
+  \draw[pl] (start) -- (s201);
+  \draw[pl] (s201)  -- (s202);
+  \draw[pl] (s202)  -- (s203);
+  \draw[pl] (s203)  -- (s204);
+  \draw[pl] (s204)  -- (s205);
+  \draw[pl] (s205)  -- (s206);
+  \draw[pl] (s206)  -- (gen);
+  \draw[pl] (gen)   -- (s207);
+  \draw[pl] (s207)  -- (s208);
+  \draw[pl] (s208)  -- (s209);
+  \draw[pl] (s209)  -- (end);
+
+  % ---- S204 的「是」：取内容摘要值，跳过 S205 直接进 S206 ----
+  % 宽度必须放得下「取内容摘要值」这一整行（6 字约 2.3cm），窄了会把
+  % 「作规范/化结果」断在词中间。
+  \node[pbox=2.5cm, anchor=west] (take) at (4.5,0 |- s204)
+    {取内容摘要值\\ 作规范化结果};
+  \coordinate (m204) at ($(s205.south)!0.5!(s206.north)$);
+  \draw[pl]  (s204.east) -- (take.west);
+  \draw[pll] (take.south) -- (take.south |- m204) -- (m204);
+  \node[plab, anchor=south west] at ($(s204.east)+(0.1,0.02)$) {是};
+
+  % ---- S203 与 S206 的「空」：汇流后并入 S207 ----
+  \draw[pl]  (s203.east) -- (8.1,0 |- s203) -- (8.1,0 |- s207) -- (s207.east);
+  \draw[pll] (s206.east) -- (8.1,0 |- s206);
+  \node[plab, anchor=south west] at ($(s203.east)+(0.1,0.02)$) {是};
+  \node[plab, anchor=south west] at ($(s206.east)+(0.1,0.02)$) {是};
+  \node[pnote, anchor=south east] at (8.0,0 |- gen) {按「空」处理};
+
+  % ---- 「否」分支 ----
+  \node[plab, anchor=west] at ($(s203.south)!0.5!(s204.north)+(0.12,0)$) {否};
+  \node[plab, anchor=west] at ($(s204.south)!0.5!(s205.north)+(0.12,0)$) {否};
+  \node[plab, anchor=west] at ($(s206.south)!0.5!(gen.north)+(0.12,0)$)  {否};
+
+\end{tikzpicture}

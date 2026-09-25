@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { PDFDocumentProxy } from "pdfjs-dist";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TypesetPdfPreview from "../TypesetPdfPreview";
 import { useStore } from "../../store";
@@ -8,7 +9,7 @@ import { useStore } from "../../store";
 const mocks = vi.hoisted(() => ({
   fileOpen: vi.fn(),
   typesetOutputFiles: vi.fn(async () => []),
-  openPdfDocumentFromPath: vi.fn(async () => {
+  openPdfDocumentFromPath: vi.fn<() => Promise<PDFDocumentProxy>>(async () => {
     throw new Error("no pdf in this test");
   }),
 }));
@@ -20,7 +21,9 @@ vi.mock("../../api/tauri", async (importOriginal) => ({
 }));
 
 vi.mock("../../pdf/runtime", () => ({
+  isPdfXrefError: () => false,
   openPdfDocumentFromPath: mocks.openPdfDocumentFromPath,
+  openPdfDocumentWithRebuiltXref: mocks.openPdfDocumentFromPath,
 }));
 
 /**
@@ -29,11 +32,9 @@ vi.mock("../../pdf/runtime", () => ({
  * by class, containers as the sum of their children.
  */
 const LEAF_WIDTHS: [string, number][] = [
-  [".typeset-pdf-panel-label", 96],
   [".typeset-compile-button-group", 120],
   [".typeset-log-toggle", 32],
   [".typeset-pdf-status-strip", 0],
-  [".typeset-preview-file", 100],
   [".typeset-pdf-page-control", 70],
   [".toolbar-pdf-controls", 60],
   [".typeset-icon-btn", 28],
@@ -132,6 +133,15 @@ describe("compiled-PDF toolbar overflow", () => {
     expect(container.querySelector(".pdf-open-external")).toBeTruthy();
   });
 
+  it("keeps the PDF toolbar focused on controls rather than redundant labels", () => {
+    const { container } = renderToolbar(1200);
+
+    expect(screen.queryByText("Compiled PDF")).toBeNull();
+    expect(screen.queryByText("paper.pdf")).toBeNull();
+    expect(container.querySelector(".typeset-pdf-page-control")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Recompile" })).toBeTruthy();
+  });
+
   it("renders the presentation button with the presentation icon instead of visual eye icon", () => {
     const { container } = renderToolbar(1200);
     const presentBtn = container.querySelector(".pdf-present");
@@ -142,7 +152,7 @@ describe("compiled-PDF toolbar overflow", () => {
   });
 
   it("moves the actions that do not fit into the ⋯ menu instead of clipping them", () => {
-    const { container } = renderToolbar(460);
+    const { container } = renderToolbar(380);
 
     // Still on the row: the page and zoom controls.
     expect(container.querySelector(".typeset-pdf-page-control")).toBeTruthy();
@@ -163,5 +173,58 @@ describe("compiled-PDF toolbar overflow", () => {
 
     expect(container.querySelectorAll(".typeset-pdf-action")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "More PDF actions" })).toBeTruthy();
+  });
+
+  it("keeps the pressed page canvas mounted throughout a drag-scroll gesture", async () => {
+    const pdfPage = {
+      view: [0, 0, 240, 120],
+      getViewport: ({ scale }: { scale: number }) => ({
+        width: 240 * scale,
+        height: 120 * scale,
+        transform: [scale, 0, 0, -scale, 0, 120 * scale],
+      }),
+      getTextContent: vi.fn(async () => ({ items: [] })),
+      getAnnotations: vi.fn(async () => []),
+      render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
+    };
+    mocks.openPdfDocumentFromPath.mockResolvedValueOnce({
+      numPages: 6,
+      getPage: vi.fn(async () => pdfPage),
+      destroy: vi.fn(),
+    } as unknown as PDFDocumentProxy);
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+      configurable: true,
+      value: vi.fn(() => ({})),
+    });
+
+    const { container } = renderToolbar(1200);
+    await screen.findByLabelText("6 PDF pages");
+    fireEvent.click(screen.getByRole("button", { name: /PDF zoom \d+%/ }));
+    fireEvent.click(within(screen.getByRole("menu", { name: "PDF zoom menu" }))
+      .getByRole("menuitemradio", { name: "400%" }));
+    await waitFor(() => expect(container.querySelectorAll(".typeset-pdf-page canvas")).toHaveLength(1));
+
+    const scroll = container.querySelector<HTMLElement>(".typeset-pdf-scroll")!;
+    const pages = Array.from(container.querySelectorAll<HTMLElement>(".typeset-pdf-page"));
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 100 });
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", { configurable: true, value: index * 520 });
+      Object.defineProperty(page, "offsetHeight", { configurable: true, value: 480 });
+    });
+
+    fireEvent.pointerDown(scroll, { pointerId: 1 });
+    scroll.scrollTop = 1_560;
+    fireEvent.scroll(scroll);
+
+    await waitFor(() => {
+      const firstPage = container.querySelectorAll<HTMLElement>(".typeset-pdf-page")[0];
+      expect(firstPage.querySelector("canvas")).toBeTruthy();
+    });
+
+    fireEvent.pointerUp(window, { pointerId: 1 });
+    await waitFor(() => {
+      const firstPage = container.querySelectorAll<HTMLElement>(".typeset-pdf-page")[0];
+      expect(firstPage.querySelector("canvas")).toBeNull();
+    });
   });
 });

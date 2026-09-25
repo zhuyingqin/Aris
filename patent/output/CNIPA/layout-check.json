@@ -1,0 +1,75 @@
+{
+  "ok": true,
+  "documents": [
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\说明书摘要.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 1,
+        "body_font_mm": [
+          4.233
+        ],
+        "line_gap_mm": [
+          2.999
+        ],
+        "min_bottom_mm": 15.403,
+        "abstract_chars": 276,
+        "line_gap_samples": 6
+      }
+    },
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\摘要附图.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 1,
+        "body_font_mm": [],
+        "line_gap_mm": [],
+        "min_bottom_mm": 15.403,
+        "line_gap_samples": 0
+      }
+    },
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\权利要求书.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 3,
+        "body_font_mm": [
+          4.233
+        ],
+        "line_gap_mm": [
+          2.999
+        ],
+        "min_bottom_mm": 15.403,
+        "line_gap_samples": 55
+      }
+    },
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\说明书.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 11,
+        "body_font_mm": [
+          4.233
+        ],
+        "line_gap_mm": [
+          2.999
+        ],
+        "min_bottom_mm": 15.403,
+        "first_body_line": "一种大语言模型智能体的工具调用控制方法及系统",
+        "line_gap_samples": 199
+      }
+    },
+    {
+      "file": "F:\\Agent\\Aris\\patent\\output\\CNIPA\\说明书附图.pdf",
+      "errors": [],
+      "metrics": {
+        "pages": 5,
+        "body_font_mm": [],
+        "line_gap_mm": [],
+        "min_bottom_mm": 15.403,
+        "line_gap_samples": 0
+      }
+    }
+  ],
+  "scope": "PDF layout only; XML validation and substantive patent review are separate"
+}

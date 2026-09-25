@@ -511,21 +511,78 @@ pub fn spawn_runner(app: AppHandle) {
             let now = now_millis();
             for record in due_records(now) {
                 let _ = update_run_state(&record.id, now, None);
-                let result = crate::engine::run_background_prompt(
-                    app.clone(),
-                    record.target_thread_id.clone(),
-                    record.prompt.clone(),
-                    non_empty_model(&record.model),
-                    true,
-                )
-                .await;
-                if let Err(error) = result {
+                if let Err(error) = dispatch(&app, &record, record.prompt.clone()).await {
                     let _ = update_run_state(&record.id, now, Some(error));
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(RUNNER_TICK_SECS)).await;
         }
     });
+}
+
+/// Hand a due automation to the work-task engine.
+///
+/// This used to call `run_background_prompt` directly, which ran the model in
+/// the bound chat session against the user's own checkout: no isolation, no
+/// diff, no review, and a run whose only trace was `lastRunAt` and
+/// `lastError`. A scheduled run that edits files is exactly as consequential
+/// as a manual one, so it goes through the same kernel — the same worktree,
+/// the same independent review, the same recovery after a restart, the same
+/// card the user accepts or rejects.
+///
+/// The project comes from the session the automation is bound to, not from
+/// whatever happens to be open when the timer fires: an automation must not
+/// run against a different repository depending on when it goes off.
+async fn dispatch(
+    app: &AppHandle,
+    record: &ArisScheduledRecord,
+    prompt: String,
+) -> Result<(), String> {
+    let project_id = project_id_for_session(&record.target_thread_id);
+    let Some(project_path) = crate::projects::project_path_for_registered_id(&project_id) else {
+        return Err(format!(
+            "this automation is bound to a chat session in project '{project_id}', which is not in \
+             SomniQ's project list any more, so there is nowhere to run it"
+        ));
+    };
+    let title = if record.name.trim().is_empty() {
+        "Scheduled task".to_string()
+    } else {
+        record.name.trim().to_string()
+    };
+    let queued = crate::work_task::commands::queue_scheduled_run(
+        &project_id,
+        &project_path,
+        &record.id,
+        title,
+        prompt,
+        non_empty_model(&record.model),
+    )?;
+    // Straight to the pump so a task due now starts now rather than at the
+    // work-task engine's own next sweep, up to a tick away.
+    crate::work_task::engine::pump(app.clone(), project_id.clone(), project_path).await;
+    crate::work_task::engine::emit_changed(app, &project_id);
+    let _ = queued;
+    Ok(())
+}
+
+/// The project a chat session belongs to, defaulting the way the rest of the
+/// app does when a session predates project binding.
+fn project_id_for_session(session_id: &str) -> String {
+    let Ok(text) = fs::read_to_string(chat_ui_sessions_path()) else {
+        return "default".to_string();
+    };
+    let Ok(Value::Array(sessions)) = serde_json::from_str::<Value>(&text) else {
+        return "default".to_string();
+    };
+    sessions
+        .iter()
+        .find(|session| session.get("id").and_then(Value::as_str) == Some(session_id))
+        .and_then(|session| session.get("projectId").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .unwrap_or("default")
+        .to_string()
 }
 
 /// Minimal, mail-module-agnostic snapshot of the message that triggered a task.
@@ -555,15 +612,10 @@ pub fn on_new_mail(app: AppHandle, ctx: MailTriggerContext) {
             let now = now_millis();
             let prompt = build_mail_trigger_prompt(&record.prompt, &ctx);
             let _ = update_run_state(&record.id, now, None);
-            let result = crate::engine::run_background_prompt(
-                app.clone(),
-                record.target_thread_id.clone(),
-                prompt,
-                non_empty_model(&record.model),
-                true,
-            )
-            .await;
-            if let Err(error) = result {
+            // Same kernel as a clock-triggered run: a task that fires because
+            // an email arrived is no less consequential than one that fires
+            // because an hour passed.
+            if let Err(error) = dispatch(&app, &record, prompt).await {
                 let _ = update_run_state(&record.id, now, Some(error));
             }
         }

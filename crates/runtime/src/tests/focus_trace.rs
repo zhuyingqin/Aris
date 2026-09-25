@@ -107,7 +107,7 @@ fn broad_work_across_many_files_is_not_flagged() {
 }
 
 #[test]
-fn nudge_asks_for_a_decision_rather_than_ordering_a_stop() {
+fn nudge_checks_completion_and_delivers_when_done() {
     let mut messages = vec![user("make the parser work")];
     for _ in 0..RABBIT_HOLE_FILE_REPEATS {
         messages.push(tool_use("edit_file", r#"{"path":"parser.rs"}"#));
@@ -118,7 +118,8 @@ fn nudge_asks_for_a_decision_rather_than_ordering_a_stop() {
         .expect("nudge past the file-repeat threshold");
     assert!(nudge.contains("parser.rs has been operated on"));
     assert!(nudge.contains("not by the user"));
-    assert!(nudge.contains("say so briefly and carry on"));
+    assert!(nudge.contains("completion checks"), "{nudge}");
+    assert!(nudge.contains("If they pass, deliver now"), "{nudge}");
 }
 
 #[test]
@@ -314,11 +315,9 @@ fn a_repeated_failure_nudge_demands_a_change_not_a_statement() {
     let nudge = FocusSignals::from_messages(&messages)
         .nudge()
         .expect("nudge past the error-repeat threshold");
-    assert!(
-        nudge.contains("Do not retry the same thing again"),
-        "{nudge}"
-    );
-    assert!(!nudge.contains("say so briefly and carry on"), "{nudge}");
+    assert!(nudge.contains("Do not retry the same failure"), "{nudge}");
+    assert!(nudge.contains("Change mechanism once"), "{nudge}");
+    assert!(nudge.contains("what remains blocked"), "{nudge}");
 }
 
 /// Notebook tools address a cell inside one file. Without the cell in the
