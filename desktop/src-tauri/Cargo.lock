@@ -203,6 +203,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "keyring",
+ "lopdf",
  "native-tls",
  "notebook",
  "notify",

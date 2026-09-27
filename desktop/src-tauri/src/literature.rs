@@ -541,7 +541,7 @@ fn run_oneshot_with_model_and_observer(
     Ok((aris_chat::final_assistant_text(&summary), model))
 }
 
-fn validate_vision_model(model: &str) -> Result<(), String> {
+pub(crate) fn validate_vision_model(model: &str) -> Result<(), String> {
     let normalized = model.trim().to_ascii_lowercase();
     if normalized.starts_with("minimax-") && normalized != "minimax-m3" {
         Err(format!(
@@ -614,7 +614,7 @@ fn resolve_pdf_path(
     resolve_pdf_path_at(&project_base(projects_state)?, relative_path)
 }
 
-fn resolve_pdf_path_at(
+pub(crate) fn resolve_pdf_path_at(
     base: &std::path::Path,
     relative_path: &str,
 ) -> Result<std::path::PathBuf, String> {

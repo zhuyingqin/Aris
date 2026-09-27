@@ -453,13 +453,6 @@
   background: var(--accent);
 }
 
-.lit-knowledge-shell {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--bg);
-}
-
 /* ══════════════════════════════════════════════════════════════════════════════
    Sidebar
    ══════════════════════════════════════════════════════════════════════════════ */
@@ -1277,105 +1270,12 @@
   padding: 5px 12px;
 }
 
-.lit-review-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  box-sizing: border-box;
-  padding: 7px 12px;
-  background: var(--bg-1);
-  flex-shrink: 0;
-}
-
-.lit-review-quick-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.lit-review-quick-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-
-.lit-review-quick-btn:hover,
-.lit-review-quick-btn.primary {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
-.lit-review-quick-btn.primary {
-  color: var(--accent);
-}
-
 .lit-th-check input[type="checkbox"] {
   width: 14px;
   height: 14px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
-}
-
-.lit-review-title {
-  font-size: 13.5px;
-  font-weight: 650;
-  color: var(--text);
-  flex-shrink: 0;
-}
-
-.lit-review-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  border-radius: 999px;
-  background: var(--bg-3);
-  color: var(--text-dim);
-  font-size: 10px;
-  padding: 1px 6px;
-  flex-shrink: 0;
-}
-
-.lit-review-filter {
-  flex: 1;
-  min-width: 0;
-  height: 30px;
-  box-sizing: border-box;
-  font-size: 12px;
-  padding: 5px 10px;
-}
-
-.lit-review-clear-filter {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-left: -34px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  z-index: 1;
-}
-
-.lit-review-clear-filter:hover {
-  color: var(--text);
-  background: var(--bg-3);
 }
 
 .lit-filter-icon-btn {
@@ -1395,14 +1295,6 @@
 .lit-filter-icon-btn:hover {
   color: var(--text);
   background: var(--bg-2);
-}
-
-.lit-review-sort {
-  height: 30px;
-  box-sizing: border-box;
-  font-size: 11.5px;
-  padding: 5px 8px;
-  flex-shrink: 0;
 }
 
 /* ── Paper cards ────────────────────────────────────────────────────────────── */
@@ -1485,22 +1377,6 @@
   background: transparent;
   border-color: transparent;
 }
-
-.lit-review-save-search {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  padding: 0;
-  color: var(--text-dim);
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-.lit-review-save-search:not(:disabled):hover { color: var(--accent); border-color: var(--accent); }
-.lit-review-save-search:disabled { cursor: not-allowed; opacity: .45; }
 
 .lit-protocol-search {
   background: var(--bg-1);
@@ -6371,27 +6247,6 @@ kbd {
 .lit-footer-backup:disabled {
   cursor: wait;
   opacity: 0.65;
-}
-
-.lit-review-advanced-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 28px;
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-
-.lit-review-advanced-search:hover,
-.lit-review-advanced-search.active {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
 .lit-advanced-search {

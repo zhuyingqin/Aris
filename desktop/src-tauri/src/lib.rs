@@ -18,6 +18,7 @@ mod git;
 mod image_assist;
 mod knowledge;
 mod literature;
+mod paper_reading;
 mod mail;
 mod mcp;
 mod membership;
@@ -653,6 +654,11 @@ fn register_screenshot_shortcut(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    if let Some(manifest) = std::env::var_os("SOMNIQ_PAPER_READING_DIAGNOSTIC") {
+        paper_reading::diagnostic::run(PathBuf::from(manifest));
+        return;
+    }
     configure_webview2_user_data_dir();
     hide_stray_console();
     augment_path_for_desktop_tools();
@@ -1073,6 +1079,11 @@ pub fn run() {
             literature::literature_search_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
+            paper_reading::paper_reading_prepare,
+            paper_reading::paper_reading_get,
+            paper_reading::paper_reading_source,
+            paper_reading::paper_reading_start,
+            paper_reading::paper_reading_cancel,
             literature::literature_rag_index_pdf,
             literature::literature_rag_index_library,
             literature::literature_rag_search,

@@ -19,6 +19,8 @@ mod hot_memory;
 mod json;
 mod knowledge_memory;
 pub mod literature;
+pub mod paper_reading;
+pub mod paper_guide;
 mod managed_job;
 mod mcp;
 mod mcp_client;

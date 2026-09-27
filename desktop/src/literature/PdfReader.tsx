@@ -14,6 +14,7 @@ import { useStore, type Language } from "../store";
 import type { ChatModelOption } from "../types";
 import { SvgIcon } from "../SvgIcon";
 import { LITERATURE_COPY } from "./i18n";
+import PaperReadingPanel from "./PaperReadingPanel";
 import type {
   PdfAnnotation,
   PdfAnnotationColor,
@@ -214,6 +215,8 @@ interface PendingAnnotation {
 }
 
 interface PdfReaderProps {
+  /** Enables the library's source-bound, background paper analysis task. */
+  paperId?: string;
   /** Library-relative path by default; a workspace/absolute path when `sourceKind` is "path". */
   relativePath: string;
   /**
@@ -1140,6 +1143,7 @@ function AnnotationEditor({
 }
 
 export default function PdfReader({
+  paperId,
   relativePath,
   sourceKind = "library",
   initialPage = 1,
@@ -1259,6 +1263,7 @@ export default function PdfReader({
   const activeHighlightAnnotation = activeHighlight
     ? annotations.find((annotation) => annotation.id === activeHighlight.id) ?? null
     : null;
+  const [readingVisible, setReadingVisible] = useState(true);
   const annotationsVisible = showAnnotations && !readOnly;
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
@@ -1798,6 +1803,7 @@ export default function PdfReader({
         </div>
 
         <div className="lit-pdf-toolbar-right">
+          {paperId && !readOnly && sourceKind === "library" && <button type="button" aria-pressed={readingVisible} onClick={() => setReadingVisible(value => !value)}>{language === "en" ? "Paper guide" : "论文讲解"}</button>}
           {!readOnly && (
             <button
               type="button"
@@ -1834,7 +1840,7 @@ export default function PdfReader({
         </div>
       </div>
 
-      <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}`}>
+      <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}${paperId && !readOnly && sourceKind === "library" && readingVisible ? " with-reading" : ""}`}>
         <div
           className="lit-pdf-scroll"
           ref={containerRef}
@@ -1913,6 +1919,10 @@ export default function PdfReader({
             </div>
           ) : null}
         </div>
+
+        {paperId && !readOnly && sourceKind === "library" && (
+          <PaperReadingPanel hidden={!readingVisible} onClose={() => setReadingVisible(false)} paperId={paperId} relativePath={relativePath} document={document} onJump={scrollToPage} />
+        )}
 
         {pendingAnnotation && (
           <QuickSelectionPopup

@@ -687,6 +687,7 @@ export default function ChatThread({
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
       <div
         className="chat-scroll"
+        style={turns.length === 0 ? { marginBottom: composerHeight } : undefined}
         ref={scrollRef}
         onWheel={(event) => noteReaderIntent(event.deltaY < 0)}
         onTouchStart={() => noteReaderIntent(false)}

@@ -237,7 +237,7 @@ export default function Login() {
             </div>
           </div>
 
-          <div
+          {showRegisterTab && <div
             className="sq-tabs sq-field"
             style={{ ...field(1), gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
             role="tablist"
@@ -259,7 +259,7 @@ export default function Login() {
                 {text}
               </button>
             ))}
-          </div>
+          </div>}
 
           <div className="sq-field" style={field(2)}>
             <div className="sq-label">{copy.accountLabel}</div>

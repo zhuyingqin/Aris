@@ -1,12 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  literatureLlm,
-  literatureRagStatus,
-  type RetrievalCardPreview,
-} from "../api/tauri";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
-import { formatUserFacingError } from "../errorMessage";
-import { SvgIcon } from "../SvgIcon";
 import { useKnowledgeStore } from "./knowledgeStore";
 import { KNOWLEDGE_COPY } from "./i18n";
 import {
@@ -17,268 +10,9 @@ import {
 } from "./knowledgeTypes";
 import "./Knowledge.css";
 
-type KnowledgeView = "fragments" | "graph" | "review" | "confirmed";
-type PaperKnowledgeView = Exclude<KnowledgeView, "graph">;
-type KnowledgeMode = "paper" | "globalGraph";
+type KnowledgeView = "fragments" | "review" | "confirmed";
 
-type KnowledgeCopy = typeof KNOWLEDGE_COPY["cn"];
-
-const PAPER_VIEW_IDS: PaperKnowledgeView[] = ["fragments", "review", "confirmed"];
-
-type GraphItemKind = KnowledgeFragment["kind"] | "confirmed" | "retrieval-card";
-
-interface GraphItem {
-  id: string;
-  kind: GraphItemKind;
-  title: string;
-  text: string;
-  source: string;
-}
-
-interface GraphSubcategory {
-  label: string;
-  itemIds: string[];
-}
-
-interface GraphCategory {
-  label: string;
-  children: GraphSubcategory[];
-}
-
-interface GraphTaxonomy {
-  categories: GraphCategory[];
-}
-
-interface VisualNode {
-  id: string;
-  label: string;
-  meta?: string;
-  kind: "root" | "category" | "subcategory" | GraphItemKind;
-  level: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface VisualEdge {
-  id: string;
-  from: string;
-  to: string;
-}
-
-const GRAPH_SYSTEM =
-  "You rebuild a project-level literature knowledge graph. Create a top-down taxonomy from broad categories to narrow subcategories, then attach existing knowledge item ids. Do not invent item ids.";
-
-const cleanLabel = (value: unknown, fallback: string): string => {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text ? text.slice(0, 48) : fallback;
-};
-
-const toGraphItems = (
-  fragments: KnowledgeFragment[],
-  confirmed: KnowledgePoint[],
-  retrievalCards: RetrievalCardPreview[],
-  copy: KnowledgeCopy,
-): GraphItem[] => [
-  ...fragments.map((fragment) => ({
-    id: fragment.id,
-    kind: fragment.kind,
-    title: fragment.title,
-    text: fragment.text,
-    source: `${fragment.paperTitle}${fragment.page ? ` p.${fragment.page}` : ""}`,
-  })),
-  ...confirmed.map((point) => {
-    const first = point.evidence[0];
-    return {
-      id: point.id,
-      kind: "confirmed" as const,
-      title: point.statement,
-      text: `${point.question}\n${point.answer}`,
-      source: first?.paperId ? `${first.paperId}${first.page ? ` p.${first.page}` : ""}` : point.sourcePaperId ?? "unknown",
-    };
-  }),
-  ...retrievalCards.map((preview) => {
-    const card = preview.card;
-    const title = card.questions[0]
-      || card.sectionHeadings[0]
-      || card.concepts.slice(0, 3).join(" · ")
-      || card.aliases.slice(0, 3).join(" · ")
-      || copy.retrievalCardFallbackTitle;
-    const terms = [
-      ...card.concepts,
-      ...card.aliases,
-      ...card.languageTerms,
-      ...card.methods,
-      ...card.datasets,
-      ...card.metrics,
-      ...card.limitations,
-    ];
-    return {
-      id: `retrieval-card:${preview.chunkId}`,
-      kind: "retrieval-card" as const,
-      title,
-      text: [...card.questions, ...card.sectionHeadings, ...terms, preview.sourcePreview].join("\n"),
-      source: `${preview.paperId} p.${preview.pageStart}${preview.pageEnd > preview.pageStart ? `–${preview.pageEnd}` : ""} · ${terms.slice(0, 2).join(" / ") || copy.recallHintFallback} · ${copy.nonEvidenceTag}`,
-    };
-  }),
-];
-
-const classifyBroadCategory = (item: GraphItem, copy: KnowledgeCopy): string => {
-  const text = `${item.title} ${item.text}`.toLowerCase();
-  if (/limit|limitation|risk|failure|\u5c40\u9650|\u9650\u5236|\u98ce\u9669|\u5931\u8d25/.test(text)) return copy.categoryLabels.limitationsAndRisks;
-  if (/result|finding|accuracy|performance|improve|\u7ed3\u679c|\u53d1\u73b0|\u6027\u80fd|\u63d0\u5347|\u5b9e\u9a8c/.test(text)) return copy.categoryLabels.resultsAndFindings;
-  if (/method|algorithm|model|framework|pipeline|\u65b9\u6cd5|\u7b97\u6cd5|\u6a21\u578b|\u6846\u67b6|\u6d41\u7a0b/.test(text)) return copy.categoryLabels.methodsAndMechanisms;
-  if (/problem|question|motivation|why|\u95ee\u9898|\u52a8\u673a|\u4e3a\u4ec0\u4e48|\u6311\u6218/.test(text)) return copy.categoryLabels.problemsAndMotivation;
-  return copy.categoryLabels.backgroundAndConcepts;
-};
-
-const heuristicTaxonomy = (items: GraphItem[], copy: KnowledgeCopy): GraphTaxonomy => {
-  const byCategory = new Map<string, Map<string, string[]>>();
-  for (const item of items) {
-    const category = classifyBroadCategory(item, copy);
-    const subcategory = copy.graphItemKindLabels[item.kind];
-    if (!byCategory.has(category)) byCategory.set(category, new Map());
-    const children = byCategory.get(category)!;
-    children.set(subcategory, [...(children.get(subcategory) ?? []), item.id]);
-  }
-  return {
-    categories: Array.from(byCategory.entries()).map(([label, children]) => ({
-      label,
-      children: Array.from(children.entries()).map(([childLabel, itemIds]) => ({
-        label: childLabel,
-        itemIds,
-      })),
-    })),
-  };
-};
-
-const extractJsonObject = (raw: string): unknown => {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("{")) return JSON.parse(trimmed);
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
-  if (fenced?.startsWith("{")) return JSON.parse(fenced);
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
-  throw new Error("agent did not return a JSON object");
-};
-
-const normalizeAgentTaxonomy = (raw: string, items: GraphItem[], copy: KnowledgeCopy): GraphTaxonomy => {
-  const parsed = extractJsonObject(raw) as { categories?: unknown };
-  if (!Array.isArray(parsed.categories)) {
-    throw new Error("agent graph JSON must include categories[]");
-  }
-  const itemIds = new Set(items.map((item) => item.id));
-  const used = new Set<string>();
-  const categories: GraphCategory[] = [];
-
-  for (const rawCategory of parsed.categories) {
-    const category = rawCategory as { label?: unknown; children?: unknown };
-    const children: GraphSubcategory[] = [];
-    if (Array.isArray(category.children)) {
-      for (const rawChild of category.children) {
-        const child = rawChild as { label?: unknown; itemIds?: unknown; items?: unknown };
-        const idsRaw = Array.isArray(child.itemIds) ? child.itemIds : child.items;
-        const ids = (Array.isArray(idsRaw) ? idsRaw : [])
-          .map((value) => typeof value === "string" ? value : (value as { id?: unknown })?.id)
-          .filter((id): id is string => typeof id === "string" && itemIds.has(id));
-        const uniqueIds = Array.from(new Set(ids));
-        if (uniqueIds.length === 0) continue;
-        uniqueIds.forEach((id) => used.add(id));
-        children.push({ label: cleanLabel(child.label, copy.unnamedSubcategory), itemIds: uniqueIds });
-      }
-    }
-    if (children.length > 0) {
-      categories.push({ label: cleanLabel(category.label, copy.unnamedCategory), children });
-    }
-  }
-
-  const missing = items.map((item) => item.id).filter((id) => !used.has(id));
-  if (missing.length > 0) {
-    categories.push({ label: copy.uncategorized, children: [{ label: copy.pendingNodes, itemIds: missing }] });
-  }
-  if (categories.length === 0) throw new Error("agent graph JSON did not assign any known item ids");
-  return { categories };
-};
-
-const buildGraphPrompt = (items: GraphItem[], copy: KnowledgeCopy): string => {
-  const payload = items.slice(0, 120).map((item) => ({
-    id: item.id,
-    type: copy.graphItemKindLabels[item.kind],
-    title: item.title,
-    text: item.text,
-    source: item.source,
-  }));
-  return `Rebuild a global literature knowledge graph from these items.
-
-Goal:
-- project-level global graph, not per-paper grouping
-- broad categories first, narrow subcategories second, existing item ids as leaves
-- categories should reflect research concepts, methods, findings, limitations, assumptions, or applications
-- keep 3-7 broad categories when possible
-
-Return ONLY JSON:
-{"categories":[{"label":"broad category","children":[{"label":"narrow subcategory","itemIds":["existing-id"]}]}]}
-
-Items:
-${JSON.stringify(payload, null, 2)}`;
-};
-
-const buildVisualGraph = (taxonomy: GraphTaxonomy, items: GraphItem[], showItems: boolean, copy: KnowledgeCopy) => {
-  const itemById = new Map(items.map((item) => [item.id, item]));
-  const nodes: VisualNode[] = [];
-  const edges: VisualEdge[] = [];
-  const pushNode = (
-    id: string,
-    label: string,
-    kind: VisualNode["kind"],
-    level: number,
-    meta?: string,
-  ) => {
-    const width = level === 0 ? 190 : level === 3 ? 230 : 190;
-    const height = level === 3 ? 74 : 58;
-    nodes.push({ id, label, meta, kind, level, x: 0, y: 0, width, height });
-  };
-
-  pushNode("root", copy.globalGraphTitle, "root", 0, copy.rootNodesMeta(items.length));
-  taxonomy.categories.forEach((category, categoryIndex) => {
-    const categoryId = `cat-${categoryIndex}`;
-    const categoryCount = category.children.reduce((sum, child) => sum + child.itemIds.length, 0);
-    pushNode(categoryId, category.label, "category", 1, copy.nodesMeta(categoryCount));
-    edges.push({ id: `root-${categoryId}`, from: "root", to: categoryId });
-
-    category.children.forEach((child, childIndex) => {
-      const childId = `sub-${categoryIndex}-${childIndex}`;
-      pushNode(childId, child.label, "subcategory", 2, copy.nodesMeta(child.itemIds.length));
-      edges.push({ id: `${categoryId}-${childId}`, from: categoryId, to: childId });
-
-      if (!showItems) return;
-      child.itemIds.forEach((itemId, itemIndex) => {
-        const item = itemById.get(itemId);
-        if (!item) return;
-        const nodeId = `item-${categoryIndex}-${childIndex}-${itemIndex}-${item.id}`;
-        pushNode(nodeId, item.title, item.kind, 3, item.source);
-        edges.push({ id: `${childId}-${nodeId}`, from: childId, to: nodeId });
-      });
-    });
-  });
-
-  const byLevel = new Map<number, VisualNode[]>();
-  nodes.forEach((node) => byLevel.set(node.level, [...(byLevel.get(node.level) ?? []), node]));
-  const maxCount = Math.max(...Array.from(byLevel.values()).map((levelNodes) => levelNodes.length));
-  const width = showItems ? 1220 : 860;
-  const height = Math.max(520, maxCount * 104 + 80);
-  const xByLevel = showItems ? [34, 300, 590, 900] : [34, 300, 590];
-  for (const [level, levelNodes] of byLevel.entries()) {
-    const gap = height / (levelNodes.length + 1);
-    levelNodes.forEach((node, index) => {
-      node.x = xByLevel[level] ?? 900 + (level - 3) * 280;
-      node.y = Math.round(gap * (index + 1) - node.height / 2);
-    });
-  }
-  return { nodes, edges, width, height };
-};
+const PAPER_VIEW_IDS: KnowledgeView[] = ["fragments", "review", "confirmed"];
 
 const citation = (item: KnowledgeEvidence): string =>
   item.page ? `${item.paperId} p.${item.page}` : item.paperId;
@@ -348,277 +82,6 @@ function FragmentList({ fragments }: { fragments: KnowledgeFragment[] }) {
         {fragments.map((fragment) => (
           <FragmentCard key={fragment.id} fragment={fragment} />
         ))}
-      </div>
-    </section>
-  );
-}
-
-function KnowledgeGraph({
-  fragments,
-  confirmed,
-  retrievalCards,
-  taxonomy,
-  rebuilding,
-  error,
-  onRebuild,
-}: {
-  fragments: KnowledgeFragment[];
-  confirmed: KnowledgePoint[];
-  retrievalCards: RetrievalCardPreview[];
-  taxonomy: GraphTaxonomy | null;
-  rebuilding: boolean;
-  error: string | null;
-  onRebuild: () => void;
-}) {
-  const language = useStore((state) => state.language);
-  const copy = KNOWLEDGE_COPY[language];
-  const items = useMemo(
-    () => toGraphItems(fragments, confirmed, retrievalCards, copy),
-    [fragments, confirmed, retrievalCards, copy],
-  );
-  const [showItems, setShowItems] = useState(false);
-  const effectiveTaxonomy = useMemo(
-    () => taxonomy ?? heuristicTaxonomy(items, copy),
-    [items, taxonomy, copy],
-  );
-  const visual = useMemo(
-    () => buildVisualGraph(effectiveTaxonomy, items, showItems, copy),
-    [effectiveTaxonomy, items, showItems, copy],
-  );
-
-  // Zoom & pan state
-  const [scale, setScale] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const dragStartRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  // Reset view whenever the graph layout changes
-  useEffect(() => {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-  }, [visual.width, visual.height]);
-
-  // Non-passive wheel listener so we can preventDefault and zoom
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return undefined;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
-      const step = event.deltaY > 0 ? -0.12 : 0.12;
-      setScale((prevScale) => {
-        const nextScale = Math.max(0.2, Math.min(3, prevScale + step));
-        if (nextScale === prevScale) return prevScale;
-        const ratio = nextScale / prevScale;
-        setOffset((prev) => ({
-          x: mouseX - (mouseX - prev.x) * ratio,
-          y: mouseY - (mouseY - prev.y) * ratio,
-        }));
-        return nextScale;
-      });
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, []);
-
-  // Window-level drag tracking so the cursor can leave the wrap without
-  // stalling the pan.
-  useEffect(() => {
-    if (!dragging) return undefined;
-    const onMove = (event: MouseEvent) => {
-      const start = dragStartRef.current;
-      if (!start) return;
-      setOffset({
-        x: start.offsetX + (event.clientX - start.x),
-        y: start.offsetY + (event.clientY - start.y),
-      });
-    };
-    const onUp = () => {
-      setDragging(false);
-      dragStartRef.current = null;
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [dragging]);
-
-  const beginDrag = (event: React.MouseEvent) => {
-    if (event.button !== 0) return;
-    setDragging(true);
-    dragStartRef.current = { x: event.clientX, y: event.clientY, offsetX: offset.x, offsetY: offset.y };
-  };
-
-  const zoomAround = (factor: number) => {
-    setScale((prevScale) => {
-      const nextScale = Math.max(0.2, Math.min(3, prevScale * factor));
-      if (nextScale === prevScale) return prevScale;
-      const ratio = nextScale / prevScale;
-      const rect = wrapRef.current?.getBoundingClientRect();
-      const cx = rect ? rect.width / 2 : 0;
-      const cy = rect ? rect.height / 2 : 0;
-      setOffset((prev) => ({
-        x: cx - (cx - prev.x) * ratio,
-        y: cy - (cy - prev.y) * ratio,
-      }));
-      return nextScale;
-    });
-  };
-
-  const resetView = () => {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-  };
-
-  const fitView = () => {
-    const rect = wrapRef.current?.getBoundingClientRect();
-    if (!rect) {
-      resetView();
-      return;
-    }
-    const padding = 56;
-    const nextScale = Math.max(
-      0.2,
-      Math.min(1.4, (rect.width - padding) / visual.width, (rect.height - padding) / visual.height),
-    );
-    setScale(nextScale);
-    setOffset({
-      x: Math.max(20, Math.round((rect.width - visual.width * nextScale) / 2)),
-      y: Math.max(20, Math.round((rect.height - visual.height * nextScale) / 2)),
-    });
-  };
-
-  if (items.length === 0) {
-    return (
-      <p className="kb-empty">
-        {copy.graphEmptyState}
-      </p>
-    );
-  }
-
-  const nodeById = new Map(visual.nodes.map((node) => [node.id, node]));
-  const edgePath = (edge: VisualEdge): string => {
-    const from = nodeById.get(edge.from);
-    const to = nodeById.get(edge.to);
-    if (!from || !to) return "";
-    const sx = from.x + from.width;
-    const sy = from.y + from.height / 2;
-    const tx = to.x;
-    const ty = to.y + to.height / 2;
-    const mid = sx + Math.max(52, (tx - sx) / 2);
-    return `M ${sx} ${sy} C ${mid} ${sy}, ${mid} ${ty}, ${tx} ${ty}`;
-  };
-
-  return (
-    <section className="kb-graph" aria-label={copy.graphSectionAriaLabel}>
-      <div className="kb-graph-toolbar">
-        <div className="kb-graph-toolbar-copy">
-          <strong>{copy.globalGraphTitle}</strong>
-          <span>
-            {copy.graphToolbarDescriptionBase}
-            {showItems ? copy.graphToolbarDescriptionWithItems : copy.graphToolbarDescriptionWithoutItems}
-          </span>
-        </div>
-        <div className="kb-graph-toolbar-actions">
-          <button
-            type="button"
-            className={`kb-graph-toggle${showItems ? " active" : ""}`}
-            onClick={() => setShowItems((value) => !value)}
-          >
-            {showItems ? copy.hideKnowledgeNodes : copy.showKnowledgeNodes}
-          </button>
-          <span className="kb-graph-zoom-label" aria-live="polite">
-            {Math.round(scale * 100)}%
-          </span>
-          <button
-            type="button"
-            className="kb-graph-zoom-btn"
-            onClick={() => zoomAround(1 / 1.25)}
-            disabled={scale <= 0.21}
-            title={copy.zoomOutTitle}
-            aria-label={copy.zoomOutLabel}
-          >
-            <SvgIcon name="minus" size={17} />
-          </button>
-          <button
-            type="button"
-            className="kb-graph-zoom-btn"
-            onClick={() => zoomAround(1.25)}
-            disabled={scale >= 2.99}
-            title={copy.zoomInTitle}
-            aria-label={copy.zoomInLabel}
-          >
-            <SvgIcon name="plus" size={17} />
-          </button>
-          <button
-            type="button"
-            className="kb-graph-zoom-btn"
-            onClick={fitView}
-            title={copy.fitViewLabel}
-            aria-label={copy.fitViewLabel}
-          >
-            <SvgIcon name="fit" size={17} />
-          </button>
-          <button
-            type="button"
-            className="kb-graph-zoom-btn"
-            onClick={resetView}
-            title={copy.resetViewLabel}
-            aria-label={copy.resetViewLabel}
-          >
-            <SvgIcon name="reset" size={17} />
-          </button>
-          <span className="kb-graph-zoom-hint">{copy.zoomPanHint}</span>
-          <button type="button" className="kb-primary" onClick={onRebuild} disabled={rebuilding}>
-            {rebuilding ? copy.graphRebuilding : copy.graphRebuildAction}
-          </button>
-        </div>
-      </div>
-      {error && <div className="kb-banner">{error}</div>}
-      <div
-        className={`kb-graph-canvas-wrap${dragging ? " dragging" : ""}`}
-        ref={wrapRef}
-        onMouseDown={beginDrag}
-        role="presentation"
-      >
-        <div
-          className="kb-graph-canvas"
-          style={{
-            width: visual.width,
-            height: visual.height,
-            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-          }}
-        >
-          <svg
-            className="kb-graph-edges"
-            viewBox={`0 0 ${visual.width} ${visual.height}`}
-            aria-hidden="true"
-          >
-            {visual.edges.map((edge) => (
-              <path key={edge.id} d={edgePath(edge)} />
-            ))}
-          </svg>
-          {visual.nodes.map((node) => (
-            <div
-              key={node.id}
-              className={`kb-graph-node ${node.kind}`}
-              style={{
-                left: node.x,
-                top: node.y,
-                width: node.width,
-                minHeight: node.height,
-              }}
-            >
-              <strong>{node.label}</strong>
-              {node.meta && <span>{node.meta}</span>}
-            </div>
-          ))}
-        </div>
       </div>
     </section>
   );
@@ -732,13 +195,11 @@ function ConfirmedCard({ point }: { point: KnowledgePoint | KnowledgeSearchHit }
 interface KnowledgeProps {
   initialPaperId?: string;
   initialView?: KnowledgeView;
-  mode?: KnowledgeMode;
 }
 
 export default function Knowledge({
   initialPaperId,
   initialView = "fragments",
-  mode = "paper",
 }: KnowledgeProps = {}) {
   const language = useStore((state) => state.language);
   const copy = KNOWLEDGE_COPY[language];
@@ -758,18 +219,9 @@ export default function Knowledge({
   const refine = useKnowledgeStore((state) => state.refine);
   const search = useKnowledgeStore((state) => state.search);
 
-  const isGlobalGraph = mode === "globalGraph";
-  const [view, setView] = useState<KnowledgeView>(
-    isGlobalGraph ? "graph" : initialView === "graph" ? "fragments" : initialView,
-  );
+  const [view, setView] = useState<KnowledgeView>(initialView);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [selectedPaper, setSelectedPaper] = useState(initialPaperId ?? "");
-  const [graphTaxonomy, setGraphTaxonomy] = useState<GraphTaxonomy | null>(null);
-  const [graphRebuilding, setGraphRebuilding] = useState(false);
-  const [graphError, setGraphError] = useState<string | null>(null);
-  const [retrievalCards, setRetrievalCards] = useState<RetrievalCardPreview[]>([]);
-  const [retrievalCardError, setRetrievalCardError] = useState<string | null>(null);
-
   const projectId = currentProject?.id ?? "default";
   useEffect(() => {
     setReviewIndex(0);
@@ -781,33 +233,10 @@ export default function Knowledge({
   }, [initialPaperId]);
 
   useEffect(() => {
-    setView(isGlobalGraph ? "graph" : initialView === "graph" ? "fragments" : initialView);
-  }, [initialView, isGlobalGraph]);
+    setView(initialView);
+  }, [initialView]);
 
-  useEffect(() => {
-    if (!isGlobalGraph) {
-      setRetrievalCards([]);
-      setRetrievalCardError(null);
-      return undefined;
-    }
-    let disposed = false;
-    void literatureRagStatus(100)
-      .then((status) => {
-        if (disposed) return;
-        setRetrievalCards(status.cardPreviews);
-        setRetrievalCardError(null);
-      })
-      .catch((cause) => {
-        if (disposed) return;
-        setRetrievalCards([]);
-        setRetrievalCardError(copy.retrievalCardsLoadFailed(cause));
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [isGlobalGraph, projectId]);
-
-  const scopedPaperId = mode === "paper" ? initialPaperId ?? "" : "";
+  const scopedPaperId = initialPaperId ?? "";
   const visibleFragments = useMemo(
     () => scopedPaperId ? fragments.filter((fragment) => fragment.paperId === scopedPaperId) : fragments,
     [fragments, scopedPaperId],
@@ -821,11 +250,6 @@ export default function Knowledge({
     () => visiblePoints.filter((point) => point.status === "confirmed"),
     [visiblePoints],
   );
-  const globalConfirmed = useMemo(
-    () => points.filter((point) => point.status === "confirmed"),
-    [points],
-  );
-
   const safeIndex = Math.min(reviewIndex, Math.max(0, drafts.length - 1));
   const current = drafts[safeIndex];
 
@@ -876,65 +300,10 @@ export default function Knowledge({
       : searchHits
     : confirmed;
 
-  const graphItems = useMemo(
-    () => toGraphItems(fragments, globalConfirmed, retrievalCards, copy),
-    [fragments, globalConfirmed, retrievalCards, copy],
-  );
-  const graphItemsKey = useMemo(
-    () => graphItems.map((item) => item.id).join("|"),
-    [graphItems],
-  );
-
-  useEffect(() => {
-    setGraphTaxonomy(null);
-    setGraphError(null);
-  }, [graphItemsKey]);
-
-  const rebuildGraph = useCallback(async () => {
-    if (graphItems.length === 0 || graphRebuilding) return;
-    setGraphRebuilding(true);
-    setGraphError(null);
-    try {
-      const raw = await literatureLlm(GRAPH_SYSTEM, buildGraphPrompt(graphItems, copy));
-      setGraphTaxonomy(normalizeAgentTaxonomy(raw, graphItems, copy));
-    } catch (err) {
-      setGraphError(copy.graphRebuildFailed(formatUserFacingError(err, language)));
-      setGraphTaxonomy(null);
-    } finally {
-      setGraphRebuilding(false);
-    }
-  }, [graphItems, graphRebuilding, copy, language]);
-
   const viewCount = (id: KnowledgeView): number => {
     if (id === "fragments") return visibleFragments.length;
-    if (id === "graph") return graphItems.length;
     return id === "review" ? drafts.length : confirmed.length;
   };
-
-  if (isGlobalGraph) {
-    return (
-      <div className="kb kb-global-graph">
-        <header className="kb-header">
-          <div className="kb-title">
-            <h1>{copy.globalGraphTitle}</h1>
-            <p>{copy.globalGraphDescription}</p>
-          </div>
-        </header>
-
-        {error && <div className="kb-banner">{error}</div>}
-
-        <KnowledgeGraph
-          fragments={fragments}
-          confirmed={globalConfirmed}
-          retrievalCards={retrievalCards}
-          taxonomy={graphTaxonomy}
-          rebuilding={graphRebuilding}
-          error={graphError ?? retrievalCardError}
-          onRebuild={rebuildGraph}
-        />
-      </div>
-    );
-  }
 
   return (
     <div className="kb kb-paper-knowledge">

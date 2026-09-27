@@ -23,12 +23,14 @@ export default function AdvancedSearchBuilder({
   conditions,
   onChange,
   onSave,
+  onApply,
   onClose,
   initialName,
 }: {
   conditions: LiteratureSearchCondition[];
   onChange: (conditions: LiteratureSearchCondition[]) => void;
   onSave: (conditions: LiteratureSearchCondition[], name: string) => void;
+  onApply: (conditions: LiteratureSearchCondition[]) => void;
   onClose: () => void;
   initialName?: string;
 }) {
@@ -126,7 +128,7 @@ export default function AdvancedSearchBuilder({
                 aria-label={copy.advancedSearch.removeCondition}
                 title={copy.advancedSearch.removeCondition}
               >
-                <SvgIcon name="close" size={13} />
+                <SvgIcon name="minus" size={13} />
               </button>
             </div>
           );
@@ -141,8 +143,11 @@ export default function AdvancedSearchBuilder({
           placeholder={copy.advancedSearch.namePlaceholder}
           aria-label={copy.advancedSearch.name}
         />
-        <button type="button" className="primary" onClick={() => onSave(rows, name.trim())}>
-          <SvgIcon name="check" size={13} />{copy.advancedSearch.save}
+        <button type="button" onClick={() => onSave(rows, name.trim())}>
+          {copy.advancedSearch.save}
+        </button>
+        <button type="button" className="primary" onClick={() => onApply(rows)}>
+          {copy.advancedSearch.apply}
         </button>
       </div>
     </section>

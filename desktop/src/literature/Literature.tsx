@@ -45,6 +45,10 @@ import { imageMimeType, isImagePath } from "../imageFiles";
 import ImageLightbox from "../ImageLightbox";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import LiteratureViewTabs, { type LiteraturePageView } from "./LiteratureViewTabs";
+import LiteratureToolbar, { type LiteratureSortKey } from "./LiteratureToolbar";
+import DetailTabRail from "./LiteratureDetailTabs";
+import LibraryActionMenu from "./LibraryActionMenu";
+import LiteratureBatchBar from "./LiteratureBatchBar";
 import AdvancedSearchBuilder from "./AdvancedSearchBuilder";
 import CitationStyleManager from "./CitationStyleManager";
 import LiteratureResourceReader from "./LiteratureResourceReader";
@@ -89,11 +93,11 @@ import {
   type PaperStage,
 } from "./literatureTypes";
 import "./Literature.css";
+import "./LibraryWorkspace.css";
 
-type SortKey = "added" | "fit" | "year" | "title" | "citations";
+type SortKey = LiteratureSortKey;
 type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
 
-const Knowledge = lazy(() => import("../knowledge/KnowledgeReview"));
 const LazyMathText = lazy(() => import("./MathText"));
 const PdfReader = lazy(() => import("./PdfReader"));
 
@@ -123,49 +127,6 @@ const MANUAL_ITEM_TYPES = [
   "email", "letter", "statute", "film", "interview", "podcast",
   "radioBroadcast", "tvBroadcast", "videoRecording",
 ] as const;
-const DETAIL_TAB_ICONS: Record<DetailTab, SvgIconName> = {
-  info: "info",
-  overview: "sparkle",
-  reader: "document",
-  evidence: "shieldCheck",
-  notes: "notebook",
-  files: "folder",
-  related: "graph",
-};
-
-function DetailTabRail({
-  tabs,
-  activeTab,
-  label,
-  className,
-  onSelect,
-}: {
-  tabs: Array<{ id: DetailTab; label: string }>;
-  activeTab: DetailTab;
-  label: string;
-  className: string;
-  onSelect: (tab: DetailTab) => void;
-}) {
-  return (
-    <nav className={className} role="tablist" aria-label={label}>
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          type="button"
-          role="tab"
-          aria-label={tab.label}
-          aria-selected={activeTab === tab.id}
-          className={`lit-workspace-tab${activeTab === tab.id ? " active" : ""}`}
-          title={tab.label}
-          onClick={() => onSelect(tab.id)}
-        >
-          <SvgIcon name={DETAIL_TAB_ICONS[tab.id]} size={16} className="lit-workspace-tab-icon" />
-        </button>
-      ))}
-    </nav>
-  );
-}
-
 function MathText({
   text,
   className = "",
@@ -1447,7 +1408,7 @@ function LiteratureRagPanel({
               {busy === "library" ? copy.ragPanel.libraryUpdating : copy.ragPanel.libraryUpdateAction}
             </button>
             <button type="button" onClick={() => void indexSelectedPaper()} disabled={maintenanceBusy || !selectedPaper?.pdf.path} title={selectedPaper?.pdf.path ? copy.ragPanel.currentSelection(selectedPaper.title) : copy.ragPanel.noSelectionPdf}>
-              <SvgIcon name="target" size={14} />
+              <SvgIcon name="library" size={14} />
               {busy === "paper" ? copy.ragPanel.paperIndexing : copy.ragPanel.paperIndexAction}
             </button>
             <button type="button" onClick={buildRetrievalCards} disabled={maintenanceBusy}>
@@ -1896,6 +1857,7 @@ export default function Literature({
   const [filter, setFilter] = useState("");
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false);
   const [advancedConditions, setAdvancedConditions] = useState<LiteratureSearchCondition[]>([]);
+  const [appliedConditions, setAppliedConditions] = useState<LiteratureSearchCondition[] | null>(null);
   const [fullTextMatchIds, setFullTextMatchIds] = useState<Set<string> | null>(null);
   const [fullTextPage, setFullTextPage] = useState<{
     total: number;
@@ -1912,6 +1874,8 @@ export default function Literature({
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [selectionCleared, setSelectionCleared] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("info");
+  const [navigationOpen, setNavigationOpen] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 680px)").matches);
+  const [detailsOpen, setDetailsOpen] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1080px)").matches);
   const [newItemOpen, setNewItemOpen] = useState(false);
   const [newItemSaving, setNewItemSaving] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
@@ -2390,6 +2354,11 @@ export default function Literature({
     () => normalizeSearchConditions(activeSavedSearch?.conditions ?? []),
     [activeSavedSearch?.conditions],
   );
+  const currentSearchConditions = appliedConditions ?? activeSavedSearchConditions;
+  useEffect(() => {
+    setAppliedConditions(null);
+    setAdvancedSearchOpen(false);
+  }, [view, projectId]);
   const normalizedItemsById = useMemo(
     () => new Map((libraryModel?.items ?? []).map((snapshot) => [snapshot.item.id, snapshot])),
     [libraryModel?.items],
@@ -2526,19 +2495,7 @@ export default function Literature({
         duplicateCandidates.flatMap((candidate) => [candidate.primaryRecordId, candidate.duplicateRecordId]),
       );
       viewFilter = (paper) => duplicateIds.has(paper.id);
-    } else if (activeSavedSearchConditions.length > 0) {
-      viewFilter = (paper) => {
-        const snapshot = normalizedItemsById.get(paper.id);
-        const searchablePaper = snapshot
-          ? {
-              ...paper,
-              creators: paper.creators ?? snapshot.creators,
-              metadataFields: paper.metadataFields ?? snapshot.fields,
-            }
-          : paper;
-        return matchesSearchConditions(searchablePaper, activeSavedSearchConditions, library.collections);
-      };
-    } else if (dynamicSearchQuery) {
+    } else if (activeSavedSearchConditions.length > 0 || dynamicSearchQuery) {
       viewFilter = () => true;
     } else {
       viewFilter = (p) => matchesView(p, view);
@@ -2547,6 +2504,13 @@ export default function Literature({
       papers.filter((p) =>
         (!scopedRecordIds || scopedRecordIds.has(p.id))
         && viewFilter(p)
+        && (currentSearchConditions.length === 0 || matchesSearchConditions(
+          normalizedItemsById.has(p.id)
+            ? { ...p, creators: p.creators ?? normalizedItemsById.get(p.id)?.creators, metadataFields: p.metadataFields ?? normalizedItemsById.get(p.id)?.fields }
+            : p,
+          currentSearchConditions,
+          library.collections,
+        ))
         && normalizedSelectedTags.every((tag) => p.tags.some((candidate) => candidate.toLocaleLowerCase() === tag))
         && (!fullTextMatchIds || fullTextMatchIds.has(p.id))
         && (!savedSearchNeedle || matchesQuery(
@@ -2572,7 +2536,7 @@ export default function Literature({
       ),
       sort,
     );
-  }, [activeSavedSearchConditions, deferredFilter, duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, normalizedItemsById, normalizedSelectedTags, papers, recentAddedPapers, recentReadPapers, scopedRecordIds, sort, view]);
+  }, [activeSavedSearchConditions, currentSearchConditions, deferredFilter, duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, normalizedItemsById, normalizedSelectedTags, papers, recentAddedPapers, recentReadPapers, scopedRecordIds, sort, view]);
 
   const availableTags = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2617,14 +2581,19 @@ export default function Literature({
     setView("search:" + id);
     setFilter("");
     setAdvancedConditions(normalized);
+    setAppliedConditions(null);
     setAdvancedSearchOpen(false);
     logActivity("ok", copy.activity.dynamicSearchSaved(name.trim() || copy.advancedSearch.title));
   };
 
   const openAdvancedSearch = () => {
-    if (activeSavedSearchConditions.length > 0) {
-      setAdvancedConditions(activeSavedSearchConditions);
-    } else if (advancedConditions.length === 0) {
+    if (advancedSearchOpen) {
+      setAdvancedSearchOpen(false);
+      return;
+    }
+    if (currentSearchConditions.length > 0) {
+      setAdvancedConditions(currentSearchConditions);
+    } else {
       setAdvancedConditions([{
         id: "condition-" + Date.now().toString(36),
         conditionIndex: 0,
@@ -2808,6 +2777,8 @@ export default function Literature({
     setReaderPage(page);
     setReaderAnnotationId(annotationId);
     setWorkspaceTab("reader");
+    setDetailsOpen(true);
+    if (paper.unread && !isTrashView) markRead(paper.id);
   };
 
   const closeReaderTab = (paperId: string) => {
@@ -3154,7 +3125,7 @@ export default function Literature({
     setReaderAttachment(null);
     setReaderPage(1);
     setReaderAnnotationId(null);
-    if (paper.unread && view !== "trash") markRead(paper.id);
+    setDetailsOpen(true);
   };
 
   const toggleItemExpanded = (itemId: string) => {
@@ -3167,6 +3138,7 @@ export default function Literature({
   };
 
   const selectLibraryChild = (paper: LiteraturePaper, child: LiteratureTreeChild) => {
+    setDetailsOpen(true);
     setSelectedId(paper.id);
     setSelectedChildId(child.id);
     setSelectionCleared(false);
@@ -3201,7 +3173,15 @@ export default function Literature({
       return next;
     });
 
-  const batchIds = Array.from(checked);
+  // A batch action only acts on the corpus visible in this view.
+  const visiblePaperIds = useMemo(() => new Set(visiblePapers.map((paper) => paper.id)), [visiblePapers]);
+  useEffect(() => {
+    setChecked((current) => {
+      const next = new Set([...current].filter((id) => visiblePaperIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [visiblePaperIds]);
+  const batchIds = Array.from(checked).filter((id) => visiblePaperIds.has(id));
   const runBatch = (action: (ids: string[]) => void) => {
     if (batchIds.length === 0) return;
     action(batchIds);
@@ -3491,6 +3471,8 @@ export default function Literature({
           <button
             type="button"
             className="lit-col-toggle"
+            disabled={children.length === 0}
+            aria-expanded={children.length > 0 ? isExpanded : undefined}
             onClick={() => toggleColExpand(collection.id)}
             aria-label={isExpanded ? copy.sidebar.collapseCollection : copy.sidebar.expandCollection}
           >
@@ -3512,32 +3494,17 @@ export default function Literature({
           ) : (
             <NavItem
               label={collection.label}
-              icon={depth === 0 ? "collection" : "circle"}
+              icon="folder"
               count={count}
               active={view === `col:${collection.id}`}
               onClick={() => setView(`col:${collection.id}`)}
             />
           )}
-          <button
-            type="button"
-            className="lit-col-add-sub-btn"
-            title={copy.sidebar.addSubcollection}
-            aria-label={copy.sidebar.addSubcollectionAria(collection.label)}
-            onClick={() => startAddCollection(collection.id)}
-          ><SvgIcon name="plus" size={13} /></button>
-          <button
-            type="button"
-            className="lit-col-edit-btn"
-            aria-label={copy.sidebar.renameCollectionAria(collection.label)}
-            title={copy.sidebar.renameCollectionAria(collection.label)}
-            onClick={() => startRenameCollection(collection)}
-          ><SvgIcon name="edit" size={13} /></button>
-          <button
-            type="button"
-            className="lit-col-delete-btn"
-            aria-label={copy.sidebar.deleteCollectionAria(collection.label)}
-            onClick={() => confirmDeleteCollection(collection)}
-          ><SvgIcon name="close" size={13} /></button>
+          <LibraryActionMenu label={copy.libraryUi.collectionActions(collection.label)} actions={[
+            { id: "add", label: copy.sidebar.addSubcollection, icon: "plus", onSelect: () => startAddCollection(collection.id) },
+            { id: "rename", label: copy.sidebar.renameCollectionMenuItem, icon: "edit", onSelect: () => startRenameCollection(collection) },
+            { id: "delete", label: copy.sidebar.deleteCollectionMenuItem, icon: "trash", danger: true, onSelect: () => confirmDeleteCollection(collection) },
+          ]} />
         </div>
         {isExpanded && (
           <>
@@ -3555,8 +3522,8 @@ export default function Literature({
                     if (event.key === "Escape") { setColInput(""); setColAddingParentId(null); }
                   }}
                 />
-                <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput(collection.id)}><SvgIcon name="check" size={14} /></button>
-                <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }}><SvgIcon name="close" size={14} /></button>
+                <button type="button" className="lit-col-confirm-btn" aria-label={copy.sidebar.confirm} onClick={() => submitColInput(collection.id)}><SvgIcon name="check" size={14} /></button>
+                <button type="button" className="lit-col-cancel-btn" aria-label={copy.sidebar.cancel} onClick={() => { setColInput(""); setColAddingParentId(null); }}><SvgIcon name="close" size={14} /></button>
               </div>
             )}
           </>
@@ -3566,7 +3533,7 @@ export default function Literature({
   };
 
   const sidebar = (
-    <aside className="lit-sidebar">
+    <aside className="lit-sidebar" id="literature-navigation" aria-label={copy.libraryUi.navigation}>
       <div className="lit-sidebar-header">
         <button
           type="button"
@@ -3588,6 +3555,8 @@ export default function Literature({
           <span className="lit-nav-text">{copy.sidebar.libraryRoot}</span>
           <span className="lit-nav-count">{paperCounts.allCount}</span>
         </button>
+        <button type="button" className="lit-mobile-nav-close lit-layout-toggle" aria-label={copy.libraryUi.hideNavigation}
+          onClick={() => setNavigationOpen(false)}><SvgIcon name="close" size={16} /></button>
       </div>
 
       <div className="lit-sidebar-section lit-sidebar-specials">
@@ -3600,14 +3569,11 @@ export default function Literature({
         />
         <NavItem
           label={copy.sidebar.recentRead}
-          icon="check"
+          icon="bookOpen"
           count={recentReadPapers.length}
           active={view === "recent:read"}
           onClick={() => setView("recent:read")}
         />
-      </div>
-
-      <NavSection title={copy.sidebar.statusLabel} defaultOpen={false}>
         <NavItem
           label={copy.sidebar.unfiled}
           icon="inbox"
@@ -3624,7 +3590,7 @@ export default function Literature({
         />
         <NavItem
           label={copy.sidebar.duplicates}
-          icon="library"
+          icon="copy"
           count={duplicateCandidates.length}
           active={view === "duplicates"}
           onClick={() => setView("duplicates")}
@@ -3641,6 +3607,9 @@ export default function Literature({
             setSelectionCleared(false);
           }}
         />
+      </div>
+
+      <NavSection title={copy.sidebar.statusLabel} defaultOpen={false}>
         {STAGES_NAV.filter((s) => s.alwaysVisible || (paperCounts.stageCounts.get(s.id) ?? 0) > 0).map(
           (stage) => (
             <NavItem
@@ -3755,16 +3724,9 @@ export default function Literature({
               active={view === `search:${search.id}`}
               onClick={() => setView(`search:${search.id}`)}
             />
-            <button
-              type="button"
-              className="lit-search-delete"
-              aria-label={copy.sidebar.deleteSavedSearchAria(search.name || search.query)}
-              title={copy.sidebar.deleteSavedSearchMenuItem}
-              onClick={(event) => {
-                event.stopPropagation();
-                confirmAndDeleteSavedSearch(search.id);
-              }}
-            ><SvgIcon name="close" size={13} /></button>
+            <LibraryActionMenu label={copy.libraryUi.searchActions(search.name || search.query)} actions={[
+              { id: "delete", label: copy.sidebar.deleteSavedSearchMenuItem, icon: "trash", danger: true, onSelect: () => confirmAndDeleteSavedSearch(search.id) },
+            ]} />
           </div>
         ))}
         {library.searches.length === 0 && <div className="lit-col-empty">{copy.sidebar.noSavedSearches}</div>}
@@ -3857,9 +3819,43 @@ export default function Literature({
     ?? activeLibraryScope?.workflowRunId
     ?? (workflowGradeGroups.length === 1 ? workflowGradeGroups[0].workflowRunId : undefined);
   const currentCollectionId = view.startsWith("col:") ? view.slice(4) : undefined;
+  const clearLibraryFilters = () => {
+    setFilter("");
+    setSelectedTags(new Set());
+    setAdvancedConditions([]);
+    setAppliedConditions(null);
+    setAdvancedSearchOpen(false);
+    if (activeSavedSearchConditions.length > 0) setView("all");
+  };
 
   const mainArea = (
     <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`}>
+      <LiteratureToolbar
+        viewLabel={viewLabel}
+        count={visiblePapers.length}
+        total={fullTextMatchIds ? fullTextPage.total : undefined}
+        filter={filter}
+        sort={sort}
+        tags={[...selectedTags]}
+        conditionCount={currentSearchConditions.length}
+        navigationOpen={navigationOpen}
+        detailsOpen={detailsOpen}
+        isTrashView={isTrashView}
+        advancedSearchOpen={advancedSearchOpen}
+        onFilterChange={setFilter}
+        onSortChange={setSort}
+        onToggleNavigation={() => setNavigationOpen((value) => !value)}
+        onToggleDetails={() => setDetailsOpen((value) => !value)}
+        onOpenAdvancedSearch={openAdvancedSearch}
+        onSaveSearch={saveCurrentFilter}
+        onRemoveTag={(tag) => setSelectedTags((current) => new Set([...current].filter((entry) => entry !== tag)))}
+        onClearFilters={clearLibraryFilters}
+        onCreateItem={() => setNewItemOpen(true)}
+        onImportBibliography={() => void importBibliography()}
+        onImportPdf={() => void importPdfAsRecord()}
+        onAddIdentifier={() => void addIdentifier()}
+        onEmptyTrash={emptyTrash}
+      />
       <PaperTable
         papers={visiblePapers}
         searchTotal={fullTextMatchIds ? fullTextPage.total : undefined}
@@ -3867,8 +3863,6 @@ export default function Literature({
         searchLoading={fullTextPage.loading}
         libraryCount={scopedLoadedCount}
         loaded={loaded}
-        filter={filter}
-        sort={sort}
         checked={checked}
         allVisibleSelected={allVisibleSelected}
         someVisibleSelected={someVisibleSelected}
@@ -3876,25 +3870,23 @@ export default function Literature({
         selectedChildId={selectedChildId}
         libraryModel={libraryModel}
         expandedItems={expandedItems}
-        viewLabel={viewLabel}
         isTrashView={isTrashView}
         workflowGradeRunId={displayedWorkflowGradeRunId}
         advancedSearchOpen={advancedSearchOpen}
         advancedConditions={advancedConditions}
         activeSavedSearchName={activeSavedSearch?.name}
         currentCollectionId={currentCollectionId}
-        onFilterChange={setFilter}
-        onSaveDynamicSearch={saveCurrentFilter}
-        onOpenAdvancedSearch={openAdvancedSearch}
         onChangeAdvancedSearch={setAdvancedConditions}
         onSaveAdvancedSearch={saveAdvancedSearch}
+        onApplyAdvancedSearch={(conditions) => {
+          setAppliedConditions(normalizeSearchConditions(conditions));
+          setAdvancedSearchOpen(false);
+        }}
         onCloseAdvancedSearch={() => setAdvancedSearchOpen(false)}
-        onCreateItem={() => setNewItemOpen(true)}
         onImportBibliography={() => void importBibliography()}
         onImportPdf={() => void importPdfAsRecord()}
         onAddIdentifier={() => void addIdentifier()}
         onToggleAll={toggleAllVisible}
-        onSortChange={setSort}
         onSelectPaper={selectPaper}
         onOpenPaperReader={openPaperInReader}
         onSelectChild={selectLibraryChild}
@@ -3910,7 +3902,6 @@ export default function Literature({
         onBatchDelete={() => confirmDeletePapers(batchIds)}
         onBatchRestore={() => confirmRestorePapers(batchIds)}
         onBatchPermanentDelete={() => confirmPermanentDeletePapers(batchIds)}
-        onEmptyTrash={emptyTrash}
         onBatchMergeDuplicates={() => void mergeSelectedDuplicates()}
         onBatchRemoveFromCollection={() => {
           if (!currentCollectionId) return;
@@ -3921,6 +3912,11 @@ export default function Literature({
         onBatchReport={() => void exportReport()}
         onBatchClear={() => setChecked(new Set())}
         onLoadMoreSearch={() => void loadMoreFullTextMatches()}
+        onResetView={() => {
+          clearLibraryFilters();
+          setView("all");
+          setLiteratureLibraryScope(null);
+        }}
       />
     </div>
   );
@@ -3937,10 +3933,9 @@ export default function Literature({
     { id: "related", label: copy.workspaceHeader.tabRelated },
   ];
   const workspace = (
-    <section className="lit-workspace">
+    <section className="lit-workspace" id="literature-details" aria-label={copy.libraryUi.details}>
       {selectedPaper ? (
         <>
-          {/* Zotero-style title header */}
           <div className="lit-info-header">
             <div className="lit-info-title-block">
               <div className="lit-info-paper-title">{selectedPaper.title}</div>
@@ -3950,7 +3945,10 @@ export default function Literature({
                 {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
               </div>
             </div>
-            <div className="lit-workspace-header-btns">
+            <button type="button" className="lit-workspace-icon-btn" aria-label={copy.libraryUi.hideDetails}
+              title={copy.libraryUi.hideDetails} onClick={() => setDetailsOpen(false)}><SvgIcon name="close" size={16} /></button>
+          </div>
+          <div className="lit-inspector-actions">
               {isTrashView && (
                 <button
                   type="button"
@@ -3958,45 +3956,43 @@ export default function Literature({
                   title={copy.table.restore}
                   aria-label={copy.table.restore}
                   onClick={() => confirmRestorePapers([selectedPaper.id])}
-                ><SvgIcon name="refresh" size={16} /></button>
+                ><SvgIcon name="reset" size={16} /></button>
               )}
               <button
                 type="button"
-                className="lit-workspace-icon-btn"
+                className="lit-inspector-primary"
                 title={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
                 aria-label={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openSelectedPaperPdfAria : copy.workspaceHeader.getSelectedPaperPdfAria}
                 onClick={() => void downloadOrBrowse(selectedPaper.id)}
-                disabled={selectedPaper.pdf.status === "downloading"}
-              ><SvgIcon name="target" size={16} /></button>
+                disabled={isTrashView || selectedPaper.pdf.status === "downloading"}
+              >
+                <SvgIcon name={selectedPaper.pdf.status === "downloading" ? "spinner" : selectedPaper.pdf.path ? "bookOpen" : "download"} size={15} />
+                {selectedPaper.pdf.status === "downloading" ? copy.infoTab.downloading : selectedPaper.pdf.path ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
+              </button>
               <button
                 type="button"
-                className="lit-workspace-icon-btn"
+                className="lit-inspector-chat"
                 title={copy.workspaceHeader.openInChat}
                 onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
-              ><SvgIcon name="externalLink" size={16} /></button>
-              <button
-                type="button"
-                className="lit-workspace-icon-btn"
-                title={copy.workspaceHeader.clearSelection}
-                aria-label={copy.workspaceHeader.clearSelection}
-                onClick={() => { setSelectedId(null); setSelectionCleared(true); }}
-              ><SvgIcon name="close" size={16} /></button>
-            </div>
+              ><SvgIcon name="messageCircle" size={15} />{copy.infoTab.askAgent}</button>
+              <LibraryActionMenu label={copy.libraryUi.moreActions} actions={[
+                { id: "clear", label: copy.workspaceHeader.clearSelection, onSelect: () => { setSelectedId(null); setSelectionCleared(true); } },
+              ]} />
           </div>
 
-
+          <DetailTabRail tabs={detailTabs} activeTab={workspaceTab} label={copy.workspaceHeader.tabRailAria}
+            className="lit-workspace-tabs" onSelect={setWorkspaceTab} />
           <div className="lit-workspace-main">
             <div className="lit-workspace-content">
             {workspaceTab === "info" && (
               <InfoTab
+                key={selectedPaper.id}
                 paper={selectedPaper}
                 collections={library.collections}
                 libraryModel={libraryModel}
                 tagDraft={tagDraft}
                 onTagDraft={setTagDraft}
                 onAddTag={addTagToSelected}
-                onOpenReader={() => void downloadOrBrowse(selectedPaper.id)}
-                onAsk={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
                 onShortlist={() => setStage([selectedPaper.id], "shortlist")}
                 onUpdateMetadata={(patch) => updatePaperMetadata(selectedPaper.id, patch)}
                 onSetRating={(rating) => setRating(selectedPaper.id, rating)}
@@ -4018,7 +4014,6 @@ export default function Literature({
                 onGenerateBrief={generateBrief}
                 onShortlist={() => setStage([selectedPaper.id], "shortlist")}
                 onDownload={() => void downloadOrBrowse(selectedPaper.id)}
-                onAsk={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
                 onViewEvidence={() => setWorkspaceTab("evidence")}
                 onOpenAnnotation={(page, annotationId) => openAnnotationInReader(selectedPaper, page, annotationId)}
                 onDelete={() => {
@@ -4117,18 +4112,11 @@ export default function Literature({
               />
             )}
             </div>
-            <DetailTabRail
-              tabs={detailTabs}
-              activeTab={workspaceTab}
-              label={copy.workspaceHeader.tabRailAria}
-              className="lit-workspace-rail"
-              onSelect={setWorkspaceTab}
-            />
           </div>
         </>
       ) : (
         <div className="lit-workspace-empty">
-          <div className="lit-workspace-empty-icon"><SvgIcon name="collection" size={28} /></div>
+          <span className="lit-workspace-empty-icon" aria-hidden="true"><SvgIcon name="bookOpen" size={28} /></span>
           <p>{copy.selectPaperToOpen}<span hidden>Select a paper to open it here.</span></p>
         </div>
       )}
@@ -4319,7 +4307,6 @@ export default function Literature({
                 className={`lit-discover-mode${discoverMode === mode.id ? " active" : ""}`}
                 onClick={() => selectDiscoverMode(mode.id)}
               >
-                <SvgIcon name={mode.icon} size={15} />
                 <span>
                   <strong>{mode.label}</strong>
                   <small>{mode.hint}</small>
@@ -4343,12 +4330,6 @@ export default function Literature({
             />
           )}
         </section>
-      ) : pageView === "graph" ? (
-        <div className="lit-knowledge-shell">
-          <Suspense fallback={<LiteratureLoading label={copy.loadingKnowledgeGraph} />}>
-            <Knowledge mode="globalGraph" />
-          </Suspense>
-        </div>
       ) : selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path && !readerAttachment ? (
         <div className="lit-reading-shell">
           <div className="lit-reading-main">
@@ -4375,7 +4356,6 @@ export default function Literature({
                       title={paper.title}
                       onClick={() => openPaperInReader(paper)}
                     >
-                      <SvgIcon name="document" size={13} />
                       <span>{paper.title}</span>
                     </button>
                     <button
@@ -4393,6 +4373,7 @@ export default function Literature({
             </div>
             <Suspense fallback={<LiteratureLoading label={copy.loadingPdfReader} />}>
             <PdfReader
+              paperId={selectedPaper.id}
               relativePath={selectedPaper.pdf.path}
               initialPage={readerPage}
               annotations={selectedPaper.pdfAnnotations}
@@ -4466,7 +4447,7 @@ export default function Literature({
         </div>
       ) : (
         <div
-          className="lit-body"
+          className={`lit-body${navigationOpen ? "" : " navigation-hidden"}${detailsOpen ? "" : " details-hidden"}`}
           style={
             {
               "--lit-sidebar-w": `${panelWidths.sidebar}px`,
@@ -4474,17 +4455,17 @@ export default function Literature({
             } as React.CSSProperties
           }
         >
-          {sidebar}
-          <div
+          {navigationOpen && sidebar}
+          {navigationOpen && <div
             className="lit-panel-divider"
             onMouseDown={(e) => startPanelResize("sidebar", e)}
-          />
+          />}
           {mainArea}
-          <div
+          {detailsOpen && <div
             className="lit-panel-divider"
             onMouseDown={(e) => startPanelResize("workspace", e)}
-          />
-          {workspace}
+          />}
+          {detailsOpen && workspace}
         </div>
       )}
 
@@ -4495,8 +4476,7 @@ export default function Literature({
           {copy.footer.papersSummary(papers.length, downloadedCount)}
           <span hidden>{papers.length} {papers.length === 1 ? "paper" : "papers"} · {downloadedCount} {downloadedCount === 1 ? "PDF" : "PDFs"}</span>
         </span>
-        <span className="lit-footer-path">
-          {storageStatus
+        <span className="lit-footer-path" title={storageStatus
             ? copy.footer.storageReady({
                 projectName: currentProject?.name,
                 schemaVersion: storageStatus.schemaVersion,
@@ -4505,7 +4485,14 @@ export default function Literature({
                 databaseSize: formatStorageBytes(storageStatus.databaseBytes),
                 latestBackupSize: storageStatus.latestBackup ? formatStorageBytes(storageStatus.latestBackup.bytes) : undefined,
               })
-            : copy.footer.storageLoading}
+            : copy.footer.storageLoading}>
+          {storageStatus
+            ? (storageStatus.health ?? storageHealth)?.healthy === false
+              ? copy.libraryUi.storageAttention
+              : (storageStatus.health ?? storageHealth)?.healthy === true
+                ? copy.libraryUi.localStorage
+                : copy.libraryUi.storageChecking
+            : copy.libraryUi.storageChecking}
         </span>
         {storageStatus && (
           <button
@@ -4542,6 +4529,10 @@ function NewItemDialog({
   const [itemType, setItemType] = useState("article");
   const [authors, setAuthors] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const returnFocus = useRef(document.activeElement as HTMLElement | null);
+  useEffect(() => () => {
+    if (returnFocus.current?.isConnected) returnFocus.current.focus();
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -4573,7 +4564,15 @@ function NewItemDialog({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <form className="lit-new-item-modal" role="dialog" aria-modal="true" aria-labelledby="lit-new-item-heading" onSubmit={submit}>
+      <form className="lit-new-item-modal" role="dialog" aria-modal="true" aria-labelledby="lit-new-item-heading" onSubmit={submit}
+        onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled)"));
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }}>
         <header className="lit-new-item-head">
           <div>
             <h2 id="lit-new-item-heading">{copy.newItemDialog.heading}</h2>
@@ -4636,8 +4635,6 @@ function PaperTable({
   searchLoading,
   libraryCount,
   loaded,
-  filter,
-  sort,
   checked,
   allVisibleSelected,
   someVisibleSelected,
@@ -4645,28 +4642,23 @@ function PaperTable({
   selectedChildId,
   libraryModel,
   expandedItems,
-  viewLabel,
   isTrashView,
   workflowGradeRunId,
   advancedSearchOpen,
   advancedConditions,
   activeSavedSearchName,
   currentCollectionId,
-  onFilterChange,
-  onSaveDynamicSearch,
-  onOpenAdvancedSearch,
   onChangeAdvancedSearch,
   onSaveAdvancedSearch,
+  onApplyAdvancedSearch,
   onCloseAdvancedSearch,
   onBatchRemoveFromCollection,
   onBatchQuickCopy,
   onBatchReport,
-  onCreateItem,
   onImportBibliography,
   onImportPdf,
   onAddIdentifier,
   onToggleAll,
-  onSortChange,
   onSelectPaper,
   onOpenPaperReader,
   onSelectChild,
@@ -4682,10 +4674,10 @@ function PaperTable({
   onBatchDelete,
   onBatchRestore,
   onBatchPermanentDelete,
-  onEmptyTrash,
   onBatchMergeDuplicates,
   onBatchClear,
   onLoadMoreSearch,
+  onResetView,
 }: {
   papers: LiteraturePaper[];
   searchTotal?: number;
@@ -4693,8 +4685,6 @@ function PaperTable({
   searchLoading: boolean;
   libraryCount: number;
   loaded: boolean;
-  filter: string;
-  sort: SortKey;
   checked: Set<string>;
   allVisibleSelected: boolean;
   someVisibleSelected: boolean;
@@ -4702,28 +4692,23 @@ function PaperTable({
   selectedChildId: string | null;
   libraryModel: LiteratureLibraryModelSnapshot | null;
   expandedItems: Set<string>;
-  viewLabel: string;
   isTrashView: boolean;
   workflowGradeRunId?: string;
   advancedSearchOpen: boolean;
   advancedConditions: LiteratureSearchCondition[];
   activeSavedSearchName?: string;
   currentCollectionId?: string;
-  onFilterChange: (v: string) => void;
-  onSaveDynamicSearch: () => void;
-  onOpenAdvancedSearch: () => void;
   onChangeAdvancedSearch: (conditions: LiteratureSearchCondition[]) => void;
   onSaveAdvancedSearch: (conditions: LiteratureSearchCondition[], name: string) => void;
+  onApplyAdvancedSearch: (conditions: LiteratureSearchCondition[]) => void;
   onCloseAdvancedSearch: () => void;
   onBatchRemoveFromCollection: () => void;
   onBatchQuickCopy: () => void;
   onBatchReport: () => void;
-  onCreateItem: () => void;
   onImportBibliography: () => void;
   onImportPdf: () => void;
   onAddIdentifier: () => void;
   onToggleAll: () => void;
-  onSortChange: (v: SortKey) => void;
   onSelectPaper: (p: LiteraturePaper) => void;
   onOpenPaperReader: (p: LiteraturePaper) => void;
   onSelectChild: (paper: LiteraturePaper, child: LiteratureTreeChild) => void;
@@ -4739,10 +4724,10 @@ function PaperTable({
   onBatchDelete: () => void;
   onBatchRestore: () => void;
   onBatchPermanentDelete: () => void;
-  onEmptyTrash: () => void;
   onBatchMergeDuplicates: () => void;
   onBatchClear: () => void;
   onLoadMoreSearch: () => void;
+  onResetView: () => void;
 }) {
   const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
@@ -4789,7 +4774,7 @@ function PaperTable({
   const rowVirtualizer = useVirtualizer({
     count: treeRows.length,
     getScrollElement: () => tableScrollRef.current,
-    estimateSize: (index) => treeRows[index]?.kind === "child" ? 46 : 54,
+    estimateSize: (index) => treeRows[index]?.kind === "child" ? 46 : 76,
     overscan: 10,
     getItemKey: (index) => {
       const row = treeRows[index];
@@ -4802,9 +4787,9 @@ function PaperTable({
   const renderedRows = isVirtualized
     ? (virtualRows.length > 0
       ? virtualRows.map((virtualRow) => ({ index: virtualRow.index, start: virtualRow.start }))
-      : treeRows.slice(0, 20).map((_, index) => ({ index, start: index * 54 })))
+      : treeRows.slice(0, 20).map((_, index) => ({ index, start: index * 76 })))
     : treeRows.map((_, index) => ({ index, start: 0 }));
-  const tableColumns = `${32}px 22px minmax(0, 1fr) ${colWidths.venue}px ${colWidths.year}px ${colWidths.tags}px 30px`;
+  const tableColumns = `32px 22px minmax(220px, 1fr) var(--lit-venue-width, ${colWidths.venue}px) ${colWidths.year}px var(--lit-tags-width, ${colWidths.tags}px) 30px`;
 
   const startResize = (col: keyof typeof colWidths, e: { clientX: number; preventDefault(): void; stopPropagation(): void }, dir: 1 | -1 = 1) => {
     e.preventDefault();
@@ -4830,109 +4815,41 @@ function PaperTable({
 
   return (
     <>
-      <div className="lit-review-toolbar">
-        <div className="lit-review-quick-actions" role="toolbar" aria-label={copy.table.newItem}>
-          <button
-            type="button"
-            className="lit-review-quick-btn primary"
-            onClick={onCreateItem}
-            title={copy.table.newItem}
-          >
-            <SvgIcon name="plus" size={13} /> <span>{copy.table.newItem}</span>
-          </button>
-        </div>
-        <span className="lit-review-title">{viewLabel}</span>
-        <span className="lit-review-count">
-          {searchTotal === undefined ? papers.length : `${papers.length}/${searchTotal}`}
-        </span>
-        {isTrashView && papers.length > 0 && (
-          <button
-            type="button"
-            className="lit-review-trash-action"
-            onClick={onEmptyTrash}
-            title={copy.table.emptyTrash}
-          >
-            {copy.table.emptyTrash}
-          </button>
-        )}
-        <input
-          className="lit-review-filter"
-          value={filter}
-          onChange={(e) => onFilterChange(e.target.value)}
-          placeholder={copy.table.filterPlaceholder}
-          aria-label={copy.table.filterAria}
-        />
-        {filter && (
-          <button
-            type="button"
-            className="lit-review-clear-filter"
-            onClick={() => onFilterChange("")}
-            aria-label={copy.table.clearFilterAria}
-            title={copy.table.clearFilterAria}
-          >
-            <SvgIcon name="close" size={13} />
-          </button>
-        )}
-        <button
-          type="button"
-          className="lit-review-save-search"
-          onClick={onSaveDynamicSearch}
-          disabled={!filter.trim()}
-          title={copy.table.saveSearchTitle}
-        >
-          <SvgIcon name="plus" size={14} />
-        </button>
-        <button
-          type="button"
-          className={"lit-review-advanced-search" + (advancedSearchOpen ? " active" : "")}
-          onClick={onOpenAdvancedSearch}
-          aria-pressed={advancedSearchOpen}
-          title={copy.table.advancedSearch}
-        >
-          <SvgIcon name="search" size={14} /><span>{copy.table.advancedSearch}</span>
-        </button>
-        <select
-          className="lit-review-sort"
-          value={sort}
-          onChange={(e) => onSortChange(e.target.value as SortKey)}
-          aria-label={copy.table.sortAria}
-        >
-          <option value="added">{copy.table.sortAdded}</option>
-          <option value="fit">{copy.table.sortFit}</option>
-          <option value="year">{copy.table.sortYear}</option>
-          <option value="citations">{copy.table.sortCitations}</option>
-          <option value="title">{copy.table.sortTitle}</option>
-        </select>
-      </div>
-
       {advancedSearchOpen && (
         <AdvancedSearchBuilder
           conditions={advancedConditions}
           onChange={onChangeAdvancedSearch}
           onSave={onSaveAdvancedSearch}
+          onApply={onApplyAdvancedSearch}
           onClose={onCloseAdvancedSearch}
           initialName={activeSavedSearchName ?? ""}
         />
       )}
 
+      <LiteratureBatchBar count={batchIds.length} isTrashView={isTrashView} currentCollectionId={currentCollectionId}
+        onShortlist={onBatchShortlist} onExclude={onBatchExclude} onDownload={onBatchDownload}
+        onDelete={onBatchDelete} onRestore={onBatchRestore} onPermanentDelete={onBatchPermanentDelete}
+        onMerge={onBatchMergeDuplicates} onRemoveFromCollection={onBatchRemoveFromCollection}
+        onQuickCopy={onBatchQuickCopy} onReport={onBatchReport} onClear={onBatchClear} />
       <div className="lit-table-wrap" ref={tableScrollRef}>
-        {loaded && libraryCount === 0 ? (
-        <div className="lit-empty-state">
-          <p>{copy.table.emptyTitle}</p>
-          <p className="dim">{copy.table.emptyHint}</p>
-          <button type="button" onClick={onImportBibliography}>
-            {copy.table.importBibliography}
-          </button>
-          <button type="button" onClick={onImportPdf}>
-            {copy.table.importPdf}
-          </button>
-          <button type="button" onClick={onAddIdentifier}>
-            {copy.table.addIdentifier}
-          </button>
-        </div>
-        ) : loaded && libraryCount > 0 && papers.length === 0 ? (
-          <div className="lit-empty-state">
-            <p className="dim">{copy.table.noMatches}</p>
+        {!loaded ? (
+          <LiteratureLoading label={copy.libraryUi.loading} />
+        ) : libraryCount === 0 && !isTrashView ? (
+          <div className="lit-empty-state lit-library-empty">
+            <span className="lit-empty-symbol" aria-hidden="true"><SvgIcon name="library" size={28} /></span>
+            <h3>{copy.libraryUi.emptyTitle}</h3>
+            <p>{copy.libraryUi.emptyHint}</p>
+            <div className="lit-empty-actions">
+              <button type="button" className="primary" onClick={onImportPdf}>{copy.table.importPdf}</button>
+              <button type="button" onClick={onImportBibliography}>{copy.table.importBibliography}</button>
+              <button type="button" onClick={onAddIdentifier}>{copy.table.addIdentifier}</button>
+            </div>
+          </div>
+        ) : papers.length === 0 ? (
+          <div className="lit-empty-state lit-library-empty">
+            <h3>{isTrashView && libraryCount === 0 ? copy.libraryUi.emptyTrash : copy.libraryUi.noMatchesTitle}</h3>
+            <p>{copy.libraryUi.noMatchesHint}</p>
+            <button type="button" onClick={onResetView}>{copy.libraryUi.allPapers}</button>
           </div>
         ) : (
            <table
@@ -4953,7 +4870,7 @@ function PaperTable({
                     aria-label={copy.table.selectAllAria}
                   />
                 </th>
-                <th className="lit-th lit-th-stage" />
+                <th className="lit-th lit-th-stage" aria-label={copy.libraryUi.readingState} />
                 <th className="lit-th lit-th-title">
                   {copy.table.columnTitle}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e, -1)} />
@@ -5037,37 +4954,12 @@ function PaperTable({
         </div>
       )}
 
-      {batchIds.length > 0 && (
-        <div className="lit-batch-bar" role="toolbar" aria-label={import.meta.env.MODE === "test" ? "Batch actions" : copy.table.batchActionsAria}>
-          {!isTrashView && batchIds.length === 2 && <button type="button" onClick={onBatchMergeDuplicates}>{copy.table.mergeDuplicates}</button>}
-          <span>{copy.table.selectedCount(batchIds.length)}</span>
-          {isTrashView ? (
-            <>
-              <button type="button" onClick={onBatchRestore}>{copy.table.restore}</button>
-              <button type="button" className="danger" onClick={onBatchPermanentDelete}>{copy.table.permanentlyDelete}</button>
-            </>
-          ) : (
-            <>
-              <button type="button" onClick={onBatchShortlist}>{copy.table.shortlist}</button>
-              <button type="button" onClick={onBatchExclude}>{copy.table.exclude}</button>
-              <button type="button" onClick={onBatchDownload}>{copy.table.downloadPdf}</button>
-              <button type="button" onClick={onBatchQuickCopy}>{copy.table.quickCopy}</button>
-              <button type="button" onClick={onBatchReport}>{copy.table.report}</button>
-              {currentCollectionId && (
-                <button type="button" onClick={onBatchRemoveFromCollection}>{copy.table.removeFromCollection}</button>
-              )}
-              <button type="button" className="danger" onClick={onBatchDelete}>{copy.table.delete}</button>
-            </>
-          )}
-          <button type="button" onClick={onBatchClear}>{copy.table.clear}</button>
-        </div>
-      )}
     </>
   );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Paper row (Zotero-style table row)
+// Reference row
 // ──────────────────────────────────────────────────────────────────────────────
 
 function PaperRow({
@@ -5121,10 +5013,11 @@ function PaperRow({
       className={`lit-row${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
       style={rowStyle}
       onClick={onSelect}
-      onDoubleClick={() => {
-        if (paper.pdf.path) onOpenReader();
+      onDoubleClick={(event) => {
+        if ((event.target as HTMLElement).closest("button, input")) return;
+        if (!isTrashView && paper.pdf.path) onOpenReader();
       }}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect(); } }}
       tabIndex={0}
       role="row"
       aria-selected={selected}
@@ -5145,14 +5038,14 @@ function PaperRow({
           className={`lit-read-toggle${paper.unread ? " unread" : " read"}`}
           aria-label={paper.unread ? copy.row.markRead : copy.row.markUnread}
           aria-pressed={!paper.unread}
-          title={`${paper.unread ? copy.row.markRead : copy.row.markUnread} · ${stageLabels(copy)[paper.stage]}`}
+          title={paper.unread ? copy.libraryUi.unread : copy.libraryUi.read}
           disabled={isTrashView}
           onClick={(event) => {
             event.stopPropagation();
             onToggleRead();
           }}
         >
-          <span className={`lit-stage-dot ${paper.stage}`} aria-hidden="true" />
+          <span className="lit-reading-dot" aria-hidden="true" />
         </button>
       </td>
       <td className="lit-row-title-cell">
@@ -5160,7 +5053,7 @@ function PaperRow({
           <button
             type="button"
             className={`lit-item-disclosure${hasChildren ? " has-children" : ""}`}
-            aria-label={expanded ? "Collapse item" : "Expand item"}
+            aria-label={expanded ? copy.libraryUi.collapseItem : copy.libraryUi.expandItem}
             aria-expanded={hasChildren ? expanded : undefined}
             disabled={!hasChildren}
             onClick={(event) => {
@@ -5170,16 +5063,19 @@ function PaperRow({
           >
             {hasChildren && <SvgIcon name={expanded ? "chevronDown" : "chevronRight"} size={12} />}
           </button>
-          <span className="lit-item-kind-icon" title={itemTypeLabel(copy, paper.itemType)} aria-hidden="true">
-            <SvgIcon name="document" size={13} />
-          </span>
-          <div className={`lit-row-title${paper.unread ? " unread" : ""}`}>{paper.title}</div>
+          <div className={`lit-row-title${paper.unread ? " unread" : ""}`} title={paper.title}>{paper.title}</div>
         </div>
         <div className="lit-row-authors">
-          {formatAuthors(copy, paper.authors)}
-          {paper.pdf.status === "downloaded" && (
-            <span className="lit-pdf-badge" title={paper.pdf.path ?? ""}>PDF</span>
-          )}
+          <span className="lit-row-author-names" title={paper.authors.join(", ")}>{formatAuthors(copy, paper.authors)}</span>
+          {paper.pdf.path ? (
+            <button type="button" className="lit-pdf-badge" title={copy.workspaceHeader.openPdf}
+              aria-label={copy.workspaceHeader.openPdf + ": " + paper.title} disabled={isTrashView}
+              onClick={(event) => { event.stopPropagation(); onOpenReader(); }}>PDF</button>
+          ) : paper.pdf.status === "downloading" || paper.pdf.status === "queued" ? (
+            <span className="lit-row-pdf-status">{paper.pdf.status === "queued" ? copy.libraryUi.pdfQueued : copy.infoTab.downloading}</span>
+          ) : paper.pdf.status === "failed" ? (
+            <span className="lit-row-pdf-status failed" title={copy.libraryUi.pdfFailed}>{copy.libraryUi.pdfFailed}</span>
+          ) : null}
           {paper.evidence.length > 0 && (
             <span className="lit-row-evidence-badge" title={copy.row.hasEvidenceTitle}>{copy.row.hasEvidenceBadge}</span>
           )}
@@ -5215,6 +5111,8 @@ function PaperRow({
           onClick={(e) => { e.stopPropagation(); if (!isTrashView) onToggleStar(); }}
           disabled={isTrashView}
           aria-label={paper.starred ? copy.row.unstar : copy.row.star}
+          aria-pressed={paper.starred}
+          title={paper.starred ? copy.row.unstar : copy.row.star}
         >
           <SvgIcon name="star" size={16} />
         </button>
@@ -5265,7 +5163,7 @@ function LiteratureChildRow({
       style={rowStyle}
       onClick={onSelect}
       onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
+        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
           event.preventDefault();
           onSelect();
         }
@@ -5283,7 +5181,7 @@ function LiteratureChildRow({
           <button
             type="button"
             className={`lit-item-disclosure${hasChildren ? " has-children" : ""}`}
-            aria-label={expanded ? "Collapse item" : "Expand item"}
+            aria-label={expanded ? copy.libraryUi.collapseItem : copy.libraryUi.expandItem}
             aria-expanded={hasChildren ? expanded : undefined}
             disabled={!hasChildren}
             onClick={(event) => {
@@ -5332,7 +5230,6 @@ function WorkspaceOverview({
   onGenerateBrief,
   onShortlist,
   onDownload,
-  onAsk,
   onViewEvidence,
   onOpenAnnotation,
   onDelete,
@@ -5344,7 +5241,6 @@ function WorkspaceOverview({
   onGenerateBrief: (id: string) => void;
   onShortlist: () => void;
   onDownload: () => void;
-  onAsk: () => void;
   onViewEvidence: () => void;
   onOpenAnnotation: (page: number, annotationId: string) => void;
   onDelete: () => void;
@@ -5361,9 +5257,6 @@ function WorkspaceOverview({
       {/* 快速判断 */}
       <div className="lit-section">
         <div className="lit-section-heading">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M8 2l1.5 4.5H14l-3.7 2.7 1.4 4.3L8 11l-3.7 2.5 1.4-4.3L2 6.5h4.5L8 2z" fill="currentColor" />
-          </svg>
           <span>{copy.overview.quickJudgment}</span>
         </div>
         <div className="lit-quick-judgment">
@@ -5386,11 +5279,6 @@ function WorkspaceOverview({
       <div className="lit-section">
         <button type="button" className="lit-abstract-toggle" onClick={onToggleAbstract}>
           <div className="lit-section-heading">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <rect x="2" y="3" width="12" height="1.5" rx=".75" fill="currentColor" />
-              <rect x="2" y="7" width="10" height="1.5" rx=".75" fill="currentColor" />
-              <rect x="2" y="11" width="8" height="1.5" rx=".75" fill="currentColor" />
-            </svg>
             <span>{copy.overview.abstract}</span>
             {!paper.abstract && <span className="lit-section-badge">{copy.overview.missing}</span>}
           </div>
@@ -5406,11 +5294,6 @@ function WorkspaceOverview({
       {/* 结构化简报 */}
       <div className="lit-section">
         <div className="lit-section-heading">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="2" y="2" width="4" height="12" rx="1" fill="currentColor" opacity=".5" />
-            <rect x="7" y="2" width="3" height="12" rx="1" fill="currentColor" opacity=".7" />
-            <rect x="11" y="2" width="3" height="12" rx="1" fill="currentColor" />
-          </svg>
           <span>{copy.overview.structuredBrief}</span>
         </div>
         {paper.brief ? (
@@ -5458,10 +5341,6 @@ function WorkspaceOverview({
       {paper.evidence.length > 0 && (
         <div className="lit-section">
           <div className="lit-section-heading">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
-              <path d="M5 6h6M5 9h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
             <span>{copy.overview.evidence}</span>
             <span className="lit-section-badge">{paper.evidence.length}</span>
             <button type="button" className="lit-view-all-btn" onClick={onViewEvidence}>
@@ -5487,25 +5366,6 @@ function WorkspaceOverview({
               {copy.overview.addToShortlist}
             </button>
           )}
-          <button
-            type="button"
-            className="lit-action-btn"
-            aria-label={paper.pdf.status === "downloaded" ? copy.overview.openPdfAria : copy.overview.downloadPdfAria}
-            onClick={onDownload}
-            disabled={paper.pdf.status === "downloading"}
-            title={paper.pdf.status === "downloaded" ? paper.pdf.path : undefined}
-          >
-            {paper.pdf.status === "downloaded"
-              ? copy.workspaceHeader.openPdf
-              : paper.pdf.status === "downloading"
-                ? copy.overview.downloading
-                : paper.pdf.url
-                  ? copy.table.downloadPdf
-                  : copy.overview.browserGetPdf}
-          </button>
-          <button type="button" className="lit-action-btn" aria-label={copy.overview.askAgentAria} onClick={onAsk}>
-            {copy.overview.askAgent}
-          </button>
           <button type="button" className="lit-action-btn" onClick={onViewEvidence}>
             {copy.overview.viewEvidence}
           </button>
@@ -6486,8 +6346,6 @@ function InfoTab({
   tagDraft,
   onTagDraft,
   onAddTag,
-  onOpenReader,
-  onAsk,
   onShortlist,
   onUpdateMetadata,
   onSetRating,
@@ -6501,8 +6359,6 @@ function InfoTab({
   tagDraft: string;
   onTagDraft: (v: string) => void;
   onAddTag: () => void;
-  onOpenReader: () => void;
-  onAsk: () => void;
   onShortlist: () => void;
   onUpdateMetadata: (patch: LiteratureMetadataPatch) => void;
   onSetRating: (rating: number) => void;
@@ -6521,6 +6377,12 @@ function InfoTab({
     (libraryModel?.tags ?? []).map((tag) => [tag.name.toLocaleLowerCase(), tag]),
   );
   const [metadataEditing, setMetadataEditing] = useState(false);
+  const metadataEditor = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!metadataEditing) return;
+    metadataEditor.current?.scrollIntoView?.({ block: "nearest" });
+    metadataEditor.current?.querySelector<HTMLInputElement>("input")?.focus();
+  }, [metadataEditing]);
   const [metadataDraft, setMetadataDraft] = useState(() => metadataDraftFor(paper, normalizedItem));
   const [creatorDraft, setCreatorDraft] = useState<LiteratureCreatorInput[]>(() => creatorDraftFor(paper, normalizedItem));
   const [extendedFields, setExtendedFields] = useState<Array<{ id: string; key: string; value: string }>>(
@@ -6618,7 +6480,7 @@ function InfoTab({
               {copy.fit[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
             </span>
           )}
-          {paper.starred && <span className="lip-star-badge"><SvgIcon name="star" size={13} /> {copy.infoTab.starred}</span>}
+          {paper.starred && <span className="lip-star-badge">{copy.infoTab.starred}</span>}
         </div>
       )}
 
@@ -6631,7 +6493,11 @@ function InfoTab({
           setMetadataEditing(true);
         }}
       >
-        <div className="lip-section-head">{copy.infoTab.infoHeading}</div>
+        <div className="lip-section-head lip-info-section-heading">
+          <span>{copy.infoTab.infoHeading}</span>
+          <button type="button" className="lit-quiet-button" aria-expanded={metadataEditing}
+            onClick={() => { setMetadataError(null); setMetadataEditing((value) => !value); }}>{copy.infoTab.editMetadata}</button>
+        </div>
         <dl className="lip-meta">
           <dt>{copy.infoTab.itemType}</dt><dd>{itemTypeLabel(copy, normalizedItem?.item.itemType ?? paper.itemType)}</dd>
           {displayCreators.map((creator, i) => (
@@ -6770,7 +6636,7 @@ function InfoTab({
       )}
 
       {metadataEditing && (
-        <div className="lip-section lip-metadata-editor">
+        <div className="lip-section lip-metadata-editor" ref={metadataEditor}>
           <div className="lip-section-head">{copy.infoTab.editMetadataHeading}</div>
           <label>{copy.infoTab.fieldTitle}<input value={metadataDraft.title} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, title: event.target.value }))} /></label>
           <label>{copy.infoTab.fieldType}
@@ -6923,13 +6789,6 @@ function InfoTab({
       )}
 
       <div className="lip-section lip-actions-section">
-        <button type="button" className="lit-action-btn" onClick={onOpenReader}
-                disabled={paper.pdf.status === "downloading"}>
-          {paper.pdf.status === "downloaded" ? copy.infoTab.openPdf
-            : paper.pdf.status === "downloading" ? copy.infoTab.downloading
-            : paper.pdf.url ? copy.infoTab.downloadPdf : copy.infoTab.getPdf}
-        </button>
-        <button type="button" className="lit-action-btn" onClick={onAsk}>{copy.infoTab.askAgent}</button>
         {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
           <button type="button" className="lit-action-btn starred" onClick={onShortlist}>{copy.infoTab.addToShortlist}</button>
         )}
@@ -7086,7 +6945,7 @@ function NavItem({
   dot?: PaperStage;
 }) {
   return (
-    <button type="button" className={`lit-nav-item${active ? " active" : ""}`} onClick={onClick} title={label}>
+    <button type="button" className={`lit-nav-item${active ? " active" : ""}`} aria-current={active ? "page" : undefined} onClick={onClick} title={label}>
       <span className="lit-nav-icon" aria-hidden="true">
         {dot ? <span className={`lit-stage-dot ${dot}`} /> : <SvgIcon name={icon} size={14} />}
       </span>

@@ -109,10 +109,9 @@ body,
 #root {
   margin: 0;
   height: 100%;
-  /* The desktop shell owns its viewport. Individual work surfaces (such as
-     `.chat-scroll`) provide their own scrolling; letting the document scroll
-     as well produces a second, competing scrollbar on the Chat home page. */
-  overflow: hidden;
+  /* Only work surfaces scroll. Unlike hidden, clip also prevents focus and
+     scrollIntoView from scrolling the window controls out of the viewport. */
+  overflow: clip;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -176,7 +175,7 @@ textarea {
   grid-template-rows: 36px 42px minmax(0, 1fr);
   grid-template-areas: "title" "head" "main";
   height: 100vh;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .window-titlebar {
@@ -18493,11 +18492,10 @@ body.somniq-resizing-col {
   bottom: 0;
 }
 
-/* `.chat-scroll` already reserves the composer's height as inline
-   padding-bottom, so this only needs to nudge the block above the optical
-   centre — a second full composer's worth of padding pushed it 74px too high. */
+/* ChatThread reserves the measured composer height outside the empty scroller.
+   Equal insets center the welcome group within the remaining visible area. */
 .chat-empty .chat-welcome {
-  padding-bottom: 56px;
+  padding-block: 26px;
 }
 
 .chat-welcome {
@@ -21082,9 +21080,6 @@ button.chat-workflow-file-path:hover {
   .kb-fragment-card,
   .kb-card-actions button,
   .kb-edit-actions button,
-  .kb-graph-toggle,
-  .kb-graph-zoom-btn,
-  .kb-graph-node,
   .am-folder,
   .am-message-row,
   .memory-recall-layer-card,

@@ -1,6 +1,12 @@
 import { createElement, type SVGProps } from "react";
 
 export type SvgIconName =
+  | "bookOpen"
+  | "filter"
+  | "messageCircle"
+  | "panelLeft"
+  | "panelRight"
+  | "upload"
   | "attachment"
   | "branch"
   | "check"
@@ -75,6 +81,17 @@ const node = (
 
 function iconNodes(name: SvgIconName): IconNode[] {
   switch (name) {
+    case "bookOpen":
+      return [node("path", { d: "M8 4C6.4 2.7 3.8 2.5 1.8 3.2v9.5C4 12 6.3 12.2 8 13.4c1.7-1.2 4-1.4 6.2-.7V3.2C12.2 2.5 9.6 2.7 8 4Zm0 0v9.4", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "filter":
+      return [node("path", { d: "M2.5 4h11M4.5 8h7M6.5 12h3", strokeLinecap: "round" })];
+    case "messageCircle":
+      return [node("path", { d: "M13.5 7.5a5.5 5.5 0 0 1-8.1 4.8L2 13.5l1.2-3.4a5.5 5.5 0 1 1 10.3-2.6Z", strokeLinecap: "round", strokeLinejoin: "round" }), node("path", { d: "M5.5 7.5h5", strokeLinecap: "round" })];
+    case "panelLeft":
+    case "panelRight":
+      return [node("rect", { x: 2, y: 2.8, width: 12, height: 10.4, rx: 1.3 }), node("path", { d: name === "panelLeft" ? "M6 2.8v10.4" : "M10 2.8v10.4", strokeLinecap: "round" })];
+    case "upload":
+      return [node("path", { d: "M8 10V2.8m-2.7 2.7L8 2.8l2.7 2.7M2.8 10v3.2h10.4V10", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "attachment":
       return [node("path", { d: "m11.7 6-4.8 4.8a2.4 2.4 0 1 1-3.4-3.4l5-5a3.45 3.45 0 0 1 4.9 4.9l-5.2 5.2", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "branch":
