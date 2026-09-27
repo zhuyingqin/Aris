@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -49,6 +49,7 @@ import LiteratureToolbar, { type LiteratureSortKey } from "./LiteratureToolbar";
 import DetailTabRail from "./LiteratureDetailTabs";
 import LibraryActionMenu from "./LibraryActionMenu";
 import LiteratureBatchBar from "./LiteratureBatchBar";
+import { findLibraryRow, idsInRange, isEditableTarget, nextAfterRemoval, useNarrowerThan } from "./libraryInteraction";
 import AdvancedSearchBuilder from "./AdvancedSearchBuilder";
 import CitationStyleManager from "./CitationStyleManager";
 import LiteratureResourceReader from "./LiteratureResourceReader";
@@ -1876,6 +1877,14 @@ export default function Literature({
   const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("info");
   const [navigationOpen, setNavigationOpen] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 680px)").matches);
   const [detailsOpen, setDetailsOpen] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1080px)").matches);
+  const [trashUndo, setTrashUndo] = useState<{ ids: string[] } | null>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // Matches the container query that turns the details panel into a drawer.
+  const detailsAsDrawer = useNarrowerThan(pageRef, 850);
+  // Set when the user hides a docked details panel; selecting a row then
+  // leaves it hidden until they show it again.
+  const detailsUserHiddenRef = useRef(false);
   const [newItemOpen, setNewItemOpen] = useState(false);
   const [newItemSaving, setNewItemSaving] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
@@ -3118,14 +3127,63 @@ export default function Literature({
     }
   };
 
-  const selectPaper = (paper: LiteraturePaper) => {
+  const setDetailsVisibility = (open: boolean) => {
+    // Closing the narrow-layout drawer only dismisses it for now; hiding a
+    // docked panel is a layout choice that row selection must respect.
+    if (open) detailsUserHiddenRef.current = false;
+    else if (!detailsAsDrawer) detailsUserHiddenRef.current = true;
+    setDetailsOpen(open);
+  };
+
+  const focusSelectedRow = () => {
+    if (!selectedPaper) return;
+    findLibraryRow(pageRef.current?.querySelector(".lit-table"), selectedPaper.id)?.focus();
+  };
+
+  const selectPaper = (paper: LiteraturePaper, options: { reveal?: boolean } = {}) => {
     setSelectedId(paper.id);
     setSelectedChildId(null);
     setSelectionCleared(false);
     setReaderAttachment(null);
     setReaderPage(1);
     setReaderAnnotationId(null);
-    setDetailsOpen(true);
+    if (options.reveal && (detailsAsDrawer || !detailsUserHiddenRef.current)) setDetailsOpen(true);
+  };
+
+  /** Enter or double-click: read the PDF when there is one, otherwise show
+   * the record. */
+  const activatePaper = (paper: LiteraturePaper) => {
+    if (!isTrashView && paper.pdf.path) {
+      openPaperInReader(paper);
+      return;
+    }
+    selectPaper(paper);
+    setDetailsVisibility(true);
+    if (detailsAsDrawer) {
+      window.requestAnimationFrame(() => document.getElementById("literature-details")?.focus());
+    }
+  };
+
+  const checkMany = (ids: string[], value: boolean) =>
+    setChecked((current) => {
+      const next = new Set(current);
+      for (const id of ids) {
+        if (value) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+
+  const handleListEscape = () => {
+    if (detailsOpen && detailsAsDrawer) {
+      setDetailsVisibility(false);
+      return true;
+    }
+    if (checked.size > 0) {
+      setChecked(new Set());
+      return true;
+    }
+    return false;
   };
 
   const toggleItemExpanded = (itemId: string) => {
@@ -3217,26 +3275,69 @@ export default function Literature({
     [copy, logActivity, quickCopyItems],
   );
 
-  const confirmDeletePapers = (ids: string[]) => {
-    if (ids.length === 0) return;
-    const label = ids.length === 1 ? copy.dialogs.deletePapersLabelSingle : copy.dialogs.deletePapersLabelMany(ids.length);
-    if (!window.confirm(copy.dialogs.deletePapersConfirm(label))) return;
-    deletePapers(ids);
+  /** Moving to the trash is recoverable, so it happens at once and offers an
+   * undo instead of asking first. */
+  const trashPapers = (ids: string[]) => {
+    const cleaned = [...new Set(ids.filter(Boolean))];
+    if (cleaned.length === 0) return;
+    deletePapers(cleaned);
     setChecked((cur) => {
       const next = new Set(cur);
-      for (const id of ids) next.delete(id);
+      for (const id of cleaned) next.delete(id);
       return next;
     });
-    if (selectedId && ids.includes(selectedId)) {
+    if (selectedId && cleaned.includes(selectedId)) {
       setSelectedId(null);
       setSelectionCleared(false);
     }
+    setTrashUndo({ ids: cleaned });
   };
 
-  const confirmRestorePapers = (ids: string[]) => {
+  const undoTrash = () => {
+    if (!trashUndo) return;
+    void restorePapers(trashUndo.ids);
+    setTrashUndo(null);
+  };
+
+  useEffect(() => {
+    if (!trashUndo) return;
+    const timer = window.setTimeout(() => setTrashUndo(null), 8000);
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== "z") return;
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      void restorePapers(trashUndo.ids);
+      setTrashUndo(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [restorePapers, trashUndo]);
+
+  // An undo restores by id in the loaded project, so it must not outlive it.
+  useEffect(() => setTrashUndo(null), [projectId]);
+
+  // "/" or Ctrl/Cmd+F jumps to the library search while the list is showing.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const input = searchInputRef.current;
+      if (!input || event.defaultPrevented || isEditableTarget(event.target)) return;
+      if (document.querySelector("[aria-modal='true']")) return;
+      const find = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "f";
+      const slash = event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey;
+      if (!find && !slash) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const restorePapersNow = (ids: string[]) => {
     if (ids.length === 0) return;
-    const label = ids.length === 1 ? copy.dialogs.deletePapersLabelSingle : copy.dialogs.deletePapersLabelMany(ids.length);
-    if (!window.confirm(copy.dialogs.restorePapersConfirm(label))) return;
     void restorePapers(ids);
     setChecked((cur) => {
       const next = new Set(cur);
@@ -3845,7 +3946,7 @@ export default function Literature({
         onFilterChange={setFilter}
         onSortChange={setSort}
         onToggleNavigation={() => setNavigationOpen((value) => !value)}
-        onToggleDetails={() => setDetailsOpen((value) => !value)}
+        onToggleDetails={() => setDetailsVisibility(!detailsOpen)}
         onOpenAdvancedSearch={openAdvancedSearch}
         onSaveSearch={saveCurrentFilter}
         onRemoveTag={(tag) => setSelectedTags((current) => new Set([...current].filter((entry) => entry !== tag)))}
@@ -3855,6 +3956,7 @@ export default function Literature({
         onImportPdf={() => void importPdfAsRecord()}
         onAddIdentifier={() => void addIdentifier()}
         onEmptyTrash={emptyTrash}
+        searchRef={searchInputRef}
       />
       <PaperTable
         papers={visiblePapers}
@@ -3889,18 +3991,22 @@ export default function Literature({
         onToggleAll={toggleAllVisible}
         onSelectPaper={selectPaper}
         onOpenPaperReader={openPaperInReader}
+        onActivatePaper={activatePaper}
         onSelectChild={selectLibraryChild}
         onToggleItem={toggleItemExpanded}
         onPaperDragStart={startPaperDrag}
         onToggleChecked={toggleChecked}
+        onCheckMany={checkMany}
+        onTrashPapers={trashPapers}
+        onListEscape={handleListEscape}
         onToggleRead={toggleRead}
         onToggleStar={toggleStar}
         batchIds={batchIds}
         onBatchShortlist={() => runBatch((ids) => setStage(ids, "shortlist"))}
         onBatchExclude={() => runBatch((ids) => setStage(ids, "excluded"))}
         onBatchDownload={() => runBatch((ids) => { for (const id of ids) void downloadOrBrowse(id); })}
-        onBatchDelete={() => confirmDeletePapers(batchIds)}
-        onBatchRestore={() => confirmRestorePapers(batchIds)}
+        onBatchDelete={() => trashPapers(batchIds)}
+        onBatchRestore={() => restorePapersNow(batchIds)}
         onBatchPermanentDelete={() => confirmPermanentDeletePapers(batchIds)}
         onBatchMergeDuplicates={() => void mergeSelectedDuplicates()}
         onBatchRemoveFromCollection={() => {
@@ -3918,6 +4024,14 @@ export default function Literature({
           setLiteratureLibraryScope(null);
         }}
       />
+      {trashUndo && (
+        <div className="lit-undo-toast" role="status">
+          <span>{copy.libraryUi.movedToTrash(trashUndo.ids.length)}</span>
+          <button type="button" className="lit-undo-action" aria-keyshortcuts="Control+Z Meta+Z" onClick={undoTrash}>{copy.libraryUi.undo}</button>
+          <button type="button" className="lit-undo-dismiss" aria-label={copy.libraryUi.dismissNotice} title={copy.libraryUi.dismissNotice}
+            onClick={() => setTrashUndo(null)}><SvgIcon name="close" size={13} /></button>
+        </div>
+      )}
     </div>
   );
 
@@ -3933,7 +4047,14 @@ export default function Literature({
     { id: "related", label: copy.workspaceHeader.tabRelated },
   ];
   const workspace = (
-    <section className="lit-workspace" id="literature-details" aria-label={copy.libraryUi.details}>
+    <section className="lit-workspace" id="literature-details" aria-label={copy.libraryUi.details} tabIndex={-1}
+      onKeyDown={(event) => {
+        // The narrow-layout drawer covers the list; Escape hands focus back.
+        if (event.key !== "Escape" || !detailsAsDrawer || event.defaultPrevented || isEditableTarget(event.target)) return;
+        event.preventDefault();
+        setDetailsVisibility(false);
+        focusSelectedRow();
+      }}>
       {selectedPaper ? (
         <>
           <div className="lit-info-header">
@@ -3946,7 +4067,10 @@ export default function Literature({
               </div>
             </div>
             <button type="button" className="lit-workspace-icon-btn" aria-label={copy.libraryUi.hideDetails}
-              title={copy.libraryUi.hideDetails} onClick={() => setDetailsOpen(false)}><SvgIcon name="close" size={16} /></button>
+              title={copy.libraryUi.hideDetails} onClick={() => {
+                setDetailsVisibility(false);
+                if (detailsAsDrawer) focusSelectedRow();
+              }}><SvgIcon name="close" size={16} /></button>
           </div>
           <div className="lit-inspector-actions">
               {isTrashView && (
@@ -3955,7 +4079,7 @@ export default function Literature({
                   className="lit-workspace-icon-btn"
                   title={copy.table.restore}
                   aria-label={copy.table.restore}
-                  onClick={() => confirmRestorePapers([selectedPaper.id])}
+                  onClick={() => restorePapersNow([selectedPaper.id])}
                 ><SvgIcon name="reset" size={16} /></button>
               )}
               <button
@@ -3998,11 +4122,7 @@ export default function Literature({
                 onSetRating={(rating) => setRating(selectedPaper.id, rating)}
                 onSetTagColor={(tag, color) => void setTagColor(selectedPaper.id, tag, color)}
                 onToggleCollection={(colId) => toggleCollection(selectedPaper.id, colId)}
-                onDelete={() => {
-                  if (window.confirm(copy.dialogs.deletePaperByTitleConfirm(selectedPaper.title))) {
-                    deletePapers([selectedPaper.id]);
-                  }
-                }}
+                onDelete={() => trashPapers([selectedPaper.id])}
               />
             )}
             {workspaceTab === "overview" && (
@@ -4016,11 +4136,7 @@ export default function Literature({
                 onDownload={() => void downloadOrBrowse(selectedPaper.id)}
                 onViewEvidence={() => setWorkspaceTab("evidence")}
                 onOpenAnnotation={(page, annotationId) => openAnnotationInReader(selectedPaper, page, annotationId)}
-                onDelete={() => {
-                  if (window.confirm(copy.dialogs.deletePaperByTitleConfirm(selectedPaper.title))) {
-                    deletePapers([selectedPaper.id]);
-                  }
-                }}
+                onDelete={() => trashPapers([selectedPaper.id])}
               />
             )}
             {workspaceTab === "reader" && !selectedPaper.pdf.path && !readerAttachment && (
@@ -4126,7 +4242,7 @@ export default function Literature({
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="lit-page">
+    <div className="lit-page" ref={pageRef}>
       {newItemOpen && (
         <NewItemDialog
           busy={newItemSaving}
@@ -4661,10 +4777,14 @@ function PaperTable({
   onToggleAll,
   onSelectPaper,
   onOpenPaperReader,
+  onActivatePaper,
   onSelectChild,
   onToggleItem,
   onPaperDragStart,
   onToggleChecked,
+  onCheckMany,
+  onTrashPapers,
+  onListEscape,
   onToggleRead,
   onToggleStar,
   batchIds,
@@ -4709,12 +4829,19 @@ function PaperTable({
   onImportPdf: () => void;
   onAddIdentifier: () => void;
   onToggleAll: () => void;
-  onSelectPaper: (p: LiteraturePaper) => void;
+  /** `reveal` marks a pointer selection, which may bring the details into view;
+   * keyboard and multi-select movement only change what they show. */
+  onSelectPaper: (p: LiteraturePaper, options?: { reveal?: boolean }) => void;
   onOpenPaperReader: (p: LiteraturePaper) => void;
+  onActivatePaper: (p: LiteraturePaper) => void;
   onSelectChild: (paper: LiteraturePaper, child: LiteratureTreeChild) => void;
   onToggleItem: (itemId: string) => void;
   onPaperDragStart: (event: DragEvent<HTMLTableRowElement>, paperId: string) => void;
   onToggleChecked: (id: string) => void;
+  onCheckMany: (ids: string[], checked: boolean) => void;
+  onTrashPapers: (ids: string[]) => void;
+  /** Returns whether Escape closed something, so an unhandled key can bubble. */
+  onListEscape: () => boolean;
   onToggleRead: (id: string) => void;
   onToggleStar: (id: string) => void;
   batchIds: string[];
@@ -4791,6 +4918,163 @@ function PaperTable({
     : treeRows.map((_, index) => ({ index, start: 0 }));
   const tableColumns = `32px 22px minmax(220px, 1fr) var(--lit-venue-width, ${colWidths.venue}px) ${colWidths.year}px var(--lit-tags-width, ${colWidths.tags}px) 30px`;
 
+  // The list is one focus stop: arrow keys move between rows and Tab leaves
+  // it. When the focused row scrolls out of the virtual window, the first
+  // rendered row takes the stop so the list stays reachable.
+  const rowKeys = useMemo(() => treeRows.map((row) => (
+    row.kind === "paper" ? row.paper.id : `${row.paper.id}:${row.child.id}`
+  )), [treeRows]);
+  const paperIds = useMemo(() => papers.map((paper) => paper.id), [papers]);
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const anchorRef = useRef<string | null>(null);
+  const pendingFocusRef = useRef<string | null>(null);
+  const renderedKeys = renderedRows.map(({ index }) => rowKeys[index]);
+  const selectedKey = selectedId ? (selectedChildId ? `${selectedId}:${selectedChildId}` : selectedId) : null;
+  const tabStopKey = [focusKey, selectedKey].find((key) => key && renderedKeys.includes(key)) ?? renderedKeys[0] ?? null;
+
+  useEffect(() => {
+    const key = pendingFocusRef.current;
+    if (!key) return;
+    const row = findLibraryRow(tableScrollRef.current, key);
+    if (row) {
+      pendingFocusRef.current = null;
+      row.focus();
+      return;
+    }
+    const index = rowKeys.indexOf(key);
+    if (index < 0) pendingFocusRef.current = null;
+    else if (isVirtualized) rowVirtualizer.scrollToIndex(index);
+  });
+
+  const focusRow = (index: number, extend: boolean, from: (typeof treeRows)[number]) => {
+    const row = treeRows[index];
+    if (!row) return;
+    setFocusKey(rowKeys[index]);
+    pendingFocusRef.current = rowKeys[index];
+    // Child rows open files or annotations when activated, so moving past
+    // them only focuses; Enter activates.
+    if (row.kind !== "paper") return;
+    if (extend) {
+      const anchor = anchorRef.current ?? (from.kind === "paper" ? from.paper.id : row.paper.id);
+      anchorRef.current = anchor;
+      onCheckMany(idsInRange(paperIds, anchor, row.paper.id), true);
+    } else {
+      anchorRef.current = row.paper.id;
+    }
+    onSelectPaper(row.paper);
+  };
+
+  const togglePaperCheck = (paper: LiteraturePaper, range: boolean) => {
+    const anchor = anchorRef.current;
+    if (range && anchor && anchor !== paper.id) {
+      onCheckMany(idsInRange(paperIds, anchor, paper.id), !checked.has(paper.id));
+    } else {
+      onToggleChecked(paper.id);
+    }
+    anchorRef.current = paper.id;
+  };
+
+  const clickPaper = (paper: LiteraturePaper, event: ReactMouseEvent<HTMLTableRowElement>) => {
+    setFocusKey(paper.id);
+    if (event.shiftKey) {
+      const anchor = anchorRef.current ?? selectedId ?? paper.id;
+      anchorRef.current = anchor;
+      onCheckMany(idsInRange(paperIds, anchor, paper.id), true);
+      onSelectPaper(paper);
+      return;
+    }
+    anchorRef.current = paper.id;
+    if (event.metaKey || event.ctrlKey) {
+      onToggleChecked(paper.id);
+      onSelectPaper(paper);
+      return;
+    }
+    onSelectPaper(paper, { reveal: true });
+  };
+
+  const trashFromRow = (paper: LiteraturePaper) => {
+    const ids = batchIds.length > 0 ? batchIds : [paper.id];
+    onTrashPapers(ids);
+    if (!ids.includes(paper.id)) return;
+    const nextId = nextAfterRemoval(paperIds, new Set(ids), paper.id);
+    const next = nextId ? papers.find((entry) => entry.id === nextId) : undefined;
+    if (!next) return;
+    anchorRef.current = next.id;
+    setFocusKey(next.id);
+    pendingFocusRef.current = next.id;
+    onSelectPaper(next);
+  };
+
+  // Keys are handled once for the list. Escape and select-all work from
+  // anywhere in it (a checkbox, the batch bar); the rest only while a row
+  // itself has focus, so buttons inside a row keep their own behaviour.
+  const onListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.altKey) return;
+    const modifier = event.metaKey || event.ctrlKey;
+    if (event.key === "Escape") {
+      if (onListEscape()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (modifier && !event.shiftKey && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      onCheckMany(paperIds, true);
+      return;
+    }
+    const key = (event.target as HTMLElement).dataset.rowKey;
+    if (!key) return;
+    const index = rowKeys.indexOf(key);
+    const row = treeRows[index];
+    if (!row) return;
+    const itemId = row.kind === "paper" ? row.paper.id : row.child.id;
+    switch (event.key) {
+      case "ArrowDown":
+      case "ArrowUp":
+        if (modifier) return;
+        event.preventDefault();
+        focusRow(index + (event.key === "ArrowDown" ? 1 : -1), event.shiftKey, row);
+        return;
+      case "Home":
+      case "End":
+        if (modifier) return;
+        event.preventDefault();
+        focusRow(event.key === "Home" ? 0 : treeRows.length - 1, event.shiftKey, row);
+        return;
+      case "ArrowRight":
+        if (modifier || !row.hasChildren) return;
+        event.preventDefault();
+        if (expandedItems.has(itemId)) focusRow(index + 1, false, row);
+        else onToggleItem(itemId);
+        return;
+      case "ArrowLeft":
+        if (modifier) return;
+        event.preventDefault();
+        if (row.hasChildren && expandedItems.has(itemId)) onToggleItem(itemId);
+        else if (row.kind === "child") {
+          const parentKey = row.child.parentId === row.paper.id ? row.paper.id : `${row.paper.id}:${row.child.parentId}`;
+          focusRow(rowKeys.indexOf(parentKey), false, row);
+        }
+        return;
+      case "Enter":
+        if (modifier) return;
+        event.preventDefault();
+        if (row.kind === "paper") onActivatePaper(row.paper);
+        else onSelectChild(row.paper, row.child);
+        return;
+      case " ":
+        event.preventDefault();
+        if (row.kind === "paper") togglePaperCheck(row.paper, event.shiftKey);
+        return;
+      case "Delete":
+      case "Backspace":
+        if (row.kind !== "paper" || isTrashView) return;
+        event.preventDefault();
+        trashFromRow(row.paper);
+    }
+  };
+
   const startResize = (col: keyof typeof colWidths, e: { clientX: number; preventDefault(): void; stopPropagation(): void }, dir: 1 | -1 = 1) => {
     e.preventDefault();
     e.stopPropagation();
@@ -4826,12 +5110,7 @@ function PaperTable({
         />
       )}
 
-      <LiteratureBatchBar count={batchIds.length} isTrashView={isTrashView} currentCollectionId={currentCollectionId}
-        onShortlist={onBatchShortlist} onExclude={onBatchExclude} onDownload={onBatchDownload}
-        onDelete={onBatchDelete} onRestore={onBatchRestore} onPermanentDelete={onBatchPermanentDelete}
-        onMerge={onBatchMergeDuplicates} onRemoveFromCollection={onBatchRemoveFromCollection}
-        onQuickCopy={onBatchQuickCopy} onReport={onBatchReport} onClear={onBatchClear} />
-      <div className="lit-table-wrap" ref={tableScrollRef}>
+      <div className="lit-table-wrap" ref={tableScrollRef} onKeyDown={onListKeyDown}>
         {!loaded ? (
           <LiteratureLoading label={copy.libraryUi.loading} />
         ) : libraryCount === 0 && !isTrashView ? (
@@ -4852,9 +5131,18 @@ function PaperTable({
             <button type="button" onClick={onResetView}>{copy.libraryUi.allPapers}</button>
           </div>
         ) : (
+          <>
+           {/* Overlays the column header instead of pushing the rows down, so
+               the row under the pointer stays put when the first box is ticked. */}
+           <LiteratureBatchBar count={batchIds.length} isTrashView={isTrashView} currentCollectionId={currentCollectionId}
+             onShortlist={onBatchShortlist} onExclude={onBatchExclude} onDownload={onBatchDownload}
+             onDelete={onBatchDelete} onRestore={onBatchRestore} onPermanentDelete={onBatchPermanentDelete}
+             onMerge={onBatchMergeDuplicates} onRemoveFromCollection={onBatchRemoveFromCollection}
+             onQuickCopy={onBatchQuickCopy} onReport={onBatchReport} onClear={onBatchClear} />
            <table
              className="lit-table"
              role="grid"
+             aria-label={copy.libraryUi.listAria}
              style={{ "--lit-table-columns": tableColumns } as CSSProperties}
            >
             <thead>
@@ -4912,11 +5200,14 @@ function PaperTable({
                   tagDefinitions={tagDefinitions}
                   hasChildren={row.hasChildren}
                   expanded={expandedItems.has(row.paper.id)}
-                  onSelect={() => onSelectPaper(row.paper)}
+                  tabStop={tabStopKey === row.paper.id}
+                  onFocusRow={() => setFocusKey(row.paper.id)}
+                  onSelect={(event) => clickPaper(row.paper, event)}
+                  onActivate={() => onActivatePaper(row.paper)}
                   onOpenReader={() => onOpenPaperReader(row.paper)}
                   onDragStart={(event) => onPaperDragStart(event, row.paper.id)}
                   onToggleExpand={() => onToggleItem(row.paper.id)}
-                  onToggleChecked={() => onToggleChecked(row.paper.id)}
+                  onToggleChecked={(range) => togglePaperCheck(row.paper, range)}
                   onToggleRead={() => onToggleRead(row.paper.id)}
                   onToggleStar={() => onToggleStar(row.paper.id)}
                 />
@@ -4931,6 +5222,8 @@ function PaperTable({
                   selected={selectedChildId === row.child.id}
                   expanded={expandedItems.has(row.child.id)}
                   hasChildren={row.hasChildren}
+                  tabStop={tabStopKey === rowKeys[index]}
+                  onFocusRow={() => setFocusKey(rowKeys[index])}
                   onSelect={() => onSelectChild(row.paper, row.child)}
                     onToggleExpand={() => onToggleItem(row.child.id)}
                   />
@@ -4938,6 +5231,7 @@ function PaperTable({
               })}
             </tbody>
           </table>
+          </>
         )}
       </div>
 
@@ -4971,7 +5265,10 @@ function PaperRow({
   tagDefinitions,
   hasChildren,
   expanded,
+  tabStop,
+  onFocusRow,
   onSelect,
+  onActivate,
   onOpenReader,
   onDragStart,
   onToggleExpand,
@@ -4990,11 +5287,15 @@ function PaperRow({
   tagDefinitions: ReadonlyMap<string, LiteratureLibraryModelSnapshot["tags"][number]>;
   hasChildren: boolean;
   expanded: boolean;
-  onSelect: () => void;
+  tabStop: boolean;
+  onFocusRow: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLTableRowElement>) => void;
+  onActivate: () => void;
   onOpenReader: () => void;
   onDragStart: (event: DragEvent<HTMLTableRowElement>) => void;
   onToggleExpand: () => void;
-  onToggleChecked: () => void;
+  /** `range` is true for a Shift-click, which ticks the run from the anchor. */
+  onToggleChecked: (range: boolean) => void;
   onToggleRead: () => void;
   onToggleStar: () => void;
   rowIndex?: number;
@@ -5010,15 +5311,18 @@ function PaperRow({
     <tr
       ref={rowRef}
       data-index={rowIndex}
-      className={`lit-row${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
+      className={`lit-row${selected ? " active" : ""}${checked ? " checked" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
       style={rowStyle}
+      data-row-key={paper.id}
       onClick={onSelect}
+      // Shift-click extends the ticked range; keep it from selecting text.
+      onMouseDown={(event) => { if (event.shiftKey) event.preventDefault(); }}
+      onFocus={(event) => { if (event.target === event.currentTarget) onFocusRow(); }}
       onDoubleClick={(event) => {
         if ((event.target as HTMLElement).closest("button, input")) return;
-        if (!isTrashView && paper.pdf.path) onOpenReader();
+        onActivate();
       }}
-      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelect(); } }}
-      tabIndex={0}
+      tabIndex={tabStop ? 0 : -1}
       role="row"
       aria-selected={selected}
       draggable
@@ -5029,7 +5333,8 @@ function PaperRow({
           type="checkbox"
           checked={checked}
           aria-label={copy.row.selectAria(paper.title)}
-          onChange={onToggleChecked}
+          // A checkbox's change is dispatched from its click, which carries Shift.
+          onChange={(event) => onToggleChecked((event.nativeEvent as MouseEvent).shiftKey === true)}
         />
       </td>
       <td className="lit-row-stage" onClick={(event) => event.stopPropagation()}>
@@ -5127,6 +5432,8 @@ function LiteratureChildRow({
   selected,
   expanded,
   hasChildren,
+  tabStop,
+  onFocusRow,
   onSelect,
   onToggleExpand,
   rowIndex,
@@ -5138,6 +5445,8 @@ function LiteratureChildRow({
   selected: boolean;
   expanded: boolean;
   hasChildren: boolean;
+  tabStop: boolean;
+  onFocusRow: () => void;
   onSelect: () => void;
   onToggleExpand: () => void;
   rowIndex?: number;
@@ -5161,14 +5470,10 @@ function LiteratureChildRow({
       data-index={rowIndex}
       className={`lit-child-row kind-${child.kind}${selected ? " active" : ""}`}
       style={rowStyle}
+      data-row-key={`${paper.id}:${child.id}`}
       onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-          event.preventDefault();
-          onSelect();
-        }
-      }}
-      tabIndex={0}
+      onFocus={(event) => { if (event.target === event.currentTarget) onFocusRow(); }}
+      tabIndex={tabStop ? 0 : -1}
       role="row"
       aria-selected={selected}
       data-parent-id={paper.id}

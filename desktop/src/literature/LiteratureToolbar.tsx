@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, type RefObject } from "react";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { LITERATURE_COPY } from "./i18n";
@@ -11,7 +11,7 @@ export default function LiteratureToolbar({
   tags, navigationOpen, detailsOpen, isTrashView, onFilterChange, onSortChange,
   onToggleNavigation, onToggleDetails, onOpenAdvancedSearch, onSaveSearch,
   onRemoveTag, onClearFilters, onCreateItem, onImportBibliography, onImportPdf,
-  onAddIdentifier, onEmptyTrash,
+  onAddIdentifier, onEmptyTrash, searchRef,
 }: {
   viewLabel: string;
   count: number;
@@ -37,11 +37,14 @@ export default function LiteratureToolbar({
   onImportPdf: () => void;
   onAddIdentifier: () => void;
   onEmptyTrash: () => void;
+  /** Lets the page focus the search from its keyboard shortcut. */
+  searchRef?: RefObject<HTMLInputElement>;
 }) {
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
   const ui = copy.libraryUi;
-  const search = useRef<HTMLInputElement>(null);
+  const localSearch = useRef<HTMLInputElement>(null);
+  const search = searchRef ?? localSearch;
   const filtered = Boolean(filter.trim() || tags.length || conditionCount);
 
   return (
@@ -76,7 +79,7 @@ export default function LiteratureToolbar({
         <div className="lit-library-search">
           <SvgIcon name="search" size={15} />
           <input ref={search} value={filter} onChange={(event) => onFilterChange(event.target.value)}
-            placeholder={copy.table.filterPlaceholder} aria-label={copy.table.filterAria}
+            placeholder={copy.table.filterPlaceholder} aria-label={copy.table.filterAria} aria-keyshortcuts="/ Control+F Meta+F"
             onKeyDown={(event) => { if (event.key === "Escape" && filter) { event.stopPropagation(); onFilterChange(""); } }} />
           {filter && <button type="button" aria-label={copy.table.clearFilterAria} title={copy.table.clearFilterAria}
             onClick={() => { onFilterChange(""); search.current?.focus(); }}><SvgIcon name="close" size={14} /></button>}

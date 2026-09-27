@@ -132,7 +132,11 @@
 .lit-row-pdf-status.failed { color: var(--red, #e87777); }
 .lit-row-tags { gap: 4px; flex-wrap: wrap; align-content: center; }
 .lit-row-year { color: var(--text-dim); }
+.lit-row.checked { background: color-mix(in srgb, var(--accent) 5%, var(--bg)); }
 .lit-row.active { background: color-mix(in srgb, var(--accent) 9%, var(--bg)); }
+/* Keyboard focus scrolls rows into view below the sticky header. */
+.lit-row, .lit-child-row { scroll-margin-top: 36px; }
+.lit-child-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .lit-reading-dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--text-dim); }
 .lit-read-toggle.unread .lit-reading-dot { background: var(--accent); border-color: var(--accent); }
 .lit-read-toggle.read .lit-reading-dot { opacity: .35; }
@@ -140,9 +144,13 @@
 .lit-row:hover .lit-card-star, .lit-row:focus-within .lit-card-star, .lit-card-star.starred { opacity: 1; }
 .lit-child-title { overflow-wrap: anywhere; }
 
-.lit-batch-bar { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding: 7px 14px; border-top: 0; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
+/* The batch bar sits over the sticky column header (leaving the select-all
+   box uncovered) and takes no height of its own, so ticking a row never
+   moves the rows under the pointer. */
+.lit-batch-bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; box-sizing: border-box; height: 34px; margin: 0 0 -34px 32px; padding: 0 8px 0 4px; overflow-x: auto; scrollbar-width: none; border-top: 0; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-1)); }
+.lit-batch-bar::-webkit-scrollbar { display: none; }
 .lit-batch-count { margin-right: 6px; color: var(--accent); font-size: 11px; font-weight: 600; white-space: nowrap; }
-.lit-batch-bar > button { min-height: 28px; padding: 3px 7px; border-radius: 5px; font-size: 11px; }
+.lit-batch-bar > button { flex-shrink: 0; min-height: 26px; padding: 2px 7px; border-radius: 5px; font-size: 11px; white-space: nowrap; }
 .lit-batch-bar > .lit-menu-trigger { width: 28px; padding: 0; border-color: transparent; }
 .lit-batch-bar > .lit-batch-clear { display: flex; align-items: center; justify-content: center; width: 28px; margin-left: auto; padding: 0; background: transparent; border-color: transparent; }
 
@@ -155,6 +163,16 @@
 .lit-empty-actions .primary { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 
 .lit-workspace { width: var(--lit-workspace-w, 336px) !important; border: 0; background: var(--bg); }
+.lit-workspace:focus { outline: none; }
+.lit-workspace:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.lit-main { position: relative; }
+.lit-undo-toast { position: absolute; left: 50%; bottom: 14px; z-index: 20; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 32px); box-sizing: border-box; padding: 7px 8px 7px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-1); box-shadow: 0 10px 30px #0003, 0 2px 6px #0002; color: var(--text); font-size: 12px; transform: translateX(-50%); }
+.lit-undo-toast > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lit-undo-toast > .lit-undo-action { flex-shrink: 0; padding: 3px 9px; border: 0; border-radius: 5px; background: transparent; color: var(--accent); font-size: 12px; font-weight: 600; }
+.lit-undo-toast > .lit-undo-action:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.lit-undo-toast > .lit-undo-dismiss { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-dim); }
+.lit-undo-toast > .lit-undo-dismiss:hover { background: var(--bg-2); color: var(--text); }
 .lit-info-header { padding: 18px 15px 10px; gap: 9px; border: 0; background: var(--bg); }
 .lit-info-paper-title { font-size: 14px; line-height: 1.6; font-weight: 600; }
 .lit-info-paper-sub { font-size: 11px; line-height: 1.6; margin-top: 6px; }
