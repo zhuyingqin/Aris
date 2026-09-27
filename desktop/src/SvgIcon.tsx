@@ -52,6 +52,7 @@ export type SvgIconName =
   | "play"
   | "playwright"
   | "plus"
+  | "quote"
   | "refresh"
   | "reset"
   | "search"
@@ -205,6 +206,9 @@ function iconNodes(name: SvgIconName): IconNode[] {
       ];
     case "plus":
       return [node("path", { d: "M8 3.5v9M3.5 8h9", strokeLinecap: "round" })];
+    case "quote":
+      // A quoted passage: a lead line, then indented lines behind a rule.
+      return [node("path", { d: "M2.8 3.6h10.4M3.2 7.2v6.2M6.2 7.2h7M6.2 10.3h7M6.2 13.4h4.4", strokeLinecap: "round" })];
     case "refresh":
       return [node("path", { d: "M12.5 5.4A5 5 0 1 0 13 8M12.5 2.8v2.6H9.9", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "reset":

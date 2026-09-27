@@ -1822,8 +1822,18 @@ describe("Literature library", () => {
     const inspectorTabs = within(screen.getByRole("region", { name: "文献详情" })).getByRole("tablist", { name: "论文详情导航" });
     expect(within(inspectorTabs).queryByRole("tab", { name: "PDF" })).toBeNull();
 
+    expect(within(inspectorTabs).getByRole("tab", { name: "笔记" }).textContent).toBe("笔记");
+
     await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
     const rail = screen.getByRole("tablist", { name: "论文详情导航" });
+    // The narrow rail beside the PDF shows icons; the label stays as the
+    // accessible name and tooltip.
+    for (const tab of within(rail).getAllByRole("tab")) {
+      expect(tab.textContent).toBe("");
+      expect(tab.querySelector("svg")).toBeTruthy();
+      expect(tab.getAttribute("title")).toBe(tab.getAttribute("aria-label"));
+    }
+    expect(within(rail).getByRole("tab", { name: "证据" }).querySelector("svg")?.getAttribute("data-icon")).toBe("quote");
     await user.click(within(rail).getByRole("tab", { name: "笔记" }));
     expect(screen.getByRole("tablist", { name: "已打开的 PDF" })).toBeTruthy();
     expect(screen.getByRole("tabpanel", { name: "笔记" })).toBeTruthy();

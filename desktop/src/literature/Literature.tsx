@@ -98,6 +98,17 @@ import "./LibraryWorkspace.css";
 
 type SortKey = LiteratureSortKey;
 const SORT_KEYS: readonly SortKey[] = ["added", "fit", "year", "title", "venue", "citations"];
+// Evidence avoids a shield or check mark: an entry is a cited passage, not a
+// verified claim.
+const READER_RAIL_ICONS: Record<DetailTab, SvgIconName> = {
+  info: "info",
+  overview: "document",
+  reader: "bookOpen",
+  evidence: "quote",
+  notes: "edit",
+  files: "attachment",
+  related: "graph",
+};
 const PANEL_LIMITS = {
   sidebar: { min: 180, max: 420, initial: 220 },
   workspace: { min: 280, max: 560, initial: 336 },
@@ -4270,6 +4281,7 @@ export default function Literature({
         activeTab={readerPanelTab ?? "reader"}
         label={copy.workspaceHeader.tabRailAria}
         className="lit-reader-detail-rail"
+        icons={READER_RAIL_ICONS}
         onSelect={(tab) => setReaderPanelTab(tab === "reader" || tab === readerPanelTab ? null : tab)}
       />
     </>
