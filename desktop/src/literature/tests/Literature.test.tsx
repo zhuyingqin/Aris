@@ -230,6 +230,7 @@ beforeEach(() => {
   localStorage.removeItem("somniq-literature-rag-preferences-v1");
   localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
   localStorage.removeItem("somniq-literature-discover-mode-v1");
+  localStorage.removeItem("somniq-literature-layout-v1");
   resetLiteratureStore();
   useStore.setState({
     language: "cn",
@@ -1809,6 +1810,56 @@ describe("Literature library", () => {
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
   });
 
+  it("opens record tabs beside the PDF instead of leaving the reader", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+
+    // The docked panel no longer offers a PDF tab that swaps the whole page.
+    const inspectorTabs = within(screen.getByRole("region", { name: "文献详情" })).getByRole("tablist", { name: "论文详情导航" });
+    expect(within(inspectorTabs).queryByRole("tab", { name: "PDF" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
+    const rail = screen.getByRole("tablist", { name: "论文详情导航" });
+    await user.click(within(rail).getByRole("tab", { name: "笔记" }));
+    expect(screen.getByRole("tablist", { name: "已打开的 PDF" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel", { name: "笔记" })).toBeTruthy();
+    expect(within(rail).getByRole("tab", { name: "笔记" }).getAttribute("aria-selected")).toBe("true");
+
+    await user.click(within(rail).getByRole("tab", { name: "证据" }));
+    expect(screen.queryByRole("tabpanel", { name: "笔记" })).toBeNull();
+    expect(screen.getByRole("tabpanel", { name: "证据" })).toBeTruthy();
+    await user.click(within(rail).getByRole("tab", { name: "证据" }));
+    expect(screen.queryByRole("tabpanel", { name: "证据" })).toBeNull();
+    expect(within(rail).getByRole("tab", { name: "PDF" }).getAttribute("aria-selected")).toBe("true");
+
+    await user.click(within(rail).getByRole("tab", { name: "简报" }));
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    const details = screen.getByRole("region", { name: "文献详情" });
+    expect(within(details).getByRole("tab", { name: "简报" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("keeps the notes beside the PDF when reading is opened from them", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("tab", { name: "笔记" }));
+    await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
+    expect(await screen.findByRole("tabpanel", { name: "笔记" })).toBeTruthy();
+    expect(screen.getByRole("tablist", { name: "已打开的 PDF" })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("tabpanel", { name: "笔记" })).toBeTruthy();
+    screen.getByRole("button", { name: "收起侧栏，只看 PDF" }).focus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tabpanel", { name: "笔记" })).toBeNull();
+  });
+
   it("opens local PDFs on double-click and switches document tabs", async () => {
     const user = userEvent.setup();
     const library = fixtureLibrary();
@@ -3122,7 +3173,7 @@ describe("Literature library", () => {
         await screen.findByText("Third reference");
         const rows = paperRows();
         await user.click(rows[0]);
-        const details = screen.getByRole("region", { name: "文献详情" });
+        const details = await screen.findByRole("region", { name: "文献详情" });
         within(details).getByRole("tab", { name: "信息" }).focus();
         await user.keyboard("{Escape}");
         expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
@@ -3134,7 +3185,158 @@ describe("Literature library", () => {
         expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
         // ...while a click still opens the drawer after it was dismissed.
         await user.click(rows[2]);
-        expect(screen.getByRole("region", { name: "文献详情" })).toBeTruthy();
+        expect(await screen.findByRole("region", { name: "文献详情" })).toBeTruthy();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("opens row actions on right-click and targets the ticked rows", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const rows = paperRows();
+      const titles = rows.map((row) => row.querySelector(".lit-row-title")?.textContent ?? "");
+
+      fireEvent.contextMenu(rows[2], { clientX: 120, clientY: 140 });
+      let menu = screen.getByRole("menu", { name: `“${titles[2]}”的操作` });
+      expect(rows[2].getAttribute("aria-selected")).toBe("true");
+      await user.click(within(menu).getByRole("menuitem", { name: "收藏" }));
+      expect(useLiteratureStore.getState().library.papers.find((paper) => paper.title === titles[2])?.starred).toBe(true);
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      await user.click(rows[0].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      await user.click(rows[1].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      fireEvent.contextMenu(rows[1], { clientX: 120, clientY: 140 });
+      menu = screen.getByRole("menu", { name: "2 篇文献的操作" });
+      await user.click(within(menu).getByRole("menuitem", { name: "加入候选" }));
+      const stages = useLiteratureStore.getState().library.papers
+        .filter((paper) => titles.slice(0, 2).includes(paper.title))
+        .map((paper) => paper.stage);
+      expect(stages).toEqual(["shortlist", "shortlist"]);
+
+      // A right-click outside the ticked set replaces it with that row.
+      await user.click(rows[0].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      fireEvent.contextMenu(rows[2], { clientX: 120, clientY: 140 });
+      expect(checkedTitles()).toEqual([]);
+      menu = screen.getByRole("menu", { name: `“${titles[2]}”的操作` });
+      await user.click(within(menu).getByRole("menuitem", { name: "移入回收站" }));
+      expect(screen.queryByText(titles[2])).toBeNull();
+      expect(screen.getByRole("status").textContent).toContain("已将 1 篇移入回收站");
+    });
+
+    it("closes the row menu with Escape and returns focus to the row", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const row = paperRows()[1];
+      fireEvent.contextMenu(row, { clientX: 0, clientY: 0 });
+      const menu = screen.getByRole("menu");
+      expect(document.activeElement).toBe(within(menu).getAllByRole("menuitem")[0]);
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it("sorts from the column headers and keeps missing values last", async () => {
+      const user = userEvent.setup();
+      const library = fixtureLibrary();
+      library.papers[0] = { ...library.papers[0], title: "Beta", year: 2021, venue: "Nature" };
+      library.papers.push(
+        { ...structuredClone(fixturePaper), id: "alpha", title: "Alpha", year: 2024, venue: "" },
+        { ...structuredClone(fixturePaper), id: "gamma", title: "Gamma", year: undefined, venue: "ACL" },
+      );
+      mocks.literatureLoad.mockResolvedValue(library);
+      render(<Literature />);
+      await screen.findByText("Gamma");
+      const order = () => paperRows().map((row) => row.querySelector(".lit-row-title")?.textContent);
+      const header = (name: string) => screen.getByRole("columnheader", { name });
+
+      await user.click(within(header("年份")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBe("descending");
+      expect(order()).toEqual(["Alpha", "Beta", "Gamma"]);
+      await user.click(within(header("年份")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBe("ascending");
+      expect(order()).toEqual(["Beta", "Alpha", "Gamma"]);
+
+      await user.click(within(header("出版物")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBeNull();
+      expect(header("出版物").getAttribute("aria-sort")).toBe("ascending");
+      expect(order()).toEqual(["Gamma", "Beta", "Alpha"]);
+      await user.click(screen.getByRole("button", { name: "升序排列，点击改为降序" }));
+      expect(header("出版物").getAttribute("aria-sort")).toBe("descending");
+      expect(order()).toEqual(["Beta", "Gamma", "Alpha"]);
+
+      await user.selectOptions(screen.getByRole("combobox", { name: "排序论文" }), "title");
+      expect(order()).toEqual(["Alpha", "Beta", "Gamma"]);
+    });
+
+    it("remembers hidden details, sorting and panel widths across visits", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      const first = render(<Literature />);
+      await screen.findByText("Third reference");
+      await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+      await user.click(within(screen.getByRole("columnheader", { name: "标题" })).getByRole("button"));
+      const divider = screen.getByRole("separator", { name: "调整导航宽度" });
+      expect(divider.getAttribute("aria-valuenow")).toBe("220");
+      divider.focus();
+      await user.keyboard("{ArrowRight}{ArrowRight}");
+      expect(divider.getAttribute("aria-valuenow")).toBe("252");
+      await waitFor(() => expect(JSON.parse(localStorage.getItem("somniq-literature-layout-v1") ?? "{}")).toMatchObject({
+        detailsHidden: true,
+        sort: "title",
+        sidebarWidth: 252,
+      }));
+      first.unmount();
+
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+      expect(screen.getByRole("columnheader", { name: "标题" }).getAttribute("aria-sort")).toBe("ascending");
+      const restored = screen.getByRole("separator", { name: "调整导航宽度" });
+      expect(restored.getAttribute("aria-valuenow")).toBe("252");
+      await user.dblClick(restored);
+      expect(restored.getAttribute("aria-valuenow")).toBe("220");
+    });
+
+    it("ignores unreadable stored layout", async () => {
+      localStorage.setItem("somniq-literature-layout-v1", "{not json");
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      expect(screen.getByRole("region", { name: "文献详情" })).toBeTruthy();
+      expect(screen.getByRole("separator", { name: "调整导航宽度" }).getAttribute("aria-valuenow")).toBe("220");
+    });
+
+    it("opens the PDF on double-click even where the drawer would cover the row", async () => {
+      class NarrowObserver {
+        constructor(private readonly callback: ResizeObserverCallback) {}
+        observe() {
+          this.callback([{ contentRect: { width: 700 } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      }
+      vi.stubGlobal("ResizeObserver", NarrowObserver);
+      try {
+        const user = userEvent.setup();
+        const library = fixtureLibrary();
+        library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+        mocks.literatureLoad.mockResolvedValue(library);
+        render(<Literature />);
+        await screen.findAllByText(fixturePaper.title);
+        await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+        const row = paperRows()[0];
+        // The first click must not put the drawer over the row before the
+        // second click of the double-click arrives.
+        fireEvent.click(row, { detail: 1 });
+        expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+        fireEvent.click(row, { detail: 2 });
+        fireEvent.doubleClick(row, { detail: 2 });
+        expect(screen.getByRole("tablist", { name: "已打开的 PDF" })).toBeTruthy();
       } finally {
         vi.unstubAllGlobals();
       }

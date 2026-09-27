@@ -2466,9 +2466,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             .filter((suggestion) => suggestion.basisPaperIds.length > 0),
         })),
       }));
-      log("warn", LITERATURE_COPY[useStore.getState().language].store.papersDeleted(targets.size), {
-        open: true,
-      });
+      // Logged without opening the activity panel: the library shows its own
+      // undo notice, and an expanding panel would shift the list under it.
+      log("warn", LITERATURE_COPY[useStore.getState().language].store.papersDeleted(targets.size));
     },
 
     restorePapers: async (ids) => {

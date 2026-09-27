@@ -4,10 +4,10 @@ import { useStore } from "../store";
 import { LITERATURE_COPY } from "./i18n";
 import LibraryActionMenu from "./LibraryActionMenu";
 
-export type LiteratureSortKey = "added" | "fit" | "year" | "title" | "citations";
+export type LiteratureSortKey = "added" | "fit" | "year" | "title" | "venue" | "citations";
 
 export default function LiteratureToolbar({
-  viewLabel, count, total, filter, sort, advancedSearchOpen, conditionCount,
+  viewLabel, count, total, filter, sort, sortDescending, onToggleSortDirection, advancedSearchOpen, conditionCount,
   tags, navigationOpen, detailsOpen, isTrashView, onFilterChange, onSortChange,
   onToggleNavigation, onToggleDetails, onOpenAdvancedSearch, onSaveSearch,
   onRemoveTag, onClearFilters, onCreateItem, onImportBibliography, onImportPdf,
@@ -18,6 +18,8 @@ export default function LiteratureToolbar({
   total?: number;
   filter: string;
   sort: LiteratureSortKey;
+  sortDescending: boolean;
+  onToggleSortDirection: () => void;
   advancedSearchOpen: boolean;
   conditionCount: number;
   tags: string[];
@@ -96,7 +98,13 @@ export default function LiteratureToolbar({
           <option value="year">{copy.table.sortYear}</option>
           <option value="citations">{copy.table.sortCitations}</option>
           <option value="title">{copy.table.sortTitle}</option>
+          <option value="venue">{copy.table.columnVenue}</option>
         </select>
+        <button type="button" className="lit-library-sort-direction" onClick={onToggleSortDirection}
+          aria-label={sortDescending ? ui.sortDescending : ui.sortAscending}
+          title={sortDescending ? ui.sortDescending : ui.sortAscending}>
+          <SvgIcon name={sortDescending ? "chevronDown" : "chevronUp"} size={14} />
+        </button>
       </div>
       {filtered && (
         <div className="lit-active-filters" aria-label={ui.filters}>

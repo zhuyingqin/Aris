@@ -58,3 +58,51 @@ export function useNarrowerThan(ref: RefObject<HTMLElement>, width: number): boo
   }, [ref, width]);
   return narrow;
 }
+
+const LAYOUT_STORAGE_KEY = "somniq-literature-layout-v1";
+
+/** Per-viewer layout choices. Stored locally only; a missing or unreadable
+ * value falls back to the responsive defaults. */
+export interface LibraryLayoutPrefs {
+  navigationOpen?: boolean;
+  /** The user hid the docked details panel (not the narrow drawer). */
+  detailsHidden?: boolean;
+  sidebarWidth?: number;
+  workspaceWidth?: number;
+  columnWidths?: { venue?: number; year?: number; tags?: number };
+  sort?: string;
+  sortReversed?: boolean;
+}
+
+export function readLayoutPrefs(): LibraryLayoutPrefs {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(LAYOUT_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? parsed as LibraryLayoutPrefs : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeLayoutPrefs(patch: LibraryLayoutPrefs) {
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ ...readLayoutPrefs(), ...patch }));
+  } catch {
+    // Storage can be unavailable (private mode, blocked site data); layout
+    // then simply resets next time.
+  }
+}
+
+/** A stored width, if it is a number inside the allowed range. */
+export function storedWidth(value: unknown, min: number, max: number, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
+/** Writes `prefs` once they stop changing, so dragging a divider does not
+ * write storage on every pointer move. */
+export function usePersistLayout(prefs: LibraryLayoutPrefs) {
+  const serialized = JSON.stringify(prefs);
+  useEffect(() => {
+    const timer = window.setTimeout(() => writeLayoutPrefs(JSON.parse(serialized) as LibraryLayoutPrefs), 250);
+    return () => window.clearTimeout(timer);
+  }, [serialized]);
+}
