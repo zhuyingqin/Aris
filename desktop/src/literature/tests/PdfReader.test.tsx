@@ -664,6 +664,30 @@ describe("PdfReader annotation interactions", () => {
     );
   });
 
+  it("explains a selected passage from simple to deep without the translation direction", async () => {
+    const onRunAi = vi.fn().mockResolvedValue("**一句话**：这段说缩放能控制分数的方差。");
+    const onAddAnnotation = vi.fn();
+    renderReader({ onRunAi, onAddAnnotation });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    fireEvent.click(screen.getByRole("button", { name: /由浅入深讲解/ }));
+
+    expect(onRunAi).toHaveBeenCalledWith(
+      expect.stringContaining("from simple to deep"),
+      expect.stringContaining("<source_text>"),
+      null,
+    );
+    expect(onRunAi.mock.calls[0][0]).toContain("Simplified Chinese");
+    expect(await screen.findByText(/这段说缩放能控制分数的方差/)).toBeTruthy();
+    expect(screen.queryByLabelText("翻译方向")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存到标注" }));
+    expect(onAddAnnotation).toHaveBeenCalledWith(
+      2,
+      expect.objectContaining({ note: expect.stringContaining("由浅入深讲解") }),
+    );
+  });
+
   it("defaults an English selection to Chinese even when the app UI is English", async () => {
     useStore.setState({ language: "en", languagePreferenceSet: true });
     const onRunAi = vi.fn().mockResolvedValue('{"translation":"这是翻译后的研究文本。"}');

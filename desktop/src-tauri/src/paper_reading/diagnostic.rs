@@ -155,9 +155,9 @@ async fn execute(app: &AppHandle, manifest_path: &Path) -> Result<serde_json::Va
         .await?;
     }
     let run_id = prepared.run.id.clone();
-    let first = paper_reading_start(app.clone(), project_id.clone(), run_id.clone()).await?;
+    let first = paper_reading_start(app.clone(), project_id.clone(), run_id.clone(), None).await?;
     // A repeated dispatch while active must attach to the same controller.
-    let duplicate = paper_reading_start(app.clone(), project_id.clone(), run_id.clone()).await?;
+    let duplicate = paper_reading_start(app.clone(), project_id.clone(), run_id.clone(), None).await?;
     if first.run.id != duplicate.run.id {
         return Err("Duplicate dispatch created another task".into());
     }
@@ -176,6 +176,7 @@ async fn execute(app: &AppHandle, manifest_path: &Path) -> Result<serde_json::Va
                     "completed": guide.lessons.iter().filter(|lesson| lesson.task.status == runtime::paper_guide::GuideTaskStatus::Completed).count(),
                     "total": guide.lessons.len(),
                     "currentTopic": guide.lessons.iter().find(|lesson| lesson.task.status == runtime::paper_guide::GuideTaskStatus::Running).map(|lesson| &lesson.topic.title),
+                    "reviews": guide.review_counts(),
                 })),
             }),
         )?;

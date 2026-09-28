@@ -2032,8 +2032,15 @@ pub async fn literature_permanently_delete_items(
     item_ids: Vec<String>,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
+    let project_id = projects::active_project_id(projects_state.inner()).ok();
     off_main_thread(move || {
-        tools::literature::library_permanently_delete_items_at(&base, &item_ids)
+        let result = tools::literature::library_permanently_delete_items_at(&base, &item_ids)?;
+        // Deleted papers take their paper-guide versions, page images and
+        // analysis sessions with them.
+        if let Some(project_id) = project_id {
+            crate::paper_reading::purge_runs_for_papers(&base, &project_id, &item_ids);
+        }
+        Ok(result)
     })
     .await
 }

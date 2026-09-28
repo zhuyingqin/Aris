@@ -9,30 +9,46 @@ fn evidence() -> Vec<GuideEvidence> {
         image_sha256: Some(content_sha256(b"original image")),
         text_sha256: None,
         text_truncated: false,
+        derived_text_sha256: None,
     }]
 }
 
 fn outline() -> GuideOutline {
-    parse_outline(&serde_json::json!({
+    parse_outline(&outline_json().to_string(), 2, &[1], false).unwrap()
+}
+
+fn outline_json() -> serde_json::Value {
+    serde_json::json!({
+        "oneSentence": "The paper compares scores more fairly by rescaling them.",
         "overview": [
             {"kind":"problem","content":"An original problem","sourcePages":[1]},
             {"kind":"method","content":"An original method","sourcePages":[1]},
             {"kind":"evidence","content":"An original experiment","sourcePages":[1]}
         ],
-        "topics":[{"kind":"formula","title":"Why scale?","learningGoal":"Understand the assumption","sourcePages":[1]}],
-        "cautions":[]
-    }).to_string(), 2, &[1]).unwrap()
+        "glossary": [{"term":"Dot product","plain":"Multiply matching numbers and add them up.","sourcePages":[1]}],
+        "topics":[{"kind":"formula","level":"core","title":"Why scale?","learningGoal":"Understand the assumption","prerequisites":["Dot product"],"sourcePages":[1]}],
+        "cautions":[],
+        "relevance": ""
+    })
 }
 
 fn lesson() -> GuideLesson {
-    parse_lesson(&serde_json::json!({
+    parse_lesson(&lesson_json().to_string(), &[1]).unwrap()
+}
+
+fn lesson_json() -> serde_json::Value {
+    serde_json::json!({
+        "plainSummary":"Large sums of many small numbers grow, so the paper shrinks them back to a comparable size.",
+        "analogy":"Like averaging votes instead of counting them. Where the analogy breaks: the paper divides by a square root, not by the count.",
+        "prerequisites":[{"concept":"Variance","explanation":"How spread out values are; for 1, 3 it is 1."}],
+        "misconceptions":[{"misconception":"Scaling guarantees stable training.","correction":"It keeps the variance at one only under the stated independence assumptions."}],
         "intuition":"Keep the score scale stable under the stated assumptions.",
         "notation":"d is the dimension.","assumptions":"Independent components with unit variance.",
         "steps":[{"title":"Reason","explanation":"The variances add under the assumptions.","origin":"teaching"}],
         "example":"An illustrative example, not a paper experiment.","evidence":"The footnote states the assumptions.",
         "checkQuestion":"What assumption is required?","checkAnswer":"Independence and unit variance.",
         "sourcePages":[1],"cautions":[]
-    }).to_string(), &[1]).unwrap()
+    })
 }
 
 #[test]
@@ -59,7 +75,7 @@ fn new_lessons_require_a_worked_example_but_saved_lessons_remain_readable() {
 fn outlines_and_lessons_cannot_invent_sources_or_review_verdicts() {
     let mut raw = serde_json::to_value(outline()).unwrap();
     raw["overview"][0]["sourcePages"] = serde_json::json!([2]);
-    assert!(parse_outline(&raw.to_string(), 2, &[1]).is_err());
+    assert!(parse_outline(&raw.to_string(), 2, &[1], false).is_err());
     let mut raw = serde_json::to_value(lesson()).unwrap();
     raw["sourcePages"] = serde_json::json!([2]);
     assert!(parse_lesson(&raw.to_string(), &[1]).is_err());
@@ -106,7 +122,8 @@ fn teaching_needs_images_and_retries_are_bounded() {
                 page: 1,
                 image_sha256: None,
                 text_sha256: Some(content_sha256(b"text")),
-                text_truncated: false
+                text_truncated: false,
+                derived_text_sha256: None,
             }]
         )
         .is_err());
@@ -218,8 +235,8 @@ fn overview_accepts_nine_supplied_pages_but_not_missing_evidence() {
     let mut value = outline();
     value.overview[2].source_pages = vec![9, 10, 11, 13, 16, 20, 21, 22, 23];
     let text = serde_json::to_string(&value).unwrap();
-    assert!(parse_outline(&text, 32, &(1..=32).collect::<Vec<_>>()).is_ok());
-    assert!(parse_outline(&text, 32, &(1..=22).collect::<Vec<_>>()).is_err());
+    assert!(parse_outline(&text, 32, &(1..=32).collect::<Vec<_>>(), false).is_ok());
+    assert!(parse_outline(&text, 32, &(1..=22).collect::<Vec<_>>(), false).is_err());
 }
 
 #[test]
@@ -244,7 +261,7 @@ fn outline_retry_can_recover_and_create_teaching_tasks() {
     let mut guide = PaperGuide::default();
     guide.outline.begin("bad".into(), evidence()).unwrap();
     guide
-        .finish_outline("bad", parse_outline("invalid JSON", 2, &[1]))
+        .finish_outline("bad", parse_outline("invalid JSON", 2, &[1], false))
         .unwrap();
     guide.outline.retry_invalid_output(true);
     assert!(guide.lessons.is_empty());
@@ -261,16 +278,16 @@ fn outline_retry_can_recover_and_create_teaching_tasks() {
 fn cited_cautions_preserve_text_and_validate_original_sources() {
     let mut value = serde_json::to_value(outline()).unwrap();
     value["cautions"] = serde_json::json!(["A plain caution", {"content":"Dataset windows differ.", "sourcePages":[1,2]}]);
-    let parsed = parse_outline(&value.to_string(), 32, &[1, 2]).unwrap();
+    let parsed = parse_outline(&value.to_string(), 32, &[1, 2], false).unwrap();
     assert_eq!(parsed.cautions[0], "A plain caution");
     assert_eq!(parsed.cautions[1], "Dataset windows differ.\n\n(PDF: 1, 2)");
-    assert!(parse_outline(&value.to_string(), 32, &[1])
+    assert!(parse_outline(&value.to_string(), 32, &[1], false)
         .unwrap_err()
         .contains("cautions[1]"));
     value["cautions"][1]["reviewed"] = serde_json::json!(true);
-    assert!(parse_outline(&value.to_string(), 32, &[1, 2]).is_err());
+    assert!(parse_outline(&value.to_string(), 32, &[1, 2], false).is_err());
     value["cautions"] = serde_json::json!([{"content": "A", "sourcePages":[1,1]}]);
-    assert!(parse_outline(&value.to_string(), 32, &[1, 2]).is_err());
+    assert!(parse_outline(&value.to_string(), 32, &[1, 2], false).is_err());
 }
 
 #[test]
@@ -312,4 +329,211 @@ fn explicit_retry_grants_one_bounded_batch_without_erasing_history() {
         .attempts
         .iter()
         .all(|attempt| attempt.error.is_some()));
+}
+
+fn review(round: usize, verdict: ReviewVerdict) -> LessonReview {
+    LessonReview {
+        round,
+        verdict,
+        summary: "Checked against the original text.".into(),
+        issues: if verdict == ReviewVerdict::NeedsRevision {
+            vec![ReviewIssue {
+                severity: IssueSeverity::Major,
+                location: "misconceptions".into(),
+                problem: "Calls the layer permutation invariant.".into(),
+                suggestion: "Say permutation equivariant.".into(),
+            }]
+        } else {
+            vec![]
+        },
+        reviewer: Some("openai / reviewer-model".into()),
+        session_id: format!("review-{round}"),
+        reviewed_at: crate::now_iso8601(),
+        evidence: evidence(),
+    }
+}
+
+fn generated_guide() -> PaperGuide {
+    let mut guide = PaperGuide::reviewed();
+    guide.outline.begin("outline".into(), evidence()).unwrap();
+    guide.finish_outline("outline", Ok(outline())).unwrap();
+    guide.lessons[0].task.begin("lesson".into(), evidence()).unwrap();
+    guide.lessons[0].task.finish("lesson", Ok(lesson())).unwrap();
+    guide
+}
+
+#[test]
+fn lessons_are_layered_from_a_plain_summary_to_details() {
+    let parsed = lesson();
+    assert!(parsed.plain_summary.starts_with("Large sums"));
+    assert!(parsed.analogy.contains("Where the analogy breaks"));
+    assert_eq!(parsed.prerequisites[0].concept, "Variance");
+    assert_eq!(parsed.misconceptions.len(), 1);
+    let mut raw = lesson_json();
+    raw["plainSummary"] = serde_json::json!("  ");
+    assert!(parse_lesson(&raw.to_string(), &[1])
+        .unwrap_err()
+        .starts_with("plainSummary"));
+    raw["plainSummary"] = serde_json::json!("A plain summary.");
+    raw["analogy"] = serde_json::json!("");
+    raw["prerequisites"] = serde_json::json!([]);
+    raw["misconceptions"] = serde_json::json!([]);
+    assert!(parse_lesson(&raw.to_string(), &[1]).is_ok(), "no forced analogy");
+    raw["misconceptions"] = serde_json::json!(["not an object"]);
+    assert!(parse_lesson(&raw.to_string(), &[1]).is_err());
+    // A v1 lesson saved before the layered protocol still loads for reading.
+    let mut legacy = serde_json::to_value(lesson()).unwrap();
+    for field in ["plainSummary", "analogy", "prerequisites", "misconceptions"] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    assert!(serde_json::from_value::<GuideLesson>(legacy).is_ok());
+}
+
+#[test]
+fn outline_is_a_reading_path_from_foundations_to_depth() {
+    let mut raw = outline_json();
+    raw["topics"] = serde_json::json!([
+        {"kind":"experiment","level":"advanced","title":"Read Table 2","learningGoal":"Compare BLEU","sourcePages":[2]},
+        {"kind":"formula","level":"core","title":"Why scale?","learningGoal":"Scaling","sourcePages":[1]},
+        {"kind":"concept","level":"foundation","title":"What is attention?","learningGoal":"Weights","sourcePages":[1]},
+        {"kind":"figure","level":"core","title":"The architecture","learningGoal":"Flow","sourcePages":[1]}
+    ]);
+    raw["relevance"] = serde_json::json!("Useful for the reader's retrieval project.");
+    let parsed = parse_outline(&raw.to_string(), 2, &[1], true).unwrap();
+    let titles = parsed.topics.iter().map(|topic| topic.title.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        ["What is attention?", "Why scale?", "The architecture", "Read Table 2"]
+    );
+    assert!(!parsed.relevance.is_empty());
+    // Without a supplied goal, any stated connection would be invented.
+    assert!(parse_outline(&raw.to_string(), 2, &[1], false)
+        .unwrap()
+        .relevance
+        .is_empty());
+    raw["oneSentence"] = serde_json::json!("");
+    assert!(parse_outline(&raw.to_string(), 2, &[1], true)
+        .unwrap_err()
+        .starts_with("oneSentence"));
+    raw["oneSentence"] = serde_json::json!("One sentence.");
+    raw["glossary"][0]["sourcePages"] = serde_json::json!([2]);
+    assert!(parse_outline(&raw.to_string(), 2, &[1], true)
+        .unwrap_err()
+        .starts_with("glossary"));
+}
+
+#[test]
+fn independent_review_gates_completion_and_triggers_one_revision() {
+    let mut guide = generated_guide();
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Review { round: 0 });
+    assert!(!guide.complete(), "an unreviewed draft is not a finished guide");
+    assert_eq!(guide.review_status(), "not_reviewed");
+
+    guide.lessons[0].record_review(review(0, ReviewVerdict::NeedsRevision));
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Revise);
+    let revision = guide.lessons[0].revision_task();
+    assert_eq!(revision.attempt_limit, MAX_REVISION_ATTEMPTS);
+    revision.begin("revision".into(), evidence()).unwrap();
+    let mut revised = lesson();
+    revised.plain_summary = "Revised plain summary.".into();
+    guide.lessons[0].revision_task().finish("revision", Ok(revised)).unwrap();
+    assert_eq!(guide.lessons[0].current().unwrap().plain_summary, "Revised plain summary.");
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Review { round: 1 });
+    assert_eq!(
+        guide.lessons[0].final_review().map(|review| review.round),
+        None,
+        "the first review does not certify the revision"
+    );
+
+    guide.lessons[0].record_review(review(1, ReviewVerdict::Pass));
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Done);
+    assert!(guide.complete());
+    assert_eq!(guide.review_status(), "all_passed");
+    assert_eq!(guide.review_counts().passed, 1);
+    assert!(guide.session_ids().contains(&"review-1".to_string()));
+}
+
+#[test]
+fn a_failed_revision_keeps_the_first_draft_and_its_findings_visible() {
+    let mut guide = generated_guide();
+    guide.lessons[0].record_review(review(0, ReviewVerdict::NeedsRevision));
+    for index in 0..MAX_REVISION_ATTEMPTS {
+        let id = format!("revision-{index}");
+        let task = guide.lessons[0].revision_task();
+        task.begin(id.clone(), evidence()).unwrap();
+        task.finish(&id, Err("Invalid explanation JSON".into())).unwrap();
+        task.retry_invalid_output(true);
+    }
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Done);
+    assert!(guide.complete());
+    assert_eq!(guide.lessons[0].current().unwrap().plain_summary, lesson().plain_summary);
+    assert_eq!(
+        guide.lessons[0].final_review().unwrap().verdict,
+        ReviewVerdict::NeedsRevision
+    );
+    assert_eq!(guide.review_status(), "reviewed_with_findings");
+}
+
+#[test]
+fn an_unavailable_reviewer_leaves_lessons_unreviewed_until_an_explicit_continue() {
+    let mut guide = generated_guide();
+    guide.lessons[0].record_review(review(0, ReviewVerdict::Unavailable));
+    assert!(guide.complete(), "a missing Reviewer does not block reading");
+    assert_eq!(guide.review_status(), "not_reviewed");
+    assert_eq!(guide.review_counts().unavailable, 1);
+    guide.reopen_for_continuation();
+    assert_eq!(guide.lessons[0].stage(true), LessonStage::Review { round: 0 });
+    // Legacy guides were never meant to be reviewed.
+    let mut legacy = generated_guide();
+    legacy.review_required = false;
+    assert!(legacy.complete());
+    assert_eq!(legacy.review_state(), "not_requested");
+}
+
+#[test]
+fn reviewer_output_is_strict_and_cannot_pass_blocking_issues() {
+    let (verdict, _, issues) = parse_review(
+        r#"{"verdict":"pass","summary":"Mostly right.","issues":[{"severity":"critical","location":"step 2","problem":"Wrong term.","suggestion":"Fix it."}]}"#,
+    )
+    .unwrap();
+    assert_eq!(verdict, ReviewVerdict::NeedsRevision);
+    assert_eq!(issues.len(), 1);
+    let (verdict, _, _) = parse_review(
+        "```json\n{\"verdict\":\"pass\",\"summary\":\"Faithful.\",\"issues\":[{\"severity\":\"minor\",\"location\":\"analogy\",\"problem\":\"Could be shorter.\",\"suggestion\":\"\"}]}\n```",
+    )
+    .unwrap();
+    assert_eq!(verdict, ReviewVerdict::Pass);
+    assert!(parse_review(r#"{"verdict":"unavailable","summary":"x","issues":[]}"#).is_err());
+    assert!(parse_review(r#"{"verdict":"needs_revision","summary":"x","issues":[]}"#).is_err());
+    assert!(parse_review(r#"{"verdict":"pass","summary":"x","issues":[],"approved":true}"#).is_err());
+}
+
+#[test]
+fn prompts_teach_from_simple_to_deep_and_keep_evidence_boundaries() {
+    let outline = outline();
+    let context = LessonContext {
+        outline: Some(&outline),
+        earlier_topics: vec!["What is attention?"],
+    };
+    let prompt = lesson_prompt("zh", &outline.topics[0], &context);
+    for required in ["plainSummary", "analogy", "prerequisites", "misconceptions", "Simplified Chinese", "Dot product", "What is attention?", "NOT evidence"] {
+        assert!(prompt.contains(required), "lesson prompt misses {required}");
+    }
+    assert!(!outline_prompt("en", 12, None).contains("READER RESEARCH GOAL"));
+    assert!(outline_prompt("en", 12, Some("Retrieval for chemistry")).contains("Retrieval for chemistry"));
+    let review = review_prompt(
+        "zh",
+        &outline.topics[0],
+        &lesson(),
+        &[ReviewSource { page: 1, text: Some("Original footnote text") }, ReviewSource { page: 2, text: None }],
+    );
+    assert!(review.contains("Original footnote text"));
+    assert!(review.contains("page 2: no text layer"));
+    assert!(review.contains("INDEPENDENT Reviewer"));
+    let revision = revision_instructions(&lesson(), &super::tests::review(0, ReviewVerdict::NeedsRevision));
+    assert!(revision.contains("permutation invariant") && revision.contains("NOT evidence"));
+    let ask = follow_up_prompt("zh", FollowUpMode::Simpler, "我没懂", Some("Step 2"), "{}", &[]);
+    assert!(ask.contains("MORE SIMPLY") && ask.contains("Step 2") && ask.contains("NOT evidence"));
+    assert!(parse_follow_up_answer("  ").is_err());
+    assert_eq!(parse_follow_up_answer(" An answer. ").unwrap(), "An answer.");
 }

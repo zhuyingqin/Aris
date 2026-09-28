@@ -2299,12 +2299,27 @@ fn paper_reading_uses_an_isolated_source_only_chat_context() {
     assert!(task.workflow().is_none());
     assert!(task.work_task().is_none());
     assert!(task.paper_reading().is_some());
-    assert!(prompt.contains("paper-source-only-v1"));
+    assert!(prompt.contains(runtime::paper_reading::PAPER_READING_POLICY));
+    assert!(prompt.contains("never evidence"));
     assert!(prompt.contains("No tools or external retrieval are authorized"));
     for tool in ["ToolSearch", "ReadFile", "Bash", "WebFetch", "AskUserQuestion", "LlmReview"] {
         assert!(validate_source_only_tool_access(true, tool).is_err());
         assert!(validate_source_only_tool_access(false, tool).is_ok());
     }
+}
+
+#[test]
+fn paper_vision_probe_requires_the_number_in_the_test_image() {
+    assert!(paper_vision_probe_passed("58"));
+    assert!(paper_vision_probe_passed("The number is 58."));
+    assert!(!paper_vision_probe_passed("I cannot see any image."));
+    assert!(!paper_vision_probe_passed("85"));
+    let image = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        PAPER_VISION_PROBE_PNG,
+    )
+    .unwrap();
+    assert!(image.starts_with(b"\x89PNG"));
 }
 
 #[test]

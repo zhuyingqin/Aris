@@ -1837,6 +1837,7 @@ export default function Literature({
   const removeSavedSearch = useLiteratureStore((s) => s.removeSavedSearch);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
   const addPdfAnnotation = useLiteratureStore((s) => s.addPdfAnnotation);
+  const addNote = useLiteratureStore((s) => s.addNote);
   const updatePdfAnnotation = useLiteratureStore((s) => s.updatePdfAnnotation);
   const deletePdfAnnotation = useLiteratureStore((s) => s.deletePdfAnnotation);
   const addAttachment = useLiteratureStore((s) => s.addAttachment);
@@ -4651,6 +4652,7 @@ export default function Literature({
                 deletePdfAnnotation(selectedPaper.id, annotationId)
               }
               onRunAi={(system, prompt, model) => literatureLlm(system, prompt, model)}
+              onSaveGuideNote={(note) => addNote(selectedPaper.id, { ...note, source: "manual" })}
             />
           </Suspense>
           </div>

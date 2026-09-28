@@ -10,13 +10,24 @@ use sha2::{Digest, Sha256};
 use crate::literature::LiteratureStore;
 
 pub const PAPER_READING_PROTOCOL: &str = "paper-perception-v2";
-pub const PAPER_READING_POLICY: &str = "paper-source-only-v1";
+/// v2: pages with a usable PDF text layer are read directly instead of being
+/// transcribed by a model first; textless pages are transcribed, and those
+/// transcriptions may guide (never replace) original evidence in later stages.
+pub const PAPER_READING_POLICY: &str = "paper-source-only-v2";
 pub const MAX_PAPER_PAGES: usize = 500;
 pub const MAX_PAGE_ATTEMPTS: usize = 3;
 fn default_attempt_limit() -> usize {
     MAX_PAGE_ATTEMPTS
 }
 pub const MAX_PAGE_RESULT_BYTES: usize = 256 * 1024;
+/// Below this many embedded characters a page is treated as having no usable
+/// text layer (scanned, image-only or a figure page) and needs transcription.
+pub const MIN_TEXT_LAYER_CHARS: usize = 200;
+
+#[must_use]
+pub fn has_text_layer(text: &str) -> bool {
+    text.chars().filter(|c| !c.is_whitespace()).count() >= MIN_TEXT_LAYER_CHARS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +44,9 @@ pub enum PaperReadingStatus {
 #[serde(rename_all = "snake_case")]
 pub enum PageStatus {
     AwaitingSource,
+    /// The page's own text layer is read directly; model transcription is
+    /// optional and only runs when the reader explicitly requests it.
+    NotRequired,
     Pending,
     Running,
     Completed,
@@ -107,7 +121,11 @@ pub struct PageAttempt {
     pub finished_at: Option<String>,
     pub status: String,
     pub error: Option<String>,
+    /// SHA-256 of the original page image delivered in this attempt.
     pub evidence_sha256: String,
+    /// SHA-256 of the embedded page text delivered with the image.
+    #[serde(default)]
+    pub text_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +172,10 @@ pub struct PaperReadingCoverage {
     pub page_processing_coverage: PageProcessingCoverage,
     pub identified_content_coverage: IdentifiedContentCoverage,
     pub recognition_completeness: RecognitionCompleteness,
+    /// Independent Reviewer state of the teaching lessons. Executor output or
+    /// task completion never changes this; only a Reviewer verdict does.
     pub review_status: &'static str,
+    pub review_counts: crate::paper_guide::ReviewCounts,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +183,8 @@ pub struct PaperReadingCoverage {
 pub struct PageProcessingCoverage {
     pub completed: usize,
     pub failed: usize,
+    /// Pages read from their own text layer without model transcription.
+    pub not_required: usize,
     pub total: usize,
 }
 
@@ -277,9 +300,58 @@ impl PaperReadingRun {
             }
             return Ok(());
         }
+        page.status = if has_text_layer(&source.embedded_text) {
+            PageStatus::NotRequired
+        } else {
+            PageStatus::Pending
+        };
         page.source = Some(source);
-        page.status = PageStatus::Pending;
         Ok(())
+    }
+
+    /// An explicit reader request to transcribe pages that are otherwise read
+    /// from their text layer (for example to see tables or formulas rebuilt).
+    pub fn request_transcription(&mut self) -> Result<usize, String> {
+        if self.status == PaperReadingStatus::Running {
+            return Err("Cannot change transcription scope while the task is running".into());
+        }
+        let mut requested = 0;
+        for page in &mut self.pages {
+            if page.status == PageStatus::NotRequired {
+                page.status = PageStatus::Pending;
+                requested += 1;
+            }
+        }
+        Ok(requested)
+    }
+
+    /// Saved results stay readable across protocol changes, but only a task
+    /// created under the current protocols may be resumed or extended.
+    #[must_use]
+    pub fn resumable(&self) -> bool {
+        self.protocol_version == PAPER_READING_PROTOCOL
+            && self.policy_version == PAPER_READING_POLICY
+            && self
+                .guide
+                .as_ref()
+                .is_none_or(crate::paper_guide::PaperGuide::current_protocol)
+    }
+
+    /// Every Chat session this task created, for audit and for cleanup when
+    /// the reader deletes this version.
+    #[must_use]
+    pub fn session_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .pages
+            .iter()
+            .flat_map(|page| page.attempts.iter().map(|attempt| attempt.session_id.clone()))
+            .collect::<Vec<_>>();
+        if let Some(guide) = &self.guide {
+            ids.extend(guide.session_ids());
+        }
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Explicit user action grants one bounded batch, retaining all prior attempts.
@@ -293,10 +365,7 @@ impl PaperReadingRun {
             }
         }
         if let Some(guide) = &mut self.guide {
-            guide.outline.reopen_exhausted_attempts();
-            for lesson in &mut guide.lessons {
-                lesson.task.reopen_exhausted_attempts();
-            }
+            guide.reopen_for_continuation();
         }
         Ok(())
     }
@@ -304,11 +373,9 @@ impl PaperReadingRun {
     /// Only the host holding the run lease may call this. Interrupted attempts
     /// are retained, while their pages become eligible for an explicit resume.
     pub fn start(&mut self) -> Result<(), String> {
-        if self.protocol_version != PAPER_READING_PROTOCOL
-            || self.policy_version != PAPER_READING_POLICY
-        {
+        if !self.resumable() {
             return Err(
-                "Paper reading protocol changed; prepare a new task with the original PDF".into(),
+                "Paper reading protocol changed; this saved version stays readable, but a new analysis is required to continue".into(),
             );
         }
         if self.pages.iter().any(|page| page.source.is_none()) {
@@ -321,7 +388,7 @@ impl PaperReadingRun {
                     attempt.finished_at = Some(crate::now_iso8601());
                 }
             }
-            if page.status != PageStatus::Completed {
+            if !matches!(page.status, PageStatus::Completed | PageStatus::NotRequired) {
                 page.status = if page.attempts.len() < page.attempt_limit {
                     PageStatus::Pending
                 } else {
@@ -371,6 +438,8 @@ impl PaperReadingRun {
             status: "running".into(),
             error: None,
             evidence_sha256: source.image_sha256.clone(),
+            text_sha256: (!source.embedded_text.is_empty())
+                .then(|| content_sha256(source.embedded_text.as_bytes())),
         });
         Ok(())
     }
@@ -428,7 +497,7 @@ impl PaperReadingRun {
         self.status = if self
             .pages
             .iter()
-            .all(|page| page.status == PageStatus::Completed)
+            .all(|page| matches!(page.status, PageStatus::Completed | PageStatus::NotRequired))
         {
             match &self.guide {
                 Some(guide) if guide.complete() => PaperReadingStatus::GuideReady,
@@ -509,10 +578,21 @@ impl PaperReadingRun {
                     .iter()
                     .filter(|p| p.status == PageStatus::Failed)
                     .count(),
+                not_required: self
+                    .pages
+                    .iter()
+                    .filter(|p| p.status == PageStatus::NotRequired)
+                    .count(),
                 total: self.total_pages,
             },
             identified_content_coverage: IdentifiedContentCoverage {
-                inventory_version: self.revision,
+                // The candidate inventory only changes when a page result is
+                // saved; saved results are never replaced within a task.
+                inventory_version: self
+                    .pages
+                    .iter()
+                    .filter(|page| page.result.is_some())
+                    .count() as u64,
                 candidates_by_kind,
                 understanding: self.guide.as_ref().map_or("not_started", |guide| {
                     if guide.outline.result.is_some() {
@@ -534,7 +614,10 @@ impl PaperReadingRun {
                         "pending"
                     }
                 }),
-                review: "not_requested",
+                review: self
+                    .guide
+                    .as_ref()
+                    .map_or("not_requested", crate::paper_guide::PaperGuide::review_state),
             },
             recognition_completeness: RecognitionCompleteness {
                 status: "not_checked",
@@ -542,7 +625,15 @@ impl PaperReadingRun {
                 expected_items: None,
                 matched_items: None,
             },
-            review_status: "not_reviewed",
+            review_status: self
+                .guide
+                .as_ref()
+                .map_or("not_reviewed", crate::paper_guide::PaperGuide::review_status),
+            review_counts: self
+                .guide
+                .as_ref()
+                .map(crate::paper_guide::PaperGuide::review_counts)
+                .unwrap_or_default(),
         }
     }
 }
@@ -625,18 +716,116 @@ impl LiteratureStore {
             .transpose()
     }
 
+    /// The newest task created under the current protocols wins. When none
+    /// exists, the newest older task is returned so a guide generated by a
+    /// previous release stays readable instead of silently disappearing.
     pub fn latest_paper_reading_run(
         &self,
         paper_id: &str,
         document_revision: &str,
     ) -> Result<Option<PaperReadingRun>, String> {
-        let payload: Option<String> = self.connection.query_row(
+        let current: Option<String> = self.connection.query_row(
             "SELECT payload FROM paper_reading_runs WHERE paper_id = ?1 AND document_revision = ?2 AND json_extract(payload, '$.protocolVersion') = ?3 AND json_extract(payload, '$.policyVersion') = ?4 ORDER BY updated_at DESC, rowid DESC LIMIT 1",
             params![paper_id, document_revision, PAPER_READING_PROTOCOL, PAPER_READING_POLICY], |row| row.get(0),
         ).optional().map_err(|e| e.to_string())?;
+        let payload = match current {
+            Some(payload) => Some(payload),
+            None => self
+                .connection
+                .query_row(
+                    "SELECT payload FROM paper_reading_runs WHERE paper_id = ?1 AND document_revision = ?2 ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+                    params![paper_id, document_revision],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?,
+        };
         payload
             .map(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
             .transpose()
+    }
+
+    /// All saved versions for one paper, newest first. Unreadable legacy
+    /// payloads are skipped rather than hiding every other version.
+    pub fn paper_reading_runs_for_paper(
+        &self,
+        paper_id: &str,
+    ) -> Result<Vec<PaperReadingRun>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM paper_reading_runs WHERE paper_id = ?1 ORDER BY updated_at DESC, rowid DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([paper_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut runs = Vec::new();
+        for payload in rows {
+            let payload = payload.map_err(|e| e.to_string())?;
+            if let Ok(run) = serde_json::from_str::<PaperReadingRun>(&payload) {
+                runs.push(run);
+            }
+        }
+        Ok(runs)
+    }
+
+    /// Removes one saved version and its reader questions. The caller removes
+    /// artifacts and Chat sessions using the returned record.
+    pub fn delete_paper_reading_run(&self, id: &str) -> Result<Option<PaperReadingRun>, String> {
+        let existing = self.paper_reading_run(id)?;
+        if existing.is_some() {
+            self.connection
+                .execute("DELETE FROM paper_follow_ups WHERE run_id = ?1", [id])
+                .map_err(|e| e.to_string())?;
+            self.connection
+                .execute("DELETE FROM paper_reading_runs WHERE id = ?1", [id])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(existing)
+    }
+
+    pub fn save_paper_follow_up(
+        &self,
+        follow_up: &crate::paper_guide::PaperFollowUp,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_string(follow_up).map_err(|e| e.to_string())?;
+        self.connection
+            .execute(
+                "INSERT INTO paper_follow_ups(id,run_id,target,created_at,payload) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    follow_up.id,
+                    follow_up.run_id,
+                    follow_up.target,
+                    follow_up.created_at,
+                    payload
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn paper_follow_ups(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::paper_guide::PaperFollowUp>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM paper_follow_ups WHERE run_id = ?1 ORDER BY created_at, rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([run_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut follow_ups = Vec::new();
+        for payload in rows {
+            let payload = payload.map_err(|e| e.to_string())?;
+            if let Ok(follow_up) = serde_json::from_str(&payload) {
+                follow_ups.push(follow_up);
+            }
+        }
+        Ok(follow_ups)
     }
 
     /// Compare-and-save prevents a cancelled/replaced attempt from committing

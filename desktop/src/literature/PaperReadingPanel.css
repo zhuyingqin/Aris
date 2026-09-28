@@ -163,6 +163,14 @@
 .paper-guide-header button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--lit-control-height, 32px); }
 .paper-guide-header .paper-guide-close { width: var(--lit-control-height, 32px); height: var(--lit-control-height, 32px); padding: 0; border-color: transparent; background: transparent; flex-shrink: 0; }
 .paper-guide-header .paper-guide-close:hover { background: var(--bg-2); }
+.paper-guide-header .paper-guide-delete { width: var(--lit-control-height, 32px); padding: 0; flex-shrink: 0; }
+.paper-reader-version-picker { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--text-dim); }
+.paper-reader-version-picker > span { white-space: nowrap; }
+.paper-reader-version-picker select { box-sizing: border-box; min-width: 0; max-width: 220px; height: var(--lit-control-height, 32px); padding: 0 8px; border: 1px solid var(--border); border-radius: var(--lit-control-radius, 6px); background: var(--bg-1); color: var(--text); font-family: inherit; font-size: var(--lit-control-font-size, 13px); }
+@container paper-guide (max-width: 560px) {
+  .paper-reader-version-picker > span { display: none; }
+  .paper-reader-version-picker select { max-width: 132px; }
+}
 .lit-paper-analysis button > .svg-icon { width: var(--lit-control-icon-size, 16px); height: var(--lit-control-icon-size, 16px); flex-shrink: 0; }
 .lit-paper-analysis-start [data-icon="spinner"] { animation: paper-guide-spin 1s linear infinite; }
 @keyframes paper-guide-spin { to { transform: rotate(360deg); } }

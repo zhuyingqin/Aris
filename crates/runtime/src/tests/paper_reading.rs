@@ -113,12 +113,105 @@ fn old_protocol_results_remain_stored_but_cannot_mask_or_resume_current_tasks() 
             .id,
         current.id,
     );
+    // With no current task, an older guide stays readable instead of
+    // disappearing after an upgrade, but it cannot be resumed.
     let legacy_only = open_literature_store_at(&temp.path().join("legacy-only")).unwrap();
     legacy_only.save_paper_reading_run(&old).unwrap();
-    assert!(legacy_only
+    let readable = legacy_only
         .latest_paper_reading_run(&old.paper_id, &old.document_revision)
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert_eq!(readable.id, old.id);
+    assert!(!readable.resumable());
+    let mut old_policy = current.clone();
+    old_policy.policy_version = "paper-source-only-v1".into();
+    assert!(!old_policy.resumable());
+    let mut old_guide = current.clone();
+    old_guide.guide = Some(crate::paper_guide::PaperGuide {
+        protocol_version: "paper-guide-v1".into(),
+        ..crate::paper_guide::PaperGuide::default()
+    });
+    assert!(!old_guide.resumable());
+    assert!(current.resumable());
+}
+
+#[test]
+fn pages_with_a_text_layer_are_read_directly_and_transcription_is_optional() {
+    let mut run = run(3);
+    let text_layer = "A full paragraph of original text from the PDF text layer. ".repeat(10);
+    for page_index in 0..3 {
+        run.attach_source(OriginalPageEvidence {
+            document_revision: run.document_revision.clone(),
+            page_index,
+            image_sha256: content_sha256(b"original page image"),
+            image_file: format!("page-{page_index}.jpg"),
+            mime_type: "image/jpeg".into(),
+            embedded_text: if page_index == 1 { String::new() } else { text_layer.clone() },
+            text_truncated: false,
+        })
+        .unwrap();
+    }
+    assert_eq!(run.pages[0].status, PageStatus::NotRequired);
+    assert_eq!(run.pages[1].status, PageStatus::Pending, "a scanned page needs transcription");
+    run.start().unwrap();
+    assert_eq!(run.next_page(), Some(1));
+    run.begin_page(1, "scan".into()).unwrap();
+    assert!(run.pages[1].attempts[0].text_sha256.is_none());
+    run.finish_page(1, "scan", Ok(&output(1))).unwrap();
+    assert_eq!(run.next_page(), None);
+    run.finish();
+    assert_eq!(run.status, PaperReadingStatus::PageProcessingComplete);
+    let coverage = run.coverage();
+    assert_eq!(coverage.page_processing_coverage.not_required, 2);
+    assert_eq!(coverage.page_processing_coverage.completed, 1);
+    assert_eq!(coverage.identified_content_coverage.inventory_version, 1);
+
+    assert_eq!(run.request_transcription().unwrap(), 2);
+    run.start().unwrap();
+    assert!(run.request_transcription().is_err(), "scope is fixed while running");
+    run.begin_page(0, "full".into()).unwrap();
+    assert_eq!(
+        run.pages[0].attempts[0].text_sha256.as_deref(),
+        Some(content_sha256(text_layer.as_bytes()).as_str())
+    );
+}
+
+#[test]
+fn versions_can_be_listed_and_deleted_with_their_reader_questions() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = open_literature_store_at(temp.path()).unwrap();
+    let first = store.save_paper_reading_run(&run(1)).unwrap();
+    let mut second = run(1);
+    second.id = content_sha256(b"regenerated version");
+    let second = store.save_paper_reading_run(&second).unwrap();
+    let mut other = run(1);
+    other.id = content_sha256(b"another paper");
+    other.paper_id = "paper-2".into();
+    store.save_paper_reading_run(&other).unwrap();
+    let listed = store.paper_reading_runs_for_paper("paper-1").unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|item| item.id == first.id));
+    let question = crate::paper_guide::PaperFollowUp {
+        id: "question-1".into(),
+        run_id: second.id.clone(),
+        target: "lesson:0".into(),
+        focus: Some("Step 2".into()),
+        mode: crate::paper_guide::FollowUpMode::Simpler,
+        question: "Explain again".into(),
+        answer: "A simpler answer.".into(),
+        model: "vision-model".into(),
+        session_id: "paper-ask".into(),
+        created_at: crate::now_iso8601(),
+        evidence: vec![],
+    };
+    store.save_paper_follow_up(&question).unwrap();
+    assert_eq!(store.paper_follow_ups(&second.id).unwrap()[0].answer, "A simpler answer.");
+    let deleted = store.delete_paper_reading_run(&second.id).unwrap().unwrap();
+    assert_eq!(deleted.id, second.id);
+    assert!(store.paper_reading_run(&second.id).unwrap().is_none());
+    assert!(store.paper_follow_ups(&second.id).unwrap().is_empty());
+    assert!(store.delete_paper_reading_run(&second.id).unwrap().is_none());
+    assert_eq!(store.paper_reading_runs_for_paper("paper-1").unwrap().len(), 1);
 }
 
 #[test]

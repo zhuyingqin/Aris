@@ -3135,6 +3135,12 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
              );
              CREATE INDEX IF NOT EXISTS paper_reading_runs_document_idx
                ON paper_reading_runs(paper_id, document_revision, updated_at);
+             CREATE TABLE IF NOT EXISTS paper_follow_ups(
+               id TEXT PRIMARY KEY, run_id TEXT NOT NULL, target TEXT NOT NULL,
+               created_at TEXT NOT NULL, payload TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS paper_follow_ups_run_idx
+               ON paper_follow_ups(run_id, created_at);
              CREATE TABLE IF NOT EXISTS literature_audit_log(
                sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL
