@@ -75,6 +75,9 @@
   --essay-column-gap: 58px;
   --essay-number-column: 32px;
   --essay-original-height: 520px;
+  --essay-diagram-height: 560px;
+  --essay-bar-label: 140px;
+  --essay-bar-height: 10px;
   --essay-control-height: var(--lit-control-height, 32px);
   --essay-control-line-height: var(--lit-control-line-height, 20px);
   --essay-radius-control: var(--lit-control-radius, 6px);
@@ -89,5 +92,6 @@
     --essay-text-body: 14px;
     --essay-text-deck: 15px;
     --essay-text-lead: 16px;
+    --essay-bar-label: 88px;
   }
 }

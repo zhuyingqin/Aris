@@ -1,9 +1,13 @@
 use super::*;
 use runtime::paper_evidence::{self, AllocatedText, PageRole, PageText};
+use futures_util::future::{BoxFuture, FutureExt};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use runtime::paper_guide::{
     self, GuideEvidence, GuideTask, GuideTaskStatus, LessonReview, LessonStage, PaperGuide,
-    ReviewSource, ReviewVerdict,
+    ReviewIssue, ReviewSource, ReviewVerdict,
 };
+use runtime::paper_reading::PAPER_PARALLEL_REQUESTS;
+use std::collections::BTreeSet;
 use runtime::paper_reading::{ContentKind, PerceptionPage};
 
 const MAX_GUIDE_TEXT_CHARS: usize = 120_000;
@@ -268,6 +272,21 @@ pub(super) fn topic_message(
     build_message(workspace, run, preamble, &texts, pages, None, task, true)
 }
 
+fn turn_context(
+    run: &PaperReadingRun,
+    stage: &'static str,
+    bundle: &EvidenceMessage,
+) -> crate::engine::PaperReadingRuntimeContext {
+    crate::engine::PaperReadingRuntimeContext {
+        run_id: run.id.clone(),
+        paper_id: run.paper_id.clone(),
+        document_revision: run.document_revision.clone(),
+        page_index: bundle.evidence.first().map_or(0, |source| source.page - 1),
+        stage,
+        executor_signature: run.executor_signature.clone(),
+    }
+}
+
 pub(super) async fn execute(
     app: &AppHandle,
     project_id: &str,
@@ -281,14 +300,7 @@ pub(super) async fn execute(
         app.clone(),
         session_id.into(),
         project_id.into(),
-        crate::engine::PaperReadingRuntimeContext {
-            run_id: run.id.clone(),
-            paper_id: run.paper_id.clone(),
-            document_revision: run.document_revision.clone(),
-            page_index: bundle.evidence.first().map_or(0, |source| source.page - 1),
-            stage,
-            executor_signature: run.executor_signature.clone(),
-        },
+        turn_context(run, stage, &bundle),
         bundle.message,
         run.model.clone(),
         cancellation,
@@ -403,41 +415,128 @@ pub(super) async fn drive(
         run = save_and_emit(app, project_id, workspace, &run)?;
         breaker.record(failure.as_deref())?;
     }
-    let count = run.guide.as_ref().map_or(0, |guide| guide.lessons.len());
-    for index in 0..count {
-        loop {
-            if cancellation.load(Ordering::SeqCst) {
-                return Ok(run);
-            }
+    // Lessons are independent: up to PAPER_PARALLEL_REQUESTS drafts, reviews
+    // and revisions run at once, at most one per lesson. Only this loop changes
+    // the task, so every save builds on the previous one.
+    let mut in_flight = FuturesUnordered::new();
+    let mut busy = BTreeSet::new();
+    let mut tripped = None;
+    loop {
+        while tripped.is_none() && !cancellation.load(Ordering::SeqCst) {
             let guide = run.guide.as_ref().ok_or("Missing explanation state")?;
-            run = match guide.lessons[index].stage(guide.review_required) {
-                LessonStage::Generate => {
-                    generate_lesson(app, project_id, workspace, run, index, false, &cancellation, breaker).await?
+            let slots = PAPER_PARALLEL_REQUESTS.saturating_sub(in_flight.len());
+            let jobs = next_lesson_jobs(guide, &busy, slots);
+            if jobs.is_empty() {
+                break;
+            }
+            // A draft whose evidence cannot be assembled fails without a
+            // request and frees its slot, so the loop looks again.
+            for (index, stage) in jobs {
+                let job = match stage {
+                    LessonStage::Generate | LessonStage::Revise => start_draft(
+                        app,
+                        project_id,
+                        workspace,
+                        &mut run,
+                        index,
+                        stage == LessonStage::Revise,
+                        &cancellation,
+                    )?,
+                    LessonStage::Review { round } => {
+                        Some(start_review(&run, index, round, &cancellation)?)
+                    }
+                    LessonStage::Done | LessonStage::Blocked => None,
+                };
+                if let Some(job) = job {
+                    busy.insert(index);
+                    in_flight.push(job);
                 }
-                LessonStage::Revise => {
-                    generate_lesson(app, project_id, workspace, run, index, true, &cancellation, breaker).await?
-                }
-                LessonStage::Review { round } => {
-                    review_lesson(app, project_id, workspace, run, index, round, &cancellation).await?
-                }
-                LessonStage::Done | LessonStage::Blocked => break,
-            };
+            }
         }
+        let Some(outcome) = in_flight.next().await else {
+            break;
+        };
+        busy.remove(&outcome.index());
+        if cancellation.load(Ordering::SeqCst) {
+            // The cancel command owns the saved state now.
+            continue;
+        }
+        // Only model requests for lessons count toward the failure breaker;
+        // an unavailable Reviewer is recorded on the lesson instead.
+        let failure = match &outcome {
+            LessonOutcome::Draft { output, .. } => Some(output.as_ref().err().cloned()),
+            LessonOutcome::Review { .. } => None,
+        };
+        apply_lesson_outcome(&mut run, outcome)?;
+        run = save_and_emit(app, project_id, workspace, &run)?;
+        if let (None, Some(failure)) = (&tripped, failure) {
+            tripped = breaker.record(failure.as_deref()).err();
+        }
+    }
+    if let Some(error) = tripped.filter(|_| !cancellation.load(Ordering::SeqCst)) {
+        return Err(error);
     }
     Ok(run)
 }
 
+/// Lessons to start now, in reading order: at most `slots`, skipping lessons
+/// that already have a request in flight or have nothing left to do.
+fn next_lesson_jobs(
+    guide: &PaperGuide,
+    busy: &BTreeSet<usize>,
+    slots: usize,
+) -> Vec<(usize, LessonStage)> {
+    guide
+        .lessons
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !busy.contains(index))
+        .map(|(index, lesson)| (index, lesson.stage(guide.review_required)))
+        .filter(|(_, stage)| !matches!(stage, LessonStage::Done | LessonStage::Blocked))
+        .take(slots)
+        .collect()
+}
+
+/// A finished lesson request, applied to the task by the controller.
+enum LessonOutcome {
+    Draft {
+        index: usize,
+        revision: bool,
+        session_id: String,
+        supplied: Vec<usize>,
+        output: Result<String, String>,
+    },
+    Review {
+        index: usize,
+        round: usize,
+        session_id: String,
+        evidence: Vec<GuideEvidence>,
+        reviewer: Option<String>,
+        outcome: Result<(ReviewVerdict, String, Vec<ReviewIssue>), String>,
+    },
+}
+
+impl LessonOutcome {
+    fn index(&self) -> usize {
+        match self {
+            Self::Draft { index, .. } | Self::Review { index, .. } => *index,
+        }
+    }
+}
+
+/// Start a first draft or a revision: build the request, record the attempt
+/// and return the request to run. `None` when the original evidence could not
+/// be assembled; only this topic fails and the rest of the guide continues.
 #[allow(clippy::too_many_arguments)]
-async fn generate_lesson(
+fn start_draft(
     app: &AppHandle,
     project_id: &str,
     workspace: &Path,
-    mut run: PaperReadingRun,
+    run: &mut PaperReadingRun,
     index: usize,
     revision: bool,
     cancellation: &Arc<AtomicBool>,
-    breaker: &mut FailureBreaker,
-) -> Result<PaperReadingRun, String> {
+) -> Result<Option<BoxFuture<'static, LessonOutcome>>, String> {
     let guide = run.guide.as_ref().ok_or("Missing explanation state")?;
     let lesson = &guide.lessons[index];
     let topic = lesson.topic.clone();
@@ -471,12 +570,12 @@ async fn generate_lesson(
             "\nThe previous attempt could not be accepted: {error}. Produce a fresh explanation from the originals above, observing the exact JSON field types."
         ));
     }
-    let bundle = match topic_message(workspace, &run, preamble, task, &topic.source_pages) {
+    let bundle = match topic_message(workspace, run, preamble, task, &topic.source_pages) {
         Ok(bundle) => bundle,
         Err(error) => {
-            // Only this topic is affected; the rest of the guide continues.
-            lesson_task(&mut run, index, revision)?.reject(&error);
-            return save_and_emit(app, project_id, workspace, &run);
+            lesson_task(run, index, revision)?.reject(&error);
+            *run = save_and_emit(app, project_id, workspace, run)?;
+            return Ok(None);
         }
     };
     let supplied = original_pages(&bundle);
@@ -486,29 +585,38 @@ async fn generate_lesson(
         if revision { "revision" } else { "lesson" },
         rand::random::<u64>()
     );
-    lesson_task(&mut run, index, revision)?.begin(session_id.clone(), bundle.evidence.clone())?;
-    run = save_and_emit(app, project_id, workspace, &run)?;
-    let output = execute(
-        app,
-        project_id,
-        &run,
-        &session_id,
-        if revision { "explanation_revision" } else { "multimodal_explanation" },
-        bundle,
+    lesson_task(run, index, revision)?.begin(session_id.clone(), bundle.evidence.clone())?;
+    *run = save_and_emit(app, project_id, workspace, run)?;
+    let stage = if revision { "explanation_revision" } else { "multimodal_explanation" };
+    let context = turn_context(run, stage, &bundle);
+    let (app, project_id, model, cancellation) = (
+        app.clone(),
+        project_id.to_owned(),
+        run.model.clone(),
         cancellation.clone(),
-    )
-    .await;
-    if cancellation.load(Ordering::SeqCst) {
-        return Ok(run);
-    }
-    let failure = output.as_ref().err().cloned();
-    let parsed = output.and_then(|text| paper_guide::parse_lesson(&text, &supplied));
-    let task = lesson_task(&mut run, index, revision)?;
-    task.finish(&session_id, parsed)?;
-    task.retry_invalid_output(failure.is_none());
-    let run = save_and_emit(app, project_id, workspace, &run)?;
-    breaker.record(failure.as_deref())?;
-    Ok(run)
+    );
+    Ok(Some(
+        async move {
+            let output = crate::engine::run_paper_reading_turn(
+                app,
+                session_id.clone(),
+                project_id,
+                context,
+                bundle.message,
+                model,
+                cancellation,
+            )
+            .await;
+            LessonOutcome::Draft {
+                index,
+                revision,
+                session_id,
+                supplied,
+                output,
+            }
+        }
+        .boxed(),
+    ))
 }
 
 /// The Reviewer only receives original text; it cannot see page images, so
@@ -542,15 +650,15 @@ fn review_sources(run: &PaperReadingRun, pages: &[usize]) -> (Vec<(usize, Option
     (sources, evidence)
 }
 
-async fn review_lesson(
-    app: &AppHandle,
-    project_id: &str,
-    workspace: &Path,
-    mut run: PaperReadingRun,
+/// Start an independent review of the current draft (`round` 0) or of the
+/// revision (`round` 1). The Reviewer gets one retry when its answer cannot be
+/// read; an unavailable Reviewer is reported, never replaced by a verdict.
+fn start_review(
+    run: &PaperReadingRun,
     index: usize,
     round: usize,
     cancellation: &Arc<AtomicBool>,
-) -> Result<PaperReadingRun, String> {
+) -> Result<BoxFuture<'static, LessonOutcome>, String> {
     let guide = run.guide.as_ref().ok_or("Missing explanation state")?;
     let entry = &guide.lessons[index];
     let lesson = if round == 0 {
@@ -563,7 +671,7 @@ async fn review_lesson(
     }
     .ok_or("No lesson draft to review")?;
     let topic = entry.topic.clone();
-    let (sources, evidence) = review_sources(&run, &topic.source_pages);
+    let (sources, evidence) = review_sources(run, &topic.source_pages);
     let review_sources = sources
         .iter()
         .map(|(page, text)| ReviewSource {
@@ -577,58 +685,101 @@ async fn review_lesson(
         &run.id[..16],
         rand::random::<u64>()
     );
-    let mut outcome = Err(String::new());
-    let mut reviewer = None;
-    for attempt in 0..2 {
-        let prompt = match &outcome {
-            Err(error) if attempt > 0 && !error.is_empty() => format!(
-                "{base_prompt}\n\nYour previous response could not be read ({error}). Return only the JSON object."
-            ),
-            _ => base_prompt.clone(),
-        };
-        let session = session_id.clone();
-        let cancel = cancellation.clone();
-        let executor_model = run.model.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            crate::engine::run_paper_lesson_review(&session, prompt, cancel, &executor_model)
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-        if cancellation.load(Ordering::SeqCst) {
-            return Ok(run);
-        }
-        match result {
-            Err(unavailable) => {
-                outcome = Err(unavailable);
-                reviewer = None;
-                break;
-            }
-            Ok(output) => {
-                reviewer = Some(output.reviewer);
-                outcome = paper_guide::parse_review(&output.text).map_err(|error| {
-                    format!("The Reviewer's response could not be read ({error})")
-                });
-                if outcome.is_ok() {
+    let (cancellation, executor_model) = (cancellation.clone(), run.model.clone());
+    Ok(async move {
+        let mut outcome = Err(String::new());
+        let mut reviewer = None;
+        for attempt in 0..2 {
+            let prompt = match &outcome {
+                Err(error) if attempt > 0 && !error.is_empty() => format!(
+                    "{base_prompt}\n\nYour previous response could not be read ({error}). Return only the JSON object."
+                ),
+                _ => base_prompt.clone(),
+            };
+            let (session, cancel, model) =
+                (session_id.clone(), cancellation.clone(), executor_model.clone());
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                crate::engine::run_paper_lesson_review(&session, prompt, cancel, &model)
+            })
+            .await;
+            match result {
+                Err(error) => {
+                    outcome = Err(format!("The Reviewer stopped unexpectedly ({error})"));
+                    reviewer = None;
                     break;
+                }
+                Ok(Err(unavailable)) => {
+                    outcome = Err(unavailable);
+                    reviewer = None;
+                    break;
+                }
+                Ok(Ok(output)) => {
+                    reviewer = Some(output.reviewer);
+                    outcome = paper_guide::parse_review(&output.text).map_err(|error| {
+                        format!("The Reviewer's response could not be read ({error})")
+                    });
+                    if outcome.is_ok() || cancellation.load(Ordering::SeqCst) {
+                        break;
+                    }
                 }
             }
         }
+        LessonOutcome::Review {
+            index,
+            round,
+            session_id,
+            evidence,
+            reviewer,
+            outcome,
+        }
     }
-    let (verdict, summary, issues) = match outcome {
-        Ok(parsed) => parsed,
-        Err(reason) => (ReviewVerdict::Unavailable, reason, Vec::new()),
-    };
-    guide_mut(&mut run)?.lessons[index].record_review(LessonReview {
-        round,
-        verdict,
-        summary,
-        issues,
-        reviewer,
-        session_id,
-        reviewed_at: runtime::now_iso8601(),
-        evidence,
-    });
-    save_and_emit(app, project_id, workspace, &run)
+    .boxed())
+}
+
+fn apply_lesson_outcome(run: &mut PaperReadingRun, outcome: LessonOutcome) -> Result<(), String> {
+    match outcome {
+        LessonOutcome::Draft {
+            index,
+            revision,
+            session_id,
+            supplied,
+            output,
+        } => {
+            let received = output.is_ok();
+            let parsed = output.and_then(|text| paper_guide::parse_lesson(&text, &supplied));
+            let task = lesson_task(run, index, revision)?;
+            task.finish(&session_id, parsed)?;
+            task.retry_invalid_output(received);
+        }
+        LessonOutcome::Review {
+            index,
+            round,
+            session_id,
+            evidence,
+            reviewer,
+            outcome,
+        } => {
+            let (verdict, summary, issues) = match outcome {
+                Ok(parsed) => parsed,
+                Err(reason) => (ReviewVerdict::Unavailable, reason, Vec::new()),
+            };
+            guide_mut(run)?
+                .lessons
+                .get_mut(index)
+                .ok_or("Missing explanation topic")?
+                .record_review(LessonReview {
+                    round,
+                    verdict,
+                    summary,
+                    issues,
+                    reviewer,
+                    session_id,
+                    reviewed_at: runtime::now_iso8601(),
+                    evidence,
+                });
+        }
+    }
+    Ok(())
 }
 
 /// Teaching notes and original pages for a reader's follow-up question.
@@ -815,6 +966,122 @@ mod tests {
         assert_eq!(sources[0].1.as_deref(), Some("Actual original PDF text"));
         assert!(evidence[0].text_sha256.is_some());
         assert!(evidence[0].image_sha256.is_none(), "the Reviewer channel is text-only");
+    }
+
+    fn evidence() -> Vec<GuideEvidence> {
+        vec![GuideEvidence {
+            page: 1,
+            image_sha256: Some(content_sha256(b"page image")),
+            text_sha256: None,
+            text_truncated: false,
+            derived_text_sha256: None,
+        }]
+    }
+
+    fn guide_with_topics(count: usize) -> PaperGuide {
+        let topics = (0..count)
+            .map(|index| serde_json::json!({
+                "kind": "concept", "level": "core", "title": format!("Topic {index}"),
+                "learningGoal": "Understand it", "prerequisites": [], "sourcePages": [1]
+            }))
+            .collect::<Vec<_>>();
+        let outline = serde_json::from_value(serde_json::json!({
+            "oneSentence": "A paper.",
+            "overview": [{"kind": "problem", "content": "A problem", "sourcePages": [1]}],
+            "glossary": [], "topics": topics, "cautions": [], "relevance": ""
+        }))
+        .unwrap();
+        let mut guide = PaperGuide::reviewed();
+        guide.outline.begin("outline".into(), evidence()).unwrap();
+        guide.finish_outline("outline", Ok(outline)).unwrap();
+        guide
+    }
+
+    fn lesson_json() -> String {
+        serde_json::json!({
+            "plainSummary": "A plain summary.", "analogy": "", "prerequisites": [],
+            "intuition": "Why it works.", "notation": "", "assumptions": "",
+            "steps": [{"title": "Step", "explanation": "Explained.", "origin": "paper"}],
+            "example": "### Givens\nTeaching numbers 1 and 2.\n### Answer\n3.",
+            "misconceptions": [], "evidence": "Page 1 says so.",
+            "checkQuestion": "Why?", "checkAnswer": "Because.", "sourcePages": [1], "cautions": []
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn lessons_start_in_reading_order_up_to_the_limit_with_one_request_each() {
+        let mut guide = guide_with_topics(4);
+        let none = BTreeSet::new();
+        let started = next_lesson_jobs(&guide, &none, PAPER_PARALLEL_REQUESTS);
+        assert_eq!(
+            started.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            (0..PAPER_PARALLEL_REQUESTS).collect::<Vec<_>>()
+        );
+        assert!(next_lesson_jobs(&guide, &none, 0).is_empty());
+        let busy = BTreeSet::from([0, 1]);
+        assert_eq!(next_lesson_jobs(&guide, &busy, 1), vec![(2, LessonStage::Generate)]);
+
+        // A finished draft moves on to review while other lessons still draft;
+        // a running lesson is never started twice.
+        guide.lessons[0].task.begin("draft-0".into(), evidence()).unwrap();
+        let lesson = paper_guide::parse_lesson(&lesson_json(), &[1]).unwrap();
+        guide.lessons[0].task.finish("draft-0", Ok(lesson)).unwrap();
+        guide.lessons[1].task.begin("draft-1".into(), evidence()).unwrap();
+        assert_eq!(
+            next_lesson_jobs(&guide, &none, 4),
+            vec![
+                (0, LessonStage::Review { round: 0 }),
+                (2, LessonStage::Generate),
+                (3, LessonStage::Generate)
+            ]
+        );
+    }
+
+    #[test]
+    fn results_arriving_out_of_order_are_applied_to_their_own_lessons() {
+        let (_directory, mut run) = super::super::tests::fixture();
+        run.guide = Some(guide_with_topics(2));
+        for index in 0..2 {
+            lesson_task(&mut run, index, false)
+                .unwrap()
+                .begin(format!("draft-{index}"), evidence())
+                .unwrap();
+        }
+        let draft = |index: usize, output: Result<String, String>| LessonOutcome::Draft {
+            index,
+            revision: false,
+            session_id: format!("draft-{index}"),
+            supplied: vec![1],
+            output,
+        };
+        // The later lesson answers first.
+        apply_lesson_outcome(&mut run, draft(1, Ok(lesson_json()))).unwrap();
+        apply_lesson_outcome(&mut run, draft(0, Ok("not JSON".into()))).unwrap();
+        let guide = run.guide.as_ref().unwrap();
+        assert_eq!(guide.lessons[1].stage(true), LessonStage::Review { round: 0 });
+        assert_eq!(guide.lessons[0].stage(true), LessonStage::Generate, "invalid output is retried");
+        assert!(guide.lessons[0].task.error.is_some());
+        assert!(
+            apply_lesson_outcome(&mut run, draft(1, Ok(lesson_json()))).is_err(),
+            "a result cannot be applied twice"
+        );
+
+        apply_lesson_outcome(
+            &mut run,
+            LessonOutcome::Review {
+                index: 1,
+                round: 0,
+                session_id: "review-1".into(),
+                evidence: vec![],
+                reviewer: Some("reviewer / model".into()),
+                outcome: Ok((ReviewVerdict::Pass, "Faithful.".into(), vec![])),
+            },
+        )
+        .unwrap();
+        let guide = run.guide.as_ref().unwrap();
+        assert_eq!(guide.lessons[1].stage(true), LessonStage::Done);
+        assert_eq!(guide.lessons[0].stage(true), LessonStage::Generate);
     }
 
     #[test]

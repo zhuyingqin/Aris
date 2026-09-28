@@ -4,6 +4,7 @@ import { renderPdfPageToCanvas } from "../pdf/canvas";
 import type { FollowUpMode, GuideLesson, GuideLessonEntry, PaperFollowUp, PaperGuide, TopicLevel } from "./paperReadingApi";
 import { currentLesson, finalReview } from "./paperGuideModel";
 import PaperReadingContent from "./PaperReadingContent";
+import PaperGuideDiagram, { diagramMarkdown } from "./PaperGuideDiagram";
 import "./PaperGuideView.css";
 
 const COPY = {
@@ -17,7 +18,7 @@ const COPY = {
     pending: "等待生成这个主题的讲解", running: "正在对照原图生成讲解…", failed: "这个主题尚未生成成功，可从上方继续重试。",
     overview: { problem: "研究什么问题", method: "方法为什么这样设计", evidence: "实验说明了什么", limitations: "结论的边界" },
     kind: { figure: "看懂方法图", formula: "理解关键公式", experiment: "读懂实验", concept: "理清概念" },
-    oneSentence: "一句话看懂这篇论文", plainSummary: "一句话看懂", analogy: "打个比方", prerequisites: "先补基础",
+    oneSentence: "一句话看懂这篇论文", atGlance: "一图看懂论文", diagram: "看图理解", plainSummary: "一句话看懂", analogy: "打个比方", prerequisites: "先补基础",
     misconceptions: "容易想错的地方", wrong: "误区", right: "正解", glossary: "关键术语：先认识这些词",
     readingPath: "阅读路线：由浅入深", relevance: "和你的研究有什么关系", prereqLabel: "先读懂",
     levels: { foundation: "打基础", core: "核心思想", advanced: "深入细节" } as Record<TopicLevel, string>,
@@ -50,7 +51,7 @@ const COPY = {
     pending: "Waiting to explain this topic", running: "Reading the original images to explain this topic…", failed: "This topic could not be generated. Continue above to retry.",
     overview: { problem: "The research problem", method: "Why the method works this way", evidence: "What the experiments show", limitations: "Limits of the conclusions" },
     kind: { figure: "Understand a figure", formula: "Understand a formula", experiment: "Read the experiments", concept: "Clarify a concept" },
-    oneSentence: "The paper in one sentence", plainSummary: "In plain words", analogy: "An analogy", prerequisites: "Background first",
+    oneSentence: "The paper in one sentence", atGlance: "The paper at a glance", diagram: "See it in a picture", plainSummary: "In plain words", analogy: "An analogy", prerequisites: "Background first",
     misconceptions: "Easy to get wrong", wrong: "Misconception", right: "Correction", glossary: "Key terms to know first",
     readingPath: "Reading path: simple to deep", relevance: "Why it may matter for your research", prereqLabel: "First understand",
     levels: { foundation: "Foundations", core: "Core idea", advanced: "Going deeper" } as Record<TopicLevel, string>,
@@ -130,6 +131,7 @@ function lessonMarkdown(entry: GuideLessonEntry, lesson: GuideLesson, copy: Copy
     lesson.analogy && `## ${copy.analogy}\n\n${lesson.analogy}`,
     lesson.prerequisites?.length && `## ${copy.prerequisites}\n\n${lesson.prerequisites.map(item => `- **${item.concept}**：${item.explanation}`).join("\n")}`,
     `## ${copy.intuition}\n\n${lesson.intuition}`,
+    lesson.diagram && `## ${copy.diagram}\n\n${diagramMarkdown(lesson.diagram)}`,
     lesson.notation && `## ${copy.notation}\n\n${lesson.notation}`,
     lesson.assumptions && `## ${copy.assumptions}\n\n${lesson.assumptions}`,
     `## ${copy.steps}\n\n${lesson.steps.map((step, index) => `### ${index + 1}. ${step.title}（${step.origin === "paper" ? copy.paper : copy.teaching}）\n\n${step.explanation}`).join("\n\n")}`,
@@ -252,6 +254,7 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
             : problem && <><div className="paper-essay-deck"><PaperReadingContent content={problem.content} /></div>{sources(problem.sourcePages)}</>}
         </header>
         {outline.relevance && <aside className="paper-essay-relevance"><span className="paper-essay-eyebrow">{copy.relevance}</span><PaperReadingContent content={outline.relevance} /></aside>}
+        {outline.diagram && <PaperGuideDiagram diagram={outline.diagram} english={english} eyebrow={copy.atGlance} />}
         <div className="paper-essay-rule"><span>{english ? "THE ARGUMENT" : "论文脉络"}</span></div>
         {outline.overview.filter(section => outline.oneSentence || section.kind !== "problem").map((section, index) => <section className="paper-essay-overview-section" key={section.kind}>
           <span className="paper-essay-section-number">{String(index + 1).padStart(2, "0")}</span><div><h2>{copy.overview[section.kind]}</h2><PaperReadingContent content={section.content} />{sources(section.sourcePages)}</div>
@@ -305,6 +308,7 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
             <dl>{lesson.prerequisites.map(item => <div key={item.concept}><dt>{item.concept}</dt><dd><PaperReadingContent content={item.explanation} /></dd></div>)}</dl>{inlineAnswers(copy.prerequisites)}
           </section>}
           <section className="paper-essay-intuition" {...(layered ? {} : { id: `${anchor}-intuition`, "data-section": "intuition" })}><h2>{copy.intuition}</h2><PaperReadingContent content={lesson.intuition} />{layered && inlineAnswers(copy.intuition)}</section>
+          {lesson.diagram && <PaperGuideDiagram diagram={lesson.diagram} english={english} eyebrow={copy.diagram} />}
           {full && (lesson.notation || lesson.assumptions) && <div className="paper-essay-foundations">
             {lesson.notation && <section><h3>{copy.notation}</h3><PaperReadingContent content={lesson.notation} /></section>}
             {lesson.assumptions && <section><h3>{copy.assumptions}</h3><PaperReadingContent content={lesson.assumptions} /></section>}

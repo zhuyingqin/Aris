@@ -12,6 +12,7 @@ use std::{
 };
 
 use base64::Engine;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use runtime::{
     literature::open_literature_store_at,
     paper_guide::{FollowUpMode, PaperFollowUp},
@@ -478,6 +479,10 @@ pub async fn paper_reading_start(
     Ok(initial)
 }
 
+/// One controller owns the saved task; up to `PAPER_PARALLEL_REQUESTS` page
+/// transcriptions run at once and their results are applied as they arrive.
+/// On cancellation or a tripped failure breaker no new page starts, and the
+/// requests already in flight are awaited so no attempt is left running.
 async fn drive(
     app: &AppHandle,
     project_id: &str,
@@ -486,43 +491,61 @@ async fn drive(
     cancellation: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut breaker = FailureBreaker::default();
-    while let Some(page_index) = run.next_page() {
-        if cancellation.load(Ordering::SeqCst) {
-            return Ok(());
+    let mut tripped = None;
+    let mut in_flight = FuturesUnordered::new();
+    loop {
+        while tripped.is_none() && !cancellation.load(Ordering::SeqCst) {
+            let Some(page_index) = run.next_page() else {
+                break;
+            };
+            let session_id = format!(
+                "paper-{}-{page_index}-{:016x}",
+                &run.id[..16],
+                rand::random::<u64>()
+            );
+            let message = original_page_message(workspace, &run, page_index);
+            run.begin_page(page_index, session_id.clone())?;
+            run = open_literature_store_at(workspace)?.save_paper_reading_run(&run)?;
+            emit(app, project_id, run.clone());
+            let context = crate::engine::PaperReadingRuntimeContext {
+                run_id: run.id.clone(),
+                paper_id: run.paper_id.clone(),
+                document_revision: run.document_revision.clone(),
+                page_index,
+                stage: "perception",
+                executor_signature: run.executor_signature.clone(),
+            };
+            let (app, project_id, model, cancellation) = (
+                app.clone(),
+                project_id.to_owned(),
+                run.model.clone(),
+                cancellation.clone(),
+            );
+            in_flight.push(async move {
+                let output = match message {
+                    Err(error) => Err(error),
+                    Ok(message) => {
+                        crate::engine::run_paper_reading_turn(
+                            app,
+                            session_id.clone(),
+                            project_id,
+                            context,
+                            message,
+                            model,
+                            cancellation,
+                        )
+                        .await
+                    }
+                };
+                (page_index, session_id, output)
+            });
         }
-        let session_id = format!(
-            "paper-{}-{page_index}-{:016x}",
-            &run.id[..16],
-            rand::random::<u64>()
-        );
-        let message = original_page_message(workspace, &run, page_index);
-        run.begin_page(page_index, session_id.clone())?;
-        run = open_literature_store_at(workspace)?.save_paper_reading_run(&run)?;
-        emit(app, project_id, run.clone());
-        let output = match message {
-            Err(error) => Err(error),
-            Ok(message) => {
-                crate::engine::run_paper_reading_turn(
-                    app.clone(),
-                    session_id.clone(),
-                    project_id.into(),
-                    crate::engine::PaperReadingRuntimeContext {
-                        run_id: run.id.clone(),
-                        paper_id: run.paper_id.clone(),
-                        document_revision: run.document_revision.clone(),
-                        page_index,
-                        stage: "perception",
-                        executor_signature: run.executor_signature.clone(),
-                    },
-                    message,
-                    run.model.clone(),
-                    cancellation.clone(),
-                )
-                .await
-            }
+        let Some((page_index, session_id, output)) = in_flight.next().await else {
+            break;
         };
         if cancellation.load(Ordering::SeqCst) {
-            return Ok(());
+            // The cancel command owns the saved state now.
+            continue;
         }
         run.finish_page(
             page_index,
@@ -532,7 +555,15 @@ async fn drive(
         run.retry_invalid_page_output(page_index, output.is_ok());
         run = open_literature_store_at(workspace)?.save_paper_reading_run(&run)?;
         emit(app, project_id, run.clone());
-        breaker.record(output.as_ref().err().map(String::as_str))?;
+        if tripped.is_none() {
+            tripped = breaker.record(output.as_ref().err().map(String::as_str)).err();
+        }
+    }
+    if cancellation.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if let Some(error) = tripped {
+        return Err(error);
     }
     run = guide::drive(app, project_id, workspace, run, cancellation.clone(), &mut breaker).await?;
     if cancellation.load(Ordering::SeqCst) {

@@ -7505,6 +7505,68 @@ fn run_llm_review_observed(
     input: LlmReviewInput,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<LlmReviewRun, String> {
+    prepare_llm_review(input.model)?.run_with(&input.prompt, cancelled)
+}
+
+/// A Reviewer endpoint resolved from the reviewer environment.
+///
+/// Resolving reads the process environment; running does not. A caller that
+/// re-applies the reviewer environment before each review can therefore
+/// resolve under a lock and send several reviews side by side.
+#[derive(Clone)]
+pub struct PreparedLlmReview {
+    protocol: ReviewerProtocol,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[derive(Clone, Copy)]
+enum ReviewerProtocol {
+    OpenAiCompat,
+    AnthropicCompat,
+}
+
+impl PreparedLlmReview {
+    /// Send one review request. Honors cancellation before and during the call.
+    pub fn run(&self, prompt: &str, cancelled: Arc<AtomicBool>) -> Result<LlmReviewRun, String> {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
+        self.run_with(prompt, Some(cancelled))
+    }
+
+    fn run_with(
+        &self,
+        prompt: &str,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Result<LlmReviewRun, String> {
+        match self.protocol {
+            ReviewerProtocol::OpenAiCompat => call_openai_compat_reviewer(
+                &self.api_key,
+                &self.base_url,
+                &self.model,
+                prompt,
+                cancelled,
+            ),
+            ReviewerProtocol::AnthropicCompat => call_anthropic_compat_reviewer(
+                &self.api_key,
+                &self.base_url,
+                &self.model,
+                prompt,
+                cancelled,
+            ),
+        }
+    }
+}
+
+/// Resolve the configured Reviewer endpoint, model and credential from the
+/// reviewer environment without sending anything.
+pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, String> {
+    let input = LlmReviewInput {
+        prompt: String::new(),
+        model,
+    };
     let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
         .ok()
         .filter(|s| !s.is_empty());
@@ -7556,7 +7618,12 @@ fn run_llm_review_observed(
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
-        return call_openai_compat_reviewer(&key, &base, model, &input.prompt, cancelled);
+        return Ok(PreparedLlmReview {
+            protocol: ReviewerProtocol::OpenAiCompat,
+            api_key: key,
+            base_url: base,
+            model: model.to_string(),
+        });
     }
 
     // Anthropic-compatible reviewer mode (e.g., Claude via proxy, DeepSeek).
@@ -7586,7 +7653,12 @@ fn run_llm_review_observed(
             "https://api.anthropic.com"
         };
         let base = custom_base_url.unwrap_or_else(|| default_base.to_string());
-        return call_anthropic_compat_reviewer(&key, &base, model, &input.prompt, cancelled);
+        return Ok(PreparedLlmReview {
+            protocol: ReviewerProtocol::AnthropicCompat,
+            api_key: key,
+            base_url: base,
+            model: model.to_string(),
+        });
     }
 
     // OpenAI-compat path: resolve model with fallback, then route to its endpoint.
@@ -7613,7 +7685,12 @@ fn run_llm_review_observed(
         .filter(|k| !k.is_empty())
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
-    call_openai_compat_reviewer(&key, &base_url, model, &input.prompt, cancelled)
+    Ok(PreparedLlmReview {
+        protocol: ReviewerProtocol::OpenAiCompat,
+        api_key: key,
+        base_url,
+        model: model.to_string(),
+    })
 }
 
 // Reviewer settings historically stored full endpoint URLs. The shared

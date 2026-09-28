@@ -26,6 +26,27 @@ export interface GuideTopic {
   sourcePages: number[];
 }
 export interface GlossaryTerm { term: string; plain: string; sourcePages: number[] }
+export type FlowNodeRole = "input" | "step" | "decision" | "data" | "output";
+/** A validated picture of a mechanism: drawn by the reader, never markup from the model. */
+export interface FlowDiagram {
+  kind: "flow";
+  title: string;
+  direction?: "LR" | "TD";
+  nodes: { id: string; label: string; role?: FlowNodeRole }[];
+  edges: { from: string; to: string; label?: string }[];
+  groups?: { label: string; nodes: string[] }[];
+  caption: string;
+}
+/** Numbers on one metric: read from an original table ("paper") or invented to teach ("teaching"). */
+export interface BarChart {
+  kind: "bars";
+  title: string;
+  unit?: string;
+  origin: "paper" | "teaching";
+  bars: { label: string; value: number; highlight?: boolean }[];
+  caption: string;
+}
+export type TeachingDiagram = FlowDiagram | BarChart;
 export interface GuideOutline {
   oneSentence?: string;
   overview: { kind: "problem" | "method" | "evidence" | "limitations"; content: string; sourcePages: number[] }[];
@@ -33,6 +54,8 @@ export interface GuideOutline {
   topics: GuideTopic[];
   cautions: string[];
   relevance?: string;
+  /** The paper at a glance; absent in guides saved before diagrams. */
+  diagram?: TeachingDiagram | null;
 }
 export interface GuideLesson {
   /** Layered fields; absent in guides saved before the layered protocol. */
@@ -41,6 +64,8 @@ export interface GuideLesson {
   prerequisites?: { concept: string; explanation: string }[];
   misconceptions?: { misconception: string; correction: string }[];
   intuition: string;
+  /** Absent in lessons saved before diagrams. */
+  diagram?: TeachingDiagram | null;
   notation: string;
   assumptions: string;
   steps: { title: string; explanation: string; origin: "paper" | "teaching" }[];

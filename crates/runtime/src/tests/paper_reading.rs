@@ -343,16 +343,30 @@ fn a_changed_model_connection_gets_a_different_task_identity() {
 }
 
 #[test]
-fn in_flight_work_is_serial_and_cancel_does_not_erase_completion() {
-    let mut run = run(2);
-    attach(&mut run, 0);
-    attach(&mut run, 1);
+fn in_flight_work_is_bounded_and_cancel_does_not_erase_completion() {
+    let pages = PAPER_PARALLEL_REQUESTS + 1;
+    let mut run = run(pages);
+    for index in 0..pages {
+        attach(&mut run, index);
+    }
     run.start().unwrap();
-    run.begin_page(0, "first".into()).unwrap();
-    assert!(run.begin_page(1, "second".into()).is_err());
-    run.finish_page(0, "first", Ok(&output(0))).unwrap();
-    run.begin_page(1, "second".into()).unwrap();
-    run.finish_page(1, "second", Ok(&output(1))).unwrap();
+    assert!(run.begin_page(1, "out-of-order".into()).is_err(), "pages start in order");
+    for index in 0..PAPER_PARALLEL_REQUESTS {
+        assert_eq!(run.next_page(), Some(index));
+        run.begin_page(index, format!("page-{index}")).unwrap();
+    }
+    assert_eq!(run.next_page(), None, "the in-flight limit is reached");
+    assert!(run.begin_page(pages - 1, "over-limit".into()).is_err());
+    // Pages finish in any order; a finished one frees a slot.
+    run.finish_page(1, "page-1", Ok(&output(1))).unwrap();
+    assert_eq!(run.next_page(), Some(pages - 1));
+    run.begin_page(pages - 1, "last".into()).unwrap();
+    assert!(run.finish_page(0, "page-1", Ok(&output(0))).is_err(), "results bind to their own attempt");
+    run.finish_page(0, "page-0", Ok(&output(0))).unwrap();
+    for index in 2..PAPER_PARALLEL_REQUESTS {
+        run.finish_page(index, &format!("page-{index}"), Ok(&output(index))).unwrap();
+    }
+    run.finish_page(pages - 1, "last", Ok(&output(pages - 1))).unwrap();
     run.finish();
     run.cancel();
     assert_eq!(run.status, PaperReadingStatus::PageProcessingComplete);

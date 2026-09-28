@@ -275,6 +275,9 @@ pub struct GuideOutline {
     /// there is no goal or no grounded connection.
     #[serde(default)]
     pub relevance: String,
+    /// The paper at a glance as a flow diagram. Absent in older guides.
+    #[serde(default)]
+    pub diagram: Option<TeachingDiagram>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +285,168 @@ pub struct GuideOutline {
 pub enum ExplanationOrigin {
     Paper,
     Teaching,
+}
+
+/// A picture that makes a mechanism or a comparison visible. It is data, not
+/// markup: the host validates it and the reader draws it, so a model can
+/// neither inject markup nor produce a diagram that fails to render.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeachingDiagram {
+    /// A process, architecture, data flow or chain of reasoning.
+    Flow(FlowDiagram),
+    /// Numbers compared on one metric.
+    Bars(BarChart),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowDirection {
+    #[default]
+    #[serde(rename = "LR")]
+    LeftToRight,
+    #[serde(rename = "TD")]
+    TopDown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowNodeRole {
+    Input,
+    #[default]
+    Step,
+    Decision,
+    Data,
+    Output,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowNode {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub role: FlowNodeRole,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowGroup {
+    pub label: String,
+    pub nodes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowDiagram {
+    pub title: String,
+    #[serde(default)]
+    pub direction: FlowDirection,
+    pub nodes: Vec<FlowNode>,
+    pub edges: Vec<FlowEdge>,
+    #[serde(default)]
+    pub groups: Vec<FlowGroup>,
+    /// What to notice, and what the picture simplifies or leaves out.
+    pub caption: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Bar {
+    pub label: String,
+    pub value: f64,
+    #[serde(default)]
+    pub highlight: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BarChart {
+    pub title: String,
+    #[serde(default)]
+    pub unit: String,
+    /// "paper" for values read from an original table; "teaching" for
+    /// invented numbers that only show how to read the metric.
+    pub origin: ExplanationOrigin,
+    pub bars: Vec<Bar>,
+    pub caption: String,
+}
+
+fn diagram_problem(diagram: &TeachingDiagram) -> Option<String> {
+    let problem = |message: &str| Some(format!("diagram: {message}"));
+    match diagram {
+        TeachingDiagram::Flow(flow) => {
+            if !text_bound(&flow.title, 120) || !text_bound(&flow.caption, 600) {
+                return problem("flow title (≤120) and caption (≤600) must be nonempty");
+            }
+            if !(2..=14).contains(&flow.nodes.len()) {
+                return problem("a flow has 2–14 nodes");
+            }
+            let mut ids = BTreeSet::new();
+            for node in &flow.nodes {
+                let id_ok = (1..=24).contains(&node.id.len())
+                    && node.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !id_ok || !ids.insert(node.id.as_str()) {
+                    return problem("node ids are unique ASCII letters, digits or _ (at most 24)");
+                }
+                if !text_bound(&node.label, 80) {
+                    return problem("node labels are nonempty plain text of at most 80 characters");
+                }
+            }
+            if !(1..=24).contains(&flow.edges.len()) {
+                return problem("a flow has 1–24 edges");
+            }
+            for edge in &flow.edges {
+                if !ids.contains(edge.from.as_str()) || !ids.contains(edge.to.as_str()) {
+                    return problem("every edge connects existing node ids");
+                }
+                if !optional_bound(&edge.label, 40) {
+                    return problem("edge labels are at most 40 characters");
+                }
+            }
+            if flow.groups.len() > 4 {
+                return problem("at most 4 groups");
+            }
+            let mut grouped = BTreeSet::new();
+            for group in &flow.groups {
+                if !text_bound(&group.label, 60)
+                    || group.nodes.is_empty()
+                    || !group
+                        .nodes
+                        .iter()
+                        .all(|id| ids.contains(id.as_str()) && grouped.insert(id.as_str()))
+                {
+                    return problem("each group has a label (≤60) and existing nodes, and a node belongs to at most one group");
+                }
+            }
+            None
+        }
+        TeachingDiagram::Bars(chart) => {
+            if !text_bound(&chart.title, 120)
+                || !text_bound(&chart.caption, 600)
+                || !optional_bound(&chart.unit, 24)
+            {
+                return problem("bars title (≤120) and caption (≤600) must be nonempty; unit at most 24 characters");
+            }
+            if !(2..=12).contains(&chart.bars.len())
+                || !chart
+                    .bars
+                    .iter()
+                    .all(|bar| text_bound(&bar.label, 60) && bar.value.is_finite())
+            {
+                return problem("a bar chart has 2–12 bars, each with a label (≤60) and a finite number");
+            }
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +484,9 @@ pub struct GuideLesson {
     #[serde(default)]
     pub prerequisites: Vec<PrerequisiteConcept>,
     pub intuition: String,
+    /// A picture of the mechanism or comparison. Absent in older lessons.
+    #[serde(default)]
+    pub diagram: Option<TeachingDiagram>,
     pub notation: String,
     pub assumptions: String,
     pub steps: Vec<ExplanationStep>,
@@ -818,6 +986,17 @@ pub fn parse_outline(
             return Err(format!("overview[{index}].sourcePages must be nonempty, unique, and refer only to original evidence supplied in this turn"));
         }
     }
+    match &result.diagram {
+        Some(TeachingDiagram::Bars(_)) => {
+            return Err("diagram: the overview uses a flow diagram (kind \"flow\") or null".into());
+        }
+        Some(diagram) => {
+            if let Some(problem) = diagram_problem(diagram) {
+                return Err(problem);
+            }
+        }
+        None => {}
+    }
     if !has_reader_goal {
         // A connection to a goal that was never supplied would be invented.
         result.relevance.clear();
@@ -880,6 +1059,9 @@ pub fn parse_lesson(text: &str, supplied_pages: &[usize]) -> Result<GuideLesson,
         ),
         (cautions_valid(&result.cautions), "cautions: at most 12 nonempty strings"),
     ])?;
+    if let Some(problem) = result.diagram.as_ref().and_then(diagram_problem) {
+        return Err(problem);
+    }
     Ok(result)
 }
 
@@ -934,6 +1116,12 @@ fn language_name(language: &str) -> &'static str {
     }
 }
 
+/// Shared rules for flow diagrams: plain labels (the reader draws them without
+/// Markdown or LaTeX) and faithful structure.
+const FLOW_RULES: &str = "A flow has 3–10 nodes with short plain-text labels (no LaTeX, no Markdown; write symbols as plain text such as Q·K^T or x_t), each with role input|step|decision|data|output, and arrows in reading order with short labels when they help; groups (at most 4) box related nodes such as an encoder and a decoder. Use direction \"LR\" for a chain of at most 5 nodes and \"TD\" for longer chains, so the picture fits a reading column. Follow the paper's actual structure: simplify by merging steps, never by inventing components or connections. caption says what to notice and what the picture simplifies or leaves out.";
+
+const FLOW_SCHEMA: &str = r#"{"kind":"flow","title":"...","direction":"LR|TD","nodes":[{"id":"a","label":"...","role":"input|step|decision|data|output"}],"edges":[{"from":"a","to":"b","label":""}],"groups":[{"label":"...","nodes":["a"]}],"caption":"..."}"#;
+
 /// The final block of the outline turn, after the original evidence and the
 /// page index. Retry feedback is appended here so retries reuse the prefix.
 pub const OUTLINE_TASK: &str = "REQUEST: write the study guide JSON described at the start of this message from the original evidence above.";
@@ -966,10 +1154,13 @@ WHAT TO WRITE (simple → deep)
 - topics: 3–6 teaching topics (at most 8) forming a LEARNING PATH. level "foundation" = a background idea the paper builds on, explained only as far as this paper needs; "core" = the paper's central mechanism or insight; "advanced" = mathematical details, experimental analysis and subtleties. Include at least one foundation and one core topic. Cover a method/architecture figure, a central formula or reasoning difficulty, and an experimental table when present; prefer substantive method pages to appendix illustrations; do not manufacture modalities absent from the paper. Each topic answers one reader question; learningGoal is one short sentence; prerequisites names glossary terms or earlier topic titles to understand first.
 - relevance: 1–3 sentences on how the paper could matter for the reader's research goal, grounded in what the paper shows; "" when there is no clear link. Never invent a connection.
 - cautions: concrete uncertainties (conflicting numbers, unreadable parts, limited scope).
+- diagram: the paper at a glance as ONE flow diagram — the method's pipeline (inputs → main components → outputs) or its argument (problem → key idea → evidence). {diagram_rules} null only when nothing faithful can be drawn.
 
 Return ONLY JSON matching this schema, without extra keys or a code fence:
-{{"oneSentence":"...","overview":[{{"kind":"problem|method|evidence|limitations","content":"...","sourcePages":[1]}}],"glossary":[{{"term":"...","plain":"...","sourcePages":[1]}}],"topics":[{{"kind":"figure|formula|experiment|concept","level":"foundation|core|advanced","title":"question or concept","learningGoal":"...","prerequisites":["..."],"sourcePages":[1]}}],"cautions":["..."],"relevance":""}}
-FORMAT CONTRACT: every text field is a JSON string. cautions and prerequisites are arrays of strings, never objects. sourcePages contains integer page numbers. Math uses LaTeX in $...$ or multiline $$...$$ with correct JSON escaping. Use exactly one kind and one level per entry. No Reviewer verdicts, reader-mastery claims or recognition-completeness claims."#
+{{"oneSentence":"...","overview":[{{"kind":"problem|method|evidence|limitations","content":"...","sourcePages":[1]}}],"glossary":[{{"term":"...","plain":"...","sourcePages":[1]}}],"topics":[{{"kind":"figure|formula|experiment|concept","level":"foundation|core|advanced","title":"question or concept","learningGoal":"...","prerequisites":["..."],"sourcePages":[1]}}],"cautions":["..."],"relevance":"","diagram":{flow_schema}}}
+FORMAT CONTRACT: every text field is a JSON string. cautions and prerequisites are arrays of strings, never objects. diagram is an object or null. sourcePages contains integer page numbers. Math uses LaTeX in $...$ or multiline $$...$$ with correct JSON escaping. Use exactly one kind and one level per entry. No Reviewer verdicts, reader-mastery claims or recognition-completeness claims."#,
+        diagram_rules = FLOW_RULES,
+        flow_schema = FLOW_SCHEMA,
     )
 }
 
@@ -1036,19 +1227,24 @@ LAYERS — keep this order; each layer adds depth to the previous one:
 2. analogy: one concrete everyday analogy that preserves the essential mechanism, then one sentence that begins with the {language} for "Where the analogy breaks:" naming what it gets wrong. Use "" when no faithful analogy exists; never force a misleading one.
 3. prerequisites: 0–4 background concepts this topic relies on that a newcomer may not know, each explained in 1–3 plain sentences with a tiny concrete illustration. Skip concepts the earlier topics already taught.
 4. intuition: why the mechanism works, mostly in words, bridging the plain summary and the details.
-5. notation and assumptions: every symbol with its meaning (and shape or unit when relevant) and every condition the argument needs; "" when not applicable. For lists, put Markdown bullets inside ONE string.
-6. steps: 3–6 steps from the big picture down to the details, one idea per step, mathematics last. origin "paper" for what the paper states, "teaching" for added derivations, analogies, checks or justifications — even when they start from a paper formula.
-7. example: a REQUIRED simple worked problem (rules below).
-8. misconceptions: 1–3 confusions a newcomer is likely to have about THIS topic, each with the correction and the reason. Include confusions between similar technical terms when relevant (for example invariant vs equivariant, correlation vs causation, training vs inference, necessary vs sufficient, a bound vs a guarantee).
-9. evidence: what the original evidence supports, and what it does not establish.
-10. checkQuestion and checkAnswer: one short question that tests the core idea (answerable from this lesson, not trivia), with the answer and why.
+5. diagram: ONE picture that makes this topic visible at a glance (rules below); null only when nothing faithful can be drawn.
+6. notation and assumptions: every symbol with its meaning (and shape or unit when relevant) and every condition the argument needs; "" when not applicable. For lists, put Markdown bullets inside ONE string.
+7. steps: 3–6 steps from the big picture down to the details, one idea per step, mathematics last. origin "paper" for what the paper states, "teaching" for added derivations, analogies, checks or justifications — even when they start from a paper formula.
+8. example: a REQUIRED simple worked problem (rules below).
+9. misconceptions: 1–3 confusions a newcomer is likely to have about THIS topic, each with the correction and the reason. Include confusions between similar technical terms when relevant (for example invariant vs equivariant, correlation vs causation, training vs inference, necessary vs sufficient, a bound vs a guarantee).
+10. evidence: what the original evidence supports, and what it does not establish.
+11. checkQuestion and checkAnswer: one short question that tests the core idea (answerable from this lesson, not trivia), with the answer and why.
 
 WORKED EXAMPLE RULES: short Markdown subheadings in {language} for Givens and question / Step-by-step solution / Answer / Connection to the paper. Use tiny inputs (two or three values, a small vector or a short sequence) and show substituted numbers and intermediate results, not just an analogy. For conceptual or figure topics, trace a concrete input through the mechanism; arithmetic is optional there. For experimental topics, use clearly invented teaching data to show how to read the metric or comparison, without inventing paper results. Label constructed numbers and simplifications as teaching choices, keep the method's relevant assumptions, and say what the toy problem does NOT establish. Recompute every number before returning.
 
+DIAGRAM RULES: kind "flow" for a process, architecture, data flow, derivation chain or cause and effect. {flow_rules} kind "bars" only for an experiment topic: 2–8 numbers on ONE metric, either read confidently from one row or column of an original table with the same split and unit, baseline included (origin "paper"), or clearly invented teaching data that shows how to read the metric (origin "teaching"); highlight the paper's method. Choose whichever picture teaches this topic best.
+
 Return ONLY JSON with exactly these fields, without a code fence:
-{{"plainSummary":"...","analogy":"...","prerequisites":[{{"concept":"...","explanation":"..."}}],"intuition":"...","notation":"...","assumptions":"...","steps":[{{"title":"...","explanation":"...","origin":"paper|teaching"}}],"example":"...","misconceptions":[{{"misconception":"...","correction":"..."}}],"evidence":"...","checkQuestion":"...","checkAnswer":"...","sourcePages":[1],"cautions":[]}}
-FORMAT CONTRACT: every text field is a JSON string, never an object or array; only prerequisites, steps, misconceptions, sourcePages and cautions are arrays. cautions contains strings only. Escape Markdown exactly once for JSON: the JSON string "$\\sqrt{{d}}$" decodes to $\sqrt{{d}}$; use \n for newlines. All sourcePages must be among the supplied original pages. Math uses correctly grouped LaTeX in $...$ or multiline $$...$$."#,
+{{"plainSummary":"...","analogy":"...","prerequisites":[{{"concept":"...","explanation":"..."}}],"intuition":"...","diagram":{flow_schema} or {{"kind":"bars","title":"...","unit":"...","origin":"paper|teaching","bars":[{{"label":"...","value":0.0,"highlight":false}}],"caption":"..."}},"notation":"...","assumptions":"...","steps":[{{"title":"...","explanation":"...","origin":"paper|teaching"}}],"example":"...","misconceptions":[{{"misconception":"...","correction":"..."}}],"evidence":"...","checkQuestion":"...","checkAnswer":"...","sourcePages":[1],"cautions":[]}}
+FORMAT CONTRACT: every text field is a JSON string, never an object or array; only prerequisites, steps, misconceptions, sourcePages and cautions are arrays, and diagram is an object or null. cautions contains strings only. Escape Markdown exactly once for JSON: the JSON string "$\\sqrt{{d}}$" decodes to $\sqrt{{d}}$; use \n for newlines. All sourcePages must be among the supplied original pages. Math uses correctly grouped LaTeX in $...$ or multiline $$...$$."#,
         topic = serde_json::to_string(topic).unwrap_or_default(),
+        flow_rules = FLOW_RULES,
+        flow_schema = FLOW_SCHEMA,
     )
 }
 
@@ -1099,6 +1295,7 @@ Check:
 4. Overclaiming: no guarantees the paper does not make; hedges such as "may" or "we suspect" are preserved.
 5. Misconceptions: every correction is itself correct.
 6. Labels: teaching additions are not presented as the paper's own statements.
+7. Diagram: its nodes, arrows and groups match what the paper describes, with no invented components or connections; bars with origin "paper" match the original table exactly (same metric, split and unit), and invented numbers are marked origin "teaching".
 Limits: you cannot see figures or page images. When a claim depends only on a figure, an unreadable table or a page without text, do not guess: report it as a minor issue whose problem says it cannot be verified from text, unless it is central to the lesson.
 
 Verdict: "pass" only when there is no critical or major issue; "needs_revision" when a critical or major issue can be fixed from the evidence; "insufficient_evidence" when the lesson's central claims cannot be checked from the supplied text.

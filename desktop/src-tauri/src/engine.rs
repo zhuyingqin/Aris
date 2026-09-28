@@ -14,7 +14,7 @@ use std::{
     sync::mpsc::{self, RecvTimeoutError, Sender},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock, TryLockError,
+        Arc, Mutex, OnceLock, PoisonError, TryLockError,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -3553,7 +3553,19 @@ pub(crate) fn run_paper_lesson_review(
                 .into(),
         );
     }
-    crate::config::apply_reviewer_environment(true);
+    // Lesson reviews run side by side. Applying the reviewer environment
+    // clears and re-sets process variables, so it and the endpoint resolution
+    // that reads them happen under one lock; the requests themselves do not.
+    static REVIEWER_SETUP: Mutex<()> = Mutex::new(());
+    // The ChatGPT web Reviewer drives one browser conversation at a time.
+    static ORACLE_REVIEWS: Mutex<()> = Mutex::new(());
+    let oracle = reviewer_provider.eq_ignore_ascii_case("oracle-web");
+    let _oracle_turn = oracle.then(|| ORACLE_REVIEWS.lock().unwrap_or_else(PoisonError::into_inner));
+    let prepared = {
+        let _setup = REVIEWER_SETUP.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::config::apply_reviewer_environment(true);
+        (!oracle).then(|| tools::prepare_llm_review(None))
+    };
     let started = Instant::now();
     crate::chat_events::record_wire_event(
         session_id,
@@ -3567,13 +3579,12 @@ pub(crate) fn run_paper_lesson_review(
             "prompt": &prompt,
         }),
     );
-    let run = if reviewer_provider.eq_ignore_ascii_case("oracle-web") {
-        crate::oracle_web::run_bound_reviewer(prompt, cancelled).map(|text| tools::LlmReviewRun {
+    let run = match prepared {
+        None => crate::oracle_web::run_bound_reviewer(prompt, cancelled).map(|text| tools::LlmReviewRun {
             text,
             usages: Vec::new(),
-        })
-    } else {
-        tools::execute_llm_review_observed_with_cancel(prompt, None, cancelled)
+        }),
+        Some(prepared) => prepared.and_then(|review| review.run(&prompt, cancelled)),
     };
     let duration_ms = started.elapsed().as_millis();
     match run {

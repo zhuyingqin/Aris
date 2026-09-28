@@ -565,3 +565,90 @@ fn request_specific_text_stays_out_of_the_shared_prefixes() {
     assert_eq!(stable(&first), stable(&second), "questions about one part share rules and notes");
     assert!(!stable(&first).contains("Why softmax?"));
 }
+
+fn flow_json() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "flow", "title": "Scaled dot-product attention", "direction": "LR",
+        "nodes": [
+            {"id": "q", "label": "Queries Q", "role": "input"},
+            {"id": "k", "label": "Keys K", "role": "input"},
+            {"id": "score", "label": "Scores Q·K^T / sqrt(d)"},
+            {"id": "out", "label": "Weighted values", "role": "output"}
+        ],
+        "edges": [
+            {"from": "q", "to": "score"},
+            {"from": "k", "to": "score", "label": "dot product"},
+            {"from": "score", "to": "out", "label": "softmax"}
+        ],
+        "groups": [{"label": "Attention", "nodes": ["score"]}],
+        "caption": "Scaling happens before softmax; the value path is merged into the last node."
+    })
+}
+
+#[test]
+fn diagrams_are_validated_data_and_older_guides_stay_readable() {
+    assert!(lesson().diagram.is_none(), "a lesson without a diagram still parses");
+    assert!(outline().diagram.is_none());
+
+    let mut raw = lesson_json();
+    raw["diagram"] = flow_json();
+    let parsed = parse_lesson(&raw.to_string(), &[1]).unwrap();
+    assert!(matches!(parsed.diagram, Some(TeachingDiagram::Flow(ref flow)) if flow.nodes.len() == 4));
+    let stored = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(stored["diagram"]["kind"], "flow");
+    assert_eq!(stored["diagram"]["direction"], "LR");
+
+    let broken: [(&str, serde_json::Value); 5] = [
+        ("/edges/0/to", serde_json::json!("missing")),
+        ("/nodes/1/id", serde_json::json!("q")),
+        ("/nodes/0/id", serde_json::json!("has space")),
+        ("/nodes/0/label", serde_json::json!("")),
+        ("/groups/0/nodes", serde_json::json!(["score", "score"])),
+    ];
+    for (pointer, value) in broken {
+        let mut flow = flow_json();
+        *flow.pointer_mut(pointer).unwrap() = value;
+        raw["diagram"] = flow;
+        let error = parse_lesson(&raw.to_string(), &[1]).unwrap_err();
+        assert!(error.starts_with("diagram:"), "{pointer}: {error}");
+    }
+    let mut flow = flow_json();
+    flow["nodes"][0]["style"] = "fill:red".into();
+    raw["diagram"] = flow;
+    assert!(parse_lesson(&raw.to_string(), &[1]).is_err(), "no styling or markup fields");
+
+    let bars = serde_json::json!({
+        "kind": "bars", "title": "BLEU on the test set", "unit": "BLEU", "origin": "paper",
+        "bars": [{"label": "Baseline", "value": 26.4}, {"label": "This paper", "value": 28.4, "highlight": true}],
+        "caption": "Same metric and split; higher is better."
+    });
+    raw["diagram"] = bars.clone();
+    assert!(matches!(
+        parse_lesson(&raw.to_string(), &[1]).unwrap().diagram,
+        Some(TeachingDiagram::Bars(ref chart)) if chart.origin == ExplanationOrigin::Paper
+    ));
+    let mut single = bars.clone();
+    single["bars"] = serde_json::json!([{"label": "Only", "value": 1.0}]);
+    raw["diagram"] = single;
+    assert!(parse_lesson(&raw.to_string(), &[1]).unwrap_err().starts_with("diagram:"));
+    let mut unlabelled = bars.clone();
+    unlabelled.as_object_mut().unwrap().remove("origin");
+    raw["diagram"] = unlabelled;
+    assert!(parse_lesson(&raw.to_string(), &[1]).is_err(), "numbers must say where they come from");
+
+    let mut overview = outline_json();
+    overview["diagram"] = flow_json();
+    assert!(parse_outline(&overview.to_string(), 2, &[1], false).unwrap().diagram.is_some());
+    overview["diagram"] = bars;
+    assert!(parse_outline(&overview.to_string(), 2, &[1], false).is_err(), "the overview draws a flow");
+}
+
+#[test]
+fn prompts_ask_for_a_diagram_and_the_reviewer_checks_it() {
+    let outline = outline();
+    let task = lesson_task("zh", &outline.topics[0], &[]);
+    assert!(task.contains("diagram") && task.contains("\"kind\":\"flow\"") && task.contains("\"kind\":\"bars\""));
+    assert!(outline_prompt("zh", 3, None).contains("\"diagram\":{\"kind\":\"flow\""));
+    let review = review_prompt("zh", &outline.topics[0], &lesson(), &[]);
+    assert!(review.contains("Diagram:"));
+}

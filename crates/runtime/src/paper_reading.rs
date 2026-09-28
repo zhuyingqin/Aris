@@ -9,6 +9,10 @@ use sha2::{Digest, Sha256};
 
 use crate::literature::LiteratureStore;
 
+/// Model requests a paper task keeps in flight at once: pages, lessons,
+/// reviews and revisions are independent, so they run side by side while one
+/// controller owns the saved state.
+pub const PAPER_PARALLEL_REQUESTS: usize = 3;
 pub const PAPER_READING_PROTOCOL: &str = "paper-perception-v2";
 /// v2: pages with a usable PDF text layer are read directly instead of being
 /// transcribed by a model first; textless pages are transcribed, and those
@@ -404,14 +408,17 @@ impl PaperReadingRun {
         Ok(())
     }
 
+    /// The next page to transcribe, while fewer than
+    /// [`PAPER_PARALLEL_REQUESTS`] pages are in flight. Pages are independent,
+    /// so they may finish in any order.
     #[must_use]
     pub fn next_page(&self) -> Option<usize> {
-        if self.status != PaperReadingStatus::Running
-            || self
-                .pages
-                .iter()
-                .any(|page| page.status == PageStatus::Running)
-        {
+        let running = self
+            .pages
+            .iter()
+            .filter(|page| page.status == PageStatus::Running)
+            .count();
+        if self.status != PaperReadingStatus::Running || running >= PAPER_PARALLEL_REQUESTS {
             return None;
         }
         self.pages

@@ -49,7 +49,8 @@ export function mermaidThemeVariables(theme: Theme) {
       };
 }
 
-async function renderMermaid(code: string, theme: Theme): Promise<string> {
+/** Render Mermaid source to SVG with the app theme, one diagram at a time. */
+export async function renderMermaid(code: string, theme: Theme): Promise<string> {
   let resolveRender: (svg: string) => void;
   let rejectRender: (reason?: unknown) => void;
   const result = new Promise<string>((resolve, reject) => {

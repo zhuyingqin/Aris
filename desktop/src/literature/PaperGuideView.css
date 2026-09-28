@@ -64,6 +64,26 @@
 .paper-essay-review li { margin: var(--essay-space-2) 0; }
 .paper-essay-review li.is-critical strong, .paper-essay-review li.is-major strong { color: var(--essay-warn); }
 
+/* Teaching diagrams: a drawn flow or a bar comparison, always with its provenance */
+.paper-essay-diagram { margin: var(--essay-space-8) 0; padding: var(--essay-space-5); border: var(--essay-rule); background: var(--essay-surface-sunken); }
+.paper-essay-diagram-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--essay-space-2) var(--essay-space-3); margin-bottom: var(--essay-space-4); }
+.paper-essay-diagram-head strong { font-size: var(--essay-text-h3); line-height: var(--essay-leading-heading); color: var(--essay-ink); }
+/* inline-size containment keeps a wide diagram from widening the reading column; it scrolls instead */
+.paper-essay-diagram-canvas { max-height: var(--essay-diagram-height); overflow: auto; contain: inline-size; text-align: center; }
+.paper-essay-diagram-canvas[aria-busy="true"] { min-height: var(--essay-control-height); }
+.paper-essay-diagram-stage svg { display: block; margin: 0 auto; height: auto; }
+.paper-essay-diagram-fallback { margin: 0; padding-left: var(--essay-space-5); font-size: var(--essay-text-dense); line-height: var(--essay-leading); color: var(--essay-ink); }
+.paper-essay-diagram figcaption { margin-top: var(--essay-space-4); font-size: var(--essay-text-dense); line-height: var(--essay-leading); color: var(--essay-ink); }
+.paper-essay-diagram figcaption .paper-essay-caption { margin-top: var(--essay-space-2); }
+.paper-essay-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--essay-space-2); }
+.paper-essay-bars li { display: grid; grid-template-columns: var(--essay-bar-label) minmax(0, 1fr) auto; align-items: center; gap: var(--essay-space-3); font-size: var(--essay-text-compact); color: var(--essay-muted); }
+.paper-essay-bars li.is-highlight { color: var(--essay-ink); font-weight: 600; }
+.paper-essay-bar-label { overflow-wrap: anywhere; }
+.paper-essay-bar-track { height: var(--essay-bar-height); background: var(--essay-tint-soft); border-radius: var(--essay-radius-pill); overflow: hidden; }
+.paper-essay-bar-fill { display: block; height: 100%; background: var(--essay-muted); border-radius: inherit; }
+.paper-essay-bars li.is-highlight .paper-essay-bar-fill { background: var(--essay-accent); }
+.paper-essay-bar-value { font-variant-numeric: tabular-nums; }
+
 /* Paper overview */
 .paper-essay-one-sentence { font-size: var(--essay-text-lead); line-height: var(--essay-leading); padding: var(--essay-space-4) var(--essay-space-5); margin-bottom: var(--essay-space-4); background: var(--essay-tint-strong); border-left: 3px solid var(--essay-accent); }
 .paper-essay-relevance { margin: 0 0 var(--essay-space-6); padding: var(--essay-space-4) var(--essay-space-5); border: 1px dashed var(--essay-line); font-size: var(--essay-text-dense); }

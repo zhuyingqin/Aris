@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 const tokens = read("../paperGuideTokens.css");
 const styles = read("../PaperGuideView.css");
-const view = read("../PaperGuideView.tsx");
+const view = read("../PaperGuideView.tsx") + read("../PaperGuideDiagram.tsx");
 const template = read("../../../../docs/design/paper-guide/template.html");
 
 /** Declarations inside innermost blocks, comments removed. */
