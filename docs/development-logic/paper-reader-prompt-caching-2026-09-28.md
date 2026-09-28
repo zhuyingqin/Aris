@@ -52,6 +52,7 @@
 | `cargo test -p aris-executor` | DeepSeek 命中字段计入缓存读取且不重复计算；Anthropic 断点标在开头块和证据末尾块 |
 | `cargo test -p runtime --lib paper_` | 逐页识别说明与页码无关；讲解开头不含主题；复核和追问的共享部分在不同请求间完全一致 |
 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib paper_reading` | 同一主题的初稿、重试和追问只有最后一块不同；系统提示不含运行、页码和阶段；同一运行的路由 ID 相同 |
+| `cargo test -p runtime --lib`（跳过 bash、background、hooks 等会启动子进程的测试）、`cargo test -p aris-chat`、`cargo check --tests -p tools` | runtime 662 个通过，aris-chat 46 个通过，tools 编译通过。本次开发容器在运行子进程类测试时会被整体终止，所以没有完成 `cargo test --workspace`；这些测试所在代码本轮未修改 |
 
 ## 仍待验证
 
