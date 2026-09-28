@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
 import {
   newapiAuthStatus,
   newapiSendVerification,
@@ -58,6 +58,8 @@ export default function Login() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [twoFactorRequired, setTwoFactorRequired] = useState(false);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [email, setEmail] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
@@ -98,7 +100,7 @@ export default function Login() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [resolvedServer, copy, language]);
+  }, [resolvedServer, copy, language, mode]);
 
   useEffect(() => {
     if (codeCooldown <= 0) return;
@@ -134,7 +136,7 @@ export default function Login() {
     (mode === "register" &&
       (!authStatus || !registerSupported || turnstileRequired || (legalRequired && !legalAccepted)));
   const sendVerificationCode = async () => {
-    if (codeBusy || codeCooldown > 0) return;
+    if (codeBusy || codeCooldown > 0 || statusBusy || !authStatus) return;
     setError(null);
     setNotice(null);
     if (!email.trim()) {
@@ -162,7 +164,7 @@ export default function Login() {
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (submitDisabled) return;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -204,10 +206,17 @@ export default function Login() {
         if (!passwordLoginEnabled) {
           throw new Error(copy.errorPasswordLoginNotSupported);
         }
-        await login(resolvedServer, username.trim(), password);
+        if (twoFactorRequired && !twoFactorCode.trim()) throw new Error(copy.twoFactorRequired);
+        await login(resolvedServer, username.trim(), password, twoFactorRequired ? twoFactorCode.trim() : undefined);
       }
     } catch (err) {
-      setError(errorMessage(err, language));
+      if (String(err instanceof Error ? err.message : err) === "AUTH_TWO_FACTOR_REQUIRED") {
+        setTwoFactorRequired(true);
+        setNotice(copy.twoFactorNotice);
+      } else {
+        setError(errorMessage(err, language));
+      }
+      setTwoFactorCode("");
     } finally {
       setBusy(false);
     }
@@ -249,8 +258,11 @@ export default function Login() {
                 type="button"
                 role="tab"
                 aria-selected={mode === value}
+                disabled={busy}
                 onClick={() => {
                   setMode(value);
+                  setTwoFactorRequired(false);
+                  setTwoFactorCode("");
                   setError(null);
                   setNotice(null);
                 }}
@@ -268,7 +280,8 @@ export default function Login() {
               value={username}
               autoFocus
               autoComplete="username"
-              onChange={(e) => setUsername(e.target.value)}
+              disabled={busy}
+              onChange={(e) => { setUsername(e.target.value); setTwoFactorRequired(false); setTwoFactorCode(""); setNotice(null); }}
               placeholder={copy.usernamePlaceholder}
             />
           </div>
@@ -280,10 +293,22 @@ export default function Login() {
               type="password"
               value={password}
               autoComplete={mode === "register" ? "new-password" : "current-password"}
-              onChange={(e) => setPassword(e.target.value)}
+              disabled={busy}
+              onChange={(e) => { setPassword(e.target.value); setTwoFactorRequired(false); setTwoFactorCode(""); setNotice(null); }}
               placeholder={mode === "register" ? copy.passwordPlaceholderRegister : copy.passwordPlaceholderLogin}
             />
           </div>
+
+          {mode === "login" && twoFactorRequired && (
+            <div className="sq-field" style={field(0)}>
+              <label className="sq-label" htmlFor="sq-two-factor">{copy.twoFactorLabel}</label>
+              <input id="sq-two-factor" className="sq-input" autoFocus
+                autoComplete="one-time-code" value={twoFactorCode} required
+                spellCheck={false} autoCapitalize="none" disabled={busy}
+                placeholder={copy.twoFactorPlaceholder}
+                onChange={(event) => setTwoFactorCode(event.target.value)} />
+            </div>
+          )}
 
           {mode === "register" && (
             <>
@@ -308,7 +333,8 @@ export default function Login() {
                       type="email"
                       value={email}
                       autoComplete="email"
-                      onChange={(e) => setEmail(e.target.value)}
+                      required
+                      onChange={(e) => { setEmail(e.target.value); setVerificationCode(""); setNotice(null); }}
                       placeholder={copy.emailPlaceholder}
                     />
                   </div>
@@ -320,6 +346,7 @@ export default function Login() {
                         className="sq-input"
                         value={verificationCode}
                         autoComplete="one-time-code"
+                        required
                         spellCheck={false}
                         onChange={(e) => setVerificationCode(e.target.value)}
                         placeholder={copy.verificationCodePlaceholder}
@@ -328,7 +355,7 @@ export default function Login() {
                         type="button"
                         className={`sq-btn-secondary${codeBusy ? " sq-btn-secondary-busy" : ""}`}
                         onClick={sendVerificationCode}
-                        disabled={codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
+                        disabled={busy || statusBusy || !authStatus || codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
                       >
                         {codeBusy && (
                           <svg className="sq-btn-spinner sq-btn-spinner-sm" viewBox="0 0 24 24" fill="none" aria-hidden="true">

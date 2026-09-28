@@ -105,6 +105,7 @@ const annotation: PdfAnnotation = {
 };
 
 const renderReader = (overrides: {
+  paperId?: string;
   initialPage?: number;
   onAddAnnotation?: ReturnType<typeof vi.fn>;
   onUpdateAnnotation?: ReturnType<typeof vi.fn>;
@@ -122,6 +123,7 @@ const renderReader = (overrides: {
   const result = render(
     <PdfReader
       relativePath="papers/test.pdf"
+      paperId={overrides.paperId}
       initialPage={overrides.initialPage}
       annotations={[annotation]}
       onOpenExternal={() => undefined}
@@ -200,6 +202,30 @@ describe("PdfReader annotation interactions", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
     expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("2");
+  });
+
+  it("keeps the PDF page and manual zoom while opening and closing the guide", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", { configurable: true, value: class DOMMatrix {} });
+    useStore.setState({ currentProject: null });
+    renderReader({ initialPage: 2, paperId: "paper-1" });
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const page = screen.getByRole("spinbutton", { name: "PDF 页码" }) as HTMLInputElement;
+    const toggle = screen.getByRole("button", { name: "论文讲解" });
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    const zoom = document.querySelector(".lit-pdf-zoom-value")?.textContent;
+    fireEvent.click(toggle);
+    expect(screen.getByRole("complementary", { name: "论文讲解" })).toBeTruthy();
+    expect(page.value).toBe("2");
+    fireEvent.keyDown(screen.getByRole("button", { name: "关闭讲解" }), { key: "Escape" });
+    expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "关闭讲解" }));
+    expect(page.value).toBe("2");
+    expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe(zoom);
+    expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1);
+    expect(readerMocks.document.destroy).not.toHaveBeenCalled();
   });
 
   it("renders the initial page when IntersectionObserver is unavailable", async () => {
@@ -444,6 +470,35 @@ describe("PdfReader annotation interactions", () => {
     scroll!.scrollTop = 160;
     fireEvent.scroll(scroll!);
     expect((document.querySelector(".lit-pdf-page-input input") as HTMLInputElement).value).toBe("2");
+  });
+
+  it("does not skip a short PDF page when several pages fit in the viewport", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    renderReader({ readOnly: true });
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    await act(async () => {
+      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
+    });
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll")!;
+    const input = document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")!;
+    document.querySelectorAll<HTMLElement>(".lit-pdf-page-slot").forEach((slot, index) => {
+      Object.defineProperty(slot, "offsetTop", { configurable: true, value: index * 160 });
+      Object.defineProperty(slot, "offsetHeight", { configurable: true, value: 140 });
+    });
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 900 });
+
+    fireEvent.wheel(scroll, { deltaY: 160 });
+    scroll.scrollTop = 160;
+    fireEvent.scroll(scroll);
+    await waitFor(() => expect(input.value).toBe("2"));
+
+    scroll.scrollTop = 300;
+    fireEvent.scroll(scroll);
+    await waitFor(() => expect(input.value).toBe("3"));
   });
 
   it("maps quote-only answer evidence onto the PDF text layer", async () => {

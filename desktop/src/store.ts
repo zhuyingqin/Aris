@@ -307,7 +307,7 @@ interface AppState {
   authed: boolean;
   /** Last-used NewAPI endpoint shown by the desktop login form. */
   authServer: string;
-  login: (server: string, username: string, password: string) => Promise<void>;
+  login: (server: string, username: string, password: string, twoFactorCode?: string) => Promise<void>;
   validateAuth: () => Promise<boolean>;
   register: (
     server: string,
@@ -432,10 +432,10 @@ if (storedLanguage) {
 export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
   authServer: readStoredServer(),
-  login: async (server, username, password) => {
+  login: async (server, username, password, twoFactorCode) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
     if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
-    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
+    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password, twoFactorCode);
     await persistManagedAuthResult(result, get().language);
     markAuthed(trimmedServer);
     set({ authed: true, authServer: trimmedServer });

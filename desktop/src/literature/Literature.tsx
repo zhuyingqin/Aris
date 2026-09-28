@@ -27,8 +27,6 @@ import {
   literatureRagStatus,
   literatureStorageBackup,
   literatureStorageStatus,
-  literatureReadAnnotationExport,
-  literatureWriteAnnotationExport,
   literatureWriteBibliographyExport,
   knowledgeRetrievalCardsBuild,
   projectRagAnswer,
@@ -45,7 +43,9 @@ import { imageMimeType, isImagePath } from "../imageFiles";
 import ImageLightbox from "../ImageLightbox";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import LiteratureViewTabs, { type LiteraturePageView } from "./LiteratureViewTabs";
-import LiteratureToolbar, { type LiteratureSortKey } from "./LiteratureToolbar";
+import LiteratureToolbar, { type LiteratureSortKey, type LibraryQuickFilter } from "./LiteratureToolbar";
+import LibraryTopbar from "./LibraryTopbar";
+import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "../settingsTabRequest";
 import DetailTabRail from "./LiteratureDetailTabs";
 import LibraryActionMenu, { LibraryMenuPopup, type LibraryMenuAction, type LibraryMenuAnchor } from "./LibraryActionMenu";
 import LiteratureBatchBar from "./LiteratureBatchBar";
@@ -89,7 +89,6 @@ import {
   type LiteratureSearchCondition,
   type LiteratureMetadataPatch,
   type LiteratureCreatorInput,
-  type LiteratureNote,
   type LiteratureWorkflowGradeLevel,
   type PaperStage,
 } from "./literatureTypes";
@@ -97,25 +96,20 @@ import "./Literature.css";
 import "./LibraryWorkspace.css";
 
 type SortKey = LiteratureSortKey;
-const SORT_KEYS: readonly SortKey[] = ["added", "fit", "year", "title", "venue", "citations"];
-// Evidence avoids a shield or check mark: an entry is a cited passage, not a
-// verified claim.
+const SORT_KEYS: readonly SortKey[] = ["added", "fit", "year", "title", "venue", "citations", "authors"];
 const READER_RAIL_ICONS: Record<DetailTab, SvgIconName> = {
   info: "info",
-  overview: "document",
+  guide: "paperGuide",
   reader: "bookOpen",
-  evidence: "quote",
-  notes: "edit",
   files: "attachment",
   related: "graph",
 };
 const PANEL_LIMITS = {
-  sidebar: { min: 180, max: 420, initial: 220 },
-  workspace: { min: 280, max: 560, initial: 336 },
+  sidebar: { min: 180, max: 420, initial: 268 },
+  workspace: { min: 280, max: 560, initial: 448 },
 } as const;
 type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
 
-const LazyMathText = lazy(() => import("./MathText"));
 const PdfReader = lazy(() => import("./PdfReader"));
 
 const AUTO_RETRIEVAL_CARDS_STORAGE_KEY = "somniq-literature-auto-retrieval-cards-v1";
@@ -144,20 +138,6 @@ const MANUAL_ITEM_TYPES = [
   "email", "letter", "statute", "film", "interview", "podcast",
   "radioBroadcast", "tvBroadcast", "videoRecording",
 ] as const;
-function MathText({
-  text,
-  className = "",
-}: {
-  text: string;
-  className?: string;
-}) {
-  return (
-    <Suspense fallback={<span className={`lit-math-text ${className}`.trim()}>{text}</span>}>
-      <LazyMathText text={text} className={className} />
-    </Suspense>
-  );
-}
-
 function LiteratureLoading({ label }: { label: string }) {
   return (
     <div className="lit-lazy-loading" role="status" aria-live="polite">
@@ -753,7 +733,7 @@ function matchesQuery(paper: LiteraturePaper, needle: string) {
     .join(" ")
     .toLowerCase();
   if (!cached) paperSearchTextCache.set(paper, searchText);
-  return searchText.includes(needle);
+  return searchText.includes(needle.toLowerCase());
 }
 
 const paperSearchTextCache = new WeakMap<LiteraturePaper, string>();
@@ -776,7 +756,7 @@ function descendantCollectionIds(collections: LiteratureLibrary["collections"], 
 /** Text sorts read A→Z by default; dates, scores and counts newest or
  * largest first. `reversed` flips that default. */
 function sortIsDescending(sort: SortKey, reversed: boolean) {
-  return (sort !== "title" && sort !== "venue") !== reversed;
+  return (sort !== "title" && sort !== "venue" && sort !== "authors") !== reversed;
 }
 
 function sortPapers(papers: LiteraturePaper[], sort: SortKey, reversed = false) {
@@ -787,6 +767,7 @@ function sortPapers(papers: LiteraturePaper[], sort: SortKey, reversed = false) 
       case "citations": return paper.citedBy;
       case "title": return paper.title.trim() || undefined;
       case "venue": return paper.venue?.trim() || undefined;
+      case "authors": return paper.authors.join(", ").trim() || undefined;
       default: return paper.addedAt;
     }
   };
@@ -1832,8 +1813,7 @@ export default function Literature({
   const permanentlyDeletePapers = useLiteratureStore((s) => s.permanentlyDeletePapers);
   const createManualItemInStore = useLiteratureStore((s) => s.createManualItem);
   const loaded = useLiteratureStore((s) => s.loaded);
-  const briefing = useLiteratureStore((s) => s.briefing);
-  const generatingAnswerChains = useLiteratureStore((s) => s.generatingAnswerChains);
+  const activityOpen = useLiteratureStore((s) => s.activityOpen);
   const storeError = useLiteratureStore((s) => s.error);
   const load = useLiteratureStore((s) => s.load);
   const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
@@ -1856,10 +1836,6 @@ export default function Literature({
   const saveDynamicSearch = useLiteratureStore((s) => s.saveDynamicSearch);
   const removeSavedSearch = useLiteratureStore((s) => s.removeSavedSearch);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
-  const generateBrief = useLiteratureStore((s) => s.generateBrief);
-  const generateAnswerChains = useLiteratureStore((s) => s.generateAnswerChains);
-  const deleteEvidence = useLiteratureStore((s) => s.deleteEvidence);
-  const updateAnswerChain = useLiteratureStore((s) => s.updateAnswerChain);
   const addPdfAnnotation = useLiteratureStore((s) => s.addPdfAnnotation);
   const updatePdfAnnotation = useLiteratureStore((s) => s.updatePdfAnnotation);
   const deletePdfAnnotation = useLiteratureStore((s) => s.deletePdfAnnotation);
@@ -1868,11 +1844,6 @@ export default function Literature({
   const setPrimaryPdfAttachment = useLiteratureStore((s) => s.setPrimaryPdfAttachment);
   const importAttachment = useLiteratureStore((s) => s.importAttachment);
   const relinkAttachment = useLiteratureStore((s) => s.relinkAttachment);
-  const addNote = useLiteratureStore((s) => s.addNote);
-  const updateNote = useLiteratureStore((s) => s.updateNote);
-  const deleteNote = useLiteratureStore((s) => s.deleteNote);
-  const createNoteFromAnnotation = useLiteratureStore((s) => s.createNoteFromAnnotation);
-  const importAnnotations = useLiteratureStore((s) => s.importAnnotations);
   const downloadPdf = useLiteratureStore((s) => s.downloadPdf);
   const uploadPdf = useLiteratureStore((s) => s.uploadPdf);
   const openPdf = useLiteratureStore((s) => s.openPdf);
@@ -1882,6 +1853,7 @@ export default function Literature({
   const [view, setView] = useState("all");
   const [localPageView, setLocalPageView] = useState<LiteraturePageView>("library");
   const [filter, setFilter] = useState("");
+  const [quickFilter, setQuickFilter] = useState<LibraryQuickFilter>("all");
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false);
   const [advancedConditions, setAdvancedConditions] = useState<LiteratureSearchCondition[]>([]);
   const [appliedConditions, setAppliedConditions] = useState<LiteratureSearchCondition[] | null>(null);
@@ -1930,7 +1902,6 @@ export default function Literature({
   const [tagDraft, setTagDraft] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
-  const [abstractOpen, setAbstractOpen] = useState(true);
   const [colInput, setColInput] = useState("");
   const [colAddingParentId, setColAddingParentId] = useState<string | null>(null);
   const [colRenamingId, setColRenamingId] = useState<string | null>(null);
@@ -2573,7 +2544,7 @@ export default function Literature({
     }
   };
 
-  const visiblePapers = useMemo(() => {
+  const matchingPapers = useMemo(() => {
     const savedSearchNeedle = dynamicSearchQuery.trim();
     const quickFilterNeedle = deferredFilter.trim();
     let viewFilter: (p: LiteraturePaper) => boolean;
@@ -2638,6 +2609,16 @@ export default function Literature({
       sortReversed,
     );
   }, [activeSavedSearchConditions, currentSearchConditions, deferredFilter, duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, normalizedItemsById, normalizedSelectedTags, papers, recentAddedPapers, recentReadPapers, scopedRecordIds, sort, sortReversed, view]);
+
+  const visiblePapers = useMemo(() => matchingPapers.filter((paper) =>
+    quickFilter === "starred" ? paper.starred : quickFilter === "unread" ? paper.unread : true,
+  ), [matchingPapers, quickFilter]);
+  const quickCounts = useMemo(() => ({
+    all: matchingPapers.length,
+    starred: matchingPapers.filter((paper) => paper.starred).length,
+    unread: matchingPapers.filter((paper) => paper.unread).length,
+  }), [matchingPapers]);
+  useEffect(() => { setQuickFilter("all"); }, [view, projectId]);
 
   const availableTags = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2711,10 +2692,6 @@ export default function Literature({
     : selectionCleared
       ? null
       : visiblePapers[0] ?? null;
-
-  useEffect(() => {
-    setAbstractOpen(true);
-  }, [selectedPaper?.id]);
 
   useEffect(() => {
     if (!readerAttachment) return;
@@ -3052,10 +3029,7 @@ export default function Literature({
         return;
       }
       setPrimaryPdfAttachment(paper.id, attachment.id);
-      setReaderAttachment(null);
-      setReaderPage(page);
-      setReaderAnnotationId(annotationId);
-      setWorkspaceTab("reader");
+      openPaperInReader(paper, page, annotationId);
       return;
     }
     if (/\.(html?|xhtml|epub|txt|md|markdown|json|csv)$/i.test(attachmentSource)) {
@@ -3121,46 +3095,7 @@ export default function Literature({
       setWorkspaceTab("reader");
       return;
     }
-    setWorkspaceTab("notes");
-  };
-
-  const exportPaperAnnotations = async (paper: LiteraturePaper) => {
-    const destination = await saveDialog({
-      defaultPath: `${paper.title.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80) || "paper"}-annotations.json`,
-      filters: [{ name: copy.dialogs.somniqAnnotationsFilter, extensions: ["json"] }],
-    });
-    if (typeof destination !== "string") return;
-    try {
-      await literatureWriteAnnotationExport(destination, {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        paper: { id: paper.id, title: paper.title },
-        annotations: paper.pdfAnnotations,
-        notes: paper.notes ?? [],
-      });
-      logActivity("ok", copy.dialogs.annotationsExported(paper.pdfAnnotations.length, (paper.notes ?? []).length));
-    } catch (error) {
-      setError(copy.dialogs.annotationsExportFailed(String(error)));
-    }
-  };
-
-  const importPaperAnnotations = async (paper: LiteraturePaper) => {
-    const source = await openDialog({
-      multiple: false,
-      filters: [{ name: copy.dialogs.somniqAnnotationsFilter, extensions: ["json"] }],
-    });
-    if (typeof source !== "string") return;
-    try {
-      const payload = await literatureReadAnnotationExport<unknown>(source);
-      const imported = importAnnotations(paper.id, payload);
-      if (imported.annotations === 0 && imported.notes === 0) {
-        setError(copy.dialogs.noImportableAnnotations);
-        return;
-      }
-      logActivity("ok", copy.dialogs.annotationsImported(imported.annotations, imported.notes));
-    } catch (error) {
-      setError(copy.dialogs.annotationsImportFailed(String(error)));
-    }
+    setWorkspaceTab("info");
   };
 
   const exportPaperBibliography = async (paper: LiteraturePaper, format: BibliographyExportFormat) => {
@@ -3313,12 +3248,12 @@ export default function Literature({
     setSelectedChildId(child.id);
     setSelectionCleared(false);
     if (child.kind === "note") {
-      setWorkspaceTab("notes");
+      setWorkspaceTab("info");
       return;
     }
     if (child.kind === "annotation") {
       if (child.page) openAnnotationInReader(paper, child.page, child.id);
-      else setWorkspaceTab("notes");
+      else setWorkspaceTab("info");
       return;
     }
     const childAttachment = paper.attachments?.find((attachment) => attachment.id === child.id);
@@ -3431,13 +3366,13 @@ export default function Literature({
   // An undo restores by id in the loaded project, so it must not outlive it.
   useEffect(() => setTrashUndo(null), [projectId]);
 
-  // "/" or Ctrl/Cmd+F jumps to the library search while the list is showing.
+  // "/", Ctrl/Cmd+F or Ctrl/Cmd+K focuses the library search.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const input = searchInputRef.current;
       if (!input || event.defaultPrevented || isEditableTarget(event.target)) return;
       if (document.querySelector("[aria-modal='true']")) return;
-      const find = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "f";
+      const find = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && ["f", "k"].includes(event.key.toLowerCase());
       const slash = event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey;
       if (!find && !slash) return;
       event.preventDefault();
@@ -3786,13 +3721,18 @@ export default function Literature({
     );
   };
 
+  const openLibrarySettings = () => {
+    try { sessionStorage.setItem(SETTINGS_TAB_REQUEST_KEY, "literature"); } catch { /* Session storage may be disabled. */ }
+    window.dispatchEvent(new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "literature" }));
+    setTab("settings");
+  };
   const sidebar = (
     <aside className="lit-sidebar" id="literature-navigation" aria-label={copy.libraryUi.navigation}>
       <div className="lit-sidebar-header">
         <button
           type="button"
           className={`lit-library-root${view === "all" ? " active" : ""}`}
-          onClick={() => setView("all")}
+          onClick={() => { setView("all"); setQuickFilter("all"); }}
           // Zotero puts "New Collection…" on the library root's context menu,
           // which is where people go looking for it first.
           onContextMenu={(event) => {
@@ -3806,7 +3746,7 @@ export default function Literature({
           }}
         >
           <span className="lit-library-root-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
-          <span className="lit-nav-text">{copy.sidebar.libraryRoot}</span>
+          <span className="lit-nav-text">{copy.viewLabel.allPapers}</span>
           <span className="lit-nav-count">{paperCounts.allCount}</span>
         </button>
         <button type="button" className="lit-mobile-nav-close lit-layout-toggle" aria-label={copy.libraryUi.hideNavigation}
@@ -3836,20 +3776,6 @@ export default function Literature({
           onClick={() => setView("unfiled")}
         />
         <NavItem
-          label={copy.sidebar.starred}
-          icon="star"
-          count={paperCounts.starredCount}
-          active={view === "starred"}
-          onClick={() => setView("starred")}
-        />
-        <NavItem
-          label={copy.sidebar.duplicates}
-          icon="copy"
-          count={duplicateCandidates.length}
-          active={view === "duplicates"}
-          onClick={() => setView("duplicates")}
-        />
-        <NavItem
           label={copy.sidebar.trash}
           icon="trash"
           count={library.trash?.length ?? 0}
@@ -3862,47 +3788,6 @@ export default function Literature({
           }}
         />
       </div>
-
-      <NavSection title={copy.sidebar.statusLabel} defaultOpen={false}>
-        {STAGES_NAV.filter((s) => s.alwaysVisible || (paperCounts.stageCounts.get(s.id) ?? 0) > 0).map(
-          (stage) => (
-            <NavItem
-              key={stage.id}
-              label={stageLabels(copy)[stage.id]}
-              icon={STAGE_ICONS[stage.id]}
-              count={paperCounts.stageCounts.get(stage.id) ?? 0}
-              active={view === `stage:${stage.id}`}
-              onClick={() => setView(`stage:${stage.id}`)}
-              dot={stage.id}
-            />
-          ),
-        )}
-      </NavSection>
-
-      {workflowGradeGroups.length > 0 && (
-        <NavSection title={copy.sidebar.workflowGradesTitle} defaultOpen>
-          {workflowGradeGroups.map((group) => (
-            <div className="lit-workflow-grade-group" key={group.workflowRunId}>
-              <div className="lit-workflow-grade-title" title={group.workflowTitle}>
-                {group.workflowTitle}
-              </div>
-              {WORKFLOW_GRADE_LEVELS.map((grade) => {
-                const gradeView = workflowGradeViewId(group.workflowRunId, grade);
-                return (
-                  <NavItem
-                    key={grade}
-                    label={copy.sidebar.workflowGradeLabels[grade]}
-                    icon="circle"
-                    count={group.counts[grade]}
-                    active={view === gradeView}
-                    onClick={() => setView(gradeView)}
-                  />
-                );
-              })}
-            </div>
-          ))}
-        </NavSection>
-      )}
 
       <NavSection
         title={copy.sidebar.categoriesTitle}
@@ -3951,39 +3836,6 @@ export default function Literature({
             ><SvgIcon name="plus" size={12} /> {copy.sidebar.createFirstCategory}</button>
           </div>
         )}
-      </NavSection>
-
-      <NavSection title={copy.sidebar.savedSearchesTitle} defaultOpen>
-        {library.searches.map((search) => (
-          <div
-            className="lit-search-row"
-            key={search.id}
-            onContextMenu={(event) => {
-              // A long query clips the row, which used to hide the
-              // hover-revealed × button. Right-clicking opens a context menu
-              // anchored to the cursor instead.
-              event.preventDefault();
-              openSavedSearchMenu({
-                searchId: search.id,
-                query: search.name || search.query,
-                clientX: event.clientX,
-                clientY: event.clientY,
-              });
-            }}
-          >
-            <NavItem
-              label={search.name || search.query}
-              icon="search"
-              count={paperCounts.searchCounts.get(search.id) ?? 0}
-              active={view === `search:${search.id}`}
-              onClick={() => setView(`search:${search.id}`)}
-            />
-            <LibraryActionMenu label={copy.libraryUi.searchActions(search.name || search.query)} actions={[
-              { id: "delete", label: copy.sidebar.deleteSavedSearchMenuItem, icon: "trash", danger: true, onSelect: () => confirmAndDeleteSavedSearch(search.id) },
-            ]} />
-          </div>
-        ))}
-        {library.searches.length === 0 && <div className="lit-col-empty">{copy.sidebar.noSavedSearches}</div>}
       </NavSection>
 
       <NavSection title={copy.sidebar.tagsTitle} defaultOpen>
@@ -4035,6 +3887,90 @@ export default function Literature({
         </div>
       </NavSection>
 
+      <div className="lit-sidebar-research">
+        <NavItem
+          label={copy.sidebar.duplicates}
+          icon="copy"
+          count={duplicateCandidates.length}
+          active={view === "duplicates"}
+          onClick={() => setView("duplicates")}
+        />
+        <NavSection title={copy.sidebar.statusLabel} defaultOpen={false}>
+          {STAGES_NAV.filter((s) => s.alwaysVisible || (paperCounts.stageCounts.get(s.id) ?? 0) > 0).map(
+            (stage) => (
+              <NavItem
+                key={stage.id}
+                label={stageLabels(copy)[stage.id]}
+                icon={STAGE_ICONS[stage.id]}
+                count={paperCounts.stageCounts.get(stage.id) ?? 0}
+                active={view === `stage:${stage.id}`}
+                onClick={() => setView(`stage:${stage.id}`)}
+                dot={stage.id}
+              />
+            ),
+          )}
+        </NavSection>
+
+        {workflowGradeGroups.length > 0 && (
+          <NavSection title={copy.sidebar.workflowGradesTitle} defaultOpen>
+            {workflowGradeGroups.map((group) => (
+              <div className="lit-workflow-grade-group" key={group.workflowRunId}>
+                <div className="lit-workflow-grade-title" title={group.workflowTitle}>
+                  {group.workflowTitle}
+                </div>
+                {WORKFLOW_GRADE_LEVELS.map((grade) => {
+                  const gradeView = workflowGradeViewId(group.workflowRunId, grade);
+                  return (
+                    <NavItem
+                      key={grade}
+                      label={copy.sidebar.workflowGradeLabels[grade]}
+                      icon="circle"
+                      count={group.counts[grade]}
+                      active={view === gradeView}
+                      onClick={() => setView(gradeView)}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </NavSection>
+        )}
+
+        <NavSection title={copy.sidebar.savedSearchesTitle} defaultOpen>
+          {library.searches.map((search) => (
+            <div
+              className="lit-search-row"
+              key={search.id}
+              onContextMenu={(event) => {
+                // A long query clips the row, which used to hide the
+                // hover-revealed × button. Right-clicking opens a context menu
+                // anchored to the cursor instead.
+                event.preventDefault();
+                openSavedSearchMenu({
+                  searchId: search.id,
+                  query: search.name || search.query,
+                  clientX: event.clientX,
+                  clientY: event.clientY,
+                });
+              }}
+            >
+              <NavItem
+                label={search.name || search.query}
+                icon="search"
+                count={paperCounts.searchCounts.get(search.id) ?? 0}
+                active={view === `search:${search.id}`}
+                onClick={() => setView(`search:${search.id}`)}
+              />
+              <LibraryActionMenu label={copy.libraryUi.searchActions(search.name || search.query)} actions={[
+                { id: "delete", label: copy.sidebar.deleteSavedSearchMenuItem, icon: "trash", danger: true, onSelect: () => confirmAndDeleteSavedSearch(search.id) },
+              ]} />
+            </div>
+          ))}
+          {library.searches.length === 0 && <div className="lit-col-empty">{copy.sidebar.noSavedSearches}</div>}
+        </NavSection>
+
+      </div>
+      <button type="button" className="lit-sidebar-settings" onClick={openLibrarySettings}><SvgIcon name="settings" size={18} />{copy.libraryUi.settings}</button>
     </aside>
   );
 
@@ -4074,6 +4010,7 @@ export default function Literature({
     ?? (workflowGradeGroups.length === 1 ? workflowGradeGroups[0].workflowRunId : undefined);
   const currentCollectionId = view.startsWith("col:") ? view.slice(4) : undefined;
   const clearLibraryFilters = () => {
+    setQuickFilter("all");
     setFilter("");
     setSelectedTags(new Set());
     setAdvancedConditions([]);
@@ -4083,35 +4020,22 @@ export default function Literature({
   };
 
   const mainArea = (
-    <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`}>
+    <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`} role="region" aria-label={viewLabel}>
       <LiteratureToolbar
-        viewLabel={viewLabel}
+        quickFilter={quickFilter}
+        quickCounts={quickCounts}
+        onQuickFilter={setQuickFilter}
         count={visiblePapers.length}
-        total={fullTextMatchIds ? fullTextPage.total : undefined}
         filter={filter}
-        sort={sort}
         tags={[...selectedTags]}
         conditionCount={currentSearchConditions.length}
-        navigationOpen={navigationOpen}
-        detailsOpen={detailsOpen}
         isTrashView={isTrashView}
         advancedSearchOpen={advancedSearchOpen}
-        onFilterChange={setFilter}
-        sortDescending={sortIsDescending(sort, sortReversed)}
-        onSortChange={(next) => { setSort(next); setSortReversed(false); }}
-        onToggleSortDirection={() => setSortReversed((value) => !value)}
-        onToggleNavigation={() => setNavigationOpen((value) => !value)}
-        onToggleDetails={() => setDetailsVisibility(!detailsOpen)}
         onOpenAdvancedSearch={openAdvancedSearch}
         onSaveSearch={saveCurrentFilter}
         onRemoveTag={(tag) => setSelectedTags((current) => new Set([...current].filter((entry) => entry !== tag)))}
         onClearFilters={clearLibraryFilters}
-        onCreateItem={() => setNewItemOpen(true)}
-        onImportBibliography={() => void importBibliography()}
-        onImportPdf={() => void importPdfAsRecord()}
-        onAddIdentifier={() => void addIdentifier()}
         onEmptyTrash={emptyTrash}
-        searchRef={searchInputRef}
       />
       <PaperTable
         papers={visiblePapers}
@@ -4154,7 +4078,6 @@ export default function Literature({
         onAddIdentifier={() => void addIdentifier()}
         onToggleAll={toggleAllVisible}
         onSelectPaper={selectPaper}
-        onOpenPaperReader={openPaperInReader}
         onActivatePaper={activatePaper}
         onSelectChild={selectLibraryChild}
         onToggleItem={toggleItemExpanded}
@@ -4215,61 +4138,57 @@ export default function Literature({
 
   const detailTabs: Array<{ id: DetailTab; label: string }> = [
     { id: "info", label: copy.workspaceHeader.tabInfo },
-    { id: "overview", label: copy.workspaceHeader.tabOverview },
-    { id: "reader", label: copy.workspaceHeader.tabReader },
-    { id: "evidence", label: copy.workspaceHeader.tabEvidence },
-    { id: "notes", label: copy.workspaceHeader.tabNotes },
-    { id: "files", label: copy.workspaceHeader.tabFiles },
     { id: "related", label: copy.workspaceHeader.tabRelated },
+    { id: "files", label: copy.workspaceHeader.tabFiles },
+    { id: "guide", label: copy.workspaceHeader.tabGuide },
+    { id: "reader", label: copy.workspaceHeader.tabReader },
   ];
   const readingOpen = Boolean(
     selectedPaper
     && workspaceTab === "reader"
     && ((selectedPaper.pdf.path && !readerAttachment) || readerAttachment?.path || readerAttachment?.externalPath),
   );
-  /** Record tabs open beside the PDF while reading instead of leaving it. */
+  const guideAvailable = Boolean(selectedPaper?.pdf.path && !readerAttachment);
+  /** One auxiliary panel at a time preserves room for the source PDF. */
   const showDetailTab = (tab: DetailTab) => {
-    if (readingOpen && tab !== "reader") setReaderPanelTab(tab);
+    if (tab === "guide") {
+      if (selectedPaper?.pdf.path) openPaperInReader(selectedPaper);
+      else setWorkspaceTab("reader");
+      setReaderPanelTab("guide");
+    } else if (readingOpen && tab !== "reader") setReaderPanelTab(tab);
     else setWorkspaceTab(tab);
   };
   const leaveReader = (tab: DetailTab) => {
-    setWorkspaceTab(readerPanelTab ?? tab);
+    setWorkspaceTab(readerPanelTab && readerPanelTab !== "guide" ? readerPanelTab : tab);
     setReaderPanelTab(null);
   };
-  // Opening the PDF from the notes, evidence or brief keeps that tab beside
-  // it, so an annotation or evidence span is checked against its source.
-  const lastDockedTabRef = useRef<DetailTab>("info");
-  const wasReadingRef = useRef(false);
   useEffect(() => {
-    if (workspaceTab !== "reader") lastDockedTabRef.current = workspaceTab;
-  }, [workspaceTab]);
-  useEffect(() => {
-    if (readingOpen && !wasReadingRef.current) {
-      const from = lastDockedTabRef.current;
-      setReaderPanelTab(from === "notes" || from === "evidence" || from === "overview" ? from : null);
-    } else if (!readingOpen && wasReadingRef.current) {
-      setReaderPanelTab(null);
-    }
-    wasReadingRef.current = readingOpen;
+    if (!readingOpen) setReaderPanelTab(null);
   }, [readingOpen]);
-  // The PDF tab only switches the whole page into the reader, which the
-  // "Open PDF" action already does; the docked panel lists it only while it
-  // is showing the "PDF needed" state.
-  const inspectorTabs = workspaceTab === "reader" ? detailTabs : detailTabs.filter((tab) => tab.id !== "reader");
+  const closeReaderPanel = () => {
+    const tab = readerPanelTab;
+    setReaderPanelTab(null);
+    if (tab) pageRef.current?.querySelector<HTMLButtonElement>(`.lit-reader-detail-rail [data-detail-tab="${tab}"]`)?.focus();
+  };
+  const inspectorTabs = detailTabs.filter((tab) => tab.id !== "reader" || workspaceTab === "reader");
+  const readerTabs = [
+    ...detailTabs.filter((tab) => tab.id === "guide" && guideAvailable),
+    ...detailTabs.filter((tab) => tab.id !== "reader" && tab.id !== "guide"),
+  ];
   const renderReaderSide = () => (
     <>
-      {readerPanelTab && selectedPaper && (
+      {readerPanelTab && readerPanelTab !== "guide" && selectedPaper && (
         <aside className="lit-reader-side-panel" id="literature-reader-panel" role="tabpanel"
           aria-label={detailTabs.find((tab) => tab.id === readerPanelTab)?.label}
           onKeyDown={(event) => {
             if (event.key !== "Escape" || event.defaultPrevented || isEditableTarget(event.target)) return;
             event.preventDefault();
-            setReaderPanelTab(null);
+            closeReaderPanel();
           }}>
           <header className="lit-reader-side-head">
             <strong>{detailTabs.find((tab) => tab.id === readerPanelTab)?.label}</strong>
             <button type="button" className="lit-workspace-icon-btn" aria-label={copy.libraryUi.closeReaderPanel}
-              title={copy.libraryUi.closeReaderPanel} onClick={() => setReaderPanelTab(null)}>
+              title={copy.libraryUi.closeReaderPanel} onClick={closeReaderPanel}>
               <SvgIcon name="close" size={14} />
             </button>
           </header>
@@ -4277,12 +4196,14 @@ export default function Literature({
         </aside>
       )}
       <DetailTabRail
-        tabs={detailTabs}
-        activeTab={readerPanelTab ?? "reader"}
+        tabs={readerTabs}
+        activeTab={readerPanelTab}
         label={copy.workspaceHeader.tabRailAria}
         className="lit-reader-detail-rail"
         icons={READER_RAIL_ICONS}
-        onSelect={(tab) => setReaderPanelTab(tab === "reader" || tab === readerPanelTab ? null : tab)}
+        onDismiss={closeReaderPanel}
+        controls={{ guide: "paper-guide-panel", info: "literature-reader-panel", files: "literature-reader-panel", related: "literature-reader-panel" }}
+        onSelect={(tab, options) => setReaderPanelTab((current) => options?.toggle && current === tab ? null : tab)}
       />
     </>
   );
@@ -4306,20 +4227,9 @@ export default function Literature({
           onSetTagColor={(tag, color) => void setTagColor(paper.id, tag, color)}
           onToggleCollection={(colId) => toggleCollection(paper.id, colId)}
           onDelete={() => trashPapers([paper.id])}
-        />
-      )}
-      {tab === "overview" && (
-        <WorkspaceOverview
-          paper={paper}
-          briefing={briefing === paper.id}
-          abstractOpen={abstractOpen}
-          onToggleAbstract={() => setAbstractOpen((v) => !v)}
-          onGenerateBrief={generateBrief}
-          onShortlist={() => setStage([paper.id], "shortlist")}
-          onDownload={() => void downloadOrBrowse(paper.id)}
-          onViewEvidence={() => showDetailTab("evidence")}
-          onOpenAnnotation={(page, annotationId) => openAnnotationInReader(paper, page, annotationId)}
-          onDelete={() => trashPapers([paper.id])}
+          onOpenAttachment={(attachment) => void openAttachment(paper, attachment)}
+          onOpenPdf={() => openPaperInReader(paper)}
+          onManageFiles={() => showDetailTab("files")}
         />
       )}
       {tab === "reader" && !paper.pdf.path && !readerAttachment && (
@@ -4332,38 +4242,6 @@ export default function Literature({
             {copy.workspaceHeader.uploadLocalPdf}
           </button>
         </div>
-      )}
-      {tab === "notes" && (
-        <WorkspaceNotes
-          paper={paper}
-          onAddNote={(note) => addNote(paper.id, note)}
-          onUpdateNote={(noteId, patch) => updateNote(paper.id, noteId, patch)}
-          onDeleteNote={(noteId) => deleteNote(paper.id, noteId)}
-          onCreateNoteFromAnnotation={(annotationId) => createNoteFromAnnotation(paper.id, annotationId)}
-          onOpenAnnotation={(page, annotationId) => openAnnotationInReader(paper, page, annotationId)}
-          onExport={() => void exportPaperAnnotations(paper)}
-          onImport={() => void importPaperAnnotations(paper)}
-        />
-      )}
-      {tab === "evidence" && (
-        <WorkspaceEvidence
-          paper={paper}
-          generatingChains={generatingAnswerChains === paper.id}
-          onDownload={() => void downloadOrBrowse(paper.id)}
-          onGenerateChains={() => void generateAnswerChains(paper.id)}
-          onDeleteEvidence={(evidenceId) => deleteEvidence(paper.id, evidenceId)}
-          onUpdateChain={(chainId, patch) =>
-            updateAnswerChain(paper.id, chainId, patch)
-          }
-          onOpenPage={(page, annotationId) => {
-            if (annotationId) openAnnotationInReader(paper, page, annotationId);
-            else {
-              setReaderPage(page);
-              setReaderAnnotationId(null);
-              setWorkspaceTab("reader");
-            }
-          }}
-        />
       )}
       {tab === "files" && (
         <WorkspaceFiles
@@ -4424,60 +4302,64 @@ export default function Literature({
       }}>
       {selectedPaper ? (
         <>
-          <div className="lit-info-header">
-            <div className="lit-info-title-block">
-              <div className="lit-info-paper-title">{selectedPaper.title}</div>
-              <div className="lit-info-paper-sub">
-                {formatAuthors(copy, selectedPaper.authors)}
-                {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
-                {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
-              </div>
-            </div>
+          <div className="lit-inspector-navigation">
+            <DetailTabRail tabs={inspectorTabs} activeTab={workspaceTab} label={copy.workspaceHeader.tabRailAria}
+              className="lit-workspace-tabs" icons={{ guide: "paperGuide", files: "attachment", reader: "bookOpen" }} onSelect={showDetailTab} />
             <button type="button" className="lit-workspace-icon-btn" aria-label={copy.libraryUi.hideDetails}
               title={copy.libraryUi.hideDetails} onClick={() => {
                 setDetailsVisibility(false);
                 if (detailsAsDrawer) focusSelectedRow();
               }}><SvgIcon name="close" size={16} /></button>
           </div>
-          <div className="lit-inspector-actions">
-              {isTrashView && (
-                <button
-                  type="button"
-                  className="lit-workspace-icon-btn"
-                  title={copy.table.restore}
-                  aria-label={copy.table.restore}
-                  onClick={() => restorePapersNow([selectedPaper.id])}
-                ><SvgIcon name="reset" size={16} /></button>
-              )}
-              <button
-                type="button"
-                className="lit-inspector-primary"
-                title={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
-                aria-label={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openSelectedPaperPdfAria : copy.workspaceHeader.getSelectedPaperPdfAria}
-                onClick={() => void downloadOrBrowse(selectedPaper.id)}
-                disabled={isTrashView || selectedPaper.pdf.status === "downloading"}
-              >
-                <SvgIcon name={selectedPaper.pdf.status === "downloading" ? "spinner" : selectedPaper.pdf.path ? "bookOpen" : "download"} size={15} />
-                {selectedPaper.pdf.status === "downloading" ? copy.infoTab.downloading : selectedPaper.pdf.path ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
-              </button>
-              <button
-                type="button"
-                className="lit-inspector-chat"
-                title={copy.workspaceHeader.openInChat}
-                onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
-              ><SvgIcon name="messageCircle" size={15} />{copy.infoTab.askAgent}</button>
-              <LibraryActionMenu label={copy.libraryUi.moreActions} actions={[
-                { id: "clear", label: copy.workspaceHeader.clearSelection, onSelect: () => { setSelectedId(null); setSelectionCleared(true); } },
-              ]} />
-          </div>
-
-          <DetailTabRail tabs={inspectorTabs} activeTab={workspaceTab} label={copy.workspaceHeader.tabRailAria}
-            className="lit-workspace-tabs" onSelect={setWorkspaceTab} />
           <div className="lit-workspace-main">
             <div className="lit-workspace-content">
-            {renderDetailContent(selectedPaper, workspaceTab)}
+              <div className="lit-info-header">
+                <div className="lit-info-title-block">
+                  <div className="lit-info-paper-title">{selectedPaper.title}</div>
+                  <div className="lit-info-paper-sub">
+                    {formatAuthors(copy, selectedPaper.authors)}
+                  </div>
+                  <div className="lit-info-paper-sub">
+                    {selectedPaper.venue}{selectedPaper.year ? ` (${selectedPaper.year})` : ""}
+                  </div>
+                </div>
+
+              </div>
+              {renderDetailContent(selectedPaper, workspaceTab)}
             </div>
           </div>
+          <div className="lit-inspector-actions">
+            {isTrashView && (
+              <button
+                type="button"
+                className="lit-workspace-icon-btn"
+                title={copy.table.restore}
+                aria-label={copy.table.restore}
+                onClick={() => restorePapersNow([selectedPaper.id])}
+              ><SvgIcon name="reset" size={16} /></button>
+            )}
+            <button
+              type="button"
+              className="lit-inspector-primary"
+              title={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
+              aria-label={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openSelectedPaperPdfAria : copy.workspaceHeader.getSelectedPaperPdfAria}
+              onClick={() => void downloadOrBrowse(selectedPaper.id)}
+              disabled={isTrashView || selectedPaper.pdf.status === "downloading"}
+            >
+              <SvgIcon name={selectedPaper.pdf.status === "downloading" ? "spinner" : selectedPaper.pdf.path ? "bookOpen" : "download"} size={15} />
+              {selectedPaper.pdf.status === "downloading" ? copy.infoTab.downloading : selectedPaper.pdf.path ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
+            </button>
+            <button
+              type="button"
+              className="lit-inspector-chat"
+              title={copy.workspaceHeader.openInChat}
+              onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
+            ><SvgIcon name="messageCircle" size={15} />{copy.infoTab.askAgent}</button>
+            <LibraryActionMenu label={copy.libraryUi.moreActions} actions={[
+              { id: "clear", label: copy.workspaceHeader.clearSelection, onSelect: () => { setSelectedId(null); setSelectionCleared(true); } },
+            ]} />
+          </div>
+
         </>
       ) : (
         <div className="lit-workspace-empty">
@@ -4610,11 +4492,23 @@ export default function Literature({
           </div>,
           document.body,
         )}
-      {showLocalViewTabs && (
+      {showLocalViewTabs && (pageView !== "library" || readingOpen) && (
         <header className="lit-header">
           <LiteratureViewTabs pageView={pageView} onPageViewChange={setPageView} />
         </header>
       )}
+
+      {pageView === "library" && !readingOpen && <LibraryTopbar
+        filter={filter} searchRef={searchInputRef} navigationOpen={navigationOpen} detailsOpen={detailsOpen}
+        onFilterChange={setFilter} onToggleNavigation={() => setNavigationOpen((value) => !value)}
+        onToggleDetails={() => setDetailsVisibility(!detailsOpen)}
+        onRefresh={() => load(projectId, { quiet: true })}
+        onActivity={() => useLiteratureStore.getState().setActivityOpen(!useLiteratureStore.getState().activityOpen)}
+        onSettings={openLibrarySettings} onDiscover={() => setPageView("discover")}
+        onCreateItem={() => setNewItemOpen(true)}
+        onImportBibliography={() => void importBibliography()}
+        onImportPdf={() => void importPdfAsRecord()} onAddIdentifier={() => void addIdentifier()}
+      />}
 
       {/* Error banner */}
       {storeError && (
@@ -4739,6 +4633,8 @@ export default function Literature({
             <Suspense fallback={<LiteratureLoading label={copy.loadingPdfReader} />}>
             <PdfReader
               paperId={selectedPaper.id}
+              readingVisible={readerPanelTab === "guide"}
+              onReadingVisibleChange={(visible) => setReaderPanelTab(visible ? "guide" : null)}
               relativePath={selectedPaper.pdf.path}
               initialPage={readerPage}
               pageRequestKey={readerPageRequest}
@@ -4817,7 +4713,7 @@ export default function Literature({
         </div>
       )}
 
-      <ActivityDrawer />
+      {(activityOpen || pageView !== "library" || readingOpen) && <ActivityDrawer />}
 
       <div className="lit-footer">
         <span>
@@ -5011,7 +4907,6 @@ function PaperTable({
   onAddIdentifier,
   onToggleAll,
   onSelectPaper,
-  onOpenPaperReader,
   onActivatePaper,
   onSelectChild,
   onToggleItem,
@@ -5071,7 +4966,6 @@ function PaperTable({
   /** `reveal` marks a pointer selection, which may bring the details into view;
    * keyboard and multi-select movement only change what they show. */
   onSelectPaper: (p: LiteraturePaper, options?: { reveal?: boolean }) => void;
-  onOpenPaperReader: (p: LiteraturePaper) => void;
   onActivatePaper: (p: LiteraturePaper) => void;
   onSelectChild: (paper: LiteraturePaper, child: LiteratureTreeChild) => void;
   onToggleItem: (itemId: string) => void;
@@ -5100,9 +4994,9 @@ function PaperTable({
   const [colWidths, setColWidths] = useState(() => {
     const stored = readLayoutPrefs().columnWidths;
     return {
-      venue: storedWidth(stored?.venue, 40, 480, 160),
-      year: storedWidth(stored?.year, 40, 160, 62),
-      tags: storedWidth(stored?.tags, 40, 360, 130),
+      venue: storedWidth(stored?.venue, 40, 480, 85),
+      year: storedWidth(stored?.year, 40, 160, 48),
+      tags: storedWidth(stored?.tags, 40, 360, 116),
     };
   });
   usePersistLayout({ columnWidths: colWidths });
@@ -5124,7 +5018,7 @@ function PaperTable({
       const hasChildren = Boolean(modelChildrenByParent?.has(paper.id))
         || hasLegacyLiteratureTreeChildren(paper);
       const children = expandedItems.has(paper.id)
-        ? literatureTreeChildren(paper, modelChildrenByParent)
+        ? literatureTreeChildren(paper, modelChildrenByParent).filter((child) => child.kind !== "note")
         : [];
       const visibleChildren: LiteratureTreeChild[] = [];
       const expandedParents = new Set(expandedItems.has(paper.id) ? [paper.id] : []);
@@ -5149,7 +5043,7 @@ function PaperTable({
   const rowVirtualizer = useVirtualizer({
     count: treeRows.length,
     getScrollElement: () => tableScrollRef.current,
-    estimateSize: (index) => treeRows[index]?.kind === "child" ? 46 : 76,
+    estimateSize: (index) => treeRows[index]?.kind === "child" ? 46 : 56,
     overscan: 10,
     getItemKey: (index) => {
       const row = treeRows[index];
@@ -5162,9 +5056,9 @@ function PaperTable({
   const renderedRows = isVirtualized
     ? (virtualRows.length > 0
       ? virtualRows.map((virtualRow) => ({ index: virtualRow.index, start: virtualRow.start }))
-      : treeRows.slice(0, 20).map((_, index) => ({ index, start: index * 76 })))
+      : treeRows.slice(0, 20).map((_, index) => ({ index, start: index * 56 })))
     : treeRows.map((_, index) => ({ index, start: 0 }));
-  const tableColumns = `32px 22px minmax(220px, 1fr) var(--lit-venue-width, ${colWidths.venue}px) ${colWidths.year}px var(--lit-tags-width, ${colWidths.tags}px) 30px`;
+  const tableColumns = `28px 22px 24px minmax(120px, 1fr) var(--lit-authors-width, minmax(70px, .65fr)) ${colWidths.year}px var(--lit-venue-width, ${colWidths.venue}px) var(--lit-tags-width, ${colWidths.tags}px) var(--lit-added-width, 88px)`;
 
   // The list is one focus stop: arrow keys move between rows and Tab leaves
   // it. When the focused row scrolls out of the virtual window, the first
@@ -5370,7 +5264,7 @@ function PaperTable({
         />
       )}
 
-      <div className="lit-table-wrap" ref={tableScrollRef} onKeyDown={onListKeyDown}>
+      <div className="lit-table-wrap lit-layout-list" ref={tableScrollRef} onKeyDown={onListKeyDown}>
         {!loaded ? (
           <LiteratureLoading label={copy.libraryUi.loading} />
         ) : libraryCount === 0 && !isTrashView ? (
@@ -5419,23 +5313,30 @@ function PaperTable({
                   />
                 </th>
                 <th role="columnheader" className="lit-th lit-th-stage" aria-label={copy.libraryUi.readingState} />
+                <th role="columnheader" className="lit-th lit-th-star" />
                 <th role="columnheader" className="lit-th lit-th-title" aria-sort={sortState("title")}>
                   {sortButton("title", copy.table.columnTitle)}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e, -1)} />
                 </th>
-                <th role="columnheader" className="lit-th lit-th-venue" aria-sort={sortState("venue")}>
-                  {sortButton("venue", copy.table.columnVenue)}
-                  <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e)} />
+                <th role="columnheader" className="lit-th lit-th-authors" aria-sort={sortState("authors")}>
+                  {sortButton("authors", copy.libraryUi.authors)}
                 </th>
                 <th role="columnheader" className="lit-th lit-th-year" aria-sort={sortState("year")}>
                   {sortButton("year", copy.table.columnYear)}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("year", e)} />
                 </th>
+                <th role="columnheader" className="lit-th lit-th-venue" aria-sort={sortState("venue")}>
+                  {sortButton("venue", copy.table.columnVenue)}
+                  <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e)} />
+                </th>
                 <th role="columnheader" className="lit-th lit-th-tags">
                   {copy.table.columnTags}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("tags", e)} />
                 </th>
-                <th role="columnheader" className="lit-th lit-th-star" />
+                <th role="columnheader" className="lit-th lit-th-added" aria-sort={sortState("added")}>
+                  {sortButton("added", copy.libraryUi.dateAdded)}
+                </th>
+
               </tr>
             </thead>
              <tbody
@@ -5445,7 +5346,7 @@ function PaperTable({
               {renderedRows.map(({ index, start }) => {
                 const row = treeRows[index];
                 if (!row) return null;
-                const rowStyle = isVirtualized ? { transform: `translateY(${start}px)` } : undefined;
+                const rowStyle: CSSProperties | undefined = isVirtualized ? { transform: `translateY(${start}px)` } : undefined;
                 return row.kind === "paper" ? (
                 <PaperRow
                   key={row.paper.id}
@@ -5464,7 +5365,6 @@ function PaperTable({
                   onFocusRow={() => setFocusKey(row.paper.id)}
                   onSelect={(event) => clickPaper(row.paper, event)}
                   onActivate={() => onActivatePaper(row.paper)}
-                  onOpenReader={() => onOpenPaperReader(row.paper)}
                   onDragStart={(event) => onPaperDragStart(event, row.paper.id)}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -5479,7 +5379,6 @@ function PaperTable({
                     setFocusKey(row.paper.id);
                     onRowContextMenu(row.paper, anchor, rowElement);
                   }}
-                  onToggleExpand={() => onToggleItem(row.paper.id)}
                   onToggleChecked={(range) => togglePaperCheck(row.paper, range)}
                   onToggleRead={() => onToggleRead(row.paper.id)}
                   onToggleStar={() => onToggleStar(row.paper.id)}
@@ -5542,10 +5441,8 @@ function PaperRow({
   onFocusRow,
   onSelect,
   onActivate,
-  onOpenReader,
   onDragStart,
   onContextMenu,
-  onToggleExpand,
   onToggleChecked,
   onToggleRead,
   onToggleStar,
@@ -5565,10 +5462,8 @@ function PaperRow({
   onFocusRow: () => void;
   onSelect: (event: ReactMouseEvent<HTMLTableRowElement>) => void;
   onActivate: () => void;
-  onOpenReader: () => void;
   onDragStart: (event: DragEvent<HTMLTableRowElement>) => void;
   onContextMenu: (event: ReactMouseEvent<HTMLTableRowElement>) => void;
-  onToggleExpand: () => void;
   /** `range` is true for a Shift-click, which ticks the run from the anchor. */
   onToggleChecked: (range: boolean) => void;
   onToggleRead: () => void;
@@ -5600,6 +5495,7 @@ function PaperRow({
       tabIndex={tabStop ? 0 : -1}
       role="row"
       aria-selected={selected}
+      aria-expanded={hasChildren ? expanded : undefined}
       draggable
       onDragStart={onDragStart}
       onContextMenu={onContextMenu}
@@ -5627,40 +5523,29 @@ function PaperRow({
             onToggleRead();
           }}
         >
+          <SvgIcon name="document" size={17} />
           <span className="lit-reading-dot" aria-hidden="true" />
+        </button>
+      </td>
+      <td className="lit-row-star" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className={`lit-card-star${paper.starred ? " starred" : ""}`}
+          onClick={(e) => { e.stopPropagation(); if (!isTrashView) onToggleStar(); }}
+          disabled={isTrashView}
+          aria-label={paper.starred ? copy.row.unstar : copy.row.star}
+          aria-pressed={paper.starred}
+          title={paper.starred ? copy.row.unstar : copy.row.star}
+        >
+          <SvgIcon name="star" size={16} />
         </button>
       </td>
       <td className="lit-row-title-cell">
         <div className="lit-row-title-wrap">
-          <button
-            type="button"
-            className={`lit-item-disclosure${hasChildren ? " has-children" : ""}`}
-            aria-label={expanded ? copy.libraryUi.collapseItem : copy.libraryUi.expandItem}
-            aria-expanded={hasChildren ? expanded : undefined}
-            disabled={!hasChildren}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleExpand();
-            }}
-          >
-            {hasChildren && <SvgIcon name={expanded ? "chevronDown" : "chevronRight"} size={12} />}
-          </button>
           <div className={`lit-row-title${paper.unread ? " unread" : ""}`} title={paper.title}>{paper.title}</div>
         </div>
-        <div className="lit-row-authors">
-          <span className="lit-row-author-names" title={paper.authors.join(", ")}>{formatAuthors(copy, paper.authors)}</span>
-          {paper.pdf.path ? (
-            <button type="button" className="lit-pdf-badge" title={copy.workspaceHeader.openPdf}
-              aria-label={copy.workspaceHeader.openPdf + ": " + paper.title} disabled={isTrashView}
-              onClick={(event) => { event.stopPropagation(); onOpenReader(); }}>PDF</button>
-          ) : paper.pdf.status === "downloading" || paper.pdf.status === "queued" ? (
-            <span className="lit-row-pdf-status">{paper.pdf.status === "queued" ? copy.libraryUi.pdfQueued : copy.infoTab.downloading}</span>
-          ) : paper.pdf.status === "failed" ? (
-            <span className="lit-row-pdf-status failed" title={copy.libraryUi.pdfFailed}>{copy.libraryUi.pdfFailed}</span>
-          ) : null}
-          {paper.evidence.length > 0 && (
-            <span className="lit-row-evidence-badge" title={copy.row.hasEvidenceTitle}>{copy.row.hasEvidenceBadge}</span>
-          )}
+        <div className={`lit-row-summary${workflowGrade ? " has-grade" : ""}`}>
+          <span className="lit-row-author-fallback" title={paper.authors.join(", ")}>{formatAuthors(copy, paper.authors)}</span>
           {workflowGrade && (
             <span
               className={`lit-row-workflow-grade grade-${workflowGrade.grade.toLowerCase()}`}
@@ -5669,8 +5554,9 @@ function PaperRow({
           )}
         </div>
       </td>
-      <td className="lit-row-venue" title={paper.venue}>{paper.venue || "—"}</td>
+      <td className="lit-row-authors" title={paper.authors.join(", ")}>{formatAuthors(copy, paper.authors)}</td>
       <td className="lit-row-year">{paper.year ?? "—"}</td>
+      <td className="lit-row-venue" title={paper.venue}>{paper.venue || "—"}</td>
       <td className="lit-row-tags">
         {paper.tags.slice(0, 2).map((tag) => {
           const definition = tagDefinitions.get(tag.toLocaleLowerCase());
@@ -5686,19 +5572,8 @@ function PaperRow({
           <span className="lit-row-tag-more">+{paper.tags.length - 2}</span>
         )}
       </td>
-      <td className="lit-row-star" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          className={`lit-card-star${paper.starred ? " starred" : ""}`}
-          onClick={(e) => { e.stopPropagation(); if (!isTrashView) onToggleStar(); }}
-          disabled={isTrashView}
-          aria-label={paper.starred ? copy.row.unstar : copy.row.star}
-          aria-pressed={paper.starred}
-          title={paper.starred ? copy.row.unstar : copy.row.star}
-        >
-          <SvgIcon name="star" size={16} />
-        </button>
-      </td>
+
+      <td className="lit-row-added" title={paper.addedAt}>{paper.addedAt.slice(0, 10)}</td>
     </tr>
   );
 }
@@ -5758,6 +5633,7 @@ function LiteratureChildRow({
     >
       <td className="lit-row-check" />
       <td className="lit-row-stage"><span className="lit-child-kind-dot" aria-hidden="true" /></td>
+      <td className="lit-row-star" />
       <td className="lit-row-title-cell">
         <div className="lit-child-title-wrap" style={{ paddingLeft: child.depth * 16 }}>
           <button
@@ -5780,8 +5656,9 @@ function LiteratureChildRow({
           </div>
         </div>
       </td>
-      <td className="lit-row-venue" title={child.detail}>{kindLabel}</td>
+      <td className="lit-row-authors" />
       <td className="lit-row-year">{child.page ?? "—"}</td>
+      <td className="lit-row-venue" title={child.detail}>{kindLabel}</td>
       <td className="lit-row-tags">
         {child.snapshot?.tags.slice(0, 2).map((tag) => (
           <span
@@ -5791,688 +5668,9 @@ function LiteratureChildRow({
           >{tag.name}</span>
         ))}
       </td>
-      <td className="lit-row-star" />
+
+      <td className="lit-row-added" />
     </tr>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Read tab
-// ──────────────────────────────────────────────────────────────────────────────
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Workspace — Overview tab
-// ──────────────────────────────────────────────────────────────────────────────
-
-function WorkspaceOverview({
-  paper,
-  briefing,
-  abstractOpen,
-  onToggleAbstract,
-  onGenerateBrief,
-  onShortlist,
-  onDownload,
-  onViewEvidence,
-  onOpenAnnotation,
-  onDelete,
-}: {
-  paper: LiteraturePaper;
-  briefing: boolean;
-  abstractOpen: boolean;
-  onToggleAbstract: () => void;
-  onGenerateBrief: (id: string) => void;
-  onShortlist: () => void;
-  onDownload: () => void;
-  onViewEvidence: () => void;
-  onOpenAnnotation: (page: number, annotationId: string) => void;
-  onDelete: () => void;
-}) {
-  const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
-  const fit = paper.verdict?.fit;
-  const relevanceClass = fit ? `relevance-${fit}` : "relevance-none";
-  const relevanceLabel = fit ? copy.fit[fit] : copy.fit.unscreened;
-  const reason = paper.verdict?.rationale || paper.agentSummary;
-
-  return (
-    <div className="lit-overview">
-      {/* 快速判断 */}
-      <div className="lit-section">
-        <div className="lit-section-heading">
-          <span>{copy.overview.quickJudgment}</span>
-        </div>
-        <div className="lit-quick-judgment">
-          <div className="lit-judgment-col">
-            <span className="lit-judgment-label">{copy.overview.relevance}</span>
-            <span className={`lit-relevance-badge ${relevanceClass}`}>{relevanceLabel}</span>
-          </div>
-          {reason && (
-            <div className="lit-judgment-col reason">
-              <span className="lit-judgment-label">{copy.overview.reason}</span>
-              <p className="lit-judgment-reason-text">
-                {reason.length > 200 ? `${reason.slice(0, 200)}…` : reason}
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 摘要 */}
-      <div className="lit-section">
-        <button type="button" className="lit-abstract-toggle" onClick={onToggleAbstract}>
-          <div className="lit-section-heading">
-            <span>{copy.overview.abstract}</span>
-            {!paper.abstract && <span className="lit-section-badge">{copy.overview.missing}</span>}
-          </div>
-          <span className="lit-toggle-caret" aria-hidden="true"><SvgIcon name={abstractOpen ? "chevronDown" : "chevronRight"} size={12} /></span>
-        </button>
-        {abstractOpen && (
-          <p className={`lit-abstract-text${paper.abstract ? "" : " missing"}`}>
-            {paper.abstract || copy.overview.abstractMissingText}
-          </p>
-        )}
-      </div>
-
-      {/* 结构化简报 */}
-      <div className="lit-section">
-        <div className="lit-section-heading">
-          <span>{copy.overview.structuredBrief}</span>
-        </div>
-        {paper.brief ? (
-          <>
-            <BriefColumns
-              brief={paper.brief}
-              annotations={paper.pdfAnnotations}
-              onOpenAnnotation={onOpenAnnotation}
-            />
-            <div className={`lit-brief-status ${paper.brief.basis}`}>
-              <span>
-                {paper.brief.basis === "fulltext"
-                  ? copy.overview.briefFulltextNote
-                  : copy.overview.briefAbstractOnlyNote}
-              </span>
-              <button
-                type="button"
-                onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
-                disabled={briefing}
-              >
-                {paper.pdf.status === "downloaded" ? copy.overview.regenerateFromFulltext : copy.workspaceHeader.getPdf}
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="lit-brief-generate">
-            <p>
-              {paper.pdf.status === "downloaded"
-                ? copy.overview.pdfDownloadedNote
-                : copy.overview.needPdfNote}
-            </p>
-            <button
-              type="button"
-              className="primary"
-              onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
-              disabled={briefing}
-            >
-              {briefing ? copy.overview.readingFulltext : paper.pdf.status === "downloaded" ? copy.overview.generateFromFulltext : copy.workspaceHeader.getPdf}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* 证据片段 */}
-      {paper.evidence.length > 0 && (
-        <div className="lit-section">
-          <div className="lit-section-heading">
-            <span>{copy.overview.evidence}</span>
-            <span className="lit-section-badge">{paper.evidence.length}</span>
-            <button type="button" className="lit-view-all-btn" onClick={onViewEvidence}>
-              {copy.overview.viewAll}
-            </button>
-          </div>
-          <div className="lit-evidence-snippets">
-            {paper.evidence.slice(0, 2).map((item) => (
-              <div key={item.id} className="lit-evidence-snippet">
-                <span className="lit-evidence-dot" aria-hidden="true" />
-                <span>"{item.quote.length > 120 ? `${item.quote.slice(0, 120)}…` : item.quote}"</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* 操作 */}
-      <div className="lit-section lit-section-actions">
-        <div className="lit-actions">
-          {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
-            <button type="button" className="lit-action-btn starred" onClick={onShortlist}>
-              {copy.overview.addToShortlist}
-            </button>
-          )}
-          <button type="button" className="lit-action-btn" onClick={onViewEvidence}>
-            {copy.overview.viewEvidence}
-          </button>
-          <button type="button" className="lit-action-btn danger" aria-label={copy.overview.deleteAria} onClick={onDelete}>
-            {copy.overview.delete}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Brief columns (5-section horizontal layout)
-// ──────────────────────────────────────────────────────────────────────────────
-
-const BRIEF_COLS: Array<{ key: "problem" | "method" | "results" | "limits" | "forYou"; cls: string }> = [
-  { key: "problem", cls: "brief-col-problem" },
-  { key: "method", cls: "brief-col-method" },
-  { key: "results", cls: "brief-col-results" },
-  { key: "limits", cls: "brief-col-limits" },
-  { key: "forYou", cls: "brief-col-foryou" },
-];
-
-function BriefColumns({
-  brief,
-  annotations,
-  onOpenAnnotation,
-}: {
-  brief: NonNullable<LiteraturePaper["brief"]>;
-  annotations: LiteraturePaper["pdfAnnotations"];
-  onOpenAnnotation: (page: number, annotationId: string) => void;
-}) {
-  const copy = LITERATURE_COPY[useStore((s) => s.language)];
-  const fallbackSource = brief.basis === "fulltext" ? "pdf" : "abstract";
-  return (
-    <div className="lit-brief lit-brief-cols">
-      {BRIEF_COLS.map(({ key, cls }) => {
-        const labels = {
-          problem: copy.brief.columnProblem,
-          method: copy.brief.columnMethod,
-          results: copy.brief.columnResults,
-          limits: copy.brief.columnLimits,
-          forYou: copy.brief.columnForYou,
-        };
-        const section = brief[key] ?? { text: copy.brief.missingFieldFallback, source: fallbackSource };
-        const annotation = annotations.find((entry) => entry.sourceId === `brief:${key}`);
-        return (
-          <div key={key} className={`lit-brief-col ${cls}`}>
-            <div className="lit-brief-col-header">
-              {labels[key]}
-              {" "}
-              <span className={`lit-src src-${section.source}`}>
-                [{section.source}{section.page ? ` p.${section.page}` : ""}]
-              </span>
-            </div>
-            <div className="lit-brief-col-body">{section.text}</div>
-            {annotation && (
-              <button
-                type="button"
-                className="lit-brief-open-core"
-                onClick={() => onOpenAnnotation(annotation.page, annotation.id)}
-              >
-                {copy.brief.viewCoreSentence}
-              </button>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Workspace — Notes tab
-// ──────────────────────────────────────────────────────────────────────────────
-
-function WorkspaceNotes({
-  paper,
-  onAddNote,
-  onUpdateNote,
-  onDeleteNote,
-  onCreateNoteFromAnnotation,
-  onOpenAnnotation,
-  onExport,
-  onImport,
-}: {
-  paper: LiteraturePaper;
-  onAddNote: (note: Omit<LiteratureNote, "id" | "createdAt" | "updatedAt">) => string | null;
-  onUpdateNote: (noteId: string, patch: Partial<Pick<LiteratureNote, "title" | "content">>) => void;
-  onDeleteNote: (noteId: string) => void;
-  onCreateNoteFromAnnotation: (annotationId: string) => string | null;
-  onOpenAnnotation: (page: number, annotationId: string) => void;
-  onExport: () => void;
-  onImport: () => void;
-}) {
-  const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
-  const [draftTitle, setDraftTitle] = useState("");
-  const [draftContent, setDraftContent] = useState("");
-  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState("");
-  const [editingContent, setEditingContent] = useState("");
-  const annotationsById = useMemo(
-    () => new Map(paper.pdfAnnotations.map((annotation) => [annotation.id, annotation])),
-    [paper.pdfAnnotations],
-  );
-  const notes = paper.notes ?? [];
-
-  const addDraft = () => {
-    if (!draftContent.trim()) return;
-    onAddNote({ title: draftTitle.trim() || undefined, content: draftContent, source: "manual" });
-    setDraftTitle("");
-    setDraftContent("");
-  };
-
-  const insertTemplate = (template: string) => {
-    setDraftContent((current) => current.trim() ? current.trimEnd() + "\n\n" + template : template);
-  };
-
-  const startEditing = (note: LiteratureNote) => {
-    setEditingNoteId(note.id);
-    setEditingTitle(note.title ?? "");
-    setEditingContent(note.content);
-  };
-
-  return (
-    <div className="lit-workspace-scroll">
-      <section className="lit-section lit-research-notes">
-        <div className="lit-section-heading">
-          <span>{copy.notes.researchNotes}</span>
-          <span className="lit-section-badge">{notes.length}</span>
-          <div className="lit-note-transfer-actions">
-            <button type="button" onClick={onImport}>{copy.notes.importAnnotations}</button>
-            <button type="button" onClick={onExport}>{copy.notes.export}</button>
-          </div>
-        </div>
-        <input
-          value={draftTitle}
-          onChange={(event) => setDraftTitle(event.target.value)}
-          placeholder={copy.notes.titlePlaceholder}
-          aria-label={copy.notes.titleAria}
-        />
-        <div className="lit-note-toolbar" role="toolbar" aria-label={copy.notes.templateToolbar}>
-          <span>{copy.notes.insertTemplate}</span>
-          <button type="button" onClick={() => insertTemplate(copy.notes.templateSummary)}>{copy.notes.templateSummaryLabel}</button>
-          <button type="button" onClick={() => insertTemplate(copy.notes.templateMethod)}>{copy.notes.templateMethodLabel}</button>
-          <button type="button" onClick={() => insertTemplate(copy.notes.templateEvidence)}>{copy.notes.templateEvidenceLabel}</button>
-          <button type="button" onClick={() => insertTemplate(copy.notes.templateLimitations)}>{copy.notes.templateLimitationsLabel}</button>
-        </div>
-        <textarea
-          rows={4}
-          value={draftContent}
-          onChange={(event) => setDraftContent(event.target.value)}
-          placeholder={copy.notes.contentPlaceholder}
-          aria-label={copy.notes.contentAria}
-        />
-        <button type="button" className="primary" disabled={!draftContent.trim()} onClick={addDraft}>
-          {copy.notes.addNote}
-        </button>
-
-        {notes.length > 0 && (
-          <div className="lit-research-note-list">
-            {notes.map((note) => {
-              const annotation = note.annotationId ? annotationsById.get(note.annotationId) : undefined;
-              const editing = editingNoteId === note.id;
-              return (
-                <article className="lit-research-note" key={note.id}>
-                  {editing ? (
-                    <>
-                      <input value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} aria-label={copy.notes.editTitleAria} />
-                      <textarea rows={5} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} aria-label={copy.notes.editContentAria} />
-                      <div className="lit-note-card-actions">
-                        <button
-                          type="button"
-                          className="primary"
-                          onClick={() => {
-                            if (editingContent.trim()) onUpdateNote(note.id, { title: editingTitle.trim() || undefined, content: editingContent });
-                            setEditingNoteId(null);
-                          }}
-                        >
-                          {copy.notes.save}
-                        </button>
-                        <button type="button" onClick={() => setEditingNoteId(null)}>{copy.notes.cancel}</button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="lit-research-note-head">
-                        <strong>{note.title || copy.notes.untitledNote}</strong>
-                        <span>{note.source === "annotation" ? copy.notes.sourceAnnotation : note.source === "imported" ? copy.notes.sourceImported : copy.notes.sourceManual}</span>
-                      </div>
-                      <p>{note.content}</p>
-                      <div className="lit-note-card-actions">
-                        {annotation && (
-                          <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>
-                            {copy.notes.annotationPageButton(annotation.page)}
-                          </button>
-                        )}
-                        <button type="button" onClick={() => startEditing(note)}>{copy.notes.edit}</button>
-                        <button type="button" className="danger" onClick={() => onDeleteNote(note.id)}>{copy.notes.delete}</button>
-                      </div>
-                    </>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      <section className="lit-section lit-annotation-note-source">
-        <div className="lit-section-heading">
-          <span>{copy.notes.pdfAnnotations}</span>
-          <span className="lit-section-badge">{paper.pdfAnnotations.length}</span>
-        </div>
-        {paper.pdfAnnotations.length === 0 ? (
-          <p className="lit-note-text">{copy.notes.noAnnotationsHint}</p>
-        ) : (
-          <div className="lit-annotation-note-list">
-            {paper.pdfAnnotations.slice().sort((left, right) => left.page - right.page).map((annotation) => (
-              <article key={annotation.id} className="lit-annotation-note-item">
-                <div><strong>{copy.evidenceTab.pageNumber(annotation.page)}</strong><span>{annotation.kind}</span></div>
-                <blockquote>{annotation.quote || annotation.note || copy.notes.noQuoteFallback}</blockquote>
-                <div className="lit-note-card-actions">
-                  <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>{copy.notes.viewInPdf}</button>
-                  <button type="button" onClick={() => onCreateNoteFromAnnotation(annotation.id)}>{copy.notes.createNoteFromAnnotation}</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
-      {paper.verdict && (
-        <div className="lit-section">
-          <div className="lit-section-heading">
-            <span>{copy.notes.reviewerJudgment}</span>
-            <span className={`lit-fit fit-${paper.verdict.fit}`}>
-              {copy.fit[paper.verdict.fit]} · {paper.verdict.score}
-            </span>
-          </div>
-          <p className="lit-verdict-text">{paper.verdict.rationale}</p>
-        </div>
-      )}
-      {paper.agentSummary && (
-        <div className="lit-section">
-          <div className="lit-section-heading"><span>{copy.notes.agentSummary}</span></div>
-          <p className="lit-note-text">{paper.agentSummary}</p>
-        </div>
-      )}
-      {!paper.verdict && !paper.agentSummary && (
-        <div className="lit-workspace-empty-content">{copy.notes.noJudgment}</div>
-      )}
-    </div>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Workspace — Evidence tab
-// ──────────────────────────────────────────────────────────────────────────────
-
-function WorkspaceEvidence({
-  paper,
-  generatingChains,
-  onGenerateChains,
-  onDeleteEvidence,
-  onUpdateChain,
-  onOpenPage,
-  onDownload,
-}: {
-  paper: LiteraturePaper;
-  generatingChains: boolean;
-  onGenerateChains: () => void;
-  onDeleteEvidence: (evidenceId: string) => void;
-  onUpdateChain: (
-    chainId: string,
-    patch: Partial<Pick<LiteraturePaper["answerChains"][number], "question" | "answer" | "reviewStatus">>,
-  ) => void;
-  onOpenPage: (page: number, annotationId?: string) => void;
-  onDownload: () => void;
-}) {
-  const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
-  const annotations = new Map(paper.pdfAnnotations.map((annotation) => [annotation.id, annotation]));
-  return (
-    <div className="lit-workspace-scroll lit-evidence-workspace" lang={copy.evidenceTab.langAttr}>
-      <header className="lit-section lit-evidence-intro">
-        <div className="lit-evidence-intro-head">
-          <div>
-            <span className="lit-evidence-eyebrow">{copy.evidenceTab.eyebrow}</span>
-            <h3>{copy.evidenceTab.heading}</h3>
-          </div>
-          <span className="lit-evidence-total">{copy.evidenceTab.totalCount(paper.evidence.length)}</span>
-        </div>
-        <p>
-          {copy.evidenceTab.intro}
-        </p>
-        <div className="lit-evidence-summary">
-          <span>{copy.evidenceTab.qaSummary} <strong>{paper.answerChains.length}</strong></span>
-          <span>{copy.evidenceTab.sourceExcerptSummary} <strong>{paper.evidence.length}</strong></span>
-          <span>{copy.evidenceTab.visualEvidenceSummary} <strong>{paper.evidence.filter((item) => item.source === "vision").length}</strong></span>
-        </div>
-        <button
-          type="button"
-          className="primary"
-          onClick={paper.pdf.status === "downloaded" ? onGenerateChains : onDownload}
-          disabled={generatingChains}
-        >
-          {generatingChains
-            ? copy.evidenceTab.buildingChains
-            : paper.pdf.status === "downloaded"
-              ? paper.answerChains.length > 0 ? copy.evidenceTab.regenerateChains : copy.evidenceTab.generateChains
-              : copy.evidenceTab.getPdf}
-        </button>
-      </header>
-
-      {paper.answerChains.length > 0 && (
-        <section className="lit-evidence-group" aria-label={copy.evidenceTab.qaConclusionsAria}>
-          <div className="lit-evidence-group-heading">
-            <div>
-              <span>{copy.evidenceTab.qaHeading}</span>
-              <p>{copy.evidenceTab.qaHeadingHint}</p>
-            </div>
-            <strong>{paper.answerChains.length}</strong>
-          </div>
-          {paper.answerChains.map((chain, index) => (
-            <article className="lit-answer-chain" key={chain.id}>
-              <div className="lit-answer-chain-head">
-                <div className="lit-answer-chain-number">
-                  <span>{copy.evidenceTab.qaNumber(String(index + 1).padStart(2, "0"))}</span>
-                  {chain.basis === "vision" && <em>{copy.evidenceTab.visionBuilt}</em>}
-                </div>
-                <div className="lit-answer-chain-review" role="group" aria-label={copy.evidenceTab.reviewStatusAria(index + 1)}>
-                  {([
-                    ["unreviewed", copy.evidenceTab.reviewUnreviewed],
-                    ["accepted", copy.evidenceTab.reviewAccepted],
-                    ["rejected", copy.evidenceTab.reviewRejected],
-                  ] as const).map(([status, label]) => (
-                    <button
-                      type="button"
-                      key={status}
-                      className={chain.reviewStatus === status ? "active" : ""}
-                      onClick={() => onUpdateChain(chain.id, { reviewStatus: status })}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <EditableMathField
-                label={copy.evidenceTab.questionLabel}
-                value={chain.question}
-                rows={2}
-                ariaLabel={copy.evidenceTab.questionAria(index + 1)}
-                onSave={(value) => onUpdateChain(chain.id, { question: value })}
-              />
-              <EditableMathField
-                label={copy.evidenceTab.conclusionLabel}
-                value={chain.answer}
-                rows={4}
-                ariaLabel={copy.evidenceTab.answerAria(index + 1)}
-                className="conclusion"
-                onSave={(value) => onUpdateChain(chain.id, { answer: value })}
-              />
-              <div className="lit-answer-chain-supports">
-                <div className="lit-answer-chain-supports-head">
-                  <span>{copy.evidenceTab.supportsHeading}</span>
-                  <strong>{chain.supports.length}</strong>
-                </div>
-                {chain.supports.map((support) => {
-                  const annotation = annotations.get(support.annotationId);
-                  if (!annotation) return null;
-                  return (
-                    <button
-                      type="button"
-                      key={support.annotationId}
-                      onClick={() => onOpenPage(annotation.page, annotation.id)}
-                    >
-                      <span className="lit-answer-support-meta">
-                        <strong>{(copy.evidenceRole as Record<string, string>)[support.role] ?? support.role}</strong>
-                        <span>{copy.evidenceTab.pageNumber(annotation.page)}</span>
-                        {annotation.source === "vision" && <span>{copy.evidenceTab.visualPageEvidence}</span>}
-                      </span>
-                      <MathText text={annotation.quote} className="lit-answer-support-quote" />
-                      <span className="lit-answer-support-open">{copy.evidenceTab.verifyInPdf}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </article>
-          ))}
-        </section>
-      )}
-
-      {paper.evidence.length === 0 ? (
-        <div className="lit-workspace-empty-content">
-          <p>
-            {paper.pdf.status === "downloaded"
-              ? copy.evidenceTab.noEvidenceWithPdf
-              : copy.evidenceTab.noEvidenceNoPdf}
-          </p>
-          <button
-            type="button"
-            className="primary"
-            onClick={paper.pdf.status === "downloaded" ? onGenerateChains : onDownload}
-            disabled={generatingChains}
-          >
-            {generatingChains
-              ? copy.evidenceTab.buildingChains
-              : paper.pdf.status === "downloaded"
-                ? copy.evidenceTab.generateChains
-                : copy.evidenceTab.getPdf}
-          </button>
-        </div>
-      ) : (
-        <section className="lit-evidence-group" aria-label={copy.evidenceTab.sourceEvidenceAria}>
-          <div className="lit-evidence-group-heading">
-            <div>
-              <span>{copy.evidenceTab.sourceEvidenceHeading}</span>
-              <p>{copy.evidenceTab.sourceEvidenceHint}</p>
-            </div>
-            <strong>{paper.evidence.length}</strong>
-          </div>
-          {paper.evidence.map((item, index) => (
-            <article className="lit-evidence-card" key={item.id}>
-              <div className="lit-evidence-card-head">
-                <div className="lit-evidence-card-meta">
-                  <span>{copy.evidenceTab.evidenceCardNumber(String(index + 1).padStart(2, "0"))}</span>
-                  <em>{copy.evidenceTab.pageNumber(item.page)}</em>
-                  <em>{item.source === "vision" ? copy.evidenceTab.visualEvidenceTag : copy.evidenceTab.textEvidenceTag}</em>
-                </div>
-                <div className="lit-evidence-card-actions">
-                  <button
-                    type="button"
-                    className="lit-evidence-open"
-                    onClick={() =>
-                      onOpenPage(
-                        item.page,
-                        paper.pdfAnnotations.find((annotation) => annotation.sourceId === item.id)?.id,
-                      )
-                    }
-                  >
-                    {copy.evidenceTab.openOriginalPage}
-                  </button>
-                  <button
-                    type="button"
-                    className="lit-evidence-delete"
-                    aria-label={copy.evidenceTab.deleteEvidenceAria(item.quote.slice(0, 30))}
-                    onClick={() => onDeleteEvidence(item.id)}
-                  >
-                    {copy.evidenceTab.delete}
-                  </button>
-                </div>
-              </div>
-              <div className="lit-evidence-explanation">
-                <span>{copy.evidenceTab.noteLabel}</span>
-                <p><MathText text={item.note} /></p>
-              </div>
-              <div className="lit-evidence-source">
-                <span>{copy.evidenceTab.sourceExcerptLabel}</span>
-                <blockquote><MathText text={item.quote} /></blockquote>
-              </div>
-            </article>
-          ))}
-        </section>
-      )}
-    </div>
-  );
-}
-
-function EditableMathField({
-  label,
-  value,
-  rows,
-  ariaLabel,
-  className = "",
-  onSave,
-}: {
-  label: string;
-  value: string;
-  rows: number;
-  ariaLabel: string;
-  className?: string;
-  onSave: (value: string) => void;
-}) {
-  const copy = LITERATURE_COPY[useStore((s) => s.language)];
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-
-  useEffect(() => {
-    if (!editing) setDraft(value);
-  }, [editing, value]);
-
-  const save = () => {
-    const next = draft.trim();
-    if (next && next !== value) onSave(next);
-    setEditing(false);
-  };
-
-  return (
-    <div className={`lit-answer-chain-field ${className}`.trim()}>
-      <div className="lit-answer-chain-field-head">
-        <span>{label}</span>
-        {!editing && (
-          <button type="button" aria-label={copy.editableField.editAria(ariaLabel)} onClick={() => setEditing(true)}>
-            {copy.editableField.edit}
-          </button>
-        )}
-      </div>
-      {editing ? (
-        <textarea
-          autoFocus
-          rows={rows}
-          value={draft}
-          aria-label={ariaLabel}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={save}
-        />
-      ) : (
-        <div className="lit-answer-chain-rendered">
-          <MathText text={value} />
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -6934,6 +6132,9 @@ function InfoTab({
   onSetTagColor,
   onToggleCollection,
   onDelete,
+  onOpenAttachment,
+  onOpenPdf,
+  onManageFiles,
 }: {
   paper: LiteraturePaper;
   collections: LiteratureLibrary["collections"];
@@ -6947,6 +6148,9 @@ function InfoTab({
   onSetTagColor: (tag: string, color: string) => void;
   onToggleCollection: (colId: string) => void;
   onDelete: () => void;
+  onOpenAttachment: (attachment: LiteratureAttachment) => void;
+  onOpenPdf: () => void;
+  onManageFiles: () => void;
 }) {
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
@@ -7055,109 +6259,7 @@ function InfoTab({
   };
   return (
     <div className="lip-panel">
-      {(fit || paper.starred) && (
-        <div className="lip-badges">
-          {fit && (
-            <span className={`lit-relevance-badge relevance-${fit}`}>
-              {copy.fit[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
-            </span>
-          )}
-          {paper.starred && <span className="lip-star-badge">{copy.infoTab.starred}</span>}
-        </div>
-      )}
-
-      <div
-        className="lip-section lip-editable-info"
-        title={copy.infoTab.doubleClickToEditMetadata}
-        onDoubleClick={(event) => {
-          if ((event.target as HTMLElement).closest("a, button, input, select, textarea")) return;
-          setMetadataError(null);
-          setMetadataEditing(true);
-        }}
-      >
-        <div className="lip-section-head lip-info-section-heading">
-          <span>{copy.infoTab.infoHeading}</span>
-          <button type="button" className="lit-quiet-button" aria-expanded={metadataEditing}
-            onClick={() => { setMetadataError(null); setMetadataEditing((value) => !value); }}>{copy.infoTab.editMetadata}</button>
-        </div>
-        <dl className="lip-meta">
-          <dt>{copy.infoTab.itemType}</dt><dd>{itemTypeLabel(copy, normalizedItem?.item.itemType ?? paper.itemType)}</dd>
-          {displayCreators.map((creator, i) => (
-            <Fragment key={i}>
-              <dt>{i === 0 ? copy.infoTab.author : creatorRoleLabel(copy, creator.creatorType ?? "author")}</dt>
-              <dd>
-                {creatorDisplayName(creator)}
-                {creator.creatorType !== "author" && (
-                  <span className="lit-creator-role"> · {creatorRoleLabel(copy, creator.creatorType ?? "author")}</span>
-                )}
-              </dd>
-            </Fragment>
-          ))}
-          {paper.venue && <><dt>{copy.infoTab.venue}</dt><dd>{paper.venue}</dd></>}
-          {paper.year && <><dt>{copy.infoTab.year}</dt><dd>{paper.year}</dd></>}
-          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>{copy.infoTab.preciseDate}</dt><dd>{paper.date}</dd></>}
-          {paper.volume && <><dt>{copy.infoTab.volume}</dt><dd>{paper.volume}</dd></>}
-          {paper.issue && <><dt>{copy.infoTab.issue}</dt><dd>{paper.issue}</dd></>}
-          {paper.pages && <><dt>{copy.infoTab.pages}</dt><dd>{paper.pages}</dd></>}
-          {paper.publisher && <><dt>{copy.infoTab.publisher}</dt><dd>{paper.publisher}</dd></>}
-          {paper.place && <><dt>{copy.infoTab.place}</dt><dd>{paper.place}</dd></>}
-          {paper.citedBy !== undefined && <><dt>{copy.infoTab.citations}</dt><dd>{paper.citedBy}</dd></>}
-          {paper.doi && (
-            <>
-              <dt>DOI</dt>
-              <dd><a href={`https://doi.org/${paper.doi}`} target="_blank" rel="noreferrer">{paper.doi}</a></dd>
-            </>
-          )}
-          {paper.isbn && <><dt>ISBN</dt><dd>{paper.isbn}</dd></>}
-          {paper.citationKey && <><dt>Citation key</dt><dd>{paper.citationKey}</dd></>}
-          {Object.entries(displayFields).map(([key, value]) => (
-            <Fragment key={key}>
-              <dt>{key}</dt><dd>{value}</dd>
-            </Fragment>
-          ))}
-          {paper.arxivId && (
-            <>
-              <dt>arXiv</dt>
-              <dd><a href={`https://arxiv.org/abs/${paper.arxivId}`} target="_blank" rel="noreferrer">{paper.arxivId}</a></dd>
-            </>
-          )}
-          <dt>{copy.infoTab.source}</dt><dd>{paper.source}</dd>
-          <dt>{copy.infoTab.stage}</dt><dd>{copy.stage[paper.stage]}</dd>
-          <dt>{copy.infoTab.rating}</dt>
-          <dd>
-            <RatingStars
-              value={paper.rating ?? 0}
-              onChange={onSetRating}
-              ariaLabel={copy.infoTab.setRatingAria}
-              clearLabel={copy.infoTab.clearRatingAria}
-            />
-          </dd>
-          <dt>{copy.infoTab.addedAt}</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
-          <dt>PDF</dt>
-          <dd>
-            {paper.pdf.status === "downloaded" ? copy.infoTab.pdfDownloaded
-              : paper.pdf.status === "downloading" ? copy.infoTab.pdfDownloading
-              : paper.pdf.status === "failed" ? copy.infoTab.pdfFailed
-              : paper.pdf.url ? copy.infoTab.pdfHasLink : copy.infoTab.pdfNoLink}
-          </dd>
-        </dl>
-      </div>
-
-      <div className="lip-section">
-        <div className="lip-section-head">{copy.infoTab.abstractHeading}</div>
-        <p className={`lip-abstract${paper.abstract ? "" : " lip-abstract-missing"}`}>
-          {paper.abstract || copy.infoTab.noAbstract}
-        </p>
-      </div>
-
-      {paper.verdict?.rationale && (
-        <div className="lip-section">
-        <div className="lip-section-head">{copy.infoTab.aiRelevanceReason}</div>
-          <p className="lip-abstract">{paper.verdict.rationale}</p>
-        </div>
-      )}
-
-      <div className="lip-section">
+      <div className="lip-section lip-reference-tags">
         <div className="lip-section-head">{copy.infoTab.tagsHeading}</div>
         <div className="lip-tags">
           {paper.tags.map((tag) => {
@@ -7194,6 +6296,135 @@ function InfoTab({
           />
         </div>
       </div>
+
+
+
+      <div
+        className="lip-section lip-editable-info"
+        title={copy.infoTab.doubleClickToEditMetadata}
+        onDoubleClick={(event) => {
+          if ((event.target as HTMLElement).closest("a, button, input, select, textarea")) return;
+          setMetadataError(null);
+          setMetadataEditing(true);
+        }}
+      >
+        <div className="lip-section-head lip-info-section-heading">
+          <span>{copy.infoTab.infoHeading}</span>
+          <button type="button" className="lit-quiet-button" aria-expanded={metadataEditing}
+            onClick={() => { setMetadataError(null); setMetadataEditing((value) => !value); }}>{copy.infoTab.editMetadata}</button>
+        </div>
+        <dl className="lip-meta">
+          <dt>{copy.infoTab.itemType}</dt><dd>{itemTypeLabel(copy, normalizedItem?.item.itemType ?? paper.itemType)}</dd>
+          {displayCreators.map((creator, i) => (
+            <Fragment key={i}>
+              <dt>{i === 0 ? copy.infoTab.author : creator.creatorType === "author" ? "" : creatorRoleLabel(copy, creator.creatorType ?? "author")}</dt>
+              <dd>
+                {creatorDisplayName(creator)}
+                {creator.creatorType !== "author" && (
+                  <span className="lit-creator-role"> · {creatorRoleLabel(copy, creator.creatorType ?? "author")}</span>
+                )}
+              </dd>
+            </Fragment>
+          ))}
+          {paper.venue && <><dt>{copy.infoTab.venue}</dt><dd>{paper.venue}</dd></>}
+          {paper.year && <><dt>{copy.infoTab.year}</dt><dd>{paper.year}</dd></>}
+          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>{copy.infoTab.preciseDate}</dt><dd>{paper.date}</dd></>}
+          {paper.volume && <><dt>{copy.infoTab.volume}</dt><dd>{paper.volume}</dd></>}
+          {paper.issue && <><dt>{copy.infoTab.issue}</dt><dd>{paper.issue}</dd></>}
+          {paper.pages && <><dt>{copy.infoTab.pages}</dt><dd>{paper.pages}</dd></>}
+          {paper.publisher && <><dt>{copy.infoTab.publisher}</dt><dd>{paper.publisher}</dd></>}
+          {paper.place && <><dt>{copy.infoTab.place}</dt><dd>{paper.place}</dd></>}
+          {paper.citedBy !== undefined && <><dt>{copy.infoTab.citations}</dt><dd>{paper.citedBy}</dd></>}
+          {paper.doi && (
+            <>
+              <dt>DOI</dt>
+              <dd><a href={`https://doi.org/${paper.doi}`} target="_blank" rel="noreferrer">{paper.doi}<SvgIcon name="externalLink" size={13} /></a></dd>
+            </>
+          )}
+          {paper.isbn && <><dt>ISBN</dt><dd>{paper.isbn}</dd></>}
+          {paper.citationKey && <><dt>Citation key</dt><dd>{paper.citationKey}</dd></>}
+          {Object.entries(displayFields).map(([key, value]) => (
+            <Fragment key={key}>
+              <dt>{key}</dt><dd>{value}</dd>
+            </Fragment>
+          ))}
+          {paper.arxivId && (
+            <>
+              <dt>arXiv</dt>
+              <dd><a href={`https://arxiv.org/abs/${paper.arxivId}`} target="_blank" rel="noreferrer">{paper.arxivId}<SvgIcon name="externalLink" size={13} /></a></dd>
+            </>
+          )}
+          <dt>{copy.infoTab.addedAt}</dt><dd>{paper.addedAt.slice(0, 16).replace("T", " ")}</dd>
+          {normalizedItem?.item.dateModified && <><dt>{copy.libraryUi.modified}</dt><dd>{normalizedItem.item.dateModified.slice(0, 16).replace("T", " ")}</dd></>}
+        </dl>
+      </div>
+
+      <div className="lip-section">
+        <div className="lip-section-head">{copy.infoTab.abstractHeading}</div>
+        <p className={`lip-abstract${paper.abstract ? "" : " lip-abstract-missing"}`}>
+          {paper.abstract || copy.infoTab.noAbstract}
+        </p>
+      </div>
+
+      {((paper.attachments?.length ?? 0) > 0 || paper.pdf.path) && (
+        <div className="lip-section lip-reference-files">
+          <div className="lip-section-head">
+            <span>{copy.workspaceHeader.tabFiles} ({(paper.attachments?.length ?? 0) + (paper.pdf.path && !paper.attachments?.some((file) => file.path === paper.pdf.path) ? 1 : 0)})</span>
+            <button type="button" className="lit-layout-toggle" aria-label={copy.libraryUi.fileDetails} title={copy.libraryUi.fileDetails} onClick={onManageFiles}><SvgIcon name="moreHorizontal" size={17} /></button>
+          </div>
+          {paper.pdf.path && !paper.attachments?.some((file) => file.path === paper.pdf.path) && (
+            <button type="button" className="lip-file-card" onClick={onOpenPdf}>
+              <span className="lip-file-icon">PDF</span><span><strong>{paper.pdf.path.split(/[\\/]/).pop()}</strong><small>{copy.workspaceHeader.openPdf}</small></span>
+            </button>
+          )}
+          {paper.attachments?.map((file) => <button type="button" className="lip-file-card" key={file.id} onClick={() => onOpenAttachment(file)}>
+            <span className={"lip-file-icon" + (file.kind === "pdf" ? "" : " secondary")}>{file.kind === "pdf" ? "PDF" : <SvgIcon name="attachment" size={20} />}</span>
+            <span><strong>{file.filename || file.path?.split(/[\\/]/).pop() || file.label}</strong><small>{file.bytes !== undefined ? formatStorageBytes(file.bytes) : file.kind === "externalLink" ? file.url : file.kind.toUpperCase()}</small></span>
+          </button>)}
+        </div>
+      )}
+
+      <div className="lip-section lip-research-details">
+        <div className="lip-section-head">{copy.libraryUi.researchDetails}</div>
+        {(fit || paper.starred) && (
+          <div className="lip-badges">
+            {fit && (
+              <span className={`lit-relevance-badge relevance-${fit}`}>
+                {copy.fit[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
+              </span>
+            )}
+            {paper.starred && <span className="lip-star-badge">{copy.infoTab.starred}</span>}
+          </div>
+        )}
+
+        <dl className="lip-meta">
+          <dt>{copy.infoTab.source}</dt><dd>{paper.source}</dd>
+          <dt>{copy.infoTab.stage}</dt><dd>{copy.stage[paper.stage]}</dd>
+          <dt>{copy.infoTab.rating}</dt>
+          <dd>
+            <RatingStars
+              value={paper.rating ?? 0}
+              onChange={onSetRating}
+              ariaLabel={copy.infoTab.setRatingAria}
+              clearLabel={copy.infoTab.clearRatingAria}
+            />
+          </dd>
+          <dt>PDF</dt>
+          <dd>
+            {paper.pdf.status === "downloaded" ? copy.infoTab.pdfDownloaded
+              : paper.pdf.status === "downloading" ? copy.infoTab.pdfDownloading
+              : paper.pdf.status === "failed" ? copy.infoTab.pdfFailed
+              : paper.pdf.url ? copy.infoTab.pdfHasLink : copy.infoTab.pdfNoLink}
+          </dd>
+        </dl>
+      </div>
+
+      {paper.verdict?.rationale && (
+        <div className="lip-section">
+        <div className="lip-section-head">{copy.infoTab.aiRelevanceReason}</div>
+          <p className="lip-abstract">{paper.verdict.rationale}</p>
+        </div>
+      )}
 
       {collections.length > 0 && (
         <div className="lip-section">

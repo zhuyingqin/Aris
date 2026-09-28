@@ -2,6 +2,7 @@ import { createElement, type SVGProps } from "react";
 
 export type SvgIconName =
   | "bookOpen"
+  | "paperGuide"
   | "filter"
   | "messageCircle"
   | "panelLeft"
@@ -38,6 +39,10 @@ export type SvgIconName =
   | "inbox"
   | "info"
   | "library"
+  | "list"
+  | "grid"
+  | "sort"
+  | "settings"
   | "lightning"
   | "memory"
   | "minus"
@@ -82,6 +87,19 @@ const node = (
 
 function iconNodes(name: SvgIconName): IconNode[] {
   switch (name) {
+    case "list":
+      return [node("path", { d: "M6 4h7M6 8h7M6 12h7M2.5 4h.5M2.5 8h.5M2.5 12h.5", strokeLinecap: "round" })];
+    case "grid":
+      return [node("rect", { x: 2, y: 2, width: 4.5, height: 4.5, rx: .8 }), node("rect", { x: 9.5, y: 2, width: 4.5, height: 4.5, rx: .8 }), node("rect", { x: 2, y: 9.5, width: 4.5, height: 4.5, rx: .8 }), node("rect", { x: 9.5, y: 9.5, width: 4.5, height: 4.5, rx: .8 })];
+    case "sort":
+      return [node("path", { d: "M5 13V3M2.5 5.5 5 3l2.5 2.5M11 3v10m-2.5-2.5L11 13l2.5-2.5", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "settings":
+      return [node("path", { d: "m6.5 1.8-.4 1.6-1.3.8-1.6-.5-1.4 2.5L3 7.4v1.3L1.8 10l1.4 2.4 1.6-.4 1.3.8.4 1.5h2.9l.4-1.5 1.4-.8 1.5.4 1.5-2.4L13 8.7V7.4l1.2-1.2-1.5-2.5-1.5.5-1.4-.8-.4-1.6Z", strokeLinejoin: "round" }), node("circle", { cx: 8, cy: 8, r: 2.1 })];
+    case "paperGuide":
+      return [
+        node("path", { d: "M7.5 14H3.25A1.25 1.25 0 0 1 2 12.75v-10A1.25 1.25 0 0 1 3.25 1.5H9l3 3V7M9 1.5v3h3M4.5 6.5h3M4.5 9h1.75", strokeLinecap: "round", strokeLinejoin: "round" }),
+        node("path", { d: "M9 8.5h4a1 1 0 0 1 1 1v2.75a1 1 0 0 1-1 1h-1.5L9 15v-1.75a1 1 0 0 1-1-1V9.5a1 1 0 0 1 1-1Z", strokeLinecap: "round", strokeLinejoin: "round" }),
+      ];
     case "bookOpen":
       return [node("path", { d: "M8 4C6.4 2.7 3.8 2.5 1.8 3.2v9.5C4 12 6.3 12.2 8 13.4c1.7-1.2 4-1.4 6.2-.7V3.2C12.2 2.5 9.6 2.7 8 4Zm0 0v9.4", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "filter":

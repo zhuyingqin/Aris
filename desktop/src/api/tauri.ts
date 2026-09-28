@@ -761,7 +761,8 @@ export const newapiLogin = (
   model: string,
   username: string,
   password: string,
-) => invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password });
+  twoFactorCode?: string,
+) => invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password, twoFactorCode });
 export const newapiRegister = (input: {
   baseUrl: string;
   username: string;

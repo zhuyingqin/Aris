@@ -848,6 +848,7 @@ async fn login(
     base: &str,
     username: &str,
     password: &str,
+    two_factor_code: Option<&str>,
 ) -> Result<NewApiSession, String> {
     let response = client
         .post(format!("{base}/api/user/login"))
@@ -855,8 +856,8 @@ async fn login(
         .send()
         .await
         .map_err(|error| format!("无法连接服务器: {error}"))?;
-    let refresh_cookies = refresh_cookies_from_headers(response.headers());
-    let body = parse_json(response, "登录").await?;
+    let mut refresh_cookies = refresh_cookies_from_headers(response.headers());
+    let mut body = parse_json(response, "登录").await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return Err(if message.is_empty() {
@@ -865,17 +866,32 @@ async fn login(
             message
         });
     }
-    let data = body
-        .get("data")
-        .ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
-    if data
-        .get("require_2fa")
-        .or_else(|| data.get("require2fa"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err("该账号开启了两步验证，当前桌面端暂不支持 2FA 登录".to_string());
+    let data = body.get("data").ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
+    let requires_verification = ["require_2fa", "require2fa", "require_verification"]
+        .iter().any(|key| status_bool(data, key, false));
+    if requires_verification {
+        let code = two_factor_code.map(str::trim).filter(|code| !code.is_empty())
+            .ok_or_else(|| "AUTH_TWO_FACTOR_REQUIRED".to_string())?;
+        let mut payload = serde_json::json!({ "code": code });
+        if let Some(flow_token) = data.get("flow_token").and_then(Value::as_str) {
+            payload["flow_token"] = Value::String(flow_token.to_string());
+            payload["method"] = Value::String("2fa".to_string());
+        }
+        // Reuse the password request's cookie jar for legacy 2FA gateways.
+        // Modern gateways bind this request through the returned flow token.
+        let mut request = client.post(format!("{base}/api/user/login/2fa")).json(&payload);
+        if let Some(origin) = request_origin(base) {
+            request = request.header(ORIGIN, origin);
+        }
+        let response = request.send().await
+            .map_err(|error| format!("两步验证失败: {error}"))?;
+        refresh_cookies = refresh_cookies_from_headers(response.headers());
+        body = parse_json(response, "两步验证").await?;
+        if !api_ok(&body) {
+            return Err(session_api_error(&body, "两步验证码错误或已过期"));
+        }
     }
+    let data = body.get("data").ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
     let user_id = data_user_id(data).ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
     let refresh_session = data_session_id(data).and_then(|session_id| {
         (refresh_cookies.len() == 1).then_some(NewApiRefreshSession {
@@ -1524,6 +1540,7 @@ pub async fn newapi_login(
     model: String,
     username: String,
     password: String,
+    two_factor_code: Option<String>,
 ) -> Result<NewApiLogin, String> {
     let base = approved_managed_base(&base_url)?;
     let username = username.trim().to_string();
@@ -1538,7 +1555,7 @@ pub async fn newapi_login(
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
 
-    let session = login(&client, &base, &username, &password).await?;
+    let session = login(&client, &base, &username, &password, two_factor_code.as_deref()).await?;
     // Save the long-lived session before minting or persisting downstream
     // executor credentials. If the OS credential store is unavailable, this
     // avoids leaving an executor key without a recoverable sign-in session.
@@ -2347,6 +2364,7 @@ mod tests {
             "MiniMax-M3".to_string(),
             "test-user".to_string(),
             "test-password".to_string(),
+            None,
         ));
 
         assert!(result.is_err(), "a redirect cannot complete managed login");
@@ -2500,6 +2518,81 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn login_two_factor_challenge_requires_code() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            write_json_response(&mut stream, r#"{"success":true,"data":{"require_2fa":true}}"#, true);
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(login(&reqwest::Client::new(), &format!("http://{address}"), "alice", "password", None));
+        assert_eq!(result.err().unwrap(), "AUTH_TWO_FACTOR_REQUIRED");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn login_two_factor_verifies_cookie_flow_token_and_errors() {
+        for modern in [false, true] {
+            for valid in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    read_request(&mut stream);
+                    let challenge = if modern {
+                        r#"{"success":true,"data":{"require_verification":true,"flow_token":"flow-test"}}"#
+                    } else {
+                        r#"{"success":true,"data":{"require_2fa":true}}"#
+                    };
+                    write_json_response(&mut stream, challenge, true);
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = read_request(&mut stream);
+                    let length: usize = request.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(|v| v.trim().parse().unwrap())).unwrap();
+                    let start = request.find("\r\n\r\n").unwrap() + 4;
+                    while request.len() < start + length {
+                        let mut bytes = [0; 1024];
+                        let count = stream.read(&mut bytes).unwrap();
+                        assert!(count > 0);
+                        request.push_str(std::str::from_utf8(&bytes[..count]).unwrap());
+                    }
+                    if valid {
+                        let body = r#"{"success":true,"data":{"id":17,"access_token":"verified-access","session":{"sid":"verified-session"}}}"#;
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSet-Cookie: new_api_refresh=verified-refresh; Path=/; HttpOnly\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    } else {
+                        write_json_response(&mut stream, r#"{"success":false,"message":"Invalid verification code"}"#, false);
+                    }
+                    request
+                });
+                let client = reqwest::Client::builder().cookie_store(true).timeout(Duration::from_secs(5)).build().unwrap();
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let result = runtime.block_on(login(&client, &format!("http://{address}"), "alice", "password", Some(" backup-code ")));
+                let request = server.join().unwrap();
+                assert!(request.starts_with("POST /api/user/login/2fa "));
+                assert!(request.to_ascii_lowercase().contains("cookie: somniq-login=test-cookie"));
+                let payload: serde_json::Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                assert_eq!(payload["code"], "backup-code");
+                assert!(payload.get("password").is_none());
+                if modern {
+                    assert_eq!(payload["flow_token"], "flow-test");
+                    assert_eq!(payload["method"], "2fa");
+                } else {
+                    assert!(payload.get("flow_token").is_none());
+                }
+                if valid {
+                    let session = result.ok().expect("verified login");
+                    assert_eq!(session.user_token.as_deref(), Some("verified-access"));
+                    assert_eq!(session.refresh_session.unwrap().cookies[0].value, "verified-refresh");
+                } else {
+                    assert_eq!(result.err().unwrap(), "Invalid verification code");
+                }
+            }
+        }
+    }
+
     #[test]
     fn login_keeps_a_modern_refresh_session_out_of_the_legacy_token_flow() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
@@ -2529,6 +2622,7 @@ mod tests {
                 &format!("http://{address}"),
                 "alice",
                 "password",
+                None,
             ))
             .expect("login succeeds");
 
@@ -2576,6 +2670,7 @@ mod tests {
                 &format!("http://{address}"),
                 "alice",
                 "password",
+                None,
             ))
             .expect("login succeeds");
         let (login_request, token_request) = server.join().expect("mock server finishes");
@@ -2629,6 +2724,7 @@ mod tests {
                 &format!("http://{address}"),
                 "alice",
                 "password",
+                None,
             ))
             .expect("login succeeds");
         let (login_request, token_request) = server.join().expect("mock server finishes");

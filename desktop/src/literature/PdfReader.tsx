@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import type { ChatModelOption } from "../types";
 import { SvgIcon } from "../SvgIcon";
 import { LITERATURE_COPY } from "./i18n";
 import PaperReadingPanel from "./PaperReadingPanel";
+import { isEditableTarget } from "./libraryInteraction";
 import type {
   PdfAnnotation,
   PdfAnnotationColor,
@@ -217,6 +219,9 @@ interface PendingAnnotation {
 interface PdfReaderProps {
   /** Enables the library's source-bound, background paper analysis task. */
   paperId?: string;
+  /** Optional shared state for the guide toolbar and the library detail rail. */
+  readingVisible?: boolean;
+  onReadingVisibleChange?: (visible: boolean) => void;
   /** Library-relative path by default; a workspace/absolute path when `sourceKind` is "path". */
   relativePath: string;
   /**
@@ -1144,6 +1149,8 @@ function AnnotationEditor({
 
 export default function PdfReader({
   paperId,
+  readingVisible: controlledReadingVisible,
+  onReadingVisibleChange,
   relativePath,
   sourceKind = "library",
   initialPage = 1,
@@ -1176,6 +1183,7 @@ export default function PdfReader({
   const programmaticPageRef = useRef<number | null>(null);
   const scrollSettleTimerRef = useRef<number | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+  const resizeAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1.2);
   const [fitWidth, setFitWidth] = useState(true);
   const [pageLayout, setPageLayout] = useState<PageLayout>(1);
@@ -1263,7 +1271,17 @@ export default function PdfReader({
   const activeHighlightAnnotation = activeHighlight
     ? annotations.find((annotation) => annotation.id === activeHighlight.id) ?? null
     : null;
-  const [readingVisible, setReadingVisible] = useState(true);
+  const [localReadingVisible, setLocalReadingVisible] = useState(false);
+  const readingVisible = controlledReadingVisible ?? localReadingVisible;
+  const guideToggleRef = useRef<HTMLButtonElement>(null);
+  const setReadingVisible = (visible: boolean) => {
+    setLocalReadingVisible(visible);
+    onReadingVisibleChange?.(visible);
+  };
+  const closeReading = () => {
+    setReadingVisible(false);
+    guideToggleRef.current?.focus();
+  };
   const annotationsVisible = showAnnotations && !readOnly;
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
@@ -1343,6 +1361,7 @@ export default function PdfReader({
     setLoading(true);
     setError(null);
     setDocument(null);
+    resizeAnchorRef.current = null;
     setNumPages(0);
     setBaseSize(null);
     setPageBaseHeights({});
@@ -1408,12 +1427,40 @@ export default function PdfReader({
     if (!container) return;
     setContainerWidth(container.clientWidth);
     if (typeof ResizeObserver === "undefined") return;
+    let previousWidth = container.clientWidth;
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) setContainerWidth(entry.contentRect.width);
+      for (const entry of entries) {
+        const width = entry.contentRect.width;
+        if (width <= 0 || Math.abs(width - previousWidth) < 0.5) continue;
+        const page = currentPageRef.current;
+        const slot = slotRefs.current[page - 1];
+        if (previousWidth > 0 && slot) {
+          // Capture before the width update changes page heights. A pending
+          // page jump keeps its destination instead of an intermediate offset.
+          const offset = programmaticPageRef.current !== null ? 0
+            : (container.scrollTop - slot.offsetTop) / Math.max(1, slot.offsetHeight);
+          resizeAnchorRef.current = { page, offset: Math.max(-0.02, Math.min(0.98, offset)) };
+          programmaticPageRef.current = page;
+        }
+        previousWidth = width;
+        setContainerWidth(width);
+      }
     });
     observer.observe(container);
     return () => observer.disconnect();
   }, [document]);
+
+  useLayoutEffect(() => {
+    const anchor = resizeAnchorRef.current;
+    const container = containerRef.current;
+    const slot = anchor && slotRefs.current[anchor.page - 1];
+    if (!anchor || !container || !slot || !document) return;
+    resizeAnchorRef.current = null;
+    programmaticPageRef.current = anchor.page;
+    const top = Math.max(0, slot.offsetTop + anchor.offset * slot.offsetHeight);
+    if (typeof container.scrollTo === "function") container.scrollTo({ top, behavior: "instant" });
+    else container.scrollTop = top;
+  }, [containerWidth, effectiveZoom, document]);
 
   // ── Lazy page rendering via IntersectionObserver ──────────────────────────────
   useEffect(() => {
@@ -1489,7 +1536,15 @@ export default function PdfReader({
     let frame = 0;
     const handle = () => {
       frame = 0;
-      const marker = container.scrollTop + container.clientHeight * 0.3;
+      const scrollTop = container.scrollTop;
+      const firstVisibleSlot = slotRefs.current.find((slot, index) =>
+        index % pageLayout === 0 && slot && slot.offsetTop + slot.offsetHeight > scrollTop);
+      // When fit-to-width makes pages shorter than the viewport, its 30% marker
+      // must not skip an entire page that is still visible at the top.
+      const marker = scrollTop + Math.min(
+        container.clientHeight * 0.3,
+        (firstVisibleSlot?.offsetHeight ?? container.clientHeight) * 0.3,
+      );
       let page = 1;
       for (let i = 0; i < slotRefs.current.length; i += pageLayout) {
         const slot = slotRefs.current[i];
@@ -1724,7 +1779,14 @@ export default function PdfReader({
   };
 
   return (
-    <div className="lit-pdf-reader">
+    <div className="lit-pdf-reader" onKeyDown={(event) => {
+      if (event.key !== "Escape" || event.defaultPrevented || isEditableTarget(event.target)) return;
+      // Annotation popovers consume the first Escape through their existing handler.
+      if (!readingVisible || activeHighlight || pendingAnnotation || editingAnnotationId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeReading();
+    }}>
       <div className="lit-pdf-toolbar">
         <div className="lit-pdf-pager">
           <button
@@ -1803,7 +1865,12 @@ export default function PdfReader({
         </div>
 
         <div className="lit-pdf-toolbar-right">
-          {paperId && !readOnly && sourceKind === "library" && <button type="button" aria-pressed={readingVisible} onClick={() => setReadingVisible(value => !value)}>{language === "en" ? "Paper guide" : "论文讲解"}</button>}
+          {paperId && !readOnly && sourceKind === "library" && <button ref={guideToggleRef} type="button"
+            className="lit-pdf-label-button lit-pdf-guide-toggle" aria-pressed={readingVisible} aria-expanded={readingVisible}
+            aria-controls="paper-guide-panel" title={copy.workspaceHeader.tabGuide}
+            onClick={() => setReadingVisible(!readingVisible)}>
+            <SvgIcon name="paperGuide" size={17} /><span>{copy.workspaceHeader.tabGuide}</span>
+          </button>}
           {!readOnly && (
             <button
               type="button"
@@ -1921,7 +1988,7 @@ export default function PdfReader({
         </div>
 
         {paperId && !readOnly && sourceKind === "library" && (
-          <PaperReadingPanel hidden={!readingVisible} onClose={() => setReadingVisible(false)} paperId={paperId} relativePath={relativePath} document={document} onJump={scrollToPage} />
+          <PaperReadingPanel id="paper-guide-panel" hidden={!readingVisible} onClose={closeReading} paperId={paperId} relativePath={relativePath} document={document} onJump={scrollToPage} />
         )}
 
         {pendingAnnotation && (

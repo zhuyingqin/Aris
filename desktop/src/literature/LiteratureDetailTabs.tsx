@@ -4,25 +4,37 @@ import type { DetailTab } from "./literatureTypes";
 
 /** Text labels keep the docked inspector discoverable; the narrow rail beside
  * the PDF shows icons, with the label kept as its accessible name and tooltip. */
-export default function LiteratureDetailTabs({ tabs, activeTab, label, className, icons, onSelect }: {
+export default function LiteratureDetailTabs({ tabs, activeTab, label, className, icons, controls, onDismiss, onSelect }: {
   tabs: Array<{ id: DetailTab; label: string }>;
-  activeTab: DetailTab;
+  activeTab: DetailTab | null;
   label: string;
   className: string;
   icons?: Partial<Record<DetailTab, SvgIconName>>;
-  onSelect: (tab: DetailTab) => void;
+  controls?: Partial<Record<DetailTab, string>>;
+  onDismiss?: () => void;
+  onSelect: (tab: DetailTab, options?: { toggle: boolean }) => void;
 }) {
   const navigation = useRef<HTMLElement>(null);
   const vertical = className === "lit-reader-detail-rail";
   return (
-    <nav ref={navigation} className={className} role="tablist" aria-label={label} aria-orientation={vertical ? "vertical" : "horizontal"}>
+    <nav ref={navigation} className={className} role="tablist" aria-label={label} aria-orientation={vertical ? "vertical" : "horizontal"}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && onDismiss) {
+          event.preventDefault();
+          event.stopPropagation();
+          onDismiss();
+        }
+      }}>
       {tabs.map((tab, index) => (
         <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id}
-          tabIndex={activeTab === tab.id ? 0 : -1}
+          id={`${className}-${tab.id}`}
+          data-detail-tab={tab.id}
+          aria-controls={controls?.[tab.id]}
+          tabIndex={activeTab === tab.id || (activeTab === null && index === 0) ? 0 : -1}
           aria-label={icons?.[tab.id] ? tab.label : undefined}
           title={icons?.[tab.id] ? tab.label : undefined}
           className={`lit-workspace-tab${activeTab === tab.id ? " active" : ""}`}
-          onClick={() => onSelect(tab.id)}
+          onClick={() => onSelect(tab.id, { toggle: true })}
           onKeyDown={(event) => {
             const nextKey = vertical ? "ArrowDown" : "ArrowRight";
             const previousKey = vertical ? "ArrowUp" : "ArrowLeft";

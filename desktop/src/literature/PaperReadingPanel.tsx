@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { useStore } from "../store";
+import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { chatModelOptions } from "../api/tauri";
 import type { ChatModelOption } from "../types";
 import {
@@ -71,6 +72,7 @@ const COPY = {
 };
 
 interface Props {
+  id?: string;
   hidden?: boolean;
   onClose?: () => void;
   paperId: string;
@@ -79,7 +81,7 @@ interface Props {
   onJump: (page: number) => void;
 }
 
-export default function PaperReadingPanel({ paperId, relativePath, document, onJump, hidden = false, onClose }: Props) {
+export default function PaperReadingPanel({ id, paperId, relativePath, document, onJump, hidden = false, onClose }: Props) {
   const language = useStore(state => state.language);
   const projectId = useStore(state => state.currentProject?.id);
   const copy = COPY[language === "en" ? "en" : "zh"];
@@ -281,13 +283,19 @@ export default function PaperReadingPanel({ paperId, relativePath, document, onJ
     : view && view.run.status !== "preparing" ? copy.resume : copy.start;
 
   return (
-    <aside className={`lit-paper-analysis${webReading && !hidden ? " web-reading" : ""}${hasEssay ? " has-essay" : ""}`} aria-label={copy.heading} style={hidden ? { display: "none" } : undefined}>
-      <div className="paper-reader-generation-actions">
-        {view && <button type="button" disabled={busy || !document || !projectId} title={language === "en" ? "Read the whole paper again; previous results are retained" : "重新阅读全文并生成新版本，旧结果保留"} onClick={() => void start(true)}>{language === "en" ? "Regenerate" : "重新生成讲解"}</button>}
-        {onClose && <button type="button" onClick={onClose}>{language === "en" ? "Close guide" : "关闭讲解"}</button>}
-      </div>
+    <aside id={id} className={`lit-paper-analysis${webReading && !hidden ? " web-reading" : ""}${hasEssay ? " has-essay" : ""}`} aria-label={copy.heading} style={hidden ? { display: "none" } : undefined}>
+      <header className="paper-guide-header">
+        <div className="paper-guide-heading"><SvgIcon name="paperGuide" size={21} /><h2>{copy.heading}</h2></div>
+        <div className="paper-reader-generation-actions">
+          {view && <button type="button" disabled={busy || !document || !projectId}
+            title={language === "en" ? "Read the whole paper again; previous results are retained" : "重新阅读全文并生成新版本，旧结果保留"}
+            onClick={() => void start(true)}><SvgIcon name="refresh" size={14} />{language === "en" ? "Regenerate" : "重新生成讲解"}</button>}
+          {onClose && <button type="button" className="paper-guide-close"
+            aria-label={language === "en" ? "Close guide" : "关闭讲解"}
+            title={language === "en" ? "Close guide (Esc)" : "关闭讲解（Esc）"} onClick={onClose}><SvgIcon name="close" size={17} /></button>}
+        </div>
+      </header>
       {hasEssay && <header className="paper-reader-toolbar">
-        <div className="paper-reader-toolbar-brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h6c2 0 3 1 3 2 0-1 1-2 3-2h6v15h-6c-2 0-3 1-3 2 0-1-1-2-3-2H3zM12 6v15" /></svg>SomniQ <span> / {language === "en" ? "Paper reader" : "论文阅读"}</span></div>
         <div className="paper-reader-toolbar-controls">
           {modelPicker}
           <div role="tablist" aria-label={copy.heading}>
@@ -302,10 +310,6 @@ export default function PaperReadingPanel({ paperId, relativePath, document, onJ
         {busy ? <button type="button" onClick={() => void cancel()}>{copy.cancel}</button> : <button type="button" onClick={() => void start()} disabled={!document || !projectId}>{label}</button>}
       </div>}
       {!hasEssay && <>
-      <header className="lit-paper-analysis-head">
-        <div><span className="lit-guide-eyebrow">{copy.badge}</span><h2>{copy.heading}</h2></div>
-        {view && <span className="lit-guide-model">{view.run.model}</span>}
-      </header>
       {view && <p className="lit-guide-paper-title">{view.run.title}</p>}
       {!view && <div className="lit-guide-welcome"><h3>{copy.intro}</h3><p>{copy.introDetail}</p></div>}
       {view && <div className="lit-guide-summary" aria-label={copy.progressTitle}>
@@ -317,11 +321,14 @@ export default function PaperReadingPanel({ paperId, relativePath, document, onJ
       {modelChanged && <p className="lit-paper-analysis-note">{language === "en" ? "The new model generates a separate result; previous results are retained." : "换模型将单独生成，原有结果保留。"}</p>}
       <div className="lit-paper-analysis-actions">
         <button type="button" className="lit-paper-analysis-start" disabled={!document || !projectId || busy} onClick={() => void start()}>
-          {busy ? status : label}<span aria-hidden="true">{busy ? " ···" : " ↗"}</span>
+          <SvgIcon name={busy ? "spinner" : "paperGuide"} size={18} /><span>{busy ? status : label}</span>
         </button>
         {busy && <button type="button" onClick={() => void cancel()}>{copy.cancel}</button>}
         {view && <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? copy.hide : copy.show}</button>}
       </div>
+      {(!document || !projectId) && <p className="lit-paper-analysis-note" role="status">{!projectId
+        ? language === "en" ? "Choose a project to generate a paper guide." : "选择项目后即可生成论文讲解。"
+        : language === "en" ? "The PDF must finish loading before a guide can be generated." : "PDF 加载完成后即可生成讲解。"}</p>}
       {busy && <p role="status" className="lit-paper-analysis-progress">{status}{preparing ? " " + preparedPages + "/" + (view?.run.totalPages ?? document?.numPages ?? 0) : guideBusy === copy.teaching ? ` ${completedLessons}/${guide?.lessons.length ?? 0}` : view?.active && !guideBusy ? ` ${pageCoverage?.completed ?? 0}/${pageCoverage?.total ?? 0}` : ""}</p>}
       {view && <ol className="lit-guide-stages" aria-label={copy.progressTitle}>
         {[{ title: copy.stageRead, done: pageCoverage?.completed === pageCoverage?.total, active: !!view.active && !guideBusy },
@@ -341,8 +348,8 @@ export default function PaperReadingPanel({ paperId, relativePath, document, onJ
         {failure && <details><summary>{copy.details}</summary><pre>{failure}</pre></details>}
       </section>}
       {!view && <div className="lit-guide-features">
-        {[[copy.figureTitle, copy.figureDetail], [copy.formulaTitle, copy.formulaDetail], [copy.experimentTitle, copy.experimentDetail]].map(([title, detail], index) =>
-          <article key={title}><span aria-hidden="true">0{index + 1}</span><div><h4>{title}</h4><p>{detail}</p></div></article>)}
+        {([[copy.figureTitle, copy.figureDetail, "image"], [copy.formulaTitle, copy.formulaDetail, "code"], [copy.experimentTitle, copy.experimentDetail, "graph"]] as Array<[string, string, SvgIconName]>).map(([title, detail, icon]) =>
+          <article key={title}><span aria-hidden="true"><SvgIcon name={icon} size={18} /></span><div><h4>{title}</h4><p>{detail}</p></div></article>)}
         <p className="lit-paper-analysis-note">{copy.data}</p>
       </div>}
       {(open || hasEssay) && view && (
