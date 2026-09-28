@@ -1,8 +1,8 @@
 use super::*;
 use runtime::paper_evidence::{self, AllocatedText, PageRole, PageText};
 use runtime::paper_guide::{
-    self, GuideEvidence, GuideTask, GuideTaskStatus, LessonContext, LessonReview, LessonStage,
-    PaperGuide, ReviewSource, ReviewVerdict,
+    self, GuideEvidence, GuideTask, GuideTaskStatus, LessonReview, LessonStage, PaperGuide,
+    ReviewSource, ReviewVerdict,
 };
 use runtime::paper_reading::{ContentKind, PerceptionPage};
 
@@ -42,17 +42,25 @@ fn original_texts(run: &PaperReadingRun) -> Vec<&str> {
 /// Build one Chat message from original page evidence. Text for pages with a
 /// text layer is original; text for pages without one is a derived
 /// transcription and is labelled and receipted as such.
+///
+/// Layout for prompt caching: the reusable `preamble` first, then the
+/// evidence, the page index and the receipts, and the request-specific `task`
+/// (topic, question, revision or retry feedback) as the only block that
+/// changes between attempts. Providers with prefix caching then reuse the
+/// preamble across a guide and the evidence across attempts at one topic.
+#[allow(clippy::too_many_arguments)]
 fn build_message(
     workspace: &Path,
     run: &PaperReadingRun,
-    prompt: String,
+    preamble: String,
     texts: &[AllocatedText],
     image_pages: &[usize],
     index: Option<String>,
+    task: String,
     strict_images: bool,
 ) -> Result<EvidenceMessage, String> {
     let mut blocks = vec![ContentBlock::Text {
-        text: format!("{prompt}\nPDF SHA-256: {}", run.document_revision),
+        text: format!("{preamble}\nPDF SHA-256: {}", run.document_revision),
     }];
     let mut evidence = Vec::new();
     let mut image_bytes = 0;
@@ -125,6 +133,7 @@ fn build_message(
             serde_json::to_string(&evidence).map_err(|error| error.to_string())?
         ),
     });
+    blocks.push(ContentBlock::Text { text: task });
     Ok(EvidenceMessage {
         message: ConversationMessage::user_blocks(blocks),
         evidence,
@@ -137,7 +146,8 @@ fn build_message(
 pub(super) fn outline_message(
     workspace: &Path,
     run: &PaperReadingRun,
-    prompt: String,
+    preamble: String,
+    task: String,
 ) -> Result<EvidenceMessage, String> {
     let originals = original_texts(run);
     let signals = paper_evidence::analyze_pages(&originals);
@@ -217,7 +227,7 @@ pub(super) fn outline_message(
         pages_with(PageRole::Appendix),
         serde_json::to_string(&entries).map_err(|error| error.to_string())?
     );
-    build_message(workspace, run, prompt, &texts, &images, Some(index), false)
+    build_message(workspace, run, preamble, &texts, &images, Some(index), task, false)
 }
 
 /// Topic input: the full original text and image of 1–4 pages. Pages without
@@ -225,7 +235,8 @@ pub(super) fn outline_message(
 pub(super) fn topic_message(
     workspace: &Path,
     run: &PaperReadingRun,
-    prompt: String,
+    preamble: String,
+    task: String,
     pages: &[usize],
 ) -> Result<EvidenceMessage, String> {
     let per_page = (MAX_GUIDE_TEXT_CHARS / pages.len().max(1)).min(30_000);
@@ -254,7 +265,7 @@ pub(super) fn topic_message(
             });
         }
     }
-    build_message(workspace, run, prompt, &texts, pages, None, true)
+    build_message(workspace, run, preamble, &texts, pages, None, task, true)
 }
 
 pub(super) async fn execute(
@@ -346,12 +357,13 @@ pub(super) async fn drive(
         }
         let guide = run.guide.as_ref().ok_or("Missing explanation state")?;
         let reader_goal = guide.reader_goal.clone();
-        let mut prompt =
+        let preamble =
             paper_guide::outline_prompt(&run.language, run.total_pages, reader_goal.as_deref());
+        let mut task = paper_guide::OUTLINE_TASK.to_owned();
         if let Some(error) = &guide.outline.error {
-            prompt.push_str(&format!("\nPrevious output was rejected: {error}. Regenerate from the originals below. Return valid JSON with exact field types and escaped quotes and backslashes."));
+            task.push_str(&format!("\nPrevious output was rejected: {error}. Regenerate from the originals above. Return valid JSON with exact field types and escaped quotes and backslashes."));
         }
-        let bundle = match outline_message(workspace, &run, prompt) {
+        let bundle = match outline_message(workspace, &run, preamble, task) {
             Ok(bundle) => bundle,
             Err(error) => {
                 guide_mut(&mut run)?.outline.reject(&error);
@@ -433,14 +445,8 @@ async fn generate_lesson(
         .iter()
         .map(|item| item.topic.title.as_str())
         .collect::<Vec<_>>();
-    let mut prompt = paper_guide::lesson_prompt(
-        &run.language,
-        &topic,
-        &LessonContext {
-            outline: guide.outline.result.as_ref(),
-            earlier_topics: earlier,
-        },
-    );
+    let preamble = paper_guide::teaching_preamble(&run.language, guide.outline.result.as_ref());
+    let mut task = paper_guide::lesson_task(&run.language, &topic, &earlier);
     if revision {
         let draft = lesson
             .task
@@ -453,7 +459,7 @@ async fn generate_lesson(
             .rev()
             .find(|review| review.round == 0)
             .ok_or("A revision needs the Reviewer findings")?;
-        prompt.push_str(&paper_guide::revision_instructions(draft, review));
+        task.push_str(&paper_guide::revision_instructions(draft, review));
     }
     let previous_error = if revision {
         lesson.revision.as_ref().and_then(|task| task.error.clone())
@@ -461,11 +467,11 @@ async fn generate_lesson(
         lesson.task.error.clone()
     };
     if let Some(error) = previous_error {
-        prompt.push_str(&format!(
-            "\nThe previous attempt could not be accepted: {error}. Produce a fresh explanation from the originals below, observing the exact JSON field types."
+        task.push_str(&format!(
+            "\nThe previous attempt could not be accepted: {error}. Produce a fresh explanation from the originals above, observing the exact JSON field types."
         ));
     }
-    let bundle = match topic_message(workspace, &run, prompt, &topic.source_pages) {
+    let bundle = match topic_message(workspace, &run, preamble, task, &topic.source_pages) {
         Ok(bundle) => bundle,
         Err(error) => {
             // Only this topic is affected; the rest of the guide continues.
@@ -697,7 +703,8 @@ mod tests {
             }],
             warnings: vec![],
         });
-        let bundle = topic_message(directory.path(), &run, "Explain".into(), &[1]).unwrap();
+        let bundle =
+            topic_message(directory.path(), &run, "Teach".into(), "Explain".into(), &[1]).unwrap();
         let texts = bundle
             .message
             .blocks
@@ -729,7 +736,9 @@ mod tests {
             b"replaced",
         )
         .unwrap();
-        assert!(topic_message(directory.path(), &run, "Explain".into(), &[1]).is_err());
+        assert!(
+            topic_message(directory.path(), &run, "Teach".into(), "Explain".into(), &[1]).is_err()
+        );
     }
 
     #[test]
@@ -747,7 +756,8 @@ mod tests {
             }],
             warnings: vec![],
         });
-        let bundle = outline_message(directory.path(), &run, "Outline".into()).unwrap();
+        let bundle =
+            outline_message(directory.path(), &run, "Outline".into(), "Now".into()).unwrap();
         let texts = bundle
             .message
             .blocks
@@ -764,6 +774,37 @@ mod tests {
         assert!(receipt.text_sha256.is_none(), "a transcription is not original text");
         assert!(receipt.derived_text_sha256.is_some());
         assert!(receipt.image_sha256.is_some(), "the original image is still attached");
+    }
+
+    /// Prefix caching (DeepSeek, MiniMax, OpenAI automatic; Anthropic-style
+    /// breakpoints on all but the last block) only helps when attempts differ
+    /// in the final block alone.
+    #[test]
+    fn attempts_and_questions_about_one_topic_differ_only_in_the_final_block() {
+        let (directory, run) = super::super::tests::fixture();
+        let run = save_page_source(directory.path(), super::super::tests::input(&run, 1)).unwrap();
+        let preamble = paper_guide::teaching_preamble(&run.language, None);
+        let draft = topic_message(directory.path(), &run, preamble.clone(), "Lesson".into(), &[1]).unwrap();
+        let retry = topic_message(
+            directory.path(),
+            &run,
+            preamble.clone(),
+            "Lesson\nThe previous attempt could not be accepted".into(),
+            &[1],
+        )
+        .unwrap();
+        let question = topic_message(directory.path(), &run, preamble, "Why?".into(), &[1]).unwrap();
+        let blocks = |bundle: &EvidenceMessage| bundle.message.blocks.clone();
+        let (draft, retry, question) = (blocks(&draft), blocks(&retry), blocks(&question));
+        let shared = draft.len() - 1;
+        assert!(shared >= 3, "preamble, original evidence and receipts precede the task");
+        assert_eq!(draft[..shared], retry[..shared]);
+        assert_eq!(draft[..shared], question[..shared]);
+        assert_ne!(draft[shared], retry[shared]);
+        assert!(matches!(&draft[shared], ContentBlock::Text { text } if text == "Lesson"));
+        assert!(draft[..shared]
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. })));
     }
 
     #[test]

@@ -2292,7 +2292,26 @@ fn paper_reading_uses_an_isolated_source_only_chat_context() {
         stage: "multimodal_explanation",
         executor_signature: "b".repeat(64),
     };
-    let prompt = context.system_prompt().join("\n");
+    let prompt = PaperReadingRuntimeContext::system_prompt().join("\n");
+    // Cacheable: nothing about the run, page or stage is in the system prompt.
+    for varying in ["run-1", "paper-1", "multimodal_explanation", &"a".repeat(64)] {
+        assert!(!prompt.contains(varying), "system prompt varies with {varying}");
+    }
+    let binding = context.binding_note();
+    assert!(binding.contains("run-1") && binding.contains("multimodal_explanation"));
+    let other_stage = PaperReadingRuntimeContext {
+        page_index: 7,
+        stage: "follow_up",
+        ..context.clone()
+    };
+    assert_eq!(context.routing_key(), other_stage.routing_key());
+    let mut message = ConversationMessage::user_blocks(vec![
+        ContentBlock::Text { text: "preamble".into() },
+        ContentBlock::Text { text: "task".into() },
+    ]);
+    append_to_final_text_block(&mut message, &binding);
+    assert!(matches!(&message.blocks[0], ContentBlock::Text { text } if text == "preamble"));
+    assert!(matches!(&message.blocks[1], ContentBlock::Text { text } if text.starts_with("task\n\nTask binding")));
     let task = ChatTurnRuntime::PaperReading(context);
     assert!(!task.emits_desktop_chat_events());
     assert!(!task.tool_profile().1);

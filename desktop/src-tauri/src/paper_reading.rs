@@ -16,7 +16,7 @@ use runtime::{
     literature::open_literature_store_at,
     paper_guide::{FollowUpMode, PaperFollowUp},
     paper_reading::{
-        content_sha256, page_perception_prompt, OriginalPageEvidence, PaperReadingCoverage,
+        content_sha256, page_perception_request, OriginalPageEvidence, PaperReadingCoverage,
         PaperReadingRun, PaperReadingStatus,
     },
     ContentBlock, ConversationMessage,
@@ -544,22 +544,28 @@ async fn drive(
     Ok(())
 }
 
+/// Layout for prompt caching: identical instructions for every page, then the
+/// page's own original text and image, and the page-specific task (plus any
+/// retry feedback) last, so retries reuse everything before it.
 fn original_page_message(
     workspace: &Path,
     run: &PaperReadingRun,
     page_index: usize,
 ) -> Result<ConversationMessage, String> {
-    let mut prompt = page_perception_prompt(run, page_index)?;
+    let request = page_perception_request(run, page_index)?;
+    let mut task = request.task;
     if let Some(error) = &run.pages[page_index].error {
-        prompt.push_str(&format!("\nPrevious output was rejected: {error}. Regenerate from the original evidence. Return valid JSON with exact field types; escape quotes and backslashes inside strings."));
+        task.push_str(&format!("\nPrevious output was rejected: {error}. Regenerate from the original evidence. Return valid JSON with exact field types; escape quotes and backslashes inside strings."));
     }
     let image = read_original_page_image(workspace, run, page_index)?;
     Ok(ConversationMessage::user_blocks(vec![
-        ContentBlock::Text { text: prompt },
+        ContentBlock::Text { text: request.instructions },
+        ContentBlock::Text { text: request.original_text },
         ContentBlock::Image {
             media_type: "image/jpeg".into(),
             data: base64::engine::general_purpose::STANDARD.encode(&image),
         },
+        ContentBlock::Text { text: task },
     ]))
 }
 
@@ -822,7 +828,13 @@ pub async fn paper_reading_ask(
         .filter(|item| item.target == input.target)
         .collect::<Vec<_>>();
     let (notes, pages) = guide::follow_up_material(&run, &input.target)?;
-    let prompt = runtime::paper_guide::follow_up_prompt(
+    // Same preamble and page evidence as the lesson it asks about, so the
+    // provider can reuse that prefix; only the question block is new.
+    let preamble = runtime::paper_guide::teaching_preamble(
+        &run.language,
+        run.guide.as_ref().and_then(|guide| guide.outline.result.as_ref()),
+    );
+    let task = runtime::paper_guide::follow_up_task(
         &run.language,
         input.mode,
         &question,
@@ -830,7 +842,7 @@ pub async fn paper_reading_ask(
         &notes,
         &history,
     );
-    let bundle = guide::topic_message(&workspace, &run, prompt, &pages)?;
+    let bundle = guide::topic_message(&workspace, &run, preamble, task, &pages)?;
     let session_id = format!(
         "paper-{}-ask-{:016x}",
         &run.id[..16],

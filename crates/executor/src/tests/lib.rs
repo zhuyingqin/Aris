@@ -4,7 +4,8 @@ use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
 use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
 
 use super::{
-    convert_messages, merge_anthropic_stream_usage, projected_tool_specs, push_text_event,
+    convert_messages, mark_stable_prefix_cache_breakpoints, merge_anthropic_stream_usage,
+    projected_tool_specs, push_text_event,
     response_to_events, ExecutorToolSpec, StreamObserver,
 };
 
@@ -154,7 +155,7 @@ fn convert_messages_maps_images_to_anthropic_image_blocks() {
     assert_eq!(converted[0].role, "user");
     assert!(matches!(
         &converted[0].content[1],
-        InputContentBlock::Image { source }
+        InputContentBlock::Image { source, .. }
             if source.kind == "base64"
                 && source.media_type == "image/png"
                 && source.data == "ZmFrZQ=="
@@ -173,4 +174,24 @@ fn coalesces_large_streams_into_one_text_event() {
         &events[0],
         AssistantEvent::TextDelta(text) if text.len() == 100_000
     ));
+}
+
+#[test]
+fn stable_prefix_breakpoints_mark_the_shared_preamble_and_the_end_of_evidence() {
+    let mut messages = convert_messages(&[ConversationMessage::user_blocks(vec![
+        ContentBlock::Text { text: "shared preamble".into() },
+        ContentBlock::Text { text: "original page text".into() },
+        ContentBlock::Image { media_type: "image/jpeg".into(), data: "ZmFrZQ==".into() },
+        ContentBlock::Text { text: "variable task".into() },
+    ])]);
+    mark_stable_prefix_cache_breakpoints(&mut messages);
+    let marked = serde_json::to_value(&messages[0].content).unwrap();
+    assert_eq!(marked[0]["cache_control"]["type"], "ephemeral");
+    assert!(marked[1].get("cache_control").is_none());
+    assert_eq!(marked[2]["cache_control"]["type"], "ephemeral");
+    assert!(marked[3].get("cache_control").is_none(), "the variable request stays unmarked");
+
+    let mut single = convert_messages(&[ConversationMessage::user_text("one block")]);
+    mark_stable_prefix_cache_breakpoints(&mut single);
+    assert!(serde_json::to_value(&single[0].content).unwrap()[0].get("cache_control").is_none());
 }

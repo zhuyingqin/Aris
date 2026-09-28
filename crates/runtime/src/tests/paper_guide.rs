@@ -511,11 +511,9 @@ fn reviewer_output_is_strict_and_cannot_pass_blocking_issues() {
 #[test]
 fn prompts_teach_from_simple_to_deep_and_keep_evidence_boundaries() {
     let outline = outline();
-    let context = LessonContext {
-        outline: Some(&outline),
-        earlier_topics: vec!["What is attention?"],
-    };
-    let prompt = lesson_prompt("zh", &outline.topics[0], &context);
+    let preamble = teaching_preamble("zh", Some(&outline));
+    let task = lesson_task("zh", &outline.topics[0], &["What is attention?"]);
+    let prompt = format!("{preamble}\n{task}");
     for required in ["plainSummary", "analogy", "prerequisites", "misconceptions", "Simplified Chinese", "Dot product", "What is attention?", "NOT evidence"] {
         assert!(prompt.contains(required), "lesson prompt misses {required}");
     }
@@ -532,8 +530,38 @@ fn prompts_teach_from_simple_to_deep_and_keep_evidence_boundaries() {
     assert!(review.contains("INDEPENDENT Reviewer"));
     let revision = revision_instructions(&lesson(), &super::tests::review(0, ReviewVerdict::NeedsRevision));
     assert!(revision.contains("permutation invariant") && revision.contains("NOT evidence"));
-    let ask = follow_up_prompt("zh", FollowUpMode::Simpler, "我没懂", Some("Step 2"), "{}", &[]);
+    let ask = follow_up_task("zh", FollowUpMode::Simpler, "我没懂", Some("Step 2"), "{}", &[]);
     assert!(ask.contains("MORE SIMPLY") && ask.contains("Step 2") && ask.contains("NOT evidence"));
     assert!(parse_follow_up_answer("  ").is_err());
     assert_eq!(parse_follow_up_answer(" An answer. ").unwrap(), "An answer.");
+}
+
+/// Providers with prefix caching (DeepSeek, MiniMax, OpenAI) only reuse the
+/// longest identical prefix, so everything specific to one request must come
+/// after the parts that repeat across a guide.
+#[test]
+fn request_specific_text_stays_out_of_the_shared_prefixes() {
+    let outline = outline();
+    let preamble = teaching_preamble("zh", Some(&outline));
+    assert_eq!(preamble, teaching_preamble("zh", Some(&outline)));
+    for topic in &outline.topics {
+        assert!(!preamble.contains(&topic.title), "the preamble names topic {}", topic.title);
+        assert!(lesson_task("zh", topic, &[]).contains(&topic.title));
+    }
+    assert!(!outline_prompt("zh", 12, None).contains("rejected"));
+
+    let draft = review_prompt("zh", &outline.topics[0], &lesson(), &[ReviewSource { page: 1, text: Some("Original text") }]);
+    let mut revised = lesson();
+    revised.plain_summary = "A different, revised summary.".into();
+    let recheck = review_prompt("zh", &outline.topics[0], &revised, &[ReviewSource { page: 1, text: Some("Original text") }]);
+    let shared = |text: &str| text[..text.find("TOPIC:").unwrap()].to_owned();
+    assert!(shared(&draft).contains("Original text"));
+    assert_eq!(shared(&draft), shared(&recheck), "a re-review reuses instructions and originals");
+
+    let first = follow_up_task("zh", FollowUpMode::Question, "Why softmax?", None, "{notes}", &[]);
+    let second = follow_up_task("zh", FollowUpMode::Example, "Another one", Some("Step 2"), "{notes}", &[]);
+    let stable = |text: &str| text[..text.find("Earlier questions").unwrap()].to_owned();
+    assert!(stable(&first).contains("{notes}"));
+    assert_eq!(stable(&first), stable(&second), "questions about one part share rules and notes");
+    assert!(!stable(&first).contains("Why softmax?"));
 }

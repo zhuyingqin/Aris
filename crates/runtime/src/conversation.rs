@@ -277,6 +277,13 @@ pub trait ApiClient {
     /// default keeps providers without session-aware transport unchanged.
     fn set_session_id(&mut self, _session_id: &str) {}
 
+    /// Ask providers that only cache up to explicitly marked blocks to mark
+    /// the stable part of the final user message: its first block (a shared
+    /// preamble) and every block except the last (reusable evidence). Used by
+    /// single-turn tasks that put reusable context first and the variable
+    /// request last. Providers with automatic prefix caching ignore it.
+    fn set_prompt_cache_prefix(&mut self, _enabled: bool) {}
+
     /// Notifies the client that the session was just compacted, removing
     /// `removed_count` messages from the head. Implementations that keep
     /// per-message-index state (e.g. OpenAI executor's reasoning-content
@@ -889,6 +896,27 @@ where
         let mut summarizer = summarizer;
         summarizer.set_session_id(&self.compaction_session_id);
         self.summarizer = Some(summarizer);
+        self
+    }
+
+    /// Route provider requests under `routing_id` without changing the
+    /// compaction identity. Independent single-turn tasks that belong to one
+    /// job share it so gateways keep them on the account holding their cache.
+    #[must_use]
+    pub fn with_routing_session_id(mut self, routing_id: &str) -> Self {
+        if !routing_id.trim().is_empty() {
+            self.api_client.set_session_id(routing_id);
+            if let Some(summarizer) = self.summarizer.as_mut() {
+                summarizer.set_session_id(routing_id);
+            }
+        }
+        self
+    }
+
+    /// See [`ApiClient::set_prompt_cache_prefix`].
+    #[must_use]
+    pub fn with_prompt_cache_prefix(mut self, enabled: bool) -> Self {
+        self.api_client.set_prompt_cache_prefix(enabled);
         self
     }
 

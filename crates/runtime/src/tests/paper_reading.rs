@@ -81,15 +81,22 @@ fn wrong_page_or_model_authored_review_status_cannot_be_promoted() {
 
 #[test]
 fn original_evidence_is_required_and_bound_to_document_version() {
-    let mut run = run(1);
-    assert!(page_perception_prompt(&run, 0).is_err());
+    let mut run = run(2);
+    assert!(page_perception_request(&run, 0).is_err());
     assert!(run.start().is_err());
     attach(&mut run, 0);
-    assert!(page_perception_prompt(&run, 0)
-        .unwrap()
-        .contains("Original text"));
+    attach(&mut run, 1);
+    let first = page_perception_request(&run, 0).unwrap();
+    assert!(first.original_text.contains("Original text"));
+    assert!(first.task.contains("\"pageIndex\":0"));
+    // Every page shares identical instructions, so providers can reuse them
+    // as a cached prefix; page identity only appears in the final task.
+    let second = page_perception_request(&run, 1).unwrap();
+    assert_eq!(first.instructions, second.instructions);
+    assert!(!first.instructions.contains(&run.document_revision));
+    assert!(second.task.contains("\"pageIndex\":1"));
     run.pages[0].source.as_mut().unwrap().document_revision = content_sha256(b"different PDF");
-    assert!(page_perception_prompt(&run, 0).is_err());
+    assert!(page_perception_request(&run, 0).is_err());
 }
 
 #[test]
