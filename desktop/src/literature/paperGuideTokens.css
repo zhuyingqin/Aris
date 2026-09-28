@@ -1,0 +1,93 @@
+/* Paper guide design tokens.
+ *
+ * The single source for how the teaching page looks. PaperGuideView.css and
+ * the static template in docs/design/paper-guide/ read only these variables:
+ * change sizes, spacing or colors here, never as literals in component rules.
+ * Color roles derive from the app theme (styles.css), so light and dark stay
+ * in step without a separate palette. See docs/design/paper-guide/README.md.
+ */
+.paper-essay {
+  /* Color roles */
+  --essay-ink: var(--text);
+  --essay-muted: color-mix(in srgb, var(--text-dim) 82%, var(--text) 18%);
+  --essay-accent: color-mix(in srgb, var(--accent) 60%, var(--text) 40%);
+  --essay-line: color-mix(in srgb, var(--border) 75%, transparent);
+  --essay-surface: var(--bg-1);
+  --essay-surface-sunken: var(--bg-2);
+  /* Backdrop of a rendered original PDF page; pages are printed on white. */
+  --essay-paper: #fff;
+  --essay-tint-soft: color-mix(in srgb, var(--accent) 3%, var(--bg-1));
+  --essay-tint: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
+  --essay-tint-strong: color-mix(in srgb, var(--accent) 5%, var(--bg-1));
+  --essay-highlight: color-mix(in srgb, var(--accent) 5%, transparent);
+  --essay-selected: color-mix(in srgb, var(--accent) 12%, transparent);
+  --essay-accent-border: color-mix(in srgb, var(--accent) 35%, transparent);
+  --essay-accent-rule: color-mix(in srgb, var(--accent) 40%, transparent);
+  --essay-pending: color-mix(in srgb, var(--accent) 45%, transparent);
+  --essay-pass: var(--green, #3fb950);
+  --essay-warn: var(--amber, #d29922);
+  --essay-danger: var(--red, #f85149);
+  --essay-focus: var(--accent);
+
+  /* Type */
+  --essay-font-display: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", "Songti SC", Georgia, serif;
+  --essay-text-label: 10px;    /* eyebrows, section labels, level chips */
+  --essay-text-caption: 11px;  /* captions, metadata, inline "unclear?" actions */
+  --essay-text-meta: 12px;     /* secondary lines, questions, cautions */
+  --essay-text-compact: var(--lit-control-font-size, 13px); /* controls, notation */
+  --essay-text-dense: 14px;    /* cards, answers, asides */
+  --essay-text-body: 15px;
+  --essay-text-h3: 16px;
+  --essay-text-deck: 17px;     /* learning goal under a title */
+  --essay-text-lead: 18px;     /* one sentence, plain summary, intuition */
+  --essay-text-h2: 20px;
+  --essay-text-arrow: 24px;
+  --essay-text-h1: clamp(28px, 3.6cqi, 43px);
+  --essay-leading: 1.85;
+  --essay-leading-prose: 1.95;
+  --essay-leading-heading: 1.5;
+  --essay-tracking-label: 1.5px;
+  --essay-tracking-wide: 2px;
+
+  /* Space: a 4px grid */
+  --essay-space-1: 4px;
+  --essay-space-2: 8px;
+  --essay-space-3: 12px;
+  --essay-space-4: 16px;
+  --essay-space-5: 20px;
+  --essay-space-6: 24px;
+  --essay-space-7: 28px;
+  --essay-space-8: 32px;
+  --essay-space-9: 36px;
+  --essay-space-10: 44px;
+
+  /* Layout and shape */
+  --essay-max-width: 1160px;
+  --essay-measure: 800px;
+  --essay-nav-width: 196px;
+  --essay-nav-inset: 10px;
+  --essay-nav-viewport-offset: 180px;
+  --essay-measure-narrow: 760px;
+  --essay-level-column: 96px;
+  --essay-label-column: 52px;
+  --essay-card-min: 220px;
+  --essay-dot: 7px;
+  --essay-column-gap: 58px;
+  --essay-number-column: 32px;
+  --essay-original-height: 520px;
+  --essay-control-height: var(--lit-control-height, 32px);
+  --essay-control-line-height: var(--lit-control-line-height, 20px);
+  --essay-radius-control: var(--lit-control-radius, 6px);
+  --essay-radius-pill: 999px;
+  --essay-rule: 1px solid var(--essay-line);
+  --essay-accent-bar: 2px solid var(--essay-accent);
+}
+
+/* Narrow readers scale the type roles, not individual rules. */
+@container paper-guide (max-width: 460px) {
+  .paper-essay {
+    --essay-text-body: 14px;
+    --essay-text-deck: 15px;
+    --essay-text-lead: 16px;
+  }
+}

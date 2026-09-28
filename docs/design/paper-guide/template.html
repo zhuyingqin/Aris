@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>论文讲解页面模板 · Paper guide template</title>
+  <!--
+    The same stylesheets the desktop app loads. Do not copy guide rules into
+    this file: change the look in desktop/src/literature/paperGuideTokens.css
+    (tokens) or PaperGuideView.css (components), and this page follows.
+  -->
+  <link rel="stylesheet" href="../../../desktop/src/styles.css">
+  <link rel="stylesheet" href="../../../desktop/src/literature/PaperReadingPanel.css">
+  <link rel="stylesheet" href="../../../desktop/src/literature/PaperGuideView.css">
+  <style>
+    /* Template chrome only. Nothing here styles guide content. */
+    html, body { height: auto; overflow: auto; }
+    body { background: var(--bg); }
+    .template-bar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 12px 24px; background: var(--bg-2); border-bottom: 1px solid var(--border); font-size: 13px; }
+    .template-bar h1 { margin: 0 auto 0 0; font-size: 15px; font-weight: 600; }
+    .template-bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); cursor: pointer; }
+    .template-page { max-width: 1320px; margin: 32px auto 56px; padding: 0 24px; }
+    .template-caption { margin: 0 0 6px; font-size: 18px; }
+    .template-caption + p { margin: 0 0 16px; color: var(--text-dim); font-size: 13px; }
+    .template-frame { border: 1px solid var(--border); overflow: visible; }
+    body.narrow .template-frame { width: 420px; }
+    .paper-essay.template-gallery { display: block; }
+    .template-row { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; margin: 0 0 20px; }
+    body.show-slots [data-slot] { outline: 1px dashed color-mix(in srgb, var(--amber) 70%, transparent); outline-offset: 2px; position: relative; }
+    body.show-slots [data-slot]::before { content: attr(data-slot); position: absolute; top: -9px; right: 0; z-index: 2; padding: 0 5px; font: 10px/16px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; color: var(--bg); background: var(--amber); border-radius: 3px; pointer-events: none; }
+    body.show-slots [data-when]::after { content: "if " attr(data-when); position: absolute; bottom: -9px; right: 0; z-index: 2; padding: 0 5px; font: 10px/16px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--bg); background: var(--accent); border-radius: 3px; pointer-events: none; }
+    body.show-slots [data-when] { position: relative; }
+  </style>
+</head>
+<body>
+  <div class="template-bar">
+    <h1>论文讲解页面模板 · 由浅入深</h1>
+    <label><input type="checkbox" id="theme-toggle"> 浅色主题</label>
+    <label><input type="checkbox" id="slot-toggle"> 显示数据字段</label>
+    <label><input type="checkbox" id="width-toggle"> 窄屏（420px）</label>
+  </div>
+
+  <!-- ─────────────── Page A: paper overview (outline) ─────────────── -->
+  <section class="template-page" id="overview">
+    <h2 class="template-caption">页面 A · 论文导读</h2>
+    <p>数据：<code>guide.outline.result</code>。阅读路线按 <code>topic.level</code> 分组，顺序固定为打基础 → 核心思想 → 深入细节。</p>
+    <div class="template-frame">
+      <div class="lit-paper-analysis web-reading">
+        <div class="paper-essay">
+          <nav class="paper-essay-contents" aria-label="阅读目录">
+            <p class="paper-essay-nav-label">阅读路线</p>
+            <button type="button" class="is-current" aria-current="page"><span>00</span><strong>先看懂论文主线</strong></button>
+            <div class="paper-essay-nav-group" data-when="topic.level">
+              <p class="paper-essay-nav-level" data-slot="levels.foundation">打基础</p>
+              <button type="button"><span>01</span><div><strong data-slot="topic.title">什么是注意力？</strong><small>理清概念<i class="paper-essay-review-dot is-pass" title="独立审核通过"></i></small></div></button>
+            </div>
+            <div class="paper-essay-nav-group">
+              <p class="paper-essay-nav-level">核心思想</p>
+              <button type="button"><span>02</span><div><strong>为什么要除以 √dₖ？</strong><small>理解关键公式<i class="paper-essay-review-dot is-warn" title="独立审核发现问题"></i></small></div></button>
+            </div>
+            <div class="paper-essay-nav-group">
+              <p class="paper-essay-nav-level">深入细节</p>
+              <button type="button"><span>03</span><div><strong>读懂 Table 2 的翻译结果</strong><small>读懂实验 · 待生成</small></div></button>
+            </div>
+            <div class="paper-essay-nav-foot"><span>主题讲解</span><strong>2 / 3</strong><p>15 页原文</p></div>
+          </nav>
+          <label class="paper-essay-mobile-nav">阅读章节<select><option>先看懂论文主线</option><option>01 · 打基础 · 什么是注意力？</option></select></label>
+          <main class="paper-essay-main">
+            <div class="paper-essay-meta"><span>论文导读</span><span>讲解草稿 · 尚未独立审核</span></div>
+            <article class="paper-essay-overview" aria-label="先看懂论文主线">
+              <header>
+                <h1 data-slot="run.title">Attention Is All You Need</h1>
+                <div class="paper-essay-one-sentence" data-slot="outline.oneSentence">
+                  <span class="paper-essay-eyebrow">一句话看懂这篇论文</span>
+                  <div class="lit-paper-reading-content"><p>这篇论文只用“注意力”在词与词之间直接传递信息，不再按顺序一个个处理，所以训练可以并行、速度更快。</p></div>
+                </div>
+              </header>
+              <aside class="paper-essay-relevance" data-slot="outline.relevance" data-when="outline.relevance">
+                <span class="paper-essay-eyebrow">和你的研究有什么关系</span>
+                <div class="lit-paper-reading-content"><p>如果你的检索模型需要比较查询和文档的相关程度，这里的缩放点积打分是一个可以直接对照的基线。</p></div>
+              </aside>
+              <div class="paper-essay-rule"><span>论文脉络</span></div>
+              <section class="paper-essay-overview-section" data-slot="outline.overview[kind=problem]">
+                <span class="paper-essay-section-number">01</span>
+                <div><h2>研究什么问题</h2><div class="lit-paper-reading-content"><p>循环网络必须按顺序处理句子，长句训练慢，远距离的词也难以互相影响。</p></div>
+                  <div class="paper-essay-sources"><span>原文</span><button type="button" aria-label="对照原文 1">第 1 页 ↗</button><button type="button" aria-label="对照原文 2">第 2 页 ↗</button></div></div>
+              </section>
+              <section class="paper-essay-overview-section" data-slot="outline.overview[kind=method]">
+                <span class="paper-essay-section-number">02</span>
+                <div><h2>方法为什么这样设计</h2><div class="lit-paper-reading-content"><p>让每个词直接“看”所有其他词，并按相关程度加权汇总；多个注意力头各自关注不同关系。</p></div>
+                  <div class="paper-essay-sources"><span>原文</span><button type="button" aria-label="对照原文 3">第 3 页 ↗</button></div></div>
+              </section>
+              <section class="paper-essay-overview-section" data-slot="outline.overview[kind=evidence]">
+                <span class="paper-essay-section-number">03</span>
+                <div><h2>实验说明了什么</h2><div class="lit-paper-reading-content"><p>在 WMT 2014 英德、英法翻译上取得更高的 BLEU，训练成本更低；结论限于这两个翻译任务。</p></div>
+                  <div class="paper-essay-sources"><span>原文</span><button type="button" aria-label="对照原文 8">第 8 页 ↗</button></div></div>
+              </section>
+              <section class="paper-essay-overview-section" data-slot="outline.overview[kind=limitations]" data-when="limitations">
+                <span class="paper-essay-section-number">04</span>
+                <div><h2>结论的边界</h2><div class="lit-paper-reading-content"><p>论文没有评估翻译以外的任务，也没有分析非常长的序列。</p></div></div>
+              </section>
+              <section class="paper-essay-glossary" aria-label="关键术语：先认识这些词" data-slot="outline.glossary[]">
+                <h2>关键术语：先认识这些词</h2>
+                <dl>
+                  <div><dt data-slot="term">注意力</dt><dd><div class="lit-paper-reading-content" data-slot="plain"><p>按“有多相关”给每条信息打分，再按分数加权平均。</p></div><div class="paper-essay-sources"><span>原文</span><button type="button">第 3 页 ↗</button></div></dd></div>
+                  <div><dt>softmax</dt><dd><div class="lit-paper-reading-content"><p>把一组分数变成加起来等于 1 的权重，分数越高权重越大。</p></div></dd></div>
+                  <div><dt>BLEU</dt><dd><div class="lit-paper-reading-content"><p>衡量机器翻译和人工参考译文有多接近的分数，越高越好。</p></div></dd></div>
+                </dl>
+              </section>
+              <section class="paper-essay-path" aria-label="阅读路线：由浅入深" data-slot="outline.topics[] grouped by level">
+                <h2>阅读路线：由浅入深</h2>
+                <ol>
+                  <li><span class="paper-essay-level">打基础</span><ul><li><button type="button"><strong>什么是注意力？</strong><span data-slot="learningGoal">理解“按相关程度加权求和”。</span></button></li></ul></li>
+                  <li><span class="paper-essay-level">核心思想</span><ul><li><button type="button"><strong>为什么要除以 √dₖ？</strong><span>理解缩放依赖的假设。</span></button><small data-slot="prerequisites">先读懂：点积、softmax</small></li></ul></li>
+                  <li><span class="paper-essay-level">深入细节</span><ul><li><button type="button"><strong>读懂 Table 2 的翻译结果</strong><span>区分指标、基线和训练成本。</span></button></li></ul></li>
+                </ol>
+              </section>
+              <details class="paper-essay-cautions" data-slot="outline.cautions[]" data-when="cautions"><summary>需要留意</summary><div class="lit-paper-reading-content"><p>正文中的英法 BLEU（41.0）与表格（41.8）不一致，以原文为准。</p></div></details>
+              <button type="button" class="paper-essay-next"><span>从基础开始学习</span><strong>什么是注意力？</strong><b aria-hidden="true">→</b></button>
+            </article>
+            <section class="paper-essay-ask" aria-label="还没懂？继续问" data-slot="follow-ups (target=overview)">
+              <h2>还没懂？继续问</h2>
+              <div class="paper-essay-ask-modes"><button type="button">讲得更简单</button><button type="button">再举个例子</button><button type="button">为什么成立</button></div>
+              <form><textarea rows="2" placeholder="输入你的问题，例如：这里的每个符号分别代表什么？"></textarea><button type="submit">提问</button></form>
+              <p class="paper-essay-caption">回答由模型对照原文页面生成，属于讲解草稿。</p>
+            </section>
+          </main>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────── Page B: one lesson, full depth ─────────────── -->
+  <section class="template-page" id="lesson">
+    <h2 class="template-caption">页面 B · 主题讲解（完整模式）</h2>
+    <p>数据：<code>guide.lessons[i]</code>，显示 <code>currentLesson()</code>（有修订稿时用修订稿）。层次顺序固定：一句话 → 类比 → 先补基础 → 直觉 → 符号与前提 → 分步推导 → 例题 → 误区 → 原文证据 → 自测 → 审核 → 追问。标 <code>depth=full</code> 的块在“入门”模式下隐藏。</p>
+    <div class="template-frame">
+      <div class="lit-paper-analysis web-reading">
+        <div class="paper-essay">
+          <nav class="paper-essay-contents" aria-label="阅读目录">
+            <p class="paper-essay-nav-label">阅读路线</p>
+            <button type="button"><span>00</span><strong>先看懂论文主线</strong></button>
+            <div class="paper-essay-nav-group"><p class="paper-essay-nav-level">核心思想</p>
+              <button type="button" class="is-current" aria-current="page"><span>02</span><div><strong>为什么要除以 √dₖ？</strong><small>理解关键公式<i class="paper-essay-review-dot is-pass"></i></small></div></button>
+            </div>
+            <div class="paper-essay-nav-foot"><span>主题讲解</span><strong>2 / 3</strong></div>
+          </nav>
+          <main class="paper-essay-main">
+            <div class="paper-essay-meta"><span>02 / 理解关键公式</span><span class="paper-essay-review-badge is-pass" data-slot="finalReview()">已按审核意见修订 · 复核通过</span></div>
+            <article class="paper-essay-chapter">
+              <header>
+                <h1 data-slot="topic.title">为什么要除以 √dₖ？</h1>
+                <div class="paper-essay-deck" data-slot="topic.learningGoal"><div class="lit-paper-reading-content"><p>理解缩放依赖的假设，以及它如何影响 softmax。</p></div></div>
+                <p class="paper-essay-topic-path"><span class="paper-essay-level" data-slot="topic.level">核心思想</span><span data-slot="topic.prerequisites">先读懂：点积、softmax</span></p>
+                <div class="paper-essay-sources" data-slot="topic.sourcePages"><span>原文</span><button type="button">第 4 页 ↗</button></div>
+              </header>
+              <div class="paper-essay-chapter-tools">
+                <nav aria-label="本节目录"><a href="#b-plain">一句话看懂</a><a href="#b-steps">一步步理解</a><a href="#b-check">检查自己是否理解</a><a href="#b-ask">还没懂？继续问</a></nav>
+                <div class="paper-essay-chapter-actions">
+                  <div class="paper-essay-depth" role="group" aria-label="阅读深度"><button type="button" aria-pressed="false">入门</button><button type="button" aria-pressed="true">完整</button></div>
+                  <button type="button">保存到笔记</button>
+                  <button type="button" aria-expanded="true">收起原图</button>
+                </div>
+              </div>
+              <section class="paper-essay-evidence-viewer" aria-label="原文对照" data-when="original image open">
+                <div class="paper-essay-page-picker"><button type="button" aria-pressed="true">第 4 页</button><button type="button" aria-pressed="false">第 5 页</button></div>
+                <figure class="paper-essay-original">
+                  <div class="paper-essay-original-toolbar"><span>原始页面 / 4</span><button type="button">在 PDF 中定位 ↗</button></div>
+                  <div class="paper-essay-page-scroll" style="height: 120px"></div>
+                  <figcaption>来自原始 PDF，可滚动查看完整页面。</figcaption>
+                </figure>
+              </section>
+              <section class="paper-essay-plain" id="b-plain" data-slot="lesson.plainSummary">
+                <header class="paper-essay-layer-head"><span class="paper-essay-layer">01</span><h2>一句话看懂</h2><button type="button" class="paper-essay-help">没看懂？</button></header>
+                <div class="lit-paper-reading-content"><p>向量越长，点积的数值越容易变得很大；先除以一个数把它缩回来，softmax 才不会只盯着一个词。</p></div>
+              </section>
+              <section class="paper-essay-analogy" data-slot="lesson.analogy" data-when="lesson.analogy">
+                <header class="paper-essay-layer-head"><span class="paper-essay-layer">02</span><h2>打个比方</h2><button type="button" class="paper-essay-help">没看懂？</button></header>
+                <div class="lit-paper-reading-content"><p>像比较不同人数班级的总分：人越多总分越大，所以先换算成可比的尺度再比。类比不成立的地方：这里除以的是维度的平方根，不是维度本身。</p></div>
+              </section>
+              <section class="paper-essay-prerequisites" data-slot="lesson.prerequisites[]" data-when="lesson.prerequisites">
+                <header class="paper-essay-layer-head"><span class="paper-essay-layer">03</span><h2>先补基础</h2><button type="button" class="paper-essay-help">没看懂？</button></header>
+                <dl>
+                  <div><dt data-slot="concept">点积</dt><dd><div class="lit-paper-reading-content" data-slot="explanation"><p>对应位置相乘再相加，例如 [1,2]·[3,4] = 1×3 + 2×4 = 11。</p></div></dd></div>
+                  <div><dt>方差</dt><dd><div class="lit-paper-reading-content"><p>数值离平均值有多分散；每项方差都是 1 时，独立相加的 dₖ 项方差是 dₖ。</p></div></dd></div>
+                </dl>
+              </section>
+              <section class="paper-essay-intuition" data-slot="lesson.intuition"><h2>先建立直觉</h2><div class="lit-paper-reading-content"><p>分数差距越大，softmax 输出越接近“只选一个”，梯度会变得很小。缩放让分数保持在温和的范围里。</p></div></section>
+              <div class="paper-essay-foundations" data-when="depth=full">
+                <section data-slot="lesson.notation"><h3>符号与图示说明</h3><div class="lit-paper-reading-content"><p>Q、K：查询和键矩阵；dₖ：键向量的维度。</p></div></section>
+                <section data-slot="lesson.assumptions"><h3>适用前提</h3><div class="lit-paper-reading-content"><p>q、k 的各分量相互独立，均值为 0、方差为 1（原文脚注的假设）。</p></div></section>
+              </div>
+              <section class="paper-essay-derivation" id="b-steps" data-slot="lesson.steps[]" data-when="depth=full"><h2>一步步理解</h2>
+                <ol>
+                  <li><div class="paper-essay-step-number">01</div><div><header><h3 data-slot="title">点积的方差随维度增长</h3><span data-slot="origin=paper">原文说明</span><button type="button" class="paper-essay-help">这一步没懂？</button></header>
+                    <div class="lit-paper-reading-content"><p>在上述假设下，q·k 的均值为 0、方差为 dₖ。</p><div class="katex-display">q · k = Σᵢ qᵢ kᵢ,&nbsp;&nbsp; Var(q · k) = dₖ</div></div></div></li>
+                  <li><div class="paper-essay-step-number">02</div><div><header><h3>除以 √dₖ 把方差拉回 1</h3><span data-slot="origin=teaching">讲解补充</span><button type="button" class="paper-essay-help">这一步没懂？</button></header>
+                    <div class="lit-paper-reading-content"><p>一个随机量除以常数 c，方差变为原来的 1/c²，所以除以 √dₖ 后方差是 1。</p></div>
+                    <ol class="paper-essay-answers" data-slot="follow-ups (focus = step.title)"><li><p class="paper-essay-question"><span>你问</span>讲得更简单<small> · 针对「除以 √dₖ 把方差拉回 1」</small></p><div class="lit-paper-reading-content"><p>换个说法：16 维时把分数除以 4，它就回到和 1 维时差不多的大小。</p></div></li></ol>
+                  </div></li>
+                </ol>
+              </section>
+              <section class="paper-essay-example" data-slot="lesson.example"><span class="paper-essay-eyebrow">推演一个例子</span><h2>简单例题：一步步算明白</h2>
+                <div class="lit-paper-reading-content"><h3>已知与问题</h3><p>dₖ = 16，两个分数为 8 和 0（教学构造）。</p><h3>分步求解</h3><p>√16 = 4，缩放后为 2 和 0。</p><h3>答案</h3><p>缩放后两个分数的差距从 8 变为 2。</p><h3>与论文的联系</h3><p>只演示缩放运算，不说明精度或训练稳定性。</p></div>
+                <p class="paper-essay-caption">教学构造示例，不是论文实验结果</p>
+                <div class="paper-essay-help-row"><button type="button" class="paper-essay-help">没看懂？</button></div>
+              </section>
+              <section class="paper-essay-misconceptions" data-slot="lesson.misconceptions[]" data-when="lesson.misconceptions"><h2>容易想错的地方</h2>
+                <ul><li><div><span class="is-wrong">误区</span><div class="lit-paper-reading-content" data-slot="misconception"><p>除以 √dₖ 保证训练一定稳定。</p></div></div><div><span class="is-right">正解</span><div class="lit-paper-reading-content" data-slot="correction"><p>它只在给定假设下控制方差，不是训练稳定性的保证。</p></div></div></li></ul>
+              </section>
+              <section class="paper-essay-evidence" data-slot="lesson.evidence" data-when="depth=full"><h2>原文支持什么</h2><div class="lit-paper-reading-content"><p>原文第 4 页脚注给出独立、零均值、单位方差的假设和方差为 dₖ 的结论；原文没有证明缩放一定改善训练。</p></div>
+                <div class="paper-essay-sources"><span>原文</span><button type="button">第 4 页 ↗</button></div></section>
+              <section class="paper-essay-check" id="b-check" data-slot="lesson.checkQuestion / checkAnswer"><span class="paper-essay-eyebrow">停下来，想一想</span><h2>检查自己是否理解</h2>
+                <div class="lit-paper-reading-content"><p>为什么除以 √dₖ，而不是除以 dₖ？</p></div>
+                <details><summary>展开参考答案</summary><div class="lit-paper-reading-content"><p>方差按 dₖ 增长，标准差按 √dₖ 增长；要把尺度拉回 1，除以的是标准差。</p></div></details></section>
+              <details class="paper-essay-cautions" data-slot="lesson.cautions[]" data-when="lesson.cautions"><summary>需要留意</summary><div class="lit-paper-reading-content"><p>假设是否成立取决于初始化，论文没有检验。</p></div></details>
+              <details class="paper-essay-review" open data-slot="finalReview()" data-when="review exists">
+                <summary>独立审核 · 已按审核意见修订 · 复核通过</summary>
+                <p>修订稿与原文一致。</p>
+                <p class="paper-essay-caption">审核模型：openai / reviewer-model</p>
+                <ul><li class="is-minor"><strong>次要 · analogy</strong><div class="lit-paper-reading-content"><p>类比可以更短。</p></div></li></ul>
+                <p class="paper-essay-caption">审核模型只能看到原文文本，看不到图片；图表相关内容请对照原图。</p>
+              </details>
+              <footer class="paper-essay-pagination"><button type="button">← 上一主题</button><button type="button">下一主题 →</button></footer>
+            </article>
+            <section class="paper-essay-ask" id="b-ask" aria-label="还没懂？继续问" data-slot="follow-ups (target=lesson:i)">
+              <h2>还没懂？继续问</h2>
+              <ol class="paper-essay-answers"><li><p class="paper-essay-question"><span>你问</span>Q 和 K 分别是什么？</p><div class="lit-paper-reading-content"><p>Q 是“我在找什么”，K 是“我能提供什么”；两者的点积就是匹配程度。</p></div></li></ol>
+              <div class="paper-essay-ask-modes"><button type="button">讲得更简单</button><button type="button">再举个例子</button><button type="button">为什么成立</button></div>
+              <form><textarea rows="2" placeholder="输入你的问题，例如：这里的每个符号分别代表什么？"></textarea><button type="submit">提问</button></form>
+              <p class="paper-essay-caption">回答由模型对照原文页面生成，属于讲解草稿。</p>
+            </section>
+          </main>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────── State gallery ─────────────── -->
+  <section class="template-page" id="states">
+    <h2 class="template-caption">状态样例</h2>
+    <p>审核徽标只由独立 Reviewer 的结论决定；旧版（v1）讲解没有审核要求，显示“讲解草稿”。入门模式在误区之后显示“继续深入”。</p>
+    <div class="template-frame">
+      <div class="lit-paper-analysis">
+        <div class="paper-essay template-gallery">
+          <main class="paper-essay-main">
+            <div class="paper-essay-meta"><span>verdict = pass</span><span class="paper-essay-review-badge is-pass">独立审核通过</span></div>
+            <div class="paper-essay-meta"><span>revised + pass</span><span class="paper-essay-review-badge is-pass">已按审核意见修订 · 复核通过</span></div>
+            <div class="paper-essay-meta"><span>needs_revision</span><span class="paper-essay-review-badge is-warn">独立审核发现问题</span></div>
+            <div class="paper-essay-meta"><span>revising / awaiting review</span><span class="paper-essay-review-badge is-pending">正在按审核意见修订…</span></div>
+            <div class="paper-essay-meta"><span>insufficient_evidence · unavailable</span><span class="paper-essay-review-badge is-muted">原文文本不足以核对</span></div>
+            <div class="paper-essay-meta"><span>legacy guide</span><span>讲解草稿 · 尚未独立审核</span></div>
+            <div class="template-row">
+              <span>目录圆点：</span><i class="paper-essay-review-dot is-pass"></i><i class="paper-essay-review-dot is-warn"></i><i class="paper-essay-review-dot is-pending"></i><i class="paper-essay-review-dot is-muted"></i>
+              <div class="paper-essay-depth" role="group" aria-label="阅读深度"><button type="button" aria-pressed="true">入门</button><button type="button" aria-pressed="false">完整</button></div>
+            </div>
+            <section class="paper-essay-deeper"><p>入门部分讲完了。准备好后，再看符号、逐步推导和原文依据。</p><button type="button">继续深入：符号、推导与原文证据 ↓</button></section>
+            <p role="status" class="paper-essay-pending">正在对照原图生成讲解…</p>
+            <details class="paper-essay-review" open>
+              <summary>独立审核 · 独立审核发现问题</summary>
+              <p>把置换等变写成了置换不变。</p>
+              <ul><li class="is-major"><strong>重要 · misconceptions</strong><div class="lit-paper-reading-content"><p>把置换等变写成了置换不变。</p><p>改为置换等变。</p></div></li></ul>
+            </details>
+            <p role="alert" class="paper-essay-ask-error">回答失败：The model returned an empty answer</p>
+          </main>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const toggle = (id, apply) => document.getElementById(id).addEventListener("change", event => apply(event.target.checked));
+    toggle("theme-toggle", on => { document.documentElement.dataset.theme = on ? "light" : "dark"; });
+    toggle("slot-toggle", on => document.body.classList.toggle("show-slots", on));
+    toggle("width-toggle", on => document.body.classList.toggle("narrow", on));
+  </script>
+</body>
+</html>
