@@ -652,6 +652,11 @@ fn register_screenshot_shortcut(app: &tauri::AppHandle) {
     screenshot::set_shortcut_status(state.inner(), status);
 }
 
+// Expand the context macro once: macOS embeds a single Info.plist symbol.
+pub(crate) fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(debug_assertions)]
@@ -1202,7 +1207,7 @@ pub fn run() {
             typeset_state::typeset_project_search,
             typeset_state::typeset_project_replace,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
             #[cfg(target_os = "macos")]

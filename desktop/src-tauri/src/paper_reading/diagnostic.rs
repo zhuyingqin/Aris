@@ -39,7 +39,7 @@ pub(crate) fn run(manifest_path: PathBuf) {
         config_root.join(".paper-reading-diagnostic").is_file(),
         "Missing diagnostic isolation marker"
     );
-    let mut context = tauri::generate_context!();
+    let mut context = crate::app_context();
     context.config_mut().app.windows.clear();
     tauri::Builder::default()
         .manage(crate::engine::ChatState::default())
