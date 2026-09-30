@@ -18494,12 +18494,12 @@ body.somniq-resizing-col {
   background: transparent;
 }
 
-/* ChatThread reserves the measured composer height outside the empty scroller.
-   Keep the welcome group close to the composer instead of letting half of all
-   spare window height turn into an unbounded gap between them. */
+/* ChatThread reserves the measured composer height outside the empty scroller,
+   so this box is exactly the region above the bottom-anchored composer. Centre
+   only the welcome group in that region; `safe` keeps tall content reachable in
+   short windows. */
 .chat-empty .chat-welcome {
-  justify-content: safe flex-end;
-  padding-block: 26px clamp(24px, 7vh, 72px);
+  justify-content: safe center;
 }
 
 .chat-empty {

@@ -36,7 +36,7 @@
   --essay-text-meta: 12px;     /* secondary lines, questions, cautions */
   --essay-text-compact: var(--lit-control-font-size, 13px); /* controls, notation */
   --essay-text-dense: 14px;    /* cards, answers, asides */
-  --essay-text-body: 15px;
+  --essay-text-body: 16px;
   --essay-text-h3: 16px;
   --essay-text-deck: 17px;     /* learning goal under a title */
   --essay-text-lead: 18px;     /* one sentence, plain summary, intuition */
@@ -63,11 +63,11 @@
 
   /* Layout and shape */
   --essay-max-width: 1160px;
-  --essay-measure: 800px;
+  --essay-measure: 760px;
   --essay-nav-width: 196px;
   --essay-nav-inset: 10px;
   --essay-nav-viewport-offset: 180px;
-  --essay-measure-narrow: 760px;
+  --essay-measure-narrow: 720px;
   --essay-level-column: 96px;
   --essay-label-column: 52px;
   --essay-card-min: 220px;
@@ -89,7 +89,7 @@
 /* Narrow readers scale the type roles, not individual rules. */
 @container paper-guide (max-width: 460px) {
   .paper-essay {
-    --essay-text-body: 14px;
+    --essay-text-body: 15px;
     --essay-text-deck: 15px;
     --essay-text-lead: 16px;
     --essay-bar-label: 88px;

@@ -251,13 +251,13 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
       {!current && outline && <article className="paper-essay-overview" aria-label={copy.storyline}>
         <header><h1>{title || (english ? "Understand the argument behind the paper." : "读懂论文，也读懂它的依据。")}</h1>
           {outline.oneSentence ? <div className="paper-essay-one-sentence"><span className="paper-essay-eyebrow">{copy.oneSentence}</span><PaperReadingContent content={outline.oneSentence} /></div>
-            : problem && <><div className="paper-essay-deck"><PaperReadingContent content={problem.content} /></div>{sources(problem.sourcePages)}</>}
+            : problem && <><div className="paper-essay-deck"><PaperReadingContent content={problem.content} readableProse /></div>{sources(problem.sourcePages)}</>}
         </header>
         {outline.relevance && <aside className="paper-essay-relevance"><span className="paper-essay-eyebrow">{copy.relevance}</span><PaperReadingContent content={outline.relevance} /></aside>}
         {outline.diagram && <PaperGuideDiagram diagram={outline.diagram} english={english} eyebrow={copy.atGlance} />}
         <div className="paper-essay-rule"><span>{english ? "THE ARGUMENT" : "论文脉络"}</span></div>
         {outline.overview.filter(section => outline.oneSentence || section.kind !== "problem").map((section, index) => <section className="paper-essay-overview-section" key={section.kind}>
-          <span className="paper-essay-section-number">{String(index + 1).padStart(2, "0")}</span><div><h2>{copy.overview[section.kind]}</h2><PaperReadingContent content={section.content} />{sources(section.sourcePages)}</div>
+          <span className="paper-essay-section-number">{String(index + 1).padStart(2, "0")}</span><div><h2>{copy.overview[section.kind]}</h2><PaperReadingContent content={section.content} readableProse />{sources(section.sourcePages)}</div>
         </section>)}
         {!!outline.glossary?.length && <section className="paper-essay-glossary" aria-label={copy.glossary}>
           <h2>{copy.glossary}</h2>
@@ -321,7 +321,7 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
             <ul>{lesson.misconceptions.map((item, index) => <li key={index}><div><span className="is-wrong">{copy.wrong}</span><PaperReadingContent content={item.misconception} /></div><div><span className="is-right">{copy.right}</span><PaperReadingContent content={item.correction} /></div></li>)}</ul>
           </section>}
           {!full && <section className="paper-essay-deeper"><p>{copy.goDeeperNote}</p><button type="button" onClick={() => { setDepth("full"); window.setTimeout(() => scrollWithinPanel(main.current?.querySelector('[data-section="steps"]')), 0); }}>{copy.goDeeper} ↓</button></section>}
-          {full && <section className="paper-essay-evidence"><h2>{copy.evidence}</h2><PaperReadingContent content={lesson.evidence} />{sources(lesson.sourcePages)}</section>}
+          {full && <section className="paper-essay-evidence"><h2>{copy.evidence}</h2><PaperReadingContent content={lesson.evidence} readableProse />{sources(lesson.sourcePages)}</section>}
           <section className="paper-essay-check" id={`${anchor}-check`} data-section="check"><span className="paper-essay-eyebrow">{english ? "PAUSE & THINK" : "停下来，想一想"}</span><h2>{copy.check}</h2><PaperReadingContent content={lesson.checkQuestion} /><details><summary>{copy.answer}</summary><PaperReadingContent content={lesson.checkAnswer} /></details></section>
           {lesson.cautions.length > 0 && <details className="paper-essay-cautions"><summary>{copy.caution}</summary>{lesson.cautions.map((text, index) => <PaperReadingContent key={index} content={text} />)}</details>}
           {review && <details className="paper-essay-review" open={review.verdict === "needs_revision"}>

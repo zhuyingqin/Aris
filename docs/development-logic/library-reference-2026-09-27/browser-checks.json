@@ -1,0 +1,325 @@
+{
+  "layouts": [
+    {
+      "width": 2048,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 2048,
+          "scrollWidth": 2048,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 2048,
+          "scrollWidth": 2048,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-sidebar",
+          "width": 268,
+          "scrollWidth": 268,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 1330,
+          "scrollWidth": 1330,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 1306,
+          "scrollWidth": 1306,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-workspace",
+          "width": 448,
+          "scrollWidth": 448,
+          "overflow": "visible"
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-sidebar",
+          "width": 268,
+          "scrollWidth": 268,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 730,
+          "scrollWidth": 730,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 706,
+          "scrollWidth": 706,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-workspace",
+          "width": 448,
+          "scrollWidth": 448,
+          "overflow": "visible"
+        }
+      ]
+    },
+    {
+      "width": 1280,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1280,
+          "scrollWidth": 1280,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1280,
+          "scrollWidth": 1280,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-sidebar",
+          "width": 268,
+          "scrollWidth": 268,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 562,
+          "scrollWidth": 562,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 538,
+          "scrollWidth": 538,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-workspace",
+          "width": 448,
+          "scrollWidth": 448,
+          "overflow": "visible"
+        }
+      ]
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1100,
+          "scrollWidth": 1100,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-sidebar",
+          "width": 200,
+          "scrollWidth": 200,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 568,
+          "scrollWidth": 568,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 544,
+          "scrollWidth": 544,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-workspace",
+          "width": 330,
+          "scrollWidth": 330,
+          "overflow": "visible"
+        }
+      ]
+    },
+    {
+      "width": 860,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 860,
+          "scrollWidth": 860,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 860,
+          "scrollWidth": 860,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-sidebar",
+          "width": 200,
+          "scrollWidth": 200,
+          "overflow": "auto"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 659,
+          "scrollWidth": 659,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 635,
+          "scrollWidth": 635,
+          "overflow": "auto"
+        }
+      ]
+    },
+    {
+      "width": 640,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 640,
+          "scrollWidth": 640,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 640,
+          "scrollWidth": 640,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 640,
+          "scrollWidth": 640,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 616,
+          "scrollWidth": 616,
+          "overflow": "auto"
+        }
+      ]
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-page",
+          "width": 480,
+          "scrollWidth": 480,
+          "overflow": "hidden"
+        },
+        {
+          "selector": ".lit-main",
+          "width": 480,
+          "scrollWidth": 480,
+          "overflow": "visible"
+        },
+        {
+          "selector": ".lit-table-wrap",
+          "width": 456,
+          "scrollWidth": 456,
+          "overflow": "auto"
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "language": "en"
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "language": "cn"
+    }
+  ],
+  "interactions": [
+    "Scoped All / Starred / Unread filters",
+    "List layout despite obsolete card preference; selection still works",
+    "Ctrl+K, keyword filter and Escape to clear",
+    "Author column sorting in both directions",
+    "Row context menu and Escape",
+    "Narrow detail drawer and Escape focus return"
+  ],
+  "previewErrors": [
+    {
+      "width": 2048,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1280,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1100,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 860,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 640,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 480,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    }
+  ],
+  "status": "passed"
+}
