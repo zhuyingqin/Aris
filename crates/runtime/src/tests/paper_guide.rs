@@ -518,7 +518,10 @@ fn prompts_teach_from_simple_to_deep_and_keep_evidence_boundaries() {
         assert!(prompt.contains(required), "lesson prompt misses {required}");
     }
     assert!(!outline_prompt("en", 12, None).contains("READER RESEARCH GOAL"));
-    assert!(outline_prompt("en", 12, Some("Retrieval for chemistry")).contains("Retrieval for chemistry"));
+    let outline_prompt = outline_prompt("en", 12, Some("Retrieval for chemistry"));
+    assert!(outline_prompt.contains("Retrieval for chemistry"));
+    assert!(outline_prompt.contains("2–5 short paragraphs"));
+    assert!(outline_prompt.contains("Never pack proof steps and numerical results into one paragraph"));
     let review = review_prompt(
         "zh",
         &outline.topics[0],

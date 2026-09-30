@@ -1,0 +1,299 @@
+{
+  "before": {
+    "settings": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "16px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".st-page",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "normal"
+      }
+    ],
+    "workflows": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "16px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".wf-page",
+        "size": "14px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "21.7px"
+      },
+      {
+        "selector": ".wf-secondary",
+        "size": "13px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".wf-page h2",
+        "size": "17px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "700",
+        "lineHeight": "26.35px"
+      }
+    ],
+    "literature": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "19px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".lit-page",
+        "size": "12px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "17.4px"
+      },
+      {
+        "selector": ".lit-library-heading h2",
+        "size": "20px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "650",
+        "lineHeight": "28px"
+      },
+      {
+        "selector": ".lit-nav-item",
+        "size": "14px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.3px"
+      },
+      {
+        "selector": ".lit-row-title",
+        "size": "13px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.8px"
+      },
+      {
+        "selector": ".lit-row-authors",
+        "size": "10.5px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "13.65px"
+      },
+      {
+        "selector": ".lit-row-year",
+        "size": "11px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "15.95px"
+      },
+      {
+        "selector": ".lit-quick-filter",
+        "size": "12px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "17.4px"
+      },
+      {
+        "selector": ".lit-workspace-tab",
+        "size": "12px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "600",
+        "lineHeight": "17.4px"
+      },
+      {
+        "selector": ".lit-info-paper-title",
+        "size": "20px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "600",
+        "lineHeight": "29px"
+      },
+      {
+        "selector": ".lip-abstract",
+        "size": "14px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "23.8px"
+      },
+      {
+        "selector": ".lip-meta dd",
+        "size": "13px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lip-file-card strong",
+        "size": "11px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "500",
+        "lineHeight": "15.95px"
+      },
+      {
+        "selector": ".lit-footer",
+        "size": "10px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "14.5px"
+      }
+    ]
+  },
+  "after": {
+    "settings": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "16px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".st-page",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "normal"
+      }
+    ],
+    "workflows": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "16px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".wf-page",
+        "size": "14px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "21.7px"
+      },
+      {
+        "selector": ".wf-secondary",
+        "size": "13px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".wf-page h2",
+        "size": "17px",
+        "family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", \"Hiragino Sans GB\", system-ui, sans-serif",
+        "weight": "700",
+        "lineHeight": "26.35px"
+      }
+    ],
+    "literature": [
+      {
+        "selector": ".product-switcher-name",
+        "size": "16px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "700",
+        "lineHeight": "normal"
+      },
+      {
+        "selector": ".lit-page",
+        "size": "14px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "21.7px"
+      },
+      {
+        "selector": ".lit-library-heading h2",
+        "size": "21px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "650",
+        "lineHeight": "29.4px"
+      },
+      {
+        "selector": ".lit-nav-item",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lit-row-title",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.8px"
+      },
+      {
+        "selector": ".lit-row-authors",
+        "size": "12px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "15.6px"
+      },
+      {
+        "selector": ".lit-row-year",
+        "size": "12px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "18.6px"
+      },
+      {
+        "selector": ".lit-quick-filter",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lit-workspace-tab",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "600",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lit-info-paper-title",
+        "size": "17px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "600",
+        "lineHeight": "24.65px"
+      },
+      {
+        "selector": ".lip-abstract",
+        "size": "14px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "23.8px"
+      },
+      {
+        "selector": ".lip-meta dd",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lip-file-card strong",
+        "size": "13px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "500",
+        "lineHeight": "20.15px"
+      },
+      {
+        "selector": ".lit-footer",
+        "size": "12px",
+        "family": "Inter, \"SF Pro Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        "weight": "400",
+        "lineHeight": "18.6px"
+      }
+    ],
+    "status": "passed"
+  }
+}

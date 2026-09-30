@@ -413,7 +413,9 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
             <button type="button" role="tab" aria-selected={tab === "guide"} onClick={() => setTab("guide")}>{copy.guideTab}</button>
             <button type="button" role="tab" aria-selected={tab === "raw"} onClick={() => setTab("raw")}>{copy.rawTab}</button>
           </div>
-          <button type="button" className="paper-reader-compare" aria-pressed={webReading} onClick={() => setWebReading(value => !value)}>{language === "en" ? webReading ? "Compare PDF ↗" : "Reading view ↗" : webReading ? "对照 PDF ↗" : "网页阅读 ↗"}</button>
+          <button type="button" className="paper-reader-compare" aria-pressed={webReading}
+            title={language === "en" ? webReading ? "Return to the side-by-side PDF and explanation" : "Hide the PDF and give the explanation a wider reading layout" : webReading ? "返回 PDF 与讲解对照" : "隐藏 PDF，用更宽的版面阅读讲解"}
+            onClick={() => setWebReading(value => !value)}>{language === "en" ? webReading ? "Compare with PDF" : "Focus view" : webReading ? "返回 PDF 对照" : "专注阅读"}</button>
         </div>
       </header>}
       {hasEssay && (busy || modelChanged || reviewMissing || view?.run.status !== "guide_ready") && <div className="paper-reader-task-notice" role="status">

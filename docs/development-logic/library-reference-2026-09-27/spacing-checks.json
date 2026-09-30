@@ -1,0 +1,77 @@
+{
+  "status": "passed",
+  "layouts": [
+    {
+      "width": 1448,
+      "rows": [
+        {
+          "top": 303.078125,
+          "bottom": 360.46875,
+          "height": 57.390625
+        },
+        {
+          "top": 360.46875,
+          "bottom": 416.46875,
+          "height": 56
+        },
+        {
+          "top": 416.46875,
+          "bottom": 472.46875,
+          "height": 56
+        }
+      ],
+      "nav": {
+        "height": 36,
+        "fontSize": "13px",
+        "gap": "14px"
+      },
+      "tags": {
+        "height": 160.96875,
+        "fontSize": "14px",
+        "gap": "2px"
+      },
+      "title": {
+        "height": 20.796875,
+        "fontSize": "13px",
+        "gap": "normal"
+      },
+      "author": {
+        "height": 56.390625,
+        "fontSize": "12px",
+        "gap": "6px"
+      }
+    },
+    {
+      "width": 480,
+      "rows": [
+        {
+          "top": 345.078125,
+          "bottom": 402.46875,
+          "height": 57.390625
+        },
+        {
+          "top": 402.46875,
+          "bottom": 458.46875,
+          "height": 56
+        },
+        {
+          "top": 458.46875,
+          "bottom": 514.46875,
+          "height": 56
+        }
+      ],
+      "nav": null,
+      "tags": null,
+      "title": {
+        "height": 20.796875,
+        "fontSize": "13px",
+        "gap": "normal"
+      },
+      "author": {
+        "height": 56.390625,
+        "fontSize": "12px",
+        "gap": "6px"
+      }
+    }
+  ]
+}
