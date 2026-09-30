@@ -12,12 +12,22 @@ use std::path::Path;
 
 use crate::{newapi, state};
 
-pub(crate) fn load_object() -> Map<String, Value> {
+pub(crate) const LEGACY_MANAGED_NEWAPI_BASE_URL: &str = "http://106.53.28.124:18080";
+
+fn load_raw_object() -> Map<String, Value> {
     std::fs::read_to_string(state::config_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default()
+}
+
+pub(crate) fn load_object() -> Map<String, Value> {
+    let mut obj = load_raw_object();
+    // Every runtime read enforces the managed credential/origin binding, even
+    // if writing the one-time migration back to disk fails.
+    sanitize_legacy_managed_http(&mut obj);
+    obj
 }
 
 fn get_str(obj: &Map<String, Value>, key: &str) -> Option<String> {
@@ -77,6 +87,100 @@ fn normalize_openai_base_url(base_url: &str) -> String {
 
 fn url_match_key(url: &str) -> String {
     url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn is_legacy_managed_http(url: &str) -> bool {
+    let normalized = url_match_key(url);
+    let legacy = LEGACY_MANAGED_NEWAPI_BASE_URL;
+    normalized == legacy || normalized == format!("{legacy}/v1")
+}
+
+fn legacy_managed_field(obj: &Map<String, Value>, key: &str) -> bool {
+    get_non_empty(obj, key).is_some_and(|url| is_legacy_managed_http(&url))
+}
+
+fn sanitize_legacy_managed_http(obj: &mut Map<String, Value>) -> bool {
+    let before = obj.clone();
+    let account_base = get_non_empty(obj, "newapi_base_url");
+    let approved_account = account_base
+        .as_deref()
+        .is_some_and(newapi::is_approved_managed_base);
+    let expected_model_base = approved_account
+        .then(|| format!("{}/v1", account_base.as_deref().unwrap_or_default()));
+    let managed_key = get_non_empty(obj, "newapi_executor_api_key");
+    let legacy_account = legacy_managed_field(obj, "newapi_base_url");
+    let legacy_executor = legacy_managed_field(obj, "newapi_executor_base_url");
+    let unapproved_account = account_base.is_some() && !approved_account;
+    let mismatched_managed_base = managed_key.is_some()
+        && expected_model_base.as_deref().is_none_or(|expected| {
+            get_non_empty(obj, "newapi_executor_base_url")
+                .is_none_or(|base| url_match_key(&base) != url_match_key(expected))
+        });
+    if legacy_account || unapproved_account {
+        for key in [
+            "newapi_base_url", "newapi_user_id", "newapi_username", "newapi_access_token",
+            "newapi_account_group", "newapi_group",
+        ] {
+            obj.remove(key);
+        }
+    }
+    if legacy_account || legacy_executor || unapproved_account || mismatched_managed_base {
+        for key in [
+            "newapi_executor_base_url", "newapi_executor_api_key", "newapi_token_id",
+            "managed_models",
+        ] {
+            obj.remove(key);
+        }
+    }
+    for prefix in ["executor", "reviewer", "summarizer"] {
+        let slot_base = get_non_empty(obj, &format!("{prefix}_base_url"));
+        let slot_key = get_non_empty(obj, &format!("{prefix}_api_key"));
+        let misplaced_managed_key = managed_key.as_deref().is_some_and(|key| {
+            slot_key.as_deref() == Some(key)
+                && expected_model_base.as_deref().is_none_or(|expected| {
+                    slot_base.as_deref().is_none_or(|base| url_match_key(base) != url_match_key(expected))
+                })
+        });
+        if slot_base.as_deref().is_some_and(is_legacy_managed_http) || misplaced_managed_key {
+            if prefix == "reviewer" {
+                clear_provider_credentials_keep_model(obj, prefix);
+            } else {
+                clear_provider_slot(obj, prefix);
+            }
+        }
+    }
+    if obj.get("verified_executors").is_some() {
+        let mut verified = read_verified(obj);
+        let len = verified.len();
+        verified.retain(|entry| {
+            if is_legacy_managed_http(&entry.base_url) {
+                return false;
+            }
+            managed_key.as_deref().is_none_or(|key| {
+                entry.api_key != key || expected_model_base.as_deref().is_some_and(|expected| {
+                    url_match_key(&entry.base_url) == url_match_key(expected)
+                })
+            })
+        });
+        if verified.len() != len {
+            write_verified(obj, &verified);
+        }
+    }
+    *obj != before
+}
+
+/// Persist the in-memory retirement on startup. Credentials are removed, not
+/// automatically replayed against the replacement host; users sign in again.
+pub(crate) fn retire_legacy_managed_http() -> Result<bool, String> {
+    // A malformed build override should disable managed access, not rewrite a
+    // valid saved session on disk. `load_object` still strips it in memory.
+    newapi::configured_managed_base()?;
+    let mut obj = load_raw_object();
+    if !sanitize_legacy_managed_http(&mut obj) {
+        return Ok(false);
+    }
+    save_object(&obj)?;
+    Ok(true)
 }
 
 fn managed_model_contains(obj: &Map<String, Value>, model: &str) -> bool {
@@ -584,6 +688,7 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
         "newapi_executor_api_key",
         "newapi_token_id",
         "newapi_group",
+        "newapi_account_group",
         "managed_models",
     ] {
         obj.remove(key);

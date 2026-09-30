@@ -1,0 +1,41 @@
+{
+  "layouts": [
+    {
+      "width": 1440,
+      "documentWidth": 1440,
+      "list": 814,
+      "title": 388,
+      "search": 545,
+      "details": 336,
+      "body": 1376
+    },
+    {
+      "width": 1280,
+      "documentWidth": 1280,
+      "list": 654,
+      "title": 358,
+      "search": 385,
+      "details": 336,
+      "body": 1216
+    },
+    {
+      "width": 1100,
+      "documentWidth": 1100,
+      "list": 542,
+      "title": 406,
+      "search": 328,
+      "details": 306,
+      "body": 1036
+    },
+    {
+      "width": 860,
+      "documentWidth": 860,
+      "list": 611,
+      "title": 315,
+      "search": 342,
+      "details": 360,
+      "body": 796
+    }
+  ],
+  "errors": []
+}

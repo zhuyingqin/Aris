@@ -1,6 +1,10 @@
 import type { Language } from "../store";
 
 export const LOGIN_COPY: Record<Language, {
+  twoFactorLabel: string;
+  twoFactorPlaceholder: string;
+  twoFactorNotice: string;
+  twoFactorRequired: string;
   tabLogin: string;
   tabRegister: string;
   authMethodAriaLabel: string;
@@ -30,6 +34,7 @@ export const LOGIN_COPY: Record<Language, {
   submitLoggingIn: string;
   submitRegistering: string;
   fetchStatusFailed: (message: string) => string;
+  gatewayUnavailable: string;
   errorEmailRequired: string;
   errorTurnstileRequired: string;
   noticeCodeSent: string;
@@ -46,11 +51,15 @@ export const LOGIN_COPY: Record<Language, {
   verifyingAuthSub: string;
 }> = {
   cn: {
+    twoFactorLabel: "两步验证码",
+    twoFactorPlaceholder: "验证器验证码或备用码",
+    twoFactorNotice: "请输入验证器中的验证码或备用码，完成登录。",
+    twoFactorRequired: "请输入两步验证码",
     tabLogin: "登录",
     tabRegister: "注册",
     authMethodAriaLabel: "认证方式",
     brandSubLogin: "登录以继续",
-    brandSubRegister: "创建 New API 账号",
+    brandSubRegister: "创建 SomniQ 账号",
     taglineMain: "梦中求索，醒时有获",
     taglineSub: "SEEK IN DREAMS, HARVEST ON WAKING.",
     accountLabel: "账号",
@@ -71,10 +80,11 @@ export const LOGIN_COPY: Record<Language, {
     turnstileNotice: "人机验证服务由 Cloudflare 提供支持",
     openWebRegister: "打开网页版注册",
     submitLogin: "登录",
-    submitRegister: "注册并登录",
+    submitRegister: "创建账号",
     submitLoggingIn: "登录中...",
     submitRegistering: "注册中...",
     fetchStatusFailed: (message) => `获取服务器状态失败: ${message}`,
+    gatewayUnavailable: "此安装包未配置可用的 HTTPS 托管账号服务器。请联系发布者更新安装包。",
     errorEmailRequired: "请先输入邮箱后再获取验证码",
     errorTurnstileRequired: "请先完成人机验证后再获取验证码",
     noticeCodeSent: "验证码已发送，请查收",
@@ -91,11 +101,15 @@ export const LOGIN_COPY: Record<Language, {
     verifyingAuthSub: "正在校验安全凭证与网关连接...",
   },
   en: {
+    twoFactorLabel: "Two-step verification code",
+    twoFactorPlaceholder: "Authenticator code or backup code",
+    twoFactorNotice: "Enter your authenticator code or a backup code to finish signing in.",
+    twoFactorRequired: "Enter your two-step verification code",
     tabLogin: "Log in",
     tabRegister: "Sign up",
     authMethodAriaLabel: "Authentication method",
     brandSubLogin: "Sign in to continue",
-    brandSubRegister: "Create a New API account",
+    brandSubRegister: "Create a SomniQ account",
     taglineMain: "Seek in Dreams, harvest on waking",
     taglineSub: "SEEK IN DREAMS, HARVEST ON WAKING.",
     accountLabel: "Account",
@@ -120,6 +134,7 @@ export const LOGIN_COPY: Record<Language, {
     submitLoggingIn: "Logging in...",
     submitRegistering: "Signing up...",
     fetchStatusFailed: (message) => `Could not read the server's registration settings: ${message}`,
+    gatewayUnavailable: "This build has no valid HTTPS managed account server. Please request an updated installer.",
     errorEmailRequired: "Please enter your email first",
     errorTurnstileRequired: "This server has bot verification enabled. Please complete registration on the web first",
     noticeCodeSent: "Verification code sent, please check your inbox",

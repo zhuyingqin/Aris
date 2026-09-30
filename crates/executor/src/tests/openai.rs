@@ -1446,6 +1446,30 @@ fn openai_usage_normalizes_cached_prompt_tokens() {
 }
 
 #[test]
+fn openai_usage_records_deepseek_prefix_cache_hits() {
+    let usage = token_usage_from_openai_usage(&json!({
+        "prompt_tokens": 1000,
+        "completion_tokens": 80,
+        "prompt_cache_hit_tokens": 768,
+        "prompt_cache_miss_tokens": 232
+    }));
+
+    assert_eq!(usage.cache_read_input_tokens, 768);
+    assert_eq!(usage.input_tokens, 232);
+    assert_eq!(usage.prompt_tokens(), 1000);
+
+    // A gateway that forwards both shapes must not count the hit twice.
+    let usage = token_usage_from_openai_usage(&json!({
+        "prompt_tokens": 1000,
+        "completion_tokens": 80,
+        "prompt_cache_hit_tokens": 768,
+        "prompt_tokens_details": { "cached_tokens": 768 }
+    }));
+    assert_eq!(usage.cache_read_input_tokens, 768);
+    assert_eq!(usage.input_tokens, 232);
+}
+
+#[test]
 fn openai_usage_clamps_malformed_cache_counts() {
     let usage = token_usage_from_openai_usage(&json!({
         "prompt_tokens": 100,

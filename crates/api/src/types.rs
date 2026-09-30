@@ -46,7 +46,10 @@ impl InputMessage {
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
-            content: vec![InputContentBlock::Text { text: text.into() }],
+            content: vec![InputContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
         }
     }
 
@@ -74,9 +77,15 @@ impl InputMessage {
 pub enum InputContentBlock {
     Text {
         text: String,
+        /// Explicit prompt-cache breakpoint (`{"type":"ephemeral"}`) for
+        /// providers that only cache up to marked blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<Value>,
     },
     Image {
         source: ImageSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<Value>,
     },
     ToolUse {
         id: String,

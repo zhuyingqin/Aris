@@ -14,7 +14,7 @@ const styles = readFileSync(resolve(__dirname, "../styles.css"), "utf8");
  * panel that keeps animating there is a real defect for the people who set it.
  */
 describe("ambient motion pass wiring", () => {
-  it("disables entrance animations and the kb-graph-node transition under reduced motion", () => {
+  it("disables entrance animations and card transitions under reduced motion", () => {
     const reduced = styles.slice(styles.indexOf("@media (prefers-reduced-motion: reduce)"));
     for (const cls of [
       ".independent-review-panel",
@@ -28,6 +28,6 @@ describe("ambient motion pass wiring", () => {
     ]) {
       expect(reduced, `${cls} disabled under reduced motion`).toContain(cls);
     }
-    expect(reduced).toContain(".kb-graph-node");
+    expect(reduced).toContain(".kb-fragment-card");
   });
 });

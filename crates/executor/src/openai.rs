@@ -837,10 +837,19 @@ fn token_usage_from_openai_usage(usage: &Value) -> TokenUsage {
     let details = usage
         .get("prompt_tokens_details")
         .or_else(|| usage.get("input_tokens_details"));
+    // DeepSeek reports its automatic prefix-cache hits as top-level
+    // `prompt_cache_hit_tokens` (with `prompt_cache_miss_tokens`) instead of
+    // OpenAI's details object; reading only the latter recorded every hit as 0.
     let cached_tokens = details
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0)
+        .max(
+            usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        ) as u32;
     // The Responses API additionally reports how much of the prompt was
     // *written* into the cache this turn (`cache_write_tokens`); chat
     // completions has no equivalent and leaves this 0. It is part of

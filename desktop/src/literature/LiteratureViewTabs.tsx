@@ -1,8 +1,7 @@
 import { useStore } from "../store";
-import { SvgIcon } from "../SvgIcon";
 import { LITERATURE_COPY } from "./i18n";
 
-export type LiteraturePageView = "library" | "discover" | "graph";
+export type LiteraturePageView = "library" | "discover";
 
 interface LiteratureViewTabsProps {
   pageView: LiteraturePageView;
@@ -18,9 +17,8 @@ export default function LiteratureViewTabs({
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
   const pageViews = [
-    { id: "library" as const, label: copy.tabs.library, icon: "library" as const },
-    { id: "discover" as const, label: copy.tabs.discover, icon: "search" as const },
-    { id: "graph" as const, label: copy.tabs.graph, icon: "graph" as const },
+    { id: "library" as const, label: copy.tabs.library },
+    { id: "discover" as const, label: copy.tabs.discover },
   ];
   return (
     <div
@@ -34,10 +32,18 @@ export default function LiteratureViewTabs({
           type="button"
           role="tab"
           aria-selected={pageView === item.id}
+          tabIndex={pageView === item.id ? 0 : -1}
           className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
           onClick={() => onPageViewChange(item.id)}
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === "Home" ? "library" : event.key === "End" ? "discover"
+              : pageView === "library" ? "discover" : "library";
+            onPageViewChange(next);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next === "library" ? 0 : 1]?.focus();
+          }}
         >
-          <span className="lit-mode-tab-icon" aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
           {item.label}
         </button>
       ))}

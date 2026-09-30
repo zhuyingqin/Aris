@@ -48,12 +48,6 @@ const mocks = vi.hoisted(() => ({
   literatureRagStatus: vi.fn(),
   literatureRagCards: vi.fn(),
   literatureRagSearch: vi.fn(),
-  knowledgeLoad: vi.fn(),
-  knowledgeSearch: vi.fn(),
-  knowledgeUpsert: vi.fn(),
-  knowledgeConfirm: vi.fn(),
-  knowledgeReject: vi.fn(),
-  knowledgeGenerate: vi.fn(),
   knowledgeRetrievalCardsBuild: vi.fn(),
   projectRagSearch: vi.fn(),
   projectRagAnswer: vi.fn(),
@@ -106,12 +100,6 @@ vi.mock("../../api/tauri", () => ({
   literatureRagStatus: mocks.literatureRagStatus,
   literatureRagCards: mocks.literatureRagCards,
   literatureRagSearch: mocks.literatureRagSearch,
-  knowledgeLoad: mocks.knowledgeLoad,
-  knowledgeSearch: mocks.knowledgeSearch,
-  knowledgeUpsert: mocks.knowledgeUpsert,
-  knowledgeConfirm: mocks.knowledgeConfirm,
-  knowledgeReject: mocks.knowledgeReject,
-  knowledgeGenerate: mocks.knowledgeGenerate,
   knowledgeRetrievalCardsBuild: mocks.knowledgeRetrievalCardsBuild,
   projectRagSearch: mocks.projectRagSearch,
   projectRagAnswer: mocks.projectRagAnswer,
@@ -120,6 +108,7 @@ vi.mock("../../api/tauri", () => ({
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
   onChatModelRetry: mocks.onChatModelRetry,
+  chatModelOptions: () => Promise.resolve({ provider: "test", current: "default-model", options: [] }),
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
@@ -139,8 +128,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 import Literature from "../Literature";
 import { resetLiteratureStore, useLiteratureStore } from "../literatureStore";
-import { resetKnowledgeStore } from "../../knowledge/knowledgeStore";
 import { useStore } from "../../store";
+
+async function openDiscover(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "文献视图切换" }));
+  await user.click(screen.getByRole("menuitem", { name: "检索" }));
+}
 
 let chatDoneHandler: ((text: string) => void) | null = null;
 let chatToolHandler:
@@ -242,8 +235,8 @@ beforeEach(() => {
   localStorage.removeItem("somniq-literature-rag-preferences-v1");
   localStorage.removeItem("somniq-literature-auto-retrieval-cards-v1");
   localStorage.removeItem("somniq-literature-discover-mode-v1");
+  localStorage.removeItem("somniq-literature-layout-v1");
   resetLiteratureStore();
-  resetKnowledgeStore();
   useStore.setState({
     language: "cn",
     languagePreferenceSet: true,
@@ -525,12 +518,6 @@ beforeEach(() => {
     }],
   });
   mocks.literatureRagSearch.mockReset().mockResolvedValue({ query: "", results: [] });
-  mocks.knowledgeLoad.mockReset().mockResolvedValue({ points: [] });
-  mocks.knowledgeSearch.mockReset().mockResolvedValue({ results: [] });
-  mocks.knowledgeUpsert.mockReset().mockResolvedValue({ ids: [] });
-  mocks.knowledgeConfirm.mockReset().mockResolvedValue(undefined);
-  mocks.knowledgeReject.mockReset().mockResolvedValue(true);
-  mocks.knowledgeGenerate.mockReset().mockResolvedValue({ candidates: [] });
   mocks.knowledgeRetrievalCardsBuild.mockReset().mockResolvedValue({
     attempted: 2,
     generated: 2,
@@ -662,7 +649,7 @@ describe("Literature library", () => {
 
     expect((await screen.findAllByText(gradedD.title)).length).toBeGreaterThan(0);
     expect(screen.queryByText(gradedA.title)).toBeNull();
-    expect(screen.getByText("综述：分级测试 · D 级文献")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "综述：分级测试 · D 级文献" })).toBeTruthy();
     expect(container.querySelector(".lit-row-workflow-grade.grade-d")?.textContent).toBe("D");
   });
 
@@ -672,10 +659,9 @@ describe("Literature library", () => {
 
     expect(screen.queryByLabelText("本地文献检索")).toBeNull();
     expect(screen.queryByRole("button", { name: "全文 RAG" })).toBeNull();
-    for (const label of ["文献库", "检索", "知识图谱"]) {
-      expect(screen.getByRole("tab", { name: label }).querySelector(".lit-mode-tab-icon > svg")).toBeTruthy();
-    }
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    expect(screen.getByRole("button", { name: "文献视图切换" }).getAttribute("aria-haspopup")).toBe("menu");
+    expect(screen.queryByRole("tab", { name: "知识图谱" })).toBeNull();
+    await openDiscover(user);
 
     const ragWorkspace = await screen.findByLabelText("本地文献检索");
     expect(ragWorkspace).toBeTruthy();
@@ -712,7 +698,7 @@ describe("Literature library", () => {
   it("previews, explicitly confirms, and reports coverage for protocol search", async () => {
     const user = userEvent.setup();
     render(<Literature />);
-    await user.click(screen.getAllByRole("tab")[1]);
+    await openDiscover(user);
     await user.click(screen.getByRole("tab", { name: /外部发现/ }));
 
     const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
@@ -790,7 +776,7 @@ describe("Literature library", () => {
     mocks.literatureSearchCancel.mockResolvedValue(true);
 
     render(<Literature />);
-    await user.click(screen.getAllByRole("tab")[1]);
+    await openDiscover(user);
     await user.click(screen.getByRole("tab", { name: /外部发现/ }));
     const panel = document.querySelector<HTMLElement>(".lit-protocol-search");
     await user.type(
@@ -881,7 +867,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.click(await screen.findByRole("button", { name: /维护/ }));
     await user.click(screen.getByRole("button", { name: "索引当前 PDF" }));
 
@@ -897,7 +883,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.click(await screen.findByRole("button", { name: /维护/ }));
     expect(screen.queryByText("语义增强（可选）")).toBeNull();
     expect(screen.queryByLabelText("嵌入模型")).toBeNull();
@@ -926,7 +912,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.click(await screen.findByRole("button", { name: /维护/ }));
     await user.click(screen.getByRole("button", { name: "增量更新全库" }));
 
@@ -940,7 +926,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.click(await screen.findByRole("button", { name: /维护/ }));
     await user.click(screen.getByRole("checkbox", { name: "自动生成检索卡" }));
     expect((screen.getByRole("checkbox", { name: "自动生成检索卡" }) as HTMLInputElement).checked).toBe(false);
@@ -1001,7 +987,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.type(screen.getByRole("textbox", { name: "检索问题" }), "limitations");
     await user.click(screen.getByRole("button", { name: "仅检索证据" }));
 
@@ -1027,7 +1013,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     await user.type(screen.getByRole("textbox", { name: "检索问题" }), "limitations");
     await user.click(screen.getByRole("button", { name: "检索并回答" }));
 
@@ -1046,24 +1032,24 @@ describe("Literature library", () => {
 
     expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "研究问题" })).toBeNull();
-    expect(await screen.findByText(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录 · 4 KB · 尚未备份/)).toBeTruthy();
+    expect(await screen.findByTitle(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录 · 4 KB · 尚未备份/)).toBeTruthy();
 
     const detailNavigation = screen.getByRole("tablist", { name: "论文详情导航" });
     const infoTab = within(detailNavigation).getByRole("tab", { name: "信息" });
-    expect(infoTab.querySelector('[data-icon="info"]')).toBeTruthy();
-    const overviewTab = within(detailNavigation).getByRole("tab", { name: "简报" });
-    const evidenceTab = within(detailNavigation).getByRole("tab", { name: "证据" });
-    expect(overviewTab.querySelector('[data-icon="sparkle"]')).toBeTruthy();
-    expect(evidenceTab.querySelector('[data-icon="shieldCheck"]')).toBeTruthy();
-    expect(document.querySelector(".lit-workspace-tabs")).toBeNull();
+    expect(infoTab.textContent).toBe("信息");
+    for (const name of ["简报", "证据", "笔记"]) {
+      expect(within(detailNavigation).queryByRole("tab", { name })).toBeNull();
+    }
+    expect(within(detailNavigation).getByRole("tab", { name: "论文讲解" }).querySelector("svg")?.getAttribute("data-icon")).toBe("paperGuide");
     expect(infoTab.getAttribute("aria-selected")).toBe("true");
-    await user.click(overviewTab);
-    expect(overviewTab.getAttribute("aria-selected")).toBe("true");
+    const relatedTab = within(detailNavigation).getByRole("tab", { name: "相关" });
+    await user.click(relatedTab);
+    expect(relatedTab.getAttribute("aria-selected")).toBe("true");
 
     await user.click(screen.getByRole("button", { name: "备份数据库" }));
     await waitFor(() => expect(mocks.literatureStorageBackup).toHaveBeenCalledTimes(1));
 
-    await user.click(screen.getByRole("tab", { name: "检索" }));
+    await openDiscover(user);
     expect(screen.queryByRole("textbox", { name: "研究问题" })).toBeNull();
     expect(screen.getByRole("textbox", { name: "检索问题" })).toBeTruthy();
   });
@@ -1081,7 +1067,7 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "保存元数据" }));
     await waitFor(() => expect(useLiteratureStore.getState().library.papers[0].citationKey).toBe("first2026"));
 
-    expect(screen.queryByRole("button", { name: "编辑元数据" })).toBeNull();
+    expect(screen.getByRole("button", { name: "编辑元数据" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("button", { name: "编辑 Citation key" })).toBeNull();
     expect(screen.queryByRole("button", { name: "简报" })).toBeNull();
     expect(screen.queryByRole("button", { name: "查看证据" })).toBeNull();
@@ -1116,7 +1102,7 @@ describe("Literature library", () => {
 
     render(<Literature />);
 
-    expect(await screen.findByText(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录/)).toBeTruthy();
+    expect(await screen.findByTitle(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录/)).toBeTruthy();
     const withHealth = mocks.literatureStorageStatus.mock.calls.filter(
       (call: unknown[]) => call[0] === true,
     );
@@ -1135,14 +1121,18 @@ describe("Literature library", () => {
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
   });
 
-  it("keeps only the New item control in the home toolbar and can create a manual item", async () => {
+  it("keeps every import route available in a populated library and creates a manual item", async () => {
     const user = userEvent.setup();
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    const homeToolbar = screen.getByRole("toolbar", { name: "新建条目" });
-    expect(within(homeToolbar).getAllByRole("button")).toHaveLength(1);
-    await user.click(within(homeToolbar).getByRole("button", { name: "新建条目" }));
+    await user.click(screen.getByRole("button", { name: "添加文献" }));
+    const addMenu = screen.getByRole("menu", { name: "添加文献" });
+    expect(within(addMenu).getAllByRole("menuitem")).toHaveLength(4);
+    expect(within(addMenu).getByRole("menuitem", { name: /导入 PDF/ })).toBeTruthy();
+    expect(within(addMenu).getByRole("menuitem", { name: /导入文献库/ })).toBeTruthy();
+    expect(within(addMenu).getByRole("menuitem", { name: /添加 DOI/ })).toBeTruthy();
+    await user.click(within(addMenu).getByRole("menuitem", { name: /新建条目/ }));
     const dialog = screen.getByRole("dialog", { name: "新建文献条目" });
     await user.type(within(dialog).getByRole("textbox", { name: "标题" }), "Manual local reference");
     await user.selectOptions(within(dialog).getByRole("combobox", { name: "条目类型" }), "book");
@@ -1169,6 +1159,34 @@ describe("Literature library", () => {
     expect((filter as HTMLInputElement).value).toBe("");
   });
 
+
+  it("matches mixed-case title and author queries and clears with Escape", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "second", title: "Unrelated reference", authors: ["C. Three"] });
+    mocks.literatureLoad.mockResolvedValue(library);
+    mocks.literatureFullTextSearch.mockResolvedValue({
+      paperIds: [fixturePaper.id],
+      total: 1,
+      exhausted: true,
+    });
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    const filter = screen.getByRole("textbox", { name: "筛选论文" });
+    for (const query of ["Grounded Reading", "A. ONE"]) {
+      fireEvent.change(filter, { target: { value: query } });
+      await waitFor(() => expect(mocks.literatureFullTextSearch).toHaveBeenCalledWith(query, 100, 0));
+      await screen.findByRole("checkbox", { name: "选择 " + fixturePaper.title });
+      const list = screen.getByRole("grid", { name: "文献列表" });
+      expect(within(list).getByText(fixturePaper.title)).toBeTruthy();
+      expect(within(list).queryByText("Unrelated reference")).toBeNull();
+    }
+    await user.click(filter);
+    await user.keyboard("{Escape}");
+    expect((filter as HTMLInputElement).value).toBe("");
+    expect(await screen.findByRole("checkbox", { name: "选择 Unrelated reference" })).toBeTruthy();
+  });
+
   it("selects the visible corpus and exposes recently added and recently read views", async () => {
     const user = userEvent.setup();
     render(<Literature />);
@@ -1178,6 +1196,8 @@ describe("Literature library", () => {
     expect((screen.getByRole("checkbox", { name: "选择 Persisted Paper on Grounded Reading" }) as HTMLInputElement).checked).toBe(true);
 
     await user.click(screen.getAllByText("Persisted Paper on Grounded Reading")[0]);
+    expect(useLiteratureStore.getState().library.papers[0].unread).toBe(true);
+    await user.click(screen.getByRole("button", { name: "标记为已读" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "最近阅读 1" })).toBeTruthy());
     await user.click(screen.getByRole("button", { name: "最近添加 1" }));
     expect(screen.getAllByText("最近添加").length).toBeGreaterThan(0);
@@ -1295,43 +1315,13 @@ describe("Literature library", () => {
     expect(await screen.findByText("暂无摘要。")).toBeTruthy();
   });
 
-  it("opens the global knowledge graph from the Literature-level switch", async () => {
-    const user = userEvent.setup();
-    const withEvidence = fixtureLibrary();
-    withEvidence.papers[0].evidence = [{
-      id: "ev-graph",
-      page: 2,
-      quote: "grounded graph quote",
-      note: "Global graph evidence node.",
-      source: "text",
-    }];
-    mocks.literatureLoad.mockResolvedValue(withEvidence);
-
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    expect(screen.queryByText("Literature Workflow")).toBeNull();
-    expect(screen.queryByText("Screen, understand, and convert papers into evidence.")).toBeNull();
-    expect(screen.queryByRole("tab", { name: "知识库" })).toBeNull();
-    expect(screen.getByRole("tab", { name: "知识图谱" })).toBeTruthy();
-
-    await user.click(screen.getByRole("tab", { name: "知识图谱" }));
-
-    const graph = await screen.findByLabelText("知识图谱");
-    expect(within(graph).queryByText("Global graph evidence node.")).toBeNull();
-    expect(screen.queryByRole("button", { name: /生成知识点/ })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "显示知识节点" }));
-    expect(within(graph).getByText("Global graph evidence node.")).toBeTruthy();
-    expect(screen.queryByText("Paper Workspace")).toBeNull();
-  });
-
   it("allows the paper workspace selection to be cleared", async () => {
     const user = userEvent.setup();
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: "清除选择" }));
+    await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "更多操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "清除选择" }));
 
     expect(screen.getByText("Select a paper to open it here.")).toBeTruthy();
   });
@@ -1372,7 +1362,7 @@ describe("Literature library", () => {
 
     // Right-clicking the library root is the affordance Zotero users reach
     // for first.
-    fireEvent.contextMenu(screen.getByText("我的文库"), { clientX: 40, clientY: 40 });
+    fireEvent.contextMenu(document.querySelector(".lit-library-root") as HTMLElement, { clientX: 40, clientY: 40 });
     const rootMenu = await screen.findByRole("menu");
     await user.click(within(rootMenu).getByRole("menuitem", { name: "新建一级分类" }));
     expect(screen.getByPlaceholderText("分类名称…")).toBeTruthy();
@@ -1456,7 +1446,7 @@ describe("Literature library", () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: "下载 PDF" }));
+    await user.click(screen.getByRole("button", { name: "获取所选论文 PDF" }));
 
     expect(mocks.literatureDownloadPdf).toHaveBeenCalledWith(
       "https://arxiv.org/pdf/1111.00001.pdf",
@@ -1842,13 +1832,86 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getAllByRole("button", { name: "打开 PDF" })[0]);
+    await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
 
     // Opening a downloaded PDF takes over the body with the immersive reading
     // shell (full-width reader + a back button), not the cramped side panel.
     expect(screen.getByRole("button", { name: "返回" })).toBeTruthy();
     expect(mocks.literaturePdfOpen).not.toHaveBeenCalled();
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
+  });
+
+  it("opens mutually exclusive guide and record panels while preserving the PDF", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
+    const rail = screen.getByRole("tablist", { name: "论文详情导航" });
+    const toggle = await screen.findByRole("button", { name: "论文讲解" });
+    const pdf = document.querySelector(".lit-pdf-reader");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
+    for (const name of ["简报", "证据", "笔记", "PDF"]) {
+      expect(within(rail).queryByRole("tab", { name })).toBeNull();
+    }
+    for (const tab of within(rail).getAllByRole("tab")) {
+      expect(tab.querySelector("svg")).toBeTruthy();
+      expect(tab.getAttribute("title")).toBe(tab.getAttribute("aria-label"));
+    }
+    const guideTab = within(rail).getByRole("tab", { name: "论文讲解" });
+    expect(guideTab.querySelector("svg")?.getAttribute("data-icon")).toBe("paperGuide");
+    await user.click(guideTab);
+    expect(screen.getByRole("complementary", { name: "论文讲解" })).toBeTruthy();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    await user.click(within(rail).getByRole("tab", { name: "信息" }));
+    expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
+    expect(screen.getByRole("tabpanel", { name: "信息" })).toBeTruthy();
+    await user.click(toggle);
+    expect(screen.queryByRole("tabpanel", { name: "信息" })).toBeNull();
+    expect(guideTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector(".lit-pdf-reader")).toBe(pdf);
+    await user.click(screen.getByRole("button", { name: "关闭讲解" }));
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+    await user.click(within(rail).getByRole("tab", { name: "文件" }));
+    expect(screen.getByRole("tabpanel", { name: "文件" })).toBeTruthy();
+    await user.click(within(rail).getByRole("tab", { name: "文件" }));
+    expect(screen.queryByRole("tabpanel", { name: "文件" })).toBeNull();
+    await user.click(within(rail).getByRole("tab", { name: "相关" }));
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(within(screen.getByRole("region", { name: "文献详情" })).getByRole("tab", { name: "相关" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens the guide directly and restores focus when guide and detail panels close with Escape", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("tab", { name: "论文讲解" }));
+    expect(await screen.findByRole("complementary", { name: "论文讲解" })).toBeTruthy();
+    screen.getByRole("button", { name: "关闭讲解" }).focus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "论文讲解" }));
+    const rail = screen.getByRole("tablist", { name: "论文详情导航" });
+    const info = within(rail).getByRole("tab", { name: "信息" });
+    await user.click(info);
+    screen.getByRole("button", { name: "收起侧栏，只看 PDF" }).focus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tabpanel", { name: "信息" })).toBeNull();
+    expect(document.activeElement).toBe(info);
+    const guide = within(rail).getByRole("tab", { name: "论文讲解" });
+    guide.focus();
+    await user.keyboard("{Home}{Home}");
+    expect(guide.getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{Escape}");
+    expect(guide.getAttribute("aria-selected")).toBe("false");
+    expect(document.querySelector('.lit-reader-detail-rail [tabindex="0"]')).toBe(guide);
   });
 
   it("opens local PDFs on double-click and switches document tabs", async () => {
@@ -1878,9 +1941,8 @@ describe("Literature library", () => {
     expect(within(documents).getByRole("tab", { name: first.title }).getAttribute("aria-selected")).toBe("true");
 
     const readerNavigation = screen.getByRole("tablist", { name: "论文详情导航" });
-    expect(within(readerNavigation).getByRole("tab", { name: "简报" })).toBeTruthy();
-    expect(within(readerNavigation).getByRole("tab", { name: "证据" })).toBeTruthy();
-    expect(within(readerNavigation).getByRole("tab", { name: "PDF" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(readerNavigation).getByRole("tab", { name: "论文讲解" }).getAttribute("aria-selected")).toBe("false");
+    expect(within(readerNavigation).getByRole("tab", { name: "信息" })).toBeTruthy();
     expect(document.querySelector(".lit-reading-tabs")).toBeNull();
     await user.click(screen.getByRole("button", { name: "返回" }));
     const secondRow = rowFor(second.title);
@@ -1938,10 +2000,14 @@ describe("Literature library", () => {
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
     expect(screen.queryByText("main.pdf")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Expand item" }));
+    const parentRow = within(screen.getByRole("grid", { name: "文献列表" })).getByText("Persisted Paper on Grounded Reading").closest("tr")!;
+    await waitFor(() => expect(parentRow.getAttribute("aria-expanded")).toBe("false"));
+    parentRow.focus();
+    await user.keyboard("{ArrowRight}");
     expect(await screen.findByText("main.pdf")).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Collapse item" }));
+    parentRow.focus();
+    await user.keyboard("{ArrowLeft}");
     expect(screen.queryByText("main.pdf")).toBeNull();
   });
 
@@ -1969,11 +2035,11 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await waitFor(() => {
-      expect((screen.getByRole("button", { name: "Expand item" }) as HTMLButtonElement).disabled).toBe(false);
-    });
-    await user.click(screen.getByRole("button", { name: "Expand item" }));
-    await user.click(screen.getByText("figure-1.png").closest("tr") as HTMLElement);
+    const parentRow = within(screen.getByRole("grid", { name: "文献列表" })).getByText("Persisted Paper on Grounded Reading").closest("tr")!;
+    await waitFor(() => expect(parentRow.getAttribute("aria-expanded")).toBe("false"));
+    parentRow.focus();
+    await user.keyboard("{ArrowRight}");
+    await user.click(within(screen.getByRole("grid", { name: "文献列表" })).getByText("figure-1.png").closest("tr") as HTMLElement);
 
     const viewer = await screen.findByRole("dialog", { name: "figure-1.png" });
     expect(mocks.literaturePdfBytes).toHaveBeenCalledWith("papers/attachments/figure-1.png");
@@ -2017,13 +2083,13 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await waitFor(() => {
-      expect((screen.getByRole("button", { name: "Expand item" }) as HTMLButtonElement).disabled).toBe(false);
-    });
-    await user.click(screen.getByRole("button", { name: "Expand item" }));
-    const secondaryRow = screen.getByText("supplement.pdf").closest("tr");
+    const parentRow = within(screen.getByRole("grid", { name: "文献列表" })).getByText("Persisted Paper on Grounded Reading").closest("tr")!;
+    await waitFor(() => expect(parentRow.getAttribute("aria-expanded")).toBe("false"));
+    parentRow.focus();
+    await user.keyboard("{ArrowRight}");
+    const secondaryRow = within(screen.getByRole("grid", { name: "文献列表" })).getByText("supplement.pdf").closest("tr");
     expect(secondaryRow).toBeTruthy();
-    await user.click(within(secondaryRow as HTMLElement).getByRole("button", { name: "Expand item" }));
+    await user.click(within(secondaryRow as HTMLElement).getByRole("button", { name: "展开条目" }));
     await user.click(screen.getByText("Annotation · p.7"));
 
     await waitFor(() => {
@@ -2048,22 +2114,24 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getByRole("button", { name: "获取 PDF" }));
+    await user.click(screen.getByRole("button", { name: "获取所选论文 PDF" }));
 
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
     expect(useStore.getState().pendingChatInput).toBeNull();
     expect(useStore.getState().tab).toBe("literature");
   });
 
-  it("deletes a paper from the library after confirmation", async () => {
+  it("moves a paper to the trash without a confirmation prompt", async () => {
     const user = userEvent.setup();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
     await user.click(screen.getByRole("button", { name: "删除" }));
 
-    expect(screen.getByText("论文库为空。")).toBeTruthy();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toContain("已将 1 篇移入回收站");
+    expect(screen.getByText("从第一篇文献开始")).toBeTruthy();
     await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
       timeout: 2000,
     });
@@ -2076,10 +2144,11 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "回收站 1" }));
     expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
     await user.click(screen.getByRole("checkbox", { name: "选择 Persisted Paper on Grounded Reading" }));
-    await user.click(within(screen.getByRole("toolbar", { name: "Batch actions" })).getByRole("button", { name: "恢复" }));
+    await user.click(within(screen.getByRole("toolbar", { name: "批量操作" })).getByRole("button", { name: "恢复" }));
     await waitFor(() =>
       expect(mocks.literatureRestoreItems).toHaveBeenCalledWith(["arxiv:1111.00001"]),
     );
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("deletes a search with its exclusive papers while preserving shared results", async () => {
@@ -2167,7 +2236,8 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findByText("inline delete");
-    await user.click(screen.getByRole("button", { name: "删除搜索 inline delete" }));
+    await user.click(screen.getByRole("button", { name: "inline delete 的搜索操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除搜索…" }));
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("inline delete"));
     expect(useLiteratureStore.getState().library.searches).toEqual([]);
@@ -2197,7 +2267,8 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findByText("legacy mirrored search");
-    await user.click(screen.getByRole("button", { name: "删除搜索 legacy mirrored search" }));
+    await user.click(screen.getByRole("button", { name: "legacy mirrored search 的搜索操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除搜索…" }));
 
     expect(useLiteratureStore.getState().library.searches).toEqual([]);
     await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
@@ -2881,6 +2952,182 @@ describe("Literature library", () => {
     expect(activity[activity.length - 1]?.text).toContain("已删除第 3 页证据");
   });
 
+  it("supports keyboard menus and restores focus after closing the creation dialog", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    const add = screen.getByRole("button", { name: "添加文献" });
+    add.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: /导入 PDF/ }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(add);
+    await user.keyboard("{ArrowDown}{End}{Enter}");
+    const dialog = screen.getByRole("dialog", { name: "新建文献条目" });
+    expect(document.activeElement).toBe(within(dialog).getByRole("textbox", { name: "标题" }));
+    within(dialog).getByRole("button", { name: "创建条目" }).focus();
+    await user.tab();
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "关闭" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(add);
+  });
+
+  it("keeps hidden details hidden while rows are selected, and restores them on request", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "second", title: "Second reference", addedAt: "2026-05-01T00:00:00.000Z" });
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+    expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+    expect(screen.getByRole("button", { name: "显示详情" }).getAttribute("aria-expanded")).toBe("false");
+
+    const secondRow = screen.getByText("Second reference").closest("tr")!;
+    await user.click(secondRow);
+    expect(secondRow.getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+    expect(useLiteratureStore.getState().library.papers[0].unread).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "显示详情" }));
+    const details = screen.getByRole("region", { name: "文献详情" });
+    expect(within(details).getAllByText("Second reference").length).toBeGreaterThan(0);
+  });
+
+  it("opens the record on Enter or double-click when a paper has no PDF", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+    const row = screen.getByText(fixturePaper.title).closest("tr")!;
+    row.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("region", { name: "文献详情" })).toBeTruthy();
+    await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+    await user.dblClick(row);
+    expect(screen.getByRole("region", { name: "文献详情" })).toBeTruthy();
+  });
+
+  it("drops hidden checked rows when changing to another collection", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "second", title: "A starred reference", starred: true });
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("checkbox", { name: "选择 " + fixturePaper.title }));
+    expect(screen.getByRole("toolbar", { name: "批量操作" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "已收藏 1" }));
+    expect(screen.queryByRole("toolbar", { name: "批量操作" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "全部论文 2" }));
+    expect((screen.getByRole("checkbox", { name: "选择 " + fixturePaper.title }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("applies advanced filters without saving a search and clears them in one action", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "older", title: "Older reference", year: 2019 });
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("button", { name: "高级搜索" }));
+    const filters = screen.getByRole("region", { name: "高级搜索" });
+    await user.selectOptions(within(filters).getByRole("combobox", { name: "搜索字段" }), "year");
+    await user.selectOptions(within(filters).getByRole("combobox", { name: "匹配方式" }), "greaterThan");
+    await user.type(within(filters).getByRole("textbox", { name: "条件值" }), "2020");
+    await user.click(within(filters).getByRole("button", { name: "应用筛选" }));
+    expect(screen.queryByText("Older reference")).toBeNull();
+    expect(useLiteratureStore.getState().library.searches).toHaveLength(0);
+    expect(screen.getByText("1 项高级条件")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByText("Older reference")).toBeTruthy();
+    expect(screen.queryByText("1 项高级条件")).toBeNull();
+  });
+
+  it("scopes quick-filter counts to the collection and clears hidden selections", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.collections = [{ id: "core", label: "Core review" }];
+    library.papers[0].collectionIds = ["core"];
+    library.papers.push(
+      { ...structuredClone(fixturePaper), id: "read", title: "Read and starred", unread: false, starred: true, collectionIds: ["core"] },
+      { ...structuredClone(fixturePaper), id: "outside", title: "Outside collection", starred: true },
+    );
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("button", { name: "Core review 2" }));
+    const quickFilters = screen.getByRole("group", { name: "快捷筛选" });
+    expect(within(quickFilters).getByRole("button", { name: "全部 2" })).toBeTruthy();
+    expect(within(quickFilters).getByRole("button", { name: "已收藏 1" })).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "选择 " + fixturePaper.title }));
+    await user.click(within(quickFilters).getByRole("button", { name: "已收藏 1" }));
+    const list = screen.getByRole("grid", { name: "文献列表" });
+    expect(within(list).queryByText(fixturePaper.title)).toBeNull();
+    expect(within(list).queryByText("Outside collection")).toBeNull();
+    expect(within(list).getByText("Read and starred")).toBeTruthy();
+    expect(screen.queryByRole("toolbar", { name: "批量操作" })).toBeNull();
+    await user.click(within(quickFilters).getByRole("button", { name: "未读 1" }));
+    expect(within(list).getByText(fixturePaper.title)).toBeTruthy();
+    expect(within(list).queryByText("Read and starred")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(within(list).getByText("Read and starred")).toBeTruthy();
+  });
+
+  it("uses the list for an obsolete card preference and keeps selection and keyboard actions", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "second", title: "Second reference" });
+    mocks.literatureLoad.mockResolvedValue(library);
+    localStorage.setItem("somniq-literature-layout-v1", JSON.stringify({ layout: "cards" }));
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.click(screen.getByRole("checkbox", { name: "选择 " + fixturePaper.title }));
+    expect(document.querySelector(".lit-layout-list")).toBeTruthy();
+    expect((screen.getByRole("checkbox", { name: "选择 " + fixturePaper.title }) as HTMLInputElement).checked).toBe(true);
+    const second = within(screen.getByRole("grid", { name: "文献列表" })).getByText("Second reference").closest("tr")!;
+    second.focus();
+    await user.keyboard(" ");
+    expect((within(second).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("focuses the top search with Ctrl+K and opens a PDF from its Info file card", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].pdf = { status: "downloaded", path: "papers/reading.pdf" };
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    await user.keyboard("{Control>}k{/Control}");
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "筛选论文" }));
+    const files = document.querySelector(".lip-reference-files") as HTMLElement;
+    await user.click(within(files).getByRole("button", { name: /reading.pdf/ }));
+    expect(document.querySelector(".lit-reading-shell")).toBeTruthy();
+    expect(useLiteratureStore.getState().library.papers[0].unread).toBe(false);
+  });
+
+  it("uses arrow keys for the labeled detail tabs and keeps control keys out of row selection", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers.push({ ...structuredClone(fixturePaper), id: "second", title: "Second reference" });
+    mocks.literatureLoad.mockResolvedValue(library);
+    render(<Literature />);
+    await screen.findAllByText(fixturePaper.title);
+    const info = screen.getByRole("tab", { name: "信息" });
+    info.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "相关" }).getAttribute("aria-selected")).toBe("true");
+    await user.keyboard("{Home}");
+    expect(info.getAttribute("aria-selected")).toBe("true");
+    const secondRow = screen.getByText("Second reference").closest("tr")!;
+    within(secondRow).getByRole("button", { name: "收藏" }).focus();
+    await user.keyboard(" ");
+    expect(secondRow.getAttribute("aria-selected")).toBe("false");
+    expect(useLiteratureStore.getState().library.papers.find((paper) => paper.id === "second")?.starred).toBe(true);
+  });
+
   it("batch-moves selected papers along the pipeline", async () => {
     const user = userEvent.setup();
     render(<Literature />);
@@ -2889,11 +3136,337 @@ describe("Literature library", () => {
     await user.click(
       screen.getByLabelText("选择 Persisted Paper on Grounded Reading"),
     );
-    const batchBar = screen.getByRole("toolbar", { name: "Batch actions" });
+    const batchBar = screen.getByRole("toolbar", { name: "批量操作" });
     await user.click(within(batchBar).getByRole("button", { name: "候选" }));
 
     await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "候选 1" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "收件箱 0" })).toBeTruthy();
+  });
+  describe("list keyboard and multi-select", () => {
+    const threePapers = () => {
+      const library = fixtureLibrary();
+      library.papers.push(
+        { ...structuredClone(fixturePaper), id: "second", title: "Second reference", addedAt: "2026-05-01T00:00:00.000Z" },
+        { ...structuredClone(fixturePaper), id: "third", title: "Third reference", addedAt: "2026-04-01T00:00:00.000Z" },
+      );
+      mocks.literatureLoad.mockResolvedValue(library);
+    };
+    const paperRows = () => Array.from(document.querySelectorAll<HTMLTableRowElement>("tr.lit-row"));
+    const checkedTitles = () => paperRows()
+      .filter((row) => row.querySelector<HTMLInputElement>("input[type='checkbox']")?.checked)
+      .map((row) => row.querySelector(".lit-row-title")?.textContent);
+
+    it("keeps a single tab stop and moves the selection with the arrow keys", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const rows = paperRows();
+      expect(rows.filter((row) => row.tabIndex === 0)).toHaveLength(1);
+
+      rows[0].focus();
+      await user.keyboard("{ArrowDown}");
+      expect(document.activeElement).toBe(rows[1]);
+      expect(rows[1].getAttribute("aria-selected")).toBe("true");
+      await user.keyboard("{End}");
+      expect(document.activeElement).toBe(rows[2]);
+      expect(rows[2].getAttribute("aria-selected")).toBe("true");
+      await user.keyboard("{Home}");
+      expect(document.activeElement).toBe(rows[0]);
+      expect(paperRows().filter((row) => row.tabIndex === 0)).toEqual([rows[0]]);
+    });
+
+    it("ticks with Space, extends with Shift+arrow, selects all and clears with Escape", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const rows = paperRows();
+      const titles = rows.map((row) => row.querySelector(".lit-row-title")?.textContent);
+
+      rows[0].focus();
+      await user.keyboard(" ");
+      expect(checkedTitles()).toEqual([titles[0]]);
+      await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}");
+      expect(checkedTitles()).toEqual(titles);
+      await user.keyboard("{Escape}");
+      expect(checkedTitles()).toEqual([]);
+      expect(screen.queryByRole("toolbar", { name: "批量操作" })).toBeNull();
+      await user.keyboard("{Control>}a{/Control}");
+      expect(checkedTitles()).toEqual(titles);
+      expect(within(screen.getByRole("toolbar", { name: "批量操作" })).getByText("已选 3 篇")).toBeTruthy();
+    });
+
+    it("ticks a run with Shift-click and toggles single rows with Ctrl-click", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const rows = paperRows();
+      const titles = rows.map((row) => row.querySelector(".lit-row-title")?.textContent);
+      const box = (row: HTMLTableRowElement) => row.querySelector<HTMLInputElement>("input[type='checkbox']")!;
+
+      await user.click(box(rows[0]));
+      await user.keyboard("{Shift>}");
+      await user.click(box(rows[2]));
+      await user.keyboard("{/Shift}");
+      expect(checkedTitles()).toEqual(titles);
+
+      await user.keyboard("{Control>}");
+      await user.click(rows[1]);
+      await user.keyboard("{/Control}");
+      expect(checkedTitles()).toEqual([titles[0], titles[2]]);
+
+      await user.click(rows[0]);
+      await user.keyboard("{Shift>}");
+      await user.click(rows[1]);
+      await user.keyboard("{/Shift}");
+      expect(checkedTitles()).toEqual(titles);
+    });
+
+    it("clears ticks with Escape while a row checkbox has focus", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      await user.click(paperRows()[1].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      expect(checkedTitles()).toHaveLength(1);
+      await user.keyboard("{Escape}");
+      expect(checkedTitles()).toEqual([]);
+    });
+
+    it("keeps the rows in place when the batch bar appears", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const table = screen.getByRole("grid", { name: "文献列表" });
+      const siblingsBefore = table.parentElement!.children.length;
+      await user.click(paperRows()[0].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      const bar = screen.getByRole("toolbar", { name: "批量操作" });
+      // The bar overlays the sticky header inside the scroll area instead of
+      // being inserted above it.
+      expect(bar.parentElement).toBe(table.parentElement);
+      expect(bar.nextElementSibling).toBe(table);
+      expect(table.parentElement!.children.length).toBe(siblingsBefore + 1);
+    });
+
+    it("moves the focused paper to the trash with Delete and undoes it", async () => {
+      const user = userEvent.setup();
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const [first, second] = paperRows();
+      const firstTitle = first.querySelector(".lit-row-title")?.textContent;
+      const secondTitle = second.querySelector(".lit-row-title")?.textContent;
+
+      first.focus();
+      await user.keyboard("{Delete}");
+      expect(confirm).not.toHaveBeenCalled();
+      expect(screen.queryByText(firstTitle!)).toBeNull();
+      expect((document.activeElement as HTMLElement).querySelector(".lit-row-title")?.textContent).toBe(secondTitle);
+      const notice = screen.getByRole("status");
+      expect(notice.textContent).toContain("已将 1 篇移入回收站");
+
+      await user.click(within(notice).getByRole("button", { name: "撤销" }));
+      await waitFor(() => expect(mocks.literatureRestoreItems).toHaveBeenCalledWith([expect.any(String)]));
+      expect(screen.queryByText("已将 1 篇移入回收站")).toBeNull();
+    });
+
+    it("treats narrow-layout details as a drawer that Escape dismisses", async () => {
+      class NarrowObserver {
+        constructor(private readonly callback: ResizeObserverCallback) {}
+        observe() {
+          this.callback([{ contentRect: { width: 700 } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      }
+      vi.stubGlobal("ResizeObserver", NarrowObserver);
+      try {
+        const user = userEvent.setup();
+        threePapers();
+        render(<Literature />);
+        await screen.findByText("Third reference");
+        const rows = paperRows();
+        await user.click(rows[0]);
+        const details = await screen.findByRole("region", { name: "文献详情" });
+        within(details).getByRole("tab", { name: "信息" }).focus();
+        await user.keyboard("{Escape}");
+        expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+        expect(document.activeElement).toBe(rows[0]);
+
+        // Browsing with the keyboard leaves the list uncovered...
+        await user.keyboard("{ArrowDown}");
+        expect(rows[1].getAttribute("aria-selected")).toBe("true");
+        expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+        // ...while a click still opens the drawer after it was dismissed.
+        await user.click(rows[2]);
+        expect(await screen.findByRole("region", { name: "文献详情" })).toBeTruthy();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("opens row actions on right-click and targets the ticked rows", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const rows = paperRows();
+      const titles = rows.map((row) => row.querySelector(".lit-row-title")?.textContent ?? "");
+
+      fireEvent.contextMenu(rows[2], { clientX: 120, clientY: 140 });
+      let menu = screen.getByRole("menu", { name: `“${titles[2]}”的操作` });
+      expect(rows[2].getAttribute("aria-selected")).toBe("true");
+      await user.click(within(menu).getByRole("menuitem", { name: "收藏" }));
+      expect(useLiteratureStore.getState().library.papers.find((paper) => paper.title === titles[2])?.starred).toBe(true);
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      await user.click(rows[0].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      await user.click(rows[1].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      fireEvent.contextMenu(rows[1], { clientX: 120, clientY: 140 });
+      menu = screen.getByRole("menu", { name: "2 篇文献的操作" });
+      await user.click(within(menu).getByRole("menuitem", { name: "加入候选" }));
+      const stages = useLiteratureStore.getState().library.papers
+        .filter((paper) => titles.slice(0, 2).includes(paper.title))
+        .map((paper) => paper.stage);
+      expect(stages).toEqual(["shortlist", "shortlist"]);
+
+      // A right-click outside the ticked set replaces it with that row.
+      await user.click(rows[0].querySelector<HTMLInputElement>("input[type='checkbox']")!);
+      fireEvent.contextMenu(rows[2], { clientX: 120, clientY: 140 });
+      expect(checkedTitles()).toEqual([]);
+      menu = screen.getByRole("menu", { name: `“${titles[2]}”的操作` });
+      await user.click(within(menu).getByRole("menuitem", { name: "移入回收站" }));
+      expect(screen.queryByText(titles[2])).toBeNull();
+      expect(screen.getByRole("status").textContent).toContain("已将 1 篇移入回收站");
+    });
+
+    it("closes the row menu with Escape and returns focus to the row", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      const row = paperRows()[1];
+      fireEvent.contextMenu(row, { clientX: 0, clientY: 0 });
+      const menu = screen.getByRole("menu");
+      expect(document.activeElement).toBe(within(menu).getAllByRole("menuitem")[0]);
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it("sorts from the column headers and keeps missing values last", async () => {
+      const user = userEvent.setup();
+      const library = fixtureLibrary();
+      library.papers[0] = { ...library.papers[0], title: "Beta", year: 2021, venue: "Nature" };
+      library.papers.push(
+        { ...structuredClone(fixturePaper), id: "alpha", title: "Alpha", year: 2024, venue: "" },
+        { ...structuredClone(fixturePaper), id: "gamma", title: "Gamma", year: undefined, venue: "ACL" },
+      );
+      mocks.literatureLoad.mockResolvedValue(library);
+      render(<Literature />);
+      await screen.findByText("Gamma");
+      const order = () => paperRows().map((row) => row.querySelector(".lit-row-title")?.textContent);
+      const header = (name: string) => screen.getByRole("columnheader", { name });
+
+      await user.click(within(header("年份")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBe("descending");
+      expect(order()).toEqual(["Alpha", "Beta", "Gamma"]);
+      await user.click(within(header("年份")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBe("ascending");
+      expect(order()).toEqual(["Beta", "Alpha", "Gamma"]);
+
+      await user.click(within(header("出版物")).getByRole("button"));
+      expect(header("年份").getAttribute("aria-sort")).toBeNull();
+      expect(header("出版物").getAttribute("aria-sort")).toBe("ascending");
+      expect(order()).toEqual(["Gamma", "Beta", "Alpha"]);
+      await user.click(within(header("出版物")).getByRole("button"));
+      expect(header("出版物").getAttribute("aria-sort")).toBe("descending");
+      expect(order()).toEqual(["Beta", "Gamma", "Alpha"]);
+
+      await user.click(within(header("标题")).getByRole("button"));
+      expect(order()).toEqual(["Alpha", "Beta", "Gamma"]);
+    });
+
+    it("remembers hidden details, sorting and panel widths across visits", async () => {
+      const user = userEvent.setup();
+      threePapers();
+      const first = render(<Literature />);
+      await screen.findByText("Third reference");
+      await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+      await user.click(within(screen.getByRole("columnheader", { name: "标题" })).getByRole("button"));
+      const divider = screen.getByRole("separator", { name: "调整导航宽度" });
+      expect(divider.getAttribute("aria-valuenow")).toBe("268");
+      divider.focus();
+      await user.keyboard("{ArrowRight}{ArrowRight}");
+      expect(divider.getAttribute("aria-valuenow")).toBe("300");
+      await waitFor(() => expect(JSON.parse(localStorage.getItem("somniq-literature-layout-v1") ?? "{}")).toMatchObject({
+        detailsHidden: true,
+        sort: "title",
+        sidebarWidth: 300,
+      }));
+      first.unmount();
+
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+      expect(screen.getByRole("columnheader", { name: "标题" }).getAttribute("aria-sort")).toBe("ascending");
+      const restored = screen.getByRole("separator", { name: "调整导航宽度" });
+      expect(restored.getAttribute("aria-valuenow")).toBe("300");
+      await user.dblClick(restored);
+      expect(restored.getAttribute("aria-valuenow")).toBe("268");
+    });
+
+    it("ignores unreadable stored layout", async () => {
+      localStorage.setItem("somniq-literature-layout-v1", "{not json");
+      threePapers();
+      render(<Literature />);
+      await screen.findByText("Third reference");
+      expect(screen.getByRole("region", { name: "文献详情" })).toBeTruthy();
+      expect(screen.getByRole("separator", { name: "调整导航宽度" }).getAttribute("aria-valuenow")).toBe("268");
+    });
+
+    it("opens the PDF on double-click even where the drawer would cover the row", async () => {
+      class NarrowObserver {
+        constructor(private readonly callback: ResizeObserverCallback) {}
+        observe() {
+          this.callback([{ contentRect: { width: 700 } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      }
+      vi.stubGlobal("ResizeObserver", NarrowObserver);
+      try {
+        const user = userEvent.setup();
+        const library = fixtureLibrary();
+        library.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+        mocks.literatureLoad.mockResolvedValue(library);
+        render(<Literature />);
+        await screen.findAllByText(fixturePaper.title);
+        await user.click(within(screen.getByRole("region", { name: "文献详情" })).getByRole("button", { name: "收起详情" }));
+        const row = paperRows()[0];
+        // The first click must not put the drawer over the row before the
+        // second click of the double-click arrives.
+        fireEvent.click(row, { detail: 1 });
+        expect(screen.queryByRole("region", { name: "文献详情" })).toBeNull();
+        fireEvent.click(row, { detail: 2 });
+        fireEvent.doubleClick(row, { detail: 2 });
+        expect(screen.getByRole("tablist", { name: "已打开的 PDF" })).toBeTruthy();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("focuses the library search with the slash key", async () => {
+      const user = userEvent.setup();
+      render(<Literature />);
+      await screen.findAllByText(fixturePaper.title);
+      await user.keyboard("/");
+      expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "筛选论文" }));
+    });
   });
 });

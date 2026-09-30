@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.71"
+version = "0.4.73"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -34,6 +34,7 @@ semver = "1"
 toml = "0.8"
 encoding_rs = "0.8"
 pdf-extract = "0.12"
+lopdf = { version = "0.42", default-features = false }
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Embedded VS Code runtime: VSCodium publishes `reh-web` as a gzipped tarball.
 # Both crates were already in the lock file as transitive dependencies.
@@ -64,7 +65,7 @@ compute = { path = "../../crates/compute" }
 # in the readable desktop configuration file.
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "apple-native", "linux-native"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"] }
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tauri-plugin-updater = "2"

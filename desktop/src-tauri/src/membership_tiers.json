@@ -1,0 +1,61 @@
+{
+  "note": "Copy of SomniQ-Site deploy/newapi/tiers.json (fields the desktop reads). Update both together.",
+  "freeGroup": "default",
+  "operatorGroups": [
+    "千研"
+  ],
+  "tiers": [
+    {
+      "id": "free",
+      "group": "default",
+      "name": {
+        "zh": "免费版",
+        "en": "Free",
+        "es": "Gratis"
+      },
+      "features": {
+        "systematicSearch": false,
+        "latexCloud": false
+      }
+    },
+    {
+      "id": "go",
+      "group": "go",
+      "name": {
+        "zh": "Go",
+        "en": "Go",
+        "es": "Go"
+      },
+      "features": {
+        "systematicSearch": false,
+        "latexCloud": false
+      }
+    },
+    {
+      "id": "plus",
+      "group": "plus",
+      "name": {
+        "zh": "Plus",
+        "en": "Plus",
+        "es": "Plus"
+      },
+      "features": {
+        "systematicSearch": true,
+        "latexCloud": false
+      }
+    },
+    {
+      "id": "pro",
+      "group": "pro",
+      "name": {
+        "zh": "Pro",
+        "en": "Pro",
+        "es": "Pro"
+      },
+      "features": {
+        "systematicSearch": true,
+        "latexCloud": "coming"
+      }
+    }
+  ]
+}

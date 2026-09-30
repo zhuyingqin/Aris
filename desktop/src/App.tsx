@@ -1201,7 +1201,7 @@ export default function App() {
               </div>
             )}
           </div>
-          {tab === "literature" && (
+          {tab === "literature" && literaturePageView !== "library" && (
             <LiteratureViewTabs
               pageView={literaturePageView}
               onPageViewChange={setLiteraturePageView}
@@ -1209,6 +1209,7 @@ export default function App() {
             />
           )}
         </div>
+        {tab === "literature" && literaturePageView === "library" && <div id="literature-toolbar-slot" />}
         <div className="app-head-actions">
           <div
             className="project-switcher"

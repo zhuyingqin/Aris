@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { isTauri, newapiGroups, newapiUpdateGroup, newapiUsageLogs, type NewApiAccount, type NewApiGroupOption, type NewApiUsageLogPage } from "../api/tauri";
+import { isTauri, newapiUsageLogs, type NewApiAccount, type NewApiUsageLogPage } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
 import { readCachedUsageLogPages, writeCachedUsageLogPages } from "../accountCache";
 import { epochToDate } from "../timestamp";
@@ -23,7 +23,6 @@ interface Props {
   accountLoading: boolean;
   accountError: string;
   onRefreshAccount: () => Promise<void>;
-  onAccountRefreshed: (account: NewApiAccount) => void;
 }
 
 export default function AccountSettings({
@@ -32,21 +31,14 @@ export default function AccountSettings({
   accountLoading,
   accountError,
   onRefreshAccount,
-  onAccountRefreshed,
 }: Props) {
   const setError = useStore((state) => state.setError);
   const logout = useStore((state) => state.logout);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const previewData = PREVIEW_SETTINGS_DATA[language];
-  const PREVIEW_GROUP_OPTIONS = previewData.groupOptions;
   const PREVIEW_USAGE_LOGS = previewData.usageLogs;
 
-  const [groupOptions, setGroupOptions] = useState<NewApiGroupOption[]>(() => isTauri() ? [] : PREVIEW_GROUP_OPTIONS);
-  const [groupDraft, setGroupDraft] = useState(() => account?.group ?? "");
-  const [groupLoading, setGroupLoading] = useState(false);
-  const [groupSaving, setGroupSaving] = useState(false);
-  const [groupError, setGroupError] = useState("");
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageLogPage, setUsageLogPage] = useState(1);
   const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
@@ -127,55 +119,6 @@ export default function AccountSettings({
     setUsageLogPage(nextPage);
   };
 
-  const loadGroupOptions = async () => {
-    if (!isTauri()) {
-      setGroupOptions(PREVIEW_GROUP_OPTIONS);
-      return;
-    }
-    setGroupLoading(true);
-    setGroupError("");
-    try {
-      setGroupOptions(await newapiGroups());
-    } catch (error) {
-      setGroupError(formatUserFacingError(error, language));
-    } finally {
-      setGroupLoading(false);
-    }
-  };
-
-  const saveAccountGroup = async () => {
-    const nextGroup = groupDraft.trim();
-    if (!nextGroup || !account || nextGroup === account.group) return;
-    setGroupSaving(true);
-    setGroupError("");
-    try {
-      const next = isTauri()
-        ? await newapiUpdateGroup(nextGroup)
-        : { ...account, group: nextGroup };
-      setGroupDraft(next.group);
-      onAccountRefreshed(next);
-    } catch (error) {
-      const message = formatUserFacingError(error, language);
-      setGroupError(message);
-      setError(message);
-    } finally {
-      setGroupSaving(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadGroupOptions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // `account` is fetched by the parent and may still be in flight (or may
-  // change from other tabs, e.g. picking a managed model) when this tab
-  // mounts; keep the draft in sync with the confirmed group instead of only
-  // seeding it once at mount.
-  useEffect(() => {
-    setGroupDraft(account?.group ?? "");
-  }, [account?.group]);
-
   useEffect(() => {
     if (!isTauri()) return;
     const refreshAccount = usageRefreshPendingRef.current;
@@ -193,17 +136,6 @@ export default function AccountSettings({
   const subscriptionTotalQuota = subscriptionUsedQuota + subscriptionRemainingQuota;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
   const accountPageRefreshing = accountLoading || usageLoading;
-  const groupCopy = {
-    label: copy.groupLabel,
-    hint: copy.groupHint,
-    save: copy.groupSave,
-    saving: copy.groupSaving,
-    loading: copy.groupLoading,
-    empty: copy.groupEmpty,
-  };
-  const groupOptionsWithCurrent = account?.group && !groupOptions.some((option) => option.name === account.group)
-    ? [{ name: account.group, desc: account.groupDesc, ratio: account.groupRatio }, ...groupOptions]
-    : groupOptions;
   const usageLogTotal = usageLogs?.total ?? 0;
   const usageLogItems = usageLogs?.items ?? [];
   const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
@@ -243,37 +175,6 @@ export default function AccountSettings({
               {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag">{copy.authGroupTag(account.group)}</span> : null}
             </div>
             {!account && <div className="sp-update-meta">{accountError || copy.authSignedOutSub}</div>}
-            {account && (
-              <div className="sp-account-group-control">
-                <label className="sp-account-group-field">
-                  <span>{groupCopy.label}</span>
-                  <select
-                    className="sp-settings-select"
-                    value={groupDraft}
-                    onChange={(event) => setGroupDraft(event.currentTarget.value)}
-                    disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
-                  >
-                    {groupOptionsWithCurrent.map((option) => (
-                      <option value={option.name} key={option.name}>
-                        {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className="sp-btn sp-btn-secondary"
-                  type="button"
-                  onClick={() => void saveAccountGroup()}
-                  disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
-                >
-                  {groupSaving ? groupCopy.saving : groupCopy.save}
-                </button>
-                <div className="sp-account-group-hint">
-                  {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
-                </div>
-                {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
-              </div>
-            )}
             {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
           </div>
         </div>

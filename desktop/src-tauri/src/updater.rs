@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::{ipc::Channel, AppHandle};
 use tauri_plugin_updater::UpdaterExt;
 
-const CHINA_UPDATE_ENDPOINT: &str = "https://somni.chat/releases/latest.json";
+const CHINA_UPDATE_ENDPOINT: &str = "https://somni.ensuanx.com/releases/latest.json";
 const GLOBAL_UPDATE_ENDPOINT: &str =
     "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json";
 
@@ -51,7 +51,7 @@ async fn check(
         .updater_builder()
         // Exactly one endpoint is supplied deliberately. Mainland China must
         // never fall through to GitHub, while the global channel must not use
-        // the website mirror.
+        // the China release mirror.
         .endpoints(vec![endpoint])
         .map_err(|error| error.to_string())?
         .build()
@@ -144,13 +144,21 @@ mod tests {
     use super::{endpoint_for_region, CHINA_UPDATE_ENDPOINT, GLOBAL_UPDATE_ENDPOINT};
 
     #[test]
-    fn china_uses_only_the_official_website_endpoint() {
+    fn china_uses_only_the_release_mirror_endpoint() {
+        assert_eq!(
+            endpoint_for_region(true),
+            "https://somni.ensuanx.com/releases/latest.json"
+        );
         assert_eq!(endpoint_for_region(true), CHINA_UPDATE_ENDPOINT);
         assert!(!endpoint_for_region(true).contains("github.com"));
     }
 
     #[test]
     fn users_outside_china_use_the_github_endpoint() {
+        assert_eq!(
+            endpoint_for_region(false),
+            "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json"
+        );
         assert_eq!(endpoint_for_region(false), GLOBAL_UPDATE_ENDPOINT);
         assert!(endpoint_for_region(false).contains("github.com"));
     }

@@ -2284,6 +2284,76 @@ fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() 
     assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
 }
 
+#[test]
+fn paper_reading_uses_an_isolated_source_only_chat_context() {
+    let context = PaperReadingRuntimeContext {
+        run_id: "run-1".into(), paper_id: "paper-1".into(),
+        document_revision: "a".repeat(64), page_index: 3,
+        stage: "multimodal_explanation",
+        executor_signature: "b".repeat(64),
+    };
+    let prompt = PaperReadingRuntimeContext::system_prompt().join("\n");
+    // Cacheable: nothing about the run, page or stage is in the system prompt.
+    for varying in ["run-1", "paper-1", "multimodal_explanation", &"a".repeat(64)] {
+        assert!(!prompt.contains(varying), "system prompt varies with {varying}");
+    }
+    let binding = context.binding_note();
+    assert!(binding.contains("run-1") && binding.contains("multimodal_explanation"));
+    let other_stage = PaperReadingRuntimeContext {
+        page_index: 7,
+        stage: "follow_up",
+        ..context.clone()
+    };
+    assert_eq!(context.routing_key(), other_stage.routing_key());
+    let mut message = ConversationMessage::user_blocks(vec![
+        ContentBlock::Text { text: "preamble".into() },
+        ContentBlock::Text { text: "task".into() },
+    ]);
+    append_to_final_text_block(&mut message, &binding);
+    assert!(matches!(&message.blocks[0], ContentBlock::Text { text } if text == "preamble"));
+    assert!(matches!(&message.blocks[1], ContentBlock::Text { text } if text.starts_with("task\n\nTask binding")));
+    let task = ChatTurnRuntime::PaperReading(context);
+    assert!(!task.emits_desktop_chat_events());
+    assert!(!task.tool_profile().1);
+    assert!(task.workflow().is_none());
+    assert!(task.work_task().is_none());
+    assert!(task.paper_reading().is_some());
+    assert!(prompt.contains(runtime::paper_reading::PAPER_READING_POLICY));
+    assert!(prompt.contains("never evidence"));
+    assert!(prompt.contains("No tools or external retrieval are authorized"));
+    for tool in ["ToolSearch", "ReadFile", "Bash", "WebFetch", "AskUserQuestion", "LlmReview"] {
+        assert!(validate_source_only_tool_access(true, tool).is_err());
+        assert!(validate_source_only_tool_access(false, tool).is_ok());
+    }
+}
+
+#[test]
+fn paper_vision_probe_requires_the_number_in_the_test_image() {
+    assert!(paper_vision_probe_passed("58"));
+    assert!(paper_vision_probe_passed("The number is 58."));
+    assert!(!paper_vision_probe_passed("I cannot see any image."));
+    assert!(!paper_vision_probe_passed("85"));
+    let image = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        PAPER_VISION_PROBE_PNG,
+    )
+    .unwrap();
+    assert!(image.starts_with(b"\x89PNG"));
+}
+
+#[test]
+fn paper_reading_model_identity_tracks_the_endpoint_without_storing_credentials() {
+    let config = |api_key: &str, base_url: &str| aris_chat::ChatExecutorConfig::OpenAiCompatible {
+        api_key: api_key.into(), base_url: base_url.into(),
+        send_routing_session_header: false, transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec![],
+    };
+    let first = paper_executor_signature("vision", "openai", &config("first-key", "https://example.test/v1"));
+    assert_eq!(first, paper_executor_signature("vision", "openai", &config("rotated-key", "https://example.test/v1")));
+    assert_ne!(first, paper_executor_signature("vision", "openai", &config("first-key", "https://other.test/v1")));
+    assert_eq!(first.len(), 64);
+}
+
 pub(crate) fn workflow_runtime_context(stage_id: &str, background: bool) -> WorkflowRuntimeContext {
     WorkflowRuntimeContext {
         binding: WorkflowSessionBinding {

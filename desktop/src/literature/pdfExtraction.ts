@@ -4,6 +4,8 @@ import { renderPdfPageToCanvas } from "../pdf/canvas";
 import { openPdfDocument } from "../pdf/runtime";
 import { useStore } from "../store";
 import { LITERATURE_COPY } from "./i18n";
+import { bytesToBase64, fingerprintBytes, normalizeText, pageEmbeddedText, renderPageJpeg } from "./pdfEvidence";
+export { paperDocumentRevision, preparePaperPageEvidence } from "./pdfEvidence";
 
 export interface PdfPageExtraction {
   page: number;
@@ -39,25 +41,7 @@ export interface PdfImageExtraction {
 const hasReadableText = (text: string) =>
   Array.from(text).filter((character) => /[\p{L}\p{N}]/u.test(character)).length >= 8;
 
-const normalizeText = (text: string) =>
-  text
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
 const PDF_IMAGE_MAX_PIXELS = 16_000_000;
-
-const pageEmbeddedText = async (page: PDFPageProxy) => {
-  const content = await page.getTextContent();
-  const text = content.items
-    .map((item) => {
-      if (!("str" in item)) return "";
-      return `${item.str}${item.hasEOL ? "\n" : " "}`;
-    })
-    .join("");
-  return normalizeText(text);
-};
 
 const renderPagePng = async (page: PDFPageProxy) => {
   const canvas = document.createElement("canvas");
@@ -73,63 +57,6 @@ const renderPagePng = async (page: PDFPageProxy) => {
     ),
   );
   return Array.from(new Uint8Array(await blob.arrayBuffer()));
-};
-
-const bytesToBase64 = (bytes: Uint8Array) => {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-};
-
-const fallbackFingerprint = (bytes: Uint8Array) => {
-  let hash = 0x811c9dc5;
-  for (const byte of bytes) {
-    hash ^= byte;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
-};
-
-const fingerprintBytes = async (bytes: Uint8Array) => {
-  if (globalThis.crypto?.subtle) {
-    const digestInput = new Uint8Array(bytes.byteLength);
-    digestInput.set(bytes);
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", digestInput.buffer);
-    return `sha256:${Array.from(new Uint8Array(digest))
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("")}`;
-  }
-  return fallbackFingerprint(bytes);
-};
-
-const renderPageJpeg = async (page: PDFPageProxy): Promise<Uint8Array> => {
-  const baseViewport = page.getViewport({ scale: 1 });
-  const edgeScale = 2200 / Math.max(baseViewport.width, baseViewport.height);
-  const areaScale = Math.sqrt(8_000_000 / (baseViewport.width * baseViewport.height));
-  const scale = Math.min(1.6, edgeScale, areaScale);
-  if (!Number.isFinite(scale) || scale <= 0) {
-    throw new Error("PDF page has invalid dimensions for visual reading.");
-  }
-  const canvas = document.createElement("canvas");
-  const render = renderPdfPageToCanvas(page, canvas, scale, { devicePixelRatio: 1 });
-  await render.task.promise;
-  const encode = (quality: number) =>
-    new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob(
-        (value) => value ? resolve(value) : reject(new Error("Could not encode PDF page image.")),
-        "image/jpeg",
-        quality,
-      ),
-    );
-  let blob = await encode(0.88);
-  if (blob.size > 7 * 1024 * 1024) blob = await encode(0.7);
-  if (blob.size > 7 * 1024 * 1024) {
-    throw new Error("Rendered PDF page image exceeds the visual-reading size limit.");
-  }
-  return new Uint8Array(await blob.arrayBuffer());
 };
 
 /**

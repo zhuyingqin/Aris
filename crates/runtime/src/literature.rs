@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{now_iso8601, somniq_project_dir, write_file_atomically};
 
-pub const LITERATURE_SCHEMA_VERSION: u32 = 7;
+pub const LITERATURE_SCHEMA_VERSION: u32 = 8;
 pub const LITERATURE_DIRECTORY: &str = "literature";
 const DATABASE_FILE: &str = "literature.sqlite3";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
@@ -509,7 +509,7 @@ pub struct CanonicalRecordUpsert {
 
 pub struct LiteratureStore {
     root: PathBuf,
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 /// Zotero-style collection metadata. Collections are views over items rather
@@ -3129,6 +3129,18 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
              CREATE TABLE IF NOT EXISTS evidence_cards(
                id TEXT PRIMARY KEY, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS paper_reading_runs(
+               id TEXT PRIMARY KEY, paper_id TEXT NOT NULL, document_revision TEXT NOT NULL,
+               revision INTEGER NOT NULL, updated_at TEXT NOT NULL, payload TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS paper_reading_runs_document_idx
+               ON paper_reading_runs(paper_id, document_revision, updated_at);
+             CREATE TABLE IF NOT EXISTS paper_follow_ups(
+               id TEXT PRIMARY KEY, run_id TEXT NOT NULL, target TEXT NOT NULL,
+               created_at TEXT NOT NULL, payload TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS paper_follow_ups_run_idx
+               ON paper_follow_ups(run_id, created_at);
              CREATE TABLE IF NOT EXISTS literature_audit_log(
                sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL

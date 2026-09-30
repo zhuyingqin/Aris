@@ -33,6 +33,7 @@ fn manifest_common_controls_for_tests() {}
 fn main() {
     println!("cargo:rerun-if-env-changed=ARIS_OUTLOOK_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=ARIS_RELEASE_UNIX_TIMESTAMP");
+    println!("cargo:rerun-if-env-changed=VITE_MANAGED_NEWAPI_URL");
     manifest_common_controls_for_tests();
 
     if let Ok(value) = std::env::var("ARIS_RELEASE_UNIX_TIMESTAMP") {

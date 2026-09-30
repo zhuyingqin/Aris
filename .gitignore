@@ -78,3 +78,7 @@ somniq-remote*.tar.gz
 # hundreds of MB each and are created by hand when sanity-checking the
 # uploaded installer.
 site/temp_release_*/
+
+# Private patent materials: keep local and never commit.
+/patent/
+/docs/patent/

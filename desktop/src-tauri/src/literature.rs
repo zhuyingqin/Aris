@@ -541,7 +541,7 @@ fn run_oneshot_with_model_and_observer(
     Ok((aris_chat::final_assistant_text(&summary), model))
 }
 
-fn validate_vision_model(model: &str) -> Result<(), String> {
+pub(crate) fn validate_vision_model(model: &str) -> Result<(), String> {
     let normalized = model.trim().to_ascii_lowercase();
     if normalized.starts_with("minimax-") && normalized != "minimax-m3" {
         Err(format!(
@@ -614,7 +614,7 @@ fn resolve_pdf_path(
     resolve_pdf_path_at(&project_base(projects_state)?, relative_path)
 }
 
-fn resolve_pdf_path_at(
+pub(crate) fn resolve_pdf_path_at(
     base: &std::path::Path,
     relative_path: &str,
 ) -> Result<std::path::PathBuf, String> {
@@ -1476,6 +1476,9 @@ pub async fn literature_add_identifier(
     projects_state: State<'_, ProjectState>,
     identifier: String,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::external_literature_denial() {
+        return Err(message);
+    }
     let identifier = identifier.trim().to_string();
     let is_doi = identifier.to_ascii_lowercase().starts_with("10.");
     let isbn_digits = identifier.chars().filter(char::is_ascii_digit).count();
@@ -2029,8 +2032,15 @@ pub async fn literature_permanently_delete_items(
     item_ids: Vec<String>,
 ) -> Result<Value, String> {
     let base = project_base(&projects_state)?;
+    let project_id = projects::active_project_id(projects_state.inner()).ok();
     off_main_thread(move || {
-        tools::literature::library_permanently_delete_items_at(&base, &item_ids)
+        let result = tools::literature::library_permanently_delete_items_at(&base, &item_ids)?;
+        // Deleted papers take their paper-guide versions, page images and
+        // analysis sessions with them.
+        if let Some(project_id) = project_id {
+            crate::paper_reading::purge_runs_for_papers(&base, &project_id, &item_ids);
+        }
+        Ok(result)
     })
     .await
 }
@@ -2163,6 +2173,9 @@ pub fn literature_search_protocol_create(
     projects_state: State<ProjectState>,
     protocol: runtime::SearchProtocolDraft,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     tools::literature::literature_search_protocol_create_at(
         &project_base(&projects_state)?,
         tools::literature::LiteratureSearchProtocolCreateInput { protocol },
@@ -2174,6 +2187,9 @@ pub fn literature_search_protocol_preview(
     projects_state: State<ProjectState>,
     protocol_id: String,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     tools::literature::literature_search_preview_at(
         &project_base(&projects_state)?,
         tools::literature::LiteratureSearchPreviewInput { protocol_id },
@@ -2190,6 +2206,9 @@ pub async fn literature_search_protocol_execute(
     variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
     request_id: Option<String>,
 ) -> Result<Value, String> {
+    if let Some(message) = crate::membership::systematic_search_denial() {
+        return Err(message);
+    }
     let base = project_base(&projects_state)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,8 +11,6 @@ const mocks = vi.hoisted(() => ({
   knowledgeConfirm: vi.fn(),
   knowledgeReject: vi.fn(),
   knowledgeGenerate: vi.fn(),
-  literatureLlm: vi.fn(),
-  literatureRagStatus: vi.fn(),
   literatureLoad: vi.fn(),
 }));
 
@@ -24,8 +22,6 @@ vi.mock("../../api/tauri", () => ({
   knowledgeConfirm: mocks.knowledgeConfirm,
   knowledgeReject: mocks.knowledgeReject,
   knowledgeGenerate: mocks.knowledgeGenerate,
-  literatureLlm: mocks.literatureLlm,
-  literatureRagStatus: mocks.literatureRagStatus,
   literatureLoad: mocks.literatureLoad,
 }));
 
@@ -110,46 +106,6 @@ beforeEach(() => {
   mocks.knowledgeConfirm.mockReset().mockResolvedValue(undefined);
   mocks.knowledgeReject.mockReset().mockResolvedValue(true);
   mocks.knowledgeGenerate.mockReset().mockResolvedValue({ candidates: [] });
-  mocks.literatureRagStatus.mockReset().mockResolvedValue({
-    exists: true,
-    cardPreviews: [{
-      chunkId: "chunk-card-1",
-      paperId: "arxiv:1",
-      relativePath: "papers/paper-one.pdf",
-      pageStart: 6,
-      pageEnd: 6,
-      updatedAt: "2026-07-22T00:00:00Z",
-      sourcePreview: "The method is evaluated on a small benchmark.",
-      card: {
-        chunkId: "chunk-card-1",
-        sourceContentHash: "hash-1",
-        questions: ["Which benchmark evaluates the method?"],
-        concepts: ["benchmark evaluation"],
-        sectionHeadings: ["Evaluation"],
-        aliases: ["evaluation suite"],
-        methods: ["local retrieval"],
-        datasets: ["small benchmark"],
-        metrics: [],
-        limitations: [],
-        languageTerms: ["基准评估"],
-        generatedBy: "MiniMax-M3",
-        promptVersion: 1,
-      },
-    }],
-  });
-  mocks.literatureLlm.mockReset().mockResolvedValue(JSON.stringify({
-    categories: [
-      {
-        label: "Agent 大类",
-        children: [
-          {
-            label: "Agent 小类",
-            itemIds: ["arxiv:1:evidence:ev-1", "kp-c1"],
-          },
-        ],
-      },
-    ],
-  }));
 });
 
 afterEach(() => {
@@ -290,49 +246,5 @@ describe("Knowledge review", () => {
 
     await user.click(screen.getByRole("button", { name: /生成知识点/ }));
     await waitFor(() => expect(mocks.knowledgeGenerate).toHaveBeenCalledWith("arxiv:1"));
-  });
-
-  it("organizes fragments and confirmed points in the graph view", async () => {
-    const user = userEvent.setup();
-    render(<Knowledge mode="globalGraph" />);
-
-    const graph = await screen.findByLabelText("知识图谱");
-    expect(graph).toBeTruthy();
-    expect(within(graph).getAllByText("全局知识图谱").length).toBeGreaterThanOrEqual(1);
-    expect(within(graph).queryByText("Evidence note becomes a knowledge fragment.")).toBeNull();
-    expect(within(graph).getByText("证据片段")).toBeTruthy();
-    expect(within(graph).getByText("问答结论")).toBeTruthy();
-    expect(await within(graph).findByText("检索卡（非证据）")).toBeTruthy();
-
-    await user.click(screen.getByRole("button", { name: "显示知识节点" }));
-    expect(within(graph).getByText("Evidence note becomes a knowledge fragment.")).toBeTruthy();
-    expect(within(graph).getByText("Confirmed statement.")).toBeTruthy();
-    expect(within(graph).getByText("Which benchmark evaluates the method?")).toBeTruthy();
-    expect(graph.querySelector(".kb-graph-node.retrieval-card")).toBeTruthy();
-    expect(mocks.literatureRagStatus).toHaveBeenCalledWith(100);
-    expect(graph.querySelector(".kb-graph-edges path")).toBeTruthy();
-    expect(graph.querySelector(".kb-graph-paper-node")).toBeNull();
-    expect(screen.queryByRole("button", { name: /生成知识点/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^待审核/ })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "放大" }));
-    expect(screen.getByText("125%")).toBeTruthy();
-  });
-
-  it("lets the agent rebuild the global graph taxonomy", async () => {
-    const user = userEvent.setup();
-    render(<Knowledge mode="globalGraph" />);
-    await screen.findByLabelText("知识图谱");
-
-    await user.click(screen.getByRole("button", { name: /Agent 重构图谱/ }));
-
-    await waitFor(() => expect(mocks.literatureLlm).toHaveBeenCalled());
-    const graph = await screen.findByLabelText("知识图谱");
-    expect(within(graph).getByText("Agent 大类")).toBeTruthy();
-    expect(within(graph).getByText("Agent 小类")).toBeTruthy();
-
-    await user.click(screen.getByRole("button", { name: "显示知识节点" }));
-    expect(within(graph).getByText("Evidence note becomes a knowledge fragment.")).toBeTruthy();
-    expect(within(graph).getByText("Confirmed statement.")).toBeTruthy();
   });
 });

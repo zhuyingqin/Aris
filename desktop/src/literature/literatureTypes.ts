@@ -56,7 +56,7 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "info" | "overview" | "reader" | "notes" | "evidence" | "files" | "related";
+export type DetailTab = "info" | "reader" | "guide" | "files" | "related";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 

@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.71"
+version = "0.4.73"
 dependencies = [
  "api",
  "aris-chat",
@@ -203,6 +203,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "keyring",
+ "lopdf",
  "native-tls",
  "notebook",
  "notify",

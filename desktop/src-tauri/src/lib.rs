@@ -18,8 +18,10 @@ mod git;
 mod image_assist;
 mod knowledge;
 mod literature;
+mod paper_reading;
 mod mail;
 mod mcp;
+mod membership;
 mod memory;
 mod newapi;
 mod oracle_web;
@@ -650,8 +652,18 @@ fn register_screenshot_shortcut(app: &tauri::AppHandle) {
     screenshot::set_shortcut_status(state.inner(), status);
 }
 
+// Expand the context macro once: macOS embeds a single Info.plist symbol.
+pub(crate) fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    if let Some(manifest) = std::env::var_os("SOMNIQ_PAPER_READING_DIAGNOSTIC") {
+        paper_reading::diagnostic::run(PathBuf::from(manifest));
+        return;
+    }
     configure_webview2_user_data_dir();
     hide_stray_console();
     augment_path_for_desktop_tools();
@@ -701,6 +713,11 @@ pub fn run() {
         .manage(screenshot::ScreenshotState::default())
         .setup(|app| {
             register_screenshot_shortcut(app.handle());
+            // Retire the old HTTP account before bundled settings can be
+            // merged; this also removes its URL-scoped Keyring refresh cookie.
+            if let Err(error) = newapi::retire_legacy_managed_session() {
+                eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
+            }
             let registered_projects =
                 projects::registered_projects(app.state::<projects::ProjectState>().inner())
                     .map(|(projects, _)| projects)
@@ -713,6 +730,9 @@ pub fn run() {
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
                     eprintln!("SomniQ internal config import skipped: {error}");
                 }
+            }
+            if let Err(error) = newapi::retire_legacy_managed_session() {
+                eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
             }
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
@@ -973,8 +993,6 @@ pub fn run() {
             newapi::newapi_send_verification,
             newapi::newapi_models,
             newapi::newapi_bootstrap,
-            newapi::newapi_groups,
-            newapi::newapi_update_group,
             newapi::newapi_usage_logs,
             profile::profile_stats,
             work_task::commands::work_task_list,
@@ -1066,6 +1084,16 @@ pub fn run() {
             literature::literature_search_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
+            paper_reading::paper_reading_prepare,
+            paper_reading::paper_reading_get,
+            paper_reading::paper_reading_source,
+            paper_reading::paper_reading_start,
+            paper_reading::paper_reading_cancel,
+            paper_reading::paper_reading_load,
+            paper_reading::paper_reading_list,
+            paper_reading::paper_reading_delete,
+            paper_reading::paper_reading_follow_ups,
+            paper_reading::paper_reading_ask,
             literature::literature_rag_index_pdf,
             literature::literature_rag_index_library,
             literature::literature_rag_search,
@@ -1184,7 +1212,7 @@ pub fn run() {
             typeset_state::typeset_project_search,
             typeset_state::typeset_project_replace,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
             #[cfg(target_os = "macos")]

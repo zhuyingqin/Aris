@@ -2,6 +2,7 @@ use super::{
     apply_bundled_internal_config, apply_deepseek_executor, apply_patch,
     apply_reviewer_environment_from, build_view, clear_newapi_session, deepseek_executor_key,
     normalize_managed_model_slots, normalize_web_proxy_patch, read_verified, review_enabled_from,
+    sanitize_legacy_managed_http,
     upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
@@ -555,6 +556,113 @@ fn managed_reviewer_replaces_stale_key_with_gateway_key() {
     assert_eq!(obj["reviewer_model"], "deepseek-v4-pro");
     assert_eq!(obj["reviewer_base_url"], "http://gateway.example/v1");
     assert_eq!(obj["reviewer_api_key"], "gateway-token");
+}
+
+#[test]
+fn retired_http_gateway_is_removed_without_touching_other_providers() {
+    let mut obj = serde_json::json!({
+        "newapi_base_url": "http://106.53.28.124:18080",
+        "newapi_user_id": 7,
+        "newapi_access_token": "old-access",
+        "newapi_executor_base_url": "http://106.53.28.124:18080/v1",
+        "newapi_executor_api_key": "old-model-key",
+        "managed_models": ["MiniMax-M3"],
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_base_url": "http://106.53.28.124:18080/v1",
+        "executor_api_key": "old-model-key",
+        "reviewer_model": "gpt-5.5",
+        "reviewer_base_url": "http://106.53.28.124:18080/v1",
+        "reviewer_api_key": "old-model-key",
+        "summarizer_base_url": "https://api.example.com/v1",
+        "summarizer_api_key": "other-key",
+        "verified_executors": [
+            { "provider": "openai", "model": "MiniMax-M3", "base_url": "http://106.53.28.124:18080/v1", "api_key": "old-model-key" },
+            { "provider": "openai", "model": "other", "base_url": "https://api.example.com/v1", "api_key": "other-key" }
+        ]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    assert!(sanitize_legacy_managed_http(&mut obj));
+    for key in ["newapi_base_url", "newapi_access_token", "newapi_executor_api_key", "managed_models", "executor_base_url", "executor_api_key", "reviewer_base_url", "reviewer_api_key"] {
+        assert!(obj.get(key).is_none(), "{key} was retained");
+    }
+    assert_eq!(obj["reviewer_model"], "gpt-5.5");
+    assert_eq!(obj["summarizer_api_key"], "other-key");
+    let verified = read_verified(&obj);
+    assert_eq!(verified.len(), 1);
+    assert_eq!(verified[0].api_key, "other-key");
+    assert!(!sanitize_legacy_managed_http(&mut obj));
+}
+
+#[test]
+fn managed_key_cannot_follow_a_tampered_executor_or_verified_url() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    let mut obj = serde_json::json!({
+        "newapi_base_url": official,
+        "newapi_user_id": 7,
+        "newapi_executor_base_url": format!("{official}/v1"),
+        "newapi_executor_api_key": "managed-key",
+        "managed_models": ["MiniMax-M3"],
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_base_url": "https://attacker.example/v1",
+        "executor_api_key": "managed-key",
+        "reviewer_provider": "custom",
+        "reviewer_model": "own-model",
+        "reviewer_base_url": "https://byok.example/v1",
+        "reviewer_api_key": "own-key",
+        "verified_executors": [
+            { "provider": "openai", "model": "MiniMax-M3", "base_url": "https://attacker.example/v1", "api_key": "managed-key" },
+            { "provider": "openai", "model": "own-model", "base_url": "https://byok.example/v1", "api_key": "own-key" }
+        ]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    assert!(sanitize_legacy_managed_http(&mut obj));
+    assert!(obj.get("executor_api_key").is_none());
+    assert!(obj.get("executor_base_url").is_none());
+    assert_eq!(obj["reviewer_base_url"], "https://byok.example/v1");
+    assert_eq!(obj["reviewer_api_key"], "own-key");
+    assert_eq!(read_verified(&obj).len(), 1);
+
+    normalize_managed_model_slots(&mut obj).expect("normalize safe config");
+    assert!(obj.get("executor_base_url").is_none());
+    assert!(obj.get("executor_api_key").is_none());
+    assert_eq!(obj["newapi_executor_base_url"], format!("{official}/v1"));
+    assert_eq!(obj["newapi_executor_api_key"], "managed-key");
+}
+
+#[test]
+fn orphaned_managed_key_is_not_treated_as_a_byok_credential() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    let mut obj = serde_json::json!({
+        "newapi_executor_base_url": format!("{official}/v1"),
+        "newapi_executor_api_key": "orphaned-managed-key",
+        "managed_models": ["MiniMax-M3"],
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_base_url": "https://byok.example/v1",
+        "executor_api_key": "orphaned-managed-key",
+        "verified_executors": [
+            { "provider": "openai", "model": "MiniMax-M3", "base_url": "https://byok.example/v1", "api_key": "orphaned-managed-key" }
+        ]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
+    assert!(sanitize_legacy_managed_http(&mut obj));
+    assert!(obj.get("newapi_executor_api_key").is_none());
+    assert!(obj.get("newapi_executor_base_url").is_none());
+    assert!(obj.get("managed_models").is_none());
+    assert!(obj.get("executor_api_key").is_none());
+    assert!(obj.get("executor_base_url").is_none());
+    assert!(read_verified(&obj).is_empty());
 }
 
 #[test]

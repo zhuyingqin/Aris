@@ -295,7 +295,6 @@ export default function Settings() {
           accountLoading={accountLoading}
           accountError={accountError}
           onRefreshAccount={loadAccount}
-          onAccountRefreshed={applyRefreshedAccount}
         />
       )}
 

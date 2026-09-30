@@ -424,6 +424,14 @@ impl ApiClient for ExecutorClient {
         }
     }
 
+    fn set_prompt_cache_prefix(&mut self, enabled: bool) {
+        match self {
+            Self::Anthropic(client) => client.set_prompt_cache_prefix(enabled),
+            // OpenAI-compatible providers cache request prefixes automatically.
+            Self::OpenAI(_) => {}
+        }
+    }
+
     fn on_session_compacted(&mut self, removed_count: usize) {
         match self {
             Self::Anthropic(_) => {}
@@ -444,6 +452,7 @@ pub struct AnthropicRuntimeClient {
     base_url: String,
     send_betas: bool,
     trace_sink: Option<Arc<dyn ExecutorTraceSink>>,
+    cache_message_prefix: bool,
 }
 
 impl AnthropicRuntimeClient {
@@ -473,6 +482,7 @@ impl AnthropicRuntimeClient {
             base_url,
             send_betas,
             trace_sink: None,
+            cache_message_prefix: false,
         })
     }
 
@@ -523,6 +533,10 @@ impl ApiClient for AnthropicRuntimeClient {
         self.active_tool_names = tool_names.cloned();
     }
 
+    fn set_prompt_cache_prefix(&mut self, enabled: bool) {
+        self.cache_message_prefix = enabled;
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let active_tool_specs =
@@ -530,7 +544,13 @@ impl ApiClient for AnthropicRuntimeClient {
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            messages: convert_messages(&request.messages),
+            messages: {
+                let mut messages = convert_messages(&request.messages);
+                if self.cache_message_prefix {
+                    mark_stable_prefix_cache_breakpoints(&mut messages);
+                }
+                messages
+            },
             system: if request.system_prompt.is_empty() {
                 None
             } else {
@@ -939,6 +959,29 @@ fn response_to_events(
     Ok(events)
 }
 
+/// Mark the reusable part of the final user message for providers whose
+/// prompt cache only covers explicitly marked blocks: the first block (shared
+/// preamble) and the block before the last (end of reusable evidence). With
+/// the system breakpoint this stays within Anthropic's four-breakpoint limit.
+fn mark_stable_prefix_cache_breakpoints(messages: &mut [InputMessage]) {
+    let Some(message) = messages.iter_mut().rev().find(|message| message.role == "user") else {
+        return;
+    };
+    let count = message.content.len();
+    if count < 2 {
+        return;
+    }
+    for index in [0, count - 2] {
+        match &mut message.content[index] {
+            InputContentBlock::Text { cache_control, .. }
+            | InputContentBlock::Image { cache_control, .. } => {
+                *cache_control = Some(json!({ "type": "ephemeral" }));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
     messages
         .iter()
@@ -953,11 +996,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .filter_map(|block| match block {
                     ContentBlock::Thinking { .. } => None,
                     block => Some(match block {
-                        ContentBlock::Text { text } => {
-                            InputContentBlock::Text { text: text.clone() }
-                        }
+                        ContentBlock::Text { text } => InputContentBlock::Text {
+                            text: text.clone(),
+                            cache_control: None,
+                        },
                         ContentBlock::Image { media_type, data } => InputContentBlock::Image {
                             source: ImageSource::base64(media_type.clone(), data.clone()),
+                            cache_control: None,
                         },
                         ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                             id: id.clone(),

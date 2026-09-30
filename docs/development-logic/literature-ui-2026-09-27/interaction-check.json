@@ -1,0 +1,12 @@
+{
+  "filterWidth": 146,
+  "keyboardMenu": "pass",
+  "panelRestore": "pass",
+  "metadataSelectionDoesNotMarkRead": "pass",
+  "applyAndClearFilters": "pass",
+  "englishLayout": "pass",
+  "virtualizedRecords": 2000,
+  "mountedAtTop": 20,
+  "mountedAtBottom": 20,
+  "errors": []
+}
