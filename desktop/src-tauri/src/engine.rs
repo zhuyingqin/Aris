@@ -3042,7 +3042,7 @@ fn chatgpt_web_image_tool_spec() -> tools::ToolSpec {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional ChatGPT UI model label; omit to use the account default."
+                    "description": "Optional ChatGPT UI model label. Set only when the user explicitly requests a model; otherwise omit to keep the assigned account's current webpage model."
                 }
             },
             "required": ["prompt"],
