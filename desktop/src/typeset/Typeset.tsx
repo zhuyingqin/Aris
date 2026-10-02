@@ -2096,26 +2096,6 @@ export default function Typeset() {
         if (!window.confirm(copy.pendingReviewRejectConfirm(unopened.length, since))) return;
       }
     }
-    if (decision) {
-      // A blanket answer must not become a shortcut around the explicit
-      // complete-file choice. Inspect every still-open text operation first;
-      // non-text operations keep their compact accept/reject review.
-      for (const item of changeSet.decisions) {
-        if (item.decision !== "pending") continue;
-        try {
-          const operation = await typesetChangeSetReadText(changeSet.id, item.path);
-          if (!["create", "modify"].includes(operation.kind)
-            || operation.baseContent === null
-            || operation.incomingContent === null) continue;
-          // A project-level blanket answer is authoritative. Large files are
-          // still reviewable through Accept all / Reject all and do not require
-          // opening every file individually.
-        } catch {
-          // Deletes, moves and binary files are intentionally handled by the
-          // existing compact operation review.
-        }
-      }
-    }
     // Bulk accept/reject answers what is still open; it does not undo answers
     // already on record. That matters beyond convenience: a rebase carries the
     // user's own saves in as `accept`, and overwriting those with a blanket

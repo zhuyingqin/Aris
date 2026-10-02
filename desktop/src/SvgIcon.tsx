@@ -8,6 +8,8 @@ export type SvgIconName =
   | "panelLeft"
   | "panelRight"
   | "upload"
+  | "zoomIn"
+  | "zoomOut"
   | "attachment"
   | "branch"
   | "check"
@@ -190,6 +192,13 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "m8 2.7 5.3 5.3L8 13.3 2.7 8z", strokeLinejoin: "round" }), node("circle", { cx: 8, cy: 8, r: 1.05, fill: "currentColor", stroke: "none" })];
     case "minus":
       return [node("path", { d: "M3.5 8h9", strokeLinecap: "round" })];
+    case "zoomIn":
+    case "zoomOut":
+      return [
+        node("circle", { cx: 6.8, cy: 6.8, r: 4.3 }),
+        node("path", { d: "m10 10 3.5 3.5M4.8 6.8h4", strokeLinecap: "round" }),
+        ...(name === "zoomIn" ? [node("path", { d: "M6.8 4.8v4", strokeLinecap: "round" })] : []),
+      ];
     case "modified":
       return [node("path", { d: "M5 3.2v9.6M11 3.2v9.6M2.8 5.5h4.4m3.6 5h2.4", strokeLinecap: "round" })];
     case "moon":

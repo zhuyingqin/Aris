@@ -280,7 +280,7 @@ describe("paper perception task", () => {
     backend.run.guide = guideFixture();
     mocks.get.mockResolvedValue(structuredClone(backend));
     const onJump = show();
-    fireEvent.click(await screen.findByRole("button", { name: "网页阅读 ↗" }));
+    fireEvent.click(await screen.findByRole("button", { name: "专注阅读" }));
     expect(screen.getByRole("complementary").classList.contains("web-reading")).toBe(true);
     expect(screen.getByRole("navigation", { name: "阅读目录" })).toBeTruthy();
     fireEvent.click(screen.getAllByRole("button", { name: /对照原文 1/ })[0]);
@@ -345,7 +345,7 @@ describe("paper perception task", () => {
     const props = { paperId: "paper-1", relativePath: "papers/test.pdf", document, onJump: vi.fn(), onClose };
     const { rerender, container } = render(<PaperReadingPanel {...props} />);
     await screen.findByRole("navigation", { name: "阅读目录" });
-    fireEvent.click(screen.getByRole("button", { name: "网页阅读 ↗" }));
+    fireEvent.click(screen.getByRole("button", { name: "专注阅读" }));
     fireEvent.click(screen.getByRole("button", { name: "关闭讲解" }));
     expect(onClose).toHaveBeenCalledOnce();
     rerender(<PaperReadingPanel {...props} hidden />);

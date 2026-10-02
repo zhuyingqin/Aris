@@ -1,0 +1,6286 @@
+{
+  "status": "passed",
+  "reference": {
+    "settings": [
+      {
+        "text": "返回应用",
+        "class": "sp-settings-back",
+        "height": 32,
+        "width": 100,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "6px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 14
+      },
+      {
+        "text": "个人资料",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "常规",
+        "class": "sp-nav-item active",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "600",
+        "icon": 16
+      },
+      {
+        "text": "账户与用量",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "模型服务",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "智能记忆",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "插件",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "远程控制",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "关于与环境",
+        "class": "sp-nav-item",
+        "height": 35,
+        "width": 211,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "8px 10px",
+        "radius": "8px",
+        "weight": "500",
+        "icon": 16
+      },
+      {
+        "text": "浅色",
+        "class": "sp-theme-option active",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "600",
+        "icon": 14
+      },
+      {
+        "text": "深色",
+        "class": "sp-theme-option",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "500",
+        "icon": 14
+      },
+      {
+        "text": "简体中文",
+        "class": "sp-theme-option active",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "600"
+      },
+      {
+        "text": "English",
+        "class": "sp-theme-option",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "500"
+      },
+      {
+        "text": "自动写入",
+        "class": "sp-theme-option active",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "600"
+      },
+      {
+        "text": "写入前确认",
+        "class": "sp-theme-option",
+        "height": 30,
+        "width": 94.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "500"
+      },
+      {
+        "text": "试一下",
+        "class": "sp-theme-option",
+        "height": 30,
+        "width": 57.5,
+        "font": "12.5px",
+        "lineHeight": "normal",
+        "padding": "4px 10px",
+        "radius": "6px",
+        "weight": "500"
+      },
+      {
+        "text": "显示",
+        "class": "sp-theme-option",
+        "height": 28,
+        "width": 94.5,
+        "font": "12px",
+        "lineHeight": "normal",
+        "padding": "3px 10px",
+        "radius": "6px",
+        "weight": "500"
+      },
+      {
+        "text": "已隐藏",
+        "class": "sp-theme-option active",
+        "height": 28,
+        "width": 94.5,
+        "font": "12px",
+        "lineHeight": "normal",
+        "padding": "3px 10px",
+        "radius": "6px",
+        "weight": "600"
+      },
+      {
+        "text": "显示",
+        "class": "sp-theme-option",
+        "height": 28,
+        "width": 94.5,
+        "font": "12px",
+        "lineHeight": "normal",
+        "padding": "3px 10px",
+        "radius": "6px",
+        "weight": "500"
+      },
+      {
+        "text": "已隐藏",
+        "class": "sp-theme-option active",
+        "height": 28,
+        "width": 94.5,
+        "font": "12px",
+        "lineHeight": "normal",
+        "padding": "3px 10px",
+        "radius": "6px",
+        "weight": "600"
+      },
+      {
+        "text": "系统提示词\n普通对话使用的只读提示词预览。\n查看",
+        "class": "sp-system-prompt-toggle",
+        "height": 44.6875,
+        "width": 918,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 14
+      },
+      {
+        "text": "用户提示词\n最近一次从对话或代理界面实际发送的用户提示词。\n查看",
+        "class": "sp-system-prompt-toggle",
+        "height": 44.6875,
+        "width": 918,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 14
+      }
+    ],
+    "workflows": [
+      {
+        "text": "工作流首页",
+        "class": "wf-secondary",
+        "height": 34,
+        "width": 87,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "0px 10px",
+        "radius": "7px",
+        "weight": "400"
+      },
+      {
+        "text": "+ 新建综述工作流",
+        "class": "wf-secondary",
+        "height": 34,
+        "width": 123.140625,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "0px 10px",
+        "radius": "7px",
+        "weight": "400"
+      },
+      {
+        "text": "创建并进入计划阶段",
+        "class": "wf-primary",
+        "height": 42,
+        "width": 590.34375,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "0px 14px",
+        "radius": "7px",
+        "weight": "600"
+      }
+    ],
+    "literature": [
+      {
+        "text": "收起导航",
+        "class": "lit-layout-toggle lit-navigation-toggle",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "Ctrl K",
+        "class": "lit-library-search",
+        "height": 44,
+        "width": 533.84375,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px 13px",
+        "radius": "9px",
+        "weight": "400",
+        "icon": 20
+      },
+      {
+        "text": "添加文献",
+        "class": "lit-menu-trigger with-label primary",
+        "height": 44,
+        "width": 134,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px 16px",
+        "radius": "9px",
+        "weight": "600",
+        "icon": 16
+      },
+      {
+        "text": "检索",
+        "class": "lit-layout-toggle",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "刷新文献库",
+        "class": "lit-layout-toggle",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "活动记录",
+        "class": "lit-layout-toggle lit-activity-toggle",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "收起详情",
+        "class": "lit-layout-toggle active",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "文献库设置",
+        "class": "lit-layout-toggle lit-settings-toggle",
+        "height": 36,
+        "width": 32,
+        "font": "13px",
+        "lineHeight": "normal",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 19
+      },
+      {
+        "text": "全部\n3",
+        "class": "lit-quick-filter active",
+        "height": 33,
+        "width": 75.46875,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "4px 11px",
+        "radius": "20px",
+        "weight": "400"
+      },
+      {
+        "text": "已收藏\n1",
+        "class": "lit-quick-filter",
+        "height": 33,
+        "width": 111.46875,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "4px 11px",
+        "radius": "20px",
+        "weight": "400",
+        "icon": 16
+      },
+      {
+        "text": "未读\n2",
+        "class": "lit-quick-filter",
+        "height": 33,
+        "width": 98.46875,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "4px 11px",
+        "radius": "20px",
+        "weight": "400",
+        "icon": 16
+      },
+      {
+        "text": "更多筛选",
+        "class": "lit-library-filter-button",
+        "height": 33,
+        "width": 97,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "0px 11px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 16
+      },
+      {
+        "text": "打开 PDF",
+        "class": "lit-inspector-primary",
+        "height": 30.140625,
+        "width": 91.3125,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "4px 8px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "问 Agent",
+        "class": "lit-inspector-chat",
+        "height": 30.140625,
+        "width": 90.171875,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "4px 8px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "更多操作",
+        "class": "lit-menu-trigger",
+        "height": 32,
+        "width": 32,
+        "font": "14px",
+        "lineHeight": "21.7px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 16
+      }
+    ],
+    "reader": [
+      {
+        "text": "上一页",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "下一页",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "单页\n双页并排\n四页网格",
+        "class": "",
+        "height": 30,
+        "width": 108,
+        "font": "12px",
+        "lineHeight": "normal",
+        "padding": "0px 28px 0px 10px",
+        "radius": "6px",
+        "weight": "400"
+      },
+      {
+        "text": "缩小",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "放大",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 15
+      },
+      {
+        "text": "适应宽度",
+        "class": "lit-pdf-label-button active",
+        "height": 30,
+        "width": 90,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px 10px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 14
+      },
+      {
+        "text": "论文讲解",
+        "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+        "height": 30,
+        "width": 93,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px 10px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 17
+      },
+      {
+        "text": "标注 · 2",
+        "class": "",
+        "height": 30,
+        "width": 61.65625,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px 10px",
+        "radius": "6px",
+        "weight": "400"
+      },
+      {
+        "text": "刷新 PDF",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 14
+      },
+      {
+        "text": "系统阅读器",
+        "class": "lit-pdf-icon-button",
+        "height": 30,
+        "width": 36,
+        "font": "12px",
+        "lineHeight": "12px",
+        "padding": "0px",
+        "radius": "6px",
+        "weight": "400",
+        "icon": 14
+      },
+      {
+        "text": "关闭讲解",
+        "class": "paper-guide-close",
+        "height": 30,
+        "width": 30,
+        "font": "12px",
+        "lineHeight": "18.6px",
+        "padding": "0px",
+        "radius": "5px",
+        "weight": "400",
+        "icon": 17
+      },
+      {
+        "text": "Somni 当前模型 · preview-model\nPreview model",
+        "class": "",
+        "height": 31,
+        "width": 197,
+        "font": "11px",
+        "lineHeight": "normal",
+        "padding": "6px 8px",
+        "radius": "4px",
+        "weight": "400"
+      },
+      {
+        "text": "多模态论文解析",
+        "class": "lit-paper-analysis-start",
+        "height": 44.140625,
+        "width": 151,
+        "font": "13px",
+        "lineHeight": "20.15px",
+        "padding": "11px 16px",
+        "radius": "9px",
+        "weight": "600",
+        "icon": 18
+      }
+    ]
+  },
+  "checks": [
+    {
+      "width": 1448,
+      "theme": "light",
+      "language": "cn",
+      "mode": "welcome",
+      "library": [
+        {
+          "text": "收起导航",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "添加文献",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 114,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "检索",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "刷新文献库",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "活动记录",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文献库设置",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "全部\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 72.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "已收藏\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 107.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "未读\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 94.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多筛选",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 95,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "打开 PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 96.3125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "问 Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 95.171875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多操作",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 925,
+          "scrollWidth": 925
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "上一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF 页码",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "单页\n双页并排\n四页网格",
+          "class": "",
+          "height": 32,
+          "width": 112,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "缩小",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "放大",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "适应宽度",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "标注 · 2",
+          "class": "",
+          "height": 32,
+          "width": 64.953125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "刷新 PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "系统阅读器",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "关闭讲解",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni 当前模型 · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 226,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "多模态论文解析",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 135,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "language": "cn",
+      "mode": "ready",
+      "library": [
+        {
+          "text": "收起导航",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "添加文献",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 114,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "检索",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "刷新文献库",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "活动记录",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文献库设置",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "全部\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 72.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "已收藏\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 107.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "未读\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 94.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多筛选",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 95,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "打开 PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 96.3125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "问 Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 95.171875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多操作",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 925,
+          "scrollWidth": 925
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "上一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF 页码",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "单页\n双页并排\n四页网格",
+          "class": "",
+          "height": 32,
+          "width": 112,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "缩小",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "放大",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "适应宽度",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "标注 · 2",
+          "class": "",
+          "height": 32,
+          "width": 64.953125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "刷新 PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "系统阅读器",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "重新生成讲解",
+          "class": "",
+          "height": 32,
+          "width": 122,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "关闭讲解",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni 当前模型 · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 226,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "网页阅读 ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.09375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ],
+      "raw": [
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "网页阅读 ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.09375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "查看原页 1",
+          "class": "",
+          "height": 32,
+          "width": 84.578125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapter": [
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "对照 PDF ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.390625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "第 1 页 ↗",
+          "class": "",
+          "height": 32,
+          "width": 53.234375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "收起原图",
+          "class": "",
+          "height": 32,
+          "width": 52,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "在 PDF 中定位 ↗",
+          "class": "",
+          "height": 32,
+          "width": 94.96875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "第 1 页 ↗",
+          "class": "",
+          "height": 32,
+          "width": 53.234375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "← 论文主线",
+          "class": "",
+          "height": 32,
+          "width": 66.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一主题 →",
+          "class": "",
+          "height": 32,
+          "width": 66.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapterLayout": [
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 1368,
+          "scrollWidth": 1368
+        },
+        {
+          "selector": ".paper-reader-toolbar",
+          "width": 1328,
+          "scrollWidth": 1328
+        },
+        {
+          "selector": ".paper-essay",
+          "width": 1160,
+          "scrollWidth": 1160
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "language": "cn",
+      "mode": "running",
+      "library": [
+        {
+          "text": "收起导航",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "添加文献",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 114,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "检索",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "刷新文献库",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "活动记录",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文献库设置",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "全部\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 72.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "已收藏\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 107.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "未读\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 94.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多筛选",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 95,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 46,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "收起详情",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "打开 PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 96.3125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "问 Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 95.171875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "更多操作",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 925,
+          "scrollWidth": 925
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "上一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF 页码",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "单页\n双页并排\n四页网格",
+          "class": "",
+          "height": 32,
+          "width": 112,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "缩小",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "放大",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "适应宽度",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "标注 · 2",
+          "class": "",
+          "height": 32,
+          "width": 64.953125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "刷新 PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "系统阅读器",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "重新生成讲解",
+          "class": "",
+          "height": 32,
+          "width": 122,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "关闭讲解",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni 当前模型 · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 226,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": true
+        },
+        {
+          "text": "正在解析页面",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 122,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "取消",
+          "class": "",
+          "height": 32,
+          "width": 48,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "展开结果",
+          "class": "",
+          "height": 32,
+          "width": 74,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ]
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "language": "en",
+      "mode": "welcome",
+      "library": [
+        {
+          "text": "Hide navigation",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Add references",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 150.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Discover",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Refresh library",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Library settings",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "All\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 61.15625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "Starred\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 109.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Unread\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 110.359375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More filters",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 108.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 37.625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 7px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 56.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 7px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Open PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 101.90625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Ask Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 102.53125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More actions",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 622,
+          "scrollWidth": 622
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1100,
+          "scrollWidth": 1100
+        }
+      ],
+      "reader": [
+        {
+          "text": "Previous page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF page number",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Single page\nTwo-page spread\nFour-page grid",
+          "class": "",
+          "height": 32,
+          "width": 160,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Zoom out",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Zoom in",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Fit width",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 93.4375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 112.59375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Annotations · 2",
+          "class": "",
+          "height": 32,
+          "width": 108.734375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Refresh PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "System reader",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Close guide",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni current model · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 255,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Analyze paper",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 127.640625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1052,
+          "scrollWidth": 1052
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1052,
+          "scrollWidth": 1052
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 483,
+          "scrollWidth": 483
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 483,
+          "scrollWidth": 483
+        }
+      ]
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "language": "en",
+      "mode": "ready",
+      "library": [
+        {
+          "text": "Hide navigation",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Add references",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 150.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Discover",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Refresh library",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Library settings",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "All\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 61.15625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "Starred\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 109.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Unread\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 110.359375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More filters",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 108.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 37.625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 7px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 56.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 7px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Open PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 101.90625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Ask Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 102.53125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More actions",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 622,
+          "scrollWidth": 622
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1100,
+          "scrollWidth": 1100
+        }
+      ],
+      "reader": [
+        {
+          "text": "Previous page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF page number",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Single page\nTwo-page spread\nFour-page grid",
+          "class": "",
+          "height": 32,
+          "width": 160,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Zoom out",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Zoom in",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Fit width",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 93.4375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 112.59375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Annotations · 2",
+          "class": "",
+          "height": 32,
+          "width": 108.734375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Refresh PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "System reader",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Regenerate",
+          "class": "",
+          "height": 32,
+          "width": 109.140625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Close guide",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni current model · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 255,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Reading view ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 110.84375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1100,
+          "scrollWidth": 1100
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1052,
+          "scrollWidth": 1052
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1052,
+          "scrollWidth": 1052
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 483,
+          "scrollWidth": 483
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 483,
+          "scrollWidth": 483
+        }
+      ],
+      "raw": [
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Reading view ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 110.84375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "View source page 1",
+          "class": "",
+          "height": 32,
+          "width": 133.640625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapter": [
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Compare PDF ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 113.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "p. 1 ↗",
+          "class": "",
+          "height": 32,
+          "width": 34.125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Close original image",
+          "class": "",
+          "height": 32,
+          "width": 116.875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Locate in PDF ↗",
+          "class": "",
+          "height": 32,
+          "width": 91.03125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "p. 1 ↗",
+          "class": "",
+          "height": 32,
+          "width": 34.125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "← Overview",
+          "class": "",
+          "height": 32,
+          "width": 67.703125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next topic →",
+          "class": "",
+          "height": 32,
+          "width": 74.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapterLayout": [
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 1052,
+          "scrollWidth": 1052
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 1020,
+          "scrollWidth": 1020
+        },
+        {
+          "selector": ".paper-reader-toolbar",
+          "width": 980,
+          "scrollWidth": 980
+        },
+        {
+          "selector": ".paper-essay",
+          "width": 980,
+          "scrollWidth": 980
+        }
+      ]
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "language": "cn",
+      "mode": "welcome",
+      "library": [
+        {
+          "text": "展开导航",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "添加文献",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 114,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "检索",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "刷新文献库",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "显示详情",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "全部\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 72.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "已收藏\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 107.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "未读\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 94.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "高级搜索",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 38,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 448,
+          "scrollWidth": 448
+        },
+        {
+          "selector": ".lit-page",
+          "width": 480,
+          "scrollWidth": 480
+        }
+      ],
+      "reader": [
+        {
+          "text": "上一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF 页码",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "单页\n双页并排\n四页网格",
+          "class": "",
+          "height": 32,
+          "width": 112,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "缩小",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "放大",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "适应宽度",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "标注 · 2",
+          "class": "",
+          "height": 32,
+          "width": 64.953125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "刷新 PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "系统阅读器",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "关闭讲解",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni 当前模型 · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 226,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "多模态论文解析",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 135,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 432,
+          "scrollWidth": 432
+        }
+      ]
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "language": "cn",
+      "mode": "ready",
+      "library": [
+        {
+          "text": "展开导航",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "添加文献",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 114,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "检索",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "刷新文献库",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "显示详情",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "全部\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 72.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "已收藏\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 107.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "未读\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 94.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "高级搜索",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 38,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 448,
+          "scrollWidth": 448
+        },
+        {
+          "selector": ".lit-page",
+          "width": 480,
+          "scrollWidth": 480
+        }
+      ],
+      "reader": [
+        {
+          "text": "上一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF 页码",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一页",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "单页\n双页并排\n四页网格",
+          "class": "",
+          "height": 32,
+          "width": 112,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "缩小",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "放大",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "适应宽度",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 96,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "标注 · 2",
+          "class": "",
+          "height": 32,
+          "width": 64.953125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "刷新 PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "系统阅读器",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "重新生成讲解",
+          "class": "",
+          "height": 32,
+          "width": 122,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "关闭讲解",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni 当前模型 · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 226,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "网页阅读 ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.09375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "论文讲解",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "信息",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "相关",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "文件",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 480,
+          "scrollWidth": 480
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 432,
+          "scrollWidth": 432
+        }
+      ],
+      "raw": [
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "网页阅读 ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.09375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "查看原页 1",
+          "class": "",
+          "height": 32,
+          "width": 84.578125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapter": [
+        {
+          "text": "图文讲解",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "原文识别",
+          "class": "",
+          "height": 32,
+          "width": 68,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "对照 PDF ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 87.390625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "先看懂论文主线\n01 · 数据如何经过模型？\n02 · 为什么除以维度的平方根？",
+          "class": "",
+          "height": 32,
+          "width": 338,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "第 1 页 ↗",
+          "class": "",
+          "height": 32,
+          "width": 53.234375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "收起原图",
+          "class": "",
+          "height": 32,
+          "width": 52,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "在 PDF 中定位 ↗",
+          "class": "",
+          "height": 32,
+          "width": 94.96875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "第 1 页 ↗",
+          "class": "",
+          "height": 32,
+          "width": 53.234375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "← 论文主线",
+          "class": "",
+          "height": 32,
+          "width": 66.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "下一主题 →",
+          "class": "",
+          "height": 32,
+          "width": 66.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapterLayout": [
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 432,
+          "scrollWidth": 432
+        },
+        {
+          "selector": ".paper-reader-toolbar",
+          "width": 396,
+          "scrollWidth": 396
+        },
+        {
+          "selector": ".paper-essay",
+          "width": 396,
+          "scrollWidth": 396
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "language": "en",
+      "mode": "welcome",
+      "library": [
+        {
+          "text": "Hide navigation",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Add references",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 150.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Discover",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Refresh library",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Activity",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Library settings",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "All\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 61.15625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "Starred\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 109.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Unread\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 110.359375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More filters",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 108.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 43.625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 62.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Open PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 101.90625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Ask Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 102.53125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More actions",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 927,
+          "scrollWidth": 927
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "Previous page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF page number",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Single page\nTwo-page spread\nFour-page grid",
+          "class": "",
+          "height": 32,
+          "width": 160,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Zoom out",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Zoom in",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Fit width",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 93.4375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 112.59375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Annotations · 2",
+          "class": "",
+          "height": 32,
+          "width": 108.734375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Refresh PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "System reader",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Close guide",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni current model · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 255,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Analyze paper",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 127.640625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "language": "en",
+      "mode": "ready",
+      "library": [
+        {
+          "text": "Hide navigation",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Add references",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 150.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Discover",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Refresh library",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Activity",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Library settings",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "All\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 61.15625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "Starred\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 109.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Unread\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 110.359375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More filters",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 108.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 43.625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 62.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Open PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 101.90625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Ask Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 102.53125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More actions",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 927,
+          "scrollWidth": 927
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "Previous page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF page number",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Single page\nTwo-page spread\nFour-page grid",
+          "class": "",
+          "height": 32,
+          "width": 160,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Zoom out",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Zoom in",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Fit width",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 93.4375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 112.59375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Annotations · 2",
+          "class": "",
+          "height": 32,
+          "width": 108.734375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Refresh PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "System reader",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Regenerate",
+          "class": "",
+          "height": 32,
+          "width": 109.140625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Close guide",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni current model · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 255,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Reading view ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 110.84375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ],
+      "raw": [
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Reading view ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 110.84375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "View source page 1",
+          "class": "",
+          "height": 32,
+          "width": 133.640625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapter": [
+        {
+          "text": "Visual explanations",
+          "class": "",
+          "height": 32,
+          "width": 125.609375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Transcriptions",
+          "class": "",
+          "height": 32,
+          "width": 95.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Compare PDF ↗",
+          "class": "paper-reader-compare",
+          "height": 32,
+          "width": 113.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "p. 1 ↗",
+          "class": "",
+          "height": 32,
+          "width": 34.125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Close original image",
+          "class": "",
+          "height": 32,
+          "width": 116.875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Locate in PDF ↗",
+          "class": "",
+          "height": 32,
+          "width": 91.03125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "p. 1 ↗",
+          "class": "",
+          "height": 32,
+          "width": 34.125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "← Overview",
+          "class": "",
+          "height": 32,
+          "width": 67.703125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next topic →",
+          "class": "",
+          "height": 32,
+          "width": 74.0625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "disabled": false
+        }
+      ],
+      "chapterLayout": [
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 1368,
+          "scrollWidth": 1368
+        },
+        {
+          "selector": ".paper-reader-toolbar",
+          "width": 1328,
+          "scrollWidth": 1328
+        },
+        {
+          "selector": ".paper-essay",
+          "width": 1160,
+          "scrollWidth": 1160
+        }
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "language": "en",
+      "mode": "running",
+      "library": [
+        {
+          "text": "Hide navigation",
+          "class": "lit-layout-toggle lit-navigation-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Add references",
+          "class": "lit-menu-trigger with-label primary",
+          "height": 32,
+          "width": 150.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Discover",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Refresh library",
+          "class": "lit-layout-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Activity",
+          "class": "lit-layout-toggle lit-activity-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-layout-toggle active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Library settings",
+          "class": "lit-layout-toggle lit-settings-toggle",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "All\n3",
+          "class": "lit-quick-filter active",
+          "height": 32,
+          "width": 61.15625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "disabled": false
+        },
+        {
+          "text": "Starred\n1",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 109.46875,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Unread\n2",
+          "class": "lit-quick-filter",
+          "height": 32,
+          "width": 110.359375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "20px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More filters",
+          "class": "lit-library-filter-button",
+          "height": 32,
+          "width": 108.78125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 43.625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 62.828125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "0px",
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "0px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Hide details",
+          "class": "lit-workspace-icon-btn",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Open PDF",
+          "class": "lit-inspector-primary",
+          "height": 32,
+          "width": 101.90625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Ask Agent",
+          "class": "lit-inspector-chat",
+          "height": 32,
+          "width": 102.53125,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "More actions",
+          "class": "lit-menu-trigger",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "libraryLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-topbar",
+          "width": 927,
+          "scrollWidth": 927
+        },
+        {
+          "selector": ".lit-page",
+          "width": 1448,
+          "scrollWidth": 1448
+        }
+      ],
+      "reader": [
+        {
+          "text": "Previous page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "PDF page number",
+          "class": "",
+          "height": 32,
+          "width": 60,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Next page",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Single page\nTwo-page spread\nFour-page grid",
+          "class": "",
+          "height": 32,
+          "width": 160,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 28px 0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Zoom out",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Zoom in",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Fit width",
+          "class": "lit-pdf-label-button active",
+          "height": 32,
+          "width": 93.4375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-pdf-label-button lit-pdf-guide-toggle",
+          "height": 32,
+          "width": 112.59375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Annotations · 2",
+          "class": "",
+          "height": 32,
+          "width": 108.734375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Refresh PDF",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "System reader",
+          "class": "lit-pdf-icon-button",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Regenerate",
+          "class": "",
+          "height": 32,
+          "width": 109.140625,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "Close guide",
+          "class": "paper-guide-close",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Somni current model · preview-model\nPreview model",
+          "class": "",
+          "height": 32,
+          "width": 255,
+          "font": "13px",
+          "lineHeight": "normal",
+          "padding": "0px 8px",
+          "radius": "6px",
+          "disabled": true
+        },
+        {
+          "text": "Processing pages",
+          "class": "lit-paper-analysis-start",
+          "height": 32,
+          "width": 145.5,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": true
+        },
+        {
+          "text": "Cancel",
+          "class": "",
+          "height": 32,
+          "width": 59.984375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Show results",
+          "class": "",
+          "height": 32,
+          "width": 94.109375,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "5px 10px",
+          "radius": "6px",
+          "disabled": false
+        },
+        {
+          "text": "Paper guide",
+          "class": "lit-workspace-tab active",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Info",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Related",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        },
+        {
+          "text": "Files",
+          "class": "lit-workspace-tab",
+          "height": 32,
+          "width": 32,
+          "font": "13px",
+          "lineHeight": "20px",
+          "padding": "0px",
+          "radius": "6px",
+          "icon": 16,
+          "disabled": false
+        }
+      ],
+      "readerLayout": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643
+        },
+        {
+          "selector": ".paper-guide-header",
+          "width": 643,
+          "scrollWidth": 643
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "width": 1448,
+      "theme": "light",
+      "mode": "welcome",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "mode": "ready",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "theme": "light",
+      "mode": "running",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "mode": "welcome",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "mode": "ready",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "mode": "welcome",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "mode": "ready",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "mode": "welcome",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "mode": "ready",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "mode": "running",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    }
+  ],
+  "source": "Repository PDF and guide fixtures with isolated native IPC; no model generation or user data writes.",
+  "controlFailures": []
+}

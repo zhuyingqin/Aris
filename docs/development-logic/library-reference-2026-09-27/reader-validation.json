@@ -1,0 +1,17 @@
+{
+  "verifiedAt": "2026-09-28T00:38:46.426408+00:00",
+  "tests": {
+    "passed": 136,
+    "failed": 0,
+    "files": [
+      "Literature.test.tsx",
+      "PaperReadingPanel.test.tsx",
+      "PdfReader.test.tsx"
+    ]
+  },
+  "typecheck": "passed",
+  "build": "passed; existing chunk-size warnings",
+  "browser": "passed; 5 layouts, repository PDF fixture with isolated native IPC mock",
+  "knownBrowserLimitation": "Existing usePendingScreenshot native event registration error without Tauri.",
+  "nativeInstaller": "Not rebuilt or installed in this change."
+}

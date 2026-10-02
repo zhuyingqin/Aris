@@ -51,4 +51,21 @@ describe("Settings account and usage", () => {
     expect((braveInput as HTMLInputElement).value).toBe("brave-test-key");
     expect((exaInput as HTMLInputElement).value).toBe("exa-test-key");
   });
+
+  it("changes overall type from Appearance, saves immediately, and restores automatic sizing", () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "general");
+    useStore.getState().setUiFontMode("auto");
+    render(<Settings />);
+    const slider = screen.getByRole("slider", { name: "整体字体大小" }) as HTMLInputElement;
+    expect(slider.disabled).toBe(true);
+    expect(screen.getByRole("group", { name: "文字预览" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "自定义" }));
+    expect(slider.disabled).toBe(false);
+    fireEvent.change(slider, { target: { value: "18" } });
+    expect(document.documentElement.dataset.uiFontSize).toBe("18");
+    expect(JSON.parse(localStorage.getItem("somniq-ui-typography-v1")!)).toEqual({ mode: "manual", fontSize: 18 });
+    fireEvent.click(screen.getByRole("radio", { name: "自动适应" }));
+    expect(slider.disabled).toBe(true);
+    expect(document.documentElement.dataset.uiFontSize).toBe(String(useStore.getState().uiRecommendedFontSize));
+  });
 });

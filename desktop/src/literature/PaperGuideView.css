@@ -176,7 +176,9 @@
 .paper-essay-ask textarea { flex: 1; min-width: 0; resize: vertical; font: inherit; font-size: var(--essay-text-compact); padding: var(--essay-space-2) var(--essay-space-2); color: var(--essay-ink); background: var(--essay-surface); border: var(--essay-rule); }
 .paper-essay-ask-error { color: var(--essay-danger); font-size: var(--essay-text-meta); }
 
-@container paper-guide (max-width: 820px) {
+/* Keep the article comfortably wide in the PDF comparison pane. The persistent
+   contents column returns only when there is room for both it and the measure. */
+@container paper-guide (max-width: 1040px) {
   .paper-essay { display: block; max-width: var(--essay-measure-narrow); }
   .paper-essay-contents { display: none; }
   .paper-essay-mobile-nav { display: flex; align-items: center; gap: var(--essay-space-3); font-size: var(--essay-text-caption); color: var(--essay-muted); border-bottom: var(--essay-rule); padding-bottom: var(--essay-space-4); margin-bottom: var(--essay-space-7); }

@@ -16,6 +16,7 @@ import type { ConfigPatch, ConfigView, SystemPromptView, UserPromptView } from "
 import { SETTINGS_COPY } from "./i18n";
 import { formatUsageDate, formatUsageExact, normalizeLanguage } from "./settingsFormatters";
 import { configuredServerLabel } from "./settingsProviderCatalog";
+import TypographySettings from "./TypographySettings";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -153,6 +154,7 @@ export default function GeneralSettings({
             ))}
           </div>
         </div>
+        <TypographySettings language={language} />
       </div>
 
       <div className="sp-update-section sp-general-language">
