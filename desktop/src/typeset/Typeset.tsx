@@ -734,6 +734,8 @@ export default function Typeset() {
   const [syncedBeamerPage, setSyncedBeamerPage] = useState<number | null>(null);
   const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
   const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
+  type LeftPanelTab = "files" | "review" | "ai";
+  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
   const {
     projectPanelVisible, setProjectPanelVisible,
     pdfPanelVisible, setPdfPanelVisible,
@@ -742,9 +744,7 @@ export default function Typeset() {
     outlineCollapsed, setOutlineCollapsed,
     beginPanelResizeFromPointer, beginOutlineResizeFromPointer,
     handlePanelResizeKey, handleOutlineResizeKey,
-  } = useTypesetPanels();
-  type LeftPanelTab = "files" | "review" | "ai";
-  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
+  } = useTypesetPanels(activeLeftTab === "ai");
   // Chat owns the live Typeset writing session. Once the user opens it, keep
   // that instance mounted while switching to Files or Review so its current
   // conversation and composer draft are not reset to the Chat home screen.
@@ -4258,6 +4258,7 @@ export default function Typeset() {
     !hasWorkspaceDocument ? "start-mode" : "",
     !effectiveProjectPanelVisible ? "project-hidden" : "",
     !effectivePdfPanelVisible ? "pdf-hidden" : "",
+    activeLeftTab === "ai" ? "ai-chat-active" : "",
     slideFocusActive ? "slide-focus-mode" : "",
   ].filter(Boolean).join(" ");
   const gridStyle = {

@@ -1,0 +1,26 @@
+export const GENERAL_PAGE_COPY = {
+  cn: {
+    title: "通用与外观", scope: "全局 · 自动保存", scopeDescription: "对本机所有项目生效，修改后自动保存。",
+    appearance: "外观与语言", mode: "模式", languageDescription: "同时用于后续助手回复。",
+    color: "主题色", colors: { default: "默认蓝", purple: "紫色", teal: "青色", green: "绿色", orange: "橙色", pink: "粉色" },
+    workspace: "工作区", mail: "邮箱", workflows: "研究流程", memoryDescription: "控制助手写入本地记忆前是否需要审批。",
+    advanced: "高级", fontSize: "界面字号", fontDescription: "侧栏、菜单和正文同步调整。",
+    saving: "正在保存记忆策略…", saved: "记忆策略已保存", saveFailed: "保存失败，已保留原设置。", retry: "重试",
+    preferenceSaving: "保存中…", preferenceSaved: "已保存",
+    shortcutEdit: "修改截图快捷键", shortcutRecording: "请按下新快捷键…",
+    shortcutHint: "点击修改全局快捷键，Esc 取消。", shortcutDesktopOnly: "请在桌面客户端中修改快捷键。",
+    shortcutInvalid: "请使用 Ctrl、Alt 或 Command 等修饰键加一个字母、数字或功能键。",
+  },
+  en: {
+    title: "General & appearance", scope: "Global · Autosaved", scopeDescription: "Applies to all projects on this device. Changes save automatically.",
+    appearance: "Appearance & language", mode: "Mode", languageDescription: "Also used for future assistant replies.",
+    color: "Accent color", colors: { default: "Default blue", purple: "Purple", teal: "Teal", green: "Green", orange: "Orange", pink: "Pink" },
+    workspace: "Workspace", mail: "Mail", workflows: "Research workflows", memoryDescription: "Choose whether local memory writes need approval.",
+    advanced: "Advanced", fontSize: "Interface text size", fontDescription: "Sidebars, menus, and body text resize together.",
+    saving: "Saving memory policy…", saved: "Memory policy saved", saveFailed: "Could not save. Your previous setting is still active.", retry: "Retry",
+    preferenceSaving: "Saving…", preferenceSaved: "Saved",
+    shortcutEdit: "Edit screenshot shortcut", shortcutRecording: "Press a new shortcut…",
+    shortcutHint: "Click to change the global shortcut. Esc cancels.", shortcutDesktopOnly: "Change the shortcut in the desktop app.",
+    shortcutInvalid: "Use Ctrl, Alt, or Command with a letter, number, or function key.",
+  },
+};

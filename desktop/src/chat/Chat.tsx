@@ -491,7 +491,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const [imageAssistActivity, setImageAssistActivity] = useState<ImageAssistActivity | null>(
     () => imageAssistActivitySnapshot(),
   );
-  const independentReview = useIndependentReview(currentId);
+  const independentReview = useIndependentReview(currentSession?.id ?? "", currentSession?.projectId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
@@ -1179,7 +1179,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   useEffect(() => {
     if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
     let active = true;
-    void chatTasksGet(currentSession.id)
+    void chatTasksGet(currentSession.id, currentSession.projectId)
       .then((todos) => {
         if (active) {
           setPersistedTodos((current) => ({ ...current, [currentSession.id]: todos }));
@@ -1450,7 +1450,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
 
   return (
     <div
-      className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
+      className={`chat-root chat-background-surface${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
       style={{
         "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px`,
         ...(sidePanelWidth === null ? {} : { "--side-panel-w": `${sidePanelWidth}px` }),

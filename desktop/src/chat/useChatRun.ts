@@ -525,7 +525,7 @@ export function useChatRun({
     ) return;
     contextHydrationRequests.current.add(currentSession.id);
     let disposed = false;
-    void chatContextTokens(currentSession.id)
+    void chatContextTokens(currentSession.id, currentSession.projectId)
       .then((tokens) => {
         if (!disposed && tokens != null) applyContextTokens(currentSession.id, tokens);
       })
@@ -641,7 +641,7 @@ export function useChatRun({
       });
       return;
     }
-    chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
+    chatPermissionGet(currentId, currentSessionRef.current?.projectId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
   }, [
     copy.permissionLabels,
@@ -649,6 +649,7 @@ export function useChatRun({
     currentId,
     currentSession?.id,
     currentSession?.model,
+    currentSession?.projectId,
     currentSession?.remoteAgent,
     refreshModelOptions,
     refreshStatus,
@@ -885,19 +886,19 @@ export function useChatRun({
         // sessions safely fall back to the existing UI reconstruction.
         const recoveryTurns = unsavedBackendTurns.current.get(session.id);
         let tokens = recoveryTurns
-          ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append").catch(() => null)
+          ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append", session.projectId).catch(() => null)
           : null;
         const rewindMessage = rewindFromUser
           ? await outgoingMessage(textFromTurn(rewindFromUser), rewindFromUser.attachments ?? [])
           : undefined;
         if (rewindMessage) {
-          const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage).catch(() => null);
+          const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage, session.projectId).catch(() => null);
           // Rewind must succeed for an edit/retry; a repaired append alone would
           // leave the rejected user turn at the end of the session.
           tokens = rewindTokens;
         }
         if (tokens == null) {
-          tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+          tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace", session.projectId);
         }
         applyContextTokens(session.id, tokens);
         markBackendContextSynced(session.id, prefix);

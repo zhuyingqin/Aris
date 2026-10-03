@@ -64,6 +64,19 @@ describe("optional navigation module visibility", () => {
     expect(restored.uiFontSize).toBe(18);
     expect(document.documentElement.dataset.uiFontSize).toBe("18");
   });
+
+  it("restores the global color before rendering and falls back safely for damaged preferences", async () => {
+    const { useStore } = await import("./store");
+    useStore.getState().setUiColor("purple");
+    vi.resetModules();
+    const restored = (await import("./store")).useStore;
+    expect(restored.getState().uiColor).toBe("purple");
+    expect(document.documentElement.dataset.uiColor).toBe("purple");
+    localStorage.setItem("somniq-ui-color-v1", "invalid");
+    vi.resetModules();
+    expect((await import("./store")).useStore.getState().uiColor).toBe("default");
+    expect(document.documentElement.dataset.uiColor).toBe("default");
+  });
 });
 
 describe("model preference on login", () => {

@@ -907,11 +907,9 @@ export default function ChatSidebar({
                 const history = Object.values(remoteSessionLists).find((item) => (
                   item.nodeId === selectedWorkspaceNodeId && item.projectId === project.projectId
                 ));
-                const currentProjectBound = currentRemoteAgent?.nodeId === selectedWorkspaceNodeId
-                  && currentRemoteAgent.projectId === project.projectId;
                 return (
                   <section
-                    className={`chat-session-group chat-remote-project-group${selected ? " selected" : ""}`}
+                    className="chat-session-group chat-remote-project-group"
                     key={project.projectId}
                   >
                     <div className="chat-sidebar-label chat-project-label">
@@ -931,7 +929,6 @@ export default function ChatSidebar({
                           <FolderIcon open={selected} />
                         </span>
                         <span className="chat-project-label-text" title={project.title}>{project.title}</span>
-                        {currentProjectBound && <span className="chat-remote-project-current">{language === "cn" ? "当前" : "Current"}</span>}
                       </button>
                       <button
                         className="chat-project-add"
@@ -1005,12 +1002,9 @@ export default function ChatSidebar({
                 const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
                   ? { transform: `translateY(${draggedProjectOffsetY}px)` }
                   : undefined;
-                const activeSession = sessions.find((s) => s.id === currentId && !s.remoteAgent);
-                const isActiveProject = activeSession?.projectId === group.id
-                  || group.sessions.some((s) => s.id === currentId);
                 return (
                   <section
-                    className={`chat-session-group chat-local-project-group${isActiveProject ? " is-active-project" : ""}${draggedProjectId === group.id ? " dragging" : ""}`}
+                    className={`chat-session-group chat-local-project-group${draggedProjectId === group.id ? " dragging" : ""}`}
                     key={group.id}
                     data-chat-project-id={group.id}
                     ref={setGroupRef(group.id)}
@@ -1032,11 +1026,6 @@ export default function ChatSidebar({
                           <FolderIcon open />
                         </span>
                         <span className="chat-project-label-text" title={group.label}>{group.label}</span>
-                        {isActiveProject && (
-                          <span className="chat-active-project-pill">
-                            {language === "cn" ? "当前" : "Active"}
-                          </span>
-                        )}
                       </div>
                       <button
                         className="chat-project-add"

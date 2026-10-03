@@ -559,6 +559,19 @@ fn with_bound_project_environment<T>(
     Ok(runtime::with_project_execution_context(&context, action))
 }
 
+/// Scope a synchronous Chat operation to its session's project. Enter this
+/// on the worker that does the work; a thread-local binding cannot cross await.
+pub(crate) fn with_chat_project<T>(
+    project_id: Option<&str>,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let Some(project_id) = project_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return action();
+    };
+    let workspace = registered_project_workspace(project_id)?;
+    with_bound_project_environment(&workspace, project_id, action)?
+}
+
 impl Default for ChatState {
     fn default() -> Self {
         Self {
@@ -3698,9 +3711,12 @@ fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
 pub fn chat_permission_get(
     state: State<ChatState>,
     session_id: String,
+    project_id: Option<String>,
 ) -> Result<PermissionModeView, String> {
     validate_session_id(&session_id)?;
-    permission_mode_for(&state, &session_id).map(permission_mode_view)
+    with_chat_project(project_id.as_deref(), || {
+        permission_mode_for(&state, &session_id).map(permission_mode_view)
+    })
 }
 
 #[tauri::command]
@@ -4823,6 +4839,18 @@ pub fn chat_run_command(
     state: State<ChatState>,
     session_id: String,
     input: String,
+    project_id: Option<String>,
+) -> Result<ChatCommandResult, String> {
+    with_chat_project(project_id.as_deref(), || {
+        run_chat_command(app, state.inner(), session_id, input)
+    })
+}
+
+fn run_chat_command(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    input: String,
 ) -> Result<ChatCommandResult, String> {
     validate_session_id(&session_id)?;
     let trimmed = input.trim();
@@ -5124,7 +5152,7 @@ pub async fn chat_suggest_title(request: ChatTitleRequest) -> Result<String, Str
 
 #[tauri::command]
 pub fn project_brief_get(project_id: String) -> Result<runtime::ProjectBrief, String> {
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     runtime::project_brief(&workspace)
 }
 
@@ -5147,7 +5175,7 @@ pub async fn project_brief_review(
     trigger: ProjectActivityReviewTrigger,
 ) -> Result<runtime::ProjectBrief, String> {
     validate_session_id(&trigger.session_id)?;
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let Some(_guard) = ProjectActivityReviewGuard::begin(&project_id)? else {
             return runtime::project_brief(&workspace);
@@ -5165,7 +5193,7 @@ pub async fn project_intent_observe(
     observations: Vec<runtime::ProjectIntentObservation>,
 ) -> Result<runtime::ProjectBrief, String> {
     validate_session_id(&session_id)?;
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     let state = runtime::record_project_intent_observations(&workspace, &session_id, observations)?;
     if !runtime::project_intent_needs_review(&state) {
         return runtime::project_brief(&workspace);
@@ -5184,20 +5212,19 @@ pub async fn project_intent_observe(
     runtime::project_brief(&workspace)
 }
 
-fn active_project_workspace(project_id: &str) -> Result<PathBuf, String> {
+fn registered_project_workspace(project_id: &str) -> Result<PathBuf, String> {
     if !crate::state::valid_project_id(project_id) {
         return Err("invalid project id".to_string());
     }
-    let active = std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string());
-    if active != project_id {
+    let workspace = crate::projects::project_path_for_registered_id(project_id)
+        .ok_or_else(|| "project not found".to_string())?;
+    if project_id != "default" && !workspace.is_dir() {
         return Err(format!(
-            "project `{project_id}` is not active; switch projects before reading its goal"
+            "project directory does not exist: {}",
+            workspace.display()
         ));
     }
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .map_err(|error| error.to_string())
+    Ok(workspace)
 }
 
 #[derive(Debug, Deserialize)]
@@ -8396,52 +8423,61 @@ async fn run_chat_turn_with_context(
     let preflight_summarizer_model = summarizer_model.clone();
     let preflight_summarizer_config = summarizer_config.clone();
     let preflight_project_id = remote_project_id_owned.clone();
+    let preflight_binding = project_binding.clone();
     let preflight_cancelled = cancelled.clone();
     let preflight = tauri::async_runtime::spawn_blocking(move || {
-        let total_started = Instant::now();
-        let load_started = Instant::now();
-        let session = if let Some(session) = cached_local_session {
-            session
-        } else if let Some(project_id) = preflight_project_id.as_deref() {
-            get_project_scoped_chat_session(project_id, &preflight_session_id)?
-        } else {
-            load_chat_session(&preflight_session_id)?
+        let prepare = || {
+            let total_started = Instant::now();
+            let load_started = Instant::now();
+            let session = if let Some(session) = cached_local_session {
+                session
+            } else if let Some(project_id) = preflight_project_id.as_deref() {
+                get_project_scoped_chat_session(project_id, &preflight_session_id)?
+            } else {
+                load_chat_session(&preflight_session_id)?
+            };
+            crate::chat_events::record_event(
+                &preflight_session_id,
+                "preflight_stage",
+                json!({
+                    "sessionId": &preflight_session_id,
+                    "stage": "session_load",
+                    "elapsedMs": load_started.elapsed().as_millis(),
+                }),
+            );
+            if preflight_cancelled.load(Ordering::SeqCst) {
+                return Err("interrupted by user".to_string());
+            }
+            let result = maybe_auto_compact(
+                &preflight_app,
+                &preflight_session_id,
+                &preflight_model,
+                preflight_executor_config,
+                preflight_summarizer_model,
+                preflight_summarizer_config,
+                session,
+                emit_desktop_chat_events,
+                event_delivery,
+                &preflight_cancelled,
+            );
+            crate::chat_events::record_event(
+                &preflight_session_id,
+                "preflight_stage",
+                json!({
+                    "sessionId": &preflight_session_id,
+                    "stage": "total",
+                    "elapsedMs": total_started.elapsed().as_millis(),
+                    "completed": result.is_ok(),
+                }),
+            );
+            result
         };
-        crate::chat_events::record_event(
-            &preflight_session_id,
-            "preflight_stage",
-            json!({
-                "sessionId": &preflight_session_id,
-                "stage": "session_load",
-                "elapsedMs": load_started.elapsed().as_millis(),
-            }),
-        );
-        if preflight_cancelled.load(Ordering::SeqCst) {
-            return Err("interrupted by user".to_string());
+        match preflight_binding {
+            Some(binding) => {
+                with_bound_project_environment(&binding.workspace, &binding.project_id, prepare)?
+            }
+            None => prepare(),
         }
-        let result = maybe_auto_compact(
-            &preflight_app,
-            &preflight_session_id,
-            &preflight_model,
-            preflight_executor_config,
-            preflight_summarizer_model,
-            preflight_summarizer_config,
-            session,
-            emit_desktop_chat_events,
-            event_delivery,
-            &preflight_cancelled,
-        );
-        crate::chat_events::record_event(
-            &preflight_session_id,
-            "preflight_stage",
-            json!({
-                "sessionId": &preflight_session_id,
-                "stage": "total",
-                "elapsedMs": total_started.elapsed().as_millis(),
-                "completed": result.is_ok(),
-            }),
-        );
-        result
     })
     .await;
     let session = match preflight {
@@ -8491,7 +8527,7 @@ async fn run_chat_turn_with_context(
             state.question_prompts.clone(),
         )
     } else {
-        match permission_mode_for(&state, &session_id) {
+        match with_chat_project(project_id.as_deref(), || permission_mode_for(&state, &session_id)) {
             Ok(permission_mode) => (
                 permission_mode,
                 state.permission_prompts.clone(),
@@ -9702,6 +9738,17 @@ pub async fn chat_rewind_to_user_message(
     state: State<'_, ChatState>,
     session_id: String,
     message: ChatContextUserMessage,
+    project_id: Option<String>,
+) -> Result<Option<u64>, String> {
+    with_chat_project(project_id.as_deref(), || {
+        rewind_chat_context(state.inner(), session_id, message)
+    })
+}
+
+fn rewind_chat_context(
+    state: &ChatState,
+    session_id: String,
+    message: ChatContextUserMessage,
 ) -> Result<Option<u64>, String> {
     validate_session_id(&session_id)?;
     release_cancelled_turn_for_replacement(&state, &session_id)?;
@@ -9741,6 +9788,7 @@ pub async fn chat_rewind_to_user_message(
 pub async fn chat_context_tokens(
     state: State<'_, ChatState>,
     session_id: String,
+    project_id: Option<String>,
 ) -> Result<Option<u64>, String> {
     validate_session_id(&session_id)?;
     let cached = state
@@ -9753,28 +9801,42 @@ pub async fn chat_context_tokens(
         return Ok(Some(runtime::estimate_session_tokens(&session) as u64));
     }
 
-    let path = chat_session_path(&session_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
     tauri::async_runtime::spawn_blocking(move || {
-        Session::load_from_path(path)
-            .map(|session| Some(runtime::estimate_session_tokens(&session) as u64))
-            .map_err(|error| error.to_string())
+        with_chat_project(project_id.as_deref(), || {
+            let path = chat_session_path(&session_id)?;
+            if !path.exists() {
+                return Ok(None);
+            }
+            Session::load_from_path(path)
+                .map(|session| Some(runtime::estimate_session_tokens(&session) as u64))
+                .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn chat_tasks_get(session_id: String) -> Result<Vec<Value>, String> {
+pub fn chat_tasks_get(session_id: String, project_id: Option<String>) -> Result<Vec<Value>, String> {
     validate_session_id(&session_id)?;
-    read_session_tasks(&session_id)
+    with_chat_project(project_id.as_deref(), || read_session_tasks(&session_id))
 }
 
 #[tauri::command]
 pub async fn chat_set_context(
     state: State<'_, ChatState>,
+    session_id: String,
+    messages: Vec<ChatContextMessage>,
+    mode: Option<String>,
+    project_id: Option<String>,
+) -> Result<u64, String> {
+    with_chat_project(project_id.as_deref(), || {
+        set_chat_context(state.inner(), session_id, messages, mode)
+    })
+}
+
+fn set_chat_context(
+    state: &ChatState,
     session_id: String,
     messages: Vec<ChatContextMessage>,
     mode: Option<String>,
@@ -10547,9 +10609,9 @@ fn skill_prompt(name: &str, args: &str) -> String {
 }
 
 fn aris_tasks_path() -> PathBuf {
-    std::env::var("CLAWD_TODO_STORE")
+    runtime::execution_env_var_os("CLAWD_TODO_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::state::config_dir().join("tasks.json"))
+        .unwrap_or_else(|| crate::state::config_dir().join("tasks.json"))
 }
 
 fn session_tasks_path(session_id: &str) -> PathBuf {
@@ -11308,11 +11370,14 @@ pub fn chat_debug_zip_export(
     state: State<ChatState>,
     session_id: String,
     path: Option<String>,
+    project_id: Option<String>,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
-    let session = get_cached_or_disk_session(&state, &session_id)?;
-    let export = export_debug_zip(&session_id, &session, path.as_deref())?;
-    Ok(export.path.display().to_string())
+    with_chat_project(project_id.as_deref(), || {
+        let session = get_cached_or_disk_session(&state, &session_id)?;
+        let export = export_debug_zip(&session_id, &session, path.as_deref())?;
+        Ok(export.path.display().to_string())
+    })
 }
 
 fn resolve_debug_zip_path(
@@ -11790,7 +11855,7 @@ fn render_desktop_repl_help() -> String {
 /// content. `status_context` itself is still right for `/status` and prompt
 /// building, where the git context is actually used.
 fn memory_file_count() -> Option<usize> {
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = runtime::execution_current_dir().ok()?;
     let hot_memory_count = runtime::load_hot_memory(&cwd)
         .map(|memory| memory.memory.len() + memory.user.len())
         .unwrap_or_default();
@@ -11799,7 +11864,7 @@ fn memory_file_count() -> Option<usize> {
 }
 
 fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered_config_files = loader.discover().len();
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
@@ -11842,7 +11907,7 @@ fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<S
 fn find_git_root() -> Result<PathBuf, String> {
     let output = crate::process::hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(std::env::current_dir().map_err(|e| e.to_string())?)
+        .current_dir(runtime::execution_current_dir().map_err(|e| e.to_string())?)
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -11853,12 +11918,12 @@ fn find_git_root() -> Result<PathBuf, String> {
 }
 
 fn render_config_report(section: Option<&str>) -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     runtime::render_config_report(&cwd, section)
 }
 
 fn render_memory_report() -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     runtime::render_memory_report(&cwd)
 }
 
@@ -11867,7 +11932,7 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
         None | Some("show") => render_memory_report(),
         Some("pending") => {
             let scope = runtime::project_scope(
-                &std::env::current_dir().map_err(|error| error.to_string())?,
+                &runtime::execution_current_dir().map_err(|error| error.to_string())?,
             );
             serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)
                 .map_err(|error| error.to_string())
@@ -11901,10 +11966,7 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
 }
 
 fn handle_goal_command(action: Option<&str>, objective: Option<&str>) -> Result<String, String> {
-    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .map_err(|error| error.to_string())?;
+    let workspace = runtime::workspace_root_from_env();
     let manual_draft = |value: &str| runtime::ProjectGoalDraft {
         objective: value.to_string(),
         success_criteria: Vec::new(),
@@ -11936,7 +11998,7 @@ fn handle_goal_command(action: Option<&str>, objective: Option<&str>) -> Result<
 }
 
 fn init_desktop_repo() -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let gitignore = cwd.join(".gitignore");
     let agents_md = cwd.join("AGENTS.md");
     let mut lines = vec![
@@ -12034,7 +12096,7 @@ fn render_diff_report() -> Result<String, String> {
 }
 
 fn render_teleport_report(target: &str) -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let file_matches = crate::process::hidden_command("rg")
         .args(["--files"])
         .current_dir(&cwd)
@@ -12309,7 +12371,7 @@ fn render_export_text(session: &Session) -> String {
 fn git_output(args: &[&str]) -> Result<String, String> {
     let output = crate::process::hidden_command("git")
         .args(args)
-        .current_dir(std::env::current_dir().map_err(|e| e.to_string())?)
+        .current_dir(runtime::execution_current_dir().map_err(|e| e.to_string())?)
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {

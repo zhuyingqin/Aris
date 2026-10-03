@@ -125,7 +125,7 @@ export function useChatCommands({
     }
 
     try {
-      const result = await chatRunCommand(session.id, text);
+      const result = await chatRunCommand(session.id, text, session.projectId);
       if (!result.handled) return false;
       if (result.openSettings) setTab("settings");
       if (result.refreshStatus) refreshStatus(session.model ?? null);
@@ -200,7 +200,7 @@ export function useChatCommands({
         ]);
         return;
       }
-      const result = await chatRunCommand(session.id, "/export");
+      const result = await chatRunCommand(session.id, "/export", session.projectId);
       if (!result.handled) return;
       if (result.openSettings) setTab("settings");
       if (result.refreshStatus) refreshStatus(session.model ?? null);
@@ -232,7 +232,7 @@ export function useChatCommands({
         ]);
         return;
       }
-      const path = await chatDebugZipExport(session.id);
+      const path = await chatDebugZipExport(session.id, undefined, session.projectId);
       patchTurns(session.id, (turns) => [
         ...turns,
         assistantTextTurn(debugExportResult(path)),

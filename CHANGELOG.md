@@ -1,5 +1,43 @@
 # ARIS-Code Changelog
 
+## v0.4.76 (2026-10-03)
+
+- **Keep each Chat bound to its own project** — sends, slash commands,
+  goals, tasks, history recovery, event replay, context rewind and independent
+  review restoration now resolve the owning project, including background
+  preparation while another project is active. Switching projects keeps
+  concurrent conversations and their saved replies isolated.
+- **One literature search entry with auditable coverage** —
+  `LiteratureSearch` accepts Boolean queries, explicit per-source queries,
+  protocol scope and criteria, known key papers, continuation, saturation and
+  bounded citation snowballing. Preview uses the same plan without opening a
+  connection; compatibility aliases retain saved protocols and runs. Explicit
+  source queries reach their provider, Boolean expressions are compiled for
+  each database, and results report known-paper recall and stop reasons.
+- **Consistent literature access** — all paid membership tiers include external
+  and systematic literature retrieval. Planning remains available without a
+  retrieval entitlement, and the free tier retains its local library.
+- **Appearance settings and continuous Chat backgrounds** — choose accent
+  colors, surface tones, fonts, reading size/width, density, corners, shadows
+  and reduced motion. Built-in backgrounds and local images support cover,
+  contain and tile modes across main Chat, history, side Chat, companion
+  windows and Typeset Chat. Preferences synchronize between windows and can
+  be imported, exported or reset.
+- **Settings and small-window layout** — reorganized settings pages retain
+  connection editing state, report preference-save failures and follow the
+  selected system theme. Chat input, reading widths, history and Typeset panels
+  adapt consistently to larger fonts and narrow windows while keeping drafts.
+- **Configurable screenshot shortcut** — set or restore the global capture
+  shortcut in Settings, with validation, persisted configuration and clear
+  registration feedback. Pending captures remain associated with their Chat.
+- **macOS signing** — the release workflow imports an optional stable signing
+  identity, checks the app signature and preserves bundle metadata in its ZIP.
+  Ad-hoc signing remains the fallback when the identity is unavailable; it
+  preserves permissions across launches, while updates can require new grants.
+- **Version consistency** — the desktop application, shared Rust workspace,
+  product lockfiles and README version badges now use 0.4.76. Release notes
+  are drawn from this changelog alongside the generated GitHub comparison.
+
 ## v0.4.71 (2026-09-19)
 
 - **Chat transcript virtualisation: scrollbar that does not

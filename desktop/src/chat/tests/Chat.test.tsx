@@ -553,7 +553,7 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: session.title }));
-    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
     const workflow = await screen.findByTitle("Repairing task persistence");
     await userEvent.click(workflow);
     expect(screen.getByText("Repairing task persistence")).toBeTruthy();
@@ -754,7 +754,7 @@ describe("Chat export action", () => {
     render(<Chat />);
     await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
 
-    await waitFor(() => expect(apiMocks.chatContextTokens).toHaveBeenCalledWith(session.id));
+    await waitFor(() => expect(apiMocks.chatContextTokens).toHaveBeenCalledWith(session.id, session.projectId));
     await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
       expect.objectContaining({ id: session.id, contextTokens: 32_768 }),
     ));
@@ -1050,7 +1050,7 @@ describe("Chat export action", () => {
 
     await userEvent.click(exportButton);
 
-    await waitFor(() => expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(session.id, "/export"));
+    await waitFor(() => expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(session.id, "/export", session.projectId));
     expect(await screen.findByText("Exported conversation to C:\\Users\\wt\\chat.md")).toBeTruthy();
   });
 
@@ -1073,6 +1073,7 @@ describe("Chat export action", () => {
       expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(
         expect.any(String),
         '/research-lit "retrieval agents"',
+        session.projectId,
       ),
     );
     expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
@@ -1183,11 +1184,82 @@ describe("Chat export action", () => {
     expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value).toBe("");
     expect(apiMocks.chatSend).not.toHaveBeenCalled();
 
+    // The send is still preparing its attachments when the user moves to
+    // another project. Its request must retain the originating session.
+    const otherProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Other", path: "F:/Other" };
+    act(() => useStore.setState({ projects: [defaultProject, otherProject], currentProject: otherProject }));
     resolveFileRead?.("# Notes");
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
       session.id,
-      expect.objectContaining({ text: expect.stringContaining("# Notes") }),
+      expect.objectContaining({ text: expect.stringContaining("# Notes"), projectId: session.projectId }),
     ));
+  });
+
+  it("keeps concurrent chats and completed replies in their independent projects", async () => {
+    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
+    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
+    const first = { ...makeSession(firstProject.id), id: "chat-first-project", title: "First project chat" };
+    const second = { ...makeSession(secondProject.id), id: "chat-second-project", title: "Second project chat" };
+    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First history" }] }];
+    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
+    localStorage.setItem(CURRENT_KEY, first.id);
+    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
+
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: first.title }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      first.id, expect.objectContaining({ projectId: firstProject.id }),
+    ));
+
+    act(() => useStore.setState({ currentProject: secondProject }));
+    await userEvent.click(await screen.findByRole("button", { name: second.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      second.id, expect.objectContaining({ projectId: secondProject.id }),
+    ));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    act(() => finishFirst?.("First project answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        projectId: firstProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First project answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First project answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    act(() => finishSecond?.("Second project answer"));
+    expect(await screen.findByText("Second project answer")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: second.id,
+        projectId: secondProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "Second project answer" }]),
+        })]),
+      }),
+    ));
+    act(() => useStore.setState({ currentProject: firstProject }));
+    await userEvent.click(screen.getByRole("button", { name: first.title }));
+    expect(await screen.findByText("First project answer")).toBeTruthy();
+    expect(screen.queryByText("Second project answer")).toBeNull();
   });
 
   it("resumes an unpreserved failed turn by appending its work, never replacing history", async () => {
@@ -1232,6 +1304,7 @@ describe("Chat export action", () => {
         { role: "assistant", text: "Partial answer" },
       ],
       "append",
+      session.projectId,
     ));
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
     expect(screen.getByText("Partial answer")).toBeTruthy();
@@ -1281,6 +1354,7 @@ describe("Chat export action", () => {
         { role: "assistant", text: "Partial answer" },
       ],
       "append",
+      session.projectId,
     ));
   });
 

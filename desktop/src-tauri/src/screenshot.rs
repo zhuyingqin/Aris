@@ -85,7 +85,7 @@ struct MonitorShot {
     windows: Vec<WindowRegion>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutStatus {
     /// Accelerator string as registered, e.g. `CmdOrCtrl+Shift+A`.
@@ -146,6 +146,147 @@ pub fn set_shortcut_status(state: &ScreenshotState, status: ShortcutStatus) {
     if let Ok(mut slot) = state.shortcut.lock() {
         *slot = status;
     }
+}
+
+fn normalize_shortcut(value: &str) -> Result<String, String> {
+    use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
+    let shortcut = value
+        .parse::<Shortcut>()
+        .map_err(|e| format!("Invalid screenshot shortcut: {e}"))?;
+    if !shortcut
+        .mods
+        .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
+    {
+        return Err("Screenshot shortcut requires Ctrl, Alt, or Command.".into());
+    }
+    let mut keys = Vec::new();
+    for (modifier, name) in [
+        (Modifiers::CONTROL, "Ctrl"),
+        (Modifiers::SUPER, "Super"),
+        (Modifiers::ALT, "Alt"),
+        (Modifiers::SHIFT, "Shift"),
+    ] {
+        if shortcut.mods.contains(modifier) {
+            keys.push(name.to_string());
+        }
+    }
+    keys.push(shortcut.key.to_string());
+    Ok(keys.join("+"))
+}
+
+fn shortcut_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("screenshot-shortcut.txt"))
+        .map_err(|e| e.to_string())
+}
+
+fn read_saved_shortcut(path: &std::path::Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => normalize_shortcut(value.trim()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULT_SHORTCUT.into()),
+        Err(e) => Err(format!("Could not read screenshot shortcut: {e}")),
+    }
+}
+
+pub fn register_shortcut(app: &tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let saved = shortcut_path(app).and_then(|path| read_saved_shortcut(&path));
+    let read_error = saved.as_ref().err().cloned();
+    let shortcut = saved.unwrap_or_else(|_| DEFAULT_SHORTCUT.into());
+    let registration = app.global_shortcut().register(shortcut.as_str());
+    let status = ShortcutStatus {
+        shortcut,
+        registered: registration.is_ok(),
+        error: registration.err().map(|e| e.to_string()).or(read_error),
+    };
+    if let Some(error) = &status.error {
+        eprintln!("Screenshot shortcut: {error}");
+    }
+    set_shortcut_status(app.state::<ScreenshotState>().inner(), status);
+}
+
+/// Claim the replacement before releasing the previous binding. Failed writes
+/// restore the previous live shortcut; state records a failed rollback truthfully.
+fn replace_shortcut(
+    status: &mut ShortcutStatus,
+    shortcut: &str,
+    register: impl Fn(&str) -> Result<(), String>,
+    unregister: impl Fn(&str) -> Result<(), String>,
+    persist: impl Fn(&str) -> Result<(), String>,
+) -> Result<ShortcutStatus, String> {
+    let shortcut = normalize_shortcut(shortcut)?;
+    let same = normalize_shortcut(&status.shortcut)? == shortcut;
+    if status.registered && same {
+        persist(&shortcut)?;
+        status.error = None;
+        return Ok(status.clone());
+    }
+    register(&shortcut).map_err(|e| format!("Could not register screenshot shortcut: {e}"))?;
+    if status.registered {
+        if let Err(error) = unregister(&status.shortcut) {
+            let cleanup = unregister(&shortcut).err();
+            return Err(format!(
+                "Could not release previous shortcut: {error}; cleanup: {cleanup:?}"
+            ));
+        }
+    }
+    if let Err(error) = persist(&shortcut) {
+        if status.registered {
+            if let Err(restore) = register(&status.shortcut) {
+                *status = ShortcutStatus {
+                    shortcut,
+                    registered: true,
+                    error: Some(error.clone()),
+                };
+                return Err(format!("Could not save shortcut: {error}. Previous shortcut could not be restored: {restore}; replacement remains active."));
+            }
+        }
+        let cleanup = unregister(&shortcut).err();
+        return Err(format!(
+            "Could not save shortcut: {error}; cleanup: {cleanup:?}"
+        ));
+    }
+    *status = ShortcutStatus {
+        shortcut,
+        registered: true,
+        error: None,
+    };
+    Ok(status.clone())
+}
+
+#[tauri::command]
+pub async fn screenshot_shortcut_set(
+    app: tauri::AppHandle,
+    shortcut: String,
+) -> Result<ShortcutStatus, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let path = shortcut_path(&app)?;
+    let state = app.state::<ScreenshotState>();
+    let mut status = state
+        .shortcut
+        .lock()
+        .map_err(|_| "screenshot shortcut lock is poisoned".to_string())?;
+    replace_shortcut(
+        &mut status,
+        &shortcut,
+        |value| {
+            app.global_shortcut()
+                .register(value)
+                .map_err(|e| e.to_string())
+        },
+        |value| {
+            app.global_shortcut()
+                .unregister(value)
+                .map_err(|e| e.to_string())
+        },
+        |value| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            runtime::write_file_atomically(&path, value).map_err(|e| e.to_string())
+        },
+    )
 }
 
 fn overlay_label(index: usize) -> String {
@@ -1082,6 +1223,165 @@ pub fn screenshot_shortcut_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_validation_requires_modifier_and_canonicalizes_keys() {
+        assert!(normalize_shortcut("KeyB").is_err());
+        assert!(normalize_shortcut("Shift+KeyB").is_err());
+        assert!(normalize_shortcut("Ctrl+invalid").is_err());
+        assert_eq!(
+            normalize_shortcut("control+shift+B").unwrap(),
+            "Ctrl+Shift+KeyB"
+        );
+        assert_eq!(normalize_shortcut("Alt+F8").unwrap(), "Alt+F8");
+    }
+
+    #[test]
+    fn saved_shortcut_is_loaded_for_startup_and_invalid_config_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "somniq-shortcut-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(read_saved_shortcut(&path).unwrap(), DEFAULT_SHORTCUT);
+        runtime::write_file_atomically(&path, "Ctrl+Shift+KeyB").unwrap();
+        assert_eq!(read_saved_shortcut(&path).unwrap(), "Ctrl+Shift+KeyB");
+        runtime::write_file_atomically(&path, "Shift+B").unwrap();
+        assert!(read_saved_shortcut(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn shortcut_replacement_claims_new_binding_before_releasing_old_and_persists() {
+        let actions = std::cell::RefCell::new(Vec::new());
+        let mut status = ShortcutStatus {
+            registered: true,
+            ..ShortcutStatus::default()
+        };
+        let result = replace_shortcut(
+            &mut status,
+            "Ctrl+Shift+B",
+            |s| {
+                actions.borrow_mut().push(format!("register:{s}"));
+                Ok(())
+            },
+            |s| {
+                actions.borrow_mut().push(format!("unregister:{s}"));
+                Ok(())
+            },
+            |s| {
+                actions.borrow_mut().push(format!("persist:{s}"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *actions.borrow(),
+            vec![
+                "register:Ctrl+Shift+KeyB",
+                "unregister:CmdOrCtrl+Shift+A",
+                "persist:Ctrl+Shift+KeyB"
+            ]
+        );
+        assert_eq!(result.shortcut, "Ctrl+Shift+KeyB");
+        assert!(result.registered);
+    }
+
+    #[test]
+    fn occupied_shortcut_does_not_release_or_save_the_previous_binding() {
+        let mut status = ShortcutStatus {
+            registered: true,
+            ..ShortcutStatus::default()
+        };
+        assert!(replace_shortcut(
+            &mut status,
+            "Alt+B",
+            |_| Err("occupied".into()),
+            |_| panic!("must retain original"),
+            |_| panic!("must not persist")
+        )
+        .is_err());
+        assert_eq!(status.shortcut, DEFAULT_SHORTCUT);
+        assert!(status.registered);
+    }
+
+    #[test]
+    fn shortcut_save_failure_restores_previous_binding() {
+        let actions = std::cell::RefCell::new(Vec::new());
+        let mut status = ShortcutStatus {
+            registered: true,
+            ..ShortcutStatus::default()
+        };
+        assert!(replace_shortcut(
+            &mut status,
+            "Alt+B",
+            |s| {
+                actions.borrow_mut().push(format!("register:{s}"));
+                Ok(())
+            },
+            |s| {
+                actions.borrow_mut().push(format!("unregister:{s}"));
+                Ok(())
+            },
+            |_| Err("disk full".into())
+        )
+        .is_err());
+        assert_eq!(status.shortcut, DEFAULT_SHORTCUT);
+        assert!(status.registered);
+        assert_eq!(
+            *actions.borrow(),
+            vec![
+                "register:Alt+KeyB",
+                "unregister:CmdOrCtrl+Shift+A",
+                "register:CmdOrCtrl+Shift+A",
+                "unregister:Alt+KeyB"
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_rollback_reports_the_actual_live_replacement() {
+        let mut status = ShortcutStatus {
+            registered: true,
+            ..ShortcutStatus::default()
+        };
+        let result = replace_shortcut(
+            &mut status,
+            "Alt+B",
+            |s| {
+                if s == DEFAULT_SHORTCUT {
+                    Err("occupied during restore".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |_| Ok(()),
+            |_| Err("disk full".into()),
+        );
+        assert!(result.unwrap_err().contains("replacement remains active"));
+        assert_eq!(status.shortcut, "Alt+KeyB");
+        assert!(status.registered);
+    }
+
+    #[test]
+    fn unchanged_shortcut_is_saved_without_registering_twice() {
+        let mut status = ShortcutStatus {
+            shortcut: "Ctrl+KeyA".into(),
+            registered: true,
+            error: None,
+        };
+        replace_shortcut(
+            &mut status,
+            "Ctrl+A",
+            |_| panic!("already registered"),
+            |_| panic!("keep current binding"),
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn overlay_labels_carry_the_capability_prefix() {

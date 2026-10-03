@@ -29,9 +29,7 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "RetrievalCorpusSeal",
     "RetrievalEvidence",
     "RetrievalLedger",
-    "LiteratureSearchProtocolCreate",
     "LiteratureSearchPreview",
-    "LiteratureSearchExecute",
     "LiteratureLibraryUpsert",
     "LiteraturePdfDownload",
     "LaTeXCompile",
@@ -253,7 +251,7 @@ fn copy_dir_recursive(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
 }
 
 pub fn state_root() -> PathBuf {
-    if let Ok(path) = std::env::var("ARIS_RUN_STATE_DIR") {
+    if let Some(path) = runtime::execution_env_var_os("ARIS_RUN_STATE_DIR") {
         return PathBuf::from(path);
     }
     runtime_dir().join("run-state")
@@ -264,7 +262,7 @@ pub fn events_path() -> PathBuf {
 }
 
 pub fn sessions_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("ARIS_SESSIONS_DIR") {
+    if let Some(path) = runtime::execution_env_var_os("ARIS_SESSIONS_DIR") {
         return PathBuf::from(path);
     }
     runtime_dir().join("sessions")

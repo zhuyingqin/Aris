@@ -141,7 +141,30 @@
 .app-rail-more-menu button[aria-checked="true"] { background: var(--bg-2); }
 .app-rail-more-menu button > span:nth-child(2) { flex: 1; }
 
-.app-rail-account { margin-top: 12px; }
+.app-rail-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.app-rail-footer .app-update-indicator {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+  border-radius: 8px;
+}
+
+.app-rail-footer .app-update-icon svg {
+  width: var(--app-icon-size);
+  height: var(--app-icon-size);
+}
+
+.app-rail-footer .app-update-indicator:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .app.app-navigation-shell .app-navigation-rail .app-rail-account .app-account {
   position: relative;
@@ -207,5 +230,5 @@
   .app-rail-primary { gap: 2px; }
   .app-navigation-rail { padding-block: 4px; }
   .app-rail-button { height: 30px; }
-  .app-rail-account { margin-top: 4px; }
+  .app-rail-footer { margin-top: 4px; }
 }

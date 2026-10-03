@@ -8,7 +8,8 @@ import {
   webSearchProviderTest,
   type NewApiAccount,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { hasNativeBackend } from "../api/transport";
 import { formatUserFacingError } from "../errorMessage";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type { ConfigPatch, ConfigTestDetail, ConfigTestResult, ConfigView } from "../types";
@@ -38,8 +39,7 @@ interface Params {
 
 /**
  * Owns everything shared by the General and Models tabs: the single
- * `advForm` draft (theme/language save button + executor/reviewer/summarizer
- * config all commit through the same `save()`), the 7 API-key drafts, and
+ * `advForm` connection draft, independent immediate preferences, API-key drafts, and
  * the model-sync/test/apply actions. `configView`/`managedModels`/`account`
  * stay parent-owned since Account and Environment also touch them.
  */
@@ -67,6 +67,10 @@ export function useSettingsConnectionState({
   const [exaKey, setExaKey] = useState("");
   const [zhihuAccessSecret, setZhihuAccessSecret] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [memorySaveState, setMemorySaveState] = useState<SaveState>("idle");
+  const [memorySaveError, setMemorySaveError] = useState("");
+  const memorySavePending = useRef(false);
+  const memorySaveTarget = useRef(false);
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
   const [webProviderTestState, setWebProviderTestState] = useState<
@@ -91,11 +95,13 @@ export function useSettingsConnectionState({
    * update `configView` directly instead, or they will drop the user's
    * unsaved key edits on the Models tab.
    */
-  const loadConfig = (view: ConfigView) => {
+  const loadConfig = (view: ConfigView, preservePreferences = false) => {
     const nextLanguage = view.language === "en" ? "en" : "cn";
-    setLanguage(nextLanguage);
-    setConfigView(view);
-    setAdvForm({
+    if (!preservePreferences) setLanguage(nextLanguage, { syncRuntime: false });
+    setConfigView((current) => preservePreferences && current ? {
+      ...view, language: current.language, memoryWriteApproval: current.memoryWriteApproval,
+    } : view);
+    setAdvForm((current) => ({
       executorProvider: normalizeExecutorProvider(view.executorProvider, view.executorBaseUrl),
       executorModel: view.executorModel ?? "",
       executorBaseUrl: view.executorBaseUrl ?? "",
@@ -107,10 +113,10 @@ export function useSettingsConnectionState({
       reviewerModel: view.reviewerModel ?? "",
       reviewerBaseUrl: view.reviewerBaseUrl ?? "",
       webProxyUrl: view.webProxyUrl ?? "",
-      language: nextLanguage,
-      memoryWriteApproval: view.memoryWriteApproval,
+      language: preservePreferences ? current.language : nextLanguage,
+      memoryWriteApproval: preservePreferences ? current.memoryWriteApproval : view.memoryWriteApproval,
       memoryV2Mode: view.memoryV2Mode,
-    });
+    }));
     setExecKey("");
     setSummaryKey("");
     setReviewerKey("");
@@ -124,6 +130,9 @@ export function useSettingsConnectionState({
 
   const buildPatch = (options: { includeExecutor?: boolean; includeReviewer?: boolean } = {}) => {
     const patch: ConfigPatch = { ...advForm };
+    // This preference has its own immediate-save flow, including in-flight requests.
+    delete patch.memoryWriteApproval;
+    delete patch.language;
     if (options.includeExecutor === false) {
       delete patch.executorProvider;
       delete patch.executorModel;
@@ -157,6 +166,37 @@ export function useSettingsConnectionState({
     setTestResult(null);
   };
 
+  const saveLanguage = async (value: Language) => {
+    const native = hasNativeBackend();
+    const confirmed = native ? (await configSet({ language: value })).language : value;
+    const next = confirmed === "en" ? "en" : "cn";
+    // Native config is authoritative; local storage is its startup cache.
+    setLanguage(next, { syncRuntime: false, requirePersistence: !native });
+    setConfigView((current) => current ? { ...current, language: next } : current);
+    setAdvForm((current) => ({ ...current, language: next }));
+  };
+
+  // Commit only this preference; a full loadConfig would erase key drafts in Models.
+  // Keep the request here so switching settings tabs cannot lose its result.
+  const saveMemoryWriteApproval = async (value: boolean) => {
+    if (memorySavePending.current) return;
+    memorySavePending.current = true;
+    memorySaveTarget.current = value;
+    setMemorySaveState("saving");
+    setMemorySaveError("");
+    try {
+      const confirmed = hasNativeBackend() ? (await configSet({ memoryWriteApproval: value })).memoryWriteApproval : value;
+      setConfigView((current) => current ? { ...current, memoryWriteApproval: confirmed } : current);
+      setAdvForm((current) => ({ ...current, memoryWriteApproval: confirmed }));
+      setMemorySaveState("saved");
+    } catch (error) {
+      setMemorySaveError(formatUserFacingError(error, language));
+      setMemorySaveState("error");
+    } finally {
+      memorySavePending.current = false;
+    }
+  };
+
   const save = async () => {
     setSaveState("saving");
     setTestState("idle");
@@ -170,7 +210,7 @@ export function useSettingsConnectionState({
         return;
       }
       const next = await configSet(buildPatch({ includeExecutor: false, includeReviewer: false }));
-      loadConfig(next);
+      loadConfig(next, true);
       setSaveState("saved");
       savedTimerRef.current = window.setTimeout(() => setSaveState("idle"), SAVE_STATE_RESET_MS);
       notifyChatModelsUpdated();
@@ -420,6 +460,8 @@ export function useSettingsConnectionState({
     exaKey, setExaKey,
     zhihuAccessSecret, setZhihuAccessSecret,
     saveState, testState, testResult, webProviderTestState,
+    memorySaveState, memorySaveError, saveMemoryWriteApproval, saveLanguage,
+    retryMemoryWriteApproval: () => saveMemoryWriteApproval(memorySaveTarget.current),
     managedModelsLoading, managedModelsError,
     canConfigureExecutor, canConfigureReviewerApi,
     loadConfig, resetOpState, save, test, testWebProvider, clearWebProviderKey, resetWebProviderTests,
