@@ -434,8 +434,8 @@ export default function MemorySettings({ language }: Props) {
             <div className="sp-section-title">{language === "cn" ? "从历史 Session 补录记忆" : "Backfill memory from past Sessions"}</div>
             <div className="sp-section-sub">
               {language === "cn"
-                ? "工具失败与恢复在每轮结束时当场写入，不花额度；其余内容仍由后台筛查抽取。此处用于回头挖掘尚未筛查过的历史对话：只扫描普通对话的最终回合，每条会消耗模型额度。"
-                : "Tool failures and recoveries are written inline as each turn ends at no cost; everything else is still extracted by background screening. This section mines past conversations that were never screened: it scans final turns from ordinary chats and does use model quota."}
+                ? "扫描历史对话在本机完成；补录记忆会调用模型并消耗额度。"
+                : "History is scanned locally. Backfilling memory calls a model and uses quota."}
             </div>
           </div>
         </div>

@@ -2312,6 +2312,26 @@ describe("Typeset start page", () => {
     return { changeSet, answered };
   }
 
+  it("accepts an external change set without waiting for unrelated file previews", async () => {
+    const { changeSet, answered } = driftedChangeSetTest();
+    mocks.typesetChangeSetList.mockResolvedValue([{ ...changeSet, actor: "external", origin: "watcher" }]);
+    mocks.typesetChangeSetResolve.mockResolvedValue({ ...changeSet, status: "accepted", decisions: answered });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const review = await screen.findByLabelText("Review project change set");
+    // A preview of this unopened chapter may be slow or unavailable; accepting
+    // its recorded change does not need to fetch its entire text first.
+    mocks.typesetChangeSetReadText.mockClear();
+    mocks.typesetChangeSetReadText.mockImplementation(() => new Promise(() => {}));
+    fireEvent.click(within(review).getByRole("button", { name: "Accept change set" }));
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(
+      changeSet.id,
+      [expect.objectContaining(answered[0])],
+    ));
+    expect(mocks.typesetChangeSetReadText).not.toHaveBeenCalled();
+  });
+
   it("retries a change set the project moved under instead of leaving the click dead", async () => {
     const { changeSet, answered } = driftedChangeSetTest();
     mocks.typesetChangeSetResolve

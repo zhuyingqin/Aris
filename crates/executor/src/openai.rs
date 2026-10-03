@@ -84,14 +84,14 @@ impl std::fmt::Display for StrictSseUtf8Error {
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 enum OpenAiSendError {
     Http(reqwest::Error),
-    ResponseHeaderTimeout,
+    ResponseHeaderTimeout(Duration),
+    Cancelled,
 }
 
 impl OpenAiSendError {
@@ -100,7 +100,19 @@ impl OpenAiSendError {
             Self::Http(error) => {
                 error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
             }
-            Self::ResponseHeaderTimeout => true,
+            Self::ResponseHeaderTimeout(_) => true,
+            Self::Cancelled => false,
+        }
+    }
+
+    /// The gateway accepted the request and we stopped waiting on it. Unlike a
+    /// connect failure, the upstream is usually still running (and billing)
+    /// it, so re-sends are capped by [`api::MAX_TIMEOUT_RESENDS`].
+    fn is_post_send_timeout(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_timeout() && !error.is_connect(),
+            Self::ResponseHeaderTimeout(_) => true,
+            Self::Cancelled => false,
         }
     }
 }
@@ -109,11 +121,12 @@ impl std::fmt::Display for OpenAiSendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Http(error) => write!(formatter, "{error}"),
-            Self::ResponseHeaderTimeout => write!(
+            Self::ResponseHeaderTimeout(timeout) => write!(
                 formatter,
                 "upstream returned no response headers within {} seconds",
-                HTTP_RESPONSE_HEADER_TIMEOUT.as_secs()
+                timeout.as_secs()
             ),
+            Self::Cancelled => write!(formatter, "interrupted by user"),
         }
     }
 }
@@ -122,18 +135,53 @@ impl std::error::Error for OpenAiSendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Http(error) => Some(error),
-            Self::ResponseHeaderTimeout => None,
+            Self::ResponseHeaderTimeout(_) | Self::Cancelled => None,
         }
     }
 }
 
+/// Send and wait for response headers. Relay gateways hold the headers until
+/// the model's first event, so this wait is time-to-first-output and can last
+/// minutes under xhigh/max reasoning — it must stay cancellable throughout.
 async fn send_with_response_header_timeout(
     request: reqwest::RequestBuilder,
+    header_timeout: Option<Duration>,
+    observer: &dyn StreamObserver,
 ) -> Result<reqwest::Response, OpenAiSendError> {
-    match tokio::time::timeout(HTTP_RESPONSE_HEADER_TIMEOUT, request.send()).await {
-        Ok(result) => result.map_err(OpenAiSendError::Http),
-        Err(_) => Err(OpenAiSendError::ResponseHeaderTimeout),
+    let send = async {
+        match header_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, request.send()).await {
+                Ok(result) => result.map_err(OpenAiSendError::Http),
+                Err(_) => Err(OpenAiSendError::ResponseHeaderTimeout(timeout)),
+            },
+            None => request.send().await.map_err(OpenAiSendError::Http),
+        }
+    };
+    tokio::select! {
+        result = send => result,
+        () = wait_for_stream_cancel(observer) => Err(OpenAiSendError::Cancelled),
     }
+}
+
+/// Backoff sleep that returns `false` as soon as the turn is cancelled.
+async fn cancellable_backoff(duration: Duration, observer: &dyn StreamObserver) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(duration) => true,
+        () = wait_for_stream_cancel(observer) => false,
+    }
+}
+
+/// Final error for a request abandoned on a post-send timeout. Says why it is
+/// not re-sent again, so the user does not read it as a silent hang.
+fn post_send_timeout_error(detail: &str, timeout_resends: u32) -> RuntimeError {
+    let resent = if timeout_resends == 0 {
+        String::new()
+    } else {
+        format!(" after {timeout_resends} re-send(s)")
+    };
+    RuntimeError::new(format!(
+        "OpenAI request timed out{resent}: {detail}\nNot re-sending again: the gateway accepted the request and may still be processing (and billing) it. For very long reasoning (xhigh/max), raise ARIS_RESPONSE_HEADER_TIMEOUT_SECS / ARIS_STREAM_IDLE_TIMEOUT_SECS."
+    ))
 }
 
 /// Signature scheme for replayed Responses reasoning items. Two encodings
@@ -1694,7 +1742,10 @@ fn sse_data_payload(line: &str) -> Option<&str> {
 /// would immediately fail again if the proxy returns 429 (which is the
 /// most common companion to chunk aborts). 3 attempts max with 1s/2s
 /// backoff between attempts 1→2 and 2→3 (no sleep after the final
-/// attempt). Mirrors the OpenAI executor's primary send-retry semantics.
+/// attempt). Mirrors the OpenAI executor's primary send-retry semantics,
+/// including the shared post-send timeout budget (`timeout_resends`) and
+/// cancellation while waiting.
+#[allow(clippy::too_many_arguments)]
 async fn stream_restart_send(
     http: &reqwest::Client,
     url: &str,
@@ -1705,14 +1756,16 @@ async fn stream_restart_send(
     trace_sink: &Option<std::sync::Arc<dyn ExecutorTraceSink>>,
     model: &str,
     reason: &str,
+    header_timeout: Option<Duration>,
+    observer: &dyn StreamObserver,
+    timeout_resends: &mut u32,
 ) -> Result<reqwest::Response, RuntimeError> {
     const RESTART_MAX_ATTEMPTS: u32 = 3;
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        if runtime::is_interrupted() {
-            runtime::clear_interrupt();
-            return Err(RuntimeError::new("interrupted by user"));
+        if stream_cancel_requested(observer) {
+            return Err(interrupted_error());
         }
         trace_record(
             trace_sink,
@@ -1731,12 +1784,11 @@ async fn stream_restart_send(
             .bearer_auth(api_key)
             .header("content-type", "application/json")
             .json(body);
-        let send_result = send_with_response_header_timeout(apply_openai_routing_session_header(
-            http_request,
-            base_url,
-            model,
-            session_id,
-        ))
+        let send_result = send_with_response_header_timeout(
+            apply_openai_routing_session_header(http_request, base_url, model, session_id),
+            header_timeout,
+            observer,
+        )
         .await;
         match send_result {
             Ok(resp) => {
@@ -1789,7 +1841,9 @@ async fn stream_restart_send(
                     eprintln!(
                         "\x1b[33m  OpenAI restart {status} (attempt {attempt}/{RESTART_MAX_ATTEMPTS}), retrying in {backoff_ms}ms\x1b[0m"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    if !cancellable_backoff(Duration::from_millis(backoff_ms), observer).await {
+                        return Err(interrupted_error());
+                    }
                     continue;
                 }
                 let body_preview = resp.text().await.unwrap_or_default();
@@ -1797,9 +1851,16 @@ async fn stream_restart_send(
                     "OpenAI stream restart failed: {status}: {body_preview}"
                 )));
             }
+            Err(OpenAiSendError::Cancelled) => return Err(interrupted_error()),
             Err(e) => {
-                let transient = e.is_transient();
-                if transient && attempt < RESTART_MAX_ATTEMPTS {
+                let post_send_timeout = e.is_post_send_timeout();
+                if post_send_timeout && *timeout_resends >= api::MAX_TIMEOUT_RESENDS {
+                    return Err(post_send_timeout_error(&e.to_string(), *timeout_resends));
+                }
+                if e.is_transient() && attempt < RESTART_MAX_ATTEMPTS {
+                    if post_send_timeout {
+                        *timeout_resends += 1;
+                    }
                     let backoff_ms: u64 = (1u64 << (attempt - 1)) * 1000;
                     trace_record(
                         trace_sink,
@@ -1812,13 +1873,16 @@ async fn stream_restart_send(
                             "attempt": attempt,
                             "maxAttempts": RESTART_MAX_ATTEMPTS,
                             "backoffMs": backoff_ms,
+                            "postSendTimeout": post_send_timeout,
                             "error": e.to_string(),
                         }),
                     );
                     eprintln!(
                         "\x1b[33m  OpenAI restart network error (attempt {attempt}/{RESTART_MAX_ATTEMPTS}), retrying in {backoff_ms}ms: {e}\x1b[0m"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    if !cancellable_backoff(Duration::from_millis(backoff_ms), observer).await {
+                        return Err(interrupted_error());
+                    }
                     continue;
                 }
                 return Err(RuntimeError::new(format!(
@@ -1875,6 +1939,8 @@ pub struct OpenAIRuntimeClient {
     /// Configured endpoint preference; `Auto` selects by model capability and
     /// learns unsupported gateway/model pairs. See [`OpenAiTransport`].
     transport: OpenAiTransport,
+    /// Header-wait and chunk-idle limits, shared with the Anthropic client.
+    wait_policy: api::StreamWaitPolicy,
 }
 
 impl OpenAIRuntimeClient {
@@ -1885,18 +1951,21 @@ impl OpenAIRuntimeClient {
         tool_specs: Vec<ExecutorToolSpec>,
         observer: Box<dyn StreamObserver>,
     ) -> Result<Self, String> {
+        let wait_policy = api::StreamWaitPolicy::from_env();
+        let mut http = reqwest::Client::builder()
+            .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+            .tcp_keepalive(HTTP_TCP_KEEPALIVE);
+        // Idle read backstop, never a whole-request timeout: a healthy
+        // streaming answer may run for many minutes. It sits above the
+        // explicit header/idle waits so those (traced, cancellable) fire first.
+        if let Some(read_timeout) = wait_policy.read_timeout_backstop() {
+            http = http.read_timeout(read_timeout);
+        }
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
-            http: reqwest::Client::builder()
-                .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(HTTP_CONNECT_TIMEOUT)
-                // Keep this as an idle read deadline rather than a whole-request
-                // timeout: a healthy streaming answer may exceed two minutes.
-                .read_timeout(HTTP_RESPONSE_HEADER_TIMEOUT)
-                .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
-                .tcp_keepalive(HTTP_TCP_KEEPALIVE)
-                .build()
-                .map_err(|error| error.to_string())?,
+            http: http.build().map_err(|error| error.to_string())?,
             api_key: config.api_key,
             base_url: config.base_url,
             session_id: crate::new_routing_session_id(),
@@ -1907,12 +1976,22 @@ impl OpenAIRuntimeClient {
             observer,
             trace_sink: None,
             transport: OpenAiTransport::default(),
+            wait_policy,
         })
     }
 
     #[must_use]
     pub fn with_trace_sink(mut self, trace_sink: std::sync::Arc<dyn ExecutorTraceSink>) -> Self {
         self.trace_sink = Some(trace_sink);
+        self
+    }
+
+    /// Override the explicit header/idle waits (tests use sub-second values;
+    /// the reqwest backstop stays at the env-derived default).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_wait_policy(mut self, wait_policy: api::StreamWaitPolicy) -> Self {
+        self.wait_policy = wait_policy;
         self
     }
 
@@ -2055,11 +2134,15 @@ impl ApiClient for OpenAIRuntimeClient {
             // reasoning replay instead of hard-failing every turn until the
             // session is compacted.
             let mut tried_without_reasoning_items = false;
+            // Post-send timeout resends spent on this request, shared by the
+            // send loop and every stream restart below; capped by
+            // `api::MAX_TIMEOUT_RESENDS`.
+            let mut timeout_resends: u32 = 0;
+            let header_timeout = self.wait_policy.response_header_timeout;
             let mut response = loop {
                 attempt += 1;
-                if runtime::is_interrupted() {
-                    runtime::clear_interrupt();
-                    return Err(RuntimeError::new("interrupted by user"));
+                if stream_cancel_requested(self.observer.as_ref()) {
+                    return Err(interrupted_error());
                 }
                 trace_record(
                     &trace_sink,
@@ -2088,6 +2171,8 @@ impl ApiClient for OpenAIRuntimeClient {
                         &self.model,
                         &self.session_id,
                     ),
+                    header_timeout,
+                    self.observer.as_ref(),
                 )
                 .await;
 
@@ -2296,13 +2381,13 @@ impl ApiClient for OpenAIRuntimeClient {
                                 "\x1b[33m  OpenAI {status} (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {}ms: {preview}\x1b[0m",
                                 backoff_ms
                             );
-                            let deadline =
-                                std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
-                            while std::time::Instant::now() < deadline {
-                                if runtime::is_interrupted() {
-                                    return Err(RuntimeError::new("interrupted by user"));
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            if !cancellable_backoff(
+                                Duration::from_millis(backoff_ms),
+                                self.observer.as_ref(),
+                            )
+                            .await
+                            {
+                                return Err(interrupted_error());
                             }
                             continue;
                         }
@@ -2388,8 +2473,10 @@ impl ApiClient for OpenAIRuntimeClient {
                             "OpenAI API error {status}: {body_text}"
                         )));
                     }
+                    Err(OpenAiSendError::Cancelled) => return Err(interrupted_error()),
                     Err(e) => {
                         let transient = e.is_transient();
+                        let post_send_timeout = e.is_post_send_timeout();
                         // Build full error chain for diagnostic visibility
                         let mut chain = vec![e.to_string()];
                         let mut src: Option<&(dyn std::error::Error + 'static)> =
@@ -2404,7 +2491,18 @@ impl ApiClient for OpenAIRuntimeClient {
                             }
                         }
                         let detail = chain.join("\n");
+                        // A timeout after the gateway accepted the request is
+                        // not a lost packet: the model is still working on it
+                        // upstream. Re-sending it 4× is what turned one slow
+                        // max-reasoning answer into ~8 minutes of silence and
+                        // four billed requests.
+                        if post_send_timeout && timeout_resends >= api::MAX_TIMEOUT_RESENDS {
+                            return Err(post_send_timeout_error(&detail, timeout_resends));
+                        }
                         if transient && attempt < MAX_ATTEMPTS {
+                            if post_send_timeout {
+                                timeout_resends += 1;
+                            }
                             let backoff_ms: u64 = (1u64 << (attempt - 1)) * 1000;
                             trace_record(
                                 &trace_sink,
@@ -2416,22 +2514,25 @@ impl ApiClient for OpenAIRuntimeClient {
                                     "attempt": attempt,
                                     "maxAttempts": MAX_ATTEMPTS,
                                     "backoffMs": backoff_ms,
+                                    "postSendTimeout": post_send_timeout,
                                     "error": detail,
                                 }),
                             );
                             eprintln!(
                                 "\x1b[33m  OpenAI network error (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms:\n{detail}\x1b[0m"
                             );
-                            let deadline = std::time::Instant::now()
-                                + std::time::Duration::from_millis(backoff_ms);
-                            while std::time::Instant::now() < deadline {
-                                if runtime::is_interrupted() {
-                                    runtime::clear_interrupt();
-                                    return Err(RuntimeError::new("interrupted by user"));
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            if !cancellable_backoff(
+                                Duration::from_millis(backoff_ms),
+                                self.observer.as_ref(),
+                            )
+                            .await
+                            {
+                                return Err(interrupted_error());
                             }
                             continue;
+                        }
+                        if post_send_timeout {
+                            return Err(post_send_timeout_error(&detail, timeout_resends));
                         }
                         return Err(RuntimeError::new(format!("OpenAI request failed: {detail}")));
                     }
@@ -2470,7 +2571,7 @@ impl ApiClient for OpenAIRuntimeClient {
             // (legacy behaviour, opt-in via `ARIS_STREAM_IDLE_TIMEOUT_SECS=0`).
             // On elapse the stream walks the same retry path as a
             // mid-body abort.
-            let idle_timeout = api::resolve_stream_idle_timeout();
+            let idle_timeout = self.wait_policy.stream_idle_timeout;
             // "Has the caller seen any meaningful output yet?" If true,
             // we cannot restart — there's no resume primitive in
             // OpenAI's API and re-sending would duplicate output.
@@ -2517,13 +2618,17 @@ impl ApiClient for OpenAIRuntimeClient {
                     } {
                         Ok(inner) => inner,
                         Err(_elapsed) => {
-                            if nothing_emitted_yet(
+                            let nothing_yet = nothing_emitted_yet(
                                 &events,
                                 &pending_tools,
                                 &current_reasoning,
-                            ) && stream_retries_remaining > 0
+                            );
+                            if nothing_yet
+                                && stream_retries_remaining > 0
+                                && timeout_resends < api::MAX_TIMEOUT_RESENDS
                             {
                                 stream_retries_remaining -= 1;
+                                timeout_resends += 1;
                                 trace_record(
                                     &trace_sink,
                                     "llm.retry",
@@ -2551,6 +2656,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &trace_sink,
                                     &self.model,
                                     "idle_timeout",
+                                    header_timeout,
+                                    observer.as_ref(),
+                                    &mut timeout_resends,
                                 )
                                 .await?;
                                 stream_buf.clear();
@@ -2558,6 +2666,19 @@ impl ApiClient for OpenAIRuntimeClient {
                                 responses_tools.clear();
                                 done = false;
                                 continue;
+                            }
+                            if nothing_yet {
+                                // Surface the timeout. A "partial output" stop
+                                // reason here made the runtime auto-send a
+                                // continuation: one more hidden, billed resend
+                                // of a request the user never saw progress on.
+                                return Err(post_send_timeout_error(
+                                    &format!(
+                                        "the stream produced no output for {} seconds",
+                                        dur.as_secs()
+                                    ),
+                                    timeout_resends,
+                                ));
                             }
                             events.push(AssistantEvent::StopReason(
                                 "stream_error_after_partial_output".to_string(),
@@ -2628,6 +2749,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &trace_sink,
                                     &self.model,
                                     "premature_eof",
+                                    header_timeout,
+                                    observer.as_ref(),
+                                    &mut timeout_resends,
                                 )
                                 .await?;
                                 stream_buf.clear();
@@ -2649,11 +2773,18 @@ impl ApiClient for OpenAIRuntimeClient {
                         }
                     }
                     Err(error) => {
+                        // reqwest's read backstop sits above the idle timeout,
+                        // but a read timeout is still a post-send timeout.
+                        let timed_out = error.is_timeout();
                         if nothing_emitted_yet(&events, &pending_tools, &current_reasoning)
                             && stream_retries_remaining > 0
                             && stream_chunk_error_is_retryable(&error)
+                            && !(timed_out && timeout_resends >= api::MAX_TIMEOUT_RESENDS)
                         {
                             stream_retries_remaining -= 1;
+                            if timed_out {
+                                timeout_resends += 1;
+                            }
                             trace_record(
                                 &trace_sink,
                                 "llm.retry",
@@ -2680,6 +2811,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 &trace_sink,
                                 &self.model,
                                 "body_abort",
+                                header_timeout,
+                                observer.as_ref(),
+                                &mut timeout_resends,
                             )
                             .await?;
                             stream_buf.clear();
@@ -2825,6 +2959,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &trace_sink,
                                     &self.model,
                                     "mid_stream_error",
+                                    header_timeout,
+                                    observer.as_ref(),
+                                    &mut timeout_resends,
                                 )
                                 .await?;
                                 stream_buf.clear();

@@ -334,6 +334,44 @@ fn dynamic_tool_router_ignores_attachment_boilerplate() {
     );
 }
 
+/// `LiteratureSearch` runs a full protocol in one call and
+/// `LiteratureSearchPreview` plans it, so a literature turn is offered those
+/// two. The create/execute aliases stay deferred — reachable through ToolSearch
+/// or by naming them — instead of competing for the turn's tool slots.
+#[test]
+fn dynamic_tool_router_keeps_protocol_aliases_deferred() {
+    let mut specs = desktop_like_catalog();
+    for name in [
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LiteratureSearchExecute",
+    ] {
+        specs.push(routing_spec(name));
+    }
+    let plan = route_chat_tools("帮我系统检索相关文献", &specs, ToolRoutingMode::Active);
+
+    assert!(plan.profile.contains("research"), "{plan:?}");
+    assert!(plan.active_names.contains("LiteratureSearch"), "{plan:?}");
+    assert!(
+        plan.active_names.contains("LiteratureSearchPreview"),
+        "{plan:?}"
+    );
+    for alias in ["LiteratureSearchProtocolCreate", "LiteratureSearchExecute"] {
+        assert!(!plan.active_names.contains(alias), "{alias}: {plan:?}");
+        assert!(plan.deferred_names.contains(alias), "{alias}: {plan:?}");
+    }
+
+    let named = route_chat_tools(
+        "用 LiteratureSearchExecute 继续执行那个检索方案",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+    assert!(
+        named.active_names.contains("LiteratureSearchExecute"),
+        "{named:?}"
+    );
+}
+
 #[test]
 fn keyword_matching_anchors_at_a_word_start() {
     // Infix hits are never an intent.

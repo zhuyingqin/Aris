@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   configGet,
   newapiBootstrap,
@@ -32,6 +32,9 @@ import {
 } from "./settingsNav";
 import { PREVIEW_SETTINGS_DATA } from "./settingsPreviewData";
 import { useSettingsConnectionState } from "./useSettingsConnectionState";
+import { usePreferenceSave } from "./usePreferenceSave";
+import { SettingsPage } from "./SettingsPrimitives";
+import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 
 type SettingsTab = SettingsNavId;
 
@@ -65,6 +68,7 @@ export default function Settings() {
   const logout = useStore((state) => state.logout);
   const setTab = useStore((state) => state.setTab);
   const hideMail = useStore((state) => state.hideMail);
+  const currentProjectId = useStore((state) => state.currentProject?.id);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const previewData = PREVIEW_SETTINGS_DATA[language];
@@ -78,6 +82,21 @@ export default function Settings() {
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
+  // Keep forms mounted after their first visit so category switches retain drafts.
+  const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set([activeSettingsTab]));
+  const preferences = usePreferenceSave();
+  const navRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const scrollPositions = useRef(new Map<SettingsTab, number>());
+
+  useLayoutEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = scrollPositions.current.get(activeSettingsTab) ?? 0;
+    navRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeSettingsTab, Boolean(configView)]);
+
+  useEffect(() => {
+    setVisitedTabs((current) => current.has(activeSettingsTab) ? current : new Set([...current, activeSettingsTab]));
+  }, [activeSettingsTab]);
 
   const connection = useSettingsConnectionState({
     configView,
@@ -97,7 +116,7 @@ export default function Settings() {
 
   useEffect(() => {
     if (hasNativeBackend()) return;
-    setConfigView(PREVIEW_CONFIG_VIEW);
+    setConfigView((current) => current ? { ...current, language: PREVIEW_CONFIG_VIEW.language } : PREVIEW_CONFIG_VIEW);
     setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
     setAccount(PREVIEW_ACCOUNT);
   }, [language]);
@@ -194,6 +213,7 @@ export default function Settings() {
   const navMisc = SETTINGS_NAV_MISC[language];
   const navLabels = SETTINGS_NAV_LABELS[language];
   const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
+  const layoutCopy = SETTINGS_LAYOUT_COPY[language];
 
   return (
     <div className="st-page sp-settings-page sp-settings-shell">
@@ -204,7 +224,7 @@ export default function Settings() {
             <span>{navMisc.back}</span>
           </button>
         </div>
-        <div className="sp-settings-nav-scroll" role="tablist">
+        <div className="sp-settings-nav-scroll" role="tablist" ref={navRef}>
           {visibleNavGroups.map((group) => (
             <div className="sp-settings-nav-group" key={group.id}>
               <div className="sp-settings-nav-group-title">{navGroupLabels[group.id]}</div>
@@ -228,18 +248,10 @@ export default function Settings() {
           ))}
         </div>
       </aside>
-      <div
-        className={`sp-settings-content${
-          activeSettingsTab === "extensions"
-            ? " sp-settings-content-flush"
-            : activeSettingsTab === "remote"
-              ? " sp-settings-content-remote"
-              : ""
-        }`}
-      >
+      <div className="sp-settings-content" ref={contentRef} onScroll={(event) => scrollPositions.current.set(activeSettingsTab, event.currentTarget.scrollTop)}>
 
       {activeSettingsTab === "profile" && (
-        <Profile account={account} language={language} />
+        <SettingsPage kind="profile" title={layoutCopy.profile}><Profile account={account} language={language} /></SettingsPage>
       )}
 
       {activeSettingsTab === "general" && (
@@ -247,64 +259,66 @@ export default function Settings() {
           language={language}
           configView={configView}
           advForm={connection.advForm}
-          setAdvForm={connection.setAdvForm}
-          saveState={connection.saveState}
-          save={connection.save}
-          resetOpState={connection.resetOpState}
+          preferences={preferences}
+          saveLanguage={connection.saveLanguage}
+          memorySaveState={connection.memorySaveState}
+          memorySaveError={connection.memorySaveError}
+          saveMemoryWriteApproval={connection.saveMemoryWriteApproval}
+          retryMemoryWriteApproval={connection.retryMemoryWriteApproval}
           previewSystemPrompt={PREVIEW_SYSTEM_PROMPT}
           previewUserPrompt={PREVIEW_USER_PROMPT}
         />
       )}
 
-      {activeSettingsTab === "mail" && (
-        <div className="sp-mail-page">
+      {(activeSettingsTab === "mail" || visitedTabs.has("mail")) && (
+        <SettingsPage kind="mail" title={layoutCopy.mail} scope={layoutCopy.local} hidden={activeSettingsTab !== "mail"}><div className="sp-mail-page">
           <MailSettingsDetail />
-        </div>
+        </div></SettingsPage>
       )}
 
-      {activeSettingsTab === "memory" && (
-        <MemorySettings language={language} />
+      {(activeSettingsTab === "memory" || visitedTabs.has("memory")) && (
+        <SettingsPage kind="memory" title={layoutCopy.memory} scope={layoutCopy.global} hidden={activeSettingsTab !== "memory"}><MemorySettings key={currentProjectId} language={language} /></SettingsPage>
       )}
 
       {activeSettingsTab === "models" && (
-        <ModelsSettings
+        <SettingsPage kind="models" title={layoutCopy.models} scope={layoutCopy.global}><ModelsSettings
           language={language}
           configView={configView}
           account={account}
           managedModels={managedModels}
           connection={connection}
-        />
+        /></SettingsPage>
       )}
 
-      {activeSettingsTab === "extensions" && (
-        <div className="sp-extensions-embed">
-          <Extensions />
-        </div>
+      {(activeSettingsTab === "extensions" || visitedTabs.has("extensions")) && (
+        <SettingsPage kind="extensions" title={layoutCopy.extensions} scope={layoutCopy.local} hidden={activeSettingsTab !== "extensions"}><div className="sp-extensions-embed">
+          <Extensions embedded />
+        </div></SettingsPage>
       )}
 
-      {activeSettingsTab === "remote" && (
-        <div className="remote-control-page">
+      {(activeSettingsTab === "remote" || visitedTabs.has("remote")) && (
+        <SettingsPage kind="remote" title={layoutCopy.remote} scope={layoutCopy.local} hidden={activeSettingsTab !== "remote"}><div className="remote-control-page">
           <RemoteControlPanel language={language} onError={setError} />
-        </div>
+        </div></SettingsPage>
       )}
 
       {activeSettingsTab === "account" && (
-        <AccountSettings
+        <SettingsPage kind="account" title={layoutCopy.account}><AccountSettings
           language={language}
           account={account}
           accountLoading={accountLoading}
           accountError={accountError}
           onRefreshAccount={loadAccount}
-        />
+        /></SettingsPage>
       )}
 
-      {activeSettingsTab === "about" && (
-        <AboutSettings
+      {(activeSettingsTab === "about" || visitedTabs.has("about")) && (
+        <SettingsPage kind="about" title={layoutCopy.about} scope={layoutCopy.local} hidden={activeSettingsTab !== "about"}><AboutSettings
           language={language}
           appVersion={configView.appVersion}
           pythonEnvironmentPath={configView.pythonEnvironmentPath ?? ""}
           onConfigRefreshed={setConfigView}
-        />
+        /></SettingsPage>
       )}
       </div>
     </div>

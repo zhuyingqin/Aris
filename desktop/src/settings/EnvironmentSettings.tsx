@@ -8,6 +8,7 @@ import type { ConfigView, LocalEnvironmentCheck } from "../types";
 import type { Language } from "../store";
 import { SETTINGS_COPY } from "./i18n";
 import { formatUsageDate } from "./settingsFormatters";
+import { SettingsSection } from "./SettingsPrimitives";
 
 // Category labels for these ids are resolved via `environmentCategoryLabel`,
 // which already has a localized cn/en map; `label` below is only the
@@ -136,18 +137,11 @@ export default function EnvironmentSettings({
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
 
   return (
-    <div className="sp-update-section sp-env-section">
-      <div className="sp-section-head sp-env-head">
-        <div className="sp-section-head-text">
-          <div className="sp-section-title">{copy.envTitle}</div>
-          <div className="sp-section-sub">
-            {environmentLoading
+    <SettingsSection title={copy.envTitle} description={environmentLoading
               ? copy.envDetectingSub
               : environmentChecks.length > 0
               ? copy.envReadySummary(environmentReadyCount, environmentChecks.length, environmentCheckedAt ? formatUsageDate(environmentCheckedAt) : undefined)
-              : copy.envSub}
-          </div>
-        </div>
+              : copy.envSub} actions={
         <div className="sp-update-actions">
           <button
             className="sp-btn sp-btn-secondary"
@@ -159,7 +153,7 @@ export default function EnvironmentSettings({
             {environmentLoading ? copy.envDetecting : copy.envRefresh}
           </button>
         </div>
-      </div>
+      }>
       <div className="sp-env-python-config">
         <div className="sp-env-python-copy">
           <strong>{copy.pythonEnvironmentTitle}</strong>
@@ -256,6 +250,6 @@ export default function EnvironmentSettings({
           ))
         )}
       </div>
-    </div>
+    </SettingsSection>
   );
 }

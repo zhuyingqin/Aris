@@ -620,36 +620,7 @@ fn spawn_autorun_prompt(app: &tauri::AppHandle) {
 /// already own the combination; that is a normal outcome, so the failure is
 /// recorded for Settings to show rather than aborting startup.
 fn register_screenshot_shortcut(app: &tauri::AppHandle) {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-
-    let state = app.state::<screenshot::ScreenshotState>();
-    let status = match screenshot::DEFAULT_SHORTCUT.parse::<tauri_plugin_global_shortcut::Shortcut>()
-    {
-        Ok(shortcut) => match app.global_shortcut().register(shortcut) {
-            Ok(()) => screenshot::ShortcutStatus {
-                shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
-                registered: true,
-                error: None,
-            },
-            Err(error) => screenshot::ShortcutStatus {
-                shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
-                registered: false,
-                error: Some(error.to_string()),
-            },
-        },
-        Err(error) => screenshot::ShortcutStatus {
-            shortcut: screenshot::DEFAULT_SHORTCUT.to_string(),
-            registered: false,
-            error: Some(error.to_string()),
-        },
-    };
-    if let Some(error) = status.error.as_deref() {
-        eprintln!(
-            "SomniQ screenshot shortcut {} unavailable: {error}",
-            status.shortcut
-        );
-    }
-    screenshot::set_shortcut_status(state.inner(), status);
+    screenshot::register_shortcut(app);
 }
 
 // Expand the context macro once: macOS embeds a single Info.plist symbol.
@@ -756,44 +727,6 @@ pub fn run() {
             }
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
-            if let Ok((projects, _)) =
-                projects::registered_projects(app.state::<projects::ProjectState>().inner())
-            {
-                for project in projects {
-                    match runtime::recover_pending_batch_writes_at(std::path::Path::new(
-                        &project.path,
-                    )) {
-                        Ok(report) if report.recovered > 0 || report.conflicts > 0 || !report.errors.is_empty() => eprintln!(
-                            "SomniQ batch-write recovery for {}: recovered {}, conflicts {}, errors {}",
-                            project.id,
-                            report.recovered,
-                            report.conflicts,
-                            report.errors.len()
-                        ),
-                        Ok(_) => {}
-                        Err(error) => eprintln!(
-                            "SomniQ batch-write recovery skipped for {}: {error}",
-                            project.id
-                        ),
-                    }
-                    match runtime::cleanup_stale_large_writes_at(
-                        std::path::Path::new(&project.path),
-                        runtime::DEFAULT_STAGED_WRITE_MAX_AGE,
-                    ) {
-                        Ok(report) if report.removed > 0 || !report.errors.is_empty() => eprintln!(
-                            "SomniQ staged-write cleanup for {}: removed {}, errors {}",
-                            project.id,
-                            report.removed,
-                            report.errors.len()
-                        ),
-                        Ok(_) => {}
-                        Err(error) => eprintln!(
-                            "SomniQ staged-write cleanup skipped for {}: {error}",
-                            project.id
-                        ),
-                    }
-                }
-            }
             let browser_project =
                 projects::current_project_path(app.state::<projects::ProjectState>().inner())
                     .map_err(std::io::Error::other)?;
@@ -863,6 +796,7 @@ pub fn run() {
             screenshot::screenshot_pin_copy,
             screenshot::screenshot_pin_close,
             screenshot::screenshot_shortcut_status,
+            screenshot::screenshot_shortcut_set,
             commands::skills_list,
             commands::skill_view,
             ppt_master::ppt_master_status,

@@ -1,0 +1,234 @@
+/* Module navigation and account controls have their own column. Conversation
+   history keeps its full height, independent of the avatar and popup menus. */
+.app.app-navigation-shell {
+  --app-rail-width: 48px;
+  grid-template-columns: var(--app-rail-width) minmax(0, 1fr);
+  grid-template-areas: "title title" "rail head" "rail main";
+}
+
+.app:not(.app-chat-shell) .app-head .app-account .sidebar-user-menu {
+  width: min(var(--account-menu-width, 240px), calc(100vw - 24px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+}
+
+.app-navigation-rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 6px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--bg-1);
+  z-index: 140;
+}
+
+.app-rail-primary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-rail-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.app-rail-button:hover,
+.app-rail-button[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--bg-2);
+}
+
+.app-rail-button.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.app-rail-button.active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  width: 3px;
+  height: 14px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.app-rail-button:focus-visible,
+.app-rail-more-menu button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app-rail-icon,
+.app-rail-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-rail-icon svg,
+.app-rail-button > svg { width: 16px; height: 16px; }
+
+.app-rail-tooltip {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 12px);
+  transform: translateY(-50%);
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+.app-rail-button:hover .app-rail-tooltip,
+.app-rail-button:focus-visible .app-rail-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+.app-rail-button[aria-expanded="true"] .app-rail-tooltip { visibility: hidden; }
+
+.app-rail-more-menu {
+  position: fixed;
+  width: min(220px, calc(100vw - 72px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.24);
+}
+
+.app-rail-more-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+}
+
+.app-rail-more-menu button:hover,
+.app-rail-more-menu button[aria-checked="true"] { background: var(--bg-2); }
+.app-rail-more-menu button > span:nth-child(2) { flex: 1; }
+
+.app-rail-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.app-rail-footer .app-update-indicator {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+  border-radius: 8px;
+}
+
+.app-rail-footer .app-update-icon svg {
+  width: var(--app-icon-size);
+  height: var(--app-icon-size);
+}
+
+.app-rail-footer .app-update-indicator:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app.app-navigation-shell .app-navigation-rail .app-rail-account .app-account {
+  position: relative;
+  display: block;
+  width: auto;
+  left: auto;
+  bottom: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.app.app-navigation-shell .app-navigation-rail .app-rail-account .app-account-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 3px;
+  border-radius: 50%;
+}
+
+.app.app-navigation-shell .app-navigation-rail .app-rail-account .sidebar-user-avatar {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+}
+
+.app.app-navigation-shell .app-navigation-rail .app-rail-account .app-account .sidebar-user-menu {
+  top: auto;
+  right: auto;
+  bottom: 0;
+  left: calc(100% + 12px);
+  width: min(var(--account-menu-width, 240px), calc(100vw - var(--app-rail-width) - 20px));
+  max-height: calc(100vh - 52px);
+  overflow-y: auto;
+}
+
+.app.app-navigation-shell .app-main { min-width: 0; }
+.app.app-navigation-shell .chat-session-list { padding-bottom: 12px; }
+
+@media (min-width: 1121px) {
+  .app.app-navigation-shell.app-chat-shell .chat-sidebar-resize-handle {
+    left: calc(var(--app-rail-width) + var(--chat-sidebar-w, 218px));
+  }
+}
+
+@media (max-width: 720px) {
+  .app.app-navigation-shell { --app-rail-width: 44px; }
+  .app-navigation-rail { padding: 6px 4px; }
+  .app.app-navigation-shell .product-switcher-name { display: none; }
+  .app .app-head > .app-head-title { flex-shrink: 0; }
+  .app .app-head .project-switcher-trigger { min-width: 0; }
+  .app .app-head .project-add-btn { flex: 0 0 26px; justify-content: center; padding: 0; }
+  .app .app-head .project-add-btn > span { display: none; }
+  /* Match the width used by the tutorial's viewport-clamped positioning. */
+  .app.app-navigation-shell .onboarding-card.anchored { width: min(390px, calc(100vw - 32px)) !important; }
+  .app.app-navigation-shell.app-chat-shell .app-head,
+  .app.app-navigation-shell .app-head { padding-inline: 10px; gap: 8px; }
+}
+
+@media (max-height: 420px) {
+  .app-rail-primary { gap: 2px; }
+  .app-navigation-rail { padding-block: 4px; }
+  .app-rail-button { height: 30px; }
+  .app-rail-footer { margin-top: 4px; }
+}

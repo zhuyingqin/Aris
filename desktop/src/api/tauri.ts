@@ -135,6 +135,10 @@ export const screenshotPinClose = () => invoke<void>("screenshot_pin_close");
 export const screenshotShortcutStatus = () =>
   invoke<ScreenshotShortcutStatus>("screenshot_shortcut_status");
 
+/** Replace and persist the system-wide binding; registration failures preserve the current one. */
+export const screenshotShortcutSet = (shortcut: string) =>
+  invoke<ScreenshotShortcutStatus>("screenshot_shortcut_set", { shortcut });
+
 /** A finished region screenshot, on its way to the composer. */
 export const onScreenshotAttachment = (handler: (attachment: ScreenshotAttachmentEvent) => void) =>
   listen<ScreenshotAttachmentEvent>("chat-screenshot", (event) => handler(event.payload));
@@ -1055,8 +1059,8 @@ export const chatUiSessionDelete = (id: string) =>
   invoke<void>("chat_ui_session_delete", { id });
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
-export const chatTasksGet = (sessionId: string) =>
-  invoke<ChatTodoItem[]>("chat_tasks_get", { sessionId });
+export const chatTasksGet = (sessionId: string, projectId?: string) =>
+  invoke<ChatTodoItem[]>("chat_tasks_get", { sessionId, projectId: projectId ?? null });
 
 // Durable, project-local research workflows.
 export const reviewWorkflowsList = <T>() =>
@@ -2313,15 +2317,15 @@ export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
   invoke<ChatStatus>("chat_model_set", { model, persist });
-// Both calls carry the model the session actually runs on: the composer can
-// switch models without persisting them, so the backend must not answer from
-// the configured executor.
+// Both calls carry the model the session actually runs on: an older session can
+// restore its pinned model without changing the saved default, so the backend
+// must not answer from the configured executor.
 export const chatReasoningEffortGet = (model?: string | null) =>
   invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model: model ?? null });
 export const chatReasoningEffortSet = (effort: string, model?: string | null) =>
   invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort, model: model ?? null });
-export const chatPermissionGet = (sessionId: string) =>
-  invoke<PermissionModeView>("chat_permission_get", { sessionId });
+export const chatPermissionGet = (sessionId: string, projectId?: string) =>
+  invoke<PermissionModeView>("chat_permission_get", { sessionId, projectId: projectId ?? null });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
   invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
 export const chatPermissionRespond = (promptId: string, allow: boolean) =>
@@ -2343,8 +2347,8 @@ export const chatChangeRevert = (changeId: string, sessionId?: string | null) =>
 
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
-export const chatRunCommand = (sessionId: string, input: string) =>
-  invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
+export const chatRunCommand = (sessionId: string, input: string, projectId?: string) =>
+  invoke<ChatCommandResult>("chat_run_command", { sessionId, input, projectId: projectId ?? null });
 export interface ChatTitleRequest {
   user: string;
   assistant: string;
@@ -2545,15 +2549,16 @@ export const chatSetContext = (
   sessionId: string,
   messages: ChatContextMessage[],
   mode: ChatContextSyncMode = "replace",
-) => invoke<number>("chat_set_context", { sessionId, messages, mode });
+  projectId?: string,
+) => invoke<number>("chat_set_context", { sessionId, messages, mode, projectId: projectId ?? null });
 /** Current backend session-history estimate. `null` means this chat has no
  * backend session yet, so callers should retain their local fallback. */
-export const chatContextTokens = (sessionId: string) =>
-  invoke<number | null>("chat_context_tokens", { sessionId });
+export const chatContextTokens = (sessionId: string, projectId?: string) =>
+  invoke<number | null>("chat_context_tokens", { sessionId, projectId: projectId ?? null });
 /** Rewind to the server's full context before this one unambiguous user
  * message. `null` means an older/ambiguous session must use the UI fallback. */
-export const chatRewindToUserMessage = (sessionId: string, message: ChatContextUserMessage) =>
-  invoke<number | null>("chat_rewind_to_user_message", { sessionId, message });
+export const chatRewindToUserMessage = (sessionId: string, message: ChatContextUserMessage, projectId?: string) =>
+  invoke<number | null>("chat_rewind_to_user_message", { sessionId, message, projectId: projectId ?? null });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
@@ -2568,15 +2573,16 @@ export const chatReviewClear = (sessionId: string) =>
  * streaming deltas (98 MB / 140k entries for one real chat), and without a
  * filter every one of them is decoded and shipped across the IPC boundary.
  */
-export const chatEventsRead = (sessionId: string, kinds?: readonly string[]) =>
+export const chatEventsRead = (sessionId: string, kinds?: readonly string[], projectId?: string) =>
   invoke<ChatEventLogEntry[]>("chat_events_read", {
     sessionId,
     kinds: kinds ? [...kinds] : null,
+    projectId: projectId ?? null,
   });
-export const chatEventsReplay = (sessionId: string) =>
-  invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
-export const chatDebugZipExport = (sessionId: string, path?: string | null) =>
-  invoke<string>("chat_debug_zip_export", { sessionId, path: path ?? null });
+export const chatEventsReplay = (sessionId: string, projectId?: string) =>
+  invoke<ChatEventsReplay>("chat_events_replay", { sessionId, projectId: projectId ?? null });
+export const chatDebugZipExport = (sessionId: string, path?: string | null, projectId?: string) =>
+  invoke<string>("chat_debug_zip_export", { sessionId, path: path ?? null, projectId: projectId ?? null });
 
 export interface ChatTextEvent {
   sessionId: string;

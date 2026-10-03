@@ -61,4 +61,19 @@ describe("transcript scroll geometry", () => {
     expect(appStyles).toMatch(/\.chat-welcome\s*\{[^}]*padding:\s*26px 0 20px;/s);
     expect(appStyles).toMatch(/\.chat-thread-loading\s*\{[^}]*padding:\s*40px 0;/s);
   });
+
+  it("centres only the empty-page welcome region while keeping the composer low", () => {
+    // The welcome area and composer have different jobs: ChatThread reserves the
+    // upper region for the welcome content, while the composer stays anchored at
+    // the bottom instead of joining the centred group.
+    expect(appStyles).toMatch(
+      /\.chat-empty \.chat-input-wrap\s*\{[^}]*bottom:\s*0;[^}]*background:\s*transparent;/s,
+    );
+    expect(appStyles).toMatch(
+      /\.chat-empty \.chat-welcome\s*\{[^}]*justify-content:\s*safe center;/s,
+    );
+    expect(appStyles).not.toMatch(
+      /\.app\.app-chat-shell \.chat\.chat-empty\s*\{[^}]*justify-content:\s*safe center;/s,
+    );
+  });
 });

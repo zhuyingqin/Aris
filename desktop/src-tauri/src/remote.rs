@@ -128,7 +128,8 @@ const REMOTE_ACCOUNT_PAIRING_FAILED_EVENT: &str = "remote-account-pairing-failed
 /// credential, or account login before they can pair a phone. The first signed
 /// QR ceremony obtains a desktop credential that stays only in the operating
 /// system credential store.
-const MANAGED_REMOTE_GATEWAY_URL: &str = "https://somni.chat";
+const MANAGED_REMOTE_GATEWAY_URL: &str = "https://ensuanx.com";
+const LEGACY_MANAGED_REMOTE_GATEWAY_URL: &str = "https://somni.chat";
 /// The managed gateway publishes this STUN-only endpoint alongside the HTTPS
 /// control plane. It supplies public ICE discovery for a direct WebRTC probe;
 /// an unavailable direct route still falls back to the encrypted TCP relay.
@@ -1376,6 +1377,33 @@ fn desktop_identity(state: &RemoteAgentState) -> Result<DesktopIdentity, String>
     identity_from_secret(device_id, &device_name, &secret)
 }
 
+/// The managed hostname changed, but both names address the same gateway and
+/// completed-device ledger. Copy only this fixed legacy credential into the
+/// canonical keyring entry before persisting the new route. Never move a custom
+/// gateway's credential, overwrite a newer credential, or rotate device keys.
+fn migrate_managed_gateway_profile(
+    store: &mut RemoteStore,
+    read_secret: impl Fn(&str) -> Result<Option<Vec<u8>>, String>,
+    write_secret: impl Fn(&str, &[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let previous = store
+        .gateway_url
+        .as_deref()
+        .and_then(|value| normalize_gateway_url(value).ok());
+    if previous.as_deref() != Some(LEGACY_MANAGED_REMOTE_GATEWAY_URL) {
+        return Ok(());
+    }
+    let canonical_account = gateway_token_secret_account(MANAGED_REMOTE_GATEWAY_URL);
+    if read_secret(&canonical_account)?.is_none() {
+        let legacy_account = gateway_token_secret_account(LEGACY_MANAGED_REMOTE_GATEWAY_URL);
+        if let Some(secret) = read_secret(&legacy_account)? {
+            write_secret(&canonical_account, &secret)?;
+        }
+    }
+    store.gateway_url = Some(MANAGED_REMOTE_GATEWAY_URL.to_string());
+    Ok(())
+}
+
 fn store_gateway_token(gateway_url: &str, token: &str) -> Result<(), String> {
     let token = token.trim();
     if token.len() < 16 || token.len() > 4_096 || token.chars().any(char::is_whitespace) {
@@ -1843,6 +1871,24 @@ fn transport_generation_is_current(app: &AppHandle, generation: u64) -> bool {
         == generation
 }
 
+/// Publish a queue only while its authenticated connection can consume it.
+/// An obsolete runner must not clear or replace a newer runner's queue.
+fn set_signal_outbound_for_generation(
+    state: &RemoteAgentState,
+    generation: u64,
+    sender: Option<mpsc::Sender<GatewayOutboundSignalFrame>>,
+) -> Result<(), String> {
+    let mut outbound = state
+        .signal_outbound
+        .lock()
+        .map_err(|_| "remote signal state poisoned".to_string())?;
+    if state.transport_generation.load(Ordering::SeqCst) != generation {
+        return Err("remote signal connection was replaced".to_string());
+    }
+    *outbound = sender;
+    Ok(())
+}
+
 fn start_transport(app: AppHandle, state: &RemoteAgentState) {
     // A missing credential is normal before a first enrollment. The settings
     // UI will surface it when the user starts pairing; startup itself must not
@@ -1869,7 +1915,9 @@ fn start_transport(app: AppHandle, state: &RemoteAgentState) {
         .wrapping_add(1);
     *guard = Some(shutdown);
     if let Ok(mut outbound) = state.signal_outbound.lock() {
-        *outbound = Some(signal_outbound);
+        // Renderer heartbeats must not accumulate while DNS/TLS is offline.
+        // The runner publishes this queue only after the gateway sends Ready.
+        *outbound = None;
     } else {
         // The runner must not outlive an unusable state lock. Drop the just
         // installed shutdown sender before returning so a later enable can
@@ -1878,7 +1926,7 @@ fn start_transport(app: AppHandle, state: &RemoteAgentState) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        run_signal_transport(app, receiver, signal_inbound, generation).await;
+        run_signal_transport(app, receiver, signal_inbound, signal_outbound, generation).await;
     });
 }
 
@@ -1940,6 +1988,7 @@ async fn run_signal_transport(
     app: AppHandle,
     mut shutdown: watch::Receiver<bool>,
     mut outbound: mpsc::Receiver<GatewayOutboundSignalFrame>,
+    outbound_sender: mpsc::Sender<GatewayOutboundSignalFrame>,
     generation: u64,
 ) {
     loop {
@@ -1972,9 +2021,16 @@ async fn run_signal_transport(
                     socket,
                     shutdown.clone(),
                     &mut outbound,
+                    &outbound_sender,
                     generation,
                 )
                 .await;
+                let state = app.state::<RemoteAgentState>();
+                let _ = set_signal_outbound_for_generation(state.inner(), generation, None);
+                drop(state);
+                // Frames for the lost lease/session must not be replayed on a
+                // later connection. New work will retry after the next Ready.
+                while outbound.try_recv().is_ok() {}
                 if !*shutdown.borrow() && transport_generation_is_current(&app, generation) {
                     close_p2p_sessions_for_signal_disconnect(&app);
                 }
@@ -2002,6 +2058,7 @@ async fn run_signal_connection(
     >,
     mut shutdown: watch::Receiver<bool>,
     outbound: &mut mpsc::Receiver<GatewayOutboundSignalFrame>,
+    outbound_sender: &mpsc::Sender<GatewayOutboundSignalFrame>,
     generation: u64,
 ) {
     // A TCP/WebSocket connection can remain locally "open" after a NAT,
@@ -2124,6 +2181,12 @@ async fn run_signal_connection(
                             }
                             GatewaySignalFrame::Ready { device_id } => {
                                 let _ = device_id;
+                                let state = app.state::<RemoteAgentState>();
+                                if set_signal_outbound_for_generation(
+                                    state.inner(), generation, Some(outbound_sender.clone()),
+                                ).is_err() {
+                                    return;
+                                }
                             }
                             GatewaySignalFrame::Revoked { device_id } => {
                                 handle_gateway_device_revoked(&app, &device_id);
@@ -2565,13 +2628,15 @@ fn queue_gateway_signal(
         .map_err(|_| "invalid remote WebRTC signaling payload".to_string())?;
     let payload = serde_json::to_value(payload)
         .map_err(|_| "cannot encode remote WebRTC signaling payload".to_string())?;
+    // Keep enqueueing atomic with disconnect: a cloned sender could enqueue
+    // after the lost connection's queue was cleared and drained.
     let outbound = state
         .signal_outbound
         .lock()
-        .map_err(|_| "remote signal state poisoned".to_string())?
-        .clone()
-        .ok_or_else(|| "remote signal transport is unavailable".to_string())?;
+        .map_err(|_| "remote signal state poisoned".to_string())?;
     outbound
+        .as_ref()
+        .ok_or_else(|| "remote signal transport is unavailable".to_string())?
         .try_send(GatewayOutboundSignalFrame::Signal {
             to: device_id.to_string(),
             session_id: session_id.to_string(),
@@ -2684,13 +2749,15 @@ pub(crate) fn send_image_assist_frame(
     state: &RemoteAgentState,
     frame: ImageAssistClientFrame,
 ) -> Result<(), String> {
+    // Keep enqueueing atomic with disconnect: a cloned sender could enqueue
+    // after the lost connection's queue was cleared and drained.
     let outbound = state
         .signal_outbound
         .lock()
-        .map_err(|_| "remote signal state poisoned".to_string())?
-        .clone()
-        .ok_or_else(|| "remote signal transport is unavailable".to_string())?;
+        .map_err(|_| "remote signal state poisoned".to_string())?;
     outbound
+        .as_ref()
+        .ok_or_else(|| "remote signal transport is unavailable".to_string())?
         .try_send(GatewayOutboundSignalFrame::ImageAssist { frame })
         .map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => {
@@ -3536,7 +3603,10 @@ fn with_store<T>(
 }
 
 pub fn init(app: AppHandle, state: &RemoteAgentState) -> Result<(), String> {
-    with_store(state, |store| migrate_local_endpoint(store))?;
+    with_store(state, |store| {
+        migrate_local_endpoint(store)?;
+        migrate_managed_gateway_profile(store, read_keyring_secret, write_keyring_secret)
+    })?;
     // `Default` eagerly loads the store. The network runner is outbound-only:
     // it authenticates to the configured gateway and never opens a desktop
     // listening port. Missing first-time credentials are handled by Settings.
@@ -3600,6 +3670,7 @@ fn enable_managed_remote(state: &RemoteAgentState) -> Result<(RemoteStore, Strin
         .clone();
     let gateway_url = normalize_gateway_url(MANAGED_REMOTE_GATEWAY_URL)?;
     with_store(state, |store| {
+        migrate_managed_gateway_profile(store, read_keyring_secret, write_keyring_secret)?;
         store.enabled = true;
         store.gateway_url = Some(gateway_url.clone());
         upgrade_placeholder_desktop_name(store);
