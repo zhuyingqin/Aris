@@ -159,6 +159,7 @@ pub(crate) fn project_execution_context(
     std::fs::create_dir_all(&run_state)?;
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;
+    crate::projects::recover_project_writes(project_id, workspace);
 
     let mut context = runtime::ProjectExecutionContext::new(workspace)
         .with_env("ARIS_WORKSPACE_ROOT", workspace.as_os_str())
