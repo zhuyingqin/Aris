@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import type { NewApiAccount } from "../api/tauri";
+import { isImageGenerationModel } from "../imageModels";
+import SomniImageSettings from "./SomniImageSettings";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
@@ -30,7 +32,7 @@ interface Props {
   connection: SettingsConnectionState;
 }
 
-export default function ModelsSettings({ language, configView, account, managedModels, connection }: Props) {
+export default function ModelsSettings({ language, configView, managedModels, connection }: Props) {
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const {
@@ -95,15 +97,13 @@ export default function ModelsSettings({ language, configView, account, managedM
     [configView.executorModel, advForm.executorModel],
     configView.managedModels,
     (configView.verifiedExecutors ?? []).map((item) => item.model),
-  ).map((model) => ({ label: model, value: model }));
+  ).filter((model) => !isImageGenerationModel(model)).map((model) => ({ label: model, value: model }));
 
   const currentManagedModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const availableManagedModels = uniqueModelList(
     managedModels,
-    configView.managedModels,
     [configView.executorModel, configView.reviewerModel],
-    account?.models,
-  );
+  ).filter((model) => !isImageGenerationModel(model));
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
   // Endpoint actually used for the selected executor model. Prefer the entry
   // probed for this exact model over the live slot, since a model switch
@@ -193,15 +193,16 @@ export default function ModelsSettings({ language, configView, account, managedM
         </div>
       </SettingsSection>
 
+      <SomniImageSettings language={language} models={managedModels} />
+
       <div className="settings-model-sections">
 
           {/* Section 1: Auxiliary Models */}
-          <SettingsSection title={copy.sectionAuxiliaryModels} description={copy.sectionAuxiliaryModelsSub}>
+          <SettingsSection title={copy.sectionAuxiliaryModels}>
             <div className="sp-adv-rows">
               <div className="st-row">
                 <div className="st-row-label">
                   <span className="st-label">{copy.summaryProvider}</span>
-                  {copy.summaryProviderHint ? <span className="st-hint">{copy.summaryProviderHint}</span> : null}
                 </div>
                 <div className="st-row-control">
                   <select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value, summaryProviderOptions)}>

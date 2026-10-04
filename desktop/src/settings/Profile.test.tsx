@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NewApiAccount } from "../api/tauri";
 import { profileStats } from "../api/tauri";
@@ -65,6 +65,7 @@ describe("Settings Profile", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     window.localStorage.clear();
   });
 
@@ -73,7 +74,7 @@ describe("Settings Profile", () => {
 
     expect(screen.getByText("未登录")).toBeTruthy();
     expect(screen.queryByText("Real Researcher")).toBeNull();
-    expect(screen.getByText(/不会再使用模拟数据/)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("暂时无法读取本机活动统计。");
     expect(screen.queryByText("累计令牌数")).toBeNull();
     expect(profileStats).not.toHaveBeenCalled();
   });
@@ -102,5 +103,58 @@ describe("Settings Profile", () => {
     fireEvent.click(screen.getByRole("button", { name: "移除" }));
     expect(window.localStorage.getItem(PROFILE_AVATAR_CACHE_KEY)).toBeNull();
     expect(container.querySelector(".sp-profile-avatar img")).toBeNull();
+  });
+
+  it("preserves the last snapshot on refresh failure and recovers on retry", async () => {
+    mocks.backendAvailable = true;
+    const refreshAccount = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(profileStats).mockResolvedValueOnce(stats).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ ...stats, toolCalls: 9 });
+    render(<Profile account={account} language="en" onRefreshAccount={refreshAccount} />);
+    await screen.findByText("/research-wiki");
+    const refreshButton = screen.getByRole("button", { name: "Refresh profile and statistics" });
+    fireEvent.click(refreshButton);
+    await screen.findByText(/Refresh failed/);
+    expect(screen.getByText("/research-wiki")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh profile and statistics" }));
+    await waitFor(() => expect(screen.queryByText(/Refresh failed/)).toBeNull());
+    expect(refreshAccount).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("9")).toBeTruthy();
+  });
+
+  it("refreshes on focus and releases listeners when unmounted", async () => {
+    mocks.backendAvailable = true;
+    vi.mocked(profileStats).mockResolvedValue(stats);
+    const { unmount } = render(<Profile account={account} language="en" />);
+    await screen.findByText("/research-wiki");
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(profileStats).toHaveBeenCalledTimes(2);
+    unmount();
+    window.dispatchEvent(new Event("focus"));
+    expect(profileStats).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows partial coverage and real model usage without hiding recorded activity", async () => {
+    mocks.backendAvailable = true;
+    vi.mocked(profileStats).mockResolvedValue({ ...stats, partialData: true });
+    render(<Profile account={account} language="en" accountError="Connection failed" />);
+    await screen.findByText(/Some historical records could not be read/);
+    expect(screen.getByText("gpt-5.5")).toBeTruthy();
+    expect(screen.getByText("/research-wiki")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Account refresh failed");
+  });
+
+  it("refreshes every 30 seconds without overlapping a pending request", async () => {
+    mocks.backendAvailable = true;
+    vi.useFakeTimers();
+    let resolve!: (value: ProfileStats) => void;
+    vi.mocked(profileStats).mockReturnValueOnce(new Promise((done) => { resolve = done; })).mockResolvedValue(stats);
+    const { unmount } = render(<Profile account={account} language="en" />);
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(profileStats).toHaveBeenCalledTimes(1);
+    await act(async () => { resolve(stats); });
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(profileStats).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

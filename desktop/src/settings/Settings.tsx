@@ -10,13 +10,13 @@ import { formatUserFacingError } from "../errorMessage";
 import { readCachedAccount, writeCachedAccount } from "../accountCache";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "../settingsTabRequest";
 import { SvgIcon } from "../SvgIcon";
-import { notifyChatModelsUpdated } from "../modelEvents";
 import type { ConfigView } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
 import MemorySettings from "./MemorySettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
+import UpdateSettings from "./UpdateSettings";
 import AccountSettings from "./AccountSettings";
 import GeneralSettings from "./GeneralSettings";
 import ModelsSettings from "./ModelsSettings";
@@ -77,7 +77,7 @@ export default function Settings() {
   const PREVIEW_SYSTEM_PROMPT = previewData.systemPrompt;
   const PREVIEW_USER_PROMPT = previewData.userPrompt;
   const [configView, setConfigView] = useState<ConfigView | null>(() => hasNativeBackend() ? null : PREVIEW_CONFIG_VIEW);
-  const [managedModels, setManagedModels] = useState<string[]>(() => hasNativeBackend() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
+  const [managedModels, setManagedModels] = useState<string[]>(() => hasNativeBackend() ? readCachedAccount()?.models ?? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
   const [account, setAccount] = useState<NewApiAccount | null>(() => hasNativeBackend() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
@@ -126,11 +126,8 @@ export default function Settings() {
   // notify Chat, persist the cache).
   const applyRefreshedAccount = (next: NewApiAccount) => {
     setAccount(next);
-    if (next.models.length > 0) {
-      setManagedModels(next.models);
-      setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
-      notifyChatModelsUpdated();
-    }
+    setManagedModels(next.models);
+    setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
     writeCachedAccount(next);
   };
 
@@ -148,6 +145,7 @@ export default function Settings() {
       setAccountError(message);
       if (isManagedAuthInvalidError(error)) {
         writeCachedAccount(null);
+        setAccount(null);
         logout();
       }
     } finally {
@@ -251,7 +249,7 @@ export default function Settings() {
       <div className="sp-settings-content" ref={contentRef} onScroll={(event) => scrollPositions.current.set(activeSettingsTab, event.currentTarget.scrollTop)}>
 
       {activeSettingsTab === "profile" && (
-        <SettingsPage kind="profile" title={layoutCopy.profile}><Profile account={account} language={language} /></SettingsPage>
+        <SettingsPage kind="profile" title={layoutCopy.profile}><Profile account={account} language={language} onRefreshAccount={loadAccount} accountLoading={accountLoading} accountError={accountError} /></SettingsPage>
       )}
 
       {activeSettingsTab === "general" && (
@@ -310,6 +308,12 @@ export default function Settings() {
           accountError={accountError}
           onRefreshAccount={loadAccount}
         /></SettingsPage>
+      )}
+
+      {(activeSettingsTab === "update" || visitedTabs.has("update")) && (
+        <SettingsPage kind="update" title={layoutCopy.update} scope={layoutCopy.local} hidden={activeSettingsTab !== "update"}>
+          <UpdateSettings language={language} appVersion={configView.appVersion} />
+        </SettingsPage>
       )}
 
       {(activeSettingsTab === "about" || visitedTabs.has("about")) && (

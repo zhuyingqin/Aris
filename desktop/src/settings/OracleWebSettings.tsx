@@ -16,6 +16,7 @@ import type { OracleWebStatusView } from "../types";
 interface OracleWebSettingsProps {
   language: Language;
   embedded?: boolean;
+  runtimeOnly?: boolean;
 }
 
 type RoleKey = "consult" | "reviewer" | "image";
@@ -28,14 +29,14 @@ const MODEL_OPTIONS = ["gpt-6", "gpt-6-pro", "gpt-5.6-sol", "gpt-5.6", "gpt-5.5-
 const COPY = {
   cn: {
     title: "ChatGPT 网页自动化",
-    subtitle: "用你自己的 ChatGPT 订阅，无需 OpenAI API Key。",
+    subtitle: "使用自己的 ChatGPT 订阅。",
     boundary: "第三方网页自动化",
-    foldTitle: "使用须知：隐私、边界与风险",
-    foldPrivacy: "每个 Oracle 账号都有一个独立、持久的浏览器用户。SomniQ 不连接日常 Chrome，不复制 Cookie，也不保存密码。",
-    foldBoundary: "走的是 ChatGPT 网页和你的订阅，不是 OpenAI 官方 API；网页改版、登录验证或服务条款变化都可能让任务暂停。",
-    foldCookies: "登录 Cookie 只留在该账号的本机浏览器用户目录中，不会复制到 SomniQ 配置或其他浏览器用户。",
-    foldLogin: "登录窗口不带自动化控制。首次登录后关闭窗口；之后 Chat 调用会复用同一个浏览器用户。",
-    foldScope: "网页咨询只发送提示词和项目内附件；绑定的审稿账号优先于模型服务页的 Reviewer。",
+    foldTitle: "隐私与使用须知",
+    foldPrivacy: "账号使用独立的本机浏览器配置；不读取日常浏览器或保存密码。",
+    foldBoundary: "使用 ChatGPT 网页订阅；网页改版或登录验证可能暂停任务。",
+    foldCookies: "登录 Cookie 仅保存在对应账号的本机目录。",
+    foldLogin: "登录窗口不受自动化控制；登录后关闭，后续调用复用登录状态。",
+    foldScope: "咨询发送提示词及项目内附件；网页审稿优先于模型服务 Reviewer。",
     dataDir: "本机目录",
     nextRuntime: "下一步：安装 Oracle 运行时",
     nextRuntimeUpdate: "下一步：更新 Oracle 运行时",
@@ -46,7 +47,6 @@ const COPY = {
     refresh: "刷新",
     refreshing: "刷新中…",
     runtimeTitle: "运行时",
-    runtimeSub: "按需安装的可选组件，不含浏览器。",
     ready: "可用",
     missing: "未安装",
     incompatible: "版本不兼容",
@@ -59,16 +59,13 @@ const COPY = {
     update: "更新运行时",
     updating: "更新中…",
     installDetail: "约 250MB，不改动系统已装的 Node / Oracle。",
-    updateDetail: "安装 SomniQ 当前兼容版本；账号、登录 profile 和用途路由都会保留。",
-    upToDate: "已是当前兼容版本。运行时随 SomniQ 版本更新，不会静默升级到未经验证的上游版本。",
+    updateDetail: "检查并更新至 SomniQ 兼容版本，保留账号与登录状态。",
     browserTitle: "浏览器",
-    browserSub: "从已安装的 Edge、Chrome、Brave、Chromium 或 Vivaldi 中选一个。",
     browserCount: "{count} 个",
     noBrowserPill: "未检测到",
     noBrowser: "未检测到 Chromium 系浏览器，装好后点刷新。",
     recommended: "推荐",
     accountTitle: "账号",
-    accountSub: "每个账号固定对应一个独立、可持续复用的浏览器用户。",
     accountCount: "{count} 个",
     noAccountPill: "未创建",
     accountName: "名称",
@@ -94,12 +91,12 @@ const COPY = {
     rolesTitle: "用途与路由",
     roleSaving: "正在保存…",
     consultRole: "Chat 咨询",
-    consultRoleHint: "启用后，Chat 中提供网页咨询工具",
+    consultRoleHint: "在 Chat 中使用网页咨询",
     reviewerRole: "独立审稿",
-    reviewerRoleHint: "可选：用 ChatGPT 网页账号替代默认 Reviewer",
+    reviewerRoleHint: "使用网页账号独立审稿",
     reviewerFallbackHint: "关闭时使用「模型服务」Reviewer",
     imageRole: "图片生成",
-    imageRoleHint: "生图沿用网页当前模型；任务明确指定模型时才切换",
+    imageRoleHint: "沿用网页模型，除非任务指定其他模型",
     accountCreated: "账号已创建，接着打开登录窗口。",
     loginOpened: "浏览器用户已打开。登录完成后关闭窗口；之后会自动复用该用户。",
     modelUpdated: "账号默认模型已保存。",
@@ -112,18 +109,19 @@ const COPY = {
     imageDisabled: "图片生成已关闭。",
     runtimeInstalled: "运行时已安装。",
     runtimeUpdated: "运行时已更新，账号和用途路由均已保留。",
+    runtimeCurrent: "运行时已是当前兼容版本。",
     preview: "浏览器预览模式不会创建真实账号。请在 SomniQ 桌面应用中操作。",
   },
   en: {
     title: "ChatGPT webpage automation",
-    subtitle: "Use your own ChatGPT subscription — no OpenAI API key.",
+    subtitle: "Uses your ChatGPT subscription.",
     boundary: "Third-party automation",
-    foldTitle: "Before you start: privacy, boundary, risk",
-    foldPrivacy: "Every Oracle account has an isolated, persistent browser user. SomniQ never connects to daily Chrome, copies cookies, or stores passwords.",
-    foldBoundary: "This uses the ChatGPT website and your subscription, not the official OpenAI API. Website, verification, or terms changes can pause tasks.",
-    foldCookies: "Sign-in cookies stay only in this account's local browser-user directory and are never copied to SomniQ configuration or another browser user.",
-    foldLogin: "The sign-in window has no automation control. Close it after the first sign-in; later Chat calls reuse the same browser user.",
-    foldScope: "Webpage consultation sends only prompts and project-local files. A bound reviewer account takes precedence over the model-services Reviewer.",
+    foldTitle: "Privacy and usage",
+    foldPrivacy: "Accounts use separate local browser profiles; daily browser data and passwords are not read or stored.",
+    foldBoundary: "Uses the ChatGPT website subscription; site changes or sign-in checks may pause tasks.",
+    foldCookies: "Sign-in cookies stay in that account's local directory.",
+    foldLogin: "The sign-in window has no automation control. Close it after sign-in; later calls reuse the session.",
+    foldScope: "Consultation sends prompts and project files; webpage review takes priority over the Model Services Reviewer.",
     dataDir: "Local folder",
     nextRuntime: "Next: install the Oracle runtime",
     nextRuntimeUpdate: "Next: update the Oracle runtime",
@@ -134,7 +132,6 @@ const COPY = {
     refresh: "Refresh",
     refreshing: "Refreshing…",
     runtimeTitle: "Runtime",
-    runtimeSub: "An optional on-demand component. The browser is not included.",
     ready: "Ready",
     missing: "Not installed",
     incompatible: "Incompatible version",
@@ -147,16 +144,13 @@ const COPY = {
     update: "Update runtime",
     updating: "Updating…",
     installDetail: "About 250MB. System Node / Oracle installs are left untouched.",
-    updateDetail: "Installs the version supported by this SomniQ build. Accounts, sign-in profiles, and capability routes are preserved.",
-    upToDate: "This is the current compatible version. The runtime follows SomniQ releases and is not silently upgraded to an unverified upstream build.",
+    updateDetail: "Checks and updates to the SomniQ-compatible version, keeping accounts and sign-ins.",
     browserTitle: "Browser",
-    browserSub: "Pick one of the installed Edge, Chrome, Brave, Chromium, or Vivaldi builds.",
     browserCount: "{count} found",
     noBrowserPill: "None found",
     noBrowser: "No Chromium-family browser found. Install one, then refresh.",
     recommended: "Recommended",
     accountTitle: "Account",
-    accountSub: "Every account maps to one isolated, persistent browser user.",
     accountCount: "{count}",
     noAccountPill: "None yet",
     accountName: "Name",
@@ -182,12 +176,12 @@ const COPY = {
     rolesTitle: "Capabilities and routing",
     roleSaving: "Saving…",
     consultRole: "Chat consultation",
-    consultRoleHint: "When on, adds webpage consultation to Chat",
+    consultRoleHint: "Use webpage consultation in Chat",
     reviewerRole: "Independent review",
-    reviewerRoleHint: "Optional: replace the default Reviewer with a ChatGPT webpage account",
+    reviewerRoleHint: "Independent review with a webpage account",
     reviewerFallbackHint: "When off, uses the Model Services Reviewer",
     imageRole: "Image generation",
-    imageRoleHint: "Images keep the current webpage model unless the task explicitly requests one",
+    imageRoleHint: "Keep the webpage model unless the task specifies another",
     accountCreated: "Account created. Open its sign-in window next.",
     loginOpened: "Browser user opened. Close it after sign-in; later calls reuse this user automatically.",
     modelUpdated: "The account default model is saved.",
@@ -200,11 +194,12 @@ const COPY = {
     imageDisabled: "Image generation is off.",
     runtimeInstalled: "The runtime is installed.",
     runtimeUpdated: "The runtime is updated. Accounts and capability routes were preserved.",
+    runtimeCurrent: "The runtime is already on the current compatible version.",
     preview: "Browser preview mode cannot create real accounts. Use the SomniQ desktop app.",
   },
 } as const;
 
-export default function OracleWebSettings({ language, embedded = false }: OracleWebSettingsProps) {
+export default function OracleWebSettings({ language, embedded = false, runtimeOnly = false }: OracleWebSettingsProps) {
   const copy = COPY[language];
   const nativeBackend = hasNativeBackend();
   const [status, setStatus] = useState<OracleWebStatusView | null>(null);
@@ -255,6 +250,7 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
 
   const runtimeReady = status?.runtime.status === "ready";
   const runtimeNeedsUpdate = status?.runtime.status === "incompatible";
+  const runtimeActionIsUpdate = runtimeReady || runtimeNeedsUpdate;
   const runtimeStatusLabel = runtimeReady
     ? copy.ready
     : status?.runtime.status === "incompatible"
@@ -286,14 +282,21 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
 
   const installOrUpdateRuntime = async () => {
     if (!nativeBackend) return;
-    const updating = runtimeNeedsUpdate;
+    const updating = runtimeActionIsUpdate;
     setInstalling(true);
     setError("");
     setNotice("");
     try {
       const next = await oracleWebRuntimeInstall();
       setStatus(next);
-      setNotice(updating ? copy.runtimeUpdated : copy.runtimeInstalled);
+      if (next.runtime.status !== "ready") {
+        setError(next.runtime.message);
+        return;
+      }
+      const alreadyCurrent = runtimeReady
+        && next.runtime.version === status?.runtime.version
+        && next.runtime.source === status?.runtime.source;
+      setNotice(alreadyCurrent ? copy.runtimeCurrent : updating ? copy.runtimeUpdated : copy.runtimeInstalled);
     } catch (cause) {
       setError(formatUserFacingError(cause));
     } finally {
@@ -440,6 +443,54 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
     };
   }, [accounts, browsers, copy, runtimeNeedsUpdate, runtimeReady, status?.consultAccountId]);
 
+  const runtimeSection = (
+    <section className="sp-update-section">
+      <div className="sp-section-head">
+        <div className="sp-section-head-text">
+          <div className="sp-section-title">
+            {runtimeOnly ? "Oracle Web" : <><span className="oracle-web-step">1</span>{copy.runtimeTitle}</>}
+          </div>
+        </div>
+        <span className={`oracle-web-pill ${runtimeReady ? "ok" : "todo"}`}>{runtimeStatusLabel}</span>
+      </div>
+      <div className="oracle-web-meta">
+        <span>{runtimeSource}</span>
+        {status?.runtime.version && <span>v{status.runtime.version}</span>}
+      </div>
+      {!runtimeReady && status?.runtime.message && <div className="oracle-web-muted">{status.runtime.message}</div>}
+      {status?.runtime.installSupported && (
+        <div className="oracle-web-install-row">
+          <button
+            className={`sp-btn ${runtimeReady ? "sp-btn-secondary" : "sp-btn-primary"}`}
+            type="button"
+            onClick={() => void installOrUpdateRuntime()}
+            disabled={installing || loading || !nativeBackend}
+            aria-busy={installing}
+          >
+            {installing
+              ? runtimeActionIsUpdate ? copy.updating : copy.installing
+              : runtimeActionIsUpdate ? copy.update : copy.install}
+          </button>
+          <span>{runtimeActionIsUpdate ? copy.updateDetail : copy.installDetail}</span>
+        </div>
+      )}
+      {runtimeOnly && (
+        <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void load()} disabled={loading || installing}>
+          {loading ? copy.refreshing : copy.refresh}
+        </button>
+      )}
+    </section>
+  );
+
+  if (runtimeOnly) {
+    return <div className="oracle-web-page oracle-web-page-embedded">
+      {runtimeSection}
+      {!nativeBackend && <div className="oracle-web-message">{copy.preview}</div>}
+      {error && <div className="oracle-web-message error" role="alert">{error}</div>}
+      {notice && <div className="oracle-web-message success" role="status">{notice}</div>}
+    </div>;
+  }
+
   return (
     <div className={`oracle-web-page${embedded ? " oracle-web-page-embedded" : ""}`}>
       <section className="sp-update-section oracle-web-hero">
@@ -454,7 +505,7 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
         <div className={`oracle-web-actionbar ${progress.ready ? "ready" : ""}`}>
           <span className="oracle-web-progress">{progress.done}/4</span>
           <span className="oracle-web-next">{progress.next}</span>
-          <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void load()} disabled={loading}>
+          <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void load()} disabled={loading || installing}>
             {loading ? copy.refreshing : copy.refresh}
           </button>
         </div>
@@ -478,47 +529,12 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
       {error && <div className="oracle-web-message error" role="alert">{error}</div>}
       {notice && <div className="oracle-web-message success" role="status">{notice}</div>}
 
-      <section className="sp-update-section">
-        <div className="sp-section-head">
-          <div className="sp-section-head-text">
-            <div className="sp-section-title"><span className="oracle-web-step">1</span>{copy.runtimeTitle}</div>
-            <div className="sp-section-sub">{copy.runtimeSub}</div>
-          </div>
-          <span className={`oracle-web-pill ${runtimeReady ? "ok" : "todo"}`}>{runtimeStatusLabel}</span>
-        </div>
-        <div className="oracle-web-meta">
-          <span>{runtimeSource}</span>
-          {status?.runtime.version && <span>v{status.runtime.version}</span>}
-        </div>
-        {runtimeReady ? (
-          <div className="oracle-web-muted">{copy.upToDate}</div>
-        ) : (
-          <>
-            {status?.runtime.message && <div className="oracle-web-muted">{status.runtime.message}</div>}
-            {status?.runtime.installSupported && (
-              <div className="oracle-web-install-row">
-                <button
-                  className="sp-btn sp-btn-primary"
-                  type="button"
-                  onClick={() => void installOrUpdateRuntime()}
-                  disabled={installing || !nativeBackend}
-                >
-                  {installing
-                    ? runtimeNeedsUpdate ? copy.updating : copy.installing
-                    : runtimeNeedsUpdate ? copy.update : copy.install}
-                </button>
-                <span>{runtimeNeedsUpdate ? copy.updateDetail : copy.installDetail}</span>
-              </div>
-            )}
-          </>
-        )}
-      </section>
+      {runtimeSection}
 
       <section className="sp-update-section">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
             <div className="sp-section-title"><span className="oracle-web-step">2</span>{copy.browserTitle}</div>
-            <div className="sp-section-sub">{copy.browserSub}</div>
           </div>
           <span className={`oracle-web-pill ${browsers.length ? "ok" : "todo"}`}>
             {browsers.length ? copy.browserCount.replace("{count}", String(browsers.length)) : copy.noBrowserPill}
@@ -543,7 +559,6 @@ export default function OracleWebSettings({ language, embedded = false }: Oracle
         <div className="sp-section-head">
           <div className="sp-section-head-text">
             <div className="sp-section-title"><span className="oracle-web-step">3</span>{copy.accountTitle}</div>
-            <div className="sp-section-sub">{copy.accountSub}</div>
           </div>
           <span className={`oracle-web-pill ${progress.accountReady ? "ok" : "todo"}`}>
             {accounts.length ? copy.accountCount.replace("{count}", String(accounts.length)) : copy.noAccountPill}

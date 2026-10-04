@@ -15,7 +15,7 @@ use crate::state;
 
 const STORE_VERSION: u32 = 1;
 const CHATGPT_URL: &str = "https://chatgpt.com/";
-const ORACLE_NPM_VERSION: &str = "0.21.3";
+const ORACLE_NPM_VERSION: &str = "0.21.4";
 const NODE_RELEASE_BASE_URL: &str = "https://nodejs.org/dist/latest-v24.x";
 const MAX_NODE_ARCHIVE_BYTES: u64 = 120 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -797,7 +797,11 @@ fn ensure_account_browser_ready(root: &Path, account: &StoredAccount) -> Result<
                 .to_string(),
         );
     }
-    if chromium_profile_lock_is_held(&profile)? {
+    prepare_chromium_profile_for_launch(&profile, &account_oracle_home_dir(root, &account.id)?)
+}
+
+fn prepare_chromium_profile_for_launch(profile: &Path, oracle_home: &Path) -> Result<(), String> {
+    if chromium_profile_lock_is_held(profile)? {
         return Err(
             "This account browser is still open. Close its isolated window before starting an Oracle task."
                 .to_string(),
@@ -820,6 +824,26 @@ fn ensure_account_browser_ready(root: &Path, account: &StoredAccount) -> Result<
                 );
             }
         }
+    }
+
+    // chrome-launcher appends stderr across launches, then discovers a dynamic
+    // DevTools port from the FIRST matching line. With a persistent profile,
+    // that can be a dead port from an earlier task. Archive launch logs only
+    // after proving the profile is idle; keep the sign-in data untouched.
+    let archive = oracle_home
+        .join("browser-launch-logs")
+        .join(new_account_id());
+    for name in ["chrome-err.log", "chrome-out.log"] {
+        let source = profile.join(name);
+        if !source.exists() {
+            continue;
+        }
+        fs::create_dir_all(&archive).map_err(|error| {
+            format!("Could not prepare the Oracle browser log archive: {error}")
+        })?;
+        fs::rename(&source, archive.join(name)).map_err(|error| {
+            format!("Could not archive the previous Oracle browser launch log {name}: {error}")
+        })?;
     }
     Ok(())
 }
@@ -1054,34 +1078,6 @@ async fn run_oracle_browser_followup(
     {
         return Err("Oracle Web task was interrupted by the user.".to_string());
     }
-    let root = root.to_path_buf();
-    let account = account.clone();
-    let parent_session_id = parent_session_id.to_string();
-    let prompt = prompt.to_string();
-    let files = files.to_vec();
-    let follow_ups = follow_ups.to_vec();
-    tokio::task::spawn_blocking(move || {
-        run_oracle_browser_followup_blocking(
-            &root,
-            &account,
-            &parent_session_id,
-            &prompt,
-            &files,
-            &follow_ups,
-        )
-    })
-    .await
-    .map_err(|error| format!("Oracle browser follow-up task did not complete: {error}"))?
-}
-
-fn run_oracle_browser_followup_blocking(
-    root: &Path,
-    account: &StoredAccount,
-    parent_session_id: &str,
-    prompt: &str,
-    files: &[String],
-    follow_ups: &[String],
-) -> Result<String, String> {
     ensure_account_browser_ready(root, account)?;
     let runtime = discover_oracle_runtime(root);
     if runtime.status != "ready" {
@@ -1116,7 +1112,8 @@ fn run_oracle_browser_followup_blocking(
         args.push(follow_up.clone());
     }
     let profile_dir = account_profile_dir(root, &account.id)?;
-    let output = Command::new(command)
+    let mut command = runtime::hidden_tokio_command(command);
+    command
         .args(args)
         .env("ORACLE_ENGINE", "browser")
         .env("ORACLE_HOME_DIR", &oracle_home)
@@ -1126,10 +1123,34 @@ fn run_oracle_browser_followup_blocking(
         .env("ORACLE_BROWSER_COOKIES_FILE", "")
         .env("ORACLE_REMOTE_HOST", "")
         .env("ORACLE_REMOTE_TOKEN", "")
-        .output()
+        .current_dir(&oracle_home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    runtime::configure_managed_tokio_command(&mut command);
+    let child = command
+        .spawn()
         .map_err(|error| format!("Could not start Oracle browser follow-up: {error}"))?;
+    let process_guard = runtime::register_owned_tokio_process(
+        &child,
+        "Oracle browser follow-up",
+        runtime::ManagedProcessKind::Foreground,
+    )
+    .map_err(|error| format!("Could not own Oracle browser follow-up: {error}"))?;
+    let output = tokio::select! {
+        output = tokio::time::timeout(std::time::Duration::from_secs(1_800), child.wait_with_output()) => {
+            match output {
+                Ok(output) => output.map_err(|error| format!("Oracle browser follow-up failed: {error}")),
+                Err(_) => Err("Oracle browser follow-up timed out.".to_string()),
+            }
+        }
+        () = wait_for_cancel(cancelled) => Err("Oracle Web task was interrupted by the user.".to_string()),
+    };
+    drop(process_guard);
     let answer = fs::read_to_string(&output_path).unwrap_or_default();
     let _ = fs::remove_file(&output_path);
+    let output = output?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
@@ -1208,6 +1229,7 @@ fn oracle_mcp_servers(
     let (command, args) = mcp_command_parts(launch);
     let mut env = BTreeMap::new();
     env.insert("ORACLE_ENGINE".to_string(), "browser".to_string());
+    env.insert("SOMNIQ_MCP_OWN_PROCESS_TREE".to_string(), "1".to_string());
     let oracle_home = account_oracle_home_dir(root, &account.id)?;
     env.insert(
         "ORACLE_HOME_DIR".to_string(),
@@ -1700,6 +1722,11 @@ fn install_oracle_runtime(root: &Path) -> Result<(), String> {
     if !entrypoint.is_file() {
         return Err("The installed Oracle package does not contain oracle-mcp.js.".to_string());
     }
+    if oracle_version_from_entrypoint(&entrypoint).as_deref() != Some(ORACLE_NPM_VERSION) {
+        return Err(format!(
+            "The installed Oracle package could not be verified as version {ORACLE_NPM_VERSION}."
+        ));
+    }
     if npm_cache.exists() {
         fs::remove_dir_all(&npm_cache)
             .map_err(|error| format!("Could not remove temporary npm cache: {error}"))?;
@@ -1722,23 +1749,42 @@ fn install_oracle_runtime(root: &Path) -> Result<(), String> {
     )
     .map_err(|error| format!("Could not write Oracle runtime manifest: {error}"))?;
 
+    activate_oracle_runtime(&runtime_root, &staging)?;
+    staging_guard.keep();
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn activate_oracle_runtime(runtime_root: &Path, staging: &Path) -> Result<(), String> {
     let current = runtime_root.join("current");
-    if current.exists() {
-        let invalid = runtime_root.join(format!("invalid-{}", new_account_id()));
-        fs::rename(&current, &invalid).map_err(|error| {
+    let previous = if current.exists() {
+        let backup = runtime_root.join(format!("previous-{}", new_account_id()));
+        fs::rename(&current, &backup).map_err(|error| {
             format!(
-                "Could not preserve the previous incomplete Oracle runtime at {}: {error}",
-                invalid.display()
+                "Could not preserve the previous Oracle runtime at {}: {error}",
+                backup.display()
             )
         })?;
-    }
-    fs::rename(&staging, &current).map_err(|error| {
-        format!(
-            "Could not activate the Oracle runtime at {}: {error}",
+        Some(backup)
+    } else {
+        None
+    };
+    if let Err(error) = fs::rename(staging, &current) {
+        let rollback = match previous {
+            Some(backup) => match fs::rename(&backup, &current) {
+                Ok(()) => " The previous runtime was restored.".to_string(),
+                Err(restore_error) => format!(
+                    " Could not restore the previous runtime: {restore_error}. It remains at {}.",
+                    backup.display()
+                ),
+            },
+            None => String::new(),
+        };
+        return Err(format!(
+            "Could not activate the Oracle runtime at {}: {error}.{rollback}",
             current.display()
-        )
-    })?;
-    staging_guard.keep();
+        ));
+    }
     Ok(())
 }
 
@@ -2881,6 +2927,75 @@ mod tests {
         assert!(saved.accounts[0].login_confirmed_at.is_some());
     }
 
+    #[test]
+    fn launch_preparation_archives_old_ports_without_changing_sign_in_data() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let profile = temporary.path().join("browser-profile");
+        let oracle_home = temporary.path().join("oracle-home");
+        fs::create_dir_all(profile.join("Default")).expect("profile fixture");
+        fs::write(profile.join("Local State"), b"sign-in state").expect("sign-in fixture");
+
+        prepare_chromium_profile_for_launch(&profile, &oracle_home).expect("no previous logs");
+        assert!(!oracle_home.exists());
+
+        let old_log = "DevTools listening on ws://127.0.0.1:57439/devtools/browser/old\n";
+        fs::write(profile.join("chrome-err.log"), old_log).expect("old port fixture");
+        fs::write(profile.join("chrome-out.log"), b"previous stdout").expect("stdout fixture");
+        prepare_chromium_profile_for_launch(&profile, &oracle_home).expect("archive previous logs");
+        assert!(!profile.join("chrome-err.log").exists());
+        assert!(!profile.join("chrome-out.log").exists());
+        assert!(profile.join("Default").is_dir());
+        assert_eq!(
+            fs::read(profile.join("Local State")).unwrap(),
+            b"sign-in state"
+        );
+
+        let fresh_log = "DevTools listening on ws://127.0.0.1:62234/devtools/browser/new\n";
+        fs::write(profile.join("chrome-err.log"), fresh_log).expect("new launch fixture");
+        assert!(!fs::read_to_string(profile.join("chrome-err.log"))
+            .unwrap()
+            .contains("57439"));
+        prepare_chromium_profile_for_launch(&profile, &oracle_home).expect("archive second launch");
+        let archives = fs::read_dir(oracle_home.join("browser-launch-logs"))
+            .expect("log archives")
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(archives.len(), 2);
+        let logs = archives
+            .iter()
+            .map(|archive| fs::read_to_string(archive.join("chrome-err.log")).unwrap())
+            .collect::<Vec<_>>();
+        assert!(logs.iter().any(|log| log == old_log));
+        assert!(logs.iter().any(|log| log == fresh_log));
+        assert!(archives.iter().any(|archive| {
+            fs::read(archive.join("chrome-out.log")).ok().as_deref() == Some(b"previous stdout")
+        }));
+    }
+
+    #[test]
+    fn launch_preparation_leaves_logs_untouched_while_debug_port_is_live() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let profile = temporary.path().join("browser-profile");
+        let oracle_home = temporary.path().join("oracle-home");
+        fs::create_dir_all(&profile).expect("profile fixture");
+        fs::write(profile.join("chrome-err.log"), b"active launch log").expect("log fixture");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("debug port fixture");
+        let port = listener.local_addr().unwrap().port();
+        fs::write(
+            profile.join("DevToolsActivePort"),
+            format!("{port}\n/devtools/browser/test"),
+        )
+        .expect("debug port file");
+        let error = prepare_chromium_profile_for_launch(&profile, &oracle_home).unwrap_err();
+        assert!(error.contains("browser is still open"));
+        assert_eq!(
+            fs::read(profile.join("chrome-err.log")).unwrap(),
+            b"active launch log"
+        );
+        assert!(!oracle_home.exists());
+        drop(listener);
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn detects_chromium_profile_lock_without_treating_stale_files_as_busy() {
@@ -2918,6 +3033,12 @@ mod tests {
         };
         assert_ne!(owner, INVALID_HANDLE_VALUE, "lock owner fixture");
         assert!(chromium_profile_lock_is_held(&profile).expect("held lockfile"));
+        fs::write(profile.join("chrome-err.log"), b"active launch log").expect("log fixture");
+        let oracle_home = temporary.path().join("oracle-home");
+        let error = prepare_chromium_profile_for_launch(&profile, &oracle_home).unwrap_err();
+        assert!(error.contains("browser is still open"));
+        assert!(profile.join("chrome-err.log").is_file());
+        assert!(!oracle_home.exists());
         unsafe {
             CloseHandle(owner);
         }
@@ -3106,7 +3227,7 @@ mod tests {
             .join("package.json");
         fs::create_dir_all(package_path.parent().expect("package parent")).expect("package parent");
         fs::write(&shim, b"oracle shim").expect("oracle shim");
-        for outdated in ["0.9.0", "0.18.0"] {
+        for outdated in ["0.9.0", "0.18.0", "0.21.3"] {
             fs::write(
                 &package_path,
                 serde_json::to_vec(&serde_json::json!({
@@ -3236,5 +3357,65 @@ mod tests {
         }
         assert!(!staging.exists());
         assert!(temporary.path().exists());
+    }
+
+    #[test]
+    fn runtime_update_preserves_previous_runtime_and_account_state() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let runtime_root = temporary.path().join("runtime");
+        let current = runtime_root.join("current");
+        let staging = runtime_root.join("installing-update");
+        fs::create_dir_all(&current).expect("current runtime");
+        fs::create_dir_all(&staging).expect("staged runtime");
+        fs::write(current.join("version"), b"0.21.3").expect("old version");
+        fs::write(staging.join("version"), ORACLE_NPM_VERSION).expect("new version");
+        let accounts = temporary.path().join("accounts");
+        fs::create_dir_all(&accounts).expect("accounts fixture");
+        fs::write(accounts.join("profile"), b"sign-in data").expect("profile fixture");
+        fs::write(temporary.path().join("accounts.json"), b"role bindings")
+            .expect("account store fixture");
+
+        activate_oracle_runtime(&runtime_root, &staging).expect("activate update");
+
+        assert_eq!(
+            fs::read_to_string(current.join("version")).expect("current version"),
+            ORACLE_NPM_VERSION
+        );
+        assert!(!staging.exists());
+        let previous = fs::read_dir(&runtime_root)
+            .expect("runtime entries")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("previous-"))
+            .expect("previous runtime backup");
+        assert_eq!(
+            fs::read(previous.path().join("version")).expect("previous version"),
+            b"0.21.3"
+        );
+        assert_eq!(
+            fs::read(accounts.join("profile")).expect("profile"),
+            b"sign-in data"
+        );
+        assert_eq!(
+            fs::read(temporary.path().join("accounts.json")).expect("account store"),
+            b"role bindings"
+        );
+    }
+
+    #[test]
+    fn failed_runtime_activation_restores_the_previous_runtime() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let runtime_root = temporary.path().join("runtime");
+        let current = runtime_root.join("current");
+        fs::create_dir_all(&current).expect("current runtime");
+        fs::write(current.join("version"), b"0.21.3").expect("old version");
+
+        let error = activate_oracle_runtime(&runtime_root, &runtime_root.join("missing-staging"))
+            .expect_err("activation fails");
+
+        assert!(error.contains("previous runtime was restored"));
+        assert_eq!(
+            fs::read(current.join("version")).expect("restored version"),
+            b"0.21.3"
+        );
     }
 }

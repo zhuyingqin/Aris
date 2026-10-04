@@ -177,7 +177,7 @@ describe("MemorySettings against the native backend", () => {
     render(<MemorySettings language="en" />);
 
     const library = await screen.findByText("Research memory library");
-    const v2 = screen.getByText("Research memory v2 (active store)");
+    const v2 = screen.getByText("Memory mode");
     expect(library.compareDocumentPosition(v2) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 

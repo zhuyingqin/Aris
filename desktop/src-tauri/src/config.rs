@@ -601,6 +601,17 @@ fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+pub(crate) fn set_somni_image_preferences(enabled: bool, model: Option<String>) -> Result<(), String> {
+    let mut obj = load_object();
+    obj.insert("somni_image_enabled".into(), Value::Bool(enabled));
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        obj.insert("somni_image_model".into(), Value::String(model.trim().to_string()));
+    } else {
+        obj.remove("somni_image_model");
+    }
+    save_object(&obj)
+}
+
 /// Merge `values` into the saved config and persist. Used by the managed-login
 /// flow to stash the new-api session (base URL, user id, access token) so the
 /// account bootstrap can refresh later without re-prompting for a password.

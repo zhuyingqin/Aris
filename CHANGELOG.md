@@ -1,5 +1,45 @@
 # ARIS-Code Changelog
 
+## v0.4.77 (2026-10-04)
+
+- **Somni account drawing** — the conversation model builds a complete prompt
+  before calling the new `SomniImage` tool. Drawing models have their own
+  selector in Settings and remain separate from Executor and Reviewer models.
+  Generation and reference-image editing reuse the current Somni account;
+  validated images and records of prompts, models, hashes and usage stay in the
+  project. Chat previews and the image canvas show actual output metadata and
+  preserve reference lineage. Requests support cancellation and are not
+  automatically resubmitted after failure. Live generation through the gateway
+  has been verified; multipart editing is covered by transport tests.
+- **A dedicated Update page** — check, download, install and restart for desktop
+  updates in one Settings page. The same page manages the Oracle webpage
+  runtime, pinned to the supported 0.21.4 version, with installation and update
+  feedback.
+- **Reliable Oracle account recovery** — managed webpage requests own their
+  browser descendants and release them on termination, including when the MCP
+  parent exits first. Stale debugging-port logs no longer revive an old browser
+  connection. Recovery remains scoped to the assigned isolated profile and
+  preserves sign-in data; manual login and verification remain available.
+- **Recorded local activity in Profile** — aggregate usage across projects,
+  deduplicate tool and skill calls from durable and archived history, and
+  distinguish complete turn duration from request latency. Profile includes
+  a 53-week UTC heatmap, model totals and coverage feedback. Refresh preserves
+  the previous successful snapshot on failure and caches summaries without
+  retaining conversation content.
+- **Clearer image-help readiness** — computers that opted into image help show
+  missing components, incompatible runtime versions and unbound accounts, with
+  install/update actions and immediate availability refresh after recovery.
+- **Consistent Settings layout and copy** — compact cards, stable switches,
+  nested skills and account pages, search inputs and advanced forms now follow
+  the shared layout in light/dark themes and narrow windows. Labels and feedback
+  consistently follow the selected language while preserving settings drafts.
+- **PDF preview reliability** — preserve bytes from ArrayBuffers created in
+  another JavaScript context, so loading and cross-reference repair do not
+  receive empty input. A PDF produced by a build with errors retains a visible
+  warning in the compact preview toolbar.
+- **Version consistency** — desktop manifests, Rust packages and lockfiles,
+  README badges and signed updater metadata use 0.4.77.
+
 ## v0.4.76 (2026-10-03)
 
 - **Keep each Chat bound to its own project** — sends, slash commands,

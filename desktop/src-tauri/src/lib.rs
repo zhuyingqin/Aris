@@ -16,6 +16,7 @@ mod env;
 mod files;
 mod git;
 mod image_assist;
+mod image_api;
 mod knowledge;
 mod literature;
 mod paper_reading;
@@ -926,6 +927,8 @@ pub fn run() {
             newapi::newapi_register,
             newapi::newapi_send_verification,
             newapi::newapi_models,
+            image_api::somni_image_settings,
+            image_api::somni_image_settings_set,
             newapi::newapi_bootstrap,
             newapi::newapi_usage_logs,
             profile::profile_stats,

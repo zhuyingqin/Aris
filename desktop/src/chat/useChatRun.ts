@@ -35,6 +35,7 @@ import {
   type ChatTitleRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { isImageGenerationModel } from "../imageModels";
 import type {
   ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
 } from "../types";
@@ -678,7 +679,7 @@ export function useChatRun({
   // plus the active model so the select never renders blank (e.g. a custom id,
   // an unverified running model, or the browser preview).
   const modelSelectOptions = useMemo(() => {
-    const items = modelOptions.map((option) => ({
+    const items = modelOptions.filter((option) => !isImageGenerationModel(option.value)).map((option) => ({
       value: option.value,
       label: option.label,
       description: option.description ?? null,

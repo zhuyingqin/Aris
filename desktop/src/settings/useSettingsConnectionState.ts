@@ -388,9 +388,8 @@ export function useSettingsConnectionState({
       const models = await newapiModels();
       setManagedModels(models);
       setConfigView((current) => current ? { ...current, managedModels: models } : current);
-      notifyChatModelsUpdated();
+      setAccount((current) => current ? { ...current, models } : current);
     } catch (error) {
-      setManagedModels([]);
       setManagedModelsError(formatUserFacingError(error, language));
     } finally {
       setManagedModelsLoading(false);

@@ -18,6 +18,7 @@ export type SettingsNavId =
   | "remote"
   | "extensions"
   | "environment"
+  | "update"
   | "about";
 
 export type SettingsNavGroupId = "personal" | "integration" | "system";
@@ -110,6 +111,11 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <path d="M8 7.3v3.4M8 5.2h.01" />
     </>,
   ),
+  update: svg(
+    <>
+      <path d="M12.8 5.8A5.2 5.2 0 0 0 3.4 3.9L2 5.5M2 2.6v2.9h2.9M3.2 10.2a5.2 5.2 0 0 0 9.4 1.9l1.4-1.6M14 13.4v-2.9h-2.9" />
+    </>,
+  ),
 };
 
 export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
@@ -134,6 +140,7 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
   {
     id: "system",
     items: [
+      { id: "update", icon: NAV_ICONS.update },
       { id: "about", icon: NAV_ICONS.about },
     ],
   },

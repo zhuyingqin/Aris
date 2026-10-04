@@ -1211,6 +1211,7 @@ fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
             | "PowerShell"
             | ASK_USER_QUESTION_TOOL
             | CHATGPT_WEB_IMAGE_TOOL
+            | SOMNI_IMAGE_TOOL
             | LATEX_COMPILE_TOOL
     )
 }
@@ -2182,6 +2183,9 @@ where
                 serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
             })
             .map_err(ToolError::new)
+        } else if tool_name == SOMNI_IMAGE_TOOL {
+            crate::image_api::execute_tool(&self.workspace, input, self.cancelled.clone())
+                .map_err(ToolError::new)
         } else if tool_name == CHATGPT_WEB_CONSULT_TOOL {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -2836,7 +2840,10 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     if !is_blocked_tool(COMPUTE_JOB_SUBMIT_TOOL, extra_blocked_tools) {
         specs.push(compute_job_submit_tool_spec());
     }
-    // The model sees one image tool with one unchanged schema. Whether it runs
+    if crate::image_api::tool_available() && !is_blocked_tool(SOMNI_IMAGE_TOOL, extra_blocked_tools) {
+        specs.push(somni_image_tool_spec());
+    }
+    // The model sees one webpage image tool with one unchanged schema. Whether it runs
     // on this machine's own ChatGPT account or is brokered to another user's
     // is an execution detail, decided at call time with local account first.
     if (crate::oracle_web::image_tool_available() || crate::image_assist::helper_online())
@@ -2988,6 +2995,30 @@ const COMPUTE_NODES_TOOL: &str = "ComputeNodes";
 const COMPUTE_JOB_SUBMIT_TOOL: &str = "ComputeJobSubmit";
 const CHATGPT_WEB_CONSULT_TOOL: &str = "ChatGptWebConsult";
 const CHATGPT_WEB_IMAGE_TOOL: &str = "ChatGptWebImage";
+const SOMNI_IMAGE_TOOL: &str = "SomniImage";
+
+fn somni_image_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: SOMNI_IMAGE_TOOL,
+        description: "Generate or edit images through the user's Somni account and its configured drawing model. When the user asks for an image, compose a complete prompt describing the subject, composition, relationships, style, exact labels, and requested changes, then call this tool. Prefer this API for ordinary image requests when available; use the webpage or Image Assist only when the user requests that route. Files are optional reference images within the current project. Generated images and a record of the actual prompt/model are saved locally under `.somniq/artifacts/somni-images/`. The request spends the user's gateway quota. For scientific plots of measured data, use plotting code with the real data. Do not automatically resubmit a failed or timed-out paid request.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 120000,
+                    "description": "Complete drawing instruction constructed from the user's request and relevant conversation context."},
+                "files": {"type": "array", "maxItems": 16, "items": {"type": "string"},
+                    "description": "Optional project-relative reference image paths. With references the images/edits API is used."},
+                "model": {"type": "string", "description": "Optional drawing model ID. Omit to use the drawing model selected in Settings > Models."},
+                "size": {"type": "string", "enum": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+                    "description": "Defaults to 1024x1024. Landscape is 1536x1024 and portrait is 1024x1536."},
+                "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
+                "n": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Defaults to one image."}
+            },
+            "required": ["prompt"], "additionalProperties": false
+        }),
+        required_permission: PermissionMode::DangerFullAccess,
+    }
+}
 
 fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
@@ -8847,6 +8878,12 @@ async fn run_chat_turn_with_context(
                             .join(", ")
                     ));
                 }
+            }
+            if crate::image_api::tool_available() {
+                system_prompt.push(
+                    "Configured integration: SomniImage generates or edits images through the user's Somni gateway account. When the user asks to draw, create an illustration, or edit an image, build the complete prompt yourself from their request and context, then call SomniImage. Include the intended composition, relationships, style and exact labels. Use project image paths as files for editing. The drawing model is configured separately from your chat model; omit model unless the user requests a specific drawing model. Prefer this service for ordinary image requests, respect any explicit request for the webpage or Image Assist, and do not automatically resubmit a failed paid request. Return the local image path and describe the result without claiming to have inspected pixels unless you actually read the image."
+                        .to_string(),
+                );
             }
             if crate::oracle_web::consult_tool_available() {
                 system_prompt.push(

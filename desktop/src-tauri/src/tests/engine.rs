@@ -645,8 +645,20 @@ fn chatgpt_web_image_tool_is_narrow_and_requires_external_action_approval() {
 
 #[test]
 fn generic_tool_progress_does_not_reflow_chat_during_image_generation() {
+    assert!(!should_emit_generic_tool_progress(SOMNI_IMAGE_TOOL));
     assert!(!should_emit_generic_tool_progress(CHATGPT_WEB_IMAGE_TOOL));
     assert!(should_emit_generic_tool_progress(CHATGPT_WEB_CONSULT_TOOL));
+}
+
+#[test]
+fn somni_image_tool_asks_the_agent_to_build_the_prompt_and_uses_external_action_policy() {
+    let spec = somni_image_tool_spec();
+    assert!(spec.description.contains("compose a complete prompt"));
+    assert!(spec.description.contains("Do not automatically resubmit"));
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["n"]["maximum"], 4);
+    assert!(spec.input_schema["properties"].get("apiKey").is_none());
 }
 
 #[test]

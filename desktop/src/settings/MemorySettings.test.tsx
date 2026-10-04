@@ -93,9 +93,9 @@ describe("MemorySettings", () => {
   it("starts v2 cleanly instead of replaying legacy derived memory", () => {
     render(<MemorySettings language="en" />);
 
-    expect(screen.getByText("Research memory v2 (active store)")).toBeTruthy();
-    expect(screen.getByText("R0 remains authoritative; the library's R1–R3 records come only from reviewed v2 memory.")).toBeTruthy();
-    expect(screen.getByText("Screening, review, or TencentDB failures never inject memory.")).toBeTruthy();
+    expect(screen.getByText("Memory mode")).toBeTruthy();
+    expect(screen.getByText("Uses reviewed memory and preserves source conversations.")).toBeTruthy();
+    expect(screen.getByText("Memory with screening, review, or sync failures stays out of conversations.")).toBeTruthy();
     for (const label of ["Backfill history", "Re-derive R1–R3", "Requeue"]) {
       expect(screen.queryByRole("button", { name: label })).toBeNull();
     }
