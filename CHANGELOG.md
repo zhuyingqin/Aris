@@ -5,11 +5,11 @@
 - **Somni account drawing** — the conversation model builds a complete prompt
   before calling the new `SomniImage` tool. Drawing models have their own
   selector in Settings and remain separate from Executor and Reviewer models.
-  Generation and reference-image editing reuse the current Somni account;
+  Generation and reference-image editing reuse the current Somni account.
   native desktop dispatch now handles the image tool and keeps paid calls
   serial. GPT drawing requests activate the API; explicit Oracle, webpage or
   Image Assist requests retain their chosen route.
-  validated images and records of prompts, models, hashes and usage stay in the
+  Validated images and records of prompts, models, hashes and usage stay in the
   project. Chat previews and the image canvas show actual output metadata and
   preserve reference lineage. Requests support cancellation and are not
   automatically resubmitted after failure. Live generation through the gateway
