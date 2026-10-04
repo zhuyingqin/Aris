@@ -1,0 +1,303 @@
+{
+  "document": "Repository PDF fixture; native IPC replaced only in isolated browser contexts.",
+  "layouts": [
+    {
+      "width": 1448,
+      "theme": "light",
+      "language": "cn",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "height": 42
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-reading-main",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 44
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643,
+          "height": 864.359375
+        }
+      ],
+      "checks": [
+        "four rail entries",
+        "guide toggle/rail sync",
+        "close focus return",
+        "Escape closes guide",
+        "exclusive record panel",
+        "page 2 preserved",
+        "PDF loaded once",
+        "no generation started",
+        "header controls do not overlap",
+        "toolbar does not overflow"
+      ]
+    },
+    {
+      "width": 1100,
+      "theme": "light",
+      "language": "en",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1100,
+          "scrollWidth": 1100,
+          "height": 42
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1100,
+          "scrollWidth": 1100,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-reading-main",
+          "width": 1052,
+          "scrollWidth": 1052,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1052,
+          "scrollWidth": 1052,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1052,
+          "scrollWidth": 1052,
+          "height": 44
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 483,
+          "scrollWidth": 483,
+          "height": 864.359375
+        }
+      ],
+      "checks": [
+        "four rail entries",
+        "guide toggle/rail sync",
+        "close focus return",
+        "Escape closes guide",
+        "exclusive record panel",
+        "page 2 preserved",
+        "PDF loaded once",
+        "no generation started",
+        "header controls do not overlap",
+        "toolbar does not overflow"
+      ]
+    },
+    {
+      "width": 860,
+      "theme": "light",
+      "language": "cn",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 860,
+          "scrollWidth": 860,
+          "height": 42
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 860,
+          "scrollWidth": 860,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-reading-main",
+          "width": 812,
+          "scrollWidth": 812,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 812,
+          "scrollWidth": 812,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 812,
+          "scrollWidth": 812,
+          "height": 80
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 373,
+          "scrollWidth": 373,
+          "height": 828.359375
+        }
+      ],
+      "checks": [
+        "four rail entries",
+        "guide toggle/rail sync",
+        "close focus return",
+        "Escape closes guide",
+        "exclusive record panel",
+        "page 2 preserved",
+        "PDF loaded once",
+        "no generation started",
+        "header controls do not overlap",
+        "toolbar does not overflow"
+      ]
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "language": "cn",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 480,
+          "scrollWidth": 480,
+          "height": 82
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 480,
+          "scrollWidth": 480,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-reading-main",
+          "width": 432,
+          "scrollWidth": 432,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 432,
+          "scrollWidth": 432,
+          "height": 868.359375
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 432,
+          "scrollWidth": 432,
+          "height": 116
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 432,
+          "scrollWidth": 432,
+          "height": 436.375
+        }
+      ],
+      "checks": [
+        "four rail entries",
+        "guide toggle/rail sync",
+        "close focus return",
+        "Escape closes guide",
+        "exclusive record panel",
+        "page 2 preserved",
+        "PDF loaded once",
+        "no generation started",
+        "header controls do not overlap",
+        "toolbar does not overflow"
+      ]
+    },
+    {
+      "width": 1448,
+      "theme": "dark",
+      "language": "en",
+      "metrics": [
+        {
+          "selector": ".app-head",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "height": 42
+        },
+        {
+          "selector": ".lit-reading-shell",
+          "width": 1448,
+          "scrollWidth": 1448,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-reading-main",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 948.359375
+        },
+        {
+          "selector": ".lit-pdf-reader",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 908.359375
+        },
+        {
+          "selector": ".lit-pdf-toolbar",
+          "width": 1400,
+          "scrollWidth": 1400,
+          "height": 44
+        },
+        {
+          "selector": ".lit-paper-analysis",
+          "width": 643,
+          "scrollWidth": 643,
+          "height": 864.359375
+        }
+      ],
+      "checks": [
+        "four rail entries",
+        "guide toggle/rail sync",
+        "close focus return",
+        "Escape closes guide",
+        "exclusive record panel",
+        "page 2 preserved",
+        "PDF loaded once",
+        "no generation started",
+        "header controls do not overlap",
+        "toolbar does not overflow"
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "width": 1448,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1100,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 860,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 480,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    },
+    {
+      "width": 1448,
+      "message": "Cannot read properties of undefined (reading 'transformCallback')"
+    }
+  ],
+  "status": "passed"
+}

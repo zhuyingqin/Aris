@@ -55,8 +55,10 @@ vi.mock("../../pdf/canvas", () => ({
 }));
 
 import PdfReader, {
+  clampFloatingToolbarPosition,
   firstPageForLayout,
   fitZoomForLayout,
+  fitZoomForPage,
   highlightBoxesForPage,
   pageRangeForLayout,
 } from "../PdfReader";
@@ -202,6 +204,18 @@ describe("PdfReader annotation interactions", () => {
 
     await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
     expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("2");
+    const previous = screen.getByRole("button", { name: "上一页" }) as HTMLButtonElement;
+    const next = screen.getByRole("button", { name: "下一页" }) as HTMLButtonElement;
+    expect(previous.closest(".lit-pdf-toolbar")).toBeTruthy();
+    expect(next.closest(".lit-pdf-toolbar")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "更多 PDF 工具" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(previous);
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("1");
+    expect(previous.disabled).toBe(true);
+    fireEvent.click(next);
+    fireEvent.click(next);
+    expect(document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")?.value).toBe("3");
+    expect(next.disabled).toBe(true);
   });
 
   it("keeps the PDF page and manual zoom while opening and closing the guide", async () => {
@@ -274,11 +288,15 @@ describe("PdfReader annotation interactions", () => {
 
     const toolbar = document.querySelector(".lit-pdf-toolbar");
     expect(toolbar).toBeTruthy();
-    for (const icon of ["chevronLeft", "chevronRight", "minus", "plus", "fit", "folder", "refresh", "externalLink"]) {
+    for (const icon of ["document", "chevronLeft", "chevronRight", "zoomIn", "zoomOut", "fit", "externalLink", "moreHorizontal"]) {
       expect(toolbar?.querySelector(`svg[data-icon="${icon}"]`), `${icon} icon`).toBeTruthy();
     }
-    expect(toolbar?.querySelectorAll(".lit-pdf-icon-button")).toHaveLength(7);
     expect(screen.getByRole("button", { name: "系统阅读器" }).textContent).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
+    const moreTools = screen.getByRole("dialog", { name: "更多 PDF 工具" });
+    for (const icon of ["folder", "refresh"]) {
+      expect(moreTools.querySelector(`svg[data-icon="${icon}"]`), `${icon} icon`).toBeTruthy();
+    }
   });
 
   it("shows multiple pages at once and keeps navigation aligned to page groups", async () => {
@@ -293,6 +311,7 @@ describe("PdfReader annotation interactions", () => {
     await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(5));
     expect(document.querySelector(".lit-pdf-pages")?.classList.contains("pages-1")).toBe(true);
 
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     const layoutSelect = screen.getByRole("combobox", { name: "阅读布局" });
     expect(Array.from((layoutSelect as HTMLSelectElement).options, (option) => option.text)).toEqual([
       "单页",
@@ -338,6 +357,7 @@ describe("PdfReader annotation interactions", () => {
     renderReader({ readOnly: true });
 
     await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(29));
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     fireEvent.change(screen.getByRole("combobox", { name: "阅读布局" }), { target: { value: "2" } });
     const pageInput = document.querySelector<HTMLInputElement>(".lit-pdf-page-input input")!;
     fireEvent.change(pageInput, { target: { value: "29" } });
@@ -357,6 +377,192 @@ describe("PdfReader annotation interactions", () => {
     expect(fitZoomForLayout(1000, 500, 4)).toBeCloseTo(0.452);
   });
 
+  it("fits a complete page to both the reader width and its available height", () => {
+    expect(fitZoomForPage(1000, 700, 500, 800, 1)).toBeCloseTo(0.815);
+    expect(fitZoomForPage(1000, 1000, 500, 800, 2)).toBeCloseTo(0.936);
+    expect(fitZoomForPage(1000, 1000, 500, 800, 4)).toBeCloseTo(0.452);
+  });
+
+  it("keeps a moved floating toolbar inside the visible PDF viewport", () => {
+    const bounds = { minX: 12, maxX: 604, minY: 12, maxY: 280 };
+    expect(clampFloatingToolbarPosition({ x: -50, y: 500 }, bounds)).toEqual({ x: 12, y: 280 });
+    expect(clampFloatingToolbarPosition({ x: 420, y: 160 }, bounds)).toEqual({ x: 420, y: 160 });
+  });
+
+  it("floats the PDF controls and drags them within the reader viewport", () => {
+    renderReader({ readOnly: true });
+    const reader = document.querySelector<HTMLElement>(".lit-pdf-reader")!;
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll")!;
+    const toolbar = screen.getByRole("toolbar", { name: "PDF 悬浮工具栏" });
+    const handle = screen.getByRole("button", { name: "移动 PDF 工具栏" });
+    const rect = (left: number, top: number, width: number, height: number) => ({
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+      width,
+      height,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(reader, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 600));
+    vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 600));
+    vi.spyOn(toolbar, "getBoundingClientRect").mockReturnValue(rect(12, 12, 184, 308));
+    const dispatchPointer = (type: string, values: Record<string, number>) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      for (const [key, value] of Object.entries(values)) {
+        Object.defineProperty(event, key, { configurable: true, value });
+      }
+      fireEvent(handle, event);
+    };
+
+    dispatchPointer("pointerdown", { pointerId: 7, button: 0, clientX: 20, clientY: 20 });
+    dispatchPointer("pointermove", { pointerId: 7, buttons: 1, clientX: 700, clientY: 500 });
+    expect(toolbar.getAttribute("style")).toContain("left: 604px");
+    expect(toolbar.getAttribute("style")).toContain("top: 280px");
+    dispatchPointer("pointerup", { pointerId: 7, button: 0, clientX: 700, clientY: 500 });
+
+    fireEvent.doubleClick(handle);
+    expect(toolbar.getAttribute("style")).toContain("left: 12px");
+    expect(toolbar.getAttribute("style")).toContain("top: 12px");
+  });
+
+  it("keeps the page, spread and manual zoom when more tools are dismissed and reopened", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", { configurable: true, value: class DOMMatrix {} });
+    renderReader({ readOnly: true });
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const moreTools = screen.getByRole("button", { name: "更多 PDF 工具" });
+    fireEvent.click(moreTools);
+    fireEvent.change(screen.getByRole("combobox", { name: "阅读布局" }), { target: { value: "2" } });
+    const input = screen.getByRole("spinbutton", { name: "PDF 页码" });
+    fireEvent.change(input, { target: { value: "3" } });
+    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    const zoom = document.querySelector(".lit-pdf-zoom-value")?.textContent;
+
+    fireEvent.keyDown(moreTools, { key: "Escape" });
+    expect(moreTools.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(moreTools);
+    expect(screen.queryByRole("combobox", { name: "阅读布局" })).toBeNull();
+    expect((input as HTMLInputElement).value).toBe("3");
+
+    fireEvent.click(moreTools);
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    expect((screen.getByRole("spinbutton", { name: "PDF 页码" }) as HTMLInputElement).value).toBe("1");
+    expect((screen.getByRole("combobox", { name: "阅读布局" }) as HTMLSelectElement).value).toBe("2");
+    expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe(zoom);
+    expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1);
+    expect(readerMocks.document.destroy).not.toHaveBeenCalled();
+  });
+
+  it("opens more tools on the free side of a rail moved to the viewport edge", () => {
+    renderReader({ readOnly: true });
+    const reader = document.querySelector<HTMLElement>(".lit-pdf-reader")!;
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll")!;
+    const toolbar = screen.getByRole("toolbar", { name: "PDF 悬浮工具栏" });
+    const rect = (left: number, top: number, width: number, height: number) => ({
+      left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => ({}),
+    });
+    vi.spyOn(reader, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 600));
+    vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 600));
+    vi.spyOn(toolbar, "getBoundingClientRect").mockImplementation(() =>
+      rect(parseFloat(toolbar.style.left), parseFloat(toolbar.style.top), 60, 430),
+    );
+    const popover = document.querySelector<HTMLElement>(".lit-pdf-tools-popover")!;
+    vi.spyOn(popover, "getBoundingClientRect").mockReturnValue(rect(0, 0, 232, 280));
+    const handle = screen.getByRole("button", { name: "移动 PDF 工具栏" });
+    for (let index = 0; index < 30; index += 1) {
+      fireEvent.keyDown(handle, { key: "ArrowRight", shiftKey: true });
+      fireEvent.keyDown(handle, { key: "ArrowDown", shiftKey: true });
+    }
+    expect(toolbar.style.left).toBe("728px");
+    expect(toolbar.style.top).toBe("158px");
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
+    expect(parseFloat(popover.style.left) + 232).toBeLessThanOrEqual(parseFloat(toolbar.style.left) - 8);
+    expect(parseFloat(popover.style.top) + 280).toBeLessThanOrEqual(588);
+    fireEvent.pointerDown(scroll);
+    expect(screen.queryByRole("dialog", { name: "更多 PDF 工具" })).toBeNull();
+  });
+
+  it("keeps the guide on the rail and opens annotations from more tools", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", { configurable: true, value: class DOMMatrix {} });
+    useStore.setState({ currentProject: null });
+    renderReader({ paperId: "paper-1" });
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const guide = screen.getByRole("button", { name: "论文讲解" });
+    fireEvent.click(guide);
+    fireEvent.click(screen.getByRole("button", { name: "关闭讲解" }));
+    expect(document.activeElement).toBe(guide);
+    const moreTools = screen.getByRole("button", { name: "更多 PDF 工具" });
+    fireEvent.click(moreTools);
+    const annotations = screen.getByRole("button", { name: "标注 · 1" });
+    fireEvent.click(annotations);
+    expect(annotations.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".lit-pdf-reader-body")?.classList.contains("with-annotations")).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "更多 PDF 工具" })).toBeNull();
+    expect(document.activeElement).toBe(moreTools);
+    expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults to whole-page reading and lets the reader switch to fit width", () => {
+    renderReader({ readOnly: true });
+
+    const fitPage = screen.getByRole("button", { name: "适合整页" });
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
+    const fitWidth = screen.getByRole("button", { name: "适应宽度" });
+    const scroll = document.querySelector(".lit-pdf-scroll");
+    expect(fitPage.getAttribute("aria-pressed")).toBe("true");
+    expect(fitWidth.getAttribute("aria-pressed")).toBe("false");
+    expect(scroll?.classList.contains("fit-page")).toBe(true);
+
+    fireEvent.click(fitWidth);
+    expect(fitPage.getAttribute("aria-pressed")).toBe("false");
+    expect(fitWidth.getAttribute("aria-pressed")).toBe("true");
+    expect(scroll?.classList.contains("fit-width")).toBe(true);
+  });
+
+  it("recomputes whole-page zoom when the available reader height changes", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", {
+      configurable: true,
+      value: class DOMMatrix {},
+    });
+    const observerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+    let notifyResize: (() => void) | null = null;
+    class ReaderResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        notifyResize = () => callback([], {} as ResizeObserver);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ReaderResizeObserver,
+    });
+
+    try {
+      renderReader({ readOnly: true });
+      await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+      const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll")!;
+      Object.defineProperty(scroll, "clientWidth", { configurable: true, value: 1000 });
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 700 });
+      act(() => notifyResize?.());
+      await waitFor(() => expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe("300%"));
+
+      Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 200 });
+      act(() => notifyResize?.());
+      await waitFor(() => expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe("127%"));
+    } finally {
+      if (observerDescriptor) Object.defineProperty(globalThis, "ResizeObserver", observerDescriptor);
+      else Reflect.deleteProperty(globalThis, "ResizeObserver");
+    }
+  });
+
   it("reloads the current PDF from the reader toolbar", async () => {
     readerMocks.isTauri.mockReturnValue(true);
     Object.defineProperty(globalThis, "DOMMatrix", {
@@ -366,6 +572,7 @@ describe("PdfReader annotation interactions", () => {
     renderReader({ readOnly: true });
 
     await waitFor(() => expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新 PDF" }));
     await waitFor(() => expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(2));
   });
@@ -549,6 +756,7 @@ describe("PdfReader annotation interactions", () => {
     const body = document.querySelector(".lit-pdf-reader-body");
     expect(body?.classList.contains("with-annotations")).toBe(false);
 
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     fireEvent.click(screen.getByRole("button", { name: /标注/ }));
     expect(body?.classList.contains("with-annotations")).toBe(true);
   });
@@ -556,6 +764,7 @@ describe("PdfReader annotation interactions", () => {
   it("does not expose annotation controls in read-only previews", () => {
     renderReader({ readOnly: true });
 
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     expect(screen.queryByRole("button", { name: /标注/ })).toBeNull();
     expect(document.querySelector(".lit-pdf-reader-body")?.classList.contains("with-annotations")).toBe(false);
   });
@@ -566,6 +775,7 @@ describe("PdfReader annotation interactions", () => {
     renderReader({ onUpdateAnnotation, onDeleteAnnotation });
 
     expect(screen.queryByText("Original core")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "更多 PDF 工具" }));
     fireEvent.click(screen.getByRole("button", { name: /标注/ }));
 
     const summary = screen.getByText("Original core");

@@ -96,14 +96,14 @@ v1 讲解（没有 `plainSummary`）不显示阅读深度切换，所有版块�
 | | `--essay-tint-soft` / `--essay-tint` / `--essay-tint-strong` | 类比、例题与公式、一句话看懂的底色（由浅到深） |
 | | `--essay-highlight` / `--essay-selected` | 目录当前项、按下的切换按钮 |
 | | `--essay-pass` / `--essay-warn` / `--essay-danger` | 审核通过、发现问题、错误；取自主题的 `--green` / `--amber` / `--red` |
-| 字号 | `--essay-text-label` 10 / `caption` 11 / `meta` 12 / `compact` 13 / `dense` 14 / `body` 15 / `h3` 16 / `deck` 17 / `lead` 18 / `h2` 20 / `h1` 28–43 | 按角色使用，不按像素挑选 |
+| 字号 | `--essay-text-label` 10 / `caption` 11 / `meta` 12 / `compact` 13 / `dense` 14 / `body` 16 / `h3` 16 / `deck` 17 / `lead` 18 / `h2` 20 / `h1` 28–43 | 按角色使用，不按像素挑选 |
 | 行高与字距 | `--essay-leading` / `--essay-leading-prose` / `--essay-leading-heading` / `--essay-tracking-label` / `--essay-tracking-wide` | 正文、讲解正文、标题、小标签 |
 | 间距 | `--essay-space-1` … `--essay-space-10`（4px 网格：4、8、12、16、20、24、28、32、36、44） | margin、padding、gap |
 | 版式 | `--essay-max-width` / `--essay-measure` / `--essay-nav-width` / `--essay-column-gap` / `--essay-number-column` 等 | 两栏布局、正文宽度、编号列 |
 | 讲解图 | `--essay-diagram-height` / `--essay-bar-label` / `--essay-bar-height` | 图框最大高度、柱状图标签列宽（窄屏 88px）、柱高 |
 | 形状 | `--essay-radius-pill` / `--essay-radius-control` / `--essay-rule` / `--essay-accent-bar` | 胶囊按钮、控件圆角、分隔线、直觉左侧强调线 |
 
-窄屏（容器宽度 ≤ 460px）只调整令牌：`body` 15→14、`deck` 17→15、`lead` 18→16、柱状图标签列 140→88px，组件规则不需要单独改。
+窄屏（容器宽度 ≤ 460px）只调整令牌：`body` 16→15、`deck` 17→15、`lead` 18→16、柱状图标签列 140→88px，组件规则不需要单独改。对照阅读时，容器宽度 ≤ 1040px 提前收起左侧目录、改用章节下拉框，避免目录把正文压窄。
 
 **使用规则**
 

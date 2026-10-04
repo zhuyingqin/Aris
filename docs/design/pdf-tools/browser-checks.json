@@ -1,0 +1,181 @@
+{
+  "source": "Local PDF, rendered by the production reader. Only native IPC is replaced in the browser preview.",
+  "layouts": [
+    {
+      "width": 1440,
+      "height": 1000,
+      "theme": "light",
+      "language": "cn",
+      "geometry": {
+        "left": 12,
+        "right": 220,
+        "top": 130,
+        "bottom": 520,
+        "width": 208,
+        "height": 390,
+        "viewport": {
+          "left": 0,
+          "right": 1392,
+          "top": 118,
+          "bottom": 940.359375
+        },
+        "overflow": false
+      },
+      "initialReads": 2,
+      "checks": [
+        "page jump",
+        "collapse keeps page and layout",
+        "keyboard move clamps to edges",
+        "guide preserves page",
+        "collapsed guide returns focus",
+        "no PDF reload during interaction",
+        "no generation started"
+      ]
+    },
+    {
+      "width": 1440,
+      "height": 1000,
+      "theme": "dark",
+      "language": "cn",
+      "geometry": {
+        "left": 12,
+        "right": 220,
+        "top": 130,
+        "bottom": 520,
+        "width": 208,
+        "height": 390,
+        "viewport": {
+          "left": 0,
+          "right": 1392,
+          "top": 118,
+          "bottom": 940.359375
+        },
+        "overflow": false
+      },
+      "initialReads": 2,
+      "checks": [
+        "page jump",
+        "collapse keeps page and layout",
+        "keyboard move clamps to edges",
+        "guide preserves page",
+        "collapsed guide returns focus",
+        "no PDF reload during interaction",
+        "no generation started"
+      ]
+    },
+    {
+      "width": 860,
+      "height": 900,
+      "theme": "light",
+      "language": "en",
+      "geometry": {
+        "left": 12,
+        "right": 220,
+        "top": 130,
+        "bottom": 520,
+        "width": 208,
+        "height": 390,
+        "viewport": {
+          "left": 0,
+          "right": 812,
+          "top": 118,
+          "bottom": 840.359375
+        },
+        "overflow": false
+      },
+      "initialReads": 2,
+      "checks": [
+        "page jump",
+        "collapse keeps page and layout",
+        "keyboard move clamps to edges",
+        "guide preserves page",
+        "collapsed guide returns focus",
+        "no PDF reload during interaction",
+        "no generation started"
+      ]
+    },
+    {
+      "width": 480,
+      "height": 820,
+      "theme": "light",
+      "language": "cn",
+      "geometry": {
+        "left": 12,
+        "right": 220,
+        "top": 170,
+        "bottom": 560,
+        "width": 208,
+        "height": 390,
+        "viewport": {
+          "left": 0,
+          "right": 432,
+          "top": 158,
+          "bottom": 760.359375
+        },
+        "overflow": false
+      },
+      "initialReads": 2,
+      "checks": [
+        "page jump",
+        "collapse keeps page and layout",
+        "keyboard move clamps to edges",
+        "guide preserves page",
+        "collapsed guide returns focus",
+        "no PDF reload during interaction",
+        "no generation started"
+      ]
+    }
+  ],
+  "previewWarnings": [
+    {
+      "width": 1440,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at invokePassiveEffectMountInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18324:19)\n    at invokeEffectsInDev (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19701:19)\n    at commitDoubleInvokeEffectsInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19686:15)\n    at flushPassiveEffectsImpl (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19503:13)"
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at commitPassiveMountOnFiber (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18156:19)\n    at commitPassiveMountEffects_complete (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18129:17)\n    at commitPassiveMountEffects_begin (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18119:15)\n    at commitPassiveMountEffects (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18109:11)"
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at invokePassiveEffectMountInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18324:19)\n    at invokeEffectsInDev (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19701:19)\n    at commitDoubleInvokeEffectsInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19686:15)\n    at flushPassiveEffectsImpl (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19503:13)"
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at commitPassiveMountOnFiber (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18156:19)\n    at commitPassiveMountEffects_complete (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18129:17)\n    at commitPassiveMountEffects_begin (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18119:15)\n    at commitPassiveMountEffects (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18109:11)"
+    },
+    {
+      "width": 860,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at invokePassiveEffectMountInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18324:19)\n    at invokeEffectsInDev (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19701:19)\n    at commitDoubleInvokeEffectsInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19686:15)\n    at flushPassiveEffectsImpl (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19503:13)"
+    },
+    {
+      "width": 860,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at commitPassiveMountOnFiber (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18156:19)\n    at commitPassiveMountEffects_complete (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18129:17)\n    at commitPassiveMountEffects_begin (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18119:15)\n    at commitPassiveMountEffects (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18109:11)"
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at invokePassiveEffectMountInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18324:19)\n    at invokeEffectsInDev (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19701:19)\n    at commitDoubleInvokeEffectsInDEV (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19686:15)\n    at flushPassiveEffectsImpl (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:19503:13)"
+    },
+    {
+      "width": 480,
+      "theme": "light",
+      "message": "Cannot read properties of undefined (reading 'transformCallback')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'transformCallback')\n    at transformCallback (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-CPIWJH5D.js?v=0fbd2314:22:37)\n    at listen (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-4POEE2HK.js?v=0fbd2314:39:14)\n    at listen (http://127.0.0.1:1421/src/api/transport.ts:59:27)\n    at onScreenshotAttachment (http://127.0.0.1:1421/src/api/tauri.ts:42:52)\n    at http://127.0.0.1:1421/src/screenshot/usePendingScreenshot.ts:6:22\n    at commitHookEffectListMount (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:16915:34)\n    at commitPassiveMountOnFiber (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18156:19)\n    at commitPassiveMountEffects_complete (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18129:17)\n    at commitPassiveMountEffects_begin (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18119:15)\n    at commitPassiveMountEffects (http://127.0.0.1:1421/@fs/F:/Agent/Aris/.vite-cache/desktop/deps/chunk-PUI33VOF.js?v=0fbd2314:18109:11)"
+    }
+  ],
+  "errors": [],
+  "status": "passed"
+}

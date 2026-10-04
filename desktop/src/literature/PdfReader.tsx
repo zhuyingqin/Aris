@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -31,9 +32,32 @@ const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.15;
 const PAGE_GRID_GAP = 16;
 const PAGE_SCROLL_INLINE_PADDING = 48;
+const PAGE_VIEWPORT_BLOCK_PADDING = 48;
+const FLOATING_TOOLBAR_INSET = 12;
 const PAGE_LAYOUT_OPTIONS = [1, 2, 4] as const;
 type PageLayout = (typeof PAGE_LAYOUT_OPTIONS)[number];
+type FitMode = "page" | "width" | "manual";
 const clampZoom = (value: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
+
+interface FloatingToolbarPosition {
+  x: number;
+  y: number;
+}
+
+interface FloatingToolbarBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+export const clampFloatingToolbarPosition = (
+  position: FloatingToolbarPosition,
+  bounds: FloatingToolbarBounds,
+): FloatingToolbarPosition => ({
+  x: Math.min(Math.max(position.x, bounds.minX), Math.max(bounds.minX, bounds.maxX)),
+  y: Math.min(Math.max(position.y, bounds.minY), Math.max(bounds.minY, bounds.maxY)),
+});
 
 export const firstPageForLayout = (page: number, pageLayout: PageLayout) =>
   Math.floor((Math.max(1, Math.round(page)) - 1) / pageLayout) * pageLayout + 1;
@@ -60,6 +84,22 @@ export const fitZoomForLayout = (
   const availableWidth = Math.max(0, containerWidth - PAGE_SCROLL_INLINE_PADDING);
   const pagesWidth = Math.max(0, availableWidth - PAGE_GRID_GAP * (pageLayout - 1));
   return clampZoom(pagesWidth / pageLayout / pageWidth);
+};
+
+/** Keeps one complete page row inside the visible reader. Width remains a
+ * hard constraint for spreads, while height determines the comfortable scale
+ * for the usual portrait-paper case. */
+export const fitZoomForPage = (
+  containerWidth: number,
+  containerHeight: number,
+  pageWidth: number,
+  pageHeight: number,
+  pageLayout: PageLayout,
+) => {
+  const widthZoom = fitZoomForLayout(containerWidth, pageWidth, pageLayout);
+  const availableHeight = Math.max(0, containerHeight - PAGE_VIEWPORT_BLOCK_PADDING);
+  const heightZoom = pageHeight > 0 ? availableHeight / pageHeight : ZOOM_MIN;
+  return clampZoom(Math.min(widthZoom, heightZoom));
 };
 
 const kindLabels = (copy: (typeof LITERATURE_COPY)[Language]): Record<PdfAnnotationKind, string> => ({
@@ -1203,6 +1243,11 @@ export default function PdfReader({
 }: PdfReaderProps) {
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
+  const viewControlsId = useId();
+  const readerRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const moreToolsRef = useRef<HTMLDivElement | null>(null);
+  const moreToolsButtonRef = useRef<HTMLButtonElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const slotRefs = useRef<Array<HTMLDivElement | null>>([]);
   const sidebarRef = useRef<HTMLElement | null>(null);
@@ -1216,10 +1261,23 @@ export default function PdfReader({
   const currentPageRef = useRef(Math.max(1, initialPage));
   const programmaticPageRef = useRef<number | null>(null);
   const scrollSettleTimerRef = useRef<number | null>(null);
-  const [containerWidth, setContainerWidth] = useState(0);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const resizeAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1.2);
-  const [fitWidth, setFitWidth] = useState(true);
+  const [fitMode, setFitMode] = useState<FitMode>("page");
+  const [toolbarPosition, setToolbarPosition] = useState<FloatingToolbarPosition>({
+    x: FLOATING_TOOLBAR_INSET,
+    y: FLOATING_TOOLBAR_INSET,
+  });
+  const [toolbarDragging, setToolbarDragging] = useState(false);
+  const [moreToolsOpen, setMoreToolsOpen] = useState(false);
+  const [moreToolsPosition, setMoreToolsPosition] = useState({ x: 80, y: 12 });
+  const toolbarDragRef = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    origin: FloatingToolbarPosition;
+  } | null>(null);
   const [pageLayout, setPageLayout] = useState<PageLayout>(1);
   const pageLayoutRef = useRef<PageLayout>(1);
   const [showAnnotations, setShowAnnotations] = useState(false);
@@ -1294,11 +1352,22 @@ export default function PdfReader({
   }, [annotations]);
 
   const effectiveZoom = useMemo(() => {
-    if (fitWidth && baseSize && containerWidth > 0) {
-      return fitZoomForLayout(containerWidth, baseSize.w, pageLayout);
+    if (baseSize && containerSize.width > 0) {
+      if (fitMode === "width") {
+        return fitZoomForLayout(containerSize.width, baseSize.w, pageLayout);
+      }
+      if (fitMode === "page" && containerSize.height > 0) {
+        return fitZoomForPage(
+          containerSize.width,
+          containerSize.height,
+          baseSize.w,
+          baseSize.h,
+          pageLayout,
+        );
+      }
     }
     return zoomLevel;
-  }, [fitWidth, baseSize, containerWidth, pageLayout, zoomLevel]);
+  }, [fitMode, baseSize, containerSize, pageLayout, zoomLevel]);
 
   const effectiveHighlightId = focusedAnnotationId ?? hoveredAnnotationId ?? editingAnnotationId;
   const editingAnnotation = annotations.find((annotation) => annotation.id === editingAnnotationId) ?? null;
@@ -1317,6 +1386,172 @@ export default function PdfReader({
     guideToggleRef.current?.focus();
   };
   const annotationsVisible = showAnnotations && !readOnly;
+
+  const closeMoreTools = useCallback((restoreFocus = false) => {
+    setMoreToolsOpen(false);
+    if (restoreFocus) moreToolsButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!moreToolsOpen) return;
+    const onOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (moreToolsRef.current?.contains(target) || moreToolsButtonRef.current?.contains(target)) return;
+      closeMoreTools();
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeMoreTools(true);
+    };
+    window.addEventListener("pointerdown", onOutsidePointer, true);
+    window.addEventListener("keydown", onEscape, true);
+    return () => {
+      window.removeEventListener("pointerdown", onOutsidePointer, true);
+      window.removeEventListener("keydown", onEscape, true);
+    };
+  }, [closeMoreTools, moreToolsOpen]);
+
+  useLayoutEffect(() => {
+    const reader = readerRef.current;
+    const toolbar = toolbarRef.current;
+    const viewport = containerRef.current;
+    const popover = moreToolsRef.current;
+    if (!moreToolsOpen || !reader || !toolbar || !viewport || !popover) return;
+    const root = reader.getBoundingClientRect();
+    const rail = toolbar.getBoundingClientRect();
+    const view = viewport.getBoundingClientRect();
+    const panel = popover.getBoundingClientRect();
+    if (!view.width || !view.height || !panel.width || !panel.height) return;
+    const right = rail.right + 8;
+    const preferredLeft = right + panel.width <= view.right - FLOATING_TOOLBAR_INSET
+      ? right : rail.left - panel.width - 8;
+    const position = clampFloatingToolbarPosition({
+      x: preferredLeft - root.left,
+      y: rail.bottom - panel.height - root.top,
+    }, {
+      minX: view.left - root.left + FLOATING_TOOLBAR_INSET,
+      maxX: view.right - root.left - panel.width - FLOATING_TOOLBAR_INSET,
+      minY: view.top - root.top + FLOATING_TOOLBAR_INSET,
+      maxY: view.bottom - root.top - panel.height - FLOATING_TOOLBAR_INSET,
+    });
+    setMoreToolsPosition((current) => current.x === position.x && current.y === position.y ? current : position);
+  }, [annotationsVisible, containerSize, language, moreToolsOpen, readingVisible, toolbarPosition]);
+
+  const floatingToolbarBounds = useCallback((): FloatingToolbarBounds | null => {
+    const reader = readerRef.current;
+    const toolbar = toolbarRef.current;
+    const viewport = containerRef.current;
+    if (!reader || !toolbar || !viewport) return null;
+    const readerRect = reader.getBoundingClientRect();
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    if (
+      readerRect.width <= 0
+      || readerRect.height <= 0
+      || toolbarRect.width <= 0
+      || toolbarRect.height <= 0
+      || viewportRect.width <= 0
+      || viewportRect.height <= 0
+    ) {
+      return null;
+    }
+    const minX = viewportRect.left - readerRect.left + FLOATING_TOOLBAR_INSET;
+    const minY = viewportRect.top - readerRect.top + FLOATING_TOOLBAR_INSET;
+    return {
+      minX,
+      minY,
+      maxX: viewportRect.right - readerRect.left - toolbarRect.width - FLOATING_TOOLBAR_INSET,
+      maxY: viewportRect.bottom - readerRect.top - toolbarRect.height - FLOATING_TOOLBAR_INSET,
+    };
+  }, []);
+
+  const constrainToolbarPosition = useCallback((position: FloatingToolbarPosition) => {
+    const bounds = floatingToolbarBounds();
+    return bounds ? clampFloatingToolbarPosition(position, bounds) : position;
+  }, [floatingToolbarBounds]);
+
+  const resetToolbarPosition = useCallback(() => {
+    setToolbarPosition(constrainToolbarPosition({
+      x: FLOATING_TOOLBAR_INSET,
+      y: FLOATING_TOOLBAR_INSET,
+    }));
+  }, [constrainToolbarPosition]);
+
+  const startToolbarDrag = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button > 0) return;
+    const reader = readerRef.current;
+    const toolbar = toolbarRef.current;
+    if (!reader || !toolbar) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const readerRect = reader.getBoundingClientRect();
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const origin = constrainToolbarPosition({
+      x: toolbarRect.left - readerRect.left,
+      y: toolbarRect.top - readerRect.top,
+    });
+    toolbarDragRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      origin,
+    };
+    setToolbarPosition(origin);
+    setToolbarDragging(true);
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is an enhancement; document coordinates still work.
+    }
+  }, [constrainToolbarPosition]);
+
+  const moveToolbarDrag = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = toolbarDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setToolbarPosition(constrainToolbarPosition({
+      x: drag.origin.x + event.clientX - drag.clientX,
+      y: drag.origin.y + event.clientY - drag.clientY,
+    }));
+  }, [constrainToolbarPosition]);
+
+  const finishToolbarDrag = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = toolbarDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    toolbarDragRef.current = null;
+    setToolbarDragging(false);
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // The pointer may already have been released by the WebView.
+    }
+  }, []);
+
+  const moveToolbarWithKeyboard = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      resetToolbarPosition();
+      return;
+    }
+    const direction = event.key === "ArrowLeft" ? [-1, 0]
+      : event.key === "ArrowRight" ? [1, 0]
+        : event.key === "ArrowUp" ? [0, -1]
+          : event.key === "ArrowDown" ? [0, 1]
+            : null;
+    if (!direction) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const step = event.shiftKey ? 32 : 8;
+    setToolbarPosition((current) => constrainToolbarPosition({
+      x: current.x + direction[0] * step,
+      y: current.y + direction[1] * step,
+    }));
+  }, [constrainToolbarPosition, resetToolbarPosition]);
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
   const handleHighlightActivate = useCallback((annotationId: string, anchor: HighlightAnchor) => {
@@ -1455,30 +1690,40 @@ export default function PdfReader({
     setPageInput(String(currentPage));
   }, [currentPage]);
 
-  // ── Container width for fit-to-width ─────────────────────────────────────────
+  // ── Live viewport size for fit-to-page / fit-to-width ─────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    setContainerWidth(container.clientWidth);
+    const readSize = () => ({ width: container.clientWidth, height: container.clientHeight });
+    const initialSize = readSize();
+    setContainerSize(initialSize);
     if (typeof ResizeObserver === "undefined") return;
-    let previousWidth = container.clientWidth;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const width = entry.contentRect.width;
-        if (width <= 0 || Math.abs(width - previousWidth) < 0.5) continue;
-        const page = currentPageRef.current;
-        const slot = slotRefs.current[page - 1];
-        if (previousWidth > 0 && slot) {
-          // Capture before the width update changes page heights. A pending
-          // page jump keeps its destination instead of an intermediate offset.
-          const offset = programmaticPageRef.current !== null ? 0
-            : (container.scrollTop - slot.offsetTop) / Math.max(1, slot.offsetHeight);
-          resizeAnchorRef.current = { page, offset: Math.max(-0.02, Math.min(0.98, offset)) };
-          programmaticPageRef.current = page;
-        }
-        previousWidth = width;
-        setContainerWidth(width);
+    let previousSize = initialSize;
+    const observer = new ResizeObserver(() => {
+      const nextSize = readSize();
+      if (
+        nextSize.width <= 0
+        || nextSize.height <= 0
+        || (
+          Math.abs(nextSize.width - previousSize.width) < 0.5
+          && Math.abs(nextSize.height - previousSize.height) < 0.5
+        )
+      ) {
+        return;
       }
+      const page = currentPageRef.current;
+      const slot = slotRefs.current[page - 1];
+      if (previousSize.width > 0 && previousSize.height > 0 && slot) {
+        // Capture before a width or height update changes page dimensions. A
+        // pending page jump keeps its destination instead of an intermediate
+        // offset while panels, toolbars, or the activity strip resize.
+        const offset = programmaticPageRef.current !== null ? 0
+          : (container.scrollTop - slot.offsetTop) / Math.max(1, slot.offsetHeight);
+        resizeAnchorRef.current = { page, offset: Math.max(-0.02, Math.min(0.98, offset)) };
+        programmaticPageRef.current = page;
+      }
+      previousSize = nextSize;
+      setContainerSize(nextSize);
     });
     observer.observe(container);
     return () => observer.disconnect();
@@ -1494,7 +1739,24 @@ export default function PdfReader({
     const top = Math.max(0, slot.offsetTop + anchor.offset * slot.offsetHeight);
     if (typeof container.scrollTo === "function") container.scrollTo({ top, behavior: "instant" });
     else container.scrollTop = top;
-  }, [containerWidth, effectiveZoom, document]);
+  }, [containerSize, effectiveZoom, document]);
+
+  useLayoutEffect(() => {
+    setToolbarPosition((current) => {
+      const next = constrainToolbarPosition(current);
+      return next.x === current.x && next.y === current.y ? current : next;
+    });
+  }, [
+    annotationsVisible,
+    constrainToolbarPosition,
+    containerSize,
+    language,
+    onReveal,
+    paperId,
+    readOnly,
+    readingVisible,
+    moreToolsOpen,
+  ]);
 
   // ── Lazy page rendering via IntersectionObserver ──────────────────────────────
   useEffect(() => {
@@ -1804,16 +2066,16 @@ export default function PdfReader({
     currentPageRef.current = nextPage;
     setCurrentPage(nextPage);
     setPageLayout(nextLayout);
-    setFitWidth(true);
+    setFitMode((current) => current === "manual" ? "page" : current);
   };
 
   const adjustZoom = (delta: number) => {
-    setFitWidth(false);
-    setZoomLevel((current) => clampZoom((fitWidth ? effectiveZoom : current) + delta));
+    setFitMode("manual");
+    setZoomLevel((current) => clampZoom((fitMode === "manual" ? current : effectiveZoom) + delta));
   };
 
   return (
-    <div className="lit-pdf-reader" onKeyDown={(event) => {
+    <div ref={readerRef} className="lit-pdf-reader" onKeyDown={(event) => {
       if (event.key !== "Escape" || event.defaultPrevented || isEditableTarget(event.target)) return;
       // Annotation popovers consume the first Escape through their existing handler.
       if (!readingVisible || activeHighlight || pendingAnnotation || editingAnnotationId) return;
@@ -1821,17 +2083,34 @@ export default function PdfReader({
       event.stopPropagation();
       closeReading();
     }}>
-      <div className="lit-pdf-toolbar">
+      <div
+        ref={toolbarRef}
+        className={"lit-pdf-toolbar floating" + (toolbarDragging ? " dragging" : "")}
+        role="toolbar"
+        aria-orientation="vertical"
+        aria-label={copy.pdfReader.floatingToolbarAria}
+        style={{
+          left: toolbarPosition.x,
+          top: toolbarPosition.y,
+          maxHeight: containerSize.height > 0 ? Math.max(0, containerSize.height - FLOATING_TOOLBAR_INSET * 2) : undefined,
+        }}
+      >
+        <button
+          type="button"
+          className="lit-pdf-toolbar-handle"
+          aria-label={copy.pdfReader.moveToolbarAria}
+          title={copy.pdfReader.moveToolbarTitle}
+          onPointerDown={startToolbarDrag}
+          onPointerMove={moveToolbarDrag}
+          onPointerUp={finishToolbarDrag}
+          onPointerCancel={finishToolbarDrag}
+          onDoubleClick={resetToolbarPosition}
+          onKeyDown={moveToolbarWithKeyboard}
+        >
+          <SvgIcon name="document" size={20} />
+          <span>PDF</span>
+        </button>
         <div className="lit-pdf-pager">
-          <button
-            type="button"
-            className="lit-pdf-icon-button"
-            onClick={jumpToPreviousPageGroup}
-            disabled={!document || currentPageRange.start <= 1}
-            aria-label={copy.pdfReader.prevPageAria}
-          >
-            <SvgIcon name="chevronLeft" size={15} />
-          </button>
           <label className="lit-pdf-page-input">
             <span className="lit-pdf-page-caption">
               {pageLayout === 1 ? copy.pdfReader.currentPageLabel : copy.pdfReader.startPageLabel}
@@ -1850,100 +2129,101 @@ export default function PdfReader({
               }}
               aria-label={copy.pdfReader.pageNumberAria}
             />
-            <span>/ {numPages || "-"}</span>
+            <span className="lit-pdf-page-total">/ {numPages || "-"}</span>
           </label>
-          <button
-            type="button"
-            className="lit-pdf-icon-button"
-            onClick={jumpToNextPageGroup}
-            disabled={!document || currentPageRange.end >= numPages}
-            aria-label={copy.pdfReader.nextPageAria}
-          >
-            <SvgIcon name="chevronRight" size={15} />
+          <div className="lit-pdf-pager-nav">
+            <button type="button" onClick={jumpToPreviousPageGroup} disabled={!document || currentPageRange.start <= 1}
+              aria-label={copy.pdfReader.prevPageAria} title={copy.pdfReader.prevPageAria}>
+              <SvgIcon name="chevronLeft" size={16} />
+            </button>
+            <button type="button" onClick={jumpToNextPageGroup} disabled={!document || currentPageRange.end >= numPages}
+              aria-label={copy.pdfReader.nextPageAria} title={copy.pdfReader.nextPageAria}>
+              <SvgIcon name="chevronRight" size={16} />
+            </button>
+          </div>
+        </div>
+        <span className="lit-pdf-toolbar-divider" aria-hidden="true" />
+        <div className="lit-pdf-toolbar-actions">
+          <button type="button" className="lit-pdf-icon-button" title={copy.pdfReader.zoomInAria} aria-label={copy.pdfReader.zoomInAria} onClick={() => adjustZoom(ZOOM_STEP)}>
+            <SvgIcon name="zoomIn" size={20} />
+          </button>
+          <button type="button" className="lit-pdf-icon-button" title={copy.pdfReader.zoomOutAria} aria-label={copy.pdfReader.zoomOutAria} onClick={() => adjustZoom(-ZOOM_STEP)}>
+            <SvgIcon name="zoomOut" size={20} />
+          </button>
+          <button type="button" className="lit-pdf-icon-button" title={copy.pdfReader.fitPage} aria-label={copy.pdfReader.fitPage}
+            aria-pressed={fitMode === "page"} onClick={() => setFitMode("page")}>
+            <SvgIcon name="fit" size={20} />
+          </button>
+          {paperId && !readOnly && sourceKind === "library" && (
+            <button ref={guideToggleRef} type="button" className="lit-pdf-icon-button lit-pdf-guide-toggle"
+              aria-label={copy.workspaceHeader.tabGuide} title={copy.workspaceHeader.tabGuide}
+              aria-pressed={readingVisible} aria-expanded={readingVisible} aria-controls="paper-guide-panel"
+              onClick={() => setReadingVisible(!readingVisible)}>
+              <SvgIcon name="bookOpen" size={20} />
+            </button>
+          )}
+          <button type="button" className="lit-pdf-icon-button" title={copy.pdfReader.systemReader} aria-label={copy.pdfReader.systemReader} onClick={onOpenExternal}>
+            <SvgIcon name="externalLink" size={20} />
+          </button>
+          <button ref={moreToolsButtonRef} type="button" className={"lit-pdf-icon-button lit-pdf-more-toggle" + (moreToolsOpen ? " active" : "")}
+            title={copy.pdfReader.moreTools} aria-label={copy.pdfReader.moreTools} aria-expanded={moreToolsOpen}
+            aria-haspopup="dialog" aria-controls={viewControlsId} onClick={() => setMoreToolsOpen((current) => !current)}>
+            <SvgIcon name="moreHorizontal" size={20} />
           </button>
         </div>
-
-        <div className="lit-pdf-layout">
-          <select
-            aria-label={copy.pdfReader.pageLayoutAria}
-            value={pageLayout}
-            onChange={(event) => {
+      </div>
+      <div ref={moreToolsRef} id={viewControlsId} className="lit-pdf-tools-popover" hidden={!moreToolsOpen}
+        role="dialog" aria-label={copy.pdfReader.moreTools}
+        style={{
+          left: moreToolsPosition.x,
+          top: moreToolsPosition.y,
+          maxHeight: containerSize.height > 0 ? Math.max(0, containerSize.height - FLOATING_TOOLBAR_INSET * 2) : undefined,
+          maxWidth: containerSize.width > 0 ? Math.max(0, containerSize.width - FLOATING_TOOLBAR_INSET * 2) : undefined,
+        }}>
+        <div className="lit-pdf-more-section">
+          <label className="lit-pdf-layout">
+            <span>{copy.pdfReader.viewSection}</span>
+            <select aria-label={copy.pdfReader.pageLayoutAria} value={pageLayout} onChange={(event) => {
               const nextLayout = Number(event.target.value) as PageLayout;
               if (PAGE_LAYOUT_OPTIONS.includes(nextLayout)) changePageLayout(nextLayout);
-            }}
-          >
-            {PAGE_LAYOUT_OPTIONS.map((layout) => (
-              <option key={layout} value={layout}>
-                {copy.pdfReader.pageLayoutLabel(layout)}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="lit-pdf-zoom">
-          <button type="button" className="lit-pdf-icon-button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label={copy.pdfReader.zoomOutAria}>
-            <SvgIcon name="minus" size={15} />
-          </button>
-          <span className="lit-pdf-zoom-value">{Math.round(effectiveZoom * 100)}%</span>
-          <button type="button" className="lit-pdf-icon-button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label={copy.pdfReader.zoomInAria}>
-            <SvgIcon name="plus" size={15} />
-          </button>
-          <button
-            type="button"
-            className={`lit-pdf-label-button${fitWidth ? " active" : ""}`}
-            onClick={() => setFitWidth(true)}
-          >
-            <SvgIcon name="fit" size={14} />
-            {copy.pdfReader.fitWidth}
+            }}>
+              {PAGE_LAYOUT_OPTIONS.map((layout) => <option key={layout} value={layout}>{copy.pdfReader.pageLayoutLabel(layout)}</option>)}
+            </select>
+          </label>
+          <div className="lit-pdf-more-status"><span>{copy.pdfReader.zoomLabel}</span><span className="lit-pdf-zoom-value">{Math.round(effectiveZoom * 100)}%</span></div>
+          <button type="button" className="lit-pdf-more-action" aria-pressed={fitMode === "width"} onClick={() => {
+            setFitMode("width");
+            closeMoreTools(true);
+          }}>
+            <SvgIcon name="panelLeft" size={16} /><span>{copy.pdfReader.fitWidth}</span>
           </button>
         </div>
-
-        <div className="lit-pdf-toolbar-right">
-          {paperId && !readOnly && sourceKind === "library" && <button ref={guideToggleRef} type="button"
-            className="lit-pdf-label-button lit-pdf-guide-toggle" aria-pressed={readingVisible} aria-expanded={readingVisible}
-            aria-controls="paper-guide-panel" title={copy.workspaceHeader.tabGuide}
-            onClick={() => setReadingVisible(!readingVisible)}>
-            <SvgIcon name="paperGuide" size={17} /><span>{copy.workspaceHeader.tabGuide}</span>
-          </button>}
+        <div className="lit-pdf-more-section">
           {!readOnly && (
-            <button
-              type="button"
-              className={annotationsVisible ? "active" : ""}
-              onClick={() => setShowAnnotations((v) => !v)}
-              title={copy.pdfReader.toggleAnnotationsSidebarTitle}
-            >
-              {copy.pdfReader.annotationsLabel(annotations.length)}
+            <button type="button" className="lit-pdf-more-action lit-pdf-annotations-toggle" aria-label={copy.pdfReader.annotationsLabel(annotations.length)}
+              aria-pressed={annotationsVisible} aria-expanded={annotationsVisible} title={copy.pdfReader.toggleAnnotationsSidebarTitle}
+              onClick={() => {
+                setShowAnnotations((current) => !current);
+                closeMoreTools(true);
+              }}>
+              <SvgIcon name="edit" size={16} /><span>{copy.pdfReader.annotationsLabel(0)}</span>
+              {annotations.length > 0 && <span className="lit-pdf-annotation-count">{annotations.length}</span>}
             </button>
           )}
-          {onReveal && (
-            <button type="button" className="lit-pdf-icon-button" aria-label={copy.pdfReader.revealAria} title={copy.pdfReader.revealAria} onClick={onReveal}>
-              <SvgIcon name="folder" size={14} />
-            </button>
-          )}
-          <button
-            type="button"
-            className="lit-pdf-icon-button"
-            aria-label={copy.pdfReader.refreshAria}
-            title={copy.pdfReader.refreshAria}
-            onClick={() => setReloadKey((value) => value + 1)}
-          >
-            <SvgIcon name="refresh" size={14} />
-          </button>
-          <button
-            type="button"
-            className="lit-pdf-icon-button"
-            aria-label={copy.pdfReader.systemReader}
-            title={copy.pdfReader.systemReader}
-            onClick={onOpenExternal}
-          >
-            <SvgIcon name="externalLink" size={14} />
-          </button>
+          {onReveal && <button type="button" className="lit-pdf-more-action" aria-label={copy.pdfReader.revealAria} onClick={() => {
+            closeMoreTools(true);
+            onReveal();
+          }}><SvgIcon name="folder" size={16} /><span>{copy.pdfReader.revealAria}</span></button>}
+          <button type="button" className="lit-pdf-more-action" aria-label={copy.pdfReader.refreshAria} onClick={() => {
+            setReloadKey((value) => value + 1);
+            closeMoreTools(true);
+          }}><SvgIcon name="refresh" size={16} /><span>{copy.pdfReader.refreshAria}</span></button>
         </div>
       </div>
 
       <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}${paperId && !readOnly && sourceKind === "library" && readingVisible ? " with-reading" : ""}`}>
         <div
-          className="lit-pdf-scroll"
+          className={`lit-pdf-scroll fit-${fitMode}`}
           ref={containerRef}
           tabIndex={0}
           aria-keyshortcuts="ArrowLeft ArrowRight"
