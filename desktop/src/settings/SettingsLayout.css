@@ -24,8 +24,6 @@
 .sp-settings-shell .settings-page { display: flex; flex-direction: column; gap: 32px; min-width: 0; padding-bottom: 8px; }
 .sp-settings-shell .settings-page[hidden] { display: none; }
 .sp-settings-shell .settings-page > * { min-width: 0; flex-shrink: 0; }
-.sp-settings-shell .settings-page-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; padding: 4px 0 8px; }
-.sp-settings-shell .settings-page-heading h1 { margin: 0; color: var(--text); font-size: 28px; font-weight: 650; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .sp-settings-shell .settings-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; }
 .sp-settings-shell .settings-section-heading > div:first-child { min-width: 0; flex: 1; }
 .sp-settings-shell .settings-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -173,8 +171,6 @@
   .sp-settings-shell .sp-nav-item { flex: 0 0 auto; }
 }
 @media (max-width: 720px) {
-  .sp-settings-shell .settings-page-heading { flex-wrap: wrap; gap: 8px; }
-  .sp-settings-shell .settings-page-heading h1 { font-size: 23px; }
   .sp-settings-shell .settings-page .settings-section-body { padding-inline: 16px; }
   .sp-settings-shell .settings-page :is(.sp-update-section, .mail-settings-panel, .sp-profile-activity, .sp-profile-insights, .sp-profile-skills, .sp-usage-card) { padding: 16px; }
   .sp-settings-shell .settings-page .sp-account-section { padding: 0; }

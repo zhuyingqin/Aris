@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useStore } from "../store";
 import { SETTINGS_TAB_REQUEST_EVENT } from "../settingsTabRequest";
+import * as tauri from "../api/tauri";
 import Settings from "./Settings";
 
 describe("Settings account and usage", () => {
@@ -19,28 +20,40 @@ describe("Settings account and usage", () => {
     vi.restoreAllMocks();
   });
 
-  it("merges identity, quota summaries, and call details without duplicate quota content", () => {
+  it("routes the legacy account category to Profile without showing preview account data", () => {
     const { container } = render(<Settings />);
-    const section = container.querySelector(".sp-account-section.sp-account-usage-section");
+    expect(screen.getByRole("tab", { name: "个人资料" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("tab", { name: "账户与用量" })).toBeNull();
+    expect(screen.getByText("未登录")).toBeTruthy();
+    expect(container.querySelector('[data-settings-page="account"]')).toBeNull();
+    expect(container.querySelector(".sp-usage-quota-card")).toBeNull();
+    expect(screen.queryByText("账户余额")).toBeNull();
+  });
 
-    expect(section).not.toBeNull();
-    const accountSection = within(section as HTMLElement);
-
-    expect(screen.getByRole("heading", { level: 1, name: "账户管理" })).toBeTruthy();
-    expect(accountSection.getByText("账户概览")).toBeTruthy();
-    expect(accountSection.queryByText("使用统计")).toBeNull();
-    expect(accountSection.getAllByRole("button", { name: "刷新" })).toHaveLength(1);
-    expect(accountSection.getAllByText("账户余额")).toHaveLength(1);
-    expect(accountSection.getAllByText("订阅余额")).toHaveLength(1);
-    expect(accountSection.getByText("调用明细")).toBeTruthy();
-    expect(section?.querySelector(".sp-account-summary")).toBeNull();
+  it("opens Profile without a duplicate page heading or refresh banner", () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "profile");
+    const { container } = render(<Settings />);
+    const profilePage = container.querySelector('[data-settings-page="profile"]');
+    expect(profilePage).not.toBeNull();
+    expect(profilePage?.getAttribute("aria-label")).toBeTruthy();
+    expect(profilePage?.querySelector(".settings-page-heading")).toBeNull();
+    expect(profilePage?.querySelector(".sp-profile-data-head")).toBeNull();
+    expect(profilePage?.querySelector(".sp-profile-avatar-button")).not.toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "常规" }));
+    expect(profilePage).toHaveProperty("hidden", true);
+    fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "profile" }));
+    expect(profilePage).toHaveProperty("hidden", false);
   });
 
   it("exposes the optional research proxy and search-provider keys", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "models");
     render(<Settings />);
 
-    expect(screen.getByRole("heading", { level: 1, name: "模型与审阅" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.getByRole("region", { name: "模型与审阅" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "测试连接配置" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存连接配置" })).toBeNull();
+    expect(screen.queryByText("账户模型变更立即生效，连接参数保存后生效。")).toBeNull();
     expect(screen.getByRole("heading", { name: "辅助模型" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "网络与社区搜索" })).toBeTruthy();
     expect(screen.queryByPlaceholderText("粘贴 Bocha API Key")).toBeNull();
@@ -57,18 +70,33 @@ describe("Settings account and usage", () => {
     expect((exaInput as HTMLInputElement).value).toBe("exa-test-key");
   });
 
-  it("opens the dedicated Update category and keeps About focused on diagnostics", async () => {
+  it("routes the legacy Update category to About with application updates and diagnostics without loading Oracle", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "update");
-    render(<Settings />);
-    expect(screen.getByRole("tab", { name: "更新" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("heading", { level: 1, name: "应用更新" })).toBeTruthy();
+    const oracleStatus = vi.spyOn(tauri, "oracleWebStatus");
+    const { container } = render(<Settings />);
+    expect(screen.queryByRole("tab", { name: "更新" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "关于与环境" }).getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector('[data-settings-page="update"]')).toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: "应用更新" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
-    expect(await screen.findByText("Oracle Web")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "关于与环境" }));
-    expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
+    expect(screen.queryByText("Oracle Web")).toBeNull();
+    expect(oracleStatus).not.toHaveBeenCalled();
     expect(screen.getByPlaceholderText("例如 C:\\Users\\name\\anaconda3 或环境中的 python.exe")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "更新" }));
-    expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+    expect(screen.getAllByText(/^当前版本 v/)).toHaveLength(1);
+  });
+
+  it("retains an available update when leaving and returning to About", async () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "about");
+    const check = vi.spyOn(tauri, "appUpdateCheck").mockResolvedValue({ available: true, version: "0.4.78", body: "Update details" });
+    render(<Settings />);
+    fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+    expect(await screen.findByText("Update details")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "常规" }));
+    expect(screen.queryByRole("button", { name: "下载并安装" })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "关于与环境" }));
+    expect(screen.getByRole("button", { name: "下载并安装" })).toBeTruthy();
+    expect(screen.getByText("Update details")).toBeTruthy();
+    expect(check).toHaveBeenCalledTimes(1);
   });
 
   it("changes overall type from Appearance, saves immediately, and restores automatic sizing", () => {
@@ -191,9 +219,36 @@ describe("Settings account and usage", () => {
     render(<Settings />);
     expect(screen.getByRole("tab", { name: "关于与环境" }).getAttribute("aria-selected")).toBe("true");
     fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "general" }));
-    expect(screen.getByRole("heading", { name: "通用与外观" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "外观与语言" })).toBeTruthy();
     fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "environment" }));
     expect(screen.getByRole("tab", { name: "关于与环境" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "account" }));
+    expect(screen.getByRole("tab", { name: "个人资料" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "update" }));
+    expect(screen.getByRole("tab", { name: "关于与环境" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it.each(["settingsTab", "settings"])("routes a legacy %s=update URL to About", (parameter) => {
+    window.history.replaceState(null, "", `/?${parameter}=update`);
+    try {
+      render(<Settings />);
+      expect(screen.getByRole("tab", { name: "关于与环境" }).getAttribute("aria-selected")).toBe("true");
+      expect(screen.queryByRole("tab", { name: "更新" })).toBeNull();
+      expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it.each(["settingsTab", "settings"])("routes a legacy %s=account URL to Profile", (parameter) => {
+    window.history.replaceState(null, "", `/?${parameter}=account`);
+    try {
+      render(<Settings />);
+      expect(screen.getByRole("tab", { name: "个人资料" }).getAttribute("aria-selected")).toBe("true");
+      expect(screen.queryByRole("tab", { name: "账户与用量" })).toBeNull();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   it("keeps mail, environment, and memory drafts when changing categories", () => {

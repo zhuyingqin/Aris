@@ -16,7 +16,6 @@ import MemorySettings from "./MemorySettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
-import UpdateSettings from "./UpdateSettings";
 import AccountSettings from "./AccountSettings";
 import GeneralSettings from "./GeneralSettings";
 import ModelsSettings from "./ModelsSettings";
@@ -26,9 +25,8 @@ import {
   SETTINGS_NAV_GROUPS,
   SETTINGS_NAV_GROUP_LABELS,
   SETTINGS_NAV_LABELS,
-  SETTINGS_NAV_MISC,
-  isSettingsNavId,
-  type SettingsNavId,
+  resolveSettingsPageId,
+  type SettingsPageId,
 } from "./settingsNav";
 import { PREVIEW_SETTINGS_DATA } from "./settingsPreviewData";
 import { useSettingsConnectionState } from "./useSettingsConnectionState";
@@ -36,22 +34,22 @@ import { usePreferenceSave } from "./usePreferenceSave";
 import { SettingsPage } from "./SettingsPrimitives";
 import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 
-type SettingsTab = SettingsNavId;
+type SettingsTab = SettingsPageId;
 
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const fromUrl = params.get("settingsTab") || params.get("settings");
-      if (fromUrl === "environment") return "about";
-      if (isSettingsNavId(fromUrl)) return fromUrl;
+      const requested = resolveSettingsPageId(fromUrl);
+      if (requested) return requested;
     }
   } catch {
     // URL search params may fail in constrained environments.
   }
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
-    const resolved = value === "environment" ? "about" : isSettingsNavId(value) ? value : null;
+    const resolved = resolveSettingsPageId(value);
     if (resolved) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       return resolved;
@@ -66,7 +64,6 @@ export default function Settings() {
   const setError = useStore((state) => state.setError);
   const language = useStore((state) => state.language);
   const logout = useStore((state) => state.logout);
-  const setTab = useStore((state) => state.setTab);
   const hideMail = useStore((state) => state.hideMail);
   const currentProjectId = useStore((state) => state.currentProject?.id);
   const localizedCopy = SETTINGS_COPY[language];
@@ -121,9 +118,7 @@ export default function Settings() {
     setAccount(PREVIEW_ACCOUNT);
   }, [language]);
 
-  // Shared by loadAccount and AccountSettings' saveAccountGroup: both apply a
-  // freshly confirmed account the same way (sync managedModels/configView,
-  // notify Chat, persist the cache).
+  // Sync the confirmed account, available models and the persistent cache.
   const applyRefreshedAccount = (next: NewApiAccount) => {
     setAccount(next);
     setManagedModels(next.models);
@@ -171,12 +166,9 @@ export default function Settings() {
     };
     const onSettingsTabRequest = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
-      if (detail === "environment") {
-        openRequestedTab("about");
-        return;
-      }
-      if (isSettingsNavId(detail)) {
-        openRequestedTab(detail);
+      const resolved = resolveSettingsPageId(detail);
+      if (resolved) {
+        openRequestedTab(resolved);
         return;
       }
       const requested = readRequestedSettingsTab();
@@ -206,9 +198,6 @@ export default function Settings() {
     }
   }, [hideMail, activeSettingsTab]);
 
-  if (!configView) return <div className="board"><div className="empty">{copy.loading}</div></div>;
-
-  const navMisc = SETTINGS_NAV_MISC[language];
   const navLabels = SETTINGS_NAV_LABELS[language];
   const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
   const layoutCopy = SETTINGS_LAYOUT_COPY[language];
@@ -216,12 +205,6 @@ export default function Settings() {
   return (
     <div className="st-page sp-settings-page sp-settings-shell">
       <aside className="sp-settings-nav" aria-label={copy.settingsCategories}>
-        <div className="sp-settings-nav-head">
-          <button type="button" className="sp-settings-back" onClick={() => setTab("chat")}>
-            <span className="sp-settings-back-icon"><SvgIcon name="chevronLeft" size={14} /></span>
-            <span>{navMisc.back}</span>
-          </button>
-        </div>
         <div className="sp-settings-nav-scroll" role="tablist" ref={navRef}>
           {visibleNavGroups.map((group) => (
             <div className="sp-settings-nav-group" key={group.id}>
@@ -248,10 +231,24 @@ export default function Settings() {
       </aside>
       <div className="sp-settings-content" ref={contentRef} onScroll={(event) => scrollPositions.current.set(activeSettingsTab, event.currentTarget.scrollTop)}>
 
-      {activeSettingsTab === "profile" && (
-        <SettingsPage kind="profile" title={layoutCopy.profile}><Profile account={account} language={language} onRefreshAccount={loadAccount} accountLoading={accountLoading} accountError={accountError} /></SettingsPage>
+      {!configView && activeSettingsTab !== "profile" && <div className="empty">{copy.loading}</div>}
+
+      {(activeSettingsTab === "profile" || visitedTabs.has("profile")) && (
+        <SettingsPage kind="profile" title={layoutCopy.profile} hidden={activeSettingsTab !== "profile"}>
+          <Profile account={account} language={language} active={activeSettingsTab === "profile"} accountError={accountError}
+            renderActivity={(activity) => hasNativeBackend() ? <AccountSettings
+              key={account?.username ?? "signed-out"}
+              language={language}
+              account={account}
+              accountLoading={accountLoading}
+              active={activeSettingsTab === "profile"}
+              onRefreshAccount={loadAccount}
+            >{activity}</AccountSettings> : activity}
+          />
+        </SettingsPage>
       )}
 
+      {configView && <>
       {activeSettingsTab === "general" && (
         <GeneralSettings
           language={language}
@@ -269,17 +266,17 @@ export default function Settings() {
       )}
 
       {(activeSettingsTab === "mail" || visitedTabs.has("mail")) && (
-        <SettingsPage kind="mail" title={layoutCopy.mail} scope={layoutCopy.local} hidden={activeSettingsTab !== "mail"}><div className="sp-mail-page">
+        <SettingsPage kind="mail" title={layoutCopy.mail} hidden={activeSettingsTab !== "mail"}><div className="sp-mail-page">
           <MailSettingsDetail />
         </div></SettingsPage>
       )}
 
       {(activeSettingsTab === "memory" || visitedTabs.has("memory")) && (
-        <SettingsPage kind="memory" title={layoutCopy.memory} scope={layoutCopy.global} hidden={activeSettingsTab !== "memory"}><MemorySettings key={currentProjectId} language={language} /></SettingsPage>
+        <SettingsPage kind="memory" title={layoutCopy.memory} hidden={activeSettingsTab !== "memory"}><MemorySettings key={currentProjectId} language={language} /></SettingsPage>
       )}
 
       {activeSettingsTab === "models" && (
-        <SettingsPage kind="models" title={layoutCopy.models} scope={layoutCopy.global}><ModelsSettings
+        <SettingsPage kind="models" title={layoutCopy.models}><ModelsSettings
           language={language}
           configView={configView}
           account={account}
@@ -289,41 +286,26 @@ export default function Settings() {
       )}
 
       {(activeSettingsTab === "extensions" || visitedTabs.has("extensions")) && (
-        <SettingsPage kind="extensions" title={layoutCopy.extensions} scope={layoutCopy.local} hidden={activeSettingsTab !== "extensions"}><div className="sp-extensions-embed">
+        <SettingsPage kind="extensions" title={layoutCopy.extensions} hidden={activeSettingsTab !== "extensions"}><div className="sp-extensions-embed">
           <Extensions embedded />
         </div></SettingsPage>
       )}
 
       {(activeSettingsTab === "remote" || visitedTabs.has("remote")) && (
-        <SettingsPage kind="remote" title={layoutCopy.remote} scope={layoutCopy.local} hidden={activeSettingsTab !== "remote"}><div className="remote-control-page">
+        <SettingsPage kind="remote" title={layoutCopy.remote} hidden={activeSettingsTab !== "remote"}><div className="remote-control-page">
           <RemoteControlPanel language={language} onError={setError} />
         </div></SettingsPage>
       )}
 
-      {activeSettingsTab === "account" && (
-        <SettingsPage kind="account" title={layoutCopy.account}><AccountSettings
-          language={language}
-          account={account}
-          accountLoading={accountLoading}
-          accountError={accountError}
-          onRefreshAccount={loadAccount}
-        /></SettingsPage>
-      )}
-
-      {(activeSettingsTab === "update" || visitedTabs.has("update")) && (
-        <SettingsPage kind="update" title={layoutCopy.update} scope={layoutCopy.local} hidden={activeSettingsTab !== "update"}>
-          <UpdateSettings language={language} appVersion={configView.appVersion} />
-        </SettingsPage>
-      )}
-
       {(activeSettingsTab === "about" || visitedTabs.has("about")) && (
-        <SettingsPage kind="about" title={layoutCopy.about} scope={layoutCopy.local} hidden={activeSettingsTab !== "about"}><AboutSettings
+        <SettingsPage kind="about" title={layoutCopy.about} hidden={activeSettingsTab !== "about"}><AboutSettings
           language={language}
           appVersion={configView.appVersion}
           pythonEnvironmentPath={configView.pythonEnvironmentPath ?? ""}
           onConfigRefreshed={setConfigView}
         /></SettingsPage>
       )}
+      </>}
       </div>
     </div>
   );

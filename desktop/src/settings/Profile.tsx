@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { profileStats, type NewApiAccount } from "../api/tauri";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import type { NewApiAccount } from "../api/tauri";
 import { hasNativeBackend } from "../api/transport";
 import type { ProfileStats } from "../types";
 import type { Language } from "../store";
@@ -10,7 +10,9 @@ import {
   writeProfileAvatar,
 } from "../profileAvatar";
 import { SETTINGS_COPY, type SettingsProfileCopy } from "./i18n";
-import { buildProfileHeatmap, type HeatmapMode } from "./profileHeatmap";
+import { buildProfileActivitySeries, buildProfileHeatmap, type HeatmapMode } from "./profileHeatmap";
+import ProfileActivityChart from "./ProfileActivityChart";
+import { readCachedProfileStats, refreshProfileStats, PROFILE_STATS_REFRESH_MS } from "./profileStatsCache";
 import "./Profile.css";
 
 function formatTokens(value: number, language: Language, copy: SettingsProfileCopy): string {
@@ -44,15 +46,17 @@ function avatarInitial(account: NewApiAccount | null): string {
 export default function Profile({
   account,
   language,
-  onRefreshAccount,
-  accountLoading = false,
+  active = true,
   accountError = "",
+  children,
+  renderActivity = (activity) => activity,
 }: {
   account: NewApiAccount | null;
   language: Language;
-  onRefreshAccount?: () => Promise<void>;
-  accountLoading?: boolean;
+  active?: boolean;
   accountError?: string;
+  children?: ReactNode;
+  renderActivity?: (activity: ReactNode) => ReactNode;
 }) {
   const copy = SETTINGS_COPY[language].profile;
   const backendAvailable = hasNativeBackend();
@@ -62,11 +66,8 @@ export default function Profile({
   const heatmapScrollRef = useRef<HTMLDivElement | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarError, setAvatarError] = useState("");
-  const [stats, setStats] = useState<ProfileStats | null>(null);
+  const [stats, setStats] = useState<ProfileStats | null>(() => backendAvailable ? readCachedProfileStats()?.stats ?? null : null);
   const [statsUnavailable, setStatsUnavailable] = useState(!backendAvailable);
-  const [statsLoading, setStatsLoading] = useState(false);
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
-  const [refreshVersion, setRefreshVersion] = useState(0);
   const [mode, setMode] = useState<HeatmapMode>("daily");
 
   useEffect(() => {
@@ -75,29 +76,27 @@ export default function Profile({
       setStatsUnavailable(true);
       return;
     }
+    if (!active) return;
     let alive = true;
     let inFlight = false;
     const refresh = async () => {
       if (!alive || inFlight) return;
       inFlight = true;
-      setStatsLoading(true);
       try {
-        const next = await profileStats();
+        const next = await refreshProfileStats();
         if (alive) {
           setStats(next);
           setStatsUnavailable(false);
-          setUpdatedAt(new Date());
         }
       } catch {
         if (alive) setStatsUnavailable(true);
       } finally {
         inFlight = false;
-        if (alive) setStatsLoading(false);
       }
     };
-    void refresh();
     const refreshVisible = () => { if (!document.hidden) void refresh(); };
-    const timer = window.setInterval(refreshVisible, 30_000);
+    refreshVisible();
+    const timer = window.setInterval(refreshVisible, PROFILE_STATS_REFRESH_MS);
     window.addEventListener("focus", refreshVisible);
     document.addEventListener("visibilitychange", refreshVisible);
     return () => {
@@ -106,12 +105,7 @@ export default function Profile({
       window.removeEventListener("focus", refreshVisible);
       document.removeEventListener("visibilitychange", refreshVisible);
     };
-  }, [backendAvailable, refreshVersion]);
-
-  const refreshAll = () => {
-    setRefreshVersion((value) => value + 1);
-    void onRefreshAccount?.();
-  };
+  }, [backendAvailable, active]);
 
   const chooseAvatar = () => {
     setAvatarError("");
@@ -143,7 +137,8 @@ export default function Profile({
     if (!writeProfileAvatar(null)) setAvatarError(copy.avatarSaveFailed);
   };
 
-  const heatmap = useMemo(() => (stats ? buildProfileHeatmap(stats.daily, mode, stats.cumulativeTokens) : null), [stats, mode]);
+  const heatmap = useMemo(() => (stats && mode === "daily" ? buildProfileHeatmap(stats.daily, "daily", stats.cumulativeTokens) : null), [stats, mode]);
+  const activitySeries = useMemo(() => (stats && mode !== "daily" ? buildProfileActivitySeries(stats.daily, mode, stats.cumulativeTokens) : null), [stats, mode]);
   const hasActivity = Boolean(stats && (mode === "cumulative" ? stats.cumulativeTokens > 0 : stats.daily.some((bucket) => bucket.tokens > 0)));
   const heatmapStart = heatmap?.[0]?.[0]?.date;
 
@@ -161,6 +156,7 @@ export default function Profile({
   const displayName = verifiedAccount?.displayName || verifiedAccount?.username || copy.signedOut;
   const handle = verifiedAccount?.username ? `@${verifiedAccount.username}` : "";
   const plan = verifiedAccount?.subscriptionName || verifiedAccount?.group || "";
+  const group = verifiedAccount?.group && verifiedAccount.group !== plan ? verifiedAccount.group : "";
 
   const tiles = stats
     ? [
@@ -174,15 +170,6 @@ export default function Profile({
 
   return (
     <div className="sp-profile">
-      <div className="sp-profile-data-head">
-        <div>
-          <span>{copy.localScope}</span>
-          {updatedAt && <span className="sp-profile-updated">{copy.updatedAt(updatedAt.toLocaleTimeString(language === "cn" ? "zh-CN" : "en-US"))}</span>}
-        </div>
-        {backendAvailable && <button type="button" className="sp-profile-refresh" onClick={refreshAll} disabled={statsLoading || accountLoading}>
-          {statsLoading || accountLoading ? copy.refreshing : copy.refresh}
-        </button>}
-      </div>
       <div className="sp-profile-hero">
         <div className="sp-profile-identity">
           <button
@@ -211,6 +198,7 @@ export default function Profile({
               {handle && <span>{handle}</span>}
               {handle && plan && <span className="sp-profile-dot">·</span>}
               {plan && <span className="sp-profile-plan">{plan}</span>}
+              {group && <span className="sp-profile-plan">{SETTINGS_COPY[language].general.authGroupTag(group)}</span>}
             </div>
             <div className="sp-profile-avatar-actions">
               <button type="button" onClick={chooseAvatar} disabled={avatarBusy}>
@@ -224,12 +212,14 @@ export default function Profile({
       </div>
       {accountError && <div className="sp-profile-unavailable" role="alert">{copy.accountRefreshFailed} {accountError}</div>}
 
+      {children}
+
+      {renderActivity(<>
       {statsUnavailable && <div className="sp-profile-unavailable" role="status">{stats ? copy.statsRefreshFailed : copy.statsUnavailable}</div>}
       {!stats && !statsUnavailable ? (
         <div className="sp-profile-loading">{copy.loading}</div>
       ) : stats ? (
         <>
-          {stats.partialData && <div className="sp-profile-unavailable" role="status">{copy.partialData}</div>}
           <div className="sp-profile-tiles">
             {tiles.map((tile) => (
               <div className="sp-profile-tile" key={tile.label} title={tile.detail}>
@@ -242,7 +232,7 @@ export default function Profile({
           <section className="sp-profile-activity">
             <div className="sp-profile-section-head">
               <div className="sp-profile-section-title">{copy.activityTitle}</div>
-              <div className="sp-profile-mode-toggle" role="tablist">
+              <div className="sp-profile-mode-toggle" role="tablist" aria-label={copy.activityTitle}>
                 {([
                   { id: "daily" as const, label: copy.modeDaily },
                   { id: "weekly" as const, label: copy.modeWeekly },
@@ -261,7 +251,9 @@ export default function Profile({
                 ))}
               </div>
             </div>
-            {hasActivity && heatmap ? (
+            {hasActivity && mode !== "daily" && activitySeries ? (
+              <ProfileActivityChart key={mode} points={activitySeries} mode={mode} language={language} copy={copy} formatValue={(value) => formatTokens(value, language, copy)} />
+            ) : hasActivity && heatmap ? (
                 <div className="sp-profile-heatmap-scroll" ref={heatmapScrollRef} tabIndex={0} role="region" aria-label={copy.activityTitle}>
                   <div className="sp-profile-heatmap" role="img" aria-label={`${copy.activityTitle} · ${copy.utcDays}`}>
                     {heatmap.map((week, weekIndex) => (
@@ -272,7 +264,7 @@ export default function Profile({
                             className="sp-profile-heatmap-cell"
                             data-level={cell.level}
                             data-future={cell.future || undefined}
-                            title={cell.future ? undefined : `${mode === "weekly" ? `${week[0].date} – ${cell.endDate}` : cell.date} · ${cell.tokens.toLocaleString(language === "cn" ? "zh-CN" : "en-US")} ${copy.tokenUnit}`}
+                            title={cell.future ? undefined : `${cell.date} · ${cell.tokens.toLocaleString(language === "cn" ? "zh-CN" : "en-US")} ${copy.tokenUnit}`}
                           />
                         ))}
                       </div>
@@ -284,7 +276,7 @@ export default function Profile({
             )}
             <div className="sp-profile-activity-foot sp-profile-activity-summary">
               <span>{copy.utcDays}{stats.since !== null && ` · ${copy.activitySince(new Date(stats.since * 1000).toISOString().slice(0, 10))}`}</span>
-              <span className="sp-profile-legend">{copy.less}{[0, 1, 2, 3, 4].map((level) => <i key={level} className="sp-profile-heatmap-cell" data-level={level} />)}{copy.more}</span>
+              {mode === "daily" && <span className="sp-profile-legend">{copy.less}{[0, 1, 2, 3, 4].map((level) => <i key={level} className="sp-profile-heatmap-cell" data-level={level} />)}{copy.more}</span>}
             </div>
           </section>
 
@@ -341,6 +333,7 @@ export default function Profile({
           </section>
         </>
       ) : null}
+      </>)}
     </div>
   );
 }

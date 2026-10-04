@@ -117,11 +117,6 @@ export default function GeneralSettings({
 
   return (
     <div className="sp-general-page settings-general">
-      <header className="settings-page-heading">
-        <h1>{pageCopy.title}</h1>
-        <span className="settings-scope" title={pageCopy.scopeDescription}>{pageCopy.scope}</span>
-      </header>
-
       <SettingsSection title={pageCopy.appearance}>
         <SettingRow title={pageCopy.mode} feedback={feedback("theme")}>
           <SettingsChoice label={copy.themeLabel} value={theme} variant="preview"

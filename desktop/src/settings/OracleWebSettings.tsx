@@ -16,7 +16,6 @@ import type { OracleWebStatusView } from "../types";
 interface OracleWebSettingsProps {
   language: Language;
   embedded?: boolean;
-  runtimeOnly?: boolean;
 }
 
 type RoleKey = "consult" | "reviewer" | "image";
@@ -199,7 +198,7 @@ const COPY = {
   },
 } as const;
 
-export default function OracleWebSettings({ language, embedded = false, runtimeOnly = false }: OracleWebSettingsProps) {
+export default function OracleWebSettings({ language, embedded = false }: OracleWebSettingsProps) {
   const copy = COPY[language];
   const nativeBackend = hasNativeBackend();
   const [status, setStatus] = useState<OracleWebStatusView | null>(null);
@@ -236,7 +235,7 @@ export default function OracleWebSettings({ language, embedded = false, runtimeO
 
   useEffect(() => {
     void load();
-    // This panel owns its request lifecycle and is only mounted for its active settings tab.
+    // Oracle status loads when its plugin details are opened.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -443,16 +442,9 @@ export default function OracleWebSettings({ language, embedded = false, runtimeO
     };
   }, [accounts, browsers, copy, runtimeNeedsUpdate, runtimeReady, status?.consultAccountId]);
 
-  const runtimeSection = (
-    <section className="sp-update-section">
-      <div className="sp-section-head">
-        <div className="sp-section-head-text">
-          <div className="sp-section-title">
-            {runtimeOnly ? "Oracle Web" : <><span className="oracle-web-step">1</span>{copy.runtimeTitle}</>}
-          </div>
-        </div>
-        <span className={`oracle-web-pill ${runtimeReady ? "ok" : "todo"}`}>{runtimeStatusLabel}</span>
-      </div>
+  const runtimeStatus = <span className={`oracle-web-pill ${runtimeReady ? "ok" : "todo"}`}>{runtimeStatusLabel}</span>;
+  const runtimeDetails = (
+    <>
       <div className="oracle-web-meta">
         <span>{runtimeSource}</span>
         {status?.runtime.version && <span>v{status.runtime.version}</span>}
@@ -474,22 +466,20 @@ export default function OracleWebSettings({ language, embedded = false, runtimeO
           <span>{runtimeActionIsUpdate ? copy.updateDetail : copy.installDetail}</span>
         </div>
       )}
-      {runtimeOnly && (
-        <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void load()} disabled={loading || installing}>
-          {loading ? copy.refreshing : copy.refresh}
-        </button>
-      )}
-    </section>
+    </>
   );
 
-  if (runtimeOnly) {
-    return <div className="oracle-web-page oracle-web-page-embedded">
-      {runtimeSection}
-      {!nativeBackend && <div className="oracle-web-message">{copy.preview}</div>}
-      {error && <div className="oracle-web-message error" role="alert">{error}</div>}
-      {notice && <div className="oracle-web-message success" role="status">{notice}</div>}
-    </div>;
-  }
+  const runtimeSection = (
+    <section className="sp-update-section">
+      <div className="sp-section-head">
+        <div className="sp-section-head-text">
+          <div className="sp-section-title"><span className="oracle-web-step">1</span>{copy.runtimeTitle}</div>
+        </div>
+        {runtimeStatus}
+      </div>
+      {runtimeDetails}
+    </section>
+  );
 
   return (
     <div className={`oracle-web-page${embedded ? " oracle-web-page-embedded" : ""}`}>

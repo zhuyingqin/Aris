@@ -15,6 +15,7 @@ import { notifyChatModelsUpdated } from "../modelEvents";
 import type { ConfigPatch, ConfigTestDetail, ConfigTestResult, ConfigView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
 import { isAdminAccount } from "./settingsFormatters";
+import { useModelAutoSave } from "./useModelAutoSave";
 import {
   EXECUTOR_PROVIDERS,
   REVIEWER_PROVIDERS,
@@ -79,6 +80,15 @@ export function useSettingsConnectionState({
   const [managedModelsLoading, setManagedModelsLoading] = useState(false);
   const [managedModelsError, setManagedModelsError] = useState("");
   const savedTimerRef = useRef<number | null>(null);
+  const modelAutoSave = useModelAutoSave({
+    configView, setConfigView, draft: advForm, setDraft: setAdvForm, language,
+    secrets: [
+      { field: "summarizerApiKey", present: "hasSummarizerKey", masked: "summarizerKeyMasked", value: summaryKey, setValue: setSummaryKey },
+      { field: "scopusApiKey", present: "hasScopusKey", masked: "scopusKeyMasked", value: scopusKey, setValue: setScopusKey },
+      { field: "braveSearchApiKey", present: "hasBraveSearchKey", masked: "braveSearchKeyMasked", value: braveSearchKey, setValue: setBraveSearchKey },
+      { field: "exaApiKey", present: "hasExaKey", masked: "exaKeyMasked", value: exaKey, setValue: setExaKey },
+    ],
+  });
 
   const canConfigureExecutor = isAdminAccount(account);
   const canConfigureReviewerApi = canConfigureExecutor;
@@ -448,6 +458,7 @@ export function useSettingsConnectionState({
   };
 
   return {
+    modelAutoSave,
     advForm, setAdvForm,
     execKey, setExecKey,
     summaryKey, setSummaryKey,

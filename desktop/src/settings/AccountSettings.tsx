@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { isTauri, newapiUsageLogs, type NewApiAccount, type NewApiUsageLogPage } from "../api/tauri";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { newapiUsageLogs, type NewApiAccount, type NewApiUsageLogPage } from "../api/tauri";
+import { hasNativeBackend } from "../api/transport";
 import { formatUserFacingError } from "../errorMessage";
 import { readCachedUsageLogPages, writeCachedUsageLogPages } from "../accountCache";
 import { epochToDate } from "../timestamp";
@@ -22,16 +23,18 @@ interface Props {
   language: Language;
   account: NewApiAccount | null;
   accountLoading: boolean;
-  accountError: string;
+  active?: boolean;
   onRefreshAccount: () => Promise<void>;
+  children?: ReactNode;
 }
 
 export default function AccountSettings({
   language,
   account,
   accountLoading,
-  accountError,
+  active = true,
   onRefreshAccount,
+  children,
 }: Props) {
   const setError = useStore((state) => state.setError);
   const logout = useStore((state) => state.logout);
@@ -43,14 +46,21 @@ export default function AccountSettings({
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageLogPage, setUsageLogPage] = useState(1);
   const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
-    isTauri() ? readCachedUsageLogPages() : { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS },
+    hasNativeBackend() ? readCachedUsageLogPages() : { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS },
   );
   const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() =>
-    isTauri() ? readCachedUsageLogPages()[1] ?? null : PREVIEW_USAGE_LOGS,
+    hasNativeBackend() ? readCachedUsageLogPages()[1] ?? null : PREVIEW_USAGE_LOGS,
   );
   const [usageLogError, setUsageLogError] = useState("");
   const usageLogPagesRef = useRef(usageLogPages);
   const usageRefreshPendingRef = useRef(false);
+  const mountedRef = useRef(false);
+  const requestPendingRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     usageLogPagesRef.current = usageLogPages;
@@ -68,25 +78,30 @@ export default function AccountSettings({
   };
 
   const loadUsageSummary = async (page = usageLogPage, options: { force?: boolean; refreshAccount?: boolean } = {}) => {
+    if (!active || requestPendingRef.current) return;
     const cachedLogs = usageLogPagesRef.current[page];
     if (!options.force && cachedLogs) {
       setUsageLogs(cachedLogs);
       setUsageLogError("");
       return;
     }
-    if (!isTauri()) {
+    if (!hasNativeBackend()) {
       cacheUsageLogPage({ ...PREVIEW_USAGE_LOGS, page });
       return;
     }
     setUsageLoading(true);
+    requestPendingRef.current = true;
     setUsageLogError("");
     try {
       if (options.refreshAccount || !account) {
         await onRefreshAccount();
       }
+      if (!mountedRef.current) return;
       const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
+      if (!mountedRef.current) return;
       cacheUsageLogPage(nextLogs, options.force);
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = formatUserFacingError(error, language);
       setUsageLogError(message);
       if (cachedLogs) {
@@ -94,7 +109,8 @@ export default function AccountSettings({
       }
       setError(message);
     } finally {
-      setUsageLoading(false);
+      requestPendingRef.current = false;
+      if (mountedRef.current) setUsageLoading(false);
     }
   };
 
@@ -121,12 +137,12 @@ export default function AccountSettings({
   };
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!hasNativeBackend() || !active || !account) return;
     const refreshAccount = usageRefreshPendingRef.current;
     usageRefreshPendingRef.current = false;
     void loadUsageSummary(usageLogPage, refreshAccount ? { force: true, refreshAccount: true } : {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [usageLogPage]);
+  }, [usageLogPage, active, account?.username]);
 
   const accountUsedQuota = account?.usedQuota ?? 0;
   const accountRemainingQuota = account?.quota ?? 0;
@@ -160,23 +176,6 @@ export default function AccountSettings({
             <SvgIcon name="close" size={13} />
             {copy.authLogout}
           </button>
-        </div>
-      </div>
-
-      <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
-        <div className="sp-update-main">
-          <span className={`sp-account-avatar${accountError && !account ? " is-error" : ""}`}>
-            <SvgIcon name={accountError && !account ? "warning" : "user"} size={18} />
-          </span>
-          <div className="sp-update-copy">
-            <div className="sp-update-title">
-              {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
-              {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version">{account.subscriptionName}</span> : null}
-              {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag">{copy.authGroupTag(account.group)}</span> : null}
-            </div>
-            {!account && <div className="sp-update-meta">{accountError || copy.authSignedOutSub}</div>}
-            {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
-          </div>
         </div>
       </div>
 
@@ -235,6 +234,11 @@ export default function AccountSettings({
               </div>
             </article>
           </div>
+        </>
+      ) : null}
+      {children}
+      {account ? (
+        <>
           <div className="sp-usage-detail-panel">
             <div className="sp-usage-card-head">
               <div className="sp-usage-card-title">{copy.callDetails}</div>

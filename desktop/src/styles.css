@@ -21530,54 +21530,6 @@ body.chat-companion-window {
   user-select: none;
 }
 
-.sp-settings-nav-head {
-  padding: 16px var(--settings-nav-inline-padding) 12px;
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-}
-
-.sp-settings-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sp-settings-back-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  color: inherit;
-  transition: transform 0.15s ease;
-}
-
-.sp-settings-back:hover {
-  background: var(--bg-2);
-  border-color: color-mix(in srgb, var(--border) 80%, var(--accent));
-  color: var(--text);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-}
-
-.sp-settings-back:hover .sp-settings-back-icon {
-  transform: translateX(-1px);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
-}
-
 .sp-settings-nav-scroll {
   flex: 1;
   min-height: 0;

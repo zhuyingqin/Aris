@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProfileHeatmap } from "./profileHeatmap";
+import { buildProfileActivitySeries, buildProfileHeatmap } from "./profileHeatmap";
 
 describe("Profile heatmap", () => {
   it("keeps 53 Sunday-aligned weeks and masks future dates", () => {
@@ -30,5 +30,30 @@ describe("Profile heatmap", () => {
     expect(weeks.at(-1)?.[0]).toMatchObject({ tokens: 50, endDate: "2026-10-05" });
     expect(weeks.at(-1)?.[1].tokens).toBe(50);
     expect(weeks.at(-1)?.[3]).toMatchObject({ tokens: 0, future: true });
+  });
+
+  it("plots each weekly total once and ends the current bucket at today", () => {
+    const points = buildProfileActivitySeries([
+      { date: "2026-10-03", tokens: 10, turns: 1 },
+      { date: "2026-10-04", tokens: 20, turns: 1 },
+      { date: "2026-10-05", tokens: 30, turns: 1 },
+      { date: "2026-10-07", tokens: 900, turns: 1 },
+    ], "weekly", 60, new Date("2026-10-05T01:00:00Z"));
+    expect(points).toHaveLength(53);
+    expect(points.at(-2)).toEqual({ date: "2026-09-27", endDate: "2026-10-03", tokens: 10 });
+    expect(points.at(-1)).toEqual({ date: "2026-10-04", endDate: "2026-10-05", tokens: 50 });
+    expect(points.reduce((sum, point) => sum + point.tokens, 0)).toBe(60);
+  });
+
+  it("plots lifetime cumulative totals through today without future points", () => {
+    const points = buildProfileActivitySeries([
+      { date: "2026-10-04", tokens: 20, turns: 1 },
+      { date: "2026-10-05", tokens: 30, turns: 1 },
+      { date: "2026-10-07", tokens: 900, turns: 1 },
+    ], "cumulative", 1_050, new Date("2026-10-05T01:00:00Z"));
+    expect(points[0].tokens).toBe(1_000);
+    expect(points.at(-2)?.tokens).toBe(1_020);
+    expect(points.at(-1)).toEqual({ date: "2026-10-05", endDate: undefined, tokens: 1_050 });
+    expect(points.every((point, i) => point.date <= "2026-10-05" && (i === 0 || point.tokens >= points[i - 1].tokens))).toBe(true);
   });
 });

@@ -4,9 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall } from "../api/tauri";
 import type { AppUpdateInfo, AppUpdateInstallResult } from "../types";
 import UpdateSettings from "./UpdateSettings";
+import OracleWebSettings from "./OracleWebSettings";
 
 vi.mock("../api/tauri", () => ({ appUpdateCheck: vi.fn(), appUpdateDownloadAndInstall: vi.fn(), appRelaunch: vi.fn() }));
-vi.mock("./OracleWebSettings", () => ({ default: ({ runtimeOnly }: { runtimeOnly: boolean }) => <div>{runtimeOnly ? "Oracle runtime updates" : "Oracle account settings"}</div> }));
+vi.mock("./OracleWebSettings", () => ({ default: vi.fn(() => <div>Oracle Web</div>) }));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -17,10 +18,10 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("UpdateSettings", () => {
-  it("shows application and Oracle updates without automatically checking or installing", () => {
+  it("shows only application updates without mounting the plugin runtime or automatically checking", () => {
     render(<UpdateSettings language="en" appVersion="0.4.76" />);
     expect(screen.getByText("Current version v0.4.76")).toBeTruthy();
-    expect(screen.getByText("Oracle runtime updates")).toBeTruthy();
+    expect(OracleWebSettings).not.toHaveBeenCalled();
     expect(appUpdateCheck).not.toHaveBeenCalled();
     expect(appUpdateDownloadAndInstall).not.toHaveBeenCalled();
   });
@@ -55,9 +56,11 @@ describe("UpdateSettings", () => {
     expect(await screen.findByText("Improved Oracle updates.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Download and install" }));
     expect(await screen.findByText(/50%/)).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Installing update" })).toHaveProperty("value", 50);
     expect((screen.getByRole("button", { name: "Check for updates" }) as HTMLButtonElement).disabled).toBe(true);
     resolveInstall?.({ installed: true, version: "0.4.77" });
     fireEvent.click(await screen.findByRole("button", { name: "Restart app" }));
+    expect(screen.queryByRole("progressbar")).toBeNull();
     await waitFor(() => expect(appRelaunch).toHaveBeenCalledTimes(1));
   });
 

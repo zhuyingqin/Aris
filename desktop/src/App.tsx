@@ -223,16 +223,14 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
 const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
 
-// Deep links into Settings address the sidebar entries directly, so the id set
-// is the nav's own — no translation layer to keep in sync.
+// Settings also resolves legacy category links to their current sidebar page.
 type RequestedSettingsTab = SettingsNavId;
 
-const IC = (p: { d: string; extra?: string }) => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+const ModuleIcon = ({ children }: { children: ReactNode }) => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
     aria-hidden="true">
-    <path d={p.d} />
-    {p.extra && <path d={p.extra} />}
+    {children}
   </svg>
 );
 
@@ -278,33 +276,50 @@ const GearIcon = () => (
 const PRIMARY_NAV_ITEMS: NavItem[] = [
   {
     id: "chat", label: "Chat",
-    icon: <IC d="M2 3a1 1 0 011-1h10a1 1 0 011 1v6.5a1 1 0 01-1 1H9.5L8 12l-1.5-1.5H3a1 1 0 01-1-1V3z" />,
+    icon: <ModuleIcon>
+      <path d="M5 3.5h14a2.5 2.5 0 0 1 2.5 2.5v9a2.5 2.5 0 0 1-2.5 2.5h-6.5L7 21v-3.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5Z" />
+      <path d="M7 8.5h10M7 12.5h6" />
+    </ModuleIcon>,
   },
   {
     id: "lab", label: "Code",
-    icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
+    icon: <ModuleIcon>
+      <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
+      <path d="m6.5 8.5 3.5 3.5-3.5 3.5M13 15.5h4.5" />
+    </ModuleIcon>,
   },
   {
     id: "typeset", label: "LaTeX",
-    icon: <IC d="M3 2.8h7.2L13 5.6v7.6H3zM10.2 2.8v2.8H13M5.2 7.1h5.6M5.2 9.2h5.6M5.2 11.3h3.2" />,
+    icon: <ModuleIcon>
+      {/* TeX's lowered E makes the editor recognizable without relying on a font. */}
+      <g fill="currentColor" stroke="none">
+        <path d="M.8 4.5h8.5v3.2H8V6H5.9v10.2h1.5v1.4H2.8v-1.4h1.5V6H2.1v1.7H.8Z" />
+        <path d="M8 7.5h7v2.8h-1.2V9h-3.3v3.9h2.6v-1.2h1.1v3.8h-1.1v-1.2h-2.6v4.3h3.3v-1.4H15V20H8v-1.4h1V9H8Z" />
+        <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
+      </g>
+    </ModuleIcon>,
   },
   {
     id: "literature", label: "Literature",
-    icon: <IC
-      d="M8 13.5V4C7 2.5 4.5 2.5 2 3.5V13c2.5-1 5-1 6 .5z"
-      extra="M8 13.5V4c1-1.5 3.5-1.5 6-.5V13c-2.5-1-5-1-6 .5z"
-    />,
+    icon: <ModuleIcon>
+      <path d="M12 5.5C9.5 3.5 5.5 3.2 2.5 4.3v15C6 18.1 9.5 18.5 12 20.5c2.5-2 6-2.4 9.5-1.2v-15C18.5 3.2 14.5 3.5 12 5.5Zm0 0v15" />
+      <path d="m5.5 8 3.5.7M15 8.7l3.5-.7" />
+    </ModuleIcon>,
   },
   {
     id: "workflows", label: "Workflows",
-    icon: <IC
-      d="M3 3.2h3.2v3.2H3zM9.8 9.6H13v3.2H9.8z"
-      extra="M6.2 4.8h2.1a2 2 0 012 2v2.8M4.6 6.4v3.2a2 2 0 002 2h3.2"
-    />,
+    icon: <ModuleIcon>
+      <rect x="3" y="3" width="6" height="6" rx="1.5" />
+      <rect x="15" y="15" width="6" height="6" rx="1.5" />
+      <path d="M9 6h5a4 4 0 0 1 4 4v5M6 9v5a4 4 0 0 0 4 4h5" />
+    </ModuleIcon>,
   },
   {
     id: "mail", label: "Mail",
-    icon: <IC d="M2 4.5h12v7H2zM2.5 5l5.5 4 5.5-4" />,
+    icon: <ModuleIcon>
+      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
+      <path d="m3.5 6 8.5 6.5L20.5 6" />
+    </ModuleIcon>,
   },
 ];
 
@@ -825,6 +840,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
+  const navigationShell = chatShell || renderedTab === "settings";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
@@ -929,7 +945,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app${chatShell ? " app-navigation-shell app-chat-shell chat-background-surface" : ""}`}>
+    <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}`}>
       <div className="window-titlebar">
         <div className="window-titlebar-left">
           {/* The sidebar belongs to Chat, so these two go quiet on other tabs
@@ -982,7 +998,7 @@ export default function App() {
               </svg>
             </button>
           )}
-          {!chatShell && renderUpdateIndicator()}
+          {!navigationShell && renderUpdateIndicator()}
           <WindowControlButtons
             labels={{
               minimize: copy.minimizeWindow,
@@ -992,7 +1008,7 @@ export default function App() {
           />
         </div>
       </div>
-      {chatShell && <AppNavigationRail
+      {navigationShell && <AppNavigationRail
         label={copy.productMenuLabel}
         moreLabel={copy.moreModules}
         items={navigationItems}
@@ -1043,7 +1059,7 @@ export default function App() {
               onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
           />
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
-          {!chatShell && accountControl}
+          {!navigationShell && accountControl}
         </div>
       </header>
 
