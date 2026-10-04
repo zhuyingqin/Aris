@@ -6086,7 +6086,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex-shrink: 0;
 }
 
-.chat-starter-research .chat-starter-icon {
+.chat-starter-research .chat-starter-icon,
+.chat-starter-patent .chat-starter-icon {
   background: color-mix(in srgb, var(--starter-teal-tint) 16%, transparent);
   color: var(--starter-teal);
 }
@@ -9892,7 +9893,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-item {
-  padding: 7px 28px 7px 22px;
+  padding: 3px 28px 3px 16px;
   border-bottom: 1px solid transparent;
   cursor: pointer;
   position: relative;
@@ -9911,6 +9912,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-session-title {
   font-size: 13.5px;
+  line-height: 1.4;
   font-weight: 450;
   color: var(--text);
   letter-spacing: -0.01em;
@@ -11064,16 +11066,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 50%;
   background: var(--bg-3);
   color: var(--text);
-}
-
-.chat-upload-icon {
-  display: block;
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
 }
 
 .chat-upload-btn:hover {
@@ -12483,8 +12475,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-left: 0;
-  border-radius: 6px;
+  padding: 3px 6px;
+  border-radius: 8px;
   user-select: none;
   transition:
     background-color 140ms ease,
@@ -12495,21 +12487,23 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-project-toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
-  height: 24px;
-  padding: 0 3px;
+  min-height: 24px;
+  height: auto;
+  padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
+  line-height: 1.4;
   letter-spacing: inherit;
   text-transform: inherit;
   text-align: left;
 }
 
-.chat-project-toggle:hover {
+button.chat-project-toggle:hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-color: transparent;
   color: var(--text);
@@ -12522,9 +12516,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex: 0 0 16px;
   align-items: center;
   justify-content: center;
-  color: #38bdf8;
-  margin-right: 4px;
+  color: var(--text-dim);
 }
+
+.chat-project-folder { width: 16px; height: 16px; }
 
 .chat-project-label.can-reorder {
   cursor: default;
@@ -12555,8 +12550,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   text-transform: none;
   letter-spacing: normal;
 }
@@ -12565,16 +12560,16 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  opacity: 0.65;
+  opacity: 0.75;
   transition: all 0.15s ease;
 }
 
@@ -12595,20 +12590,26 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-collapsed-summary {
-  width: 100%;
-  margin: 1px 0 4px;
-  padding: 8px 10px;
-  border: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 24px;
+  margin: 0;
+  padding: 3px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   font-size: 12px;
+  line-height: 1.4;
   text-align: left;
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-session-collapsed-summary:hover {
-  background: var(--bg-2);
-  border-color: var(--border);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: transparent;
   color: var(--text);
 }
 
@@ -12617,9 +12618,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-item {
-  min-height: 34px;
-  margin: 1px 0;
-  padding: 7px 28px 7px 22px;
+  min-height: 28px;
+  margin: 0;
+  padding: 3px 28px 3px 16px;
   border: 1px solid transparent;
   border-radius: 7px;
   box-sizing: border-box;
@@ -12632,7 +12633,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-item.active {
-  padding: 7px 28px 7px 22px;
+  padding: 3px 28px 3px 16px;
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-2));
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
   box-shadow: inset 2.5px 0 0 var(--accent);
@@ -12926,7 +12927,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-turn {
   width: min(100%, 820px);
   max-width: none;
-  margin: 0 auto 30px;
+  margin: 0 auto;
 }
 
 .chat-user {
@@ -12942,7 +12943,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-user .chat-text {
   width: fit-content;
   max-width: min(82%, 680px);
-  padding: 10px 16px;
+  padding: 8px 14px;
   background: #1c2633;
   border: 1px solid #2d3b4e;
   border-radius: 16px 16px 4px 16px;
@@ -13021,7 +13022,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .md-think {
-  margin: 6px 0 8px;
+  margin: 4px 0 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
@@ -13040,11 +13041,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 32px;
+  min-height: 28px;
   text-align: left;
   background: var(--bg-1);
   border: none;
-  padding: 6px 12px;
+  padding: 4px 10px;
   color: var(--text-dim);
   font-size: 12px;
   cursor: pointer;
@@ -15177,16 +15178,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   gap: 3px;
   position: relative;
   min-width: 0;
-  background: color-mix(in srgb, var(--bg-2) 75%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: transparent;
+  border: 0;
   border-radius: 8px;
-  padding: 1px 3px;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.project-switcher:hover {
-  border-color: var(--border);
-  background: var(--bg-2);
+  padding: 0;
 }
 
 .project-switcher-trigger {
@@ -15210,6 +15205,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .project-switcher-trigger[aria-expanded="true"] {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   color: var(--text);
+}
+
+.project-switcher-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .project-switcher-current {
@@ -15507,7 +15507,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-sidebar-top-group {
   flex: 0 0 auto;
-  padding: 22px 16px 12px;
+  padding: 14px 16px 8px;
 }
 
 .chat-sidebar-title {
@@ -15539,41 +15539,39 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-session-list {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 8px 76px;
+  padding: 0 10px 76px;
+}
+
+.chat-projects-label {
+  padding: 6px 6px 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Keep child conversations aligned across selected and unselected projects. */
+.chat-project-sessions {
+  margin-left: 14px;
+  padding: 0 0 0 8px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+.chat-project-sessions:empty {
+  display: none;
+}
+
+.chat-project-sessions .chat-session-item,
+.chat-project-sessions .chat-session-item.active {
+  min-height: 26px;
+  padding: 3px 28px 3px 12px;
 }
 
 .chat-session-group {
-  margin-bottom: 9px;
+  margin-bottom: 4px;
   transform-origin: center top;
   transition:
     opacity 120ms ease,
     background-color 120ms ease;
   will-change: transform;
-}
-
-.chat-session-group.is-active-project {
-  position: relative;
-  background: color-mix(in srgb, var(--accent) 3.5%, transparent);
-  border-radius: 9px;
-  padding: 2px 2px 4px;
-}
-
-.chat-session-group.is-active-project .chat-project-label-text {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.chat-active-project-pill {
-  margin-left: auto;
-  margin-right: 4px;
-  font-size: 9.5px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
-  letter-spacing: 0.2px;
 }
 
 .chat-session-group:not(.dragging) {
@@ -15591,9 +15589,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-item {
-  min-height: 34px;
-  padding: 7px 28px 7px 22px;
-  border-bottom: none;
+  min-height: 28px;
+  padding: 3px 28px 3px 16px;
+  border-bottom: 1px solid transparent;
 }
 
 .chat-session-item.active {
@@ -18560,14 +18558,16 @@ body.somniq-resizing-col {
 
 .chat-turn {
   position: relative;
-  padding-bottom: 24px;
+  /* Keep one measured gap after the action row; a second bottom margin made
+     even single-line exchanges take up most of the transcript. */
+  padding-bottom: 8px;
 }
 
 .chat-message-actions {
   display: flex;
   gap: 4px;
   min-height: 24px;
-  margin-top: 5px;
+  margin-top: 4px;
   opacity: 0;
   transition: opacity 0.12s;
 }
@@ -20505,7 +20505,7 @@ button.chat-workflow-file-path:hover {
 }
 
 .chat-session-item.active {
-  padding: 7px 28px 7px 22px;
+  padding: 3px 28px 3px 16px;
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-2));
   border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
   box-shadow: inset 2.5px 0 0 var(--accent);
@@ -21528,54 +21528,6 @@ body.chat-companion-window {
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-1) 80%, var(--bg));
   user-select: none;
-}
-
-.sp-settings-nav-head {
-  padding: 16px var(--settings-nav-inline-padding) 12px;
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-}
-
-.sp-settings-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sp-settings-back-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  color: inherit;
-  transition: transform 0.15s ease;
-}
-
-.sp-settings-back:hover {
-  background: var(--bg-2);
-  border-color: color-mix(in srgb, var(--border) 80%, var(--accent));
-  color: var(--text);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-}
-
-.sp-settings-back:hover .sp-settings-back-icon {
-  transform: translateX(-1px);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
 }
 
 .sp-settings-nav-scroll {
@@ -22623,30 +22575,136 @@ body.chat-companion-window {
   }
 }
 
-/* Chat execution workspace lives in the conversation sidebar. Switching here
-   changes the project/session authority shown below: local storage for this
-   computer, or the authoritative project history of one paired computer. */
+/* Appearance controls use the same font hierarchy as the workspace. */
+.sp-general-typography {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.sp-general-typography .sp-section-title {
+  display: block;
+}
+
+.sp-font-size-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 16px;
+}
+
+.sp-settings-page .sp-font-size-controls input[type="range"] {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.sp-settings-page .sp-font-size-controls input[type="range"]:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-font-size-small,
+.sp-font-size-large {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.sp-font-size-small { font-size: 12px; }
+.sp-font-size-large { font-size: 20px; }
+
+.sp-font-size-value {
+  flex: 0 0 auto;
+  min-width: 52px;
+  color: var(--text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sp-font-size-hint {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.sp-font-size-recommendation { white-space: nowrap; }
+
+.sp-font-size-preview {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  overflow-wrap: anywhere;
+}
+
+.sp-font-size-preview strong {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+.sp-font-size-preview p {
+  margin: 7px 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.sp-font-size-preview small {
+  display: block;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Chat owns the selected computer; its compact switcher is portaled beside
+   SomniQ in the shell header. Standalone Chat keeps the same icon locally. */
+#app-chat-workspace-portal:not([hidden]) {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.app.app-chat-shell .app-head-title .product-switcher {
+  flex: 0 1 auto;
+}
+
 .chat-workspace-picker {
   position: relative;
   z-index: 80;
-  margin-bottom: 8px;
 }
 
 .chat-workspace-trigger {
+  position: relative;
   display: grid;
-  width: 100%;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  /* Matches `.chat-new-btn` / `.chat-scheduled-btn` below it in the stack. */
-  min-height: 36px;
-  gap: 8px;
-  padding: 4px 8px;
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-2) 55%, transparent);
-  color: var(--text);
-  text-align: left;
-  transition: all 0.16s ease;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  transition: color 0.16s ease, background 0.16s ease;
 }
 
 .chat-workspace-trigger:hover,
@@ -22659,7 +22717,24 @@ body.chat-companion-window {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
 }
 
-.chat-workspace-icon,
+.chat-workspace-trigger:focus-visible,
+.chat-workspace-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chat-workspace-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-workspace-trigger:hover .chat-workspace-icon,
+.chat-workspace-trigger[aria-expanded="true"] .chat-workspace-icon,
+.chat-workspace-trigger.is-remote .chat-workspace-icon {
+  color: var(--accent);
+}
+
 .chat-workspace-option-icon {
   display: grid;
   width: 22px;
@@ -22671,29 +22746,15 @@ body.chat-companion-window {
   transition: color 0.16s ease, background 0.16s ease;
 }
 
-:root[data-theme="light"] .chat-workspace-icon,
 :root[data-theme="light"] .chat-workspace-option-icon {
   background: color-mix(in srgb, var(--text) 8%, transparent);
   color: #1e293b;
-}
-
-.chat-workspace-trigger:hover .chat-workspace-icon,
-.chat-workspace-trigger[aria-expanded="true"] .chat-workspace-icon {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .chat-workspace-option:hover:not(:disabled) .chat-workspace-option-icon,
 .chat-workspace-option.active .chat-workspace-option-icon {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-.chat-workspace-trigger-copy {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 6px;
 }
 
 .chat-workspace-option > span:nth-child(2) {
@@ -22703,7 +22764,6 @@ body.chat-companion-window {
   gap: 2px;
 }
 
-.chat-workspace-trigger-copy strong,
 .chat-workspace-option strong {
   overflow: hidden;
   color: var(--text);
@@ -22713,12 +22773,6 @@ body.chat-companion-window {
   white-space: nowrap;
 }
 
-.chat-workspace-trigger-copy strong {
-  flex: 0 0 auto;
-  font-size: 12px;
-}
-
-.chat-workspace-trigger-copy small,
 .chat-workspace-option small {
   overflow: hidden;
   color: var(--text-dim);
@@ -22728,16 +22782,10 @@ body.chat-companion-window {
   white-space: nowrap;
 }
 
-.chat-workspace-trigger-copy small {
-  min-width: 0;
-  font-size: 10px;
-}
-
-.chat-workspace-trailing {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-dim);
+.chat-workspace-trigger > .chat-workspace-connection {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
 }
 
 .chat-workspace-connection {
@@ -22764,13 +22812,13 @@ body.chat-companion-window {
 }
 
 .chat-workspace-menu {
-  position: absolute;
-  top: calc(100% + 5px);
-  right: 0;
-  left: 0;
+  position: fixed;
   z-index: 100;
   display: grid;
   gap: 3px;
+  width: min(288px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
   border-radius: 10px;
@@ -22845,25 +22893,8 @@ body.chat-companion-window {
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
 }
 
-.chat-remote-project-group.selected {
-  margin-bottom: 12px;
-  padding-bottom: 5px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-}
-
 .chat-remote-project-group .chat-project-toggle {
   cursor: pointer;
-}
-
-.chat-remote-project-current {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 13%, transparent);
-  color: var(--accent);
-  font-size: 9px;
-  font-weight: 650;
 }
 
 .chat-remote-project-sessions {

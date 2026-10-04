@@ -6,6 +6,7 @@ import { parseToolBlockObject, textFromTurn } from "./model";
 // without rendering, and keeps the canvas free of magic numbers.
 
 export const IMAGE_TOOL_NAME = "ChatGptWebImage";
+const IMAGE_TOOL_NAMES = new Set([IMAGE_TOOL_NAME, "SomniImage"]);
 
 export type ImageWorkflowStatus = "running" | "complete" | "failed";
 
@@ -97,7 +98,7 @@ export function imageWorkflowCallsFromTurns(turns: ChatTurn[]): ImageWorkflowCal
     if (turn.role === "user") latestUserPrompt = textFromTurn(turn).trim();
     for (let blockIndex = 0; blockIndex < turn.blocks.length; blockIndex += 1) {
       const block = turn.blocks[blockIndex];
-      if (block.kind !== "tool" || block.name !== IMAGE_TOOL_NAME) continue;
+      if (block.kind !== "tool" || !IMAGE_TOOL_NAMES.has(block.name)) continue;
       const input = parseToolBlockObject(block, "input");
       const output = parseToolBlockObject(block, "output");
       const baseId = `${turn.id}-${block.id ?? blockIndex}`;
@@ -137,7 +138,7 @@ export function imageWorkflowCallsFromTurns(turns: ChatTurn[]): ImageWorkflowCal
           return sourceId ? [sourceId] : [];
         }),
         aspectRatio: nonEmptyString(input?.aspectRatio),
-        model: nonEmptyString(input?.model),
+        model: nonEmptyString(input?.model) ?? nonEmptyString(output?.model),
         generations,
       });
       for (const generation of generations) {

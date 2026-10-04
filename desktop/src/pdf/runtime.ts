@@ -48,7 +48,9 @@ export async function openPdfDocument(bytes: PdfDocumentBytes): Promise<PDFDocum
 
 function pdfBytesToArray(bytes: PdfDocumentBytes): Uint8Array {
   if (bytes instanceof Uint8Array) return new Uint8Array(bytes);
-  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes.slice(0));
+  if (bytes instanceof ArrayBuffer || Object.prototype.toString.call(bytes) === "[object ArrayBuffer]") {
+    return new Uint8Array((bytes as ArrayBuffer).slice(0));
+  }
   return Uint8Array.from(bytes);
 }
 

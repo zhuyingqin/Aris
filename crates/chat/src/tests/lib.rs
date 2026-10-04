@@ -134,6 +134,32 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
 }
 
 #[test]
+fn drawing_router_pins_api_for_gpt_requests_and_honors_explicit_webpage_requests() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("SomniImage"), routing_spec("ChatGptWebImage")]);
+    for prompt in [
+        "生成一个小猪佩奇的图，使用GPT",
+        "使用API生成图",
+        "用 GPT Image 2 画一张图",
+        "Create an illustration using GPT",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("SomniImage"), "{prompt}: {plan:?}");
+        assert!(!plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+    }
+    for prompt in ["用 Oracle 网页生成图片", "Create an image with Image Assist"] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+        assert!(!plan.pinned_names.contains("SomniImage"), "{prompt}");
+    }
+    let read = route_chat_tools("Analyze this attached image", &specs, ToolRoutingMode::Active);
+    assert!(!read.pinned_names.contains("SomniImage"));
+    specs.retain(|spec| spec.name != "SomniImage");
+    let unavailable = route_chat_tools("使用API生成图", &specs, ToolRoutingMode::Active);
+    assert!(!unavailable.active_names.contains("SomniImage"));
+}
+
+#[test]
 fn dynamic_tool_router_gives_every_matched_intent_its_required_tools() {
     let specs = desktop_like_catalog();
     let plan = route_chat_tools(
@@ -331,6 +357,44 @@ fn dynamic_tool_router_ignores_attachment_boilerplate() {
     assert!(
         !plan.active_names.contains("mcp__pw__browser_navigate"),
         "{plan:?}"
+    );
+}
+
+/// `LiteratureSearch` runs a full protocol in one call and
+/// `LiteratureSearchPreview` plans it, so a literature turn is offered those
+/// two. The create/execute aliases stay deferred — reachable through ToolSearch
+/// or by naming them — instead of competing for the turn's tool slots.
+#[test]
+fn dynamic_tool_router_keeps_protocol_aliases_deferred() {
+    let mut specs = desktop_like_catalog();
+    for name in [
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LiteratureSearchExecute",
+    ] {
+        specs.push(routing_spec(name));
+    }
+    let plan = route_chat_tools("帮我系统检索相关文献", &specs, ToolRoutingMode::Active);
+
+    assert!(plan.profile.contains("research"), "{plan:?}");
+    assert!(plan.active_names.contains("LiteratureSearch"), "{plan:?}");
+    assert!(
+        plan.active_names.contains("LiteratureSearchPreview"),
+        "{plan:?}"
+    );
+    for alias in ["LiteratureSearchProtocolCreate", "LiteratureSearchExecute"] {
+        assert!(!plan.active_names.contains(alias), "{alias}: {plan:?}");
+        assert!(plan.deferred_names.contains(alias), "{alias}: {plan:?}");
+    }
+
+    let named = route_chat_tools(
+        "用 LiteratureSearchExecute 继续执行那个检索方案",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+    assert!(
+        named.active_names.contains("LiteratureSearchExecute"),
+        "{named:?}"
     );
 }
 

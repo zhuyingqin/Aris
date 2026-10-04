@@ -1,0 +1,218 @@
+/* Keep the shell's controls in proportion to the shared UI text size. */
+.app {
+  --app-titlebar-height: 2.25rem;
+  --app-header-height: 2.75rem;
+  --app-control-size: 2rem;
+  --app-icon-size: 1.125rem;
+  grid-template-rows: var(--app-titlebar-height) auto minmax(0, 1fr);
+}
+
+.window-titlebar { height: var(--app-titlebar-height); }
+.window-titlebar-left { gap: 0.75rem; padding-left: 1rem; }
+.window-titlebar button.window-titlebar-icon {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+  min-width: var(--app-control-size);
+}
+.window-titlebar-icon svg {
+  width: var(--app-icon-size);
+  height: var(--app-icon-size);
+}
+.window-titlebar-controls button {
+  width: 2.875rem;
+  height: var(--app-titlebar-height);
+}
+.window-titlebar-controls .win-ctl-glyph { width: 0.75rem; height: 0.75rem; }
+.window-titlebar-controls .chat-companion-launch svg,
+.window-titlebar-controls .app-update-icon { width: 1rem; height: 1rem; }
+.window-titlebar-controls .app-update-indicator {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+  margin-right: 0.375rem;
+}
+
+.app-head { min-height: var(--app-header-height); padding-inline: 1rem; }
+.app-head-title { gap: 0.5rem; }
+.app-head-actions { gap: 0.5rem; }
+.app.app-chat-shell .app-head-title { padding-inline: 0.625rem; }
+.app.app-chat-shell .app-head-actions { padding-inline: 1rem; gap: 0.5rem; }
+.app-head .product-switcher-trigger {
+  height: var(--app-control-size);
+  gap: 0.25rem;
+  padding-inline: 0.5625rem;
+}
+.app-head .product-switcher-caret svg,
+.app-head .project-switcher-caret svg { width: 0.875rem; height: 0.875rem; }
+.app-head .product-switcher-name { flex-shrink: 0; }
+.app-head .chat-workspace-trigger {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+}
+.app-head .chat-workspace-icon svg { width: var(--app-icon-size); height: var(--app-icon-size); }
+
+.app-head .project-switcher {
+  --project-control-size: clamp(26px, 1.75rem, 36px);
+  --project-icon-size: clamp(14px, 1rem, 20px);
+  padding: 0;
+  border-radius: 0.5rem;
+}
+.app-head .project-switcher-trigger {
+  width: max-content;
+  min-width: 0;
+  max-width: min(14.25rem, 26vw);
+  height: var(--project-control-size);
+  gap: 0.375rem;
+  padding: 0 0.625rem;
+  border: 0;
+  border-radius: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.app-head .project-switcher-caret svg { width: 0.75rem; height: 0.75rem; }
+.app-head .project-switcher-icon {
+  flex: 0 0 auto;
+  width: var(--project-icon-size);
+  height: var(--project-icon-size);
+  color: var(--text-dim);
+}
+.app-head .project-switcher-current { flex: 1; text-align: left; }
+.app-head .project-menu {
+  top: calc(100% + 0.375rem);
+  width: min(340px, calc(100vw - var(--app-rail-width, 0px) - 1.5rem));
+  display: flex;
+  flex-direction: column;
+  padding: 0.375rem;
+}
+.app-head .project-menu-heading {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  font-weight: 500;
+}
+.app-head .project-menu-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.app-head .project-menu-item {
+  min-height: max(40px, 2.625rem);
+  grid-template-columns: 0.75rem minmax(0, 1fr) 0.375rem;
+  padding: 0.375rem 0.5rem;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.app-head .project-menu-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.app-head .project-drag-handle svg { width: 0.625rem; height: 0.875rem; }
+.app-head .project-menu-name { font-size: 0.8125rem; line-height: 1.4; }
+.app-head .project-menu-path { margin-top: 0.125rem; font-size: 0.6875rem; line-height: 1.4; }
+.app-head .project-current-dot { width: 0.375rem; height: 0.375rem; }
+.app-head .project-menu-empty { margin: 0; padding: 0.5rem; font-size: 0.8125rem; color: var(--text-dim); }
+.app-head .project-menu-actions {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 0.125rem;
+  margin-top: 0.375rem;
+  padding-top: 0.375rem;
+  border-top: 1px solid var(--border);
+}
+.app-head .project-menu-action {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: max(30px, 2rem);
+  padding: 0.375rem 0.5rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  text-align: left;
+}
+.app-head .project-menu-action:first-child { color: var(--accent); font-weight: 500; }
+.app-head .project-menu-action svg { width: var(--project-icon-size); height: var(--project-icon-size); flex-shrink: 0; }
+.app-head .project-menu-action span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-head .project-menu-action:hover:not(:disabled),
+.app-head .project-menu-action:focus-visible { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.app-head .project-menu-action:disabled { opacity: 0.4; cursor: not-allowed; }
+.app-head .chat-head-actions-group { gap: 0.25rem; padding-left: 0.375rem; }
+.app-head .chat-head-actions button {
+  width: var(--app-control-size);
+  height: var(--app-control-size);
+  min-width: var(--app-control-size);
+  min-height: var(--app-control-size);
+  padding: 0 !important;
+}
+.app-head .chat-head-actions button > svg { width: var(--app-icon-size); height: var(--app-icon-size); }
+.app-head .mem-badge { min-height: 1.5rem; gap: 0.1875rem; padding: 0.125rem 0.4375rem; }
+
+/* The navigation rail uses the same icon and hit-area sizes as the header. */
+.app.app-navigation-shell { --app-rail-width: 3rem; }
+.app.app-navigation-shell .window-titlebar-left {
+  padding-left: calc((var(--app-rail-width) - var(--app-control-size) - 1px) / 2);
+}
+.app-navigation-rail { padding: 0.5rem 0.375rem; }
+.app-rail-primary { gap: 0.375rem; }
+.app-rail-button { width: var(--app-control-size); height: var(--app-control-size); }
+.app-rail-icon svg,
+.app-rail-button > svg { width: 1.25rem; height: 1.25rem; }
+.app-rail-button.active::before { left: -0.4375rem; height: 0.875rem; }
+
+/* A docked sidebar must leave enough room for the full product switcher. */
+@media (min-width: 1121px) {
+  body:not(.somniq-chat-sidebar-collapsed) .app.app-chat-shell .app-head-title {
+    flex-basis: max(var(--chat-sidebar-w, 218px), 14rem);
+    width: max(var(--chat-sidebar-w, 218px), 14rem);
+  }
+  body:not(.somniq-chat-sidebar-collapsed) .app.app-chat-shell .chat-root {
+    grid-template-columns: max(var(--chat-sidebar-w, 218px), 14rem) minmax(0, 1fr);
+  }
+  body:not(.somniq-chat-sidebar-collapsed) .app.app-chat-shell .chat-root.side-task-open {
+    grid-template-columns: max(var(--chat-sidebar-w, 218px), 14rem) minmax(320px, 1fr) var(--side-panel-w, minmax(360px, 1fr));
+  }
+  .app.app-navigation-shell.app-chat-shell .chat-sidebar-resize-handle {
+    top: var(--app-titlebar-height);
+    left: calc(var(--app-rail-width) + max(var(--chat-sidebar-w, 218px), 14rem));
+  }
+}
+
+/* Allow large type to take another row when the window cannot fit both groups. */
+@media (max-width: 1120px) {
+  .app .app-head,
+  .app.app-chat-shell .app-head {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.375rem 0.625rem;
+  }
+  .app .app-head-title,
+  .app.app-chat-shell .app-head-title {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 0;
+  }
+  .app .app-head-actions,
+  .app.app-chat-shell .app-head-actions {
+    flex: 1 1 24rem;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    padding: 0;
+  }
+  .app .app-head .project-switcher { flex: 0 1 auto; max-width: 100%; }
+  .app .app-head .project-switcher-trigger { min-width: 0; max-width: 14.25rem; }
+}
+
+@media (max-width: 720px) {
+  .app.app-navigation-shell { --app-rail-width: 2.75rem; }
+  .app-navigation-rail { padding: 0.375rem 0.25rem; }
+  .window-titlebar-left { gap: 0.25rem; padding-left: 0.5rem; }
+  .window-titlebar-controls button { width: 2.25rem; }
+}
+
+@media (max-width: 480px) {
+  .window-titlebar-left .window-titlebar-icon:disabled { display: none; }
+}
+
+@media (max-height: 420px) {
+  .app-rail-primary { gap: 0.125rem; }
+  .app-navigation-rail { padding-block: 0.25rem; }
+}

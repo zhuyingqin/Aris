@@ -87,7 +87,7 @@ function mergeReviewStates(
   };
 }
 
-export function useIndependentReview(sessionId: string) {
+export function useIndependentReview(sessionId: string, projectId?: string) {
   const [states, setStates] = useState<Map<string, IndependentReviewState>>(() => new Map());
   const loadedSessions = useRef(new Set<string>());
 
@@ -117,10 +117,11 @@ export function useIndependentReview(sessionId: string) {
   }, []);
 
   useEffect(() => {
-    if (!isTauri() || !sessionId || loadedSessions.current.has(sessionId)) return;
-    loadedSessions.current.add(sessionId);
+    const restoreKey = `${projectId ?? ""}:${sessionId}`;
+    if (!isTauri() || !sessionId || loadedSessions.current.has(restoreKey)) return;
+    loadedSessions.current.add(restoreKey);
     let active = true;
-    void chatEventsRead(sessionId, [REVIEW_EVENT_KIND]).then((events) => {
+    void chatEventsRead(sessionId, [REVIEW_EVENT_KIND], projectId).then((events) => {
       if (!active) return;
       let restored: IndependentReviewState | undefined;
       let lastLogicalAttempt = 0;
@@ -158,10 +159,10 @@ export function useIndependentReview(sessionId: string) {
         return new Map(current).set(sessionId, merged);
       });
     }).catch(() => {
-      loadedSessions.current.delete(sessionId);
+      loadedSessions.current.delete(restoreKey);
     });
     return () => { active = false; };
-  }, [sessionId]);
+  }, [projectId, sessionId]);
 
   return useMemo(() => states.get(sessionId) ?? null, [sessionId, states]);
 }

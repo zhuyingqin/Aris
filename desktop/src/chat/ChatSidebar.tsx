@@ -20,6 +20,7 @@ import type {
 import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
+import ChatWorkspaceSwitcher from "./ChatWorkspaceSwitcher";
 import { groupSessionsByProject } from "./model";
 import type { ChatSession, RemoteAgentBinding } from "./types";
 
@@ -138,10 +139,17 @@ type MenuPosition = {
   left: number;
 };
 
-function FolderIcon({ open: _open }: { open?: boolean }) {
+function FolderIcon({ open = false }: { open?: boolean }) {
   return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M2 3.8a1 1 0 0 1 1-1h3.2l1.4 1.6H13a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" fill="currentColor" fillOpacity="0.18" />
+    <svg className="chat-project-folder" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M3.25 17.25v-11A1.75 1.75 0 0 1 5 4.5h4.25l2 2H19a1.75 1.75 0 0 1 1.75 1.75v9A1.75 1.75 0 0 1 19 19H5a1.75 1.75 0 0 1-1.75-1.75Z" fill="currentColor" fillOpacity="0.1" />
+      <path
+        d={open
+          ? "M4.25 9h15.5a1.5 1.5 0 0 1 1.47 1.8l-1.27 6.5A2.1 2.1 0 0 1 17.89 19H6.11a2.1 2.1 0 0 1-2.06-1.7l-1.27-6.5A1.5 1.5 0 0 1 4.25 9Z"
+          : "M3.25 9h17.5v8.25A1.75 1.75 0 0 1 19 19H5a1.75 1.75 0 0 1-1.75-1.75Z"}
+        fill="currentColor"
+        fillOpacity="0.2"
+      />
     </svg>
   );
 }
@@ -191,15 +199,12 @@ export default function ChatSidebar({
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
-  const setTab = useStore((s) => s.setTab);
   const copy = CHAT_COPY[language];
   const sessionListRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const groupRefs = useRef(new Map<string, HTMLElement>());
   const selectedWorkspaceRef = useRef<string | null>(null);
   const requestedRemoteHistoryRef = useRef<string | null>(null);
@@ -264,6 +269,17 @@ export default function ChatSidebar({
   const defaultNewTaskProjectId = sessions.find((session) => (
     session.id === currentId && !session.remoteAgent
   ))?.projectId ?? projects[0]?.id ?? "default";
+  const workspaceName = remoteMode
+    ? (selectedRemotePeer?.displayName ?? selectedRemoteWorkspace?.nodeName
+      ?? (language === "cn" ? "远程电脑" : "Remote computer"))
+    : (language === "cn" ? "本机" : "This computer");
+  const workspaceDescription = remoteMode
+    ? (selectedRemoteProject?.title
+      ?? (remoteBusy
+        ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
+        : (language === "cn" ? "选择远程项目" : "Choose a remote project")))
+    : (projects.find((project) => project.id === defaultNewTaskProjectId)?.name
+      ?? (language === "cn" ? "项目、模型与工具" : "Projects, models, and tools"));
 
   const requestLocalNewChat = useCallback((projectId?: string) => {
     void onNew(projectId ?? defaultNewTaskProjectId);
@@ -297,24 +313,6 @@ export default function ChatSidebar({
     if (sameProjectOrder(nextOrder, projects.map((project) => project.id))) return;
     void onReorderProjects(nextOrder).catch(() => undefined);
   }, [onReorderProjects, projects, sessions, sessionsHydrated]);
-
-  useEffect(() => {
-    if (!workspaceMenuOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!workspaceMenuRef.current?.contains(event.target as Node)) {
-        setWorkspaceMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setWorkspaceMenuOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [workspaceMenuOpen]);
 
   useEffect(() => {
     if (!selectedWorkspaceNodeId || !selectedRemoteWorkspace) {
@@ -762,9 +760,10 @@ export default function ChatSidebar({
         aria-expanded={expanded}
         onClick={() => toggleSessionGroup(groupId)}
       >
-        {expanded
+        <span>{expanded
           ? copy.showFewerChats
-          : `${copy.showMoreChats} (${hiddenCount})`}
+          : `${copy.showMoreChats} (${hiddenCount})`}</span>
+        <SvgIcon name={expanded ? "chevronUp" : "chevronDown"} size={12} />
       </button>
     );
   };
@@ -811,7 +810,7 @@ export default function ChatSidebar({
           }}
         />
       ) : (
-        <div className="chat-session-title">
+        <div className="chat-session-title" title={session.title}>
           {running && <span className="chat-running-dot" role="img" aria-label={copy.running} title={copy.running} />}
           {unread && <span className="chat-unread-dot" role="img" aria-label={copy.unread} title={copy.unread} />}
           {session.title}
@@ -844,7 +843,7 @@ export default function ChatSidebar({
           void onOpenRemote(session.nodeId, session.projectId, session.sessionId);
         }}
       >
-        <span className="chat-session-title">{session.title || (language === "cn" ? "未命名对话" : "Untitled chat")}</span>
+        <span className="chat-session-title" title={session.title}>{session.title || (language === "cn" ? "未命名对话" : "Untitled chat")}</span>
         {session.model && <small className="chat-remote-session-meta">{session.model}</small>}
       </button>
     );
@@ -857,113 +856,17 @@ export default function ChatSidebar({
     >
       <div className="chat-sidebar-container">
         <div className="chat-sidebar-top-group">
-          <div className="chat-workspace-picker" ref={workspaceMenuRef}>
-            <button
-              className={`chat-workspace-trigger${remoteMode ? " is-remote" : ""}`}
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={workspaceMenuOpen}
-              aria-label={language === "cn" ? "切换本机或远程电脑" : "Switch local or remote computer"}
-              onClick={() => {
-                const opening = !workspaceMenuOpen;
-                setWorkspaceMenuOpen(opening);
-                if (opening) onLoadRemoteTargets?.();
-              }}
-            >
-              <span className="chat-workspace-icon" aria-hidden="true">
-                <SvgIcon name={remoteMode ? "collection" : "desktop"} size={14} />
-              </span>
-              <span className="chat-workspace-trigger-copy">
-                <strong>
-                  {remoteMode
-                    ? (selectedRemotePeer?.displayName
-                      ?? selectedRemoteWorkspace?.nodeName
-                      ?? (language === "cn" ? "远程电脑" : "Remote computer"))
-                    : (language === "cn" ? "本机" : "This computer")}
-                </strong>
-                <small>
-                  {remoteMode
-                    ? (selectedRemoteProject?.title
-                      ?? (remoteBusy
-                        ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
-                        : (language === "cn" ? "选择远程项目" : "Choose a remote project")))
-                    : (currentRemoteAgent
-                      ? (language === "cn" ? "本机项目" : "Local projects")
-                      : (projects.find((project) => project.id === sessions.find(
-                          (session) => session.id === currentId && !session.remoteAgent,
-                        )?.projectId)?.name
-                        ?? (language === "cn" ? "本机项目" : "Local projects")))}
-                </small>
-              </span>
-              <span className="chat-workspace-trailing">
-                {remoteMode && (
-                  <span
-                    className={`chat-workspace-connection${selectedRemotePeer?.connected ? " is-online" : " is-connecting"}`}
-                    title={selectedRemotePeer?.connected
-                      ? (language === "cn" ? "在线" : "Online")
-                      : (language === "cn" ? "正在自动连接" : "Reconnecting automatically")}
-                  />
-                )}
-                <SvgIcon name={workspaceMenuOpen ? "chevronUp" : "chevronDown"} size={12} />
-              </span>
-            </button>
-            {workspaceMenuOpen && (
-              <div className="chat-workspace-menu" role="menu">
-                <div className="chat-workspace-menu-label">
-                  {language === "cn" ? "运行位置" : "Run on"}
-                </div>
-                <button
-                  className={`chat-workspace-option${!remoteMode ? " active" : ""}`}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    onWorkspaceSelect?.(null);
-                    setWorkspaceMenuOpen(false);
-                  }}
-                >
-                  <span className="chat-workspace-option-icon"><SvgIcon name="desktop" size={14} /></span>
-                  <span><strong>{language === "cn" ? "本机" : "This computer"}</strong><small>{language === "cn" ? "本机项目、模型与工具" : "Local projects, models, and tools"}</small></span>
-                  {!remoteMode && <SvgIcon name="check" size={13} />}
-                </button>
-                {remotePeers.map((peer) => {
-                  const unavailable = !peer.agentChatAuthorized;
-                  return (
-                    <button
-                      key={peer.nodeId}
-                      className={`chat-workspace-option${selectedWorkspaceNodeId === peer.nodeId ? " active" : ""}${!peer.connected ? " is-connecting" : ""}`}
-                      type="button"
-                      role="menuitem"
-                      disabled={unavailable}
-                      onClick={() => {
-                        onWorkspaceSelect?.(peer.nodeId);
-                        setWorkspaceMenuOpen(false);
-                      }}
-                    >
-                      <span className="chat-workspace-option-icon"><SvgIcon name="collection" size={14} /></span>
-                      <span>
-                        <strong>{peer.displayName}</strong>
-                        <small>
-                          {!peer.agentChatAuthorized
-                            ? (language === "cn" ? "需重新配对以启用 Agent" : "Re-pair to enable Agent")
-                            : peer.connected
-                              ? (language === "cn" ? "在线 · 远程项目" : "Online · Remote projects")
-                              : (language === "cn" ? "正在自动连接，可先进入等待" : "Reconnecting automatically · Open to wait")}
-                        </small>
-                      </span>
-                      {selectedWorkspaceNodeId === peer.nodeId && <SvgIcon name="check" size={13} />}
-                    </button>
-                  );
-                })}
-                {remotePeers.length === 0 && (
-                  <div className="chat-workspace-empty">
-                    {remoteBusy
-                      ? (language === "cn" ? "正在查找已配对电脑…" : "Looking for paired computers…")
-                      : (language === "cn" ? "没有可用的远程电脑" : "No remote computers available")}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <ChatWorkspaceSwitcher
+            language={language}
+            visible={tab === "chat" || tab === "scheduled" || tab === "tasks"}
+            workspaceName={workspaceName}
+            workspaceDescription={workspaceDescription}
+            selectedNodeId={selectedWorkspaceNodeId}
+            peers={remotePeers}
+            busy={remoteBusy}
+            onLoad={onLoadRemoteTargets}
+            onSelect={onWorkspaceSelect}
+          />
           <div className="chat-sidebar-head">
             <div className="chat-sidebar-top-row">
               <button
@@ -982,24 +885,6 @@ export default function ChatSidebar({
               </button>
               <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
             </div>
-            {!remoteMode && (
-              <div className="chat-sidebar-destinations">
-                <button
-                  className={`chat-scheduled-btn${tab === "scheduled" ? " active" : ""}`}
-                  onClick={() => setTab("scheduled")}
-                >
-                  <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
-                  <span>{copy.scheduledTasks}</span>
-                </button>
-                <button
-                  className={`chat-scheduled-btn chat-tasks-btn${tab === "tasks" ? " active" : ""}`}
-                  onClick={() => setTab("tasks")}
-                >
-                  <span className="chat-scheduled-icon"><SvgIcon name="notebook" size={14} /></span>
-                  <span>{language === "cn" ? "待办任务" : "To-dos"}</span>
-                </button>
-              </div>
-            )}
           </div>
         </div>
         <div className="chat-session-list" ref={sessionListRef}>
@@ -1022,11 +907,9 @@ export default function ChatSidebar({
                 const history = Object.values(remoteSessionLists).find((item) => (
                   item.nodeId === selectedWorkspaceNodeId && item.projectId === project.projectId
                 ));
-                const currentProjectBound = currentRemoteAgent?.nodeId === selectedWorkspaceNodeId
-                  && currentRemoteAgent.projectId === project.projectId;
                 return (
                   <section
-                    className={`chat-session-group chat-remote-project-group${selected ? " selected" : ""}`}
+                    className="chat-session-group chat-remote-project-group"
                     key={project.projectId}
                   >
                     <div className="chat-sidebar-label chat-project-label">
@@ -1045,8 +928,7 @@ export default function ChatSidebar({
                         <span className="chat-project-caret" aria-hidden="true">
                           <FolderIcon open={selected} />
                         </span>
-                        <span className="chat-project-label-text">{project.title}</span>
-                        {currentProjectBound && <span className="chat-remote-project-current">{language === "cn" ? "当前" : "Current"}</span>}
+                        <span className="chat-project-label-text" title={project.title}>{project.title}</span>
                       </button>
                       <button
                         className="chat-project-add"
@@ -1064,7 +946,7 @@ export default function ChatSidebar({
                       </button>
                     </div>
                     {selected && (
-                      <div className="chat-remote-project-sessions">
+                      <div className="chat-project-sessions chat-remote-project-sessions">
                         {!history && (
                           <div className="chat-session-empty chat-remote-loading">
                             <SvgIcon name="spinner" size={13} />
@@ -1120,12 +1002,9 @@ export default function ChatSidebar({
                 const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
                   ? { transform: `translateY(${draggedProjectOffsetY}px)` }
                   : undefined;
-                const activeSession = sessions.find((s) => s.id === currentId && !s.remoteAgent);
-                const isActiveProject = activeSession?.projectId === group.id
-                  || group.sessions.some((s) => s.id === currentId);
                 return (
                   <section
-                    className={`chat-session-group${isActiveProject ? " is-active-project" : ""}${draggedProjectId === group.id ? " dragging" : ""}`}
+                    className={`chat-session-group chat-local-project-group${draggedProjectId === group.id ? " dragging" : ""}`}
                     key={group.id}
                     data-chat-project-id={group.id}
                     ref={setGroupRef(group.id)}
@@ -1146,12 +1025,7 @@ export default function ChatSidebar({
                         <span className="chat-project-caret" aria-hidden="true">
                           <FolderIcon open />
                         </span>
-                        <span className="chat-project-label-text">{group.label}</span>
-                        {isActiveProject && (
-                          <span className="chat-active-project-pill">
-                            {language === "cn" ? "当前" : "Active"}
-                          </span>
-                        )}
+                        <span className="chat-project-label-text" title={group.label}>{group.label}</span>
                       </div>
                       <button
                         className="chat-project-add"
@@ -1169,13 +1043,15 @@ export default function ChatSidebar({
                         <SvgIcon name="plus" size={11} />
                       </button>
                     </div>
-                    {visibleSessions.map((session) => renderSessionItem(session))}
-                    {renderSessionGroupToggle(
-                      group.id,
-                      group.sessions.length,
-                      visibleSessions.length,
-                      expanded,
-                    )}
+                    <div className="chat-project-sessions">
+                      {visibleSessions.map((session) => renderSessionItem(session))}
+                      {renderSessionGroupToggle(
+                        group.id,
+                        group.sessions.length,
+                        visibleSessions.length,
+                        expanded,
+                      )}
+                    </div>
                   </section>
                 );
               })}

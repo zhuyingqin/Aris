@@ -14,6 +14,7 @@ fn legacy_usage_entries_default_to_executor_role() {
     .expect("legacy usage entry");
 
     assert_eq!(entry.role, "executor");
+    assert_eq!(entry.turn_duration_ms, 0);
 }
 
 #[test]
@@ -67,6 +68,8 @@ fn each_request_row_carries_its_own_latency() {
         vec![1_000, 1_010, 1_030],
     );
     assert_eq!(rows.iter().map(|row| row.duration_ms).sum::<u64>(), 4_500);
+    assert_eq!(rows.iter().map(|row| row.turn_duration_ms).sum::<u64>(), 99_999);
+    assert_eq!(rows.last().unwrap().turn_duration_ms, 99_999);
 }
 
 /// When the wire trace and the usage list cannot be lined up, one row carries

@@ -831,6 +831,21 @@ describe("ChatMessage rendering", () => {
     expect(screen.queryByText(/\"accountId\"/)).toBeNull();
   });
 
+  it("previews only local Somni image artifacts and shows the actual prompt and model", async () => {
+    render(<ChatMessage turn={{ id: "somni-image", role: "assistant", blocks: [{ kind: "tool", name: "SomniImage",
+      input: JSON.stringify({ prompt: "A research diagram", files: ["reference.png"] }),
+      output: JSON.stringify({ status: "completed", model: "gpt-image-2", prompt: "A research diagram",
+        images: [{ path: ".somniq/artifacts/somni-images/run/image-1.png" }] }),
+    }] }} canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined} />);
+    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    await userEvent.click(screen.getByText("Somni drawing"));
+    expect(screen.getByText(/gpt-image-2/)).toBeTruthy();
+    expect(screen.getByText("A research diagram")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(".somniq/artifacts/somni-images/run/image-1.png"));
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith("reference.png");
+    expect(screen.queryByText(/Third-party webpage automation/)).toBeNull();
+  });
+
   it("previews image artifacts returned by ChatGptWebImage", async () => {
     render(
       <ChatMessage

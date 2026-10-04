@@ -1,27 +1,26 @@
-/* The Git context belongs to the composer but sits on its own quiet status
-   line. Keep it on the same centre axis as the input instead of letting the
-   unstyled button fall back to the page's left edge. */
+/* Repository context shares the input toolbar with attachments and permission. */
 .chat-workspace-bar {
   display: flex;
   align-items: center;
-  width: min(100%, 860px);
-  min-height: 28px;
-  margin: 4px auto 0;
-  padding: 0 7px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
 }
 
 .chat-git-menu-anchor {
   position: relative;
   min-width: 0;
+  max-width: 100%;
 }
 
 .chat-workspace-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  max-width: min(280px, 60vw);
-  min-height: 25px;
-  padding: 2px 7px;
+  gap: 0.3125rem;
+  max-width: 100%;
+  min-height: 1.75rem;
+  padding: 0.125rem 0.4375rem;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -32,10 +31,15 @@
 }
 
 .chat-workspace-item > span:not(.chat-workspace-change-count) {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.chat-workspace-item > svg { flex-shrink: 0; }
+.chat-workspace-git > svg:first-child { width: 0.875rem; height: 0.875rem; }
+.chat-workspace-chevron { width: 0.6875rem; height: 0.6875rem; }
 
 .chat-workspace-item:hover,
 .chat-workspace-item[aria-expanded="true"] {
@@ -50,9 +54,10 @@
 .chat-workspace-change-count {
   display: inline-grid;
   place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.25rem;
+  flex-shrink: 0;
   border-radius: 999px;
   background: color-mix(in srgb, var(--amber) 16%, transparent);
   color: var(--amber);
@@ -212,10 +217,4 @@
 
 .chat-git-menu-error {
   color: var(--red);
-}
-
-@media (max-width: 720px) {
-  .chat-workspace-bar {
-    padding-inline: 3px;
-  }
 }

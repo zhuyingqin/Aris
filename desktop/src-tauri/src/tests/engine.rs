@@ -1,5 +1,246 @@
 use super::*;
 
+struct MultiWorkspaceFixture {
+    _temp: tempfile::TempDir,
+    first: PathBuf,
+    first_id: String,
+    second: PathBuf,
+    second_id: String,
+    previous_env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl MultiWorkspaceFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let first_id = crate::projects::project_id(&first);
+        let second_id = crate::projects::project_id(&second);
+        let config = temp.path().join("config");
+        let runtime = config
+            .join("desktop-runtime")
+            .join("projects")
+            .join(&second_id);
+        let environment = [
+            ("ARIS_CONFIG_ROOT", config.clone().into_os_string()),
+            ("ARIS_WORKSPACE_ROOT", second.clone().into_os_string()),
+            ("ARIS_DESKTOP_PROJECT_ID", second_id.clone().into()),
+            ("ARIS_RUNTIME_ROOT", runtime.clone().into_os_string()),
+            (
+                "ARIS_SESSIONS_DIR",
+                runtime.join("sessions").into_os_string(),
+            ),
+            (
+                "ARIS_RUN_STATE_DIR",
+                runtime.join("run-state").into_os_string(),
+            ),
+            (
+                "CLAWD_TODO_STORE",
+                runtime.join("tasks.json").into_os_string(),
+            ),
+        ];
+        let previous_env = environment
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in environment {
+            std::env::set_var(key, value);
+        }
+        fs::create_dir_all(config.join("desktop-runtime")).unwrap();
+        fs::write(config.join("desktop-runtime/projects.json"), serde_json::to_vec(&json!({
+            "projects": [
+                { "id": first_id, "name": "First", "path": first, "addedAt": 0, "lastOpenedAt": 0 },
+                { "id": second_id, "name": "Second", "path": second, "addedAt": 0, "lastOpenedAt": 0 }
+            ],
+            "currentProjectId": second_id
+        })).unwrap()).unwrap();
+        Self {
+            _temp: temp,
+            first,
+            first_id,
+            second,
+            second_id,
+            previous_env,
+        }
+    }
+}
+
+impl Drop for MultiWorkspaceFixture {
+    fn drop(&mut self) {
+        for (key, previous) in &self.previous_env {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+#[test]
+fn nonactive_workspace_continuity_uses_the_requested_project() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = MultiWorkspaceFixture::new();
+    runtime::start_project_goal(
+        &fixture.first,
+        runtime::ProjectGoalDraft {
+            objective: "Implement project First".into(),
+            success_criteria: vec![],
+            recent_status: String::new(),
+        },
+        None,
+    )
+    .unwrap();
+    let brief =
+        project_brief_get(fixture.first_id.clone()).expect("read an inactive workspace's goal");
+    assert_eq!(brief.goal.unwrap().objective, "Implement project First");
+    assert_eq!(
+        std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap(),
+        fixture.second_id
+    );
+}
+
+#[test]
+fn bound_workspace_goal_and_tasks_ignore_the_active_project() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = MultiWorkspaceFixture::new();
+    for (root, label) in [(&fixture.first, "First"), (&fixture.second, "Second")] {
+        runtime::start_project_goal(
+            root,
+            runtime::ProjectGoalDraft {
+                objective: format!("Implement project {label}"),
+                success_criteria: vec![],
+                recent_status: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let task_path =
+        crate::state::project_runtime_dir(&fixture.first_id).join("tasks/chat-bound.json");
+    fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+    fs::write(
+        &task_path,
+        r#"[{"content":"First task","status":"pending"}]"#,
+    )
+    .unwrap();
+    with_bound_project_environment(&fixture.first, &fixture.first_id, || {
+        let report = handle_goal_command(Some("status"), None).unwrap();
+        assert!(report.contains("Implement project First"), "{report}");
+        assert!(!report.contains("Implement project Second"));
+        assert_eq!(
+            read_session_tasks("chat-bound").unwrap()[0]["content"],
+            "First task"
+        );
+    })
+    .unwrap();
+}
+
+#[test]
+fn concurrent_workspace_chat_operations_preserve_files_history_and_events() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = MultiWorkspaceFixture::new();
+    let barrier = std::sync::Barrier::new(2);
+    let state = ChatState::default();
+    for (root, project_id, label) in [
+        (&fixture.first, &fixture.first_id, "First"),
+        (&fixture.second, &fixture.second_id, "Second"),
+    ] {
+        fs::write(root.join("workspace-marker.txt"), label).unwrap();
+        runtime::start_project_goal(
+            root,
+            runtime::ProjectGoalDraft {
+                objective: format!("Implement project {label}"),
+                success_criteria: vec![],
+                recent_status: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+        let tasks = crate::state::project_runtime_dir(project_id).join("tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        fs::write(
+            tasks.join(format!("chat-{label}.json")),
+            serde_json::to_vec(&json!([
+                { "content": format!("{label} task"), "status": "pending" }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    std::thread::scope(|threads| {
+        for (root, project_id, label) in [
+            (&fixture.first, &fixture.first_id, "First"),
+            (&fixture.second, &fixture.second_id, "Second"),
+        ] {
+            let state = &state;
+            let barrier = &barrier;
+            threads.spawn(move || {
+                with_chat_project(Some(project_id), || {
+                    barrier.wait();
+                    assert_eq!(runtime::execution_current_dir().unwrap(), *root);
+                    assert!(runtime::read_file("workspace-marker.txt", None, None)
+                        .unwrap()
+                        .file
+                        .content
+                        .contains(label));
+                    assert!(handle_goal_command(Some("status"), None)?
+                        .contains(&format!("Implement project {label}")));
+                    let session_id = format!("chat-{label}");
+                    assert_eq!(
+                        read_session_tasks(&session_id)?[0]["content"],
+                        format!("{label} task")
+                    );
+                    let message =
+                        serde_json::from_value(json!({ "role": "user", "text": label })).unwrap();
+                    set_chat_context(state, session_id.clone(), vec![message], None)?;
+                    state.sessions.lock().unwrap().remove(&session_id);
+                    let loaded = get_cached_or_disk_session(state, &session_id)?;
+                    assert_eq!(loaded.messages, vec![ConversationMessage::user_text(label)]);
+                    let path = crate::chat_events::chat_event_log_path(&session_id)?;
+                    assert_eq!(
+                        path.parent().unwrap(),
+                        crate::state::sessions_dir_for_project(project_id)
+                    );
+                    assert!(fs::read_to_string(path).unwrap().contains("session_checkpoint"));
+                    let replay = crate::chat_events::replay_session_events(&session_id)?;
+                    assert_eq!(replay.turns[0]["blocks"][0]["text"], label);
+                    rewind_chat_context(
+                        state,
+                        session_id.clone(),
+                        ChatContextUserMessage {
+                            text: label.to_string(),
+                            images: vec![],
+                        },
+                    )?;
+                    assert!(load_chat_session(&session_id)?.messages.is_empty());
+                    Ok(())
+                })
+                .unwrap();
+            });
+        }
+    });
+    assert!(!crate::state::sessions_dir_for_project(&fixture.first_id)
+        .join("chat-Second.json")
+        .exists());
+    assert!(!crate::state::sessions_dir_for_project(&fixture.second_id)
+        .join("chat-First.json")
+        .exists());
+    assert_eq!(
+        std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap(),
+        fixture.second_id
+    );
+    assert_eq!(crate::state::workspace_dir(), fixture.second);
+    assert!(registered_project_workspace("../project").is_err());
+    assert!(registered_project_workspace("project-0000000000000000").is_err());
+}
 #[test]
 fn generated_project_guidance_does_not_route_deliverables_into_internal_storage() {
     let guidance = render_desktop_agents_md(Path::new("C:/Research"));
@@ -404,8 +645,84 @@ fn chatgpt_web_image_tool_is_narrow_and_requires_external_action_approval() {
 
 #[test]
 fn generic_tool_progress_does_not_reflow_chat_during_image_generation() {
+    assert!(!should_emit_generic_tool_progress(SOMNI_IMAGE_TOOL));
     assert!(!should_emit_generic_tool_progress(CHATGPT_WEB_IMAGE_TOOL));
     assert!(should_emit_generic_tool_progress(CHATGPT_WEB_CONSULT_TOOL));
+}
+
+#[test]
+fn somni_image_tool_asks_the_agent_to_build_the_prompt_and_uses_external_action_policy() {
+    let spec = somni_image_tool_spec();
+    assert!(spec.description.contains("compose a complete prompt"));
+    assert!(spec.description.contains("Do not automatically resubmit"));
+    assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
+    assert_eq!(spec.input_schema["required"], json!(["prompt"]));
+    assert_eq!(spec.input_schema["properties"]["n"]["maximum"], 4);
+    assert!(spec.input_schema["properties"].get("apiKey").is_none());
+}
+
+#[test]
+fn somni_image_rich_output_reaches_the_native_handler_instead_of_the_kernel() {
+    let workspace = tempfile::tempdir().unwrap();
+    // This malformed input must be rejected by the native image parser before
+    // any configuration read or paid submission, not as an unsupported tool.
+    let input = r#"{"prompt":"fixture","aspectRatio":"16:9"}"#;
+    let output = desktop_tool_output(SOMNI_IMAGE_TOOL, || {
+        crate::image_api::execute_tool(
+            workspace.path(),
+            input,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map_err(ToolError::new)
+    })
+    .unwrap_or_else(|| {
+        tools::execute_tool(SOMNI_IMAGE_TOOL, &serde_json::from_str(input).unwrap())
+            .map(ToolOutput::text)
+            .map_err(ToolError::new)
+    });
+    let error = output.err().expect("invalid image input must fail").to_string();
+    assert!(error.contains("绘图参数无效"), "{error}");
+    assert!(error.contains("aspectRatio"), "{error}");
+    assert!(!error.contains("unsupported tool"), "{error}");
+}
+
+#[test]
+fn desktop_dispatch_preserves_rich_mcp_results() {
+    assert!(desktop_tool_output("mcp__test__image", || {
+        panic!("MCP image results must use the rich inner executor")
+    })
+    .is_none());
+}
+
+#[test]
+#[ignore = "Explicit live check: submits one image using the signed-in account's selected drawing model"]
+fn somni_image_live_desktop_dispatch_saves_an_api_artifact() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = std::env::var_os("SOMNIQ_IMAGE_SMOKE_WORKSPACE")
+        .map(PathBuf::from)
+        .expect("set SOMNIQ_IMAGE_SMOKE_WORKSPACE to the project receiving the test artifact");
+    let input = json!({
+        "prompt": "A simple blue circle centered on a plain white square background. Clean flat colors, no text, no gradients, no extra elements.",
+        "size": "1024x1024", "quality": "low", "n": 1
+    }).to_string();
+    let result = desktop_tool_output(SOMNI_IMAGE_TOOL, || {
+        crate::image_api::execute_tool(
+            &workspace,
+            &input,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map_err(ToolError::new)
+    })
+    .expect("image tool must use desktop dispatch")
+    .expect("live image generation must succeed");
+    let output: Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(output["provider"], "somni");
+    assert_eq!(output["status"], "completed");
+    let image_path = output["images"][0]["path"].as_str().unwrap();
+    assert!(workspace.join(image_path).is_file());
+    println!("{}", result.text);
 }
 
 #[test]

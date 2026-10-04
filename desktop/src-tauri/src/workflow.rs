@@ -1183,9 +1183,9 @@ pub fn review_workflow_create(
     app: AppHandle,
     input: runtime::ReviewWorkflowCreateInput,
 ) -> Result<runtime::ReviewWorkflowRun, String> {
-    // A review is built on systematic search; refuse up front rather than
+    // A review is built on external literature search; refuse up front rather than
     // failing at its first retrieval stage.
-    if let Some(message) = crate::membership::systematic_search_denial() {
+    if let Some(message) = crate::membership::external_literature_denial() {
         return Err(message);
     }
     create_workflow(&TauriCtx::new(app), input)

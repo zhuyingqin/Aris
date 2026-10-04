@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInNewContext } from "node:vm";
 
 const mocks = vi.hoisted(() => ({
   getDocument: vi.fn(),
@@ -63,6 +64,19 @@ describe("shared PDF.js runtime", () => {
     const request = mocks.getDocument.mock.calls[0][0] as { data: Uint8Array };
     expect(request.data).toEqual(source);
     expect(request.data).not.toBe(source);
+  });
+
+  it("preserves PDF bytes from an ArrayBuffer created in another realm", async () => {
+    mocks.getDocument.mockReturnValue({ promise: Promise.resolve({ destroy: vi.fn() }) });
+    const { openPdfDocument } = await import("../runtime");
+    const source = runInNewContext("new Uint8Array([37, 80, 68, 70]).buffer") as ArrayBuffer;
+
+    await openPdfDocument(source);
+
+    const request = mocks.getDocument.mock.calls[0][0] as { data: Uint8Array };
+    expect(Array.from(request.data)).toEqual([37, 80, 68, 70]);
+    request.data[0] = 0;
+    expect(new Uint8Array(source)[0]).toBe(37);
   });
 
   it("uses bounded range requests for large workspace PDFs", async () => {
@@ -146,7 +160,7 @@ describe("cross-reference repair", () => {
     apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
     apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
     mocks.getDocument
-      .mockReturnValueOnce({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) })
+      .mockImplementationOnce(() => ({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) }))
       .mockReturnValueOnce({ promise: Promise.resolve(repaired) });
 
     const { openPdfDocumentFromPath } = await import("../runtime");
@@ -161,8 +175,8 @@ describe("cross-reference repair", () => {
     apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
     apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
     mocks.getDocument
-      .mockReturnValueOnce({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) })
-      .mockReturnValueOnce({ promise: Promise.reject(new Error("Invalid PDF structure.")) });
+      .mockImplementationOnce(() => ({ promise: Promise.reject(new Error("Bad (uncompressed) XRef entry: 1327R")) }))
+      .mockImplementationOnce(() => ({ promise: Promise.reject(new Error("Invalid PDF structure.")) }));
 
     const { openPdfDocumentFromPath } = await import("../runtime");
 
@@ -172,7 +186,7 @@ describe("cross-reference repair", () => {
   it("does not rebuild for failures that have nothing to do with the xref table", async () => {
     apiMocks.fileReadBytesInfo.mockResolvedValue({ bytes: 64 });
     apiMocks.fileReadBytes.mockResolvedValue(pdfWithTrailer("0000000123").buffer);
-    mocks.getDocument.mockReturnValueOnce({ promise: Promise.reject(new Error("Password required")) });
+    mocks.getDocument.mockImplementationOnce(() => ({ promise: Promise.reject(new Error("Password required")) }));
 
     const { openPdfDocumentFromPath } = await import("../runtime");
 

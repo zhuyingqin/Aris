@@ -35,6 +35,7 @@ import {
   type ChatTitleRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { isImageGenerationModel } from "../imageModels";
 import type {
   ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
 } from "../types";
@@ -525,7 +526,7 @@ export function useChatRun({
     ) return;
     contextHydrationRequests.current.add(currentSession.id);
     let disposed = false;
-    void chatContextTokens(currentSession.id)
+    void chatContextTokens(currentSession.id, currentSession.projectId)
       .then((tokens) => {
         if (!disposed && tokens != null) applyContextTokens(currentSession.id, tokens);
       })
@@ -641,7 +642,7 @@ export function useChatRun({
       });
       return;
     }
-    chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
+    chatPermissionGet(currentId, currentSessionRef.current?.projectId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
   }, [
     copy.permissionLabels,
@@ -649,6 +650,7 @@ export function useChatRun({
     currentId,
     currentSession?.id,
     currentSession?.model,
+    currentSession?.projectId,
     currentSession?.remoteAgent,
     refreshModelOptions,
     refreshStatus,
@@ -677,7 +679,7 @@ export function useChatRun({
   // plus the active model so the select never renders blank (e.g. a custom id,
   // an unverified running model, or the browser preview).
   const modelSelectOptions = useMemo(() => {
-    const items = modelOptions.map((option) => ({
+    const items = modelOptions.filter((option) => !isImageGenerationModel(option.value)).map((option) => ({
       value: option.value,
       label: option.label,
       description: option.description ?? null,
@@ -693,8 +695,9 @@ export function useChatRun({
   const canSwitchModel = modelSelectOptions.length > 1;
 
   const changeModel = useCallback(async (model: string) => {
-    if (!model || model === activeModel || !currentSession) return;
+    if (!model || !currentSession) return;
     if (currentSession.remoteAgent) {
+      if (model === activeModel) return;
       setModelBusy(true);
       try {
         const binding = currentSession.remoteAgent;
@@ -731,7 +734,9 @@ export function useChatRun({
     const requestId = ++statusRequestIdRef.current;
     setModelBusy(true);
     try {
-      const nextStatus = await chatModelSet(model, false);
+      // An explicit choice also becomes the default for new chats and app
+      // restarts. Restoring an existing session above remains non-persistent.
+      const nextStatus = await chatModelSet(model, true);
       if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
       updateSession(currentSession.id, (session) => ({
         ...session,
@@ -882,19 +887,19 @@ export function useChatRun({
         // sessions safely fall back to the existing UI reconstruction.
         const recoveryTurns = unsavedBackendTurns.current.get(session.id);
         let tokens = recoveryTurns
-          ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append").catch(() => null)
+          ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append", session.projectId).catch(() => null)
           : null;
         const rewindMessage = rewindFromUser
           ? await outgoingMessage(textFromTurn(rewindFromUser), rewindFromUser.attachments ?? [])
           : undefined;
         if (rewindMessage) {
-          const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage).catch(() => null);
+          const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage, session.projectId).catch(() => null);
           // Rewind must succeed for an edit/retry; a repaired append alone would
           // leave the rejected user turn at the end of the session.
           tokens = rewindTokens;
         }
         if (tokens == null) {
-          tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+          tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace", session.projectId);
         }
         applyContextTokens(session.id, tokens);
         markBackendContextSynced(session.id, prefix);

@@ -215,12 +215,6 @@ export function MailSettingsDetail() {
   return (
     <div className="sp-detail-form mail-settings-detail">
       <section className="mail-settings-summary">
-        <div>
-          <div className="sp-field-label">{copy.detailTitle}</div>
-          <div className="sp-field-hint">
-            {copy.detailSub}
-          </div>
-        </div>
         <div className="mail-settings-summary-badges">
           <span className="sp-role-badge sp-role-mail">{copy.providerApiBadge}</span>
           <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
@@ -285,7 +279,6 @@ export function MailSettingsDetail() {
         <div className="mail-settings-oauth-card">
           <div className="mail-settings-oauth-copy">
             <strong>{copy.discoverTitle}</strong>
-            <span>{copy.discoverSub}</span>
             {discoveryResult && (
               <span>{copy.discoverUsed(discoveryResult.source, discoveryResult.notes)}</span>
             )}
@@ -341,6 +334,7 @@ export function MailSettingsDetail() {
           </Field>
         </div>
 
+        <details className="settings-advanced settings-mail-advanced"><summary>{copy.outgoingSmtpTitle}<span aria-hidden="true">⌄</span></summary>
         <label className="mail-settings-toggle">
           <input
             type="checkbox"
@@ -355,7 +349,6 @@ export function MailSettingsDetail() {
 
         {form.smtpEnabled && (
           <>
-            <div className="mail-settings-subtitle">{copy.outgoingSmtpTitle}</div>
             <div className="mail-settings-grid">
               <Field label={copy.fieldHost}>
                 <input
@@ -401,7 +394,9 @@ export function MailSettingsDetail() {
           </>
         )}
 
-        <div className="sp-detail-actions">
+        </details>
+
+        <div className="sp-detail-actions settings-actions">
           <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== null} onClick={() => void testConnection()}>
             {busy === "test" ? copy.testTesting : copy.testConnection}
           </button>
@@ -420,7 +415,7 @@ export function MailSettingsDetail() {
         <div className="mail-settings-panel-head">
           <div>
             <div className="sp-field-label">{copy.connectedAccounts}</div>
-            <div className="sp-field-hint">{accounts.length > 0 ? accountSummary(accounts, copy) : copy.connectedAccountsSub}</div>
+            {accounts.length > 0 && <div className="sp-field-hint">{accountSummary(accounts, copy)}</div>}
           </div>
         </div>
 
