@@ -2073,6 +2073,31 @@ where
     }
 }
 
+// Use one dispatch list for rich results and batch scheduling. Desktop tools
+// are not implemented by the shared registry, even when ToolSearch exposes
+// their schemas. Paid image calls and budgeted probes must stay serial.
+fn is_desktop_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        ASK_USER_QUESTION_TOOL
+            | REVIEW_WORKFLOW_STATE_TOOL
+            | WORKFLOW_SCOPUS_PROBE_TOOL
+            | PROJECT_EVIDENCE_SEARCH_TOOL
+            | COMPUTE_NODES_TOOL
+            | COMPUTE_JOB_SUBMIT_TOOL
+            | SOMNI_IMAGE_TOOL
+            | CHATGPT_WEB_CONSULT_TOOL
+            | CHATGPT_WEB_IMAGE_TOOL
+    )
+}
+
+fn desktop_tool_output(
+    tool_name: &str,
+    execute: impl FnOnce() -> Result<String, ToolError>,
+) -> Option<Result<ToolOutput, ToolError>> {
+    is_desktop_tool(tool_name).then(|| execute().map(ToolOutput::text))
+}
+
 impl<T> ToolExecutor for DesktopToolExecutor<T>
 where
     T: ToolExecutor,
@@ -2247,21 +2272,10 @@ where
         // Local desktop-only tools keep their existing UI/question/progress
         // path. MCP and other wrapped tools use the rich path so inline image
         // blocks survive the desktop adapter instead of being stringified.
-        let desktop_only = matches!(
-            tool_name,
-            ASK_USER_QUESTION_TOOL
-                | REVIEW_WORKFLOW_STATE_TOOL
-                | WORKFLOW_SCOPUS_PROBE_TOOL
-                | PROJECT_EVIDENCE_SEARCH_TOOL
-                | COMPUTE_NODES_TOOL
-                | COMPUTE_JOB_SUBMIT_TOOL
-                | CHATGPT_WEB_CONSULT_TOOL
-                | CHATGPT_WEB_IMAGE_TOOL
-        );
-        if desktop_only {
-            return self
-                .execute_with_id(tool_use_id, tool_name, input)
-                .map(ToolOutput::text);
+        if let Some(result) = desktop_tool_output(tool_name, || {
+            self.execute_with_id(tool_use_id, tool_name, input)
+        }) {
+            return result;
         }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
@@ -2308,19 +2322,7 @@ where
         if self.source_only {
             return ToolExecution::Serial;
         }
-        if matches!(
-            tool_name,
-            ASK_USER_QUESTION_TOOL
-                | REVIEW_WORKFLOW_STATE_TOOL
-                // Serial so the per-turn probe budget is actually counted; a
-                // parallel batch could spend it several times over.
-                | WORKFLOW_SCOPUS_PROBE_TOOL
-                | PROJECT_EVIDENCE_SEARCH_TOOL
-                | COMPUTE_NODES_TOOL
-                | COMPUTE_JOB_SUBMIT_TOOL
-                | CHATGPT_WEB_CONSULT_TOOL
-                | CHATGPT_WEB_IMAGE_TOOL
-        ) {
+        if is_desktop_tool(tool_name) {
             ToolExecution::Serial
         } else {
             self.inner.execution(tool_name)
@@ -3064,7 +3066,7 @@ fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
 fn chatgpt_web_image_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
         name: CHATGPT_WEB_IMAGE_TOOL,
-        description: "Generate image artifacts through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. Use it only when the user asks to create or edit an image. Reference files must be inside the active project; generated files are imported into `.somniq/artifacts/oracle-images/` and returned as local paths.",
+        description: "Generate image artifacts through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. When SomniImage is available, use this tool only if the user explicitly requests the webpage, Oracle or Image Assist route. A request to use GPT or GPT Image is an API image request, not a webpage selection. Reference files must be inside the active project; generated files are imported into `.somniq/artifacts/oracle-images/` and returned as local paths.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -8881,7 +8883,7 @@ async fn run_chat_turn_with_context(
             }
             if crate::image_api::tool_available() {
                 system_prompt.push(
-                    "Configured integration: SomniImage generates or edits images through the user's Somni gateway account. When the user asks to draw, create an illustration, or edit an image, build the complete prompt yourself from their request and context, then call SomniImage. Include the intended composition, relationships, style and exact labels. Use project image paths as files for editing. The drawing model is configured separately from your chat model; omit model unless the user requests a specific drawing model. Prefer this service for ordinary image requests, respect any explicit request for the webpage or Image Assist, and do not automatically resubmit a failed paid request. Return the local image path and describe the result without claiming to have inspected pixels unless you actually read the image."
+                    "Configured integration: SomniImage generates or edits images through the user's Somni gateway account. When the user asks to draw, create an illustration, or edit an image, build the complete prompt yourself from their request and context, then call SomniImage. Include the intended composition, relationships, style and exact labels. Use project image paths as files for editing. The drawing model is configured separately from your chat model; omit model unless the user requests a specific drawing model. In this drawing context, GPT / GPT Image / GPT2 refers to the configured GPT Image drawing family; do not reinterpret it as the historical GPT-2 text model or as an Oracle webpage selection. Prefer this service for ordinary image requests, respect any explicit request for the webpage or Image Assist, and do not automatically resubmit a failed paid request. Use size (auto, 1024x1024, 1536x1024, 1024x1536), never the webpage tool's aspectRatio parameter. When the user requests API generation, do not substitute SVG, plotting code, webpage automation or Image Assist after a failure; report the actual API error. Return the local image path and describe the result without claiming to have inspected pixels unless you actually read the image."
                         .to_string(),
                 );
             }

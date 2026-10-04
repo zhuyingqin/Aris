@@ -662,6 +662,70 @@ fn somni_image_tool_asks_the_agent_to_build_the_prompt_and_uses_external_action_
 }
 
 #[test]
+fn somni_image_rich_output_reaches_the_native_handler_instead_of_the_kernel() {
+    let workspace = tempfile::tempdir().unwrap();
+    // This malformed input must be rejected by the native image parser before
+    // any configuration read or paid submission, not as an unsupported tool.
+    let input = r#"{"prompt":"fixture","aspectRatio":"16:9"}"#;
+    let output = desktop_tool_output(SOMNI_IMAGE_TOOL, || {
+        crate::image_api::execute_tool(
+            workspace.path(),
+            input,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map_err(ToolError::new)
+    })
+    .unwrap_or_else(|| {
+        tools::execute_tool(SOMNI_IMAGE_TOOL, &serde_json::from_str(input).unwrap())
+            .map(ToolOutput::text)
+            .map_err(ToolError::new)
+    });
+    let error = output.err().expect("invalid image input must fail").to_string();
+    assert!(error.contains("绘图参数无效"), "{error}");
+    assert!(error.contains("aspectRatio"), "{error}");
+    assert!(!error.contains("unsupported tool"), "{error}");
+}
+
+#[test]
+fn desktop_dispatch_preserves_rich_mcp_results() {
+    assert!(desktop_tool_output("mcp__test__image", || {
+        panic!("MCP image results must use the rich inner executor")
+    })
+    .is_none());
+}
+
+#[test]
+#[ignore = "Explicit live check: submits one image using the signed-in account's selected drawing model"]
+fn somni_image_live_desktop_dispatch_saves_an_api_artifact() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = std::env::var_os("SOMNIQ_IMAGE_SMOKE_WORKSPACE")
+        .map(PathBuf::from)
+        .expect("set SOMNIQ_IMAGE_SMOKE_WORKSPACE to the project receiving the test artifact");
+    let input = json!({
+        "prompt": "A simple blue circle centered on a plain white square background. Clean flat colors, no text, no gradients, no extra elements.",
+        "size": "1024x1024", "quality": "low", "n": 1
+    }).to_string();
+    let result = desktop_tool_output(SOMNI_IMAGE_TOOL, || {
+        crate::image_api::execute_tool(
+            &workspace,
+            &input,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map_err(ToolError::new)
+    })
+    .expect("image tool must use desktop dispatch")
+    .expect("live image generation must succeed");
+    let output: Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(output["provider"], "somni");
+    assert_eq!(output["status"], "completed");
+    let image_path = output["images"][0]["path"].as_str().unwrap();
+    assert!(workspace.join(image_path).is_file());
+    println!("{}", result.text);
+}
+
+#[test]
 fn latex_compile_progress_stays_out_of_live_chat() {
     assert!(!should_emit_generic_tool_progress(LATEX_COMPILE_TOOL));
     assert!(!should_emit_live_tool_progress(

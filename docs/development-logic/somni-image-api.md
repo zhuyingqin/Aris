@@ -82,3 +82,34 @@ Live generation through the shared client is now verified. Multipart editing is
 covered by focused transport tests; no additional paid edit was submitted in
 this generation check. The client integration is present in the source build;
 this check did not replace the running installed desktop executable.
+
+## Desktop dispatch regression
+
+A subsequent desktop conversation exposed a separate client failure: ToolSearch
+published `SomniImage`, but the rich-result executor omitted it from its desktop
+dispatch list. Calls fell through to the shared kernel and returned
+`unsupported tool: SomniImage` before any image HTTP request was submitted.
+The desktop now shares one dispatch classification between rich results and
+serial batch scheduling, including the paid image tool. A regression invokes
+the actual native image parser through that dispatch boundary and checks that
+MCP image results retain their separate rich-result path.
+
+Drawing requests activate the configured API tool before generic file creation
+and media extras. GPT image requests use that API; explicit Oracle, webpage or
+Image Assist requests retain the webpage route. The prompt explains the API's
+`size` field and prevents silent substitution with SVG or webpage automation
+when the user requests API generation. An opt-in ignored desktop test exercises
+dispatch, the current account's selected drawing model, and artifact saving:
+
+```powershell
+$env:SOMNIQ_IMAGE_SMOKE_WORKSPACE = 'F:/Agent/Aris'
+cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib somni_image_live_desktop_dispatch_saves_an_api_artifact -- --ignored --nocapture
+```
+
+This check submits one paid image request and never retries automatically.
+
+The opt-in check passed with the account's selected `gpt-image-2.5-flare`:
+the native dispatch and artifact writer saved a decoded 1254×1254 PNG in about
+55 seconds. The project-local `generation.json` records the submitted prompt,
+actual model, dimensions, hash and reported usage. This verifies the repaired
+native path independently of any running executable still built before the fix.

@@ -134,6 +134,32 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
 }
 
 #[test]
+fn drawing_router_pins_api_for_gpt_requests_and_honors_explicit_webpage_requests() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("SomniImage"), routing_spec("ChatGptWebImage")]);
+    for prompt in [
+        "生成一个小猪佩奇的图，使用GPT",
+        "使用API生成图",
+        "用 GPT Image 2 画一张图",
+        "Create an illustration using GPT",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("SomniImage"), "{prompt}: {plan:?}");
+        assert!(!plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+    }
+    for prompt in ["用 Oracle 网页生成图片", "Create an image with Image Assist"] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+        assert!(!plan.pinned_names.contains("SomniImage"), "{prompt}");
+    }
+    let read = route_chat_tools("Analyze this attached image", &specs, ToolRoutingMode::Active);
+    assert!(!read.pinned_names.contains("SomniImage"));
+    specs.retain(|spec| spec.name != "SomniImage");
+    let unavailable = route_chat_tools("使用API生成图", &specs, ToolRoutingMode::Active);
+    assert!(!unavailable.active_names.contains("SomniImage"));
+}
+
+#[test]
 fn dynamic_tool_router_gives_every_matched_intent_its_required_tools() {
     let specs = desktop_like_catalog();
     let plan = route_chat_tools(
