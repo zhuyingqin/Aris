@@ -1850,7 +1850,8 @@ describe("Literature library", () => {
     await screen.findAllByText(fixturePaper.title);
     await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
     const rail = screen.getByRole("tablist", { name: "论文详情导航" });
-    const toggle = await screen.findByRole("button", { name: "论文讲解" });
+    // A cold suite must also load the reader chunk before its toolbar appears.
+    const toggle = await screen.findByRole("button", { name: "论文讲解" }, { timeout: 5000 });
     const pdf = document.querySelector(".lit-pdf-reader");
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();

@@ -894,6 +894,6 @@ describe("useChatSessions Tauri persistence", () => {
       blocks: [{ kind: "text", text: "event sourced" }],
     }));
     expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("event-recovery-chat");
-    expect(apiMocks.chatEventsReplay).toHaveBeenCalledWith("event-recovery-chat");
+    expect(apiMocks.chatEventsReplay).toHaveBeenCalledWith("event-recovery-chat", "default");
   });
 });

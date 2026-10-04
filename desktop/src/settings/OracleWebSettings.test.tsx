@@ -35,7 +35,7 @@ const baseStatus = (): OracleWebStatusView => ({
   runtime: {
     status: "ready",
     source: "managed",
-    version: "0.18.0",
+    version: "0.21.4",
     commandPath: "C:/SomniQ/oracle-mcp.js",
     nodePath: "C:/SomniQ/node.exe",
     installSupported: true,
@@ -139,7 +139,7 @@ describe("OracleWebSettings", () => {
     vi.mocked(oracleWebStatus).mockResolvedValue(statusWithAccount());
     render(<OracleWebSettings language="cn" />);
 
-    fireEvent.change(await screen.findByRole("combobox", { name: "FPT · 默认模型" }), {
+    fireEvent.change(await screen.findByRole("combobox", { name: "FPT · 咨询/审稿模型" }), {
       target: { value: "gpt-5.6" },
     });
 
@@ -181,17 +181,17 @@ describe("OracleWebSettings", () => {
       runtime: {
         status: "incompatible",
         source: "system",
-        version: "0.9.0",
+        version: "0.21.3",
         commandPath: "C:/Users/test/AppData/Roaming/npm/oracle-mcp.cmd",
         nodePath: null,
         installSupported: true,
-        message: "Detected Oracle MCP 0.9.0, but SomniQ requires 0.18.0.",
+        message: "Detected Oracle MCP 0.21.3, but SomniQ requires 0.21.4.",
       },
     });
     render(<OracleWebSettings language="cn" />);
 
     expect(await screen.findByText("版本不兼容")).toBeTruthy();
-    expect(screen.getByText("v0.9.0")).toBeTruthy();
+    expect(screen.getByText("v0.21.3")).toBeTruthy();
     expect(screen.getByText("下一步：更新 Oracle 运行时")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "更新运行时" }));
 
@@ -199,12 +199,79 @@ describe("OracleWebSettings", () => {
     expect(await screen.findByText("运行时已更新，账号和用途路由均已保留。")).toBeTruthy();
   });
 
-  it("reports a compatible runtime as current without offering an unnecessary install", async () => {
+  it("keeps Update available for a ready runtime and reports when it is already current", async () => {
     render(<OracleWebSettings language="cn" />);
 
-    expect(await screen.findByText("已是当前兼容版本。运行时随 SomniQ 版本更新，不会静默升级到未经验证的上游版本。")).toBeTruthy();
+    expect(await screen.findByText("可用")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "安装运行时" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "更新运行时" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "更新运行时" }));
+
+    await waitFor(() => expect(oracleWebRuntimeInstall).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("运行时已是当前兼容版本。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "更新运行时" })).toBeTruthy();
+  });
+
+  it("reuses the runtime update in the Update page without showing account setup", async () => {
+    render(<OracleWebSettings language="en" runtimeOnly />);
+    expect(await screen.findByText("Oracle Web")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create account" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Update runtime" }));
+    expect(await screen.findByText("The runtime is already on the current compatible version.")).toBeTruthy();
+  });
+
+  it("disables Update and Refresh while an update is pending", async () => {
+    let resolveInstall: ((status: OracleWebStatusView) => void) | undefined;
+    vi.mocked(oracleWebRuntimeInstall).mockImplementationOnce(
+      () => new Promise<OracleWebStatusView>((resolve) => { resolveInstall = resolve; }),
+    );
+    render(<OracleWebSettings language="en" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Update runtime" }));
+
+    expect((screen.getByRole("button", { name: "Updating…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Updating…" }).getAttribute("aria-busy")).toBe("true");
+
+    resolveInstall?.(baseStatus());
+    expect(await screen.findByText("The runtime is already on the current compatible version.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Update runtime" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows update failures and leaves account routes and the retry action available", async () => {
+    vi.mocked(oracleWebStatus).mockResolvedValue({
+      ...statusWithAccount(), consultAccountId: ACCOUNT_ID,
+    });
+    vi.mocked(oracleWebRuntimeInstall).mockRejectedValueOnce(new Error("Download failed"));
+    render(<OracleWebSettings language="en" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Update runtime" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Download failed");
+    expect((screen.getByRole("button", { name: "Update runtime" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "FPT · Chat consultation" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("does not report success when a development override remains incompatible after installation", async () => {
+    vi.mocked(oracleWebRuntimeInstall).mockResolvedValueOnce({
+      ...baseStatus(),
+      runtime: { ...baseStatus().runtime, status: "incompatible", source: "environment", message: "Development override is incompatible." },
+    });
+    render(<OracleWebSettings language="en" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Update runtime" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Development override is incompatible.");
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("does not offer automatic updates on unsupported platforms", async () => {
+    vi.mocked(oracleWebStatus).mockResolvedValue({
+      ...baseStatus(), runtime: { ...baseStatus().runtime, installSupported: false },
+    });
+    render(<OracleWebSettings language="en" />);
+
+    expect(await screen.findByText("Ready")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Update runtime" })).toBeNull();
   });
 
   it("binds the reviewer role explicitly", async () => {

@@ -1689,7 +1689,7 @@ export interface ProfileStats {
   activeDays: number;
   currentStreak: number;
   longestStreak: number;
-  /** Longest single task in seconds; `null` until turn-duration telemetry accrues. */
+  /** Longest completed turn's wall time; request latency is the legacy fallback. */
   longestTaskSeconds: number | null;
   /** Chronological daily buckets (up to ~53 weeks) for the heatmap. */
   daily: ProfileDailyBucket[];
@@ -1699,8 +1699,10 @@ export interface ProfileStats {
   toolCalls: number;
   /** `null` until reasoning-effort telemetry accrues. */
   topReasoningEffort: string | null;
-  /** Whether the runtime meta event log is populated (drives skill/tool stats). */
+  /** Historical activity coverage from durable chat events or optional metadata. */
   metaLoggingEnabled: boolean;
+  /** Some logs were unreadable or malformed; totals cover only readable records. */
+  partialData?: boolean;
   /** Epoch seconds of the earliest recorded activity, or `null` when empty. */
   since: number | null;
 }

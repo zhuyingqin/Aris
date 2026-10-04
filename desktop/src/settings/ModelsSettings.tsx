@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import type { NewApiAccount } from "../api/tauri";
+import { isImageGenerationModel } from "../imageModels";
+import SomniImageSettings from "./SomniImageSettings";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
@@ -8,6 +10,8 @@ import KeyInput from "./KeyInput";
 import PresetTextInput from "./PresetTextInput";
 import TestDetail from "./TestDetail";
 import type { SettingsConnectionState } from "./useSettingsConnectionState";
+import { SettingsAdvanced, SettingsSection } from "./SettingsPrimitives";
+import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 import {
   ANTHROPIC_COMPAT_URLS,
   OPENAI_COMPAT_URLS,
@@ -28,7 +32,7 @@ interface Props {
   connection: SettingsConnectionState;
 }
 
-export default function ModelsSettings({ language, configView, account, managedModels, connection }: Props) {
+export default function ModelsSettings({ language, configView, managedModels, connection }: Props) {
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const {
@@ -93,16 +97,13 @@ export default function ModelsSettings({ language, configView, account, managedM
     [configView.executorModel, advForm.executorModel],
     configView.managedModels,
     (configView.verifiedExecutors ?? []).map((item) => item.model),
-  ).map((model) => ({ label: model, value: model }));
+  ).filter((model) => !isImageGenerationModel(model)).map((model) => ({ label: model, value: model }));
 
   const currentManagedModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const availableManagedModels = uniqueModelList(
     managedModels,
-    configView.managedModels,
     [configView.executorModel, configView.reviewerModel],
-    account?.models,
-  );
-  const managedModelPreview = availableManagedModels.slice(0, 12);
+  ).filter((model) => !isImageGenerationModel(model));
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
   // Endpoint actually used for the selected executor model. Prefer the entry
   // probed for this exact model over the live slot, since a model switch
@@ -119,19 +120,14 @@ export default function ModelsSettings({ language, configView, account, managedM
 
   return (
     <>
-      <div className="sp-update-section">
-        <div className="sp-section-head">
-          <div className="sp-section-head-text">
-            <div className="sp-section-title">{copy.modelServiceTitle}</div>
-            <div className="sp-section-sub">{copy.modelServiceSub}</div>
-          </div>
+      <SettingsSection title={copy.modelServiceTitle} actions={
           <div className="sp-update-actions">
             <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
               <SvgIcon name={managedModelsLoading ? "spinner" : "refresh"} size={13} />
               {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
             </button>
           </div>
-        </div>
+      }>
         <div className="sp-model-pair">
           <label className="sp-model-select-row">
             <span>{copy.executorModel}</span>
@@ -192,39 +188,21 @@ export default function ModelsSettings({ language, configView, account, managedM
                       ? copy.modelSynced(availableManagedModels.length)
                       : copy.modelSyncAfterLoginStatus}
               </div>
-              {managedModelPreview.length > 0 && (
-                <div className="sp-model-preview" aria-label={copy.modelSynced(availableManagedModels.length)}>
-                  {managedModelPreview.map((model) => (
-                    <span key={model}>{model}</span>
-                  ))}
-                  {availableManagedModels.length > managedModelPreview.length && (
-                    <span>+{availableManagedModels.length - managedModelPreview.length}</span>
-                  )}
-                </div>
-              )}
             </div>
           </div>
         </div>
-      </div>
+      </SettingsSection>
 
-      <div className="sp-advanced-wrap sp-advanced-wrap-tab">
-        <div className="sp-advanced-body">
-          <div className="sp-adv-main-header">
-            <div className="sp-section-title">{copy.advancedSummaryTools}</div>
-            <div className="sp-section-sub">{copy.advancedSummaryToolsSub}</div>
-          </div>
+      <SomniImageSettings language={language} models={managedModels} />
+
+      <div className="settings-model-sections">
 
           {/* Section 1: Auxiliary Models */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionAuxiliaryModels}</span>
-              <span className="sp-adv-section-sub">{copy.sectionAuxiliaryModelsSub}</span>
-            </div>
+          <SettingsSection title={copy.sectionAuxiliaryModels}>
             <div className="sp-adv-rows">
               <div className="st-row">
                 <div className="st-row-label">
                   <span className="st-label">{copy.summaryProvider}</span>
-                  {copy.summaryProviderHint ? <span className="st-hint">{copy.summaryProviderHint}</span> : null}
                 </div>
                 <div className="st-row-control">
                   <select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value, summaryProviderOptions)}>
@@ -307,14 +285,10 @@ export default function ModelsSettings({ language, configView, account, managedM
                 </div>
               </div>
             </div>
-          </div>
+          </SettingsSection>
 
           {/* Section 2: Literature APIs */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionLiteratureServices}</span>
-              <span className="sp-adv-section-sub">{copy.sectionLiteratureServicesSub}</span>
-            </div>
+          <SettingsSection title={copy.sectionLiteratureServices}>
             <div className="sp-adv-rows">
               <div className="st-row">
                 <div className="st-row-label">
@@ -339,14 +313,10 @@ export default function ModelsSettings({ language, configView, account, managedM
                 </div>
               </div>
             </div>
-          </div>
+          </SettingsSection>
 
           {/* Section 3: Web Search & Community */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionWebSearchServices}</span>
-              <span className="sp-adv-section-sub">{copy.sectionWebSearchServicesSub}</span>
-            </div>
+          <SettingsSection title={copy.sectionWebSearchServices}>
             <div className="sp-adv-rows">
               <div className="st-row">
                 <div className="st-row-label">
@@ -429,10 +399,10 @@ export default function ModelsSettings({ language, configView, account, managedM
                 </div>
               </div>
             </div>
-          </div>
+          </SettingsSection>
 
           {/* Section 4: System / Config File */}
-          <div className="sp-adv-section">
+          <SettingsAdvanced title={SETTINGS_LAYOUT_COPY[language].advanced}>
             <div className="sp-adv-rows">
               <div className="st-row">
                 <div className="st-row-label">
@@ -443,7 +413,7 @@ export default function ModelsSettings({ language, configView, account, managedM
                 </div>
               </div>
             </div>
-          </div>
+          </SettingsAdvanced>
 
           {testResult && (
             <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
@@ -454,16 +424,16 @@ export default function ModelsSettings({ language, configView, account, managedM
               </div>
             </div>
           )}
-          <div className="sp-detail-actions sp-advanced-actions">
-            <button className="sp-btn sp-btn-secondary" onClick={() => void test()} disabled={testState === "testing" || saveState === "saving"} type="button">
-              {testState === "testing" ? copy.testTesting : copy.testConnectionConfig}
-            </button>
-            <button className="sp-btn sp-btn-primary" onClick={() => void save()} disabled={saveState === "saving" || testState === "testing"} type="button">
-              {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.saveConnectionConfig}
-            </button>
-            {saveState === "saved" && <span className="st-save-info">{copy.saveConnectionSavedInfo}</span>}
-          </div>
-        </div>
+      </div>
+      <div className="sp-detail-actions sp-advanced-actions settings-actions">
+        <span className="settings-actions-note">{SETTINGS_LAYOUT_COPY[language].modelScope}</span>
+        <button className="sp-btn sp-btn-secondary" onClick={() => void test()} disabled={testState === "testing" || saveState === "saving"} type="button">
+          {testState === "testing" ? copy.testTesting : copy.testConnectionConfig}
+        </button>
+        <button className="sp-btn sp-btn-primary" onClick={() => void save()} disabled={saveState === "saving" || testState === "testing"} type="button">
+          {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.saveConnectionConfig}
+        </button>
+        {saveState === "saved" && <span className="st-save-info">{copy.saveConnectionSavedInfo}</span>}
       </div>
     </>
   );

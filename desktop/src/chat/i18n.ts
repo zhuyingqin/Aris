@@ -50,6 +50,8 @@ export const CHAT_COPY: Record<Language, {
   previewCommandReply: string;
   previewResponse: string;
   emptyResponse: string;
+  waitingForModel: string;
+  modelWaitHint: string;
   responseStopped: string;
   stoppedByUser: string;
   responseFailed: string;
@@ -72,8 +74,8 @@ export const CHAT_COPY: Record<Language, {
     expanded: "已展开",
     pinnedSection: "置顶",
     projectsSection: "项目",
-    showMoreChats: "展开显示",
-    showFewerChats: "收起显示",
+    showMoreChats: "更多对话",
+    showFewerChats: "收起对话",
     newChatInProject: (project) => `在 ${project} 中新建任务`,
     newChatInThisProject: "在此项目中新建任务",
     unread: "未读",
@@ -116,6 +118,8 @@ export const CHAT_COPY: Record<Language, {
     previewCommandReply: "桌面斜杠命令需要在 Tauri 应用内运行。",
     previewResponse: "浏览器预览回复。运行 Tauri 应用可使用实时对话。",
     emptyResponse: "模型返回了空回复。",
+    waitingForModel: "等待模型响应 · 已",
+    modelWaitHint: "深度推理时模型可能要几分钟才开始输出，这不是卡死；可随时点击停止。",
     responseStopped: "回复已停止",
     stoppedByUser: "已由用户停止。",
     responseFailed: "回复失败",
@@ -182,6 +186,8 @@ export const CHAT_COPY: Record<Language, {
     previewCommandReply: "Desktop slash commands run inside the Tauri app.",
     previewResponse: "Browser preview response. Run the Tauri app for live Chat.",
     emptyResponse: "Model returned an empty response.",
+    waitingForModel: "Waiting for the model ·",
+    modelWaitHint: "Deep reasoning can take several minutes before output starts — this is not a hang. You can stop at any time.",
     responseStopped: "Response stopped",
     stoppedByUser: "Stopped by user.",
     responseFailed: "Response failed",

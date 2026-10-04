@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { profileStats, type NewApiAccount } from "../api/tauri";
 import { hasNativeBackend } from "../api/transport";
 import type { ProfileStats } from "../types";
@@ -10,16 +10,8 @@ import {
   writeProfileAvatar,
 } from "../profileAvatar";
 import { SETTINGS_COPY, type SettingsProfileCopy } from "./i18n";
-
-type HeatmapMode = "daily" | "weekly" | "cumulative";
-
-const HEATMAP_WEEKS = 53;
-const HEATMAP_DAYS = HEATMAP_WEEKS * 7;
-
-// Uses UTC so the grid date keys line up with the backend's UTC day buckets.
-function isoDate(date: Date): string {
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
-}
+import { buildProfileHeatmap, type HeatmapMode } from "./profileHeatmap";
+import "./Profile.css";
 
 function formatTokens(value: number, language: Language, copy: SettingsProfileCopy): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
@@ -49,79 +41,32 @@ function avatarInitial(account: NewApiAccount | null): string {
   return first ? first.toUpperCase() : "S";
 }
 
-interface HeatmapCell {
-  date: string;
-  tokens: number;
-  level: number;
-}
-
-/** Bucket daily activity into a 53-week grid with 0–4 intensity levels. */
-function buildHeatmap(daily: ProfileStats["daily"], mode: HeatmapMode): { weeks: HeatmapCell[][]; max: number } {
-  const byDate = new Map(daily.map((bucket) => [bucket.date, bucket.tokens]));
-  const cells: HeatmapCell[] = [];
-  const today = new Date();
-  // Align the grid so the last column ends on today; first cell starts on a
-  // Sunday. All stepping is in UTC to match the backend's UTC day buckets.
-  const start = new Date(today);
-  start.setUTCDate(today.getUTCDate() - (HEATMAP_DAYS - 1));
-  start.setUTCDate(start.getUTCDate() - start.getUTCDay());
-
-  let runningCumulative = 0;
-  const grandTotal = daily.reduce((sum, bucket) => sum + bucket.tokens, 0) || 1;
-  const cursor = new Date(start);
-  while (cursor <= today) {
-    const key = isoDate(cursor);
-    const tokens = byDate.get(key) ?? 0;
-    runningCumulative += tokens;
-    cells.push({ date: key, tokens, level: 0 });
-    if (mode === "cumulative") {
-      // stash cumulative fraction temporarily in level for later normalization
-      cells[cells.length - 1].level = runningCumulative / grandTotal;
-    }
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-
-  const weeks: HeatmapCell[][] = [];
-  for (let i = 0; i < cells.length; i += 7) {
-    weeks.push(cells.slice(i, i + 7));
-  }
-
-  if (mode === "weekly") {
-    for (const week of weeks) {
-      const weekTotal = week.reduce((sum, cell) => sum + cell.tokens, 0);
-      for (const cell of week) cell.tokens = weekTotal;
-    }
-  }
-
-  const max = Math.max(1, ...cells.map((cell) => (mode === "cumulative" ? 0 : cell.tokens)));
-  for (const cell of cells) {
-    if (mode === "cumulative") {
-      cell.level = cell.level <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil(cell.level * 4)));
-    } else if (cell.tokens <= 0) {
-      cell.level = 0;
-    } else {
-      cell.level = Math.min(4, Math.max(1, Math.ceil((cell.tokens / max) * 4)));
-    }
-  }
-  return { weeks, max };
-}
-
 export default function Profile({
   account,
   language,
+  onRefreshAccount,
+  accountLoading = false,
+  accountError = "",
 }: {
   account: NewApiAccount | null;
   language: Language;
+  onRefreshAccount?: () => Promise<void>;
+  accountLoading?: boolean;
+  accountError?: string;
 }) {
   const copy = SETTINGS_COPY[language].profile;
   const backendAvailable = hasNativeBackend();
   const verifiedAccount = backendAvailable ? account : null;
   const avatar = useProfileAvatar();
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const heatmapScrollRef = useRef<HTMLDivElement | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarError, setAvatarError] = useState("");
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(!backendAvailable);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [mode, setMode] = useState<HeatmapMode>("daily");
 
   useEffect(() => {
@@ -131,18 +76,42 @@ export default function Profile({
       return;
     }
     let alive = true;
-    setStatsUnavailable(false);
-    profileStats()
-      .then((next) => {
-        if (alive) setStats(next);
-      })
-      .catch(() => {
+    let inFlight = false;
+    const refresh = async () => {
+      if (!alive || inFlight) return;
+      inFlight = true;
+      setStatsLoading(true);
+      try {
+        const next = await profileStats();
+        if (alive) {
+          setStats(next);
+          setStatsUnavailable(false);
+          setUpdatedAt(new Date());
+        }
+      } catch {
         if (alive) setStatsUnavailable(true);
-      });
+      } finally {
+        inFlight = false;
+        if (alive) setStatsLoading(false);
+      }
+    };
+    void refresh();
+    const refreshVisible = () => { if (!document.hidden) void refresh(); };
+    const timer = window.setInterval(refreshVisible, 30_000);
+    window.addEventListener("focus", refreshVisible);
+    document.addEventListener("visibilitychange", refreshVisible);
     return () => {
       alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisible);
+      document.removeEventListener("visibilitychange", refreshVisible);
     };
-  }, [backendAvailable]);
+  }, [backendAvailable, refreshVersion]);
+
+  const refreshAll = () => {
+    setRefreshVersion((value) => value + 1);
+    void onRefreshAccount?.();
+  };
 
   const chooseAvatar = () => {
     setAvatarError("");
@@ -174,8 +143,20 @@ export default function Profile({
     if (!writeProfileAvatar(null)) setAvatarError(copy.avatarSaveFailed);
   };
 
-  const heatmap = useMemo(() => (stats ? buildHeatmap(stats.daily, mode) : null), [stats, mode]);
-  const hasActivity = Boolean(stats && stats.daily.some((bucket) => bucket.tokens > 0));
+  const heatmap = useMemo(() => (stats ? buildProfileHeatmap(stats.daily, mode, stats.cumulativeTokens) : null), [stats, mode]);
+  const hasActivity = Boolean(stats && (mode === "cumulative" ? stats.cumulativeTokens > 0 : stats.daily.some((bucket) => bucket.tokens > 0)));
+  const heatmapStart = heatmap?.[0]?.[0]?.date;
+
+  useLayoutEffect(() => {
+    const element = heatmapScrollRef.current;
+    if (!element) return;
+    const showLatest = () => { element.scrollLeft = Math.max(0, element.scrollWidth - element.clientWidth); };
+    showLatest();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(showLatest);
+    observer?.observe(element);
+    window.addEventListener("resize", showLatest);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", showLatest); };
+  }, [hasActivity, heatmapStart]);
 
   const displayName = verifiedAccount?.displayName || verifiedAccount?.username || copy.signedOut;
   const handle = verifiedAccount?.username ? `@${verifiedAccount.username}` : "";
@@ -183,16 +164,25 @@ export default function Profile({
 
   const tiles = stats
     ? [
-        { label: copy.statCumulative, value: formatTokens(stats.cumulativeTokens, language, copy) },
-        { label: copy.statPeak, value: formatTokens(stats.peakDailyTokens, language, copy) },
-        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, copy.unavailable, copy) },
-        { label: copy.statCurrentStreak, value: copy.days(stats.currentStreak) },
-        { label: copy.statLongestStreak, value: copy.days(stats.longestStreak) },
+        { label: copy.statCumulative, value: formatTokens(stats.cumulativeTokens, language, copy), detail: `${stats.cumulativeTokens.toLocaleString()} ${copy.tokenUnit}` },
+        { label: copy.statPeak, value: formatTokens(stats.peakDailyTokens, language, copy), detail: `${stats.peakDailyTokens.toLocaleString()} ${copy.tokenUnit}` },
+        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, copy.unavailable, copy), detail: copy.taskDurationHint },
+        { label: copy.statCurrentStreak, value: copy.days(stats.currentStreak), detail: copy.utcDays },
+        { label: copy.statLongestStreak, value: copy.days(stats.longestStreak), detail: copy.utcDays },
       ]
     : [];
 
   return (
     <div className="sp-profile">
+      <div className="sp-profile-data-head">
+        <div>
+          <span>{copy.localScope}</span>
+          {updatedAt && <span className="sp-profile-updated">{copy.updatedAt(updatedAt.toLocaleTimeString(language === "cn" ? "zh-CN" : "en-US"))}</span>}
+        </div>
+        {backendAvailable && <button type="button" className="sp-profile-refresh" onClick={refreshAll} disabled={statsLoading || accountLoading}>
+          {statsLoading || accountLoading ? copy.refreshing : copy.refresh}
+        </button>}
+      </div>
       <div className="sp-profile-hero">
         <div className="sp-profile-identity">
           <button
@@ -232,16 +222,17 @@ export default function Profile({
           </div>
         </div>
       </div>
+      {accountError && <div className="sp-profile-unavailable" role="alert">{copy.accountRefreshFailed} {accountError}</div>}
 
-      {statsUnavailable ? (
-        <div className="sp-profile-unavailable" role="status">{copy.statsUnavailable}</div>
-      ) : !stats ? (
+      {statsUnavailable && <div className="sp-profile-unavailable" role="status">{stats ? copy.statsRefreshFailed : copy.statsUnavailable}</div>}
+      {!stats && !statsUnavailable ? (
         <div className="sp-profile-loading">{copy.loading}</div>
-      ) : (
+      ) : stats ? (
         <>
+          {stats.partialData && <div className="sp-profile-unavailable" role="status">{copy.partialData}</div>}
           <div className="sp-profile-tiles">
             {tiles.map((tile) => (
-              <div className="sp-profile-tile" key={tile.label}>
+              <div className="sp-profile-tile" key={tile.label} title={tile.detail}>
                 <strong>{tile.value}</strong>
                 <span>{tile.label}</span>
               </div>
@@ -271,35 +262,41 @@ export default function Profile({
               </div>
             </div>
             {hasActivity && heatmap ? (
-              <>
-                <div className="sp-profile-heatmap" role="img" aria-label={copy.activityTitle}>
-                  {heatmap.weeks.map((week, weekIndex) => (
-                    <div className="sp-profile-heatmap-week" key={weekIndex}>
-                      {week.map((cell) => (
-                        <span
-                          key={cell.date}
-                          className="sp-profile-heatmap-cell"
-                          data-level={cell.level}
-                          title={`${cell.date} · ${formatTokens(cell.tokens, language, copy)} ${copy.tokenUnit}`}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                </div>
-                {stats.since && (
-                  <div className="sp-profile-activity-foot">
-                    {copy.activitySince(new Date(stats.since * 1000).toLocaleDateString())}
+                <div className="sp-profile-heatmap-scroll" ref={heatmapScrollRef} tabIndex={0} role="region" aria-label={copy.activityTitle}>
+                  <div className="sp-profile-heatmap" role="img" aria-label={`${copy.activityTitle} · ${copy.utcDays}`}>
+                    {heatmap.map((week, weekIndex) => (
+                      <div className="sp-profile-heatmap-week" key={weekIndex}>
+                        {week.map((cell) => (
+                          <span
+                            key={cell.date}
+                            className="sp-profile-heatmap-cell"
+                            data-level={cell.level}
+                            data-future={cell.future || undefined}
+                            title={cell.future ? undefined : `${mode === "weekly" ? `${week[0].date} – ${cell.endDate}` : cell.date} · ${cell.tokens.toLocaleString(language === "cn" ? "zh-CN" : "en-US")} ${copy.tokenUnit}`}
+                          />
+                        ))}
+                      </div>
+                    ))}
                   </div>
-                )}
-              </>
+                </div>
             ) : (
               <div className="sp-profile-empty">{copy.activityEmpty}</div>
             )}
+            <div className="sp-profile-activity-foot sp-profile-activity-summary">
+              <span>{copy.utcDays}{stats.since !== null && ` · ${copy.activitySince(new Date(stats.since * 1000).toISOString().slice(0, 10))}`}</span>
+              <span className="sp-profile-legend">{copy.less}{[0, 1, 2, 3, 4].map((level) => <i key={level} className="sp-profile-heatmap-cell" data-level={level} />)}{copy.more}</span>
+            </div>
           </section>
 
           <div className="sp-profile-columns">
             <section className="sp-profile-insights">
               <div className="sp-profile-section-title">{copy.insightsTitle}</div>
+              <div className="sp-profile-insight-row">
+                <span>{copy.insightTurns}</span><strong>{stats.totalTurns.toLocaleString()}</strong>
+              </div>
+              <div className="sp-profile-insight-row">
+                <span>{copy.insightDays}</span><strong>{copy.days(stats.activeDays)}</strong>
+              </div>
               <div className="sp-profile-insight-row">
                 <span>{copy.insightReasoning}</span>
                 <strong>{stats.topReasoningEffort ?? copy.unavailable}</strong>
@@ -331,8 +328,19 @@ export default function Profile({
               )}
             </section>
           </div>
+          <section className="sp-profile-models">
+            <div className="sp-profile-section-title">{copy.modelsTitle}</div>
+            <div className="sp-profile-meta-hint">{copy.modelsHint}</div>
+            {stats.byModel.length > 0 ? <div className="sp-profile-model-list">
+              {stats.byModel.map((model) => <div className="sp-profile-model-row" key={`${model.provider}:${model.model}`}>
+                <div><strong>{model.model}</strong><span>{model.provider} · {copy.modelTurns(model.turns)}</span></div>
+                <div className="sp-profile-model-meter"><span style={{ width: `${Math.min(100, model.tokens / Math.max(1, stats.cumulativeTokens) * 100)}%` }} /></div>
+                <span title={model.tokens.toLocaleString()}>{formatTokens(model.tokens, language, copy)} {copy.tokenUnit}</span>
+              </div>)}
+            </div> : <div className="sp-profile-empty">{copy.modelsEmpty}</div>}
+          </section>
         </>
-      )}
+      ) : null}
     </div>
   );
 }

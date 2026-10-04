@@ -121,7 +121,7 @@ function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
   ];
 }
 
-export default function Extensions() {
+export default function Extensions({ embedded = false }: { embedded?: boolean } = {}) {
   const setError = useStore((state) => state.setError);
   const currentProject = useStore((state) => state.currentProject);
   const language = useStore((state) => state.language);
@@ -411,10 +411,10 @@ export default function Extensions() {
     <div className="ext-page">
       <header className="ext-head">
         <div className="ext-head-inner">
-          <div className="ext-headline">
+          {!embedded && <div className="ext-headline">
             <h1>{copy.title}</h1>
             <p>{copy.subtitle}</p>
-          </div>
+          </div>}
           <div className="ext-head-controls">
             <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
               <button
@@ -649,7 +649,6 @@ export default function Extensions() {
             <div className="ext-section-head">
               <div>
                 <h2>{copy.skillsHeading}</h2>
-                <p className="ext-section-sub">{copy.skillsSubtitle}</p>
               </div>
               <span className="ext-section-count">{skills.length}</span>
             </div>

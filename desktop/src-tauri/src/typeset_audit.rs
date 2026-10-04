@@ -131,7 +131,14 @@ fn operations(root: &Path, source: &AuditedTurn) -> Result<Vec<TypesetRevisionOp
             },
         );
     }
-    let stems = document_stems(operations.keys().map(String::as_str));
+    let mut stems = document_stems(operations.keys().map(String::as_str));
+    if operations
+        .keys()
+        .any(|path| path.to_ascii_lowercase().ends_with(".pdf"))
+    {
+        let candidates = project_revision_candidates(root)?;
+        stems.extend(document_stems(candidates.iter().map(|(_, path)| path.as_str())));
+    }
     Ok(operations
         .into_values()
         .filter(|operation| {
@@ -254,7 +261,7 @@ pub(crate) fn capture_turn(
 
 /// Re-project only pending decisions. Unchanged files retain staged answers;
 /// changed endpoints require review again.
-fn refresh_projection(root: &Path, batch: &mut TypesetChangeSet) -> Result<(), String> {
+pub(super) fn refresh_projection(root: &Path, batch: &mut TypesetChangeSet) -> Result<(), String> {
     let projected = operations(root, batch.audited_turn.as_ref().expect("audited source"))?;
     let previous = &batch.decisions;
     batch.decisions = projected.into_iter().map(|operation| {
@@ -663,6 +670,67 @@ mod tests {
     }
 
     #[test]
+    fn non_latex_chat_edits_stay_in_the_audit_without_opening_a_typeset_review() {
+        in_workspace(|root| {
+            record_at(root, "notes.md", "tool-notes", "before", "after");
+            record_at(root, "script.py", "tool-code", "before", "after");
+            assert!(capture_turn(root, "chat-session", "turn-test")
+                .unwrap()
+                .is_none());
+            let audit = runtime::list_file_changes_for_workspace(
+                root,
+                runtime::FileChangeListInput {
+                    session_id: Some("chat-session".into()),
+                    limit: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(audit.records.len(), 2, "Chat retains its complete file audit");
+        });
+    }
+
+    #[test]
+    fn mixed_chat_turn_reviews_only_latex_inputs_and_can_be_accepted() {
+        in_workspace(|root| {
+            record(root, "tool-source", "before", "after");
+            record_at(root, "refs.bib", "tool-bib", "before", "after");
+            record_at(root, "notes.md", "tool-notes", "before", "after");
+            record_at(root, "state.json", "tool-state", "before", "after");
+            let batch = captured(root);
+            assert_eq!(
+                batch.decisions.iter().map(|item| item.path.as_str()).collect::<Vec<_>>(),
+                vec!["paper.tex", "refs.bib"]
+            );
+            let reopened = read_change_set(root, &change_set_path(root, &batch.id).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                resolve_at(root, reopened.clone(), decisions(&reopened, "accept"))
+                    .unwrap()
+                    .status,
+                "accepted"
+            );
+            assert_eq!(fs::read_to_string(root.join("notes.md")).unwrap(), "after");
+        });
+    }
+
+    #[test]
+    fn a_chat_write_of_only_compiled_output_does_not_open_a_review() {
+        in_workspace(|root| {
+            fs::write(root.join("paper.tex"), "source").unwrap();
+            record_at(root, "paper.pdf", "tool-pdf", "old pdf", "rebuilt pdf");
+            fs::create_dir_all(root.join("build")).unwrap();
+            fs::write(root.join("build/paper.aux"), "build metadata").unwrap();
+            record_at(
+                root, "build/paper.pdf", "tool-build-pdf", "old pdf", "rebuilt pdf",
+            );
+            assert!(capture_turn(root, "chat-session", "turn-test")
+                .unwrap()
+                .is_none());
+        });
+    }
+
+    #[test]
     fn reject_restores_only_the_audited_file() {
         in_workspace(|root| {
             record(root, "tool-1", "original\n", "chat\n");
@@ -754,7 +822,7 @@ mod tests {
                 "user conflict\n"
             );
             assert_eq!(
-                read_change_set(&change_set_path(root, &change_set.id).unwrap())
+                read_change_set(root, &change_set_path(root, &change_set.id).unwrap())
                     .unwrap()
                     .unwrap()
                     .status,

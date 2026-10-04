@@ -1,0 +1,190 @@
+/* The settings shell shares the application's palette and appearance choices. */
+:root[data-theme] .sp-settings-page.sp-settings-shell {
+  --settings-page-bg: var(--bg);
+  --settings-surface: var(--bg-1);
+  --settings-surface-2: var(--bg-2);
+  --settings-surface-3: var(--bg-3);
+  --settings-border: var(--border);
+  --settings-border-strong: color-mix(in srgb, var(--border) 70%, var(--text-dim));
+  --settings-text: var(--text);
+  --settings-muted: var(--text-dim);
+  --settings-active: color-mix(in srgb, var(--accent) 12%, var(--bg-1));
+  --settings-active-border: color-mix(in srgb, var(--accent) 35%, var(--border));
+  --settings-control-width: 360px;
+  --settings-control-height: max(34px, 2.125rem);
+  --settings-row-height: 60px;
+  --settings-row-padding: 14px;
+  --settings-card-shadow: none;
+  --settings-on-accent: var(--ui-on-accent, #0e1116);
+}
+:root[data-theme="light"] .sp-settings-page.sp-settings-shell { --settings-on-accent: var(--ui-on-accent, #fff); }
+:root[data-density="compact"] .sp-settings-page.sp-settings-shell { --settings-row-height: 48px; --settings-row-padding: 9px; }
+:root[data-density="comfortable"] .sp-settings-page.sp-settings-shell { --settings-row-height: 72px; --settings-row-padding: 20px; }
+:root[data-shadows="soft"] .sp-settings-page.sp-settings-shell { --settings-card-shadow: 0 6px 24px #0001; }
+.sp-settings-shell .settings-page { display: flex; flex-direction: column; gap: 32px; min-width: 0; padding-bottom: 8px; }
+.sp-settings-shell .settings-page[hidden] { display: none; }
+.sp-settings-shell .settings-page > * { min-width: 0; flex-shrink: 0; }
+.sp-settings-shell .settings-page-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; padding: 4px 0 8px; }
+.sp-settings-shell .settings-page-heading h1 { margin: 0; color: var(--text); font-size: 28px; font-weight: 650; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px 20px; flex-wrap: wrap; }
+.sp-settings-shell .settings-section-heading > div:first-child { min-width: 0; flex: 1; }
+.sp-settings-shell .settings-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sp-settings-shell .settings-section-body { border-radius: var(--appearance-radius, 16px); box-shadow: var(--settings-card-shadow); }
+.sp-settings-shell .settings-page .settings-section-body { overflow: visible; }
+.sp-settings-shell .settings-page .settings-section-body > :only-child { margin-block: 0; }
+.sp-settings-shell .settings-page .settings-section-body > :is(.sp-field-hint, .sp-update-message) { padding-block: 16px; }
+.sp-settings-shell .settings-page .settings-section-body > .sp-update-panel { padding-inline: 0; border: 0; background: transparent; box-shadow: none; }
+.sp-settings-shell .settings-page .settings-section-body > .sp-about-links-row { padding-block: 16px; margin: 0; }
+.sp-settings-shell .settings-model-sections { display: flex; flex-direction: column; gap: 32px; }
+.sp-settings-shell .settings-page :is(.sp-section-head, .mail-settings-panel-head, .sp-profile-section-head) { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 16px; }
+.sp-settings-shell .settings-page :is(.sp-section-head-text, .sp-update-copy) { min-width: 0; max-width: none; }
+.sp-settings-shell .settings-page :is(.sp-section-title, .sp-profile-section-title, .mail-settings-subtitle) { color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.5; }
+.sp-settings-shell .settings-page :is(.sp-section-sub, .sp-field-hint, .st-hint) { color: var(--text-dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page :is(.sp-update-section, .mail-settings-panel, .sp-profile-activity, .sp-profile-insights, .sp-profile-skills, .sp-usage-card) { padding: 20px; border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); background: var(--bg-1); box-shadow: var(--settings-card-shadow); }
+:root[data-theme] .sp-settings-shell :is(.settings-page, .settings-general) .sp-update-section { margin-top: 0; background-image: none; background-color: var(--bg-1); }
+.sp-settings-shell .settings-page :is(.sp-usage-quota-card, .sp-profile-tile, .sp-remote-devices, .sp-remote-device, .sp-remote-status-card, .sp-remote-add-device, .ext-card, .ext-server-row) { border-color: var(--border); border-radius: var(--appearance-radius, 16px); box-shadow: var(--settings-card-shadow); }
+.sp-settings-shell .settings-row-control:has(.settings-switch),
+.sp-settings-shell .settings-switch { flex-shrink: 0; }
+
+/* Ordinary fields use the same compact label/control geometry as General. */
+.sp-settings-shell .settings-page :is(.st-row, .sp-model-select-row, .sp-env-python-config) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, var(--settings-control-width)); align-items: center; gap: 24px; min-height: var(--settings-row-height); padding: var(--settings-row-padding) 0; margin: 0; border: 0; background: transparent; border-radius: 0; }
+.sp-settings-shell .settings-page .st-row + .st-row,
+.sp-settings-shell .settings-page .sp-model-select-row + .sp-model-select-row { border-top: 1px solid var(--border); }
+.sp-settings-shell .settings-page :is(.st-row-label, .sp-model-select-row > span:first-child) { min-width: 0; padding: 0; color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.5; }
+.sp-settings-shell .settings-page .st-label { color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.5; }
+.sp-settings-shell .settings-page .sp-adv-rows { display: flex; flex-direction: column; gap: 0; padding: 0; }
+.sp-settings-shell .settings-page .st-row-control { min-width: 0; width: 100%; }
+.sp-settings-shell .settings-page .st-row-control > :is(input, select, .st-key-wrap, .st-preset-control) { width: 100%; max-width: 100%; }
+.sp-settings-shell .settings-page .st-preset-control { grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); }
+.sp-settings-shell .settings-page .st-preset-control > * { min-width: 0; max-width: 100%; }
+.sp-settings-shell .settings-page .st-search-service-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sp-settings-shell .settings-page .st-search-service-control > .st-key-wrap { flex-basis: 100%; }
+.sp-settings-shell .settings-page .st-search-service-control > button { margin: 0; }
+.sp-settings-shell .settings-page .sp-model-pair { display: flex; flex-direction: column; gap: 0; padding: 0; }
+.sp-settings-shell .settings-page .sp-model-transport { grid-column: 2; justify-self: end; margin-top: -16px; }
+.sp-settings-shell .settings-page .sp-model-pair + .sp-update-panel { margin: 0; padding: 14px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; box-shadow: none; }
+.sp-settings-shell .settings-page :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]), select) { min-width: 0; min-height: var(--settings-control-height); max-width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); color: var(--text); font-size: 13px; line-height: 1.5; }
+/* Search fields already have a bordered wrapper around the icon and input. */
+.sp-settings-shell .settings-page :is(.memory-library-search, .ext-skills-search-bar) { min-height: var(--settings-control-height); }
+.sp-settings-shell .settings-page :is(.memory-library-search, .ext-skills-search-bar) input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]) { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.sp-settings-shell .settings-page :is(.memory-library-search, .ext-skills-search-bar) input:focus-visible { outline: none; }
+.sp-settings-shell :is(.sp-btn, .ext-primary-btn, .ext-secondary-btn, .sp-about-link, .settings-page .st-row-control > button) { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: var(--settings-control-height); height: auto; max-width: 100%; padding: 6px 12px; font-size: 12px; line-height: 1.5; white-space: normal; text-align: center; }
+.sp-settings-shell :is(.sp-btn-primary, .ext-primary-btn) { background: var(--accent); border-color: var(--accent); color: var(--settings-on-accent); box-shadow: none; }
+.sp-settings-shell .ext-primary-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 90%, var(--text)); border-color: var(--accent); box-shadow: none; }
+.sp-settings-shell :is(button, input, select, textarea, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sp-settings-shell .settings-page .settings-page-advanced { margin: 0; }
+.sp-settings-shell .settings-page-advanced > summary > span { transition: transform .15s; }
+.sp-settings-shell .settings-page-advanced[open] > summary > span { transform: rotate(180deg); }
+.sp-settings-shell .settings-page-advanced .sp-adv-rows { padding: 0 20px; border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); background: var(--bg-1); }
+.sp-settings-shell .settings-page .settings-actions { position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin: 0; padding: 14px 0; border-top: 1px solid var(--border); background: var(--bg); box-shadow: 0 -8px 16px color-mix(in srgb, var(--bg) 85%, transparent); }
+.sp-settings-shell .settings-actions-note { flex: 1 1 240px; color: var(--text-dim); font-size: 11px; line-height: 1.6; }
+.sp-settings-shell .settings-page .st-save-info { flex-basis: 100%; text-align: right; color: var(--green); font-size: 12px; }
+.sp-settings-shell .settings-page :is(.st-hint.failed, .mail-settings-result.failed, .sp-update-message-error) { color: var(--danger, #dc5050); }
+.sp-settings-shell .settings-page :is(.st-hint.ok, .mail-settings-result.ok) { color: var(--green); }
+
+/* Data-heavy areas remain cards while their surrounding layout stays uniform. */
+.sp-settings-shell .settings-page-account { gap: 20px; }
+.sp-settings-shell .settings-page .sp-account-section { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.sp-settings-shell .settings-page-account .sp-account-section > .sp-section-head { margin: 0; }
+.sp-settings-shell .settings-page :is(.sp-profile, .memory-settings-page, .mail-settings-detail) { width: 100%; gap: 32px; padding: 0; }
+.sp-settings-shell .settings-page .mail-settings-detail { overflow: visible; }
+.sp-settings-shell .settings-page .sp-profile-hero { padding: 20px; border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); background: var(--bg-1); }
+.sp-settings-shell .settings-page .sp-profile-tiles { gap: 12px; }
+.sp-settings-shell .settings-page .sp-profile-avatar-button { display: inline-grid; place-items: center; line-height: 1; }
+.sp-settings-shell .settings-page .sp-profile-avatar-edit { width: max(20px, 1.25rem); height: max(20px, 1.25rem); }
+.sp-settings-shell .settings-page .sp-env-python-control { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; width: 100%; }
+.sp-settings-shell .settings-page .sp-env-python-control input { flex-basis: 100%; width: 100%; }
+.sp-settings-shell .settings-page .sp-env-grid { padding-block: 16px; gap: 12px; }
+.sp-settings-shell .settings-page .sp-env-card { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2); box-shadow: none; }
+.sp-settings-shell .settings-page .sp-tool-availability-grid { padding-block: 16px; }
+.sp-settings-shell .settings-page .memory-status-bar { display: flex; flex-wrap: wrap; min-width: 0; padding: 4px; border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); box-shadow: none; }
+.sp-settings-shell .settings-page .memory-status-bar .sp-status-slot { flex: 1 1 220px; flex-wrap: wrap; }
+.sp-settings-shell .settings-page .memory-status-bar .sp-status-sep { display: none; }
+.sp-settings-shell .settings-page .memory-status-bar .sp-status-note { white-space: normal; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page .memory-build-actions { flex-wrap: wrap; }
+.sp-settings-shell .settings-page .memory-build-model { min-width: 0; max-width: 100%; }
+.sp-settings-shell .settings-page .memory-build-model select { min-width: 0; max-width: 100%; }
+
+.sp-settings-shell .settings-page .mail-settings-summary { padding: 0; border: 0; background: transparent; box-shadow: none; flex-wrap: wrap; }
+.sp-settings-shell .settings-page .mail-settings-summary-badges { min-width: 0; }
+.sp-settings-shell .settings-page .mail-settings-oauth-card { padding: 14px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; gap: 12px; flex-wrap: wrap; }
+.sp-settings-shell .settings-page .mail-settings-oauth-copy { min-width: 0; }
+.sp-settings-shell .settings-page :is(.mail-settings-grid, .mail-settings-detail .sp-detail-row2) { display: flex; flex-direction: column; gap: 0; }
+.sp-settings-shell .settings-page .mail-settings-detail .sp-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, var(--settings-control-width)); align-items: center; gap: 24px; min-width: 0; min-height: var(--settings-row-height); padding: var(--settings-row-padding) 0; border-top: 1px solid var(--border); }
+.sp-settings-shell .settings-page .mail-settings-detail .sp-field-label { margin: 0; font-size: 14px; line-height: 1.5; }
+.sp-settings-shell .settings-page-mail .sp-field-label { color: var(--text); font-weight: 600; text-transform: none; letter-spacing: normal; }
+.sp-settings-shell .settings-page .mail-settings-detail .sp-input { width: 100%; }
+.sp-settings-shell .settings-page .settings-mail-advanced { margin-top: 20px; }
+.sp-settings-shell .settings-page .settings-mail-advanced > summary { justify-content: space-between; }
+.sp-settings-shell .settings-page .mail-settings-detail .settings-actions { background: var(--bg-1); margin-inline: -20px; padding-inline: 20px; }
+.sp-settings-shell .settings-page .mail-settings-result { flex-basis: 100%; text-align: right; overflow-wrap: anywhere; }
+
+.sp-settings-shell .settings-page .remote-control-page { width: 100%; height: auto; min-height: 0; margin: 0; padding: 0; overflow: visible; }
+.sp-settings-shell .settings-page .sp-remote-section { height: auto; min-height: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.sp-settings-shell .settings-page .sp-remote-pane { padding: 0; min-width: 0; }
+.sp-settings-shell .settings-page .sp-remote-section > .sp-section-head { padding: 0; background: transparent; border: 0; }
+.sp-settings-shell .settings-page .sp-remote-section > .sp-section-head .sp-section-title { display: none; }
+.sp-settings-shell .settings-page .sp-remote-tabs { margin: 0; flex-wrap: wrap; }
+
+/* Local capabilities share General's sections, rows, and controls. */
+.sp-settings-shell .settings-page-remote { container-type: inline-size; }
+.settings-remote-capabilities { display: flex; flex-direction: column; gap: 32px; min-width: 0; }
+.settings-remote-capabilities .settings-row { min-height: var(--settings-row-height); padding-block: var(--settings-row-padding); }
+.settings-remote-capabilities .settings-remote-parallel-input { width: 80px; padding: 6px 10px; }
+.settings-remote-capabilities .settings-row-entry > .sp-remote-message { display: block; margin: 0 0 14px; }
+.settings-remote-roster-body { padding-block: 16px; }
+.settings-remote-roster-body :is(.sp-image-assist-roster-summary, .sp-image-assist-roster-empty) { margin-top: 0; }
+.settings-remote-roster-body .sp-image-assist-roster-summary { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.settings-remote-roster-body .sp-image-assist-roster-summary:hover { background: transparent; color: var(--accent); }
+.sp-settings-shell .settings-page-remote .sp-remote-tabs { border-radius: 8px; }
+.sp-settings-shell .settings-page-remote .sp-remote-tab { min-height: 30px; padding: 5px 12px; border: 1px solid transparent; border-radius: 5px; font-size: 12px; }
+.sp-settings-shell .settings-page-remote .sp-remote-tab.active { border-color: var(--border); background: var(--bg-1); box-shadow: 0 1px 2px #0000000a; }
+
+/* Embedded extensions use the outer settings scroller; drawers retain viewport positioning. */
+.sp-settings-shell .settings-page .sp-extensions-embed { flex: 0 0 auto; min-height: 0; }
+.sp-settings-shell .settings-page-extensions .ext-page { height: auto; min-height: 0; overflow: visible; background: transparent; }
+.sp-settings-shell .settings-page-extensions :is(.ext-head, .ext-head-inner, .ext-scroll) { padding: 0; width: 100%; max-width: none; height: auto; overflow: visible; background: transparent; border: 0; }
+.sp-settings-shell .settings-page-extensions .ext-head-inner { display: block; }
+.sp-settings-shell .settings-page-extensions .ext-head-controls { justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.sp-settings-shell .settings-page-extensions .ext-scroll { margin-top: 28px; }
+.sp-settings-shell .settings-page-extensions .ext-section { margin-bottom: 32px; }
+.sp-settings-shell .settings-page-extensions .ext-section-head h2 { font-size: 15px; line-height: 1.5; font-weight: 600; }
+.sp-settings-shell .settings-page-extensions .ext-catalog { grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
+.sp-settings-shell .settings-page-extensions .ext-card { background: var(--bg-1); }
+.sp-settings-shell .settings-page-extensions .ext-server-list { border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); background: var(--bg-1); }
+/* The embedded skills page flows in Settings instead of reserving a viewport. */
+.sp-settings-shell .settings-page-extensions .ext-skills-layout { height: auto; min-height: 0; align-items: start; }
+.sp-settings-shell .settings-page-extensions :is(.ext-skills-sidebar, .ext-skill-detail, .ext-skill-placeholder) { height: auto; }
+.sp-settings-shell .settings-page-extensions .ext-skills-list { max-height: min(60vh, 560px); overflow-y: auto; }
+.sp-settings-shell .settings-page-extensions .ext-skill-content { flex: 0 1 auto; min-height: 0; max-height: 60vh; }
+.sp-settings-shell .settings-page-extensions .ext-skill-placeholder { min-height: 200px; }
+
+@media (max-width: 1100px) {
+  .sp-settings-shell .settings-page :is(.st-row, .sp-model-select-row, .sp-env-python-config, .mail-settings-detail .sp-field) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .sp-settings-shell .settings-page .st-row-control { max-width: 100%; }
+  .sp-settings-shell .settings-page .sp-model-transport { grid-column: 1; margin: 0; }
+  .sp-settings-shell .settings-page .sp-env-python-control { justify-content: flex-start; }
+  .sp-settings-shell .settings-page .sp-usage-hero { grid-template-columns: minmax(0, 1fr); }
+  .sp-settings-shell .settings-page .sp-profile-columns { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .sp-settings-shell .sp-settings-nav-scroll { display: flex; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; }
+  .sp-settings-shell .sp-settings-nav-group { flex: 0 0 auto; }
+  .sp-settings-shell .sp-nav-item { flex: 0 0 auto; }
+}
+@media (max-width: 720px) {
+  .sp-settings-shell .settings-page-heading { flex-wrap: wrap; gap: 8px; }
+  .sp-settings-shell .settings-page-heading h1 { font-size: 23px; }
+  .sp-settings-shell .settings-page .settings-section-body { padding-inline: 16px; }
+  .sp-settings-shell .settings-page :is(.sp-update-section, .mail-settings-panel, .sp-profile-activity, .sp-profile-insights, .sp-profile-skills, .sp-usage-card) { padding: 16px; }
+  .sp-settings-shell .settings-page .sp-account-section { padding: 0; }
+  .sp-settings-shell .settings-page .mail-settings-detail .settings-actions { margin-inline: -16px; padding-inline: 16px; }
+  .sp-settings-shell .settings-page .sp-env-grid { grid-template-columns: minmax(0, 1fr); }
+  .sp-settings-shell .settings-page .sp-profile-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sp-settings-shell .settings-page :is(.sp-about-links-row, .sp-tool-availability-grid) { grid-template-columns: minmax(0, 1fr); }
+  .sp-settings-shell .settings-page .sp-about-link { width: 100%; }
+  .sp-settings-shell .settings-page .sp-remote-status-card { flex-wrap: wrap; }
+  .sp-settings-shell .settings-page .sp-remote-tabs { width: 100%; }
+  .sp-settings-shell .settings-page .sp-remote-tab { flex: 1; }
+  .sp-settings-shell .settings-page .settings-actions-note { flex-basis: 100%; }
+}

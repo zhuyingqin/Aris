@@ -7,10 +7,11 @@ import {
   isTauri,
 } from "../api/tauri";
 import { ImageAssistRoster } from "../remote/ImageAssistRoster";
+import { ImageAssistReadiness } from "../remote/ImageAssistReadiness";
 import type { Language } from "../store";
-import { SvgIcon } from "../SvgIcon";
 import type { ComputeNodeCapabilities, ComputeNodeConfig } from "../types";
 import { SETTINGS_COPY } from "./i18n";
+import { SettingRow, SettingsSection } from "./SettingsPrimitives";
 
 interface LocalDeviceCapabilitiesProps {
   language: Language;
@@ -99,117 +100,73 @@ export default function LocalDeviceCapabilities({
   }
 
   return (
-    <section className="sp-remote-capabilities" aria-labelledby="remote-capabilities-title">
-      <div className="sp-remote-devices-head">
-        <div>
-          <div className="sp-section-title" id="remote-capabilities-title">{copy.title}</div>
-          <div className="sp-section-sub">{copy.subtitle}</div>
-        </div>
+    <div className="settings-remote-capabilities">
+      {message && <span className="sp-remote-message" role="status">{message}</span>}
+
+      <SettingsSection title={copy.title} actions={
         <span className={"sp-remote-capability-badge" + (config.acceptRemoteJobs ? " enabled" : "")}>
           {config.acceptRemoteJobs ? copy.badgeAccepting : copy.badgeLocalOnly}
         </span>
-      </div>
+      }>
+        <SettingRow title={copy.maxParallelJobsLabel} description={capabilities
+          ? [capabilities.logicalCpus + " CPU", capabilities.platform, capabilities.architecture].join(" · ")
+          : copy.detectingCapabilities}>
+          <input
+            className="settings-remote-parallel-input"
+            aria-label={copy.maxParallelJobsLabel}
+            type="number"
+            min={1}
+            max={64}
+            value={config.maxParallelJobs}
+            onChange={(event) => updateConfigDraft({
+              maxParallelJobs: Math.max(1, Math.min(64, Number(event.target.value) || 1)),
+            })}
+            onBlur={() => persistConfig(config)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+          />
+        </SettingRow>
 
-      {message && <span className="sp-remote-message" role="status">{message}</span>}
+        <SettingRow title={copy.acceptRemoteJobsTitle} description={copy.acceptRemoteJobsDesc}>
+          <button type="button" className="settings-switch" role="switch"
+            aria-label={copy.acceptRemoteJobsTitle} aria-checked={config.acceptRemoteJobs}
+            onClick={() => persistConfig({ ...config, acceptRemoteJobs: !config.acceptRemoteJobs })}>
+            <span />
+          </button>
+        </SettingRow>
 
-      <div className="sp-remote-capability-grid">
-        <div className="sp-remote-capability-card">
-          <label>
-            <span className="sp-remote-capability-card-label">{copy.maxParallelJobsLabel}</span>
-            <input
-              className="sp-remote-capability-parallel-input"
-              aria-label={copy.maxParallelJobsLabel}
-              type="number"
-              min={1}
-              max={64}
-              value={config.maxParallelJobs}
-              onChange={(event) => updateConfigDraft({
-                maxParallelJobs: Math.max(1, Math.min(64, Number(event.target.value) || 1)),
-              })}
-              onBlur={() => persistConfig(config)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") event.currentTarget.blur();
-              }}
-            />
-          </label>
-          <small>
-            {capabilities
-              ? [capabilities.logicalCpus + " CPU", capabilities.platform, capabilities.architecture].join(" · ")
-              : copy.detectingCapabilities}
-          </small>
+        <SettingRow title={copy.acceptRemoteAgentChatsTitle} description={copy.acceptRemoteAgentChatsDesc}>
+          <button type="button" className="settings-switch" role="switch"
+            aria-label={copy.acceptRemoteAgentChatsTitle} aria-checked={config.acceptRemoteAgentChats}
+            onClick={() => persistConfig({ ...config, acceptRemoteAgentChats: !config.acceptRemoteAgentChats })}>
+            <span />
+          </button>
+        </SettingRow>
+
+        <SettingRow title={copy.acceptImageHelpTitle} description={copy.acceptImageHelpDesc}
+          feedback={<ImageAssistReadiness enabled={config.acceptImageHelp} language={language} />}>
+          <button type="button" className="settings-switch" role="switch"
+            aria-label={copy.acceptImageHelpTitle} aria-checked={config.acceptImageHelp}
+            onClick={() => persistConfig({ ...config, acceptImageHelp: !config.acceptImageHelp })}>
+            <span />
+          </button>
+        </SettingRow>
+
+        <SettingRow title={copy.preferImageHelpTitle} description={copy.preferImageHelpDesc}>
+          <button type="button" className="settings-switch" role="switch"
+            aria-label={copy.preferImageHelpTitle} aria-checked={config.preferImageHelp}
+            onClick={() => persistConfig({ ...config, preferImageHelp: !config.preferImageHelp })}>
+            <span />
+          </button>
+        </SettingRow>
+      </SettingsSection>
+
+      <SettingsSection title={copy.imageAssistRosterTitle} description={copy.imageAssistRosterDesc}>
+        <div className="settings-remote-roster-body">
+          <ImageAssistRoster language={language} />
         </div>
-      </div>
-
-      <label className="sp-remote-capability-toggle">
-        <span className="sp-remote-capability-icon"><SvgIcon name="shieldCheck" size={18} /></span>
-        <span className="sp-remote-capability-copy">
-          <strong>{copy.acceptRemoteJobsTitle}</strong>
-          <small>{copy.acceptRemoteJobsDesc}</small>
-        </span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={config.acceptRemoteJobs}
-          onChange={(event) => persistConfig({ ...config, acceptRemoteJobs: event.target.checked })}
-        />
-      </label>
-
-      <label className="sp-remote-capability-toggle">
-        <span className="sp-remote-capability-icon"><SvgIcon name="user" size={18} /></span>
-        <span className="sp-remote-capability-copy">
-          <strong>{copy.acceptRemoteAgentChatsTitle}</strong>
-          <small>{copy.acceptRemoteAgentChatsDesc}</small>
-        </span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={config.acceptRemoteAgentChats}
-          onChange={(event) => persistConfig({
-            ...config,
-            acceptRemoteAgentChats: event.target.checked,
-          })}
-        />
-      </label>
-
-      <label className="sp-remote-capability-toggle">
-        <span className="sp-remote-capability-icon"><SvgIcon name="image" size={18} /></span>
-        <span className="sp-remote-capability-copy">
-          <strong>{copy.acceptImageHelpTitle}</strong>
-          <small>{copy.acceptImageHelpDesc}</small>
-        </span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={config.acceptImageHelp}
-          onChange={(event) => persistConfig({
-            ...config,
-            acceptImageHelp: event.target.checked,
-          })}
-        />
-      </label>
-
-      <label className="sp-remote-capability-toggle">
-        <span className="sp-remote-capability-icon"><SvgIcon name="image" size={18} /></span>
-        <span className="sp-remote-capability-copy">
-          <strong>{copy.preferImageHelpTitle}</strong>
-          <small>{copy.preferImageHelpDesc}</small>
-        </span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={config.preferImageHelp}
-          onChange={(event) => persistConfig({
-            ...config,
-            preferImageHelp: event.target.checked,
-          })}
-        />
-      </label>
-
-      <div className="sp-remote-capability-roster">
-        <div className="sp-section-title">{copy.imageAssistRosterTitle}</div>
-        <div className="sp-section-sub">{copy.imageAssistRosterDesc}</div>
-        <ImageAssistRoster language={language} />
-      </div>
-    </section>
+      </SettingsSection>
+    </div>
   );
 }

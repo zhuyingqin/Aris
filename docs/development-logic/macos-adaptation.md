@@ -43,6 +43,84 @@ native window behavior. Tectonic packaging is retired on every OS.
 
 ## Development and release
 
+### Files and Folders consent
+
+Opening a project under Desktop, Documents, Downloads, iCloud Drive or a
+removable/network volume may require macOS Files and Folders consent. A grant
+for one protected location does not grant all of the other locations.
+
+To avoid asking for unrelated folders during launch:
+
+- Reading the project registry resolves metadata without probing the saved
+  current directory. Only startup or explicit activation checks that folder.
+- Interrupted batch-write recovery and stale staged-write cleanup run before
+  that project's first execution context is prepared, including an authorized
+  background task. Startup no longer reads these directories for every saved
+  project. Recovery is attempted once per workspace per process so reopening
+  it cannot roll back a live write, even if an older journal reported an error.
+- A successful native workspace watch is reused without a directory probe on
+  every 500ms tick. A permission-denied binding waits for explicit project
+  reactivation; other binding failures retry after 1, 2, 4, 8, 16, 32 and then
+  at most once every 60 seconds. Reopening or changing projects resets the wait.
+
+These changes reduce unnecessary access requests. They cannot preserve a
+system grant across different application identities. An application-side
+`authorized: true` flag cannot replace the system grant.
+
+Releases up to 0.4.75 were never bundle-signed. Only the linker signed the
+arm64 executable, so Info.plist and resources were not sealed. macOS kept
+asking for the same folders on every launch, not just after updates. Release
+signing now has three levels (`desktop/scripts/macos-signing.sh`):
+
+| Build | Designated requirement | Grants survive |
+| --- | --- | --- |
+| unsealed (up to 0.4.75) | none usable | nothing; prompts on every launch |
+| ad-hoc, `signingIdentity: "-"` in `tauri.macos.conf.json` | `cdhash H"…"` | relaunches of that build, not updates |
+| self-signed release certificate | `identifier "com.aris.studio" and certificate root = H"<sha1>"` | updates too |
+
+- Local `tauri build` and a release without the signing secrets get ad-hoc.
+  The release job warns when this happens.
+- With `MACOS_SIGNING_P12` / `MACOS_SIGNING_P12_PASSWORD` configured, the job
+  imports the certificate into a throwaway keychain and trusts it on the
+  runner. It then passes the SHA-1 as `APPLE_SIGNING_IDENTITY`, which Tauri
+  prefers over the config's `"-"`. The secrets are not named
+  `APPLE_CERTIFICATE*`, because Tauri's own import only accepts Apple-issued
+  identities.
+- Before upload, `verify` fails the job in three cases: the bundle seal is
+  broken, the requirement is still `cdhash` while a certificate is configured,
+  or the requirement names a different certificate.
+- The `.app.zip` is made with `ditto`. `zip -r` can rewrite the bundle
+  contents and break the seal.
+- `hardenedRuntime` is off. It only matters for notarization, and turning it on
+  would change what the unnotarized app can load.
+
+Generate the certificate once with `bash desktop/scripts/macos-signing.sh
+create <dir-outside-repo>`, then back up the p12. A new certificate is a new
+identity, so every user re-grants each folder once more. The first release
+signed with it also asks one last time. The self-signed certificate does
+nothing for Gatekeeper: first launch still needs Privacy & Security -> Open
+Anyway.
+
+For Gatekeeper trust as well, use a Developer ID Application certificate.
+Setting `APPLE_SIGNING_IDENTITY` and the main-app signature is not a complete
+notarization pipeline. Notarization also requires signing every distributed
+Mach-O helper, including those inside runtime archives, enabling hardened
+runtime, and giving the Node helpers the entitlements they need. Do not
+substitute an identifier-only custom designated requirement or reset TCC on
+each launch.
+
+References:
+- https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web
+- https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
+- https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac
+
+Physical-Mac regression still required: use projects in two protected folders;
+confirm opening one does not request the other; approve and relaunch the same
+installed build; deny a workspace watch and confirm it does not loop; grant
+access in System Settings and reopen the project; then update between two
+releases signed with the same certificate and confirm there is no new prompt. Windows unit tests do not verify macOS TCC
+behavior or permission continuity after an update.
+
 ```sh
 cd desktop
 npm ci
@@ -59,8 +137,9 @@ SOMNIQ_BUILD_TARGET=universal-apple-darwin npm run tauri build -- --target unive
 Release CI sets this variable. The existing updater manifest includes both CPU
 architectures and must continue to point to the Universal archive.
 
-The current release job remains unsigned with respect to Apple Developer ID.
-Tauri updater signatures do not replace Apple signing/notarization. Before a
+The release job signs the app ad-hoc or with the self-signed certificate (see
+above), never with an Apple Developer ID. Tauri updater signatures do not
+replace Apple signing/notarization. Before a
 public signed release, provision Developer ID credentials, sign all distributed
 Mach-O helpers (including executable resources inside runtime archives), enable
 appropriate hardened runtime entitlements for Node, and notarize/staple the final
