@@ -6,6 +6,7 @@ import type { ConfigSecretKind } from "../types";
 import { SETTINGS_COPY } from "./i18n";
 
 export default function KeyInput({
+  label,
   value,
   placeholder,
   masked,
@@ -14,6 +15,7 @@ export default function KeyInput({
   language,
   disabled = false,
 }: {
+  label: string;
   value: string;
   placeholder: string;
   masked: string | null | undefined;
@@ -59,6 +61,7 @@ export default function KeyInput({
   return (
     <div className="st-key-wrap" data-has-saved-secret={Boolean(masked)}>
       <input
+        aria-label={label}
         type={visible ? "text" : "password"}
         value={displayValue}
         placeholder={placeholder}
@@ -73,14 +76,15 @@ export default function KeyInput({
       />
       <button
         type="button"
-        className="st-key-eye"
+        className="sp-btn sp-btn-secondary st-key-eye"
         onClick={() => void toggleVisible()}
         disabled={disabled || loading || (!value && !masked)}
         title={error || (visible ? keyCopy.keyHideSecret : keyCopy.keyShowSecret)}
+        aria-label={`${visible ? keyCopy.keyHideSecret : keyCopy.keyShowSecret}: ${label}`}
       >
         {loading ? "..." : visible ? keyCopy.keyHide : keyCopy.keyShow}
       </button>
-      {error && <span className="st-key-error">{error}</span>}
+      {error && <span className="st-key-error" role="alert">{error}</span>}
     </div>
   );
 }

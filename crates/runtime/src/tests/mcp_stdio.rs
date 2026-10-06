@@ -38,6 +38,115 @@ fn temp_dir() -> PathBuf {
     ))
 }
 
+#[cfg(windows)]
+fn owned_child_transport(exit_parent: bool) -> (crate::mcp_client::McpStdioTransport, PathBuf) {
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("child fixture directory");
+    let heartbeat = root.join("heartbeat");
+    let script = root.join("detached-child.py");
+    let child_script = "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nfor n in range(200):\n p.write_text(str(n))\n time.sleep(0.05)\n";
+    let script_body = format!(
+        "import pathlib,subprocess,sys,time\ntime.sleep(0.2)\np=pathlib.Path(sys.argv[1])\nsubprocess.Popen([sys.executable,'-c',{},str(p)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)\nwhile not p.exists(): time.sleep(0.01)\nprint('READY',flush=True)\n{}\n",
+        serde_json::to_string(child_script).expect("child code"),
+        if exit_parent { "sys.exit(0)" } else { "sys.stdin.buffer.read()" },
+    );
+    fs::write(&script, script_body).expect("child fixture script");
+    let mut transport = standard_script_transport(&script);
+    transport
+        .args
+        .push(heartbeat.to_string_lossy().into_owned());
+    transport
+        .env
+        .insert("SOMNIQ_MCP_OWN_PROCESS_TREE".into(), "1".into());
+    transport.request_timeout_secs = Some(1);
+    (transport, heartbeat)
+}
+
+#[cfg(windows)]
+async fn assert_owned_child_stopped(heartbeat: &Path) {
+    // A killed descendant may finish one pending write. Compare after that
+    // settles, while the unowned fixture would still run for ten seconds.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let before = fs::read_to_string(heartbeat).expect("child heartbeat");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        fs::read_to_string(heartbeat).expect("child heartbeat"),
+        before,
+        "a browser-like descendant is still alive after MCP cleanup"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn owned_mcp_shutdown_releases_descendants_after_the_controller_exits() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (transport, heartbeat) = owned_child_transport(true);
+        let mut process = McpStdioProcess::spawn(&transport).expect("owned MCP process");
+        assert_eq!(
+            process.read_line().await.expect("child ready").trim(),
+            "READY"
+        );
+        assert!(process.wait().await.expect("controller exit").success());
+        let before = fs::read_to_string(&heartbeat).expect("initial heartbeat");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_ne!(
+            fs::read_to_string(&heartbeat).expect("live heartbeat"),
+            before
+        );
+        process.shutdown().await.expect("shutdown owned tree");
+        assert_owned_child_stopped(&heartbeat).await;
+        fs::remove_dir_all(heartbeat.parent().expect("fixture root")).expect("fixture cleanup");
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn dropping_an_owned_mcp_process_releases_its_descendants() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (transport, heartbeat) = owned_child_transport(false);
+        let mut process = McpStdioProcess::spawn(&transport).expect("owned MCP process");
+        assert_eq!(
+            process.read_line().await.expect("child ready").trim(),
+            "READY"
+        );
+        drop(process);
+        assert_owned_child_stopped(&heartbeat).await;
+        fs::remove_dir_all(heartbeat.parent().expect("fixture root")).expect("fixture cleanup");
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn owned_mcp_request_timeout_releases_its_descendants() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (transport, heartbeat) = owned_child_transport(false);
+        let mut process = McpStdioProcess::spawn(&transport).expect("owned MCP process");
+        assert_eq!(
+            process.read_line().await.expect("child ready").trim(),
+            "READY"
+        );
+        let error = process
+            .initialize(JsonRpcId::Number(1), super::default_initialize_params())
+            .await
+            .expect_err("unresponsive MCP times out");
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_owned_child_stopped(&heartbeat).await;
+        fs::remove_dir_all(heartbeat.parent().expect("fixture root")).expect("fixture cleanup");
+    });
+}
+
 fn make_executable(script_path: &Path) {
     #[cfg(not(unix))]
     let _ = script_path;

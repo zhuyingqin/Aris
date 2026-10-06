@@ -18,14 +18,16 @@ export type SettingsNavId =
   | "remote"
   | "extensions"
   | "environment"
+  | "update"
   | "about";
 
 export type SettingsNavGroupId = "personal" | "integration" | "system";
+export type SettingsPageId = Exclude<SettingsNavId, "account" | "environment" | "update">;
 
 export interface SettingsNavItemDef {
-  id: SettingsNavId;
+  id: SettingsPageId;
   icon: ReactNode;
-  /** Renders a trailing ↗ affordance (e.g. account opens the gateway). */
+  /** Renders a trailing ↗ affordance for external destinations. */
   external?: boolean;
 }
 
@@ -110,6 +112,11 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <path d="M8 7.3v3.4M8 5.2h.01" />
     </>,
   ),
+  update: svg(
+    <>
+      <path d="M12.8 5.8A5.2 5.2 0 0 0 3.4 3.9L2 5.5M2 2.6v2.9h2.9M3.2 10.2a5.2 5.2 0 0 0 9.4 1.9l1.4-1.6M14 13.4v-2.9h-2.9" />
+    </>,
+  ),
 };
 
 export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
@@ -118,7 +125,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     items: [
       { id: "profile", icon: NAV_ICONS.profile },
       { id: "general", icon: NAV_ICONS.general },
-      { id: "account", icon: NAV_ICONS.account },
     ],
   },
   {
@@ -157,8 +163,18 @@ export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([
   ...SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
   "environment",
+  "account",
+  "update",
 ]);
 
 export function isSettingsNavId(value: unknown): value is SettingsNavId {
   return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
+}
+
+/** Keep stored requests and old links working after categories are merged. */
+export function resolveSettingsPageId(value: unknown): SettingsPageId | null {
+  if (!isSettingsNavId(value)) return null;
+  if (value === "account") return "profile";
+  if (value === "environment" || value === "update") return "about";
+  return value;
 }

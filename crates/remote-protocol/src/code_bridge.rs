@@ -47,6 +47,55 @@ pub const CODE_BRIDGE_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// minified bundle pasted into a prompt helps nobody.
 pub const CODE_BRIDGE_MAX_SELECTION_BYTES: usize = 32 * 1024;
 
+/// Navigation and account presentation only; credentials stay in the desktop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeShellState {
+    pub language: String,
+    pub modules: Vec<CodeShellModule>,
+    pub projects: Vec<CodeShellProject>,
+    pub current_project_id: Option<String>,
+    pub project_busy: bool,
+    pub account: CodeShellAccount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeShellModule {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeShellProject {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeShellAccount {
+    pub name: String,
+    pub plan: String,
+    pub allowance: String,
+    pub remaining_percent: Option<u8>,
+}
+
+/// User gestures from native workbench menus. IDs are resolved by the desktop
+/// against its current project/module list, never used as paths or commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CodeShellAction {
+    SelectModule { id: String },
+    SelectProject { id: String },
+    AddProject,
+    RevealProject,
+    Settings,
+    SignOut,
+}
+
 /// A message from the extension to the desktop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -97,6 +146,14 @@ pub enum BridgeToHost {
         /// Paths that could not be written, with the reason.
         failed: Vec<String>,
     },
+    ShellAction {
+        action: CodeShellAction,
+    },
+    /// Acknowledges that the native controls have been populated. The desktop
+    /// keeps its header until the latest snapshot has actually been applied.
+    ShellReady {
+        revision: u32,
+    },
 }
 
 /// A message from the desktop to the extension.
@@ -105,6 +162,10 @@ pub enum BridgeToHost {
 pub enum HostToBridge {
     /// The handshake was accepted.
     Welcome { protocol_version: u32 },
+    SetShell {
+        revision: u32,
+        shell: CodeShellState,
+    },
     /// Flush every dirty editor before Aris touches the working tree.
     ///
     /// Without this an AI edit races the user's unsaved buffer: whichever
@@ -213,6 +274,62 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn shell_handoff_and_actions_round_trip() {
+        let message = HostToBridge::SetShell {
+            revision: 7,
+            shell: CodeShellState {
+                language: "cn".into(),
+                modules: vec![CodeShellModule {
+                    id: "lab".into(),
+                    label: "代码".into(),
+                }],
+                projects: vec![CodeShellProject {
+                    id: "p1".into(),
+                    name: "work".into(),
+                    path: "D:/work".into(),
+                }],
+                current_project_id: Some("p1".into()),
+                project_busy: false,
+                account: CodeShellAccount {
+                    name: "Researcher".into(),
+                    plan: "Pro".into(),
+                    allowance: "$12.50".into(),
+                    remaining_percent: Some(75),
+                },
+            },
+        };
+        let json = serde_json::to_string(&message).expect("serialize shell");
+        assert!(json.contains("\"currentProjectId\":\"p1\""));
+        assert_eq!(
+            serde_json::from_str::<HostToBridge>(&json).expect("decode shell"),
+            message
+        );
+        assert!(serde_json::from_str::<BridgeToHost>(&json).is_err());
+        for action in [
+            CodeShellAction::SelectModule { id: "chat".into() },
+            CodeShellAction::SelectProject { id: "p1".into() },
+            CodeShellAction::AddProject,
+            CodeShellAction::RevealProject,
+            CodeShellAction::Settings,
+            CodeShellAction::SignOut,
+        ] {
+            let message = BridgeToHost::ShellAction { action };
+            let json = serde_json::to_string(&message).expect("serialize action");
+            assert_eq!(
+                serde_json::from_str::<BridgeToHost>(&json).expect("decode action"),
+                message
+            );
+            assert!(serde_json::from_str::<HostToBridge>(&json).is_err());
+        }
+        let ready = BridgeToHost::ShellReady { revision: 7 };
+        assert_eq!(
+            serde_json::from_str::<BridgeToHost>(r#"{"type":"shell-ready","revision":7}"#)
+                .expect("decode acknowledgement"),
+            ready
+        );
     }
 
     /// The two directions must not be confusable: a frame meant for one side

@@ -1,0 +1,43 @@
+/* Environment diagnostics shares General's typography, rows, and controls. */
+.sp-settings-shell .settings-environment { min-width: 0; container-type: inline-size; }
+.sp-settings-shell .settings-environment .settings-row { min-height: var(--settings-row-height); padding-block: var(--settings-row-padding); }
+.sp-settings-shell .settings-environment .settings-row-control { width: var(--settings-control-width); flex-basis: var(--settings-control-width); }
+.sp-settings-shell .settings-environment-path-control { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; width: 100%; min-width: 0; }
+.sp-settings-shell .settings-environment-path-input { display: flex; align-items: center; width: 100%; min-width: 0; min-height: var(--settings-control-height); border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
+.sp-settings-shell .settings-environment-path-input:focus-within { border-color: var(--accent); }
+.sp-settings-shell .settings-page .settings-environment-path-input input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]) { flex: 1; width: 100%; min-width: 0; min-height: 0; padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; box-shadow: none; }
+.sp-settings-shell .settings-environment-path-input:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sp-settings-shell .settings-environment-path-input input:focus-visible { outline: none; }
+.sp-settings-shell .settings-environment-path-input .sp-btn { flex: 0 0 auto; min-width: 30px; min-height: 28px; margin-right: 3px; padding: 5px; border: 0; border-radius: 5px; background: transparent; box-shadow: none; color: var(--text-dim); }
+.sp-settings-shell .settings-environment-path-input .sp-btn:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.sp-settings-shell .settings-environment .sp-btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 90%, var(--text)); box-shadow: none; filter: none; transform: none; }
+.sp-settings-shell .settings-environment .sp-env-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px 0 20px; border-top: 1px solid var(--border); }
+.sp-settings-shell .settings-environment .sp-env-card { padding: 16px; border-color: var(--border); border-radius: 10px; background: var(--bg-2); box-shadow: none; }
+.sp-settings-shell .settings-environment .sp-env-card-top { gap: 10px; align-items: flex-start; }
+.sp-settings-shell .settings-environment .sp-env-mark { width: 28px; height: 28px; border-radius: 6px; background: transparent; }
+.sp-settings-shell .settings-environment .sp-env-title { font-size: 14px; font-weight: 600; line-height: 1.5; }
+.sp-settings-shell .settings-environment .sp-env-category { margin-top: 2px; font-size: 12px; font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-environment .sp-env-badge { max-width: 45%; padding: 2px 8px; font-size: 11px; font-weight: 500; line-height: 1.5; }
+.sp-settings-shell .settings-environment-details { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 10px; margin: 14px 0 0; }
+.sp-settings-shell .settings-environment-details > div { min-width: 0; }
+.sp-settings-shell .settings-environment-details dt { color: var(--text-dim); font-size: 11px; font-weight: 400; line-height: 1.5; }
+.sp-settings-shell .settings-environment-details dd { margin: 3px 0 0; color: var(--text); font-family: inherit; font-size: 12px; font-weight: 400; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-settings-shell .settings-environment .sp-env-message { margin-top: 10px; font-size: 12px; font-weight: 400; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-environment-install { position: relative; }
+.sp-settings-shell .settings-environment-install > summary { list-style: none; cursor: pointer; font-family: inherit; font-weight: 600; }
+.sp-settings-shell .settings-environment-install > summary::-webkit-details-marker { display: none; }
+.sp-settings-shell .settings-environment-install[open] > summary svg { transform: rotate(180deg); }
+.sp-settings-shell .settings-environment-install-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 10; display: grid; min-width: 160px; max-width: min(280px, 80vw); padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-1); box-shadow: 0 4px 16px #0002; }
+.sp-settings-shell .settings-environment-install:not([open]) .settings-environment-install-menu { display: none; }
+.sp-settings-shell .settings-environment-install-menu button { border: 0; border-radius: 5px; background: transparent; color: var(--text); padding: 8px 10px; font: inherit; font-size: 12px; line-height: 1.5; text-align: left; cursor: pointer; }
+.sp-settings-shell .settings-environment-install-menu button:hover { background: var(--bg-2); }
+@container (max-width: 620px) {
+  .sp-settings-shell .settings-environment .settings-row-control { width: 100%; flex-basis: 100%; align-items: stretch; }
+  .sp-settings-shell .settings-environment .sp-env-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@container (max-width: 360px) {
+  .sp-settings-shell .settings-environment .sp-env-card-top { flex-wrap: wrap; }
+  .sp-settings-shell .settings-environment .sp-env-title-block { flex-basis: calc(100% - 38px); }
+  .sp-settings-shell .settings-environment .sp-env-badge { margin-left: 38px; max-width: calc(100% - 38px); }
+  .sp-settings-shell .settings-environment-details { grid-template-columns: minmax(0, 1fr); }
+}

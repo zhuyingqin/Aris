@@ -38,6 +38,11 @@ pub struct UsageLogEntry {
     /// nothing about which call was slow.
     #[serde(default)]
     pub duration_ms: u64,
+    /// Full turn wall time, stored once on its final billable row. Separate
+    /// from request latency so tools/approvals survive event-log compaction
+    /// without inflating per-request duration totals. Zero on legacy rows.
+    #[serde(default)]
+    pub turn_duration_ms: u64,
     /// Reasoning effort applied for this turn (empty when not applicable or on
     /// legacy rows).
     #[serde(default)]
@@ -104,6 +109,7 @@ fn build_usage_rows(
                 cache_creation_input_tokens: usage.cache_creation_input_tokens,
                 cache_read_input_tokens: usage.cache_read_input_tokens,
                 duration_ms: timing.duration_ms,
+                turn_duration_ms: 0,
                 reasoning_effort: reasoning_effort.to_string(),
                 turn_id: turn_id.to_string(),
             }
@@ -116,6 +122,9 @@ fn build_usage_rows(
         if let Some(last) = entries.last_mut() {
             last.duration_ms = turn_duration_ms;
         }
+    }
+    if let Some(last) = entries.last_mut() {
+        last.turn_duration_ms = turn_duration_ms;
     }
     entries
 }

@@ -199,13 +199,25 @@ fn built_in_research_gateway_routes_are_fixed_and_provider_scoped() {
         somniq_research_gateway_url("bocha")
             .expect("Bocha gateway URL")
             .as_str(),
-        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/bocha"
+        "https://somni.ensuanx.com/research/bocha"
+    );
+    assert_eq!(
+        somniq_research_gateway_url("zhihu")
+            .expect("Zhihu gateway URL")
+            .as_str(),
+        "https://somni.ensuanx.com/research/zhihu"
     );
     assert_eq!(
         somniq_research_gateway_url("/openalex/works")
             .expect("OpenAlex gateway URL")
             .as_str(),
-        "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/openalex/works"
+        "https://somni.ensuanx.com/research/openalex/works"
+    );
+    assert_eq!(
+        somniq_research_gateway_url("openalex/works/doi:10.1038/nature14539")
+            .expect("OpenAlex DOI gateway URL")
+            .as_str(),
+        "https://somni.ensuanx.com/research/openalex/works/doi:10.1038/nature14539"
     );
 }
 

@@ -1495,6 +1495,7 @@ pub async fn literature_add_identifier(
                 max_results: Some(3),
                 time_window: None,
                 sort_order: None,
+                ..Default::default()
             },
         )
     })
@@ -2173,9 +2174,6 @@ pub fn literature_search_protocol_create(
     projects_state: State<ProjectState>,
     protocol: runtime::SearchProtocolDraft,
 ) -> Result<Value, String> {
-    if let Some(message) = crate::membership::systematic_search_denial() {
-        return Err(message);
-    }
     tools::literature::literature_search_protocol_create_at(
         &project_base(&projects_state)?,
         tools::literature::LiteratureSearchProtocolCreateInput { protocol },
@@ -2187,12 +2185,9 @@ pub fn literature_search_protocol_preview(
     projects_state: State<ProjectState>,
     protocol_id: String,
 ) -> Result<Value, String> {
-    if let Some(message) = crate::membership::systematic_search_denial() {
-        return Err(message);
-    }
     tools::literature::literature_search_preview_at(
         &project_base(&projects_state)?,
-        tools::literature::LiteratureSearchPreviewInput { protocol_id },
+        tools::literature::LiteratureSearchPreviewInput::for_protocol(protocol_id),
     )
 }
 
@@ -2206,7 +2201,7 @@ pub async fn literature_search_protocol_execute(
     variant_budgets: Option<std::collections::BTreeMap<String, usize>>,
     request_id: Option<String>,
 ) -> Result<Value, String> {
-    if let Some(message) = crate::membership::systematic_search_denial() {
+    if let Some(message) = crate::membership::external_literature_denial() {
         return Err(message);
     }
     let base = project_base(&projects_state)?;

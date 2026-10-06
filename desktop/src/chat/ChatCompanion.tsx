@@ -137,7 +137,7 @@ export default function ChatCompanion() {
   };
 
   return (
-    <div className={`chat-companion-root${compact ? " is-compact" : ""}`}>
+    <div className={`chat-companion-root chat-background-surface${compact ? " is-compact" : ""}`}>
       <header className="chat-companion-titlebar">
         <div className="chat-companion-brand" data-tauri-drag-region>
           <span className="chat-companion-mark" aria-hidden="true">

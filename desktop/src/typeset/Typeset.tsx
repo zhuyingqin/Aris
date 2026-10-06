@@ -734,6 +734,8 @@ export default function Typeset() {
   const [syncedBeamerPage, setSyncedBeamerPage] = useState<number | null>(null);
   const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
   const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
+  type LeftPanelTab = "files" | "review" | "ai";
+  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
   const {
     projectPanelVisible, setProjectPanelVisible,
     pdfPanelVisible, setPdfPanelVisible,
@@ -742,9 +744,7 @@ export default function Typeset() {
     outlineCollapsed, setOutlineCollapsed,
     beginPanelResizeFromPointer, beginOutlineResizeFromPointer,
     handlePanelResizeKey, handleOutlineResizeKey,
-  } = useTypesetPanels();
-  type LeftPanelTab = "files" | "review" | "ai";
-  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
+  } = useTypesetPanels(activeLeftTab === "ai");
   // Chat owns the live Typeset writing session. Once the user opens it, keep
   // that instance mounted while switching to Files or Review so its current
   // conversation and composer draft are not reset to the Chat home screen.
@@ -2094,26 +2094,6 @@ export default function Typeset() {
           ? new Date(base.createdAtMs).toLocaleString()
           : copy.pendingReviewRejectSinceUnknown;
         if (!window.confirm(copy.pendingReviewRejectConfirm(unopened.length, since))) return;
-      }
-    }
-    if (decision) {
-      // A blanket answer must not become a shortcut around the explicit
-      // complete-file choice. Inspect every still-open text operation first;
-      // non-text operations keep their compact accept/reject review.
-      for (const item of changeSet.decisions) {
-        if (item.decision !== "pending") continue;
-        try {
-          const operation = await typesetChangeSetReadText(changeSet.id, item.path);
-          if (!["create", "modify"].includes(operation.kind)
-            || operation.baseContent === null
-            || operation.incomingContent === null) continue;
-          // A project-level blanket answer is authoritative. Large files are
-          // still reviewable through Accept all / Reject all and do not require
-          // opening every file individually.
-        } catch {
-          // Deletes, moves and binary files are intentionally handled by the
-          // existing compact operation review.
-        }
       }
     }
     // Bulk accept/reject answers what is still open; it does not undo answers
@@ -4278,6 +4258,7 @@ export default function Typeset() {
     !hasWorkspaceDocument ? "start-mode" : "",
     !effectiveProjectPanelVisible ? "project-hidden" : "",
     !effectivePdfPanelVisible ? "pdf-hidden" : "",
+    activeLeftTab === "ai" ? "ai-chat-active" : "",
     slideFocusActive ? "slide-focus-mode" : "",
   ].filter(Boolean).join(" ");
   const gridStyle = {

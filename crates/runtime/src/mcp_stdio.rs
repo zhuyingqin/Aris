@@ -847,15 +847,28 @@ impl McpStdioProcess {
             }
         }
         crate::configure_managed_tokio_command(&mut command);
+        let owns_process_tree = transport
+            .env
+            .get("SOMNIQ_MCP_OWN_PROCESS_TREE")
+            .is_some_and(|value| value == "1");
+        command.kill_on_drop(owns_process_tree);
 
         let mut child = command.spawn()?;
-        let process_guard = child.id().map(|pid| {
-            crate::register_managed_process(
-                pid,
+        let process_guard = if owns_process_tree {
+            Some(crate::register_owned_tokio_process(
+                &child,
                 format!("mcp stdio: {}", transport.command),
                 crate::ManagedProcessKind::Mcp,
-            )
-        });
+            )?)
+        } else {
+            child.id().map(|pid| {
+                crate::register_managed_process(
+                    pid,
+                    format!("mcp stdio: {}", transport.command),
+                    crate::ManagedProcessKind::Mcp,
+                )
+            })
+        };
         let stdin = child
             .stdin
             .take()
@@ -1270,6 +1283,9 @@ impl McpStdioProcess {
         // negative-pid process-group signal here; hosted Linux runners have
         // cancelled the entire job when this test path tears down quickly.
         let _ = self.stdin.shutdown().await;
+        if let Some(guard) = &self._process_guard {
+            guard.terminate_owned_tree();
+        }
         if let Ok(Some(_)) = self.child.try_wait() {
             return Ok(());
         }
@@ -1285,9 +1301,9 @@ impl McpStdioProcess {
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
-        if self.child.try_wait()?.is_none() {
-            self.terminate().await?;
-        }
+        // The direct child can already be dead while its browser is still
+        // alive. Owned jobs must be released in that case as well.
+        self.terminate().await?;
         let _ = self.child.wait().await?;
         Ok(())
     }

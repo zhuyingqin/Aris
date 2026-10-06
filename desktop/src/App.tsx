@@ -17,6 +17,13 @@ import LiteratureViewTabs, { type LiteraturePageView } from "./literature/Litera
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
+import AppNavigationRail from "./AppNavigationRail";
+import AppProductSwitcher from "./AppProductSwitcher";
+import AppProjectSwitcher, { type AppProjectSwitcherCopy } from "./AppProjectSwitcher";
+import AppAccountMenu from "./AppAccountMenu";
+import { useCodeShell } from "./code/useCodeShell";
+import { formatQuota } from "./settings/settingsFormatters";
+import { accountMenuPlan } from "./accountMenuPlan";
 import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 import { requestWindowAction } from "./windowControls";
 import { WindowControlButtons } from "./WindowControlButtons";
@@ -43,7 +50,7 @@ const CodePane = lazy(loadCode);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
 
-type AppShellCopy = {
+type AppShellCopy = AppProjectSwitcherCopy & {
   nav: Record<Tab, string>;
   loading: (label: string) => string;
   viewErrorTitle: string;
@@ -51,31 +58,18 @@ type AppShellCopy = {
   tryAgain: string;
   userFallback: string;
   accountInfo: string;
-  account: string;
-  balance: (value: string) => string;
   back: string;
   forward: string;
   toggleSidebar: string;
   findConversations: string;
   productMenuLabel: string;
   switchProduct: (name: string) => string;
+  moreModules: string;
   minimizeWindow: string;
   maximizeWindow: string;
   closeWindow: string;
   openChatCompanion: string;
-  userMenu: string;
-  settings: string;
-  remainingUsage: string;
-  logout: string;
-  user: string;
-  currentProject: string;
-  noProject: string;
-  projects: string;
-  dragToReorder: string;
-  addProject: string;
-  add: string;
   runStateDir: string;
-  openWorkspace: string;
   dismiss: string;
   updateReady: (version: string) => string;
   updateDownloading: (version: string, percent?: number | null) => string;
@@ -102,29 +96,24 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     tryAgain: "重试",
     userFallback: "用户",
     accountInfo: "账户信息",
-    account: "账户",
-    balance: (value) => `余额 ${value}`,
     back: "后退",
     forward: "前进",
     toggleSidebar: "显示或隐藏对话侧栏",
     findConversations: "在侧栏中查找对话",
     productMenuLabel: "SomniQ 功能",
     switchProduct: (name) => `当前功能：${name}，点击切换`,
+    moreModules: "更多功能",
     minimizeWindow: "最小化窗口",
     maximizeWindow: "最大化窗口",
     closeWindow: "关闭窗口",
     openChatCompanion: "打开论文伴写悬浮窗",
-    userMenu: "用户菜单",
-    settings: "设置",
-    remainingUsage: "剩余用量",
-    logout: "退出登录",
-    user: "用户",
     currentProject: "当前项目",
     noProject: "无项目",
-    projects: "项目",
+    projects: "本地项目",
     dragToReorder: "拖动排序",
-    addProject: "添加 SomniQ 项目",
-    add: "添加",
+    addProject: "添加本地项目…",
+    openProjectFolder: "打开项目文件夹",
+    projectEmptyHint: "选择文件夹以添加项目",
     runStateDir: "运行状态目录",
     openWorkspace: "在文件管理器中打开工作目录",
     dismiss: "关闭",
@@ -151,29 +140,24 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     tryAgain: "Try again",
     userFallback: "User",
     accountInfo: "Account info",
-    account: "Account",
-    balance: (value) => `Balance ${value}`,
     back: "Back",
     forward: "Forward",
     toggleSidebar: "Show or hide the conversation sidebar",
     findConversations: "Find conversations in the sidebar",
     productMenuLabel: "SomniQ modules",
     switchProduct: (name) => `Current module: ${name}. Switch module`,
+    moreModules: "More modules",
     minimizeWindow: "Minimize window",
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
     openChatCompanion: "Open writing companion",
-    userMenu: "User menu",
-    settings: "Settings",
-    remainingUsage: "Remaining usage",
-    logout: "Sign out",
-    user: "User",
     currentProject: "Current project",
     noProject: "No project",
-    projects: "Projects",
+    projects: "Local projects",
     dragToReorder: "Drag to reorder",
-    addProject: "Add SomniQ project",
-    add: "Add",
+    addProject: "Add local project…",
+    openProjectFolder: "Open project folder",
+    projectEmptyHint: "Choose a folder to add a project",
     runStateDir: "run-state directory",
     openWorkspace: "Open workspace folder in file manager",
     dismiss: "Dismiss",
@@ -241,33 +225,16 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
 const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
 
-// Deep links into Settings address the sidebar entries directly, so the id set
-// is the nav's own — no translation layer to keep in sync.
+// Settings also resolves legacy category links to their current sidebar page.
 type RequestedSettingsTab = SettingsNavId;
 
-const IC = (p: { d: string; extra?: string }) => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+const ModuleIcon = ({ children }: { children: ReactNode }) => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
     aria-hidden="true">
-    <path d={p.d} />
-    {p.extra && <path d={p.extra} />}
+    {children}
   </svg>
 );
-
-// Chevron / control glyphs rendered as crisp SVG so they align on the pixel grid
-// instead of relying on font-dependent glyphs like "鈥?, "脳" or "v".
-const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
-  const s = p.size ?? 16;
-  const d = p.dir === "left" ? "M10 3.5 5.5 8l4.5 4.5"
-    : p.dir === "right" ? "M6 3.5 10.5 8 6 12.5"
-      : "M3.5 6 8 10.5 12.5 6";
-  return (
-    <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor"
-      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  );
-};
 
 // Titlebar glyphs. All share an 18px box with 1.5 strokes and round caps so the
 // left cluster reads as one row of evenly weighted icons.
@@ -299,31 +266,6 @@ const NavArrow = (p: { dir: "left" | "right" }) => (
   </TitlebarGlyph>
 );
 
-const GripIcon = () => (
-  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true">
-    <circle cx="3" cy="3" r="1.1" /><circle cx="7" cy="3" r="1.1" />
-    <circle cx="3" cy="7" r="1.1" /><circle cx="7" cy="7" r="1.1" />
-    <circle cx="3" cy="11" r="1.1" /><circle cx="7" cy="11" r="1.1" />
-  </svg>
-);
-
-const PlusIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-    strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
-    <path d="M8 3.5v9M3.5 8h9" />
-  </svg>
-);
-
-const UserCircleIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-    aria-hidden="true">
-    <circle cx="8" cy="8" r="6" />
-    <circle cx="8" cy="6.3" r="1.8" />
-    <path d="M4.8 12c.8-1.7 5.6-1.7 6.4 0" />
-  </svg>
-);
-
 const GearIcon = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
     stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
@@ -333,55 +275,53 @@ const GearIcon = () => (
   </svg>
 );
 
-const UsageIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-    aria-hidden="true">
-    <path d="M3.3 11.8a5.8 5.8 0 119.4 0" />
-    <path d="M8 8.4l2.6-2.6" />
-    <path d="M5 12.8h6" />
-  </svg>
-);
-
-const LogoutIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-    aria-hidden="true">
-    <path d="M6.5 3H3.8a1 1 0 00-1 1v8a1 1 0 001 1h2.7" />
-    <path d="M9.5 5.2L12.3 8l-2.8 2.8M12.1 8H6.2" />
-  </svg>
-);
-
 const PRIMARY_NAV_ITEMS: NavItem[] = [
   {
     id: "chat", label: "Chat",
-    icon: <IC d="M2 3a1 1 0 011-1h10a1 1 0 011 1v6.5a1 1 0 01-1 1H9.5L8 12l-1.5-1.5H3a1 1 0 01-1-1V3z" />,
+    icon: <ModuleIcon>
+      <path d="M5 3.5h14a2.5 2.5 0 0 1 2.5 2.5v9a2.5 2.5 0 0 1-2.5 2.5h-6.5L7 21v-3.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5Z" />
+      <path d="M7 8.5h10M7 12.5h6" />
+    </ModuleIcon>,
   },
   {
     id: "lab", label: "Code",
-    icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
+    icon: <ModuleIcon>
+      <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
+      <path d="m6.5 8.5 3.5 3.5-3.5 3.5M13 15.5h4.5" />
+    </ModuleIcon>,
   },
   {
     id: "typeset", label: "LaTeX",
-    icon: <IC d="M3 2.8h7.2L13 5.6v7.6H3zM10.2 2.8v2.8H13M5.2 7.1h5.6M5.2 9.2h5.6M5.2 11.3h3.2" />,
+    icon: <ModuleIcon>
+      {/* TeX's lowered E makes the editor recognizable without relying on a font. */}
+      <g fill="currentColor" stroke="none">
+        <path d="M.8 4.5h8.5v3.2H8V6H5.9v10.2h1.5v1.4H2.8v-1.4h1.5V6H2.1v1.7H.8Z" />
+        <path d="M8 7.5h7v2.8h-1.2V9h-3.3v3.9h2.6v-1.2h1.1v3.8h-1.1v-1.2h-2.6v4.3h3.3v-1.4H15V20H8v-1.4h1V9H8Z" />
+        <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
+      </g>
+    </ModuleIcon>,
   },
   {
     id: "literature", label: "Literature",
-    icon: <IC
-      d="M8 13.5V4C7 2.5 4.5 2.5 2 3.5V13c2.5-1 5-1 6 .5z"
-      extra="M8 13.5V4c1-1.5 3.5-1.5 6-.5V13c-2.5-1-5-1-6 .5z"
-    />,
+    icon: <ModuleIcon>
+      <path d="M12 5.5C9.5 3.5 5.5 3.2 2.5 4.3v15C6 18.1 9.5 18.5 12 20.5c2.5-2 6-2.4 9.5-1.2v-15C18.5 3.2 14.5 3.5 12 5.5Zm0 0v15" />
+      <path d="m5.5 8 3.5.7M15 8.7l3.5-.7" />
+    </ModuleIcon>,
   },
   {
     id: "workflows", label: "Workflows",
-    icon: <IC
-      d="M3 3.2h3.2v3.2H3zM9.8 9.6H13v3.2H9.8z"
-      extra="M6.2 4.8h2.1a2 2 0 012 2v2.8M4.6 6.4v3.2a2 2 0 002 2h3.2"
-    />,
+    icon: <ModuleIcon>
+      <rect x="3" y="3" width="6" height="6" rx="1.5" />
+      <rect x="15" y="15" width="6" height="6" rx="1.5" />
+      <path d="M9 6h5a4 4 0 0 1 4 4v5M6 9v5a4 4 0 0 0 4 4h5" />
+    </ModuleIcon>,
   },
   {
     id: "mail", label: "Mail",
-    icon: <IC d="M2 4.5h12v7H2zM2.5 5l5.5 4 5.5-4" />,
+    icon: <ModuleIcon>
+      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
+      <path d="m3.5 6 8.5 6.5L20.5 6" />
+    </ModuleIcon>,
   },
 ];
 
@@ -391,6 +331,11 @@ const UTILITY_NAV_ITEMS: NavItem[] = [
     label: "Settings",
     icon: <GearIcon />,
   },
+];
+
+const CHAT_DESTINATION_ITEMS: NavItem[] = [
+  { id: "scheduled", label: "Scheduled", icon: <SvgIcon name="lightning" size={16} /> },
+  { id: "tasks", label: "To-dos", icon: <SvgIcon name="notebook" size={16} /> },
 ];
 
 const PRODUCT_NAMES: Record<Tab, string> = Object.fromEntries(
@@ -418,49 +363,6 @@ const menuKeyDownHandler = (close: () => void) => (event: ReactKeyboardEvent<HTM
   event.preventDefault();
   items[nextIndex]?.focus();
 };
-
-/** The product switcher's module list. */
-function NavMenuItems({ copy, tab, onSelect }: {
-  copy: AppShellCopy;
-  tab: Tab;
-  onSelect: (id: Tab) => void;
-}) {
-  const hideMail = useStore((s) => s.hideMail);
-  const hideWorkflows = useStore((s) => s.hideWorkflows);
-  const visiblePrimaryItems = PRIMARY_NAV_ITEMS.filter((item) => {
-    if (item.id === "mail" && hideMail) return false;
-    if (item.id === "workflows" && hideWorkflows) return false;
-    return true;
-  });
-
-  const renderItem = (item: NavItem, secondary: boolean) => (
-    <button
-      key={item.id}
-      className={`product-menu-item${secondary ? " secondary" : ""}${tab === item.id ? " active" : ""}`}
-      type="button"
-      role="menuitemradio"
-      aria-checked={tab === item.id}
-      {...(secondary ? {} : { "data-onboarding-target": `nav-${item.id}` })}
-      onPointerEnter={() => preloadTabModule(item.id)}
-      onFocus={() => preloadTabModule(item.id)}
-      onClick={() => onSelect(item.id)}
-    >
-      <span className="product-menu-icon">{item.icon}</span>
-      <span>{copy.nav[item.id]}</span>
-      <span className="product-menu-check" aria-hidden="true">
-        {tab === item.id && <SvgIcon name="check" size={14} />}
-      </span>
-    </button>
-  );
-  return (
-    <>
-      <div className="product-menu-label">SomniQ</div>
-      {visiblePrimaryItems.map((item) => renderItem(item, false))}
-      <div className="product-menu-divider" role="separator" />
-      {UTILITY_NAV_ITEMS.map((item) => renderItem(item, true))}
-    </>
-  );
-}
 
 function moveProjectId(
   ids: string[],
@@ -491,23 +393,6 @@ function accountName(account: NewApiAccount | null, fallback: string) {
 
 function accountEmail(account: NewApiAccount | null, fallback: string) {
   return account?.username?.trim() || account?.displayName?.trim() || fallback;
-}
-
-function accountPlan(account: NewApiAccount | null, copy: AppShellCopy) {
-  const subscription = account?.subscriptionName?.trim();
-  if (subscription) return subscription;
-  if (account && Number.isFinite(account.quota)) return copy.balance(formatAccountQuota(account.quota));
-  return copy.account;
-}
-
-function formatAccountQuota(credits: number): string {
-  return `$${(credits / 500000).toFixed(2)}`;
-}
-
-function formatOptionalAccountQuota(credits?: number | null): string {
-  return typeof credits === "number" && Number.isFinite(credits)
-    ? formatAccountQuota(credits)
-    : "-";
 }
 
 function accountInitials(name: string, email: string, userFallback: string) {
@@ -542,6 +427,8 @@ export default function App() {
   const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
   const setChatSidebarCollapsed = useStore((s) => s.setChatSidebarCollapsed);
   const sidebarIsOverlay = useSidebarIsOverlay();
+  const hideMail = useStore((s) => s.hideMail);
+  const hideWorkflows = useStore((s) => s.hideWorkflows);
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
@@ -554,10 +441,8 @@ export default function App() {
   const addProject = useStore((s) => s.addProject);
   const switchProject = useStore((s) => s.switchProject);
   const reorderProjects = useStore((s) => s.reorderProjects);
-  const [productMenuOpen, setProductMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
   const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
   const profileAvatar = useProfileAvatar();
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -570,12 +455,9 @@ export default function App() {
   // instead of conditionally mounting per tab: remounting would tear down the
   // workbench iframe and restart its extension host on every tab switch.
   const [codeMounted, setCodeMounted] = useState(false);
+  const [codeWorkbenchReady, setCodeWorkbenchReady] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
-  const productSwitcherRef = useRef<HTMLDivElement | null>(null);
-  const productSwitcherTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const productMenuRef = useRef<HTMLDivElement | null>(null);
-  const projectSwitcherRef = useRef<HTMLDivElement | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
@@ -590,6 +472,7 @@ export default function App() {
     moved: boolean;
   } | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const userMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Close requests are synchronous, whereas chat events are asynchronous. A
   // ref keeps the latest backend-wide count available in the close callback,
   // including turns started from the Writing Companion window.
@@ -598,18 +481,21 @@ export default function App() {
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
     startTabTransition(() => setTab(nextTab));
-    setProductMenuOpen(false);
     setProjectMenuOpen(false);
     setUserMenuOpen(false);
-    setUsageDetailsOpen(false);
   }, [setTab, startTabTransition]);
+
+  const setProjectSwitcherOpen = useCallback((open: boolean) => {
+    if (open) setUserMenuOpen(false);
+    setProjectMenuOpen(open);
+  }, []);
 
   const chooseProject = async () => {
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Add SomniQ project",
+      title: copy.addProject.replace(/…$/, ""),
     });
     if (typeof selected === "string") {
       if (typesetDirty && !window.confirm("Discard the unsaved LaTeX changes and open the added project?")) {
@@ -728,7 +614,6 @@ export default function App() {
 
   const handleLogout = useCallback(() => {
     setUserMenuOpen(false);
-    setUsageDetailsOpen(false);
     setAccount(null);
     writeCachedAccount(null);
     logout();
@@ -912,36 +797,6 @@ export default function App() {
     return () => document.body.classList.remove("somniq-chat-sidebar-collapsed");
   }, [chatSidebarCollapsed]);
   useEffect(() => {
-    if (!productMenuOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setProductMenuOpen(false);
-        productSwitcherTriggerRef.current?.focus();
-      }
-    };
-    const closeOnPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (target instanceof Node && !productSwitcherRef.current?.contains(target)) {
-        setProductMenuOpen(false);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    document.addEventListener("pointerdown", closeOnPointerDown);
-    return () => {
-      window.removeEventListener("keydown", closeOnEscape);
-      document.removeEventListener("pointerdown", closeOnPointerDown);
-    };
-  }, [productMenuOpen]);
-  useEffect(() => {
-    if (!productMenuOpen) return;
-    const frame = window.requestAnimationFrame(() => {
-      productMenuRef.current
-        ?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
-        ?.focus();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [productMenuOpen]);
-  useEffect(() => {
     const openSettingsShortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key === ",") {
         event.preventDefault();
@@ -952,32 +807,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", openSettingsShortcut);
   }, [openSettingsTab]);
   useEffect(() => {
-    if (!projectMenuOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setProjectMenuOpen(false);
-    };
-    const closeOnPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        !projectSwitcherRef.current?.contains(target)
-      ) {
-        setProjectMenuOpen(false);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    document.addEventListener("pointerdown", closeOnPointerDown);
-    return () => {
-      window.removeEventListener("keydown", closeOnEscape);
-      document.removeEventListener("pointerdown", closeOnPointerDown);
-    };
-  }, [projectMenuOpen]);
-  useEffect(() => {
     if (!userMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setUserMenuOpen(false);
-        setUsageDetailsOpen(false);
+        userMenuTriggerRef.current?.focus();
       }
     };
     const closeOnPointerDown = (event: PointerEvent) => {
@@ -987,7 +821,6 @@ export default function App() {
         !userMenuRef.current?.contains(target)
       ) {
         setUserMenuOpen(false);
-        setUsageDetailsOpen(false);
       }
     };
     window.addEventListener("keydown", closeOnEscape);
@@ -997,12 +830,20 @@ export default function App() {
       document.removeEventListener("pointerdown", closeOnPointerDown);
     };
   }, [userMenuOpen]);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      userMenuRef.current?.querySelector<HTMLButtonElement>('.sidebar-user-menu button')?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [userMenuOpen]);
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
+  const navigationShell = chatShell || renderedTab === "settings";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
@@ -1075,31 +916,87 @@ export default function App() {
   ) : null;
   const userName = accountName(account, copy.userFallback);
   const userEmail = accountEmail(account, copy.accountInfo);
-  const userPlan = accountPlan(account, copy);
+  const userPlan = accountMenuPlan(account, language);
   const userInitials = accountInitials(userName, userEmail, copy.userFallback);
-  const usageMenuLabels = language === "cn"
-    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
-    : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
-  const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
-  const showSubscriptionQuota = typeof account?.subscriptionQuota === "number"
-    && Number.isFinite(account.subscriptionQuota)
-    && account.subscriptionQuota !== account.quota;
-  const usagePrimary = [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)] as const;
-  const usageMetrics = [
-    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)] as const,
-    ...(showSubscriptionQuota
-      ? [[usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)] as const]
-      : []),
-  ];
-  const handleProductMenuKeyDown = menuKeyDownHandler(() => {
-    setProductMenuOpen(false);
-    productSwitcherTriggerRef.current?.focus();
+  const handleUserMenuKeyDown = menuKeyDownHandler(() => {
+    setUserMenuOpen(false);
+    userMenuTriggerRef.current?.focus();
   });
+  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, 4).map((item) => ({ ...item, label: copy.nav[item.id] }));
+  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(4), ...UTILITY_NAV_ITEMS]
+    .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
+    .map((item) => ({ ...item, label: copy.nav[item.id] }));
+
+  const codeShellReady = useCodeShell({
+    enabled: codeMounted,
+    active: renderedTab === "lab",
+    shell: {
+      language,
+      modules: [...navigationItems, ...moreNavigationItems].map(({ id, label }) => ({ id, label })),
+      projects: orderedProjects.map(({ id, name, path }) => ({ id, name, path })),
+      currentProjectId: currentProject?.id ?? null,
+      projectBusy,
+      account: {
+        name: userName, plan: userPlan.label,
+        allowance: userPlan.remaining === null ? (language === "cn" ? "额度信息暂不可用" : "Allowance unavailable") : formatQuota(userPlan.remaining),
+        remainingPercent: userPlan.remainingPercent,
+      },
+    },
+    onSelectModule: (id) => selectTab(id as Tab),
+    onSelectProject: selectProject,
+    onAddProject: () => void chooseProject().catch((reason) => setError(String(reason))),
+    onRevealProject: () => {
+      if (currentProject?.path) void fileReveal(currentProject.path).catch((reason) => setError(String(reason)));
+    },
+    onSettings: () => openSettingsTab("general"),
+    onSignOut: handleLogout,
+  });
+  const codePage = renderedTab === "lab";
+  const codeShell = codePage && codeShellReady && codeWorkbenchReady;
+  // Keep a desktop-owned exit from Code when the duplicate header is removed.
+  // It must work without an extension command or an editor socket round trip.
+  const productSwitcher = (
+    <AppProductSwitcher
+      label={copy.productMenuLabel}
+      triggerLabel={copy.switchProduct(PRODUCT_NAMES[productTab] ?? copy.nav[productTab])}
+      moduleName={PRODUCT_NAMES[productTab] ?? copy.nav[productTab]}
+      activeTab={productTab}
+      items={[...navigationItems, ...moreNavigationItems.filter((item) => item.id !== "settings" && item.id !== "scheduled" && item.id !== "tasks")]}
+      utilityItems={moreNavigationItems.filter((item) => item.id === "settings")}
+      onOpen={() => {
+        setProjectMenuOpen(false);
+        setUserMenuOpen(false);
+      }}
+      onSelect={selectTab}
+      onPreload={preloadTabModule}
+    />
+  );
+
+  const accountControl = (
+    <AppAccountMenu
+      language={language}
+      name={userName}
+      initials={userInitials}
+      avatar={profileAvatar}
+      plan={userPlan}
+      open={userMenuOpen}
+      rootRef={userMenuRef}
+      triggerRef={userMenuTriggerRef}
+      onMenuKeyDown={handleUserMenuKeyDown}
+      onToggle={() => {
+        setProjectMenuOpen(false);
+        setUserMenuOpen((open) => !open);
+      }}
+      onSettings={() => openSettingsTab("general")}
+      onLogout={handleLogout}
+    />
+  );
 
   return (
-    <div className={`app${chatShell ? " app-chat-shell" : ""}`}>
+    <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}${codeShell ? " app-code-shell" : ""}`}>
       <div className="window-titlebar">
-        <div className="window-titlebar-left">
+        {codePage && <div className="window-titlebar-code-switcher">{productSwitcher}</div>}
+        {!codePage && <div className="window-titlebar-left">
           {/* The sidebar belongs to Chat, so these two go quiet on other tabs
               rather than switching modules out from under the pointer. */}
           <button
@@ -1129,7 +1026,7 @@ export default function App() {
           <button className="window-titlebar-icon" type="button" disabled aria-label={copy.forward}>
             <NavArrow dir="right" />
           </button>
-        </div>
+        </div>}
         <div
           className="window-titlebar-drag"
           data-tauri-drag-region
@@ -1150,7 +1047,7 @@ export default function App() {
               </svg>
             </button>
           )}
-          {renderUpdateIndicator()}
+          {!navigationShell && renderUpdateIndicator()}
           <WindowControlButtons
             labels={{
               minimize: copy.minimizeWindow,
@@ -1160,47 +1057,21 @@ export default function App() {
           />
         </div>
       </div>
-      <header className="app-head">
+      {navigationShell && <AppNavigationRail
+        label={copy.productMenuLabel}
+        moreLabel={copy.moreModules}
+        items={navigationItems}
+        moreItems={moreNavigationItems}
+        activeTab={renderedTab}
+        update={renderUpdateIndicator()}
+        account={accountControl}
+        onSelect={selectTab}
+        onPreload={preloadTabModule}
+      />}
+      <header className="app-head" hidden={codeShell}>
         <div className="app-head-title">
-          <div className="product-switcher" ref={productSwitcherRef}>
-            <button
-              ref={productSwitcherTriggerRef}
-              className="product-switcher-trigger"
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={productMenuOpen}
-              aria-label={copy.switchProduct(PRODUCT_NAMES[productTab])}
-              data-onboarding-target="product-switcher"
-              onKeyDown={(event) => {
-                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                event.preventDefault();
-                setProductMenuOpen(true);
-              }}
-              onClick={() => {
-                setProjectMenuOpen(false);
-                setUserMenuOpen(false);
-                setUsageDetailsOpen(false);
-                setProductMenuOpen((open) => !open);
-              }}
-            >
-              <span className="product-switcher-name">SomniQ</span>
-              <span className="product-switcher-module">{PRODUCT_NAMES[productTab]}</span>
-              <span className="product-switcher-caret" aria-hidden="true">
-                <Chevron dir="down" size={13} />
-              </span>
-            </button>
-            {productMenuOpen && (
-              <div
-                ref={productMenuRef}
-                className="product-menu"
-                role="menu"
-                aria-label={copy.productMenuLabel}
-                onKeyDown={handleProductMenuKeyDown}
-              >
-                <NavMenuItems copy={copy} tab={tab} onSelect={selectTab} />
-              </div>
-            )}
-          </div>
+          {!codePage && productSwitcher}
+          <div id="app-chat-workspace-portal" hidden={!chatShell} />
           {tab === "literature" && literaturePageView !== "library" && (
             <LiteratureViewTabs
               pageView={literaturePageView}
@@ -1211,192 +1082,20 @@ export default function App() {
         </div>
         {tab === "literature" && literaturePageView === "library" && <div id="literature-toolbar-slot" />}
         <div className="app-head-actions">
-          <div
-            className="project-switcher"
-            ref={projectSwitcherRef}
-            data-onboarding-target="project-switcher"
-          >
-            <button
-              className="project-switcher-trigger"
-              type="button"
-              aria-label={copy.currentProject}
-              aria-haspopup="listbox"
-              aria-expanded={projectMenuOpen}
-              disabled={projectBusy || projects.length === 0}
-              onClick={() => {
-                setProductMenuOpen(false);
-                setUserMenuOpen(false);
-                setUsageDetailsOpen(false);
-                setProjectMenuOpen((open) => !open);
-              }}
-              title={currentProject?.path}
-            >
-              <span className="project-switcher-current">
-                {currentProject?.name ?? copy.noProject}
-              </span>
-              <span className="project-switcher-caret" aria-hidden="true">
-                <Chevron dir="down" size={13} />
-              </span>
-            </button>
-            {projectMenuOpen && (
-              <div className="project-menu" role="listbox" aria-label={copy.projects}>
-                {orderedProjects.map((project) => (
-                  <div
-                    key={project.id}
-                    className={`project-menu-item${currentProject?.id === project.id ? " active" : ""}${draggedProjectId === project.id ? " dragging" : ""}`}
-                    role="option"
-                    aria-selected={currentProject?.id === project.id}
-                    aria-disabled={projectBusy}
-                    tabIndex={projectBusy ? -1 : 0}
-                    data-project-id={project.id}
-                    title={project.path}
-                    onClick={(event) => {
-                      if (suppressProjectClickRef.current) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        return;
-                      }
-                      if (!projectBusy) selectProject(project.id);
-                    }}
-                    onKeyDown={(event) => {
-                      if (!projectBusy && (event.key === "Enter" || event.key === " ")) {
-                        event.preventDefault();
-                        selectProject(project.id);
-                      }
-                    }}
-                    onPointerDown={(event) => startProjectDrag(event, project.id)}
-                    onPointerMove={moveProjectDrag}
-                    onPointerUp={finishProjectDrag}
-                    onPointerCancel={cancelProjectDrag}
-                  >
-                    <span
-                      className="project-drag-handle"
-                      aria-hidden="true"
-                      title={copy.dragToReorder}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                      }}
-                    >
-                      <GripIcon />
-                    </span>
-                    <span className="project-menu-copy">
-                      <span className="project-menu-name">{project.name}</span>
-                      <span className="project-menu-path">{project.path}</span>
-                    </span>
-                    <span className="project-current-dot" aria-hidden="true" />
-                  </div>
-                ))}
-              </div>
-            )}
-            <button
-              className="project-add-btn"
-              onClick={() => void chooseProject()}
-              disabled={projectBusy}
-              title={copy.addProject}
-              aria-label={copy.addProject}
-            >
-              <PlusIcon />
-              <span>{copy.add}</span>
-            </button>
-            <button
-              className="project-open-btn"
-              type="button"
-              title={currentProject?.path ? `${copy.openWorkspace} (${currentProject.path})` : copy.openWorkspace}
-              aria-label={copy.openWorkspace}
-              disabled={!currentProject?.path}
-              onClick={() => {
-                if (!currentProject?.path) return;
-                void fileReveal(currentProject.path).catch((error) => setError(String(error)));
-              }}
-            >
-              <SvgIcon name="folder" size={15} />
-            </button>
-          </div>
+          <AppProjectSwitcher
+            copy={copy} projects={orderedProjects} currentProject={currentProject}
+            busy={projectBusy} open={projectMenuOpen} onOpenChange={setProjectSwitcherOpen}
+            onSelect={selectProject} onAdd={() => void chooseProject()}
+            onReveal={() => {
+              if (!currentProject?.path) return;
+              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+            }}
+            drag={{ id: draggedProjectId, suppressClick: suppressProjectClickRef,
+              onStart: startProjectDrag, onMove: moveProjectDrag,
+              onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
+          />
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
-          <div className="app-account" ref={userMenuRef}>
-            {userMenuOpen && (
-              <div className="sidebar-user-menu" role="menu" aria-label={copy.userMenu}>
-                <div className="sidebar-user-menu-row muted" role="presentation">
-                  <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
-                  <span className="sidebar-user-menu-email">{userEmail}</span>
-                </div>
-                <button
-                  className="sidebar-user-menu-row"
-                  type="button"
-                  role="menuitem"
-                  data-onboarding-target="user-settings"
-                  onClick={() => openSettingsTab("general")}
-                >
-                  <span className="sidebar-user-menu-icon"><GearIcon /></span>
-                  <span>{copy.settings}</span>
-                  <span className="sidebar-user-shortcut">Ctrl+,</span>
-                </button>
-                <div className="sidebar-user-menu-divider" role="separator" />
-                <button
-                  className={`sidebar-user-menu-row${usageDetailsOpen ? " active" : ""}`}
-                  type="button"
-                  role="menuitem"
-                  aria-expanded={usageDetailsOpen}
-                  aria-controls="sidebar-user-usage-details"
-                  onClick={() => setUsageDetailsOpen((open) => !open)}
-                >
-                  <span className="sidebar-user-menu-icon"><UsageIcon /></span>
-                  <span>{copy.remainingUsage}</span>
-                  <span className="sidebar-user-chevron"><Chevron dir={usageDetailsOpen ? "down" : "right"} size={13} /></span>
-                </button>
-                {usageDetailsOpen && (
-                  <div className="sidebar-user-usage-panel" id="sidebar-user-usage-details" role="group" aria-label={copy.remainingUsage}>
-                    <div className="sidebar-user-usage-primary">
-                      <span>{usagePrimary[0]}</span>
-                      <strong>{usagePrimary[1]}</strong>
-                    </div>
-                    <div className="sidebar-user-usage-grid">
-                      {usageMetrics.map(([label, value]) => (
-                        <div className="sidebar-user-usage-tile" key={label}>
-                          <span>{label}</span>
-                          <strong>{value}</strong>
-                        </div>
-                      ))}
-                    </div>
-                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("account")}>
-                      {usageDetailsLabel}
-                    </button>
-                  </div>
-                )}
-                <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
-                  <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
-                  <span>{copy.logout}</span>
-                </button>
-              </div>
-            )}
-            <button
-              className="app-account-button"
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={userMenuOpen}
-              aria-label={copy.user}
-              title={`${userName} · ${userPlan}`}
-              data-onboarding-target="user-menu"
-              onClick={() => {
-                setProductMenuOpen(false);
-                setProjectMenuOpen(false);
-                setUsageDetailsOpen(false);
-                setUserMenuOpen((open) => !open);
-              }}
-            >
-              <span className="sidebar-user-avatar">
-                {profileAvatar ? <img src={profileAvatar} alt="" /> : userInitials}
-              </span>
-              <span className="app-account-summary" aria-hidden="true">
-                <span className="app-account-name">{userName}</span>
-                <span className="app-account-plan">{userPlan}</span>
-              </span>
-              <span className="app-account-chevron" aria-hidden="true">
-                <Chevron dir={userMenuOpen ? "down" : "right"} size={13} />
-              </span>
-            </button>
-          </div>
+          {!navigationShell && accountControl}
         </div>
       </header>
 
@@ -1420,7 +1119,7 @@ export default function App() {
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
-                  <CodePane />
+                  <CodePane onWorkbenchReadyChange={setCodeWorkbenchReady} />
                 </Suspense>
               </ErrorBoundary>
             </div>

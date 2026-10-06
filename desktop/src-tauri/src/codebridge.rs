@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
 use remote_protocol::{
-    truncate_utf8, BridgeToHost, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
+    truncate_utf8, BridgeToHost, CodeShellState, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
     CODE_BRIDGE_MAX_SELECTION_BYTES, CODE_BRIDGE_PROTOCOL_VERSION,
 };
 use serde::Serialize;
@@ -48,6 +48,8 @@ const CONNECTION_EVENT: &str = "code-bridge-connection";
 /// Emitted when the workbench's active editor changes, so app-side panels can
 /// act on the file the user is actually looking at.
 const ACTIVE_EDITOR_EVENT: &str = "code-bridge-active-editor";
+const SHELL_ACTION_EVENT: &str = "code-bridge-shell-action";
+const SHELL_READY_EVENT: &str = "code-bridge-shell-ready";
 
 /// How long the extension has to send its `Hello` before we hang up. Generous
 /// because the extension host starts under load, but not unbounded: an
@@ -312,6 +314,12 @@ fn handle_message(app: &AppHandle, message: BridgeToHost) {
                 ActiveEditorPayload { path, is_notebook },
             );
         }
+        BridgeToHost::ShellAction { action } => {
+            let _ = app.emit(SHELL_ACTION_EVENT, action);
+        }
+        BridgeToHost::ShellReady { revision } => {
+            let _ = app.emit(SHELL_READY_EVENT, revision);
+        }
         // A second `Hello` on an open connection is meaningless; ignore rather
         // than re-authenticating.
         BridgeToHost::Hello { .. } => {}
@@ -361,6 +369,15 @@ pub fn code_bridge_connected(state: tauri::State<'_, CodeBridgeState>) -> bool {
     state.is_connected()
 }
 
+#[tauri::command]
+pub fn code_bridge_set_shell(
+    state: tauri::State<'_, CodeBridgeState>,
+    revision: u32,
+    shell: CodeShellState,
+) -> bool {
+    state.send(HostToBridge::SetShell { revision, shell })
+}
+
 /// Push the app's appearance into the workbench.
 ///
 /// `colors` is resolved from the app's live stylesheet on the frontend rather
@@ -391,8 +408,8 @@ pub fn code_bridge_reload(state: tauri::State<'_, CodeBridgeState>, paths: Vec<S
 
 /// Open a file in the workbench, for chat's "click a path to open it".
 #[tauri::command]
-pub fn code_bridge_open_file(state: tauri::State<'_, CodeBridgeState>, path: String) {
-    state.send(HostToBridge::OpenFile { path });
+pub fn code_bridge_open_file(state: tauri::State<'_, CodeBridgeState>, path: String) -> bool {
+    state.send(HostToBridge::OpenFile { path })
 }
 
 /// Open the selected Git change in VSCodium's native diff editor.

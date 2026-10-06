@@ -643,10 +643,10 @@ fn resolve_stream_idle_timeout_parses_env() {
     use super::parse_stream_idle_timeout_secs;
     use std::time::Duration;
 
-    // unset → default 120s
+    // unset → default 300s
     assert_eq!(
         parse_stream_idle_timeout_secs(None),
-        Some(Duration::from_secs(120))
+        Some(Duration::from_secs(300))
     );
 
     // valid mid-range
@@ -673,16 +673,16 @@ fn resolve_stream_idle_timeout_parses_env() {
     // negative → opt-out
     assert_eq!(parse_stream_idle_timeout_secs(Some("-1")), None);
 
-    // parse failure → fall back to default 120s, not silently disable
+    // parse failure → fall back to default 300s, not silently disable
     assert_eq!(
         parse_stream_idle_timeout_secs(Some("abc")),
-        Some(Duration::from_secs(120))
+        Some(Duration::from_secs(300))
     );
 
-    // blank / whitespace-only → treated as missing → default 120s
+    // blank / whitespace-only → treated as missing → default 300s
     assert_eq!(
         parse_stream_idle_timeout_secs(Some("   ")),
-        Some(Duration::from_secs(120))
+        Some(Duration::from_secs(300))
     );
 
     // exact boundaries → pass through
@@ -694,4 +694,68 @@ fn resolve_stream_idle_timeout_parses_env() {
         parse_stream_idle_timeout_secs(Some("1800")),
         Some(Duration::from_secs(1800))
     );
+}
+
+#[test]
+fn resolve_response_header_timeout_parses_env() {
+    use super::parse_response_header_timeout_secs;
+    use std::time::Duration;
+
+    // unset / blank / garbage → default 600s (time-to-first-output of
+    // xhigh/max reasoning behind relay gateways exceeded the old 120s)
+    for raw in [None, Some("   "), Some("abc")] {
+        assert_eq!(
+            parse_response_header_timeout_secs(raw),
+            Some(Duration::from_secs(600))
+        );
+    }
+    assert_eq!(
+        parse_response_header_timeout_secs(Some("900")),
+        Some(Duration::from_secs(900))
+    );
+    // clamps into [30, 3600]
+    assert_eq!(
+        parse_response_header_timeout_secs(Some("5")),
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(
+        parse_response_header_timeout_secs(Some("99999")),
+        Some(Duration::from_secs(3600))
+    );
+    // zero / negative → no header wait limit
+    assert_eq!(parse_response_header_timeout_secs(Some("0")), None);
+    assert_eq!(parse_response_header_timeout_secs(Some("-1")), None);
+}
+
+#[test]
+fn read_timeout_backstop_never_fires_before_the_explicit_waits() {
+    use super::StreamWaitPolicy;
+    use std::time::Duration;
+
+    let policy = StreamWaitPolicy {
+        response_header_timeout: Some(Duration::from_secs(600)),
+        stream_idle_timeout: Some(Duration::from_secs(300)),
+    };
+    let backstop = policy.read_timeout_backstop().expect("both waits enabled");
+    assert!(backstop > Duration::from_secs(600));
+
+    let long_idle = StreamWaitPolicy {
+        response_header_timeout: Some(Duration::from_secs(60)),
+        stream_idle_timeout: Some(Duration::from_secs(1800)),
+    };
+    assert!(long_idle.read_timeout_backstop().expect("enabled") > Duration::from_secs(1800));
+
+    // Opting out of either wait must not leave reqwest enforcing it anyway.
+    for policy in [
+        StreamWaitPolicy {
+            response_header_timeout: None,
+            stream_idle_timeout: Some(Duration::from_secs(300)),
+        },
+        StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(600)),
+            stream_idle_timeout: None,
+        },
+    ] {
+        assert_eq!(policy.read_timeout_backstop(), None);
+    }
 }

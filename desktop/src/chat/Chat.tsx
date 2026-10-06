@@ -134,11 +134,11 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       prompt: "请围绕当前项目主题检索近5年的高相关论文，筛选权威来源并梳理研究脉络、代表性方法与尚未解决的问题。",
     },
     {
-      id: "research",
-      label: "资料搜集",
-      hint: "汇总资料、数据与可靠来源",
-      badge: "证据链",
-      prompt: "请搜集与当前项目相关的权威资料、数据集和公开来源，按主题整理，并标注每条资料可以支持的研究判断。",
+      id: "patent",
+      label: "构建中国专利",
+      hint: "从技术材料形成交底书与申请文件",
+      badge: "交底与申请",
+      prompt: "/patent-disclosure-skill 请根据当前项目中的技术材料构建中国专利，交底申请一起做：先梳理技术方案与专利点、核查相关现有技术，再形成交底书、权利要求书、说明书、摘要与说明书附图。若已有交底目录，优先沿用；缺少必要技术事实时先向我提问，不得编造。",
     },
     {
       id: "review",
@@ -164,11 +164,11 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       prompt: "Search for highly relevant papers from the last five years on this project's topic, prioritize authoritative sources, and map methods, themes, and open problems.",
     },
     {
-      id: "research",
-      label: "Research materials",
-      hint: "Collect sources, data, and evidence",
-      badge: "Evidence",
-      prompt: "Collect authoritative sources, datasets, and public materials related to this project, organize them by theme, and explain what each source can support.",
+      id: "patent",
+      label: "Draft a Chinese patent",
+      hint: "Turn technical materials into filing documents",
+      badge: "CN patents",
+      prompt: "/patent-disclosure-skill Build a Chinese patent from this project's technical materials, drafting the disclosure and application documents together (交底申请一起做). Identify the technical solution and patentable features, check relevant prior art, then prepare the disclosure, claims, specification, abstract, and drawings in Chinese. Reuse an existing disclosure directory when available. Ask me for missing technical facts; do not invent them.",
     },
     {
       id: "review",
@@ -491,7 +491,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const [imageAssistActivity, setImageAssistActivity] = useState<ImageAssistActivity | null>(
     () => imageAssistActivitySnapshot(),
   );
-  const independentReview = useIndependentReview(currentId);
+  const independentReview = useIndependentReview(currentSession?.id ?? "", currentSession?.projectId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
@@ -1179,7 +1179,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   useEffect(() => {
     if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
     let active = true;
-    void chatTasksGet(currentSession.id)
+    void chatTasksGet(currentSession.id, currentSession.projectId)
       .then((todos) => {
         if (active) {
           setPersistedTodos((current) => ({ ...current, [currentSession.id]: todos }));
@@ -1450,7 +1450,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
 
   return (
     <div
-      className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
+      className={`chat-root chat-background-surface${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
       style={{
         "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px`,
         ...(sidePanelWidth === null ? {} : { "--side-panel-w": `${sidePanelWidth}px` }),
