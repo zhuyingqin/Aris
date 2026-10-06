@@ -347,6 +347,14 @@ impl AnthropicClient {
         self
     }
 
+    /// One HTTP attempt, including the response stream. For paid artifact jobs
+    /// an accepted-but-lost response must be reconciled, never silently resent.
+    #[must_use]
+    pub fn with_single_request(mut self) -> Self {
+        self.max_retries = 0;
+        self
+    }
+
     #[must_use]
     pub fn with_trace_sink(mut self, trace_sink: Arc<dyn ApiTraceSink>) -> Self {
         self.trace_sink = Some(trace_sink);
@@ -396,7 +404,7 @@ impl AnthropicClient {
             pending: VecDeque::new(),
             events_emitted: 0,
             has_emitted_meaningful_content: false,
-            stream_retries_remaining: read_stream_retry_budget(),
+            stream_retries_remaining: if self.max_retries == 0 { 0 } else { read_stream_retry_budget() },
             observed_terminal: false,
             idle_timeout: resolve_stream_idle_timeout(),
             timeout_resends,
@@ -528,7 +536,7 @@ impl AnthropicClient {
     }
 
     fn may_resend(&self, error: &ApiError, attempts: u32, timeout_resends: u32) -> bool {
-        error.is_retryable()
+        self.max_retries > 0 && error.is_retryable()
             && attempts <= self.max_retries + 1
             && !(error.is_post_send_timeout() && timeout_resends >= MAX_TIMEOUT_RESENDS)
     }

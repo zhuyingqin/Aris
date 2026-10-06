@@ -108,6 +108,40 @@ pub(crate) fn tool_available() -> bool {
     somni_image_settings().available
 }
 
+/// Resolve once before the figure's first paid request. Generation then uses
+/// this same account connection even if Settings changes during vision probes.
+pub(crate) struct PreparedFigureImage {
+    pub identity: runtime::figures::ModelIdentity,
+    client: ImageApiClient,
+    request: ImageGenerationRequest,
+}
+
+pub(crate) fn prepare_figure_image(prompt: String, model: Option<String>) -> Result<PreparedFigureImage, String> {
+    let object = config::load_object();
+    let settings = settings_from_object(&object);
+    if !settings.available { return Err("SomniImage is not available; configure it in Settings or import an image".into()); }
+    let model = model.or(settings.model).ok_or("SomniImage has no model")?;
+    if !settings.models.contains(&model) { return Err("SomniImage model is no longer available".into()); }
+    let (base, key) = managed_credentials(&object)?;
+    let identity = runtime::figures::ModelIdentity {
+        model: model.clone(), provider: "somni-image".into(), endpoint: base.clone(), transport: "images_generations".into(),
+        signature: runtime::figures::hash(format!("image|{model}|{base}|figure-image-v1").as_bytes()),
+    };
+    let request = ImageGenerationRequest { model, prompt, size: "1024x1024".into(), quality: None, n: 1 };
+    request.validate()?;
+    Ok(PreparedFigureImage { identity, client: ImageApiClient::new(&base, key)?, request })
+}
+
+impl PreparedFigureImage {
+    pub fn generate(&self, workspace: &Path, cancelled: Arc<AtomicBool>) -> Result<Value, String> {
+        let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+        let result = runtime.block_on(generate_with_cancel(&self.client, &self.request, Vec::new(), &cancelled))?;
+        let run_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(24).map(char::from).collect();
+        save_result(&workspace, &run_id, &self.request, &[], result)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ImageToolInput {

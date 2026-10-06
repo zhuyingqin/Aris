@@ -4,6 +4,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, newapiBootstrap, onChatDone, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { hasNativeBackend } from "./api/transport";
+import { figuresRunningCount, onFigureUpdated } from "./figures/figureApi";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import { readCachedAccount, writeCachedAccount } from "./accountCache";
@@ -40,12 +41,14 @@ import "./tasks/Tasks.css";
 const loadLiterature = () => import("./literature/Literature");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
+const loadFigures = () => import("./figures/FigureStudio");
 const loadCode = () => import("./code/CodePane");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
+const FigureStudio = lazy(loadFigures);
 const CodePane = lazy(loadCode);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
@@ -82,6 +85,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       chat: "对话",
       lab: "代码",
       typeset: "LaTeX",
+      figures: "科研绘图",
       literature: "文献",
       workflows: "研究流程",
       mail: "邮箱",
@@ -126,6 +130,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       chat: "Chat",
       lab: "Code",
       typeset: "LaTeX",
+      figures: "Figures",
       literature: "Literature",
       workflows: "Workflows",
       mail: "Mail",
@@ -191,6 +196,7 @@ function preloadTabModule(tabId: string) {
   else if (tabId === "workflows") void loadWorkflows();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
+  else if (tabId === "figures") void loadFigures();
   else if (tabId === "lab") void loadCode();
 }
 
@@ -300,6 +306,10 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
         <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
       </g>
     </ModuleIcon>,
+  },
+  {
+    id: "figures", label: "Figures",
+    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
   },
   {
     id: "literature", label: "Literature",
@@ -422,6 +432,7 @@ export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const typesetDirty = useStore((s) => s.typesetDirty);
+  const figureDirty = useStore((s) => s.figureDirty);
   const chatSidebarOpen = useStore((s) => s.chatSidebarOpen);
   const setChatSidebarOpen = useStore((s) => s.setChatSidebarOpen);
   const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
@@ -457,6 +468,7 @@ export default function App() {
   const [codeMounted, setCodeMounted] = useState(false);
   const [codeWorkbenchReady, setCodeWorkbenchReady] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
+  const [figuresMounted, setFiguresMounted] = useState(false);
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
@@ -477,6 +489,7 @@ export default function App() {
   // ref keeps the latest backend-wide count available in the close callback,
   // including turns started from the Writing Companion window.
   const runningConversationCountRef = useRef(0);
+  const runningFigureCountRef = useRef(0);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
@@ -491,6 +504,7 @@ export default function App() {
   }, []);
 
   const chooseProject = async () => {
+    if (figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
@@ -510,6 +524,7 @@ export default function App() {
   };
 
   const selectProject = (id: string) => {
+    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
     setProjectMenuOpen(false);
     if (
       id !== currentProject?.id
@@ -673,11 +688,12 @@ export default function App() {
   useEffect(() => {
     if (tab === "lab") setCodeMounted(true);
     if (tab === "typeset") setTypesetMounted(true);
+    if (tab === "figures") setFiguresMounted(true);
     if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
   useEffect(() => installBrowserUnsavedChangesGuard(
     isTauri(),
-    () => useStore.getState().typesetDirty,
+    () => useStore.getState().typesetDirty || useStore.getState().figureDirty,
   ), []);
   useEffect(() => {
     if (!isTauri()) return;
@@ -705,7 +721,9 @@ export default function App() {
     let unlisten: (() => void) | null = null;
     void getCurrentWindow().onCloseRequested((event) => {
       const hazards = {
-        hasUnsavedChanges: useStore.getState().typesetDirty,
+        hasUnsavedChanges: useStore.getState().typesetDirty || useStore.getState().figureDirty,
+        hasUnsavedFigureChanges: useStore.getState().figureDirty,
+        runningFigureCount: runningFigureCountRef.current,
         runningConversationCount: Math.max(
           runningConversationCountRef.current,
           clientRunningConversationCount(),
@@ -725,6 +743,14 @@ export default function App() {
       unlisten?.();
     };
   }, [language]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void figuresRunningCount().then((count) => { if (!disposed) runningFigureCountRef.current = count; }).catch(() => undefined);
+    void onFigureUpdated((next) => { if (!disposed) runningFigureCountRef.current = next.activeCount ?? 0; }).then((fn) => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "mail"];
@@ -922,8 +948,8 @@ export default function App() {
     setUserMenuOpen(false);
     userMenuTriggerRef.current?.focus();
   });
-  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, 4).map((item) => ({ ...item, label: copy.nav[item.id] }));
-  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(4), ...UTILITY_NAV_ITEMS]
+  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, 5).map((item) => ({ ...item, label: copy.nav[item.id] }));
+  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(5), ...UTILITY_NAV_ITEMS]
     .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
     .map((item) => ({ ...item, label: copy.nav[item.id] }));
 
@@ -1135,6 +1161,11 @@ export default function App() {
             <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
+          )}
+          {figuresMounted && (
+            <div className="app-figures-pane" hidden={renderedTab !== "figures"}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.figures} />}><FigureStudio visible={renderedTab === "figures"} /></Suspense>
+            </div>
           )}
           {workflowsMounted && (
             <div className="app-workflows-pane" hidden={renderedTab !== "workflows"}>

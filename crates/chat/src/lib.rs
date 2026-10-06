@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+pub mod figures;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},

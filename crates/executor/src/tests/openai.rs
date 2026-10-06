@@ -4,6 +4,38 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+#[test]
+fn bounded_artifact_requests_never_resend_and_pin_the_budget() {
+    for (status, response_body) in [
+        ("500 Internal Server Error", "failed for secret-test-key"),
+        ("400 Bad Request", "Error from provider (Console Go): Request is missing x-opencode-session"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_http_request(&mut stream);
+            write_mock_http_response(&mut stream, status, response_body);
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut resends = 0;
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() { resends += 1; write_mock_http_response(&mut stream, status, response_body); }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            (request, resends)
+        });
+        let mut client = OpenAIRuntimeClient::new(OpenAIExecutorConfig { api_key: "secret-test-key".into(), base_url: format!("http://{address}/v1") }, "figure-boundary-model".into(), false, vec![], Box::new(crate::NoopStreamObserver)).unwrap().with_transport(OpenAiTransport::ChatCompletions).with_single_request(16384);
+        let error = client.stream(ApiRequest { system_prompt: vec![], messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "reconstruct".into() }, ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() }])] }).unwrap_err();
+        assert!(!error.to_string().contains("secret-test-key"));
+        let (request, resends) = server.join().unwrap(); assert_eq!(resends, 0);
+        let payload: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["max_tokens"], 16384);
+        assert_eq!(payload["messages"][0]["content"][1]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
+    }
+}
+
 fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];

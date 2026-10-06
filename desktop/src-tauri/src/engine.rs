@@ -4879,6 +4879,23 @@ pub fn chat_run_command(
     })
 }
 
+pub(crate) fn figure_connections(model: Option<&str>) -> Result<(aris_chat::figures::FigureExecutor, tools::PreparedLlmReview), String> {
+    let _setup = project_env_lock().lock().map_err(|e| e.to_string())?;
+    let current = resolve_executor()?;
+    let (model, provider, config) = if model.is_some_and(|requested| !requested.eq_ignore_ascii_case(&current.0)) { resolve_executor_for_model(model)? } else { current };
+    let (reviewer_provider, reviewer_model) = configured_reviewer_identity().ok_or("Configure an independent Reviewer in Settings before starting a figure task")?;
+    if reviewer_provider == "oracle-web" { return Err("Figures currently require an API Reviewer; select one in Settings".into()); }
+    if !reviewer_is_independent(&reviewer_provider, &reviewer_model, &provider, &model) { return Err("Figure Executor and independent Reviewer must use different configured models".into()); }
+    crate::config::apply_reviewer_environment(true);
+    let reviewer = tools::prepare_llm_review(Some(reviewer_model))?.freeze_for_figures();
+    let executor = aris_chat::figures::FigureExecutor::new(model, provider, config);
+    for identity in [&executor.identity, &reviewer.figure_identity()] {
+        let url = reqwest::Url::parse(&identity.endpoint).map_err(|_| "Invalid model endpoint")?;
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() { return Err("Model endpoints must not contain embedded credentials or query parameters".into()); }
+    }
+    Ok((executor, reviewer))
+}
+
 fn run_chat_command(
     app: AppHandle,
     state: &ChatState,

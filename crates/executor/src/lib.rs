@@ -31,11 +31,12 @@ fn new_routing_session_id() -> String {
 }
 
 mod openai;
+pub mod bounded;
 pub mod reasoning_effort;
 
 pub use openai::{
     chat_requires_responses_transport, resolve_openai_executor_config,
-    responses_transport_unsupported, set_transport_verdict_hook, OpenAIExecutorConfig,
+    responses_transport_unsupported, set_transport_verdict_hook, selected_openai_transport, OpenAIExecutorConfig,
     OpenAIRuntimeClient, OpenAiTransport,
 };
 
@@ -453,6 +454,7 @@ pub struct AnthropicRuntimeClient {
     send_betas: bool,
     trace_sink: Option<Arc<dyn ExecutorTraceSink>>,
     cache_message_prefix: bool,
+    bounded_request: bool,
 }
 
 impl AnthropicRuntimeClient {
@@ -483,6 +485,7 @@ impl AnthropicRuntimeClient {
             send_betas,
             trace_sink: None,
             cache_message_prefix: false,
+            bounded_request: false,
         })
     }
 
@@ -492,6 +495,13 @@ impl AnthropicRuntimeClient {
             self.client = self.client.clone().with_trace_sink(api_trace_sink);
         }
         self.trace_sink = Some(trace_sink);
+        self
+    }
+
+    #[must_use]
+    pub fn with_single_request(mut self) -> Self {
+        self.client = self.client.with_single_request();
+        self.bounded_request = true;
         self
     }
 }
@@ -579,7 +589,7 @@ impl ApiClient for AnthropicRuntimeClient {
                     .collect()
             }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-            thinking: anthropic_thinking_config(&self.model, self.max_tokens),
+            thinking: if self.bounded_request { None } else { anthropic_thinking_config(&self.model, self.max_tokens) },
             stream: true,
         };
 

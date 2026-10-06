@@ -240,6 +240,11 @@ pub enum OpenAiTransport {
     Responses,
 }
 
+pub fn selected_openai_transport(preference: OpenAiTransport, base_url: &str, model: &str) -> OpenAiTransport {
+    if resolve_transport(preference, base_url, model, false).0 { OpenAiTransport::Responses }
+    else { OpenAiTransport::ChatCompletions }
+}
+
 impl OpenAiTransport {
     /// Parse a Settings/config value. Unknown or empty values fall back to
     /// [`OpenAiTransport::Auto`] so a hand-edited config can never wedge a
@@ -1941,6 +1946,8 @@ pub struct OpenAIRuntimeClient {
     transport: OpenAiTransport,
     /// Header-wait and chunk-idle limits, shared with the Anthropic client.
     wait_policy: api::StreamWaitPolicy,
+    single_request: bool,
+    max_output_tokens: Option<u32>,
 }
 
 impl OpenAIRuntimeClient {
@@ -1977,6 +1984,8 @@ impl OpenAIRuntimeClient {
             trace_sink: None,
             transport: OpenAiTransport::default(),
             wait_policy,
+            single_request: false,
+            max_output_tokens: None,
         })
     }
 
@@ -2002,6 +2011,21 @@ impl OpenAIRuntimeClient {
     pub fn with_transport(mut self, transport: OpenAiTransport) -> Self {
         self.transport = transport;
         self
+    }
+
+    /// Pin a bounded artifact job to one submission; no route negotiation,
+    /// request-shape retry, network retry or stream restart is permitted.
+    #[must_use]
+    pub fn with_single_request(mut self, max_output_tokens: u32) -> Self {
+        self.single_request = true;
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    pub fn selected_transport(&self) -> OpenAiTransport {
+        if resolve_transport(self.transport, &self.base_url, &self.model, self.enable_tools).0 {
+            OpenAiTransport::Responses
+        } else { OpenAiTransport::ChatCompletions }
     }
 
     /// Enable the OpenCode-compatible routing header before the first request.
@@ -2059,6 +2083,7 @@ impl ApiClient for OpenAIRuntimeClient {
             &self.model,
             self.enable_tools,
         );
+        if self.single_request && self.transport != OpenAiTransport::Auto { use_responses_api = self.transport == OpenAiTransport::Responses; }
 
         let mut body = if use_responses_api {
             build_responses_body(
@@ -2084,6 +2109,19 @@ impl ApiClient for OpenAIRuntimeClient {
         };
 
         let mut endpoint = endpoint_for_transport(use_responses_api);
+        if let Some(limit) = self.max_output_tokens {
+            body.as_object_mut().expect("request object").remove("max_tokens");
+            let field = if use_responses_api { "max_output_tokens" }
+                else if self.model.starts_with("gpt-5") || self.model.starts_with("gpt-6") || self.model.starts_with("o1") || self.model.starts_with("o3") || self.model.starts_with("o4") { "max_completion_tokens" }
+                else { "max_tokens" };
+            body[field] = json!(limit);
+            // An artifact budget must leave room for visible SVG/JSON rather
+            // than inheriting a chat's high reasoning budget.
+            if let Some(level) = crate::reasoning_effort::closest_level(&self.model, "low") {
+                if use_responses_api { body["reasoning"]["effort"] = json!(level); }
+                else if chat_reasoning_effort_for(&self.model, &self.base_url, false).is_some() { body["reasoning_effort"] = json!(level); }
+            }
+        }
         let mut transport = transport_label(use_responses_api);
         let mut url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
         trace_record(
@@ -2207,6 +2245,10 @@ impl ApiClient for OpenAIRuntimeClient {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
                         let body_text = resp.text().await.unwrap_or_default();
+                        if self.single_request {
+                            let safe_body = body_text.replace(&self.api_key, "[REDACTED]");
+                            return Err(RuntimeError::new(format!("HTTP {status}: {}", safe_body.chars().take(500).collect::<String>())));
+                        }
                         let missing_opencode_session =
                             is_missing_opencode_session_error(status.as_u16(), &body_text);
 
@@ -2491,6 +2533,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             }
                         }
                         let detail = chain.join("\n");
+                        if self.single_request { return Err(RuntimeError::new(detail)); }
                         // A timeout after the gateway accepted the request is
                         // not a lost packet: the model is still working on it
                         // upstream. Re-sending it 4× is what turned one slow
@@ -2566,7 +2609,7 @@ impl ApiClient for OpenAIRuntimeClient {
             // C6 v0.4.10: whole-stream restart budget for mid-body aborts
             // or premature EOF before any event has been emitted. See
             // openai_executor.rs::stream_retry_budget docstring.
-            let mut stream_retries_remaining: u8 = stream_retry_budget();
+            let mut stream_retries_remaining: u8 = if self.single_request { 0 } else { stream_retry_budget() };
             // v0.4.14 C11: per-chunk idle timeout. None = wait forever
             // (legacy behaviour, opt-in via `ARIS_STREAM_IDLE_TIMEOUT_SECS=0`).
             // On elapse the stream walks the same retry path as a
