@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "observedDate": "2026-10-06",
+  "scope": "One moderate P0 development sample, not a P3 acceptance result or a complete output-budget experiment",
+  "codeBaseline": "0b92865",
+  "sampleId": "DEV-02",
+  "runId": "e5c7c17b9dc1087bb73a57127711698f",
+  "fixture": "desktop/src-tauri/tests/fixtures/figures/dev-02-research-loop/fixture.json",
+  "groundTruthSvg": "desktop/src-tauri/tests/fixtures/figures/dev-02-research-loop/source.svg",
+  "input": {
+    "provenance": "Hand-authored thirteen-module reference SVG rendered locally; source SVG and geometry were not attached to any model request",
+    "modelInput": "Actual PNG plus the method/style fields and the preregistered textual module/relation requirements",
+    "width": 1600,
+    "height": 1000,
+    "mainModules": 13,
+    "directedRelations": 16,
+    "parallelSplits": 2,
+    "feedbackLoops": 2,
+    "sourceSvgSha256": "dff83b06dc7ad77597be8f4cddca5715f3601dce1e940bf1dc8203c25aaa336a",
+    "pngSha256": "64e0ab2b79ff276871c331489172d25e4eec9754d836c1fb62741cb751704670"
+  },
+  "configuration": {
+    "executor": "deepseek-v4.1-flash",
+    "reviewer": "MiniMax-M3",
+    "transport": "chat_completions",
+    "reconstructionOutputLimit": 16384,
+    "reviewOutputLimit": 2048,
+    "renderer": "resvg-0.45.1/svg2pdf-0.13.0",
+    "fontFingerprint": "2ad2fc5bb31d338c0fa95213340b33bc0e6e6a8387bb41beed87b7de46739a62"
+  },
+  "requests": [
+    {"kind": "reconstruct", "model": "deepseek-v4.1-flash", "stopReason": "stop", "outputLimit": 16384, "inputTokens": 1426, "outputTokens": 10814, "durationMs": 70262},
+    {"kind": "review", "model": "MiniMax-M3", "stopReason": "length", "outputLimit": 2048, "inputTokens": 7778, "outputTokens": 2048, "cacheReadInputTokens": 147, "durationMs": 85801}
+  ],
+  "pipelineOutcome": {
+    "status": "draft",
+    "accepted": false,
+    "independentReview": null,
+    "error": "Reviewer response is incomplete; visual check remains pending",
+    "coreRequests": 2,
+    "additionalProbeRequests": 0,
+    "revisionUsed": false,
+    "reconstructionBudgetTruncated": false,
+    "reviewBudgetTruncated": true,
+    "coreDurationSeconds": 156.063,
+    "coldPipelineDurationSeconds": 198.92,
+    "currencyFee": null,
+    "feeNote": "No billing amount available; reported token counts include provider-reported output, not a calculated currency charge"
+  },
+  "svgOutcome": {
+    "width": 1600,
+    "height": 1000,
+    "viewBox": "0 0 1600 1000",
+    "aspectRatioDifferencePercent": 0,
+    "bytes": 8315,
+    "classification": "editable_vector",
+    "textElements": 31,
+    "bodyVectorElements": 47,
+    "rasterImages": 0,
+    "exactMainLabels": 12,
+    "semanticMainLabelsAfterNfkc": 13,
+    "labelDifference": {"source": "质量达标？", "reconstructed": "质量达标?", "meaningChanged": false},
+    "groupsWithOneOrTwoMainLabelsAndRectangle": 0,
+    "sourceClipPaths": 3,
+    "reconstructedClipPaths": 0,
+    "svgSha256": "7b1e5bc59da543957298c562b59a6f98322725e8e619cdf716fa7b18a2383f98",
+    "pngSha256": "36444a48375d21f9fa5f4554d5bbd3d91e232bd94395277c99037500adb7f7f5"
+  },
+  "assistantVisualInspection": {
+    "independentReviewerDecision": false,
+    "method": "Compare reference and reconstructed PNGs and trace the actual SVG path endpoints; shared join segments count as the preregistered logical relations",
+    "observedDirectedRelations": 16,
+    "observedFeedbackLoops": 2,
+    "conditionDiamondAndYesNoBranchesPresent": true,
+    "bothFeedbackLoopsDashed": true,
+    "threeLanesPresent": true,
+    "pixelEquivalent": false,
+    "issues": [
+      "Module positions, spacing, colors and font sizes differ from the reference",
+      "Module rectangles and labels are separate root elements without the expected semantic grouping",
+      "Same unmodified SVG has visibly thinner CJK text in native resvg PNG than in Chromium rendering; renderer/font cause not yet isolated",
+      "Full-width question mark became ASCII; literal label preservation is 12/13",
+      "Original clipPath/group structure was not reconstructed"
+    ]
+  },
+  "localBrowserValidation": {
+    "engine": "Existing local Chromium via Playwright",
+    "modelRequests": 0,
+    "chineseTextEdit": true,
+    "undoRedo": true,
+    "serializeAndReopen": true,
+    "semanticMainLabelsAfterReopen": 13,
+    "markersRetained": true,
+    "pageErrors": [],
+    "nativeWebView2Validated": false
+  },
+  "artifactsDirectory": ".somniq/artifacts/figures/e5c7c17b9dc1087bb73a57127711698f/",
+  "artifacts": {
+    "svg": "versions/0001.svg",
+    "nativePng": "versions/0001.png",
+    "pdf": "versions/0001.pdf",
+    "comparisonPng": "experiment/comparison.png",
+    "comparisonHtml": "experiment/comparison.html",
+    "browserRenderPng": "experiment/browser-render.png",
+    "sourcePng": "experiment/reference.png",
+    "sourceSvg": "experiment/reference.svg",
+    "localChecks": "experiment/local-checks.json"
+  }
+}

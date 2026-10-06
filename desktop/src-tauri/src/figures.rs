@@ -1374,6 +1374,122 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "P0 DEV-02: prepare locally first; explicit live invocation submits at most four core requests plus uncached probes"]
+    fn live_p0_moderate_figure_reconstruction() {
+        let workspace = PathBuf::from(
+            std::env::var("SOMNIQ_FIGURE_P0_WORKSPACE")
+                .expect("Set the diagnostic project workspace"),
+        );
+        let svg = include_str!("../tests/fixtures/figures/dev-02-research-loop/source.svg");
+        let mut sample: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/figures/dev-02-research-loop/fixture.json"
+        ))
+        .unwrap();
+        let output = workspace.join(".somniq/tmp/figures-dev-02");
+        let frozen_run = output.join("live-run.json");
+        assert!(
+            !frozen_run.exists(),
+            "DEV-02 was already submitted. Inspect its ledger instead of submitting again."
+        );
+        fs::create_dir_all(&output).unwrap();
+        if std::env::var("SOMNIQ_FIGURE_PREPARE_ONLY").as_deref() == Ok("1") {
+            let rendered = tools::figures::render(svg).unwrap();
+            sample["sourceSvgHash"] = json!(store::hash(svg.as_bytes()));
+            sample["inputHash"] = json!(store::hash(&rendered.png));
+            sample["renderer"] = json!(tools::figures::RENDERER);
+            sample["fontFingerprint"] = json!(rendered.font_fingerprint);
+            for (name, bytes) in [
+                ("reference.svg", svg.as_bytes()),
+                ("reference.png", rendered.png.as_slice()),
+                ("reference.pdf", rendered.pdf.as_slice()),
+            ] {
+                runtime::write_file_atomically(&output.join(name), bytes).unwrap();
+            }
+            runtime::write_file_atomically(
+                &output.join("sample.json"),
+                serde_json::to_vec_pretty(&sample).unwrap(),
+            )
+            .unwrap();
+            println!("Prepared DEV-02 without model calls: {}", output.display());
+            return;
+        }
+        let frozen: Value =
+            serde_json::from_slice(&fs::read(output.join("sample.json")).unwrap()).unwrap();
+        let png = fs::read(output.join("reference.png")).unwrap();
+        assert_eq!(frozen["inputHash"], json!(store::hash(&png)));
+        assert_eq!(frozen["sourceSvgHash"], json!(store::hash(svg.as_bytes())));
+        for key in [
+            "method",
+            "style",
+            "requiredLabels",
+            "requiredRelations",
+            "outputLimit",
+        ] {
+            assert_eq!(sample[key], frozen[key], "Frozen fixture changed: {key}");
+        }
+        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
+        let now = runtime::now_iso8601();
+        let run: FigureRun = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": id, "title": "[P0 DEV-02] 科研执行与证据闭环", "method": sample["method"], "style": sample["style"], "sourceMode": "import", "sourceMime": "image/png", "sourceHash": null,
+            "status": "ready", "outputLimit": sample["outputLimit"], "executor": executor.identity, "reviewer": reviewer.figure_identity(), "imageIdentity": null,
+            "executorVision": false, "reviewerVision": false, "revisionUsed": false, "versions": [], "requests": [], "review": null, "error": null, "createdAt": now, "updatedAt": now,
+        })).unwrap();
+        store::create(&workspace, run, Some(&png)).unwrap();
+        sample = frozen;
+        sample["runId"] = json!(id);
+        runtime::write_file_atomically(
+            &store::directory(&workspace, &id)
+                .unwrap()
+                .join("p0-sample.json"),
+            serde_json::to_vec_pretty(&sample).unwrap(),
+        )
+        .unwrap();
+        runtime::write_file_atomically(
+            &frozen_run,
+            serde_json::to_vec_pretty(&json!({"sampleId": "DEV-02", "runId": id, "inputHash": sample["inputHash"], "outputLimit": sample["outputLimit"]})).unwrap(),
+        )
+        .unwrap();
+        let result = process(&workspace, &id, Arc::new(AtomicBool::new(false)), || {});
+        if let Err(error) = &result {
+            store::update(&workspace, &id, |run| {
+                if run.status != "budget_truncated" {
+                    run.status = if run.requests.iter().any(|r| r.status == "unknown") {
+                        "unknown"
+                    } else {
+                        "draft"
+                    }
+                    .into();
+                }
+                run.error = Some(error.clone());
+                Ok(())
+            })
+            .unwrap();
+        }
+        let run = store::load(&workspace, &id).unwrap();
+        let report = json!({"kind": "moderate_development_sample", "sampleId": "DEV-02", "runId": id, "result": result, "status": run.status, "requests": run.requests, "revisionUsed": run.revision_used, "versions": run.versions, "review": run.review});
+        let bytes = serde_json::to_vec_pretty(&report).unwrap();
+        runtime::write_file_atomically(&output.join("result.json"), &bytes).unwrap();
+        runtime::write_file_atomically(
+            &store::directory(&workspace, &id)
+                .unwrap()
+                .join("p0-result.json"),
+            bytes,
+        )
+        .unwrap();
+        println!(
+            "DEV-02 run={id}, status={}, requests={}, versions={}, revision={}",
+            run.status,
+            run.requests.len(),
+            run.versions.len(),
+            run.revision_used
+        );
+        assert!(
+            !run.versions.is_empty(),
+            "No editable SVG was produced; inspect the frozen result and request ledger"
+        );
+    }
+    #[test]
     fn routing_or_budget_errors_are_not_evidence_of_missing_vision() {
         assert!(!image_not_supported("HTTP 400: missing x-opencode-session"));
         assert!(!image_not_supported("HTTP 400: unsupported max_tokens"));
