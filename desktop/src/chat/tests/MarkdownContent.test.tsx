@@ -41,6 +41,7 @@ beforeEach(() => {
   useStore.setState({
     tab: "chat",
     pendingTypesetFilePath: null,
+    pendingCodeFilePath: null,
     pendingSidePanelEvidence: null,
   });
 });
@@ -372,7 +373,9 @@ describe("MarkdownContent local links", () => {
 
     await user.click(screen.getByRole("link", { name: "Open source" }));
 
-    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("F:/Agent/Aris/desktop/src/chat/Chat.tsx");
+    expect(useStore.getState().pendingCodeFilePath).toBe("F:/Agent/Aris/desktop/src/chat/Chat.tsx");
+    expect(useStore.getState().tab).toBe("lab");
+    expect(apiMocks.codeBridgeOpenFile).not.toHaveBeenCalled();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

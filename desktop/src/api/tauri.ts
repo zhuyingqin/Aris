@@ -5,6 +5,7 @@ import { hasNativeBackend, invoke, listen } from "./transport";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
+import type { CodeShellAction, CodeShellState } from "../code/codeShell";
 import {
   isFilePreviewMode,
   previewCreateDir,
@@ -2762,6 +2763,16 @@ export const onCodeServerStatus = (handler: (status: CodeServerStatus) => void) 
 // ── VS Code bridge (aris-code-bridge extension) ─────────────────────────────
 export const codeBridgeConnected = () =>
   isTauri() ? invoke<boolean>("code_bridge_connected") : Promise.resolve(false);
+export const codeBridgeSetShell = (revision: number, shell: CodeShellState) =>
+  isTauri() ? invoke<boolean>("code_bridge_set_shell", { revision, shell }) : Promise.resolve(false);
+export const onCodeBridgeShellAction = (handler: (action: CodeShellAction) => void) =>
+  isTauri()
+    ? listen<CodeShellAction>("code-bridge-shell-action", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
+export const onCodeBridgeShellReady = (handler: (revision: number) => void) =>
+  isTauri()
+    ? listen<number>("code-bridge-shell-ready", (e) => handler(e.payload))
+    : Promise.resolve(noopUnlisten);
 export const codeBridgeSetTheme = (dark: boolean, colors: Record<string, string>) =>
   isTauri() ? invoke<void>("code_bridge_set_theme", { dark, colors }) : Promise.resolve();
 export const codeBridgeSaveAll = () =>
@@ -2781,6 +2792,6 @@ export const onCodeBridgeActiveEditor = (handler: (editor: CodeActiveEditor) => 
     ? listen<CodeActiveEditor>("code-bridge-active-editor", (e) => handler(e.payload))
     : Promise.resolve(noopUnlisten);
 export const codeBridgeOpenFile = (path: string) =>
-  isTauri() ? invoke<void>("code_bridge_open_file", { path }) : Promise.resolve();
+  isTauri() ? invoke<boolean>("code_bridge_open_file", { path }) : Promise.resolve(false);
 export const codeBridgeOpenDiff = (path: string, staged: boolean) =>
   isTauri() ? invoke<boolean>("code_bridge_open_diff", { path, staged }) : Promise.resolve(false);

@@ -27,7 +27,6 @@ export default function ChatReasoningPanel({ language, effort, levels, modelName
   const progress = levels.length > 1 ? Math.max(0, index) / (levels.length - 1) : 0;
   const visualStyle = {
     "--reasoning-progress": progress,
-    "--reasoning-hue": 228 + progress * 48,
     "--reasoning-spark-duration": `${2.8 - progress * 1.2}s`,
   } as CSSProperties;
   const locked = disabled || committing || !levels.includes(effort);

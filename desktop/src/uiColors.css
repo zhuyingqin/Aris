@@ -17,14 +17,14 @@
 :root[data-ui-color="pink"], .settings-color-swatch[data-color="pink"] {
   --ui-color-light: #be185d; --ui-color-dark: #f49ac2;
 }
-:root[data-ui-color]:not([data-ui-color="default"]) {
+:root[data-ui-color]:not([data-ui-color="default"]):not([data-custom-accent="true"]) {
   --ui-accent: var(--ui-color-dark);
   --ui-on-accent: #0e1116;
   --accent: var(--ui-accent);
   --accent-2: var(--ui-accent);
   --product-module-accent: var(--ui-accent);
 }
-:root[data-theme="light"][data-ui-color]:not([data-ui-color="default"]) {
+:root[data-theme="light"][data-ui-color]:not([data-ui-color="default"]):not([data-custom-accent="true"]) {
   --ui-accent: var(--ui-color-light);
   --ui-on-accent: #fff;
 }

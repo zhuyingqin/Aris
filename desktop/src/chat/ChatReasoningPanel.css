@@ -1,5 +1,4 @@
 .chat-reasoning-panel {
-  --reasoning-accent-lightness: 68%;
   --reasoning-thumb-size: 20px;
   position: absolute;
   right: 0;
@@ -15,8 +14,6 @@
   background: var(--bg-2);
   box-shadow: var(--chat-pill-shadow);
 }
-
-[data-theme="light"] .chat-reasoning-panel { --reasoning-accent-lightness: 46%; }
 
 .chat-reasoning-panel.chat-reasoning-panel-embedded {
   position: static;
@@ -39,7 +36,7 @@
 }
 
 .chat-reasoning-value {
-  color: hsl(var(--reasoning-hue) 75% var(--reasoning-accent-lightness));
+  color: var(--accent);
   font-size: 0.8125rem;
   font-weight: 600;
   text-align: center;
@@ -114,7 +111,7 @@ button.chat-reasoning-model:hover:not(:disabled) {
   height: 12px;
   overflow: hidden;
   border-radius: 999px;
-  background: linear-gradient(100deg, #4f72df, hsl(var(--reasoning-hue) 80% 65%));
+  background: linear-gradient(100deg, color-mix(in srgb, var(--accent) 72%, var(--bg-3)), var(--accent));
   transition: width 160ms ease;
   pointer-events: none;
 }
@@ -124,8 +121,8 @@ button.chat-reasoning-model:hover:not(:disabled) {
   width: 2px;
   height: 2px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.7);
+  background: var(--ui-on-accent);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--ui-on-accent) 70%, transparent);
   animation: sq-reasoning-spark var(--reasoning-spark-duration) ease-in-out infinite;
 }
 
@@ -168,10 +165,10 @@ button.chat-reasoning-model:hover:not(:disabled) {
   width: var(--reasoning-thumb-size);
   height: var(--reasoning-thumb-size);
   margin-top: -4px;
-  border: 1px solid #e4e4ef;
+  border: 2px solid var(--bg-1);
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16), 0 0 calc(3px + var(--reasoning-progress) * 7px) rgba(139, 103, 238, 0.32);
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16), 0 0 calc(3px + var(--reasoning-progress) * 7px) color-mix(in srgb, var(--accent) 32%, transparent);
   transition: box-shadow 160ms ease, transform 120ms ease;
   appearance: none;
 }
@@ -180,10 +177,10 @@ button.chat-reasoning-model:hover:not(:disabled) {
 .chat-reasoning-track input::-moz-range-thumb {
   width: var(--reasoning-thumb-size);
   height: var(--reasoning-thumb-size);
-  border: 1px solid #e4e4ef;
+  border: 2px solid var(--bg-1);
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16), 0 0 calc(3px + var(--reasoning-progress) * 7px) rgba(139, 103, 238, 0.32);
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16), 0 0 calc(3px + var(--reasoning-progress) * 7px) color-mix(in srgb, var(--accent) 32%, transparent);
   transition: box-shadow 160ms ease, transform 120ms ease;
 }
 
@@ -191,7 +188,7 @@ button.chat-reasoning-model:hover:not(:disabled) {
 .chat-reasoning-track input:active::-moz-range-thumb { transform: scale(1.1); }
 
 .chat-reasoning-track input:focus-visible {
-  outline: 2px solid var(--chat-hl-purple);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 

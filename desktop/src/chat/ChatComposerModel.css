@@ -24,7 +24,7 @@
 
 .chat-model-pill-separator { color: var(--text-dim); }
 .chat-model-pill-effort { flex-shrink: 0; }
-.chat-model-pill-effort.applied { color: var(--chat-hl-purple); }
+.chat-model-pill-effort.applied { color: var(--accent); }
 
 .chat-model-settings-panel {
   position: absolute;

@@ -344,6 +344,9 @@ interface AppState {
 
   pendingCodeDiff: PendingCodeDiff | null;
   setPendingCodeDiff: (value: PendingCodeDiff | null) => void;
+  /** File requested before the embedded editor is connected and ready. */
+  pendingCodeFilePath: string | null;
+  setPendingCodeFilePath: (path: string | null) => void;
 
   /** True while the LaTeX editor contains changes not persisted to disk. */
   typesetDirty: boolean;
@@ -521,7 +524,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (isTauri()) {
       void newapiLogout().catch(() => undefined);
     }
-    set({ authed: false });
+    set({ authed: false, pendingCodeFilePath: null });
   },
 
   tab: (() => {
@@ -539,6 +542,8 @@ export const useStore = create<AppState>((set, get) => ({
   setTab: (tab) => set({ tab }),
   pendingCodeDiff: null,
   setPendingCodeDiff: (value) => set({ pendingCodeDiff: value }),
+  pendingCodeFilePath: null,
+  setPendingCodeFilePath: (pendingCodeFilePath) => set({ pendingCodeFilePath }),
   typesetDirty: false,
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 

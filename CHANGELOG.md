@@ -1,5 +1,33 @@
 # ARIS-Code Changelog
 
+## v0.4.79 (2026-10-05)
+
+- **Native Code workspace controls** — module, project and account menus now
+  use VSCodium status-bar controls and Quick Pick. Project actions also appear
+  in the Explorer title bar and command palette. The desktop keeps its header
+  until the editor acknowledges the current navigation snapshot, restores it on
+  disconnect and keeps the top-left module menu available during reconnection.
+  Unsaved editor and notebook contents retain their save/cancel protection
+  before project changes. Localized menus receive display-only account data;
+  account credentials remain in the desktop.
+- **Reliable file opening from Chat** — Code file links retain the target
+  while the editor starts or reconnects, retry after unsuccessful queueing and
+  preserve the newest request when several files are clicked. Relative paths
+  resolve against the project selected at click time, including paths with
+  spaces, Chinese characters and UNC locations.
+- **Shared navigation protocol** — shell state, readiness and user actions
+  use the shared Rust protocol, with generated TypeScript types and regression
+  checks for drift. The native bridge reports whether file-open commands were
+  successfully queued, and desktop navigation validates current module/project
+  identifiers before applying actions.
+- **Consistent editor colors and desktop layout** — VSCodium button labels and
+  badges follow the selected accent contrast, and hover feedback preserves its
+  hue. Code navigation and Chat controls receive layout refinements; the
+  embedded workbench no longer reserves space for a duplicate top-left logo.
+- **Version consistency** — desktop manifests, shared Rust packages, product
+  lockfiles and README badges now use 0.4.79. The release workflow generates
+  Windows/macOS installers, updater signatures and release notes.
+
 ## v0.4.78 (2026-10-04)
 
 - **Profile and account in one place** — balances, subscription quota and call

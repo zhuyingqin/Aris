@@ -133,7 +133,7 @@
 .appearance-preview-answer p { margin: 4px 0 0; }
 .appearance-preview-composer { display: flex; align-items: center; gap: 8px; margin: 0 16px 16px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--bg-1) 90%, transparent); color: var(--text-dim); font-size: 11px; line-height: 1.5; }
 .appearance-preview-composer > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.appearance-preview-send { display: grid; place-items: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px; background: var(--bg-2); }
+.appearance-preview-send { display: grid; place-items: center; width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px; background: var(--accent); color: var(--ui-on-accent); }
 .appearance-preview-hint { margin: 8px 0 0; }
 .appearance-file-name { max-width: 230px; }
 @container (max-width: 800px) {

@@ -1061,6 +1061,7 @@ pub fn run() {
             codeserver::code_server_ensure,
             codeserver::code_server_stop,
             codebridge::code_bridge_connected,
+            codebridge::code_bridge_set_shell,
             codebridge::code_bridge_set_theme,
             codebridge::code_bridge_save_all,
             codebridge::code_bridge_reload,
