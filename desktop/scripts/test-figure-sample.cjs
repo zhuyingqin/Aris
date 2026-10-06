@@ -15,12 +15,11 @@ const run = JSON.parse(fs.readFileSync(path.join(runDirectory, 'manifest.json'),
 const version = run.versions.at(-1);
 assert.ok(version, 'No reconstruction version exists');
 const generated = fs.readFileSync(path.join(runDirectory, version.svgPath), 'utf8');
-const source = fs.readFileSync(path.join(sampleDirectory, 'reference.svg'), 'utf8');
 const vendorRoot = path.resolve(__dirname, '../public/figure-editor');
 const wrapperRoot = path.resolve(__dirname, '../figure-editor');
 const wrapper = Object.fromEntries(['index.html', 'bridge.js'].map(name => [name, fs.readFileSync(path.join(wrapperRoot, name))]));
 const channel = crypto.randomBytes(16).toString('hex');
-const report = { sampleId: sample.sampleId, runId: run.id, modelRequests: 0, nativeWebView2: false };
+const report = { sampleId: sample.sampleId, runId: run.id, authorship: sample.authorship || 'model_reconstruction', modelRequests: 0, nativeWebView2: false };
 const server = http.createServer((request, response) => {
   response.setHeader('Access-Control-Allow-Origin', '*');
   if (request.url === '/') {
@@ -44,16 +43,23 @@ const server = http.createServer((request, response) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    report.svg = await page.evaluate(({ svg, labels }) => {
+    report.svg = await page.evaluate(({ svg, labels, occurrences }) => {
       const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
       const root = document.documentElement;
       const texts = [...document.querySelectorAll('text')].map(node => node.textContent.replace(/\s/g, ''));
       const normalize = value => value.replace(/\s/g, '').normalize('NFKC');
       const exact = labels.filter(label => texts.includes(label.replace(/\s/g, '')));
       const semantic = labels.filter(label => texts.some(text => normalize(text) === normalize(label)));
-      return { width: Number(root.getAttribute('width')), height: Number(root.getAttribute('height')), textCount: texts.length, imageCount: document.querySelectorAll('image').length, clipPathCount: document.querySelectorAll('clipPath').length, exactLabels: exact, semanticLabels: semantic, missingExactLabels: labels.filter(label => !exact.includes(label)), groupsWithRectangleAndLabel: [...document.querySelectorAll('g')].filter(group => group.querySelector('rect') && [...group.querySelectorAll('text')].some(node => labels.some(label => normalize(node.textContent) === normalize(label))) && [...group.querySelectorAll('text')].filter(node => labels.some(label => normalize(node.textContent) === normalize(label))).length <= 2).length };
-    }, { svg: generated, labels: sample.requiredLabels });
+      const actualOccurrences = Object.fromEntries(Object.keys(occurrences).map(label => [label, texts.filter(text => normalize(text) === normalize(label)).length]));
+      return { width: Number(root.getAttribute('width')), height: Number(root.getAttribute('height')), textCount: texts.length, imageCount: document.querySelectorAll('image').length, clipPathCount: document.querySelectorAll('clipPath').length, exactLabels: exact, semanticLabels: semantic, missingExactLabels: labels.filter(label => !exact.includes(label)), missingSemanticLabels: labels.filter(label => !semantic.includes(label)), actualOccurrences, insufficientOccurrences: Object.keys(occurrences).filter(label => actualOccurrences[label] < occurrences[label]), groupsWithRectangleAndLabel: [...document.querySelectorAll('g')].filter(group => group.querySelector('rect') && [...group.querySelectorAll('text')].some(node => labels.some(label => normalize(node.textContent) === normalize(label))) && [...group.querySelectorAll('text')].filter(node => labels.some(label => normalize(node.textContent) === normalize(label))).length <= 2).length };
+    }, { svg: generated, labels: sample.requiredLabels, occurrences: sample.requiredOccurrences || {} });
     report.aspectRatioDifferencePercent = ((report.svg.width / report.svg.height) / (sample.sourceWidth / sample.sourceHeight) - 1) * 100;
+    report.allRequiredLabelsPresent = report.svg.semanticLabels.length === sample.requiredLabels.length;
+    // Record the untouched model SVG even if an editor operation later fails.
+    await page.setViewportSize({ width: report.svg.width, height: report.svg.height });
+    await page.setContent(`<html><body style="margin:0">${generated}</body></html>`);
+    await page.locator('svg').screenshot({ path: path.join(sampleDirectory, 'browser-render.png') });
+    await page.setViewportSize({ width: 1880, height: 1250 });
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     const waitMessage = id => page.waitForFunction(id => window.messages.some(message => message.requestId === id && ['loaded', 'serialized', 'error'].includes(message.type)), id, { timeout: 15000 });
     const load = async (svg, id) => { await page.evaluate(({ channel, svg, id }) => document.getElementById('editor').contentWindow.postMessage({ channel, type: 'load', requestId: id, svg }, '*'), { channel, svg, id }); await waitMessage(id); assert.equal(await page.evaluate(id => window.messages.find(message => message.requestId === id).type, id), 'loaded'); };
@@ -61,14 +67,40 @@ const server = http.createServer((request, response) => {
     await page.waitForFunction(() => window.messages.some(message => message.type === 'ready'), null, { timeout: 30000 });
     await load(generated, 'generated');
     const frame = page.frameLocator('#editor');
-    const label = frame.locator('#svgcontent text').filter({ hasText: /^研究问题$/ }).first();
+    if (sample.moveGroupId) {
+      const module = frame.locator(`#svgcontent [id="${sample.moveGroupId}"]`);
+      const shape = module.locator('use').first();
+      const text = module.locator('text').first();
+      const beforeShape = await shape.boundingBox();
+      const beforeText = await text.boundingBox();
+      assert.ok(beforeShape && beforeText);
+      const start = { x: beforeShape.x + beforeShape.width / 2, y: beforeShape.y + beforeShape.height / 3 };
+      await page.mouse.move(start.x, start.y);
+      await page.mouse.down();
+      await page.mouse.move(start.x + 28, start.y + 18, { steps: 8 });
+      await page.mouse.up();
+      const afterShape = await shape.boundingBox();
+      const afterText = await text.boundingBox();
+      const dx = afterText.x - beforeText.x;
+      const dy = afterText.y - beforeText.y;
+      assert.ok(Math.abs(dx) > 5 && Math.abs(dy) > 5, 'Module label did not move');
+      assert.ok(Math.abs((afterShape.x - beforeShape.x) - dx) < 1 && Math.abs((afterShape.y - beforeShape.y) - dy) < 1, 'Icon and label moved separately');
+      await frame.locator('#tool_undo').click();
+      const restored = await text.boundingBox();
+      assert.ok(Math.abs(restored.x - beforeText.x) < 1 && Math.abs(restored.y - beforeText.y) < 1, 'Module undo did not restore its position');
+      report.groupMoveAndUndo = { id: sample.moveGroupId, labelDelta: { dx, dy }, iconAndLabelTogether: true };
+    }
+    const editLabel = sample.editLabel || sample.requiredLabels[0];
+    const labelPattern = new RegExp(`^${editLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const editedLabel = `${editLabel}（改字验证）`;
+    const label = frame.locator('#svgcontent text').filter({ hasText: labelPattern }).first();
     await label.dblclick();
-    await frame.locator('#text').fill('研究问题（改字验证）');
-    await frame.locator('#svgcontent text').filter({ hasText: '研究问题（改字验证）' }).waitFor();
+    await frame.locator('#text').fill(editedLabel);
+    await frame.locator('#svgcontent text').filter({ hasText: editedLabel }).waitFor();
     await frame.locator('#tool_undo').click();
-    await frame.locator('#svgcontent text').filter({ hasText: /^研究问题$/ }).first().waitFor();
+    await frame.locator('#svgcontent text').filter({ hasText: labelPattern }).first().waitFor();
     await frame.locator('#tool_redo').click();
-    await frame.locator('#svgcontent text').filter({ hasText: '研究问题（改字验证）' }).waitFor();
+    await frame.locator('#svgcontent text').filter({ hasText: editedLabel }).waitFor();
     report.textEditUndoRedo = true;
     // Restore the original text; the immutable model version is never modified.
     await frame.locator('#tool_undo').click();
@@ -84,17 +116,16 @@ const server = http.createServer((request, response) => {
       const texts = [...document.querySelectorAll('text')].map(node => node.textContent.replace(/\s/g, '').normalize('NFKC'));
       return labels.filter(label => texts.includes(label.replace(/\s/g, '').normalize('NFKC')));
     }, { svg: reopened, labels: sample.requiredLabels });
-    assert.equal(report.reopenedLabels.length, sample.requiredLabels.length, 'A main label was lost');
+    assert.deepEqual(report.reopenedLabels, report.svg.semanticLabels, 'A generated label was lost during the editor roundtrip');
     report.saveAndReopen = true;
     await page.screenshot({ path: path.join(sampleDirectory, 'editor.png') });
-    // Browser SVG rendering is recorded separately from the native PNG export.
-    await page.setViewportSize({ width: report.svg.width, height: report.svg.height });
-    await page.setContent(`<html><body style="margin:0">${generated}</body></html>`);
-    await page.locator('svg').screenshot({ path: path.join(sampleDirectory, 'browser-render.png') });
     const image = bytes => `data:image/png;base64,${bytes.toString('base64')}`;
     const originalPng = image(fs.readFileSync(path.join(sampleDirectory, 'reference.png')));
     const generatedPng = image(fs.readFileSync(path.join(runDirectory, version.pngPath)));
-    const comparison = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>DEV-02 原图与还原图</title><style>body{margin:0;padding:28px;background:#e9eef5;color:#182b49;font-family:'Microsoft YaHei',sans-serif}h1{font-size:30px;margin:0 0 8px}p{margin:0 0 20px;font-size:19px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:24px}.figure{background:white;border-radius:12px;overflow:hidden}.label{padding:16px 20px;font-size:23px;font-weight:bold;border-bottom:1px solid #e3e8ef}.figure img{width:100%;display:block}footer{margin-top:20px;font-size:19px}</style><h1>DEV-02 · 中等复杂度科研架构图</h1><p>13 个主体模块 · 16 条有向关系 · 2 条反馈回路 · 原图 SVG 不提供给重建模型</p><div class="pair"><div class="figure"><div class="label">原图 · 本地设计的参考 PNG</div><img src="${originalPng}"></div><div class="figure"><div class="label">还原图 · 模型 SVG 的原生导出 PNG</div><img src="${generatedPng}"></div></div><footer>画布 ${report.svg.width}×${report.svg.height} · 语义标签 ${report.svg.semanticLabels.length}/13 · 逐字标签 ${report.svg.exactLabels.length}/13 · 独立审查因 2K 输出截断而保持草稿</footer></html>`;
+    const html = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    const subtitle = sample.comparisonSubtitle || `${sample.requiredLabels.length} 个必要标签 · ${sample.requiredRelations.length} 条关系 · 输入为 PNG 与文字要求`;
+    const drawingCaption = sample.authorship === 'manual_vector_redraw' ? '手工重绘 · SVG 的原生导出 PNG' : '还原图 · 模型 SVG 的原生导出 PNG';
+    const comparison = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>${html(sample.sampleId)} 原图与还原图</title><style>body{margin:0;padding:28px;background:#e9eef5;color:#182b49;font-family:'Microsoft YaHei',sans-serif}h1{font-size:30px;margin:0 0 8px}p{margin:0 0 20px;font-size:19px}.pair{display:grid;grid-template-columns:1fr 1fr;gap:24px}.figure{background:white;border-radius:12px;overflow:hidden}.label{padding:16px 20px;font-size:23px;font-weight:bold;border-bottom:1px solid #e3e8ef}.figure img{width:100%;display:block}footer{margin-top:20px;font-size:19px}</style><h1>${html(sample.sampleId)} · ${html(sample.title)}</h1><p>${html(subtitle)}</p><div class="pair"><div class="figure"><div class="label">原图 · 参考 PNG</div><img src="${originalPng}"></div><div class="figure"><div class="label">${html(drawingCaption)}</div><img src="${generatedPng}"></div></div><footer>画布 ${report.svg.width}×${report.svg.height} · 标签 ${report.svg.semanticLabels.length}/${sample.requiredLabels.length} · 独立审查状态 ${html(run.status)}${run.error ? ` · ${html(run.error)}` : ''}</footer></html>`;
     fs.writeFileSync(path.join(sampleDirectory, 'comparison.html'), comparison);
     await page.setViewportSize({ width: 2400, height: 1100 });
     await page.setContent(comparison);

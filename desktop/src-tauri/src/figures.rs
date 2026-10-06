@@ -19,6 +19,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+// Includes any model reasoning. DEV-02 exhausted 2K before a complete verdict.
+// Fixed before submission; truncation never increases this limit or retries.
+const REVIEW_OUTPUT_LIMIT: u32 = 8192;
+
 type ActiveRuns = Mutex<HashMap<(String, String), Arc<AtomicBool>>>;
 fn active_runs() -> &'static ActiveRuns {
     static RUNS: OnceLock<ActiveRuns> = OnceLock::new();
@@ -886,8 +890,8 @@ fn review(
         kind,
         "reviewer",
         run.reviewer.clone(),
-        2048,
-        || reviewer.run_figure_request(request, 2048, cancelled),
+        REVIEW_OUTPUT_LIMIT,
+        || reviewer.run_figure_request(request, REVIEW_OUTPUT_LIMIT, cancelled),
     )?;
     if is_budget_truncated(reply.stop_reason.as_deref())
         || reply
@@ -1479,6 +1483,110 @@ mod tests {
         .unwrap();
         println!(
             "DEV-02 run={id}, status={}, requests={}, versions={}, revision={}",
+            run.status,
+            run.requests.len(),
+            run.versions.len(),
+            run.revision_used
+        );
+        assert!(
+            !run.versions.is_empty(),
+            "No editable SVG was produced; inspect the frozen result and request ledger"
+        );
+    }
+    #[test]
+    #[ignore = "Explicit paid import diagnostic; frozen PNG/sample and a fresh submission guard required"]
+    fn live_imported_figure_reconstruction() {
+        let workspace = PathBuf::from(
+            std::env::var("SOMNIQ_FIGURE_P0_WORKSPACE")
+                .expect("Set the diagnostic project workspace"),
+        )
+        .canonicalize()
+        .unwrap();
+        let output = PathBuf::from(
+            std::env::var("SOMNIQ_FIGURE_SAMPLE_DIR")
+                .expect("Set the directory containing frozen sample.json and reference.png"),
+        )
+        .canonicalize()
+        .unwrap();
+        assert!(output.starts_with(&workspace));
+        let guard = output.join("live-run.json");
+        assert!(
+            !guard.exists(),
+            "Already submitted. Inspect the saved ledger; do not submit again."
+        );
+        let mut sample: Value =
+            serde_json::from_slice(&fs::read(output.join("sample.json")).unwrap()).unwrap();
+        let png = fs::read(output.join("reference.png")).unwrap();
+        assert_eq!(sample["inputHash"], json!(store::hash(&png)));
+        assert_eq!(sample["reviewOutputLimit"], json!(REVIEW_OUTPUT_LIMIT));
+        assert!(sample["method"].is_string());
+        assert!(sample["style"].is_string());
+        assert!(sample["sampleId"].is_string());
+        let local_svg = std::env::var("SOMNIQ_FIGURE_LOCAL_SVG").ok().map(|path| {
+            let path = PathBuf::from(path).canonicalize().unwrap();
+            assert!(path.starts_with(&workspace));
+            let svg = fs::read_to_string(path).unwrap();
+            assert_eq!(sample["authorship"], "manual_vector_redraw");
+            assert_eq!(sample["manualSvgHash"], json!(store::hash(svg.as_bytes())));
+            svg
+        });
+        assert!(
+            local_svg.is_some() || sample["authorship"] != "manual_vector_redraw",
+            "A manual fixture must never accidentally submit a reconstruction request"
+        );
+        let validated = api::validate_image_bytes(png.clone()).unwrap();
+        assert_eq!(validated.mime_type, "image/png");
+        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
+        let now = runtime::now_iso8601();
+        let run: FigureRun = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": id, "title": sample["title"], "method": sample["method"], "style": sample["style"], "sourceMode": "import", "sourceMime": "image/png", "sourceHash": null,
+            "status": "ready", "outputLimit": sample["outputLimit"], "executor": executor.identity, "reviewer": reviewer.figure_identity(), "imageIdentity": null,
+            "executorVision": false, "reviewerVision": false, "revisionUsed": false, "versions": [], "requests": [], "review": null, "error": null, "createdAt": now, "updatedAt": now,
+        })).unwrap();
+        store::create(&workspace, run, Some(&png)).unwrap();
+        sample["runId"] = json!(id);
+        let directory = store::directory(&workspace, &id).unwrap();
+        runtime::write_file_atomically(
+            &directory.join("p0-sample.json"),
+            serde_json::to_vec_pretty(&sample).unwrap(),
+        )
+        .unwrap();
+        // Write before process: a failed, interrupted or unknown result cannot
+        // turn a diagnostic rerun into a second paid submission.
+        runtime::write_file_atomically(
+            &guard,
+            serde_json::to_vec_pretty(&json!({"sampleId": sample["sampleId"], "runId": id, "inputHash": sample["inputHash"], "outputLimit": sample["outputLimit"], "reviewOutputLimit": REVIEW_OUTPUT_LIMIT})).unwrap(),
+        )
+        .unwrap();
+        let result = if let Some(svg) = local_svg {
+            persist_svg(&workspace, &id, None, &svg, "manual_reference_redraw").map(|_| ())
+        } else {
+            process(&workspace, &id, Arc::new(AtomicBool::new(false)), || {})
+        };
+        if let Err(error) = &result {
+            store::update(&workspace, &id, |run| {
+                if run.status != "budget_truncated" {
+                    run.status = if run.requests.iter().any(|r| r.status == "unknown") {
+                        "unknown"
+                    } else {
+                        "draft"
+                    }
+                    .into();
+                }
+                run.error = Some(error.clone());
+                Ok(())
+            })
+            .unwrap();
+        }
+        let run = store::load(&workspace, &id).unwrap();
+        let report = json!({"kind": if sample["authorship"] == "manual_vector_redraw" { "manual_local_import" } else { "imported_development_sample" }, "sampleId": sample["sampleId"], "runId": id, "result": result, "status": run.status, "requests": run.requests, "revisionUsed": run.revision_used, "versions": run.versions, "review": run.review});
+        let bytes = serde_json::to_vec_pretty(&report).unwrap();
+        runtime::write_file_atomically(&output.join("result.json"), &bytes).unwrap();
+        runtime::write_file_atomically(&directory.join("p0-result.json"), bytes).unwrap();
+        println!(
+            "{} run={id}, status={}, requests={}, versions={}, revision={}",
+            sample["sampleId"],
             run.status,
             run.requests.len(),
             run.versions.len(),
