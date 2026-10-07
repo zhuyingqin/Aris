@@ -24,6 +24,8 @@ beforeEach(() => {
     tab: "chat",
     language: "en",
     pendingTypesetFilePath: null,
+    pendingCodeFilePath: null,
+    currentProject: { id: "p1", name: "work", path: "D:/work", addedAt: 0, lastOpenedAt: 0 },
     pendingSidePanelEvidence: null,
   });
   apiMocks.isTauri.mockReturnValue(false);
@@ -698,9 +700,8 @@ describe("ChatMessage rendering", () => {
     expect(fileLink).toBeTruthy();
     await user.click(fileLink!);
     expect(useStore.getState().tab).toBe("lab");
-    // The workbench owns its own tabs, so the open travels over the bridge
-    // rather than through the store.
-    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("reports/result.md");
+    expect(useStore.getState().pendingCodeFilePath).toBe("D:/work/reports/result.md");
+    expect(apiMocks.codeBridgeOpenFile).not.toHaveBeenCalled();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
@@ -829,6 +830,21 @@ describe("ChatMessage rendering", () => {
     await user.click(screen.getByText("ChatGPT Web consultation"));
     expect(screen.getByText("The draft needs a stronger evidence table.")).toBeTruthy();
     expect(screen.queryByText(/\"accountId\"/)).toBeNull();
+  });
+
+  it("previews only local Somni image artifacts and shows the actual prompt and model", async () => {
+    render(<ChatMessage turn={{ id: "somni-image", role: "assistant", blocks: [{ kind: "tool", name: "SomniImage",
+      input: JSON.stringify({ prompt: "A research diagram", files: ["reference.png"] }),
+      output: JSON.stringify({ status: "completed", model: "gpt-image-2", prompt: "A research diagram",
+        images: [{ path: ".somniq/artifacts/somni-images/run/image-1.png" }] }),
+    }] }} canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined} />);
+    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    await userEvent.click(screen.getByText("Somni drawing"));
+    expect(screen.getByText(/gpt-image-2/)).toBeTruthy();
+    expect(screen.getByText("A research diagram")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(".somniq/artifacts/somni-images/run/image-1.png"));
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalledWith("reference.png");
+    expect(screen.queryByText(/Third-party webpage automation/)).toBeNull();
   });
 
   it("previews image artifacts returned by ChatGptWebImage", async () => {

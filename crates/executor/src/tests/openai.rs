@@ -4,6 +4,66 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+#[test]
+fn bounded_artifact_requests_never_resend_and_pin_the_budget() {
+    for (status, response_body, managed) in [
+        ("500 Internal Server Error", "failed for secret-test-key", false),
+        ("400 Bad Request", "Error from provider (Console Go): Request is missing x-opencode-session", false),
+        ("400 Bad Request", "Request is missing x-opencode-session: secret-test-key", true),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_http_request(&mut stream);
+            write_mock_http_response(&mut stream, status, response_body);
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut resends = 0;
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() { resends += 1; write_mock_http_response(&mut stream, status, response_body); }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            (request, resends)
+        });
+        let mut client = OpenAIRuntimeClient::new(OpenAIExecutorConfig { api_key: "secret-test-key".into(), base_url: format!("http://{address}/v1") }, "figure-boundary-model".into(), false, vec![], Box::new(crate::NoopStreamObserver)).unwrap().with_transport(OpenAiTransport::ChatCompletions).with_routing_session_header(managed).with_single_request(16384);
+        client.set_session_id("figure-task-executor");
+        let error = client.stream(ApiRequest { system_prompt: vec![], messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "reconstruct".into() }, ContentBlock::Image { media_type: "image/png".into(), data: "aW1hZ2U=".into() }])] }).unwrap_err();
+        assert!(!error.to_string().contains("secret-test-key"));
+        if managed {
+            assert!(error.to_string().contains("HTTP 400"));
+            assert!(error.to_string().contains("gateway did not forward it"));
+            assert!(error.to_string().contains("{client_header:x-opencode-session}"));
+        }
+        let (request, resends) = server.join().unwrap(); assert_eq!(resends, 0);
+        assert_eq!(request.to_ascii_lowercase().contains("x-opencode-session: figure-task-executor"), managed);
+        let payload: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["max_tokens"], 16384);
+        assert_eq!(payload["messages"][0]["content"][1]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
+    }
+}
+
+#[test]
+fn uncapped_artifact_request_follows_chat_and_keeps_light_reasoning() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_mock_http_request(&mut stream);
+        write_mock_http_response(&mut stream, "400 Bad Request", "rejected");
+        request
+    });
+    let mut client = OpenAIRuntimeClient::new(OpenAIExecutorConfig { api_key: "k".into(), base_url: format!("http://{address}/v1") }, "deepseek-v4.1-flash".into(), false, vec![], Box::new(crate::NoopStreamObserver)).unwrap().with_transport(OpenAiTransport::ChatCompletions).with_single_request_limit(None);
+    client.stream(ApiRequest { system_prompt: vec![], messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "reconstruct".into() }])] }).unwrap_err();
+    let request = server.join().unwrap();
+    let payload: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        assert!(payload.get(field).is_none(), "{field} must not be sent: {payload}");
+    }
+    assert_eq!(payload["reasoning_effort"], "low");
+}
+
 fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -157,39 +217,14 @@ fn detects_only_explicit_missing_opencode_session_errors() {
 }
 
 #[test]
-fn proxied_opencode_route_is_learned_and_gets_the_session_header() {
-    let base_url = "https://adaptive-opencode-proxy.test/v1";
-    let model = "proxy-only-opencode-model";
+fn opencode_session_header_requires_explicit_connection_identity() {
     let client = reqwest::Client::new();
-
-    assert!(!opencode_session_known_required(base_url, model));
-    let before = apply_openai_routing_session_header(
-        client.post(format!("{base_url}/chat/completions")),
-        base_url,
-        model,
-        "conversation-42",
-    )
-    .build()
-    .expect("request before route discovery");
-    assert!(before.headers().get(api::OPENCODE_SESSION_HEADER).is_none());
-
-    assert!(mark_opencode_session_required(base_url, model));
-
-    let after = apply_openai_routing_session_header(
-        client.post(format!("{base_url}/chat/completions")),
-        base_url,
-        model,
-        "conversation-42",
-    )
-    .build()
-    .expect("request after route discovery");
-    assert_eq!(
-        after
-            .headers()
-            .get(api::OPENCODE_SESSION_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some("conversation-42"),
-    );
+    for confirmed in [false, true] {
+        let request = apply_openai_routing_session_header(
+            client.post("https://proxy.test/v1/chat/completions"), confirmed, "conversation-42",
+        ).build().unwrap();
+        assert_eq!(request.headers().get(api::OPENCODE_SESSION_HEADER).is_some(), confirmed);
+    }
 }
 
 #[test]
@@ -244,49 +279,35 @@ fn proxied_opencode_missing_session_response_retries_with_header() {
 }
 
 #[test]
-fn managed_gateway_sends_session_header_on_first_request() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
-    let address = listener.local_addr().expect("mock gateway address");
+fn confirmed_opencode_connection_does_not_classify_other_clients() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("first request");
-        let request = read_mock_http_request(&mut stream);
-        write_mock_sse_success(&mut stream);
-        request
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            requests.push(read_mock_http_request(&mut stream));
+            write_mock_sse_success(&mut stream);
+        }
+        requests
     });
-
-    let base_url = format!("http://{address}/v1");
-    let mut client = OpenAIRuntimeClient::new(
-        OpenAIExecutorConfig {
-            api_key: "test-key".to_string(),
-            base_url,
-        },
-        "managed-newapi-first-request-model".to_string(),
-        false,
-        Vec::new(),
-        Box::new(crate::NoopStreamObserver),
-    )
-    .expect("OpenAI client")
-    .with_transport(OpenAiTransport::ChatCompletions)
-    .with_routing_session_header(true);
-    client.set_session_id("managed-conversation-7");
-    let events = client
-        .stream(ApiRequest {
-            system_prompt: Vec::new(),
-            messages: vec![ConversationMessage::user_text("hello")],
-        })
-        .expect("managed gateway request should succeed without a 400 probe");
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "ok")));
-
-    let first_request = server.join().expect("mock gateway thread");
-    assert!(first_request
-        .to_ascii_lowercase()
-        .contains("x-opencode-session: managed-conversation-7"));
+    for confirmed_opencode in [true, false] {
+        let mut client = OpenAIRuntimeClient::new(
+            OpenAIExecutorConfig { api_key: "test-key".into(), base_url: base_url.clone() },
+            "same-model-different-connection".into(), false, Vec::new(),
+            Box::new(crate::NoopStreamObserver),
+        ).unwrap().with_transport(OpenAiTransport::ChatCompletions)
+            .with_routing_session_header(confirmed_opencode);
+        client.set_session_id("conversation-7");
+        client.stream(ApiRequest { system_prompt: Vec::new(), messages: vec![ConversationMessage::user_text("hello")] }).unwrap();
+    }
+    let requests = server.join().unwrap();
+    assert!(requests[0].to_ascii_lowercase().contains("x-opencode-session: conversation-7"));
+    assert!(!requests[1].to_ascii_lowercase().contains("x-opencode-session:"));
 }
 
 #[test]
-fn managed_gateway_reports_when_newapi_strips_the_session_header() {
+fn confirmed_opencode_route_reports_when_newapi_strips_the_session_header() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
     let address = listener.local_addr().expect("mock gateway address");
     let server = thread::spawn(move || {
@@ -2245,4 +2266,238 @@ fn null_and_repeated_usage_frames_do_not_flood_the_event_stream() {
     assert_eq!(usage_events[0].input_tokens, 100);
     assert_eq!(usage_events[0].output_tokens, 7);
     server.join().expect("mock gateway thread");
+}
+
+/// Mock gateway that accepts every request, optionally writes `prelude`
+/// (status line + headers), then holds the connection open without sending
+/// anything else — a relay still waiting on a long-reasoning model. Returns
+/// how many requests reached it once `stop` is set.
+fn spawn_silent_gateway(
+    prelude: Option<&'static str>,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread::JoinHandle<usize>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking mock listener");
+    let address = listener.local_addr().expect("mock gateway address");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = std::sync::Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let mut held = Vec::new();
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking mock stream");
+                    read_mock_http_request(&mut stream);
+                    if let Some(prelude) = prelude {
+                        stream
+                            .write_all(prelude.as_bytes())
+                            .expect("write mock prelude");
+                        stream.flush().expect("flush mock prelude");
+                    }
+                    held.push(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("mock gateway accept failed: {error}"),
+            }
+        }
+        held.len()
+    });
+    (format!("http://{address}/v1"), stop, server)
+}
+
+fn silent_gateway_client(
+    base_url: String,
+    model: &str,
+    observer: Box<dyn StreamObserver>,
+    wait_policy: api::StreamWaitPolicy,
+) -> OpenAIRuntimeClient {
+    OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url,
+        },
+        model.to_string(),
+        false,
+        Vec::new(),
+        observer,
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions)
+    .with_wait_policy(wait_policy)
+}
+
+fn hello_request() -> ApiRequest {
+    ApiRequest {
+        system_prompt: Vec::new(),
+        messages: vec![ConversationMessage::user_text("hello")],
+    }
+}
+
+/// Regression: a gateway that holds headers until the model's first event
+/// (NewAPI → Sub2API → OpenAI under max reasoning) was abandoned at 120s and
+/// re-sent up to 4 times — ~8 minutes of silence and 4 billed requests.
+#[test]
+fn post_send_header_timeout_is_resent_at_most_once() {
+    let (base_url, stop, server) = spawn_silent_gateway(None);
+    let mut client = silent_gateway_client(
+        base_url,
+        "silent-header-model",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_millis(300)),
+            stream_idle_timeout: Some(Duration::from_secs(30)),
+        },
+    );
+    let error = client
+        .stream(hello_request())
+        .expect_err("a gateway that never answers must fail");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert_eq!(requests, 1 + api::MAX_TIMEOUT_RESENDS as usize);
+    let message = error.to_string();
+    assert!(message.contains("no response headers within"), "{message}");
+    assert!(message.contains("Not re-sending again"), "{message}");
+}
+
+/// Regression: an idle timeout before any output used to end the turn with a
+/// fake `stream_error_after_partial_output`, which the runtime answered with
+/// an automatic continuation request — another hidden resend.
+#[test]
+fn idle_timeout_before_output_fails_visibly_after_one_resend() {
+    let (base_url, stop, server) = spawn_silent_gateway(Some(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+    ));
+    let mut client = silent_gateway_client(
+        base_url,
+        "silent-stream-model",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(30)),
+            stream_idle_timeout: Some(Duration::from_millis(300)),
+        },
+    );
+    let error = client
+        .stream(hello_request())
+        .expect_err("no output at all must surface as an error, not a continuation");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert_eq!(requests, 1 + api::MAX_TIMEOUT_RESENDS as usize);
+    let message = error.to_string();
+    assert!(message.contains("produced no output"), "{message}");
+    assert!(message.contains("Not re-sending again"), "{message}");
+}
+
+/// Regression: desktop Stop only flips the observer's cancel flag, which the
+/// send phase never checked — Stop did nothing while waiting for headers.
+#[test]
+fn stop_interrupts_the_response_header_wait() {
+    struct CancelAfter(std::time::Instant);
+    impl StreamObserver for CancelAfter {
+        fn is_cancelled(&self) -> bool {
+            std::time::Instant::now() >= self.0
+        }
+    }
+
+    let (base_url, stop, server) = spawn_silent_gateway(None);
+    let mut client = silent_gateway_client(
+        base_url,
+        "stop-during-header-wait-model",
+        Box::new(CancelAfter(
+            std::time::Instant::now() + Duration::from_millis(300),
+        )),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(60)),
+            stream_idle_timeout: Some(Duration::from_secs(60)),
+        },
+    );
+    let started = std::time::Instant::now();
+    let error = client
+        .stream(hello_request())
+        .expect_err("Stop must end the wait");
+    let elapsed = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert!(error.to_string().contains("interrupted by user"), "{error}");
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    assert_eq!(requests, 1);
+}
+
+#[test]
+fn artifact_accepts_late_headers_with_one_streamed_submission() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let wire = read_mock_http_request(&mut stream);
+        thread::sleep(Duration::from_millis(200));
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"<svg/>\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        drop(stream);
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert!(listener.accept().is_err(), "late response must not cause another submission");
+        wire
+    });
+    let mut client = silent_gateway_client(
+        format!("http://{address}/v1"), "deepseek-v4.1-flash", Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy { response_header_timeout: Some(Duration::from_millis(50)), stream_idle_timeout: Some(Duration::from_secs(2)) },
+    ).with_single_request_limit(None);
+    assert_eq!(client.wait_policy, api::StreamWaitPolicy::single_request_from_env());
+    client = client.with_wait_policy(api::StreamWaitPolicy {
+        response_header_timeout: Some(Duration::from_secs(2)), stream_idle_timeout: Some(Duration::from_secs(2)),
+    });
+    let events = client.stream(hello_request()).unwrap();
+    assert!(events.iter().any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "<svg/>")));
+    let wire = server.join().unwrap();
+    let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["reasoning_effort"], "low");
+    assert!(body.get("max_tokens").is_none());
+}
+
+#[test]
+fn artifact_header_and_idle_timeouts_never_resend() {
+    for prelude in [None, Some("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")] {
+        let (base_url, stop, server) = spawn_silent_gateway(prelude);
+        let mut client = silent_gateway_client(
+            base_url, "silent-artifact", Box::new(crate::NoopStreamObserver), api::StreamWaitPolicy::from_env(),
+        ).with_single_request_limit(None).with_wait_policy(api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_millis(200)), stream_idle_timeout: Some(Duration::from_millis(200)),
+        });
+        let error = client.stream(hello_request()).unwrap_err();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(error.to_string().contains(if prelude.is_some() { "produced no output" } else { "no response headers" }), "{error}");
+    }
+}
+
+#[test]
+fn artifact_long_header_wait_can_still_be_cancelled_without_resending() {
+    struct CancelAfter(std::time::Instant);
+    impl StreamObserver for CancelAfter {
+        fn is_cancelled(&self) -> bool { std::time::Instant::now() >= self.0 }
+    }
+    let (base_url, stop, server) = spawn_silent_gateway(None);
+    let mut client = silent_gateway_client(
+        base_url, "cancel-artifact", Box::new(CancelAfter(std::time::Instant::now() + Duration::from_millis(300))),
+        api::StreamWaitPolicy::from_env(),
+    ).with_single_request_limit(None);
+    let started = std::time::Instant::now();
+    let error = client.stream(hello_request()).unwrap_err();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(server.join().unwrap(), 1);
+    assert!(error.to_string().contains("interrupted by user"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5));
 }

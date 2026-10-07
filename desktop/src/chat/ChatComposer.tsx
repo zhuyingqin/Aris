@@ -7,12 +7,18 @@ import {
   type GitWorkspaceSnapshot,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { useAppearance } from "../appearance";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import ChatImagePreview from "./ChatImagePreview";
+import ChatReasoningPanel from "./ChatReasoningPanel";
 import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
+import { groupChatModels } from "./modelGroups";
+import { reasoningLevelName } from "./reasoningLevels";
 import "./ChatComposerGit.css";
+import "./ChatComposerModel.css";
+import "./ChatComposerLayout.css";
 
 interface ContextStatusView {
   kind: "warning" | "compacted";
@@ -278,26 +284,6 @@ const PERMISSION_OPTIONS = [
   { value: "danger-full-access" },
 ];
 
-// Display names for the reasoning levels. Which of them are *offered* is not
-// decided here: the backend reports the levels the active model accepts (GPT-5.6
-// has `max`, GPT-5.5 stops at `xhigh`, o3 only does low/medium/high), and this
-// map just names whatever comes back.
-const REASONING_LEVEL_NAMES: Record<string, { en: string; cn: string }> = {
-  none: { en: "No thinking", cn: "不思考" },
-  minimal: { en: "Minimal", cn: "最少" },
-  low: { en: "Low", cn: "低" },
-  medium: { en: "Medium", cn: "中" },
-  high: { en: "High", cn: "高" },
-  xhigh: { en: "Extra high", cn: "很高" },
-  max: { en: "Max", cn: "最高" },
-};
-
-function reasoningLevelName(level: string, language: "cn" | "en") {
-  const name = REASONING_LEVEL_NAMES[level];
-  if (!name) return level;
-  return language === "cn" ? name.cn : name.en;
-}
-
 function ContextRing({ used, max }: { used: number; max: number }) {
   const rawPct = max > 0 ? used / max : 0;
   const pct = Math.min(1, Math.max(0, rawPct));
@@ -324,14 +310,6 @@ function ContextRing({ used, max }: { used: number; max: number }) {
       </svg>
       <span className="ctx-ring-label">{label}</span>
     </div>
-  );
-}
-
-function UploadPlusIcon() {
-  return (
-    <svg className="chat-upload-icon" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-      <path d="M7 2.75v8.5M2.75 7h8.5" />
-    </svg>
   );
 }
 
@@ -365,7 +343,7 @@ interface Props {
   /** Levels the active model accepts, weakest → strongest. */
   reasoningOptions?: string[];
   reasoningBusy?: boolean;
-  onReasoningEffortChange?: (effort: string) => void;
+  onReasoningEffortChange?: (effort: string) => void | Promise<void>;
   contextUsed?: number;
   contextMax?: number | null;
   contextStatus?: ContextStatusView | null;
@@ -422,7 +400,14 @@ function ChatComposer({
   onCreateGitBranch,
 }: Props) {
   const language = useStore((state) => state.language);
+  const uiTextScale = useStore((state) => state.uiFontMode === "manual" ? state.uiFontSize : state.uiRecommendedFontSize);
+  const readingStyle = useAppearance(({ value }) => `${value.font}:${value.bodySize}:${value.lineHeight}:${value.readingWidth}`);
   const copy = CHAT_COPY[language];
+  const modelGroups = useMemo(
+    () => groupChatModels(modelOptions ?? [], language === "cn" ? "其他模型" : "Other models"),
+    [modelOptions, language],
+  );
+  const activeModelSeries = modelGroups.find((group) => group.options.some((option) => option.value === modelName))?.series ?? null;
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -436,7 +421,7 @@ function ChatComposer({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  const [expandedModelSeries, setExpandedModelSeries] = useState<string | null>(null);
   const [gitMenuOpen, setGitMenuOpen] = useState(false);
   const [gitSearch, setGitSearch] = useState("");
   const [gitBranchesOpen, setGitBranchesOpen] = useState(false);
@@ -451,11 +436,19 @@ function ChatComposer({
   const [recentFiles, setRecentFiles] = useState(() => loadRecent(RECENT_FILES_KEY));
   const permMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
-  const reasoningMenuRef = useRef<HTMLDivElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const gitMenuRef = useRef<HTMLDivElement>(null);
+  const gitPopupRef = useRef<HTMLDivElement>(null);
+  const [gitMenuLayout, setGitMenuLayout] = useState({ left: 0, maxHeight: 430 });
   const fileSearchVersion = useRef(0);
   const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
   const dismissContextLabel = language === "cn" ? "关闭上下文提示" : "Dismiss context notice";
+  const modelSettingsLabel = language === "cn" ? "模型与思考强度" : "Model and reasoning effort";
+  const canChooseModel = Boolean(canSwitchModel && modelOptions?.length && onModelChange);
+  const canAdjustReasoning = Boolean(reasoningSupported && reasoningApplied && reasoningOptions.length && onReasoningEffortChange);
+  const reasoningLabel = reasoningApplied
+    ? reasoningLevelName(reasoningEffort, language)
+    : (language === "cn" ? "服务端默认" : "Provider default");
   const repository = gitWorkspace ?? null;
   const gitLabel = repository
     ? !repository.gitAvailable
@@ -548,7 +541,7 @@ function ChatComposer({
 
   useLayoutEffect(() => {
     if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
-  }, [input]);
+  }, [input, uiTextScale, readingStyle]);
   useEffect(() => {
     if (focusRequest > 0) textareaRef.current?.focus();
   }, [focusRequest]);
@@ -576,15 +569,45 @@ function ChatComposer({
 
   useLayoutEffect(() => {
     if (!wrapRef.current) return;
-    const update = () => onHeightChange(wrapRef.current?.getBoundingClientRect().height ?? 0);
+    const wrap = wrapRef.current;
+    let previousWidth = wrap.getBoundingClientRect().width;
+    const update = () => {
+      const width = wrap.getBoundingClientRect().width;
+      if (Math.abs(previousWidth - width) > 0.5) {
+        previousWidth = width;
+        if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
+      }
+      onHeightChange(wrap.getBoundingClientRect().height);
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(wrapRef.current);
     return () => observer.disconnect();
   }, [onHeightChange]);
 
+  useLayoutEffect(() => {
+    const anchor = gitMenuRef.current;
+    const popup = gitPopupRef.current;
+    if (!gitMenuOpen || !anchor || !popup) return;
+    const positionMenu = () => {
+      const rect = anchor.getBoundingClientRect();
+      const width = popup.getBoundingClientRect().width;
+      const viewportLeft = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+      const left = viewportLeft - rect.left;
+      const maxHeight = Math.max(0, Math.min(430, rect.top - 15));
+      setGitMenuLayout(previous => Math.abs(previous.left - left) < 0.5 && Math.abs(previous.maxHeight - maxHeight) < 0.5
+        ? previous : { left, maxHeight });
+    };
+    positionMenu();
+    const observer = new ResizeObserver(positionMenu);
+    observer.observe(anchor);
+    observer.observe(popup);
+    window.addEventListener("resize", positionMenu);
+    return () => { observer.disconnect(); window.removeEventListener("resize", positionMenu); };
+  }, [gitMenuOpen]);
+
   useEffect(() => {
-    if (!permMenuOpen && !modelMenuOpen && !reasoningMenuOpen && !gitMenuOpen) return;
+    if (!permMenuOpen && !modelMenuOpen && !gitMenuOpen) return;
     const handler = (e: MouseEvent) => {
       if (permMenuOpen && permMenuRef.current && !permMenuRef.current.contains(e.target as Node)) {
         setPermMenuOpen(false);
@@ -592,15 +615,18 @@ function ChatComposer({
       if (modelMenuOpen && modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
         setModelMenuOpen(false);
       }
-      if (reasoningMenuOpen && reasoningMenuRef.current && !reasoningMenuRef.current.contains(e.target as Node)) {
-        setReasoningMenuOpen(false);
-      }
       if (gitMenuOpen && gitMenuRef.current && !gitMenuRef.current.contains(e.target as Node)) {
         setGitMenuOpen(false);
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setGitMenuOpen(false);
+      if (event.key === "Escape") {
+        setGitMenuOpen(false);
+        if (modelMenuOpen) {
+          setModelMenuOpen(false);
+          modelTriggerRef.current?.focus({ preventScroll: true });
+        }
+      }
     };
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", closeOnEscape);
@@ -608,7 +634,11 @@ function ChatComposer({
       document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [gitMenuOpen, permMenuOpen, modelMenuOpen, reasoningMenuOpen]);
+  }, [gitMenuOpen, permMenuOpen, modelMenuOpen]);
+
+  useEffect(() => {
+    setModelMenuOpen(false);
+  }, [modelName, reasoningSupported, reasoningApplied]);
 
   useEffect(() => {
     const version = ++fileSearchVersion.current;
@@ -978,73 +1008,230 @@ function ChatComposer({
                 : (language === "cn" ? "远程 Agent 暂不支持附件" : "Remote Agent attachments are not supported yet")}
               aria-label={copy.attachFiles}
             >
-              <UploadPlusIcon />
+              <SvgIcon name="plus" size={16} />
             </button>
+            {gitWorkspace !== undefined && (
+              <div className="chat-workspace-bar" aria-label={language === "cn" ? "Git 工作区" : "Git workspace"}>
+                <div className="chat-git-menu-anchor" ref={gitMenuRef}>
+                  <button
+                    type="button"
+                    className={`chat-workspace-item chat-workspace-git${repository?.hasConflicts ? " has-conflicts" : ""}`}
+                    onClick={() => {
+                      setGitMenuOpen((open) => !open);
+                      setGitMenuError(null);
+                    }}
+                    aria-haspopup="menu"
+                  aria-expanded={gitMenuOpen}
+                  aria-label={language === "cn" ? `Git 菜单，${gitLabel}` : `Git menu, ${gitLabel}`}
+                  title={gitLabel}
+                  >
+                    <SvgIcon name="branch" size={14} />
+                  <span className="chat-workspace-branch">{gitLabel}</span>
+                    {gitChangeCount > 0 && <span className="chat-workspace-change-count">{gitChangeCount}</span>}
+                    <SvgIcon name="chevronDown" size={11} className="chat-workspace-chevron" />
+                  </button>
+                  {gitMenuOpen && (
+                  <div className="chat-git-menu" ref={gitPopupRef} style={gitMenuLayout} role="menu" aria-label={language === "cn" ? "Git 操作" : "Git actions"}>
+                      <label className="chat-git-menu-search">
+                        <SvgIcon name="search" size={14} />
+                        <input
+                          type="search"
+                          value={gitSearch}
+                          autoFocus
+                          placeholder={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
+                          aria-label={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
+                          onChange={(event) => setGitSearch(event.target.value)}
+                        />
+                      </label>
+                      <div className="chat-git-menu-actions">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={gitActionBusy || !onRefreshGit}
+                          onClick={() => void runGitAction(onRefreshGit)}
+                        >
+                          <SvgIcon name="refresh" size={14} />
+                          <span>{language === "cn" ? "刷新 Git 状态" : "Refresh Git status"}</span>
+                        </button>
+                        {repository?.isRepository ? (
+                          <>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={!onOpenGit}
+                              onClick={() => {
+                                setGitMenuOpen(false);
+                                onOpenGit?.();
+                              }}
+                            >
+                              <SvgIcon name="modified" size={14} />
+                              <span>{language === "cn" ? "查看更改与提交…" : "View changes and commit…"}</span>
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={gitActionBusy || !onCreateGitBranch}
+                              onClick={() => setGitCreatingBranch((open) => !open)}
+                            >
+                              <SvgIcon name="branch" size={14} />
+                              <span>{language === "cn" ? "新建分支…" : "New branch…"}</span>
+                            </button>
+                          </>
+                        ) : repository?.gitAvailable ? (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={gitActionBusy || !onInitializeGit}
+                            onClick={() => void runGitAction(onInitializeGit)}
+                          >
+                            <SvgIcon name="plus" size={14} />
+                            <span>{language === "cn" ? "初始化 Git 仓库" : "Initialize Git repository"}</span>
+                          </button>
+                        ) : null}
+                      </div>
+                      {gitCreatingBranch && repository?.isRepository && (
+                        <div className="chat-git-new-branch">
+                          <input
+                            value={gitNewBranch}
+                            placeholder={language === "cn" ? "新分支名称" : "New branch name"}
+                            aria-label={language === "cn" ? "新分支名称" : "New branch name"}
+                            disabled={gitActionBusy}
+                            onChange={(event) => setGitNewBranch(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") submitNewGitBranch();
+                            }}
+                          />
+                          <button type="button" disabled={gitActionBusy || !gitNewBranch.trim()} onClick={submitNewGitBranch}>
+                            {language === "cn" ? "创建" : "Create"}
+                          </button>
+                        </div>
+                      )}
+                      {repository?.isRepository && (
+                        <section className="chat-git-branch-section">
+                          <button
+                            type="button"
+                            className="chat-git-branch-heading"
+                            aria-expanded={gitBranchesOpen || Boolean(gitSearch.trim())}
+                            onClick={() => setGitBranchesOpen((open) => !open)}
+                          >
+                            <SvgIcon name={gitBranchesOpen || gitSearch.trim() ? "chevronDown" : "chevronRight"} size={12} />
+                            <span>{language === "cn" ? "本地分支" : "Local branches"}</span>
+                            <small>{repository.branches.length}</small>
+                          </button>
+                          {(gitBranchesOpen || Boolean(gitSearch.trim())) && (
+                            <div className="chat-git-branch-list">
+                              {filteredGitBranches.map((branch) => (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  key={branch.name}
+                                  className={branch.current ? "active" : ""}
+                                  disabled={gitActionBusy || branch.current || !onSwitchGitBranch}
+                                  onClick={() => void runGitAction(() => onSwitchGitBranch?.(branch.name), true)}
+                                >
+                                  <SvgIcon name="branch" size={13} />
+                                  <span>{branch.name}</span>
+                                  {branch.current && <SvgIcon name="check" size={13} />}
+                                </button>
+                              ))}
+                              {filteredGitBranches.length === 0 && (
+                                <p>{language === "cn" ? "没有匹配的本地分支" : "No matching local branches"}</p>
+                              )}
+                            </div>
+                          )}
+                        </section>
+                      )}
+                      {gitMenuError && <div className="chat-git-menu-error" role="alert">{gitMenuError}</div>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
           <div className="chat-footer-right">
             {contextMax != null && contextMax > 0 && (
               <ContextRing used={contextUsed ?? 0} max={contextMax} />
             )}
-            {modelName && (
+            {(modelName || reasoningSupported) && (
               <div className="chat-pill-wrap" ref={modelMenuRef}>
                 <button
-                  className="chat-pill chat-model-pill"
-                  onClick={() => { if (canSwitchModel) setModelMenuOpen((v) => !v); }}
-                  disabled={modelBusy || !canSwitchModel}
-                  title={canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel}
-                >
-                  {modelName}
-                  {canSwitchModel && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
-                </button>
-                {modelMenuOpen && modelOptions && modelOptions.length > 0 && (
-                  <div className="chat-pill-menu chat-pill-menu-right" role="menu">
-                    {modelOptions.map((opt) => (
-                      <button
-                        key={opt.value}
-                        className={`chat-pill-menu-item${modelName === opt.value ? " active" : ""}`}
-                        role="menuitem"
-                        onClick={() => {
-                          void onModelChange?.(opt.value);
-                          setModelMenuOpen(false);
-                        }}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {reasoningSupported && (
-              <div className="chat-pill-wrap" ref={reasoningMenuRef}>
-                <button
                   type="button"
-                  className="chat-pill chat-reasoning-pill"
-                  onClick={() => setReasoningMenuOpen((v) => !v)}
-                  disabled={busy || reasoningBusy || !reasoningApplied}
-                  title={reasoningMessage ?? "Reasoning effort"}
-                  aria-label="Reasoning effort"
+                  ref={modelTriggerRef}
+                  className="chat-pill chat-model-pill"
+                  onClick={() => {
+                    if (!modelMenuOpen) setExpandedModelSeries(activeModelSeries);
+                    setModelMenuOpen((value) => !value);
+                  }}
+                  disabled={modelBusy || reasoningBusy || (!canChooseModel && (!canAdjustReasoning || busy))}
+                  title={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}`}
+                  aria-label={reasoningSupported ? `${modelName ?? (language === "cn" ? "模型" : "Model")} · ${reasoningLabel}` : undefined}
+                  aria-haspopup="dialog"
+                  aria-expanded={modelMenuOpen}
                 >
-                  {reasoningApplied
-                    ? reasoningLevelName(reasoningEffort, language)
-                    : (language === "cn" ? "服务端默认" : "Provider default")}
-                  {reasoningApplied && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
+                  <span className="chat-model-pill-name">{modelName ?? (language === "cn" ? "模型" : "Model")}</span>
+                  {reasoningSupported && (
+                    <>
+                      <span className="chat-model-pill-separator" aria-hidden="true">·</span>
+                      <span className={`chat-model-pill-effort${reasoningApplied ? " applied" : ""}`}>{reasoningLabel}</span>
+                    </>
+                  )}
+                  {(canChooseModel || canAdjustReasoning) && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
                 </button>
-                {reasoningApplied && reasoningMenuOpen && reasoningOptions.length > 0 && (
-                  <div className="chat-pill-menu chat-pill-menu-right" role="menu">
-                    {reasoningOptions.map((level) => (
-                      <button
-                        key={level}
-                        className={`chat-pill-menu-item${reasoningEffort === level ? " active" : ""}`}
-                        role="menuitem"
-                        onClick={() => {
-                          onReasoningEffortChange?.(level);
-                          setReasoningMenuOpen(false);
-                        }}
-                      >
-                        {reasoningLevelName(level, language)}
-                      </button>
-                    ))}
+                {modelMenuOpen && (
+                  <div className="chat-model-settings-panel" role="dialog" aria-label={modelSettingsLabel}>
+                    {canChooseModel && <div className="chat-model-settings-label">{language === "cn" ? "选择模型" : "Choose model"}</div>}
+                    {canChooseModel && <div className="chat-model-menu" role="menu" aria-label={copy.switchModel}>
+                      {modelGroups.map((group) => (
+                        <div key={group.series} className="chat-model-group" role="group" aria-label={group.label}>
+                          <button
+                            type="button"
+                            className={`chat-model-group-trigger${activeModelSeries === group.series ? " active" : ""}`}
+                            role="menuitem"
+                            aria-expanded={expandedModelSeries === group.series}
+                            onClick={() => setExpandedModelSeries((series) => series === group.series ? null : group.series)}
+                          >
+                            <span>{group.label}</span>
+                            <span className="chat-model-group-count" aria-hidden="true">{group.options.length}</span>
+                            <SvgIcon name={expandedModelSeries === group.series ? "chevronDown" : "chevronRight"} size={12} />
+                          </button>
+                          {expandedModelSeries === group.series && group.options.map((opt) => (
+                            <button
+                              type="button"
+                              key={opt.value}
+                              className={`chat-pill-menu-item chat-model-option${modelName === opt.value ? " active" : ""}`}
+                              role="menuitemradio"
+                              aria-checked={modelName === opt.value}
+                              disabled={modelBusy || reasoningBusy}
+                              onClick={() => {
+                                void onModelChange?.(opt.value);
+                                setModelMenuOpen(false);
+                              }}
+                            >
+                              <span>{opt.label}</span>
+                              {modelName === opt.value && <SvgIcon name="check" size={12} />}
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </div>}
+                    {reasoningSupported && (
+                      <div className={`chat-model-settings-reasoning${canChooseModel ? " has-models" : ""}`}>
+                        <div className="chat-model-settings-label">{language === "cn" ? "思考强度" : "Reasoning effort"}</div>
+                        {canAdjustReasoning && onReasoningEffortChange ? (
+                          <ChatReasoningPanel
+                            embedded
+                            language={language}
+                            effort={reasoningEffort}
+                            levels={reasoningOptions}
+                            disabled={busy || modelBusy || reasoningBusy}
+                            onChange={onReasoningEffortChange}
+                          />
+                        ) : (
+                          <div className="chat-model-settings-note" title={reasoningMessage ?? undefined}>{reasoningMessage || reasoningLabel}</div>
+                        )}
+                        {busy && canAdjustReasoning && <div className="chat-model-settings-note">{language === "cn" ? "回答完成后可调整" : "Adjust after the response finishes"}</div>}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1064,142 +1251,6 @@ function ChatComposer({
           </div>
         </div>
       </div>
-      {gitWorkspace !== undefined && (
-        <div className="chat-workspace-bar" aria-label={language === "cn" ? "Git 工作区" : "Git workspace"}>
-          <div className="chat-git-menu-anchor" ref={gitMenuRef}>
-            <button
-              type="button"
-              className={`chat-workspace-item chat-workspace-git${repository?.hasConflicts ? " has-conflicts" : ""}`}
-              onClick={() => {
-                setGitMenuOpen((open) => !open);
-                setGitMenuError(null);
-              }}
-              aria-haspopup="menu"
-              aria-expanded={gitMenuOpen}
-              aria-label={language === "cn" ? `Git 菜单，${gitLabel}` : `Git menu, ${gitLabel}`}
-            >
-              <SvgIcon name="branch" size={14} />
-              <span>{gitLabel}</span>
-              {gitChangeCount > 0 && <span className="chat-workspace-change-count">{gitChangeCount}</span>}
-              <SvgIcon name="chevronDown" size={11} className="chat-workspace-chevron" />
-            </button>
-            {gitMenuOpen && (
-              <div className="chat-git-menu" role="menu" aria-label={language === "cn" ? "Git 操作" : "Git actions"}>
-                <label className="chat-git-menu-search">
-                  <SvgIcon name="search" size={14} />
-                  <input
-                    type="search"
-                    value={gitSearch}
-                    autoFocus
-                    placeholder={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
-                    aria-label={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
-                    onChange={(event) => setGitSearch(event.target.value)}
-                  />
-                </label>
-                <div className="chat-git-menu-actions">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={gitActionBusy || !onRefreshGit}
-                    onClick={() => void runGitAction(onRefreshGit)}
-                  >
-                    <SvgIcon name="refresh" size={14} />
-                    <span>{language === "cn" ? "刷新 Git 状态" : "Refresh Git status"}</span>
-                  </button>
-                  {repository?.isRepository ? (
-                    <>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={!onOpenGit}
-                        onClick={() => {
-                          setGitMenuOpen(false);
-                          onOpenGit?.();
-                        }}
-                      >
-                        <SvgIcon name="modified" size={14} />
-                        <span>{language === "cn" ? "查看更改与提交…" : "View changes and commit…"}</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={gitActionBusy || !onCreateGitBranch}
-                        onClick={() => setGitCreatingBranch((open) => !open)}
-                      >
-                        <SvgIcon name="branch" size={14} />
-                        <span>{language === "cn" ? "新建分支…" : "New branch…"}</span>
-                      </button>
-                    </>
-                  ) : repository?.gitAvailable ? (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      disabled={gitActionBusy || !onInitializeGit}
-                      onClick={() => void runGitAction(onInitializeGit)}
-                    >
-                      <SvgIcon name="plus" size={14} />
-                      <span>{language === "cn" ? "初始化 Git 仓库" : "Initialize Git repository"}</span>
-                    </button>
-                  ) : null}
-                </div>
-                {gitCreatingBranch && repository?.isRepository && (
-                  <div className="chat-git-new-branch">
-                    <input
-                      value={gitNewBranch}
-                      placeholder={language === "cn" ? "新分支名称" : "New branch name"}
-                      aria-label={language === "cn" ? "新分支名称" : "New branch name"}
-                      disabled={gitActionBusy}
-                      onChange={(event) => setGitNewBranch(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") submitNewGitBranch();
-                      }}
-                    />
-                    <button type="button" disabled={gitActionBusy || !gitNewBranch.trim()} onClick={submitNewGitBranch}>
-                      {language === "cn" ? "创建" : "Create"}
-                    </button>
-                  </div>
-                )}
-                {repository?.isRepository && (
-                  <section className="chat-git-branch-section">
-                    <button
-                      type="button"
-                      className="chat-git-branch-heading"
-                      aria-expanded={gitBranchesOpen || Boolean(gitSearch.trim())}
-                      onClick={() => setGitBranchesOpen((open) => !open)}
-                    >
-                      <SvgIcon name={gitBranchesOpen || gitSearch.trim() ? "chevronDown" : "chevronRight"} size={12} />
-                      <span>{language === "cn" ? "本地分支" : "Local branches"}</span>
-                      <small>{repository.branches.length}</small>
-                    </button>
-                    {(gitBranchesOpen || Boolean(gitSearch.trim())) && (
-                      <div className="chat-git-branch-list">
-                        {filteredGitBranches.map((branch) => (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            key={branch.name}
-                            className={branch.current ? "active" : ""}
-                            disabled={gitActionBusy || branch.current || !onSwitchGitBranch}
-                            onClick={() => void runGitAction(() => onSwitchGitBranch?.(branch.name), true)}
-                          >
-                            <SvgIcon name="branch" size={13} />
-                            <span>{branch.name}</span>
-                            {branch.current && <SvgIcon name="check" size={13} />}
-                          </button>
-                        ))}
-                        {filteredGitBranches.length === 0 && (
-                          <p>{language === "cn" ? "没有匹配的本地分支" : "No matching local branches"}</p>
-                        )}
-                      </div>
-                    )}
-                  </section>
-                )}
-                {gitMenuError && <div className="chat-git-menu-error" role="alert">{gitMenuError}</div>}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

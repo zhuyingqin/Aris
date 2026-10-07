@@ -20,6 +20,7 @@ mod json;
 mod knowledge_memory;
 pub mod literature;
 pub mod paper_reading;
+pub mod figures;
 pub mod paper_evidence;
 pub mod paper_guide;
 mod managed_job;
@@ -186,12 +187,13 @@ pub use permissions::{
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use process_registry::{
     background_service_key, configure_managed_tokio_command, managed_processes_snapshot,
-    register_managed_process, reusable_background_service, run_managed_command,
-    run_managed_command_with_cancel, run_managed_command_with_cancel_and_progress,
-    spawn_managed_background, spawn_managed_background_service,
-    spawn_managed_background_with_rolling_log, terminate_all_managed_processes,
-    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
-    ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+    register_managed_process, register_owned_tokio_process, reusable_background_service,
+    run_managed_command, run_managed_command_with_cancel,
+    run_managed_command_with_cancel_and_progress, spawn_managed_background,
+    spawn_managed_background_service, spawn_managed_background_with_rolling_log,
+    terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
+    ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
+    ManagedProcessKind,
 };
 pub use project_activity::{
     clear_project_activity, load_project_activity, project_activity_path, save_project_activity,

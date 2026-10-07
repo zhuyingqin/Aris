@@ -27,6 +27,10 @@ interface Harness {
   fire: (name: string, arg: unknown) => void;
   commands: Map<string, Handler>;
   status: { text: string; tooltip: string };
+  statusItems: Map<string, { text: string; tooltip: string; command: string; visible: boolean }>;
+  picks: Array<{ items: Array<Record<string, unknown>>; options: Record<string, unknown> }>;
+  pickResponses: Array<Record<string, unknown> | undefined>;
+  warningResponse: string | undefined;
   config: Map<string, unknown>;
   documents: unknown[];
   activeEditor: unknown;
@@ -51,29 +55,42 @@ function makeVscodeStub(state: Harness) {
   };
   return {
     version: "1.126.0",
-    StatusBarAlignment: { Right: 2 },
+    StatusBarAlignment: { Left: 1, Right: 2 },
     ConfigurationTarget: { Global: 1 },
     ViewColumn: { One: 1 },
     window: {
-      createStatusBarItem: () => ({
-        show() {},
-        dispose() {},
-        set text(value: string) {
-          state.status.text = value;
-        },
-        get text() {
-          return state.status.text;
-        },
-        set tooltip(value: string) {
-          state.status.tooltip = value;
-        },
-        get tooltip() {
-          return state.status.tooltip;
-        },
-        command: "",
-      }),
+      createStatusBarItem: (id?: string | number) => {
+        const key = typeof id === "string" ? id : "bridge";
+        const item = { text: "", tooltip: "", command: "", visible: false };
+        state.statusItems.set(key, item);
+        return {
+          show() { item.visible = true; },
+          hide() { item.visible = false; },
+          dispose() {},
+          set text(value: string) {
+            item.text = value;
+            if (key === "bridge") state.status.text = value;
+          },
+          get text() {
+            return item.text;
+          },
+          set tooltip(value: string) {
+            item.tooltip = value;
+            if (key === "bridge") state.status.tooltip = value;
+          },
+          get tooltip() {
+            return item.tooltip;
+          },
+          set command(value: string) { item.command = value; },
+          get command() { return item.command; },
+        };
+      },
+      showQuickPick: async (items: Array<Record<string, unknown>>, options: Record<string, unknown>) => {
+        state.picks.push({ items, options });
+        return state.pickResponses.shift();
+      },
       showInformationMessage: vi.fn(),
-      showWarningMessage: vi.fn(),
+      showWarningMessage: vi.fn(async () => state.warningResponse),
       showTextDocument: async (uri: unknown) => {
         state.opened.push(uri);
       },
@@ -134,6 +151,10 @@ function loadExtension(): Harness {
     fire: () => {},
     commands: new Map(),
     status: { text: "", tooltip: "" },
+    statusItems: new Map(),
+    picks: [],
+    pickResponses: [],
+    warningResponse: undefined,
     config: new Map(),
     documents: [],
     activeEditor: undefined,
@@ -216,6 +237,86 @@ async function flush() {
 }
 
 describe("aris-code-bridge", () => {
+  const shell = {
+    language: "cn",
+    modules: [{ id: "lab", label: "代码" }, { id: "chat", label: "对话" }],
+    projects: [{ id: "p1", name: "work", path: "D:/work" }, { id: "p2", name: "other", path: "D:/other" }],
+    currentProjectId: "p1", projectBusy: false,
+    account: { name: "Researcher", plan: "Pro", allowance: "$12.50", remainingPercent: 75 },
+  };
+  function connectShell(patch = {}) {
+    harness.emit("message", JSON.stringify({ type: "welcome", protocol_version: 1 }));
+    harness.emit("message", JSON.stringify({ type: "set-shell", revision: 7, shell: { ...shell, ...patch } }));
+  }
+
+  it("populates native shell controls before acknowledging the desktop header handoff", async () => {
+    activate();
+    connectShell();
+    expect(harness.statusItems.get("somniq.modules")).toMatchObject({ visible: true, command: "aris.switchModule" });
+    expect(harness.statusItems.get("somniq.projects")).toMatchObject({ visible: true, text: "$(folder-opened) work" });
+    expect(harness.statusItems.get("somniq.account")?.tooltip).toContain("$12.50");
+    expect(harness.sent.at(-1)).toEqual({ type: "shell-ready", revision: 7 });
+    harness.emit("close", "");
+    expect(harness.statusItems.get("somniq.modules")?.visible).toBe(false);
+    harness.pickResponses.push({ id: "chat" });
+    await harness.commands.get("aris.switchModule")!();
+    expect(harness.sent.some((message) => message.type === "shell-action")).toBe(false);
+  });
+
+  it("uses native pickers and sends IDs back to the existing desktop navigation", async () => {
+    activate();
+    connectShell();
+    harness.pickResponses.push({ id: "chat" });
+    await harness.commands.get("aris.switchModule")!();
+    expect(harness.picks[0]?.options.title).toBe("SomniQ 功能");
+    expect(harness.sent.at(-1)).toEqual({ type: "shell-action", action: { kind: "select-module", id: "chat" } });
+    harness.pickResponses.push({ action: { kind: "select-project", id: "p2" } });
+    await harness.commands.get("aris.switchProject")!();
+    expect(harness.picks[1]?.items[0]?.detail).toBe("D:/work");
+    expect(harness.sent.at(-1)).toEqual({ type: "shell-action", action: { kind: "select-project", id: "p2" } });
+    harness.pickResponses.push({ action: { kind: "settings" } });
+    await harness.commands.get("aris.account")!();
+    expect(harness.picks[2]?.items[1]).toMatchObject({ description: "$12.50", detail: "75%" });
+    expect(harness.sent.at(-1)).toEqual({ type: "shell-action", action: { kind: "settings" } });
+  });
+
+  it("does not switch a project when the user cancels saving dirty editors", async () => {
+    activate();
+    connectShell();
+    harness.documents = [doc("D:/work/main.rs", "unsaved", true)];
+    harness.pickResponses.push({ action: { kind: "select-project", id: "p2" } });
+    await harness.commands.get("aris.switchProject")!();
+    expect(harness.sent.some((message) => message.type === "shell-action")).toBe(false);
+  });
+
+  it("requires every dirty editor to save successfully before switching", async () => {
+    activate();
+    connectShell();
+    const dirty = doc("D:/work/main.rs", "unsaved", true);
+    const save = vi.fn(async () => false);
+    harness.documents = [{ ...dirty, save }];
+    harness.warningResponse = "保存并切换";
+    harness.pickResponses.push({ action: { kind: "select-project", id: "p2" } });
+    await harness.commands.get("aris.switchProject")!();
+    expect(save).toHaveBeenCalled();
+    expect(harness.sent.some((message) => message.type === "shell-action")).toBe(false);
+    save.mockResolvedValue(true);
+    harness.pickResponses.push({ action: { kind: "select-project", id: "p2" } });
+    await harness.commands.get("aris.switchProject")!();
+    expect(harness.sent.at(-1)).toEqual({ type: "shell-action", action: { kind: "select-project", id: "p2" } });
+  });
+
+  it("ignores cancelled pickers and blocks project actions while the host is busy", async () => {
+    activate();
+    connectShell();
+    await harness.commands.get("aris.switchModule")!();
+    await harness.commands.get("aris.switchProject")!();
+    await harness.commands.get("aris.account")!();
+    expect(harness.sent.some((message) => message.type === "shell-action")).toBe(false);
+    connectShell({ projectBusy: true });
+    await harness.commands.get("aris.switchProject")!();
+    expect(harness.picks).toHaveLength(3);
+  });
   it("opens with a handshake carrying the token from the environment", async () => {
     activate();
     await flush();

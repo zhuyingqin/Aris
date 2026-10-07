@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{ErrorKind, Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
@@ -24,6 +24,63 @@ use crate::{files, projects, state};
 const WORKSPACE_FILE_CHANGED_EVENT: &str = "workspace-file-changed";
 const WATCH_REBIND_INTERVAL: Duration = Duration::from_millis(500);
 const DUPLICATE_EVENT_WINDOW: Duration = Duration::from_millis(80);
+const INITIAL_WATCH_RETRY: Duration = Duration::from_secs(1);
+const MAX_WATCH_RETRY: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct WorkspaceWatchBinding {
+    watched_root: Option<PathBuf>,
+    requested: Option<(PathBuf, u64)>,
+    retry_at: Option<Instant>,
+    retry_delay: Duration,
+}
+
+impl WorkspaceWatchBinding {
+    fn bind(
+        &mut self,
+        watcher: &mut impl Watcher,
+        next_root: PathBuf,
+        generation: u64,
+        now: Instant,
+    ) -> Result<(), notify::Error> {
+        let requested = (next_root.clone(), generation);
+        if self.requested.as_ref() != Some(&requested) {
+            self.requested = Some(requested);
+            self.retry_at = Some(now);
+            self.retry_delay = INITIAL_WATCH_RETRY;
+        }
+        if self.watched_root.as_ref() == Some(&next_root)
+            || !self.retry_at.is_some_and(|retry_at| now >= retry_at)
+        {
+            return Ok(());
+        }
+        if let Some(previous) = self.watched_root.take() {
+            let _ = watcher.unwatch(&previous);
+        }
+        match watcher.watch(&next_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.watched_root = Some(next_root);
+                self.retry_at = None;
+                Ok(())
+            }
+            Err(error) => {
+                // Files and Folders denial is a user decision. Retrying every
+                // 500ms cannot grant access and can keep macOS asking. Other
+                // errors (e.g. an offline volume) recover with bounded backoff.
+                self.retry_at = if matches!(
+                    &error.kind,
+                    ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+                ) {
+                    None
+                } else {
+                    Some(now + self.retry_delay)
+                };
+                self.retry_delay = (self.retry_delay * 2).min(MAX_WATCH_RETRY);
+                Err(error)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,22 +158,6 @@ fn emit_workspace_event(
     }
 }
 
-fn bind_workspace_watcher(
-    watcher: &mut RecommendedWatcher,
-    watched_root: &mut Option<PathBuf>,
-    next_root: PathBuf,
-) -> Result<(), notify::Error> {
-    if watched_root.as_ref() == Some(&next_root) {
-        return Ok(());
-    }
-    if let Some(previous) = watched_root.take() {
-        let _ = watcher.unwatch(&previous);
-    }
-    watcher.watch(&next_root, RecursiveMode::Recursive)?;
-    *watched_root = Some(next_root);
-    Ok(())
-}
-
 pub fn spawn_workspace_file_watcher(app: AppHandle) {
     thread::spawn(move || {
         let (sender, receiver) = mpsc::channel::<notify::Result<Event>>();
@@ -127,23 +168,19 @@ pub fn spawn_workspace_file_watcher(app: AppHandle) {
                 return;
             }
         };
-        let mut watched_root: Option<PathBuf> = None;
+        let mut binding = WorkspaceWatchBinding::default();
         let mut recent = HashMap::new();
         loop {
-            if let Ok(root) =
-                projects::current_project_path(app.state::<projects::ProjectState>().inner())
-            {
-                if root.is_dir() {
-                    if let Err(error) =
-                        bind_workspace_watcher(&mut watcher, &mut watched_root, root)
-                    {
-                        eprintln!("SomniQ could not watch the current workspace: {error}");
-                    }
+            if let Ok((root, generation)) = projects::current_project_watch_binding(
+                app.state::<projects::ProjectState>().inner(),
+            ) {
+                if let Err(error) = binding.bind(&mut watcher, root, generation, Instant::now()) {
+                    eprintln!("SomniQ could not watch the current workspace: {error}");
                 }
             }
             match receiver.recv_timeout(WATCH_REBIND_INTERVAL) {
                 Ok(Ok(event)) => {
-                    if let Some(root) = watched_root.as_deref() {
+                    if let Some(root) = binding.watched_root.as_deref() {
                         emit_workspace_event(&app, root, event, &mut recent);
                     }
                 }
@@ -199,8 +236,137 @@ pub fn spawn_event_watcher(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ignored_workspace_path, workspace_relative_path};
-    use std::path::Path;
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingWatcher {
+        calls: Vec<PathBuf>,
+        unwatched: Vec<PathBuf>,
+        failure: Option<std::io::ErrorKind>,
+    }
+
+    impl Watcher for RecordingWatcher {
+        fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> {
+            Ok(Self::default())
+        }
+
+        fn watch(&mut self, path: &Path, _: RecursiveMode) -> notify::Result<()> {
+            self.calls.push(path.to_path_buf());
+            match self.failure {
+                Some(kind) => Err(notify::Error::io(std::io::Error::from(kind))),
+                None => Ok(()),
+            }
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.unwatched.push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::PollWatcher
+        }
+    }
+
+    #[test]
+    fn an_authorized_workspace_is_watched_once_across_poll_ticks() {
+        let mut watcher = RecordingWatcher::default();
+        let mut binding = WorkspaceWatchBinding::default();
+        let now = Instant::now();
+        for tick in 0..1_000 {
+            binding
+                .bind(
+                    &mut watcher,
+                    "paper".into(),
+                    1,
+                    now + WATCH_REBIND_INTERVAL * tick,
+                )
+                .unwrap();
+        }
+        assert_eq!(watcher.calls, vec![PathBuf::from("paper")]);
+        assert_eq!(binding.watched_root, Some("paper".into()));
+    }
+
+    #[test]
+    fn a_denied_workspace_waits_for_explicit_reactivation() {
+        let mut watcher = RecordingWatcher {
+            failure: Some(std::io::ErrorKind::PermissionDenied),
+            ..Default::default()
+        };
+        let mut binding = WorkspaceWatchBinding::default();
+        let now = Instant::now();
+        assert!(binding.bind(&mut watcher, "paper".into(), 1, now).is_err());
+        for tick in 1..1_000 {
+            binding
+                .bind(
+                    &mut watcher,
+                    "paper".into(),
+                    1,
+                    now + Duration::from_secs(tick),
+                )
+                .unwrap();
+        }
+        assert_eq!(watcher.calls.len(), 1);
+        assert!(binding.watched_root.is_none());
+        watcher.failure = None;
+        binding.bind(&mut watcher, "paper".into(), 2, now).unwrap();
+        assert_eq!(watcher.calls.len(), 2);
+        assert_eq!(binding.watched_root, Some("paper".into()));
+    }
+
+    #[test]
+    fn transient_failures_back_off_and_recover_without_reopening() {
+        let mut watcher = RecordingWatcher {
+            failure: Some(std::io::ErrorKind::NotFound),
+            ..Default::default()
+        };
+        let mut binding = WorkspaceWatchBinding::default();
+        let now = Instant::now();
+        assert!(binding.bind(&mut watcher, "paper".into(), 1, now).is_err());
+        let mut elapsed = Duration::ZERO;
+        for (attempt, delay) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
+            elapsed += Duration::from_secs(delay);
+            binding
+                .bind(
+                    &mut watcher,
+                    "paper".into(),
+                    1,
+                    now + elapsed - WATCH_REBIND_INTERVAL,
+                )
+                .unwrap();
+            assert_eq!(watcher.calls.len(), attempt + 1);
+            assert!(binding
+                .bind(&mut watcher, "paper".into(), 1, now + elapsed)
+                .is_err());
+            assert_eq!(watcher.calls.len(), attempt + 2);
+        }
+        watcher.failure = None;
+        binding
+            .bind(
+                &mut watcher,
+                "paper".into(),
+                1,
+                now + elapsed + MAX_WATCH_RETRY,
+            )
+            .unwrap();
+        assert_eq!(binding.watched_root, Some("paper".into()));
+    }
+
+    #[test]
+    fn switching_projects_releases_the_old_watch_and_resets_a_denial() {
+        let mut watcher = RecordingWatcher::default();
+        let mut binding = WorkspaceWatchBinding::default();
+        let now = Instant::now();
+        binding.bind(&mut watcher, "first".into(), 1, now).unwrap();
+        watcher.failure = Some(std::io::ErrorKind::PermissionDenied);
+        assert!(binding.bind(&mut watcher, "second".into(), 2, now).is_err());
+        assert_eq!(watcher.unwatched, vec![PathBuf::from("first")]);
+        assert!(binding.watched_root.is_none());
+        watcher.failure = None;
+        binding.bind(&mut watcher, "first".into(), 3, now).unwrap();
+        assert_eq!(watcher.calls.len(), 3);
+        assert_eq!(binding.watched_root, Some("first".into()));
+    }
 
     #[test]
     fn workspace_events_are_relative_and_normalized() {

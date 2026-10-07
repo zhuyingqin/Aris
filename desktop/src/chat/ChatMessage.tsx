@@ -5,6 +5,7 @@ import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
+import ModelWaitIndicator from "./ModelWaitIndicator";
 import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
@@ -20,6 +21,7 @@ import {
   guardRefusalFromTool,
   imagePathsFromTool,
   oracleWebSummaryFromTool,
+  somniImageSummaryFromTool,
   webSearchSummaryFromTool,
   type ChatToolBlock,
   type CountedFileChange,
@@ -169,12 +171,19 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const webSearch = useMemo(() => webSearchSummaryFromTool(block), [block]);
   const refusal = useMemo(() => guardRefusalFromTool(block), [block]);
   const oracleWeb = useMemo(() => oracleWebSummaryFromTool(block), [block]);
+  const somniImage = useMemo(() => somniImageSummaryFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
   const running = block.output === undefined;
   const evidenceCount = evidenceSearch?.items.length ?? 0;
-  const status = oracleWeb
+  const status = somniImage
+    ? running
+      ? language === "cn" ? "正在通过 Somni 生成图片" : "Generating through Somni"
+      : block.isError
+        ? language === "cn" ? "Somni 绘图失败" : "Somni drawing failed"
+        : language === "cn" ? `已生成 ${somniImage.imageCount} 张图片` : `Generated ${somniImage.imageCount} image(s)`
+    : oracleWeb
     ? language === "cn"
       ? running
         ? oracleWeb.kind === "image" ? "正在通过 ChatGPT 网页生成图片" : "正在咨询 ChatGPT 网页"
@@ -278,7 +287,9 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           </button>
         ) : (
           <span className="tool-name">
-            {oracleWeb
+            {somniImage
+              ? language === "cn" ? "Somni 绘图" : "Somni drawing"
+              : oracleWeb
               ? oracleWeb.kind === "image"
                 ? language === "cn" ? "ChatGPT 网页图片" : "ChatGPT Web image"
                 : language === "cn" ? "ChatGPT 网页咨询" : "ChatGPT Web consultation"
@@ -308,7 +319,13 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
       )}
       {open && (
         <div className="chat-tool-body">
-          {oracleWeb ? (
+          {somniImage ? (
+            <div className="chat-oracle-web-result">
+              {somniImage.model && <p>{language === "cn" ? "绘图模型" : "Drawing model"}：{somniImage.model}</p>}
+              {somniImage.prompt && <p>{somniImage.prompt}</p>}
+              {block.isError && <pre>{block.output}</pre>}
+            </div>
+          ) : oracleWeb ? (
             <div className="chat-oracle-web-result">
               <div className="chat-oracle-web-boundary">
                 {language === "cn"
@@ -1219,6 +1236,7 @@ function ChatMessage({
         </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor" aria-hidden="true" />}
+      {turn.streaming && turn.role === "assistant" && <ModelWaitIndicator turn={turn} />}
       {turn.error && (
         <div className="chat-error-card">
           <strong>{copy.responseFailed}</strong>

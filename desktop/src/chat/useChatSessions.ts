@@ -755,7 +755,7 @@ export function useChatSessions(projectId?: string | null) {
       const runId = workflowRunId(session);
       const replay = isWorkflowSession(session) && runId
         ? await reviewWorkflowTranscript(runId)
-        : await chatEventsReplay(session.id);
+        : await chatEventsReplay(session.id, session.projectId);
       if (replay.eventCount === 0 && replay.turns.length === 0 && !isWorkflowSession(session)) return null;
       if (replay.turns.length === 0 && (session.turnCount ?? 0) > 0 && !isWorkflowSession(session)) return null;
       return {

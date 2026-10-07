@@ -15,16 +15,22 @@ test("universal bundles both architectures even on an arm64 host", () => {
   assert.throws(() => bundleTargets("darwin", "arm64", "unknown"));
 });
 
-test("retired Tectonic payload is removed without touching MCP launchers", () => {
+test("retired compiler payloads are removed without touching MCP launchers", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "somniq-resource-cleanup-"));
   try {
     fs.mkdirSync(path.join(root, "bin"));
-    for (const name of ["tectonic", "tectonic.exe", "TECTONIC_VERSION", "aris-playwright-mcp"]) {
+    for (const name of [
+      "tectonic", "tectonic.exe", "TECTONIC_VERSION",
+      "typst", "typst.exe", "TYPST_VERSION",
+      "aris-playwright-mcp", "aris-playwright-mcp.cmd", ".gitignore",
+    ]) {
       fs.writeFileSync(path.join(root, "bin", name), "fixture");
     }
     prepareResources(root);
-    assert.deepEqual(fs.readdirSync(path.join(root, "bin")), ["aris-playwright-mcp"]);
+    const preserved = [".gitignore", "aris-playwright-mcp", "aris-playwright-mcp.cmd"];
+    assert.deepEqual(fs.readdirSync(path.join(root, "bin")).sort(), preserved);
     prepareResources(root);
+    assert.deepEqual(fs.readdirSync(path.join(root, "bin")).sort(), preserved);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

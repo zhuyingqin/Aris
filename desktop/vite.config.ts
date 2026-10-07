@@ -1,13 +1,23 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { uiTypographyPostcss } from "./src/uiTypographyPostcss";
 
 // Tauri expects a fixed dev port and quiet logging.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), {
+    name: "somniq-figure-editor-assets",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        if (request.url?.startsWith("/figure-editor/")) response.setHeader("Access-Control-Allow-Origin", "*");
+        next();
+      });
+    },
+  }],
   base: "./",
   cacheDir: "../.vite-cache/desktop",
   clearScreen: false,
+  css: { postcss: { plugins: [uiTypographyPostcss()] } },
   resolve: {
     // Dedupe CodeMirror too: multiple @codemirror/state or @codemirror/view
     // instances break decoration identity checks ("Block decorations may not be

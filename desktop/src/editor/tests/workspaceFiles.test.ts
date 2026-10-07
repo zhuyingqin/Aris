@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { basename, extension, languageForPath, workspaceFileOpenTarget } from "../workspaceFiles";
+import { basename, extension, languageForPath, resolveWorkspaceFilePath, workspaceFileOpenTarget } from "../workspaceFiles";
 
 describe("workspaceFiles", () => {
+  it.each([
+    ["scripts\\train.py", "F:\\研究 项目\\", "F:/研究 项目/scripts/train.py"],
+    ["main.m", "/home/research/work", "/home/research/work/main.m"],
+    ["main.py", "/", "/main.py"],
+    ["D:\\outside\\main.rs", "F:/work", "D:/outside/main.rs"],
+    ["\\\\server\\share\\train.py", "F:/work", "//server/share/train.py"],
+    ["main.py", null, "main.py"],
+  ])("resolves %s against its originating project", (file, root, expected) => {
+    expect(resolveWorkspaceFilePath(file, root)).toBe(expected);
+  });
+
   it("maps common source paths to editor languages", () => {
     expect(languageForPath("src/main.py")).toBe("python");
     expect(languageForPath("web/App.TSX")).toBe("typescript");

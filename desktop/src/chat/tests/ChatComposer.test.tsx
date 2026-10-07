@@ -1,16 +1,12 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { useState } from "react";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { useState, type ComponentProps } from "react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types";
 import { useStore } from "../../store";
 import ChatComposer, { attachmentFromFile, attachmentFromPath, resizeComposerTextarea } from "../ChatComposer";
-
-const gitComposerStyles = readFileSync(resolve(process.cwd(), "src/chat/ChatComposerGit.css"), "utf8");
 
 const attachmentApiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -221,7 +217,30 @@ describe("ChatComposer textarea and attachments", () => {
     expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows only Git below the composer and opens the branch action menu", async () => {
+  it("keeps the Git action menu inside the viewport when its toolbar trigger is near the edge", async () => {
+    vi.stubGlobal("innerWidth", 360);
+    const rectangle = (left: number, top: number, width: number, height: number) => ({
+      left, top, right: left + width, bottom: top + height, x: left, y: top, width, height, toJSON() {},
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("chat-git-menu-anchor")) return rectangle(260, 180, 80, 30);
+      if (this.classList.contains("chat-git-menu")) return rectangle(260, 0, 340, 220);
+      return rectangle(0, 0, 0, 0);
+    });
+    render(<ChatComposer
+      input="" commands={[]} skills={[]} attachments={[]} busy={false} ready editing={false} gitWorkspace={null}
+      onInputChange={() => undefined} onAttachmentsChange={() => undefined} onSubmit={() => undefined}
+      onStop={() => undefined} onCancelEdit={() => undefined} onHeightChange={() => undefined}
+    />);
+    await userEvent.setup().click(screen.getByRole("button", { name: /Git menu/ }));
+    const menu = screen.getByRole("menu", { name: "Git actions" });
+    const left = 260 + Number.parseFloat(menu.style.left);
+    expect(left).toBeGreaterThanOrEqual(8);
+    expect(left + 340).toBeLessThanOrEqual(352);
+    expect(Number.parseFloat(menu.style.maxHeight)).toBeLessThan(180);
+  });
+
+  it("shows Git in the composer toolbar and preserves branch actions", async () => {
     const user = userEvent.setup();
     const onOpenGit = vi.fn();
     const onSwitchGitBranch = vi.fn();
@@ -271,7 +290,7 @@ describe("ChatComposer textarea and attachments", () => {
     );
 
     const workspaceBar = screen.getByLabelText("Git workspace");
-    expect(gitComposerStyles).toMatch(/\.chat-workspace-bar\s*\{[^}]*display:\s*flex/s);
+    expect(workspaceBar.closest(".chat-input-footer")).not.toBeNull();
     expect(within(workspaceBar).queryByText("Aris")).toBeNull();
     expect(within(workspaceBar).getByText("task/5")).toBeTruthy();
     expect(within(workspaceBar).getByText("1")).toBeTruthy();
@@ -300,6 +319,202 @@ const SKILLS: SkillMeta[] = [
   { name: "paper-plan", description: "Plan a paper", path: "paper-plan/SKILL.md" },
   { name: "review", description: "Review code", path: "review/SKILL.md" },
 ];
+
+const GROUPED_MODELS = [
+  "MiniMax-M3", "gpt-5.6-luna", "deepseek-v4.1-flash", "MiniMax-M3.1-Flash-Preview",
+  "gpt-6-astra", "gpt-6.1-sol", "laya-triage", "longcat-2.5-preview-free", "mimo-v2.6-flash",
+].map((value) => ({ value, label: value }));
+
+function modelComposer(overrides: Partial<ComponentProps<typeof ChatComposer>> = {}) {
+  return <ChatComposer input="" commands={[]} skills={[]} attachments={[]} busy={false} ready editing={false}
+    onInputChange={() => undefined} onAttachmentsChange={() => undefined} onSubmit={() => undefined}
+    onStop={() => undefined} onCancelEdit={() => undefined} onHeightChange={() => undefined}
+    modelName="gpt-6.1-sol" modelOptions={GROUPED_MODELS} canSwitchModel onModelChange={vi.fn()} {...overrides} />;
+}
+
+describe("ChatComposer model series", () => {
+  it("opens only the current series and preserves model labels, order, and selection", async () => {
+    const user = userEvent.setup();
+    render(modelComposer());
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" });
+    await user.click(trigger);
+    const menu = screen.getByRole("menu", { name: "Switch model" });
+    const groups = within(menu).getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual(["MiniMax", "GPT", "DeepSeek", "Laya", "LongCat", "MiMo"]);
+    expect(within(groups[1]).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["gpt-5.6-luna", "gpt-6-astra", "gpt-6.1-sol"]);
+    expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(3);
+    expect(within(menu).getByRole("menuitem", { name: "GPT" }).getAttribute("aria-expanded")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: "MiniMax" }).getAttribute("aria-expanded")).toBe("false");
+    expect(within(menu).getByRole("menuitemradio", { name: "gpt-6.1-sol" }).getAttribute("aria-checked")).toBe("true");
+    expect(within(menu).queryByRole("textbox")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("switches between series, collapses them, and restores the current series when reopening", async () => {
+    const user = userEvent.setup();
+    render(modelComposer());
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" });
+    await user.click(trigger);
+    const menu = screen.getByRole("menu", { name: "Switch model" });
+    const minimax = within(menu).getByRole("menuitem", { name: "MiniMax" });
+    await user.click(minimax);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash-Preview"]);
+    expect(within(menu).getByRole("menuitem", { name: "GPT" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("menu")).toBe(menu);
+    await user.click(minimax);
+    expect(within(menu).queryAllByRole("menuitemradio")).toHaveLength(0);
+    expect(minimax.getAttribute("aria-expanded")).toBe("false");
+    minimax.focus();
+    await user.keyboard("{Enter}");
+    expect(minimax.getAttribute("aria-expanded")).toBe("true");
+    await user.click(document.body);
+    expect(screen.queryByRole("menu")).toBeNull();
+    await user.click(trigger);
+    expect(screen.getByRole("menuitemradio", { name: "gpt-6.1-sol" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("menuitem", { name: "MiniMax" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps routed and unknown models selectable and sends the original model ID", async () => {
+    useStore.setState({ language: "cn" });
+    const user = userEvent.setup();
+    const onModelChange = vi.fn();
+    render(modelComposer({
+      onModelChange,
+      modelOptions: [
+        { value: "openai/GPT-6.1-sol", label: "Gateway GPT" },
+        { value: "custom-research", label: "My research model" },
+      ],
+      modelName: "custom-research",
+    }));
+    await user.click(screen.getByRole("button", { name: "custom-research" }));
+    const unknown = screen.getByRole("group", { name: "其他模型" });
+    expect(within(unknown).getByRole("menuitemradio", { name: "My research model" }).getAttribute("aria-checked")).toBe("true");
+    await user.click(screen.getByRole("menuitem", { name: "GPT" }));
+    await user.click(within(screen.getByRole("group", { name: "GPT" })).getByRole("menuitemradio", { name: "Gateway GPT" }));
+    expect(onModelChange).toHaveBeenCalledOnce();
+    expect(onModelChange).toHaveBeenCalledWith("openai/GPT-6.1-sol");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps the model control disabled while saving or when switching is unavailable", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(modelComposer({ modelBusy: true }));
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+    await user.click(trigger);
+    expect(screen.queryByRole("menu")).toBeNull();
+    rerender(modelComposer({ canSwitchModel: false }));
+    expect(trigger.disabled).toBe(true);
+  });
+});
+
+describe("ChatComposer combined model and reasoning panel", () => {
+  const reasoning = {
+    reasoningSupported: true,
+    reasoningEffort: "high",
+    reasoningOptions: ["none", "low", "medium", "high", "xhigh", "max"],
+    onReasoningEffortChange: vi.fn(),
+  };
+
+  it("keeps models selectable when reasoning is provider-controlled or unsupported", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(modelComposer({ ...reasoning, reasoningApplied: false }));
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol · Provider default" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
+    await user.click(trigger);
+    const panel = screen.getByRole("dialog", { name: "Model and reasoning effort" });
+    expect(within(panel).getByRole("menu", { name: "Switch model" })).toBeTruthy();
+    expect(within(panel).getByText("Provider default")).toBeTruthy();
+    expect(within(panel).queryByRole("slider")).toBeNull();
+    rerender(modelComposer({ ...reasoning, reasoningSupported: false }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reasoning effort" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "gpt-6.1-sol" }));
+    expect(screen.getByRole("menu", { name: "Switch model" })).toBeTruthy();
+    expect(screen.queryByRole("slider")).toBeNull();
+  });
+
+  it("shows one entry and one panel with folded models and a slider, then restores focus on Escape", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(modelComposer({ ...reasoning, onReasoningEffortChange: onChange }));
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol · High" });
+    expect(screen.queryByRole("button", { name: "gpt-6.1-sol" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reasoning effort" })).toBeNull();
+    await user.click(trigger);
+    const panel = screen.getByRole("dialog", { name: "Model and reasoning effort" });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(within(panel).getByRole("slider").getAttribute("max")).toBe("5");
+    expect(within(panel).getByRole("menuitem", { name: "GPT" }).getAttribute("aria-expanded")).toBe("true");
+    expect(within(panel).getAllByRole("menuitemradio")).toHaveLength(3);
+    expect(within(panel).queryByRole("textbox")).toBeNull();
+    within(panel).getByRole("slider").focus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("allows reasoning for a fixed model and updates the combined label after saving", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    function FixedModel() {
+      const [effort, setEffort] = useState("high");
+      return modelComposer({ ...reasoning, canSwitchModel: false, reasoningEffort: effort,
+        onReasoningEffortChange: (value) => { onChange(value); setEffort(value); } });
+    }
+    render(<FixedModel />);
+    await user.click(screen.getByRole("button", { name: "gpt-6.1-sol · High" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    const slider = screen.getByRole("slider", { name: "Reasoning effort" });
+    slider.focus();
+    fireEvent.change(slider, { target: { value: "5" } });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(screen.getByRole("button", { name: "gpt-6.1-sol · Max" })).toBeTruthy());
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("max");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    await user.click(document.body);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("locks reasoning during a response while allowing the next-turn model choice", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(modelComposer({ ...reasoning, busy: true }));
+    await user.click(screen.getByRole("button", { name: "gpt-6.1-sol · High" }));
+    expect((screen.getByRole("slider") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText("Adjust after the response finishes")).toBeTruthy();
+    expect((screen.getByRole("menuitemradio", { name: "gpt-6-astra" }) as HTMLButtonElement).disabled).toBe(false);
+    for (const state of [{ modelBusy: true }, { reasoningBusy: true }]) {
+      rerender(modelComposer({ ...reasoning, ...state }));
+      expect((screen.getByRole("button", { name: "gpt-6.1-sol · High" }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole("slider") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByRole("menuitemradio", { name: "gpt-6-astra" }) as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
+  it("reopens with the new model's actual levels and never saves a strength when selecting a model", async () => {
+    useStore.setState({ language: "cn" });
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const onModelChange = vi.fn();
+    const { rerender } = render(modelComposer({ ...reasoning, onModelChange, onReasoningEffortChange: onChange }));
+    await user.click(screen.getByRole("button", { name: "gpt-6.1-sol · 高" }));
+    await user.click(screen.getByRole("menuitem", { name: "DeepSeek" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "deepseek-v4.1-flash" }));
+    expect(onModelChange).toHaveBeenCalledWith("deepseek-v4.1-flash");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    rerender(modelComposer({ ...reasoning, modelName: "deepseek-v4.1-flash", reasoningOptions: ["low", "medium", "high"],
+      reasoningEffort: "medium", onReasoningEffortChange: onChange }));
+    await user.click(screen.getByRole("button", { name: "deepseek-v4.1-flash · 中" }));
+    expect(screen.getByRole("slider").getAttribute("max")).toBe("2");
+    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
+    expect(screen.getByRole("menuitem", { name: "DeepSeek" }).getAttribute("aria-expanded")).toBe("true");
+  });
+});
 
 function ComposerHarness({
   commands = [],

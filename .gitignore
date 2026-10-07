@@ -82,3 +82,8 @@ site/temp_release_*/
 # Private patent materials: keep local and never commit.
 /patent/
 /docs/patent/
+
+# Local UI audit screenshots and private company business documents.
+/desktop/.audit/
+/docs/business/
+desktop/public/figure-editor/

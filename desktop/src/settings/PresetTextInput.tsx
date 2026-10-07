@@ -3,6 +3,7 @@ import { SETTINGS_COPY } from "./i18n";
 import { isManagedModelServerUrl, type PresetOption } from "./settingsProviderCatalog";
 
 export default function PresetTextInput({
+  label,
   value,
   placeholder,
   options,
@@ -10,6 +11,7 @@ export default function PresetTextInput({
   disabled = false,
   formatValue,
 }: {
+  label: string;
   value: string;
   placeholder: string;
   options: PresetOption[];
@@ -25,6 +27,7 @@ export default function PresetTextInput({
   return (
     <div className="st-preset-control">
       <select
+        aria-label={`${label} (${language === "cn" ? "预设" : "preset"})`}
         value={currentPreset}
         disabled={disabled}
         onChange={(event) => {
@@ -51,6 +54,7 @@ export default function PresetTextInput({
         })}
       </select>
       <input
+        aria-label={label}
         value={inputValue}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}

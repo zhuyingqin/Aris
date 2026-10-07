@@ -101,19 +101,15 @@ const TOKEN_TARGETS: Record<string, readonly string[]> = {
     "textLink.activeForeground",
     "textLink.foreground",
   ],
+  "--ui-on-accent": [
+    "button.foreground",
+    "activityBarBadge.foreground",
+    "badge.foreground",
+    "statusBarItem.remoteForeground",
+  ],
   "--red": ["editorError.foreground", "errorForeground"],
   "--amber": ["editorWarning.foreground"],
   "--green": ["editorInfo.foreground", "gitDecoration.addedResourceForeground"],
-};
-
-/** Colour IDs whose value is fixed rather than taken from a token. */
-const FIXED: Readonly<Record<string, string>> = {
-  // The accent is chosen for contrast against the app background, so button
-  // labels need the same white the app's own primary buttons use.
-  "button.foreground": "#ffffff",
-  "activityBarBadge.foreground": "#ffffff",
-  "badge.foreground": "#ffffff",
-  "statusBarItem.remoteForeground": "#ffffff",
 };
 
 const HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
@@ -151,6 +147,20 @@ export function toVsCodeColor(raw: string): string | null {
 /** Reads one SomniQ token off an element's computed style. */
 export type TokenReader = (token: string) => string;
 
+/** Keep hover feedback in the selected hue instead of the base theme's blue. */
+function accentHover(accent: string, text: string): string {
+  const expand = (hex: string) => {
+    const value = hex.slice(1);
+    return value.length <= 4 ? value.split("").map((digit) => digit + digit).join("") : value;
+  };
+  const base = expand(accent);
+  const foreground = expand(text);
+  const rgb = [0, 2, 4].map((offset) =>
+    channel(String(parseInt(base.slice(offset, offset + 2), 16) * .9
+      + parseInt(foreground.slice(offset, offset + 2), 16) * .1)));
+  return `#${rgb.join("")}${base.slice(6)}`;
+}
+
 /**
  * Build the `workbench.colorCustomizations` payload.
  *
@@ -165,9 +175,9 @@ export function somniqWorkbenchColors(read: TokenReader): Record<string, string>
     if (!color) continue;
     for (const target of targets) colors[target] = color;
   }
-  // Only worth sending alongside a palette; on their own they would recolour
-  // badges to white-on-default and look like a bug.
-  if (Object.keys(colors).length > 0) Object.assign(colors, FIXED);
+  if (colors["button.background"] && colors.foreground) {
+    colors["button.hoverBackground"] = accentHover(colors["button.background"], colors.foreground);
+  }
   return colors;
 }
 

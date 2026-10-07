@@ -38,6 +38,11 @@ let statusItem = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let reconnectTimer = null;
 let disposed = false;
+let shell = null;
+let shellConnected = false;
+let moduleItem = null;
+let projectItem = null;
+let accountItem = null;
 
 /**
  * Last known on-disk content per file, so a save can be reported as a diff.
@@ -122,6 +127,9 @@ function connect() {
 
   ws.addEventListener("close", () => {
     socket = null;
+    shellConnected = false;
+    shell = null;
+    for (const item of [moduleItem, projectItem, accountItem]) item?.hide();
     setStatus("$(debug-disconnect) Aris", "Disconnected from Aris.");
     scheduleReconnect();
   });
@@ -144,10 +152,17 @@ function handleHostMessage(message) {
   if (!message || typeof message.type !== "string") return;
   switch (message.type) {
     case "welcome":
+      shellConnected = true;
       setStatus("$(check) Aris", "Connected to Aris.");
       // The host missed every editor change that happened before the socket
       // opened, so state the current one rather than waiting for the next.
       reportActiveEditor();
+      break;
+    case "set-shell":
+      if (!shellConnected) return;
+      shell = message.shell;
+      renderShell();
+      send({ type: "shell-ready", revision: message.revision });
       break;
     case "save-all":
       void saveAll();
@@ -178,6 +193,117 @@ function handleHostMessage(message) {
     default:
       break;
   }
+}
+
+function shellCopy() {
+  return shell?.language === "cn" ? {
+    modules: "SomniQ 功能", projects: "本地项目", account: "SomniQ 账户",
+    current: "当前", add: "添加本地项目…", reveal: "打开项目文件夹",
+    settings: "设置", signOut: "退出登录", allowance: "剩余额度",
+    noProject: "无项目", disconnected: "编辑器尚未连接到 SomniQ。",
+    switching: "正在切换项目…", savePrompt: "切换项目前保存编辑器中未保存的更改？",
+    save: "保存并切换", saveFailed: "部分更改无法保存，项目尚未切换。",
+  } : {
+    modules: "SomniQ modules", projects: "Local projects", account: "SomniQ account",
+    current: "Current", add: "Add local project…", reveal: "Open project folder",
+    settings: "Settings", signOut: "Sign out", allowance: "Remaining allowance",
+    noProject: "No project", disconnected: "The editor is not connected to SomniQ yet.",
+    switching: "Switching project…", savePrompt: "Save unsaved editor changes before switching projects?",
+    save: "Save and switch", saveFailed: "Some changes could not be saved. The project was not switched.",
+  };
+}
+
+function renderShell() {
+  const copy = shellCopy();
+  const project = shell.projects.find((item) => item.id === shell.currentProjectId);
+  moduleItem.text = "SomniQ Code $(chevron-down)";
+  moduleItem.tooltip = copy.modules;
+  projectItem.text = `$(folder-opened) ${project?.name || copy.noProject}`;
+  projectItem.tooltip = shell.projectBusy ? copy.switching : `${copy.projects}\n${project?.path || ""}`;
+  accountItem.text = `$(account) ${shell.account.name}`;
+  accountItem.tooltip = `${copy.account}\n${shell.account.name} · ${shell.account.plan}\n${copy.allowance}: ${shell.account.allowance}`;
+  for (const item of [moduleItem, projectItem, accountItem]) item.show();
+}
+
+function requireShell() {
+  if (shellConnected && shell) return true;
+  void vscode.window.showWarningMessage(shellCopy().disconnected);
+  return false;
+}
+
+function shellAction(action) {
+  if (!requireShell()) return;
+  if (!send({ type: "shell-action", action })) {
+    void vscode.window.showWarningMessage(shellCopy().disconnected);
+  }
+}
+
+async function pickModule() {
+  if (!requireShell()) return;
+  const copy = shellCopy();
+  const picked = await vscode.window.showQuickPick(
+    shell.modules.map((item) => ({
+      label: item.id === "lab" ? `$(check) ${item.label}` : item.label,
+      description: item.id === "lab" ? copy.current : undefined,
+      id: item.id,
+    })),
+    { title: copy.modules, matchOnDescription: true },
+  );
+  if (picked && shell?.modules.some((item) => item.id === picked.id)) {
+    shellAction({ kind: "select-module", id: picked.id });
+  }
+}
+
+async function confirmWorkspaceSwitch() {
+  const dirty = [...vscode.workspace.textDocuments, ...(vscode.workspace.notebookDocuments || [])]
+    .filter((document) => document.isDirty);
+  if (!dirty.length) return true;
+  const copy = shellCopy();
+  if (await vscode.window.showWarningMessage(copy.savePrompt, { modal: true }, copy.save) !== copy.save) return false;
+  try {
+    for (const document of dirty) {
+      if (!await document.save()) throw new Error("save failed");
+    }
+    return true;
+  } catch {
+    void vscode.window.showWarningMessage(copy.saveFailed);
+    return false;
+  }
+}
+
+async function pickProject() {
+  if (!requireShell() || shell.projectBusy) return;
+  const copy = shellCopy();
+  const items = shell.projects.map((project) => ({
+    label: `$(folder) ${project.name}`,
+    description: project.id === shell.currentProjectId ? copy.current : undefined,
+    detail: project.path,
+    action: { kind: "select-project", id: project.id },
+  }));
+  items.push({ label: `$(add) ${copy.add}`, action: { kind: "add-project" } });
+  if (shell.currentProjectId) items.push({ label: `$(link-external) ${copy.reveal}`, action: { kind: "reveal-project" } });
+  const picked = await vscode.window.showQuickPick(items, { title: copy.projects, matchOnDetail: true });
+  if (!picked || !shell || shell.projectBusy) return;
+  const action = picked.action;
+  if (action.kind === "select-project") {
+    if (action.id === shell.currentProjectId || !shell.projects.some((project) => project.id === action.id)) return;
+  }
+  if (action.kind !== "reveal-project" && !await confirmWorkspaceSwitch()) return;
+  shellAction(action);
+}
+
+async function pickAccount() {
+  if (!requireShell()) return;
+  const copy = shellCopy();
+  const account = shell.account;
+  const picked = await vscode.window.showQuickPick([
+    { label: account.plan, description: account.name },
+    { label: copy.allowance, description: account.allowance,
+      detail: account.remainingPercent === null ? undefined : `${account.remainingPercent}%` },
+    { label: `$(settings-gear) ${copy.settings}`, action: { kind: "settings" } },
+    { label: `$(sign-out) ${copy.signOut}`, action: { kind: "sign-out" } },
+  ], { title: `${copy.account} · ${account.name}` });
+  if (picked?.action) shellAction(picked.action);
 }
 
 async function saveAll() {
@@ -367,9 +493,22 @@ function activate(context) {
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusItem.command = "aris.askAris";
   context.subscriptions.push(statusItem);
+  moduleItem = vscode.window.createStatusBarItem("somniq.modules", vscode.StatusBarAlignment.Left, 1000);
+  projectItem = vscode.window.createStatusBarItem("somniq.projects", vscode.StatusBarAlignment.Left, 999);
+  accountItem = vscode.window.createStatusBarItem("somniq.account", vscode.StatusBarAlignment.Right, 101);
+  moduleItem.name = "SomniQ modules";
+  projectItem.name = "SomniQ projects";
+  accountItem.name = "SomniQ account";
+  moduleItem.command = "aris.switchModule";
+  projectItem.command = "aris.switchProject";
+  accountItem.command = "aris.account";
+  context.subscriptions.push(moduleItem, projectItem, accountItem);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("aris.askAris", askAris),
+    vscode.commands.registerCommand("aris.switchModule", pickModule),
+    vscode.commands.registerCommand("aris.switchProject", pickProject),
+    vscode.commands.registerCommand("aris.account", pickAccount),
 
     vscode.workspace.onDidOpenTextDocument((document) => {
       if (document.uri.scheme !== "file") return;
@@ -528,6 +667,9 @@ const WELCOME_HTML = `<!DOCTYPE html>
     </section>
 
     <div class="links">
+      <a href="command:aris.switchModule">Switch SomniQ module</a>
+      <a href="command:aris.switchProject">Switch project</a>
+      <a href="command:aris.account">SomniQ account</a>
       <a href="command:workbench.view.explorer">Open the explorer</a>
       <a href="command:workbench.view.extensions">Browse extensions</a>
       <a href="command:workbench.action.terminal.new">New terminal</a>

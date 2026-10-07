@@ -134,6 +134,32 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
 }
 
 #[test]
+fn drawing_router_pins_api_for_gpt_requests_and_honors_explicit_webpage_requests() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("SomniImage"), routing_spec("ChatGptWebImage")]);
+    for prompt in [
+        "生成一个小猪佩奇的图，使用GPT",
+        "使用API生成图",
+        "用 GPT Image 2 画一张图",
+        "Create an illustration using GPT",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("SomniImage"), "{prompt}: {plan:?}");
+        assert!(!plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+    }
+    for prompt in ["用 Oracle 网页生成图片", "Create an image with Image Assist"] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
+        assert!(!plan.pinned_names.contains("SomniImage"), "{prompt}");
+    }
+    let read = route_chat_tools("Analyze this attached image", &specs, ToolRoutingMode::Active);
+    assert!(!read.pinned_names.contains("SomniImage"));
+    specs.retain(|spec| spec.name != "SomniImage");
+    let unavailable = route_chat_tools("使用API生成图", &specs, ToolRoutingMode::Active);
+    assert!(!unavailable.active_names.contains("SomniImage"));
+}
+
+#[test]
 fn dynamic_tool_router_gives_every_matched_intent_its_required_tools() {
     let specs = desktop_like_catalog();
     let plan = route_chat_tools(
@@ -331,6 +357,44 @@ fn dynamic_tool_router_ignores_attachment_boilerplate() {
     assert!(
         !plan.active_names.contains("mcp__pw__browser_navigate"),
         "{plan:?}"
+    );
+}
+
+/// `LiteratureSearch` runs a full protocol in one call and
+/// `LiteratureSearchPreview` plans it, so a literature turn is offered those
+/// two. The create/execute aliases stay deferred — reachable through ToolSearch
+/// or by naming them — instead of competing for the turn's tool slots.
+#[test]
+fn dynamic_tool_router_keeps_protocol_aliases_deferred() {
+    let mut specs = desktop_like_catalog();
+    for name in [
+        "LiteratureSearchPreview",
+        "LiteratureSearchProtocolCreate",
+        "LiteratureSearchExecute",
+    ] {
+        specs.push(routing_spec(name));
+    }
+    let plan = route_chat_tools("帮我系统检索相关文献", &specs, ToolRoutingMode::Active);
+
+    assert!(plan.profile.contains("research"), "{plan:?}");
+    assert!(plan.active_names.contains("LiteratureSearch"), "{plan:?}");
+    assert!(
+        plan.active_names.contains("LiteratureSearchPreview"),
+        "{plan:?}"
+    );
+    for alias in ["LiteratureSearchProtocolCreate", "LiteratureSearchExecute"] {
+        assert!(!plan.active_names.contains(alias), "{alias}: {plan:?}");
+        assert!(plan.deferred_names.contains(alias), "{alias}: {plan:?}");
+    }
+
+    let named = route_chat_tools(
+        "用 LiteratureSearchExecute 继续执行那个检索方案",
+        &specs,
+        ToolRoutingMode::Active,
+    );
+    assert!(
+        named.active_names.contains("LiteratureSearchExecute"),
+        "{named:?}"
     );
 }
 
@@ -1154,10 +1218,26 @@ while True:
 }
 
 #[test]
-fn managed_newapi_settings_enable_the_initial_routing_header() {
+fn opencode_settings_route_by_endpoint_without_model_name_rules() {
+    for model in ["gpt-5.5", "deepseek-v4-flash-free", "MiniMax-M3"] {
+        let obj = json!({
+            "executor_provider": "openai", "executor_model": model,
+            "executor_api_key": "test-key", "executor_base_url": "https://opencode.ai/zen/v1",
+        });
+        let (_, _, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
+        match config {
+            ChatExecutorConfig::OpenAiCompatible { send_routing_session_header, .. } => assert!(send_routing_session_header),
+            _ => panic!("expected OpenAI-compatible config"),
+        }
+    }
+}
+
+#[test]
+fn managed_gateway_propagates_session_without_reclassifying_models() {
+    for model in ["MiniMax-M3", "deepseek-v4.1-flash", "gpt-5.5", "unknown-alias"] {
     let obj = json!({
         "executor_provider": "openai",
-        "executor_model": "MiniMax-M3",
+        "executor_model": model,
         "executor_api_key": "sk-test",
         "executor_base_url": "https://gateway.test/v1/",
         "newapi_executor_base_url": "https://gateway.test/v1"
@@ -1166,7 +1246,9 @@ fn managed_newapi_settings_enable_the_initial_routing_header() {
     .cloned()
     .expect("object");
 
-    let (_, _, config) = resolve_settings_executor_config(&obj).expect("config");
+    let (resolved_model, provider, config) = resolve_settings_executor_config(&obj).expect("config");
+    assert_eq!(resolved_model, model);
+    assert_eq!(provider, "openai");
     match config {
         ChatExecutorConfig::OpenAiCompatible {
             send_routing_session_header,
@@ -1174,6 +1256,22 @@ fn managed_newapi_settings_enable_the_initial_routing_header() {
         } => assert!(send_routing_session_header),
         ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
     }
+    }
+}
+
+#[test]
+fn explicit_opencode_settings_identify_the_connection_without_model_rules() {
+    for model in ["gpt-5.5", "MiniMax-M3", "opencode/alias", "unknown-model"] {
+        let obj = json!({
+            "executor_provider": "opencode", "executor_model": model,
+            "executor_api_key": "own-key", "executor_base_url": "https://fixed-channel.test/v1"
+        });
+        let (_, provider, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
+        assert_eq!(provider, "opencode");
+        assert!(matches!(config, ChatExecutorConfig::OpenAiCompatible { send_routing_session_header: true, .. }));
+    }
+    let missing_endpoint = json!({"executor_provider": "opencode", "executor_api_key": "own-key"});
+    assert!(resolve_settings_executor_config(missing_endpoint.as_object().unwrap()).is_err());
 }
 
 #[test]

@@ -598,6 +598,22 @@ fn retired_http_gateway_is_removed_without_touching_other_providers() {
 }
 
 #[test]
+fn model_sync_preserves_explicit_opencode_connection_identity() {
+    let mut obj = serde_json::json!({
+        "managed_models": ["same-model"],
+        "executor_provider": "opencode", "executor_model": "same-model",
+        "executor_base_url": "https://fixed-channel.test/v1", "executor_api_key": "own-key",
+        "reviewer_provider": "opencode", "reviewer_model": "same-model",
+        "reviewer_base_url": "https://review-channel.test/v1", "reviewer_api_key": "review-key"
+    }).as_object().unwrap().clone();
+    let before = obj.clone();
+    normalize_managed_model_slots(&mut obj).unwrap();
+    for key in ["executor_provider", "executor_base_url", "executor_api_key", "reviewer_provider", "reviewer_base_url", "reviewer_api_key"] {
+        assert_eq!(obj.get(key), before.get(key), "model sync changed {key}");
+    }
+}
+
+#[test]
 fn managed_key_cannot_follow_a_tampered_executor_or_verified_url() {
     let official = crate::newapi::configured_managed_base().expect("build endpoint");
     let mut obj = serde_json::json!({
@@ -840,6 +856,7 @@ fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
     std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
     std::env::set_var("ARIS_REVIEWER_BASE_URL", "https://old.example/v1");
     std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");
+    std::env::set_var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL", "https://old.example/v1");
 
     apply_reviewer_environment_from(&Map::new(), true);
 
@@ -850,7 +867,36 @@ fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
     assert!(std::env::var("ARIS_REVIEWER_MODEL").is_err());
     assert!(std::env::var("ARIS_REVIEWER_BASE_URL").is_err());
     assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+    assert!(std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").is_err());
     std::env::remove_var("ARIS_REVIEWER_PROVIDER");
+}
+
+#[test]
+fn account_reviewer_exports_gateway_session_metadata_and_clears_it_on_switch() {
+    let _guard = crate::test_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let keys = ["ARIS_REVIEWER_PROVIDER", "ARIS_REVIEWER_MODEL", "ARIS_REVIEWER_BASE_URL", "ARIS_REVIEWER_AUTH_TOKEN", "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL"];
+    let prior: Vec<_> = keys.iter().map(|key| (*key, std::env::var(key).ok())).collect();
+    let mut obj = serde_json::json!({
+        "reviewer_provider": "custom", "reviewer_model": "MiniMax-M3",
+        "reviewer_base_url": "https://gateway.test/v1",
+        "newapi_executor_base_url": "https://gateway.test/v1",
+        "newapi_executor_api_key": "gateway-token",
+    }).as_object().unwrap().clone();
+    apply_reviewer_environment_from(&obj, true);
+    assert_eq!(std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").as_deref(), Ok("https://gateway.test/v1"));
+    let account = tools::prepare_llm_review(None).unwrap().figure_identity();
+    obj.remove("newapi_executor_base_url");
+    obj.remove("newapi_executor_api_key");
+    obj.insert("reviewer_api_key".into(), Value::String("own-token".into()));
+    apply_reviewer_environment_from(&obj, true);
+    assert!(std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").is_err());
+    let custom = tools::prepare_llm_review(None).unwrap().figure_identity();
+    assert_eq!(account.model, custom.model);
+    assert_eq!(account.provider, custom.provider);
+    assert_ne!(account.signature, custom.signature);
+    for (key, value) in prior {
+        match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+    }
 }
 
 #[test]
