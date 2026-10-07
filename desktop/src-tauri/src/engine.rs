@@ -4879,15 +4879,24 @@ pub fn chat_run_command(
     })
 }
 
-pub(crate) fn figure_connections(model: Option<&str>) -> Result<(aris_chat::figures::FigureExecutor, tools::PreparedLlmReview), String> {
+/// `reviewer_model` other than the configured Reviewer must be a synced
+/// account model; it is resolved for this task only.
+pub(crate) fn figure_connections(model: Option<&str>, reviewer_model: Option<&str>) -> Result<(aris_chat::figures::FigureExecutor, tools::PreparedLlmReview), String> {
     let _setup = project_env_lock().lock().map_err(|e| e.to_string())?;
     let current = resolve_executor()?;
     let (model, provider, config) = if model.is_some_and(|requested| !requested.eq_ignore_ascii_case(&current.0)) { resolve_executor_for_model(model)? } else { current };
-    let (reviewer_provider, reviewer_model) = configured_reviewer_identity().ok_or("Configure an independent Reviewer in Settings before starting a figure task")?;
-    if reviewer_provider == "oracle-web" { return Err("Figures currently require an API Reviewer; select one in Settings".into()); }
-    if !reviewer_is_independent(&reviewer_provider, &reviewer_model, &provider, &model) { return Err("Figure Executor and independent Reviewer must use different configured models".into()); }
-    crate::config::apply_reviewer_environment(true);
-    let reviewer = tools::prepare_llm_review(Some(reviewer_model))?.freeze_for_figures();
+    let configured = configured_reviewer_identity();
+    let requested = reviewer_model.map(str::trim).filter(|requested| !requested.is_empty() && configured.as_ref().is_none_or(|(_, configured)| !configured.eq_ignore_ascii_case(requested)));
+    let (reviewer_model, reviewer) = if let Some(requested) = requested {
+        (requested.to_string(), crate::config::managed_figure_reviewer(requested)?)
+    } else {
+        let (reviewer_provider, reviewer_model) = configured.ok_or("Choose an independent Reviewer before starting a figure task")?;
+        if reviewer_provider == "oracle-web" { return Err("Figures currently require an API Reviewer; choose one for this task".into()); }
+        crate::config::apply_reviewer_environment(true);
+        (reviewer_model.clone(), tools::prepare_llm_review(Some(reviewer_model))?)
+    };
+    if !reviewer_is_independent("", &reviewer_model, &provider, &model) { return Err("Figure Executor and independent Reviewer must use different models".into()); }
+    let reviewer = reviewer.freeze_for_figures();
     let executor = aris_chat::figures::FigureExecutor::new(model, provider, config);
     for identity in [&executor.identity, &reviewer.figure_identity()] {
         let url = reqwest::Url::parse(&identity.endpoint).map_err(|_| "Invalid model endpoint")?;
@@ -10212,18 +10221,15 @@ fn resolve_summarizer_config(
             let api_key = api_key.ok_or_else(|| {
                 "No API key configured for the selected summary provider.".to_string()
             })?;
-            let base_url =
-                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string());
-            let send_routing_session_header = obj
-                .get("newapi_executor_base_url")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some_and(|managed| {
-                    managed.trim_end_matches('/').eq_ignore_ascii_case(
-                        base_url.trim().trim_end_matches('/'),
-                    )
-                });
+            let base_url = if provider == "opencode" {
+                base_url.ok_or("Set the endpoint of this fixed OpenCode connection")?
+            } else {
+                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string())
+            };
+            let managed_base_url = crate::config::managed_executor_base_url(obj);
+            let send_routing_session_header = api::connection_uses_routing_session_header(
+                &provider, &base_url, managed_base_url.as_deref(),
+            );
             aris_chat::ChatExecutorConfig::OpenAiCompatible {
                 api_key,
                 base_url,

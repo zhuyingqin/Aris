@@ -271,6 +271,8 @@ impl RenderedFigure {
     pub fn version(&self, author: &str) -> FigureVersion {
         FigureVersion {
             index: 0,
+            parent_index: None,
+            svg_edit_id: None,
             hash: String::new(),
             svg_path: String::new(),
             png_path: String::new(),

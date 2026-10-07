@@ -1,0 +1,63 @@
+/* Editor chrome shares the workspace palette. SVG artwork is never themed. */
+:root {
+  color-scheme: dark;
+  --somniq-bg: #0e1116;
+  --somniq-surface: #151a21;
+  --somniq-raised: #1c232c;
+  --somniq-border: #2b3440;
+  --somniq-text: #d7dee7;
+  --somniq-muted: #8a97a6;
+  --somniq-accent: #4f9cf9;
+  --somniq-font-size: 12px;
+  --somniq-font-family: "Inter", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --somniq-icon-filter: grayscale(1) brightness(0) invert(1) opacity(.8);
+  --main-bg-color: var(--somniq-surface);
+  --icon-bg-color: var(--somniq-surface);
+  --icon-bg-color-hover: var(--somniq-raised);
+  --border-color: var(--somniq-border);
+  --text-color: var(--somniq-text);
+  --canvas-bg-color: var(--somniq-bg);
+  --input-color: var(--somniq-raised);
+  --ruler-color: #eef2f6;
+  --link-color: var(--somniq-accent);
+  --orange-color: var(--somniq-accent);
+  --top-toolbar-min-height: 44px;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --somniq-bg: #edf1f5;
+  --somniq-surface: #fff;
+  --somniq-raised: #f4f6f8;
+  --somniq-border: #d7dde6;
+  --somniq-text: #1f2937;
+  --somniq-muted: #647080;
+  --somniq-icon-filter: grayscale(1) brightness(0) opacity(.65);
+}
+html, body { margin: 0; height: 100%; overflow: hidden; }
+#container { width: 100%; height: 100vh; }
+#main_button, #main_menu, #title_panel, #tool_source,
+#tool_open, #tool_save, #tool_export, #tool_import { display: none !important; }
+.svg_editor {
+  font-family: var(--somniq-font-family);
+  font-size: var(--somniq-font-size);
+  grid-template-columns: 44px 16px 50px 1fr 16px;
+  grid-template-rows: minmax(var(--top-toolbar-min-height), auto) 16px minmax(0, 1fr) 40px;
+  grid-template-areas: "top top top top top" "left corner rulerX rulerX side"
+    "left rulerY workarea workarea side" "left bottom bottom bottom bottom";
+}
+.svg_editor.open { grid-template-columns: 44px 16px 50px 1fr 220px; }
+#tools_top { padding: 4px 8px; box-sizing: border-box; align-items: center; border-bottom: 1px solid var(--somniq-border); }
+#tools_top > * { align-items: center; }
+#tools_left { width: 100%; margin: 0; padding: 6px 4px; box-sizing: border-box; border-right: 1px solid var(--somniq-border); }
+#tools_bottom { padding: 0 8px; border-top: 1px solid var(--somniq-border); }
+#workarea { background: var(--somniq-bg); border: 0; }
+#ruler_corner { background: var(--somniq-raised); }
+:root[data-theme="dark"] :is(#ruler_x, #ruler_y) { filter: invert(.9) hue-rotate(180deg); }
+.tool_sep { border-color: var(--somniq-border); opacity: .6; }
+#sidepanel_handle { background: var(--somniq-raised); color: var(--somniq-muted); border-color: var(--somniq-border); }
+#sidepanel_content { background: var(--somniq-surface); border-color: var(--somniq-border); }
+#layerlist tr.layer { background: var(--somniq-surface); color: var(--somniq-text); }
+#layerlist tr.layersel { background: var(--somniq-raised); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: var(--somniq-bg); }
+::-webkit-scrollbar-thumb { border: 2px solid var(--somniq-bg); border-radius: 8px; background: color-mix(in srgb, var(--somniq-muted) 45%, transparent); }

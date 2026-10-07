@@ -18,6 +18,11 @@ const REVIEWER_KEY_ENVS: &[&str] = &[
     "ARIS_MINIMAX_BASE_URL",
     "MINIMAX_BASE_URL",
     "KIMI_API_KEY",
+    "ARIS_REVIEWER_PROVIDER",
+    "ARIS_REVIEWER_MODEL",
+    "ARIS_REVIEWER_BASE_URL",
+    "ARIS_REVIEWER_AUTH_TOKEN",
+    "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL",
 ];
 
 struct ReviewerEnvSnapshot {
@@ -46,6 +51,60 @@ impl Drop for ReviewerEnvSnapshot {
             }
         }
     }
+}
+
+#[test]
+fn managed_reviewer_session_policy_follows_endpoint_not_model() {
+    let _guard = env_lock_reviewer().lock().unwrap();
+    let _snapshot = ReviewerEnvSnapshot::capture_and_clear();
+    std::env::set_var("ARIS_REVIEWER_PROVIDER", "custom");
+    std::env::set_var(
+        "ARIS_REVIEWER_BASE_URL",
+        "https://gateway.test/v1/chat/completions",
+    );
+    std::env::set_var(
+        "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL",
+        "https://gateway.test/v1/",
+    );
+    std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "own-key");
+    for model in ["MiniMax-M3", "deepseek-v4.1-flash", "unknown-alias"] {
+        std::env::set_var("ARIS_REVIEWER_MODEL", model);
+        let review = crate::prepare_llm_review(None).unwrap();
+        assert!(review.send_routing_session_header);
+        assert_eq!(review.model, model);
+    }
+    std::env::set_var("ARIS_REVIEWER_BASE_URL", "https://other.test/v1");
+    assert!(
+        !crate::prepare_llm_review(None)
+            .unwrap()
+            .send_routing_session_header
+    );
+    std::env::set_var("ARIS_REVIEWER_BASE_URL", "https://gateway.test/v1");
+    std::env::remove_var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL");
+    assert!(
+        !crate::prepare_llm_review(None)
+            .unwrap()
+            .send_routing_session_header
+    );
+}
+
+#[test]
+fn explicit_opencode_reviewer_uses_its_connection_for_any_model_alias() {
+    let _guard = env_lock_reviewer().lock().unwrap();
+    let _snapshot = ReviewerEnvSnapshot::capture_and_clear();
+    std::env::set_var("ARIS_REVIEWER_PROVIDER", "opencode");
+    std::env::set_var("ARIS_REVIEWER_MODEL", "claude-custom-alias");
+    std::env::set_var("ARIS_REVIEWER_BASE_URL", "https://fixed-channel.test/v1");
+    std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "own-key");
+    let review = crate::prepare_llm_review(None).unwrap();
+    assert!(review.send_routing_session_header);
+    assert_eq!(review.base_url, "https://fixed-channel.test/v1");
+    assert_eq!(review.model, "claude-custom-alias");
+    let signature = review.figure_identity().signature;
+    std::env::set_var("ARIS_REVIEWER_PROVIDER", "custom");
+    let ordinary = crate::prepare_llm_review(None).unwrap();
+    assert!(!ordinary.send_routing_session_header);
+    assert_ne!(ordinary.figure_identity().signature, signature);
 }
 
 #[test]

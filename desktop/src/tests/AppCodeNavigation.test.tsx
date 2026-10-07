@@ -50,6 +50,25 @@ async function readyApp() {
 }
 
 describe("Code module navigation in the app shell", () => {
+  it("keeps the application rail in Figures and preserves its workspace when switching back", async () => {
+    const user = userEvent.setup();
+    useStore.setState({ tab: "chat" });
+    const view = render(<App />);
+    await user.click(screen.getByRole("button", { name: "科研绘图" }));
+    const workspace = await screen.findByRole("region", { name: "科研绘图应用" });
+    await waitFor(() => expect(workspace.closest("[hidden]")).toBeNull());
+    await user.type(within(workspace).getByRole("textbox", { name: "图形描述" }), "A points to B");
+    const navigation = screen.getByRole("navigation", { name: "SomniQ 功能" });
+    expect(within(navigation).getByRole("button", { name: "科研绘图" }).getAttribute("aria-current")).toBe("page");
+    await user.click(within(navigation).getByRole("button", { name: "对话" }));
+    await waitFor(() => expect(workspace.closest("[hidden]")).not.toBeNull());
+    await user.click(within(navigation).getByRole("button", { name: "科研绘图" }));
+    await waitFor(() => expect(workspace.closest("[hidden]")).toBeNull());
+    expect(screen.getByRole("region", { name: "科研绘图应用" })).toBe(workspace);
+    expect((within(workspace).getByRole("textbox", { name: "图形描述" }) as HTMLTextAreaElement).value).toBe("A points to B");
+    expect(view.container.querySelector(".app-navigation-shell")).not.toBeNull();
+  });
+
   it("switches the visible workspace when a native editor action arrives and can return to Code", async () => {
     const user = userEvent.setup();
     const view = await readyApp();

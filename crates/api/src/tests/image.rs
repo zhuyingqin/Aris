@@ -13,6 +13,35 @@ fn png() -> Vec<u8> {
     cursor.into_inner()
 }
 
+#[test]
+fn dimension_rounding_is_distinct_from_an_actual_canvas_change() {
+    for (base, returned) in [((2171, 724), (2170, 725)), ((2048, 1024), (2046, 1026)), ((400, 400), (402, 400)), ((1, 1), (1, 1))] {
+        assert!(image_dimensions_match_with_rounding(base, returned));
+        assert!(image_dimensions_match_with_rounding(returned, base));
+    }
+    for (base, returned) in [((100, 100), (101, 100)), ((4, 3), (6, 2)), ((1024, 1024), (2048, 2048)), ((2048, 1024), (2045, 1024)), ((0, 100), (1, 100)), ((u32::MAX, 100), (u32::MAX, 100))] {
+        assert!(!image_dimensions_match_with_rounding(base, returned));
+    }
+}
+
+#[test]
+fn vision_selection_map_is_opaque_white_for_editable_pixels_only() {
+    let reference = validate_image_bytes(png()).unwrap();
+    for whole in [false, true] {
+        let pixels = ::image::RgbaImage::from_fn(2, 3, |x, _| ::image::Rgba([27, 91, 180, if whole || x == 0 { 0 } else { 255 }]));
+        let mut output = Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(pixels).write_to(&mut output, ::image::ImageFormat::Png).unwrap();
+        let mask = validate_edit_mask(output.into_inner(), &reference).unwrap();
+        let preview = mask.selection_preview().unwrap();
+        assert_eq!((preview.width, preview.height), (2, 3));
+        let pixels = ::image::load_from_memory(&preview.bytes).unwrap().to_rgba8();
+        for (x, _, pixel) in pixels.enumerate_pixels() {
+            let color = if whole || x == 0 { 255 } else { 0 };
+            assert_eq!(pixel.0, [color, color, color, 255]);
+        }
+    }
+}
+
 fn response() -> String {
     serde_json::json!({"data": [{"b64_json": STANDARD.encode(png())}], "usage": {"total_tokens": 4}}).to_string()
 }
@@ -66,6 +95,80 @@ fn request() -> ImageGenerationRequest {
     }
 }
 
+fn mask_png(width: u32, height: u32, selected: bool) -> Vec<u8> {
+    let mut pixels =
+        ::image::RgbaImage::from_pixel(width, height, ::image::Rgba([255, 255, 255, 255]));
+    if selected {
+        pixels.put_pixel(0, 1, ::image::Rgba([0, 0, 0, 0]));
+    }
+    let mut output = Cursor::new(Vec::new());
+    pixels
+        .write_to(&mut output, ::image::ImageFormat::Png)
+        .unwrap();
+    output.into_inner()
+}
+
+#[tokio::test]
+async fn region_edits_send_a_real_png_mask_once_and_never_fall_back_to_generation() {
+    let reference = validate_image_bytes(png()).unwrap();
+    let mask = validate_edit_mask(mask_png(2, 3, true), &reference).unwrap();
+    let (base, server) = server(
+        r#"{"error":{"message":"mask unsupported"}}"#.into(),
+        "400 Bad Request",
+    );
+    let client = ImageApiClient::new(&base, "fixture-key".into()).unwrap();
+    let error = client
+        .edit(
+            &request(),
+            ImageReference {
+                name: "original.png".into(),
+                image: reference,
+            },
+            &mask,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("mask unsupported"));
+    let (sent, count) = server.join().unwrap();
+    assert_eq!(count, 1);
+    assert!(sent.starts_with("POST /v1/images/edits "));
+    assert!(sent.contains("name=\"image[]\"; filename=\"original.png\""));
+    assert!(sent.contains("name=\"mask\"; filename=\"selection.png\""));
+}
+
+#[test]
+fn edit_mask_validation_and_compositing_protect_every_unselected_pixel() {
+    let original = validate_image_bytes(png()).unwrap();
+    assert!(validate_edit_mask(mask_png(3, 3, true), &original).is_err());
+    assert!(validate_edit_mask(mask_png(2, 3, false), &original).is_err());
+    assert!(validate_edit_mask(png(), &original).is_err()); // RGB has no transparent region.
+    let mask = validate_edit_mask(mask_png(2, 3, true), &original).unwrap();
+    let pixels = ::image::RgbaImage::from_pixel(2, 3, ::image::Rgba([200, 80, 30, 255]));
+    let mut output = Cursor::new(Vec::new());
+    pixels
+        .write_to(&mut output, ::image::ImageFormat::Png)
+        .unwrap();
+    let edited = validate_image_bytes(output.into_inner()).unwrap();
+    let result = composite_masked_edit(&original, &edited, &mask).unwrap();
+    let result = ::image::load_from_memory(&result.bytes).unwrap().to_rgba8();
+    let base = ::image::load_from_memory(&original.bytes)
+        .unwrap()
+        .to_rgba8();
+    for (x, y, pixel) in result.enumerate_pixels() {
+        assert_eq!(
+            *pixel,
+            if (x, y) == (0, 1) {
+                ::image::Rgba([200, 80, 30, 255])
+            } else {
+                *base.get_pixel(x, y)
+            }
+        );
+    }
+    let wrong_size = validate_image_bytes(mask_png(3, 3, true)).unwrap();
+    assert!(composite_masked_edit(&original, &wrong_size, &mask).is_err());
+}
+
 #[tokio::test]
 async fn generation_uses_account_auth_and_returns_validated_pixels() {
     let (base, server) = server(response(), "200 OK");
@@ -83,6 +186,24 @@ async fn generation_uses_account_auth_and_returns_validated_pixels() {
     assert_eq!(body["prompt"], request().prompt);
     assert_eq!(body["n"], 1);
     assert_eq!(count, 1);
+}
+
+#[test]
+fn explicit_resize_then_selection_preserves_protected_pixels() {
+    let original = validate_image_bytes(png()).unwrap();
+    let mask = validate_edit_mask(mask_png(2, 3, true), &original).unwrap();
+    let pixels = ::image::RgbaImage::from_pixel(5, 2, ::image::Rgba([200, 80, 30, 255]));
+    let mut output = Cursor::new(Vec::new());
+    pixels.write_to(&mut output, ::image::ImageFormat::Png).unwrap();
+    let returned = validate_image_bytes(output.into_inner()).unwrap();
+    let resized = resize_image_exact(&returned, original.width, original.height).unwrap();
+    assert_eq!((returned.width, returned.height), (5, 2));
+    let result = composite_masked_edit(&original, &resized, &mask).unwrap();
+    let result = ::image::load_from_memory(&result.bytes).unwrap().to_rgba8();
+    let base = ::image::load_from_memory(&original.bytes).unwrap().to_rgba8();
+    for (x, y, pixel) in result.enumerate_pixels() {
+        assert_eq!(*pixel, if (x, y) == (0, 1) { ::image::Rgba([200, 80, 30, 255]) } else { *base.get_pixel(x, y) });
+    }
 }
 
 #[tokio::test]

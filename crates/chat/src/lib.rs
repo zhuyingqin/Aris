@@ -2173,9 +2173,9 @@ pub enum ChatExecutorConfig {
     OpenAiCompatible {
         api_key: String,
         base_url: String,
-        /// Send the conversation-scoped routing header from the first request.
-        /// Managed NewAPI gateways need this so a channel passthrough rule can
-        /// forward it to an OpenCode Go upstream without an initial 400 probe.
+        /// Propagate the session to OpenCode or the configured account gateway.
+        /// This connection setting does not identify the selected upstream or
+        /// classify any model as OpenCode.
         send_routing_session_header: bool,
         /// Which endpoint to use. `Auto` keeps the historical base-URL-derived
         /// choice; an explicit `Responses` preference still falls back to
@@ -2306,9 +2306,15 @@ pub fn resolve_settings_executor_config(
                     "No API key configured for provider '{provider}'. Add it on the Settings page."
                 )
             })?;
-            let base_url =
-                get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
-            let send_routing_session_header = is_managed_newapi_gateway(obj, &base_url);
+            let base_url = if provider == "opencode" {
+                get("executor_base_url").ok_or("Set the endpoint of this fixed OpenCode connection")?
+            } else {
+                get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
+            };
+            let send_routing_session_header = api::connection_uses_routing_session_header(
+                &provider, &base_url,
+                obj.get("newapi_executor_base_url").and_then(Value::as_str),
+            );
             // Absent/unknown → `Auto`, i.e. the historical behaviour. A
             // per-model override lives on the verified-executor entry and is
             // merged into this object before it reaches here.

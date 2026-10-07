@@ -35,7 +35,7 @@ pub mod bounded;
 pub mod reasoning_effort;
 
 pub use openai::{
-    chat_requires_responses_transport, resolve_openai_executor_config,
+    chat_requires_responses_transport, openai_max_tokens_override, resolve_openai_executor_config,
     responses_transport_unsupported, set_transport_verdict_hook, selected_openai_transport, OpenAIExecutorConfig,
     OpenAIRuntimeClient, OpenAiTransport,
 };
@@ -499,8 +499,9 @@ impl AnthropicRuntimeClient {
     }
 
     #[must_use]
-    pub fn with_single_request(mut self) -> Self {
+    pub fn with_single_request(mut self, max_output_tokens: u32) -> Self {
         self.client = self.client.with_single_request();
+        self.max_tokens = max_output_tokens;
         self.bounded_request = true;
         self
     }

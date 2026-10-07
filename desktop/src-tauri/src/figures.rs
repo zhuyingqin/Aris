@@ -17,6 +17,12 @@ use std::{
     },
     time::Instant,
 };
+
+pub(crate) mod raster;
+mod prompt;
+pub(crate) mod raster_result;
+mod continuation;
+pub(crate) mod svg_edit;
 use tauri::{AppHandle, Emitter, Manager};
 
 // Includes any model reasoning. DEV-02 exhausted 2K before a complete verdict.
@@ -159,23 +165,37 @@ pub struct FigureConnections {
     executor: ModelIdentity,
     reviewer: ModelIdentity,
     executor_models: Vec<String>,
+    reviewer_models: Vec<String>,
     image: crate::image_api::SomniImageSettings,
 }
 #[tauri::command]
-pub async fn figures_connections(model: Option<String>) -> Result<FigureConnections, String> {
+pub async fn figures_connections(
+    model: Option<String>,
+    reviewer_model: Option<String>,
+) -> Result<FigureConnections, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (executor, reviewer) = crate::engine::figure_connections(model.as_deref())?;
+        let (executor, reviewer) =
+            crate::engine::figure_connections(model.as_deref(), reviewer_model.as_deref())?;
+        let account_models = crate::config::managed_text_models();
         let mut executor_models: Vec<String> = crate::config::verified_executor_summaries()
             .into_iter()
             .map(|(_, model, _)| model)
+            .chain(account_models.iter().cloned())
             .collect();
         executor_models.push(executor.identity.model.clone());
         executor_models.sort();
         executor_models.dedup();
+        // Synced account models can review any task; the configured Reviewer
+        // stays selectable even when it lives outside the account.
+        let mut reviewer_models = account_models;
+        reviewer_models.push(reviewer.figure_identity().model);
+        reviewer_models.sort();
+        reviewer_models.dedup();
         Ok(FigureConnections {
             executor: executor.identity,
             reviewer: reviewer.figure_identity(),
             executor_models,
+            reviewer_models,
             image: crate::image_api::somni_image_settings(),
         })
     })
@@ -193,8 +213,11 @@ pub struct PrepareInput {
     style: String,
     source_mode: String,
     source_base64: Option<String>,
-    output_limit: u32,
     model: Option<String>,
+    reviewer_model: Option<String>,
+    image_model: Option<String>,
+    #[serde(default)]
+    confirmed_raster: Option<continuation::ConfirmedRaster>,
 }
 #[tauri::command]
 pub async fn figures_prepare(app: AppHandle, input: PrepareInput) -> Result<FigureView, String> {
@@ -206,7 +229,10 @@ pub async fn figures_prepare(app: AppHandle, input: PrepareInput) -> Result<Figu
         if input.title.len() > 200 || input.style.len() > 2000 {
             return Err("Title or style exceeds length limit".into());
         }
-        let (executor, reviewer) = crate::engine::figure_connections(input.model.as_deref())?;
+        let (executor, reviewer) = crate::engine::figure_connections(
+            input.model.as_deref(),
+            input.reviewer_model.as_deref(),
+        )?;
         let source = if input.source_mode == "import" {
             let encoded = input
                 .source_base64
@@ -231,12 +257,18 @@ pub async fn figures_prepare(app: AppHandle, input: PrepareInput) -> Result<Figu
             }
             None
         };
+        if let Some(reference) = &input.confirmed_raster {
+            if active_runs().lock().map_err(|e| e.to_string())?.contains_key(&(input.project_id.clone(), reference.id.clone())) {
+                return Err("请等待当前任务完成。".into());
+            }
+            continuation::validate_source(&workspace, reference, source.as_ref().ok_or("A continuation requires an imported image")?)?;
+        }
         let now = runtime::now_iso8601();
         let image_identity = if input.source_mode == "generate" {
             Some(
                 crate::image_api::prepare_figure_image(
-                    image_prompt(&input.method, &input.style),
-                    None,
+                    "Executor prompt pending".into(),
+                    input.image_model.clone().filter(|model| !model.trim().is_empty()),
                 )?
                 .identity,
             )
@@ -253,21 +285,30 @@ pub async fn figures_prepare(app: AppHandle, input: PrepareInput) -> Result<Figu
             source_mime: source.as_ref().map(|s| s.mime_type.to_string()),
             source_hash: None,
             status: "ready".into(),
-            output_limit: input.output_limit,
+            // Same cap Chat uses for this Executor; not a user setting.
+            output_limit: executor.chat_output_limit().unwrap_or(0),
             executor: executor.identity,
             reviewer: reviewer.figure_identity(),
             image_identity,
+            raster_versions: vec![],
+            pending_raster_edit: None,
+            source_raster: None,
+            image_confirmed: false,
             executor_vision: false,
             reviewer_vision: false,
             revision_used: false,
             versions: vec![],
+            svg_edits: vec![],
             requests: vec![],
             review: None,
             error: None,
             created_at: now.clone(),
             updated_at: now,
         };
-        let run = store::create(&workspace, run, source.as_ref().map(|s| s.bytes.as_slice()))?;
+        let mut run = store::create(&workspace, run, source.as_ref().map(|s| s.bytes.as_slice()))?;
+        if let Some(reference) = &input.confirmed_raster {
+            run = continuation::prepare_confirmed(&workspace, &run.id, reference)?;
+        }
         Ok(view(&input.project_id, run))
     })
     .await
@@ -281,12 +322,14 @@ pub async fn figures_list(app: AppHandle, project_id: String) -> Result<Vec<Figu
         store::list(&workspace)?
             .into_iter()
             .map(|run| {
-                let v = view(&project_id, run);
+                let mut v = view(&project_id, run);
+                if !v.active { v.run = raster_result::restore_saved_edit(&workspace, v.run)?; }
                 if !v.active
                     && (v.run.requests.iter().any(|r| r.status == "submitted")
+                        || v.run.svg_edits.iter().any(|edit| edit.status == "running")
                         || matches!(
                             v.run.status.as_str(),
-                            "probing" | "generating" | "reconstructing" | "reviewing" | "revising"
+                            "probing" | "generating" | "editing_image" | "editing_svg" | "reconstructing" | "reviewing" | "revising"
                         ))
                 {
                     Ok(view(&project_id, store::recover(&workspace, &v.run.id)?))
@@ -310,6 +353,8 @@ pub async fn figures_start(
     app: AppHandle,
     project_id: String,
     id: String,
+    expected_source_hash: Option<String>,
+    expected_source_index: Option<usize>,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &project_id)?;
     let mut jobs = active_runs().lock().map_err(|e| e.to_string())?;
@@ -322,8 +367,13 @@ pub async fn figures_start(
             jobs.len(),
         ));
     }
-    let run = store::load(&workspace, &id)?;
-    if !run.can_start() {
+    let mut run = store::load(&workspace, &id)?;
+    if let Some(expected) = expected_source_hash {
+        if expected_source_index.is_none() || run.source_raster != expected_source_index {
+            return Err("图片版本已变更，请重新确认。".into());
+        }
+        run = store::confirm_image(&workspace, &id, &expected)?;
+    } else if !run.can_start() {
         return Err(
             "This task has already started. Create a new task to submit new paid requests.".into(),
         );
@@ -390,6 +440,22 @@ pub fn figures_cancel(project_id: String, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Running tasks must be cancelled first. The job lock is held while deleting
+/// so a start or review cannot begin on a half-removed task.
+#[tauri::command]
+pub async fn figures_delete(app: AppHandle, project_id: String, id: String) -> Result<(), String> {
+    let workspace = project(&app, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let jobs = active_runs().lock().map_err(|e| e.to_string())?;
+        if jobs.contains_key(&(project_id, id.clone())) {
+            return Err("Cancel the running task before deleting it".into());
+        }
+        store::delete(&workspace, &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn stage(
     app: &AppHandle,
     project_id: &str,
@@ -443,7 +509,8 @@ fn call(
         Ok(())
     })?;
     let usages = reply.usage.into_iter().collect::<Vec<_>>();
-    let _ = crate::usage_log::append_turn_usage(
+    // Unit fixtures keep their usage in the project ledger, not the user's log.
+    if !cfg!(test) { let _ = crate::usage_log::append_turn_usage(
         &format!("figure-{id}"),
         &record.id,
         role,
@@ -454,7 +521,7 @@ fn call(
         &[],
         duration,
         "figure-light",
-    );
+    ); }
     if !reply.text.is_empty() {
         runtime::write_file_atomically(
             &store::directory(workspace, id)?.join(format!("{}.response.txt", record.id)),
@@ -576,33 +643,81 @@ fn process(
         Ok(())
     };
     let run = store::load(workspace, id)?;
-    let (executor, reviewer) = crate::engine::figure_connections(Some(&run.executor.model))?;
+    if !run.image_confirmed {
+        let image_connection = if run.source_mode == "generate" {
+            let prepared = crate::image_api::prepare_figure_image(
+                "Executor prompt pending".into(),
+                run.image_identity
+                    .as_ref()
+                    .map(|identity| identity.model.clone()),
+            )?;
+            if Some(&prepared.identity) != run.image_identity.as_ref() {
+                return Err(
+                    "SomniImage settings changed; create a new task before submitting paid requests"
+                        .into(),
+                );
+            }
+            Some(prepared)
+        } else {
+            None
+        };
+        if run.source_mode == "generate" && run.source_hash.is_none() {
+            let executor = prompt::executor(&run)?;
+            let mut prepared = image_connection.ok_or("Missing SomniImage snapshot")?;
+            let output = prompt::generate_once(workspace, &run, &cancelled,
+                |request| executor.run_with_limit(&store::routing_session_id(workspace, id, "executor"), request, svg_cap(&run), cancelled.clone()),
+                |instruction| { prepared.set_prompt(instruction)?; prepared.generate(workspace, cancelled.clone()) }, &notify)?;
+            let relative = output["images"][0]["path"]
+                .as_str()
+                .ok_or("SomniImage returned no image")?;
+            let path = workspace
+                .join(relative)
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
+            if !path.starts_with(&workspace.canonicalize().map_err(|e| e.to_string())?) {
+                return Err("Generated image escaped its project".into());
+            }
+            let bytes = fs::read(path).map_err(|e| e.to_string())?;
+            if bytes.len() > store::MAX_SOURCE_BYTES {
+                return Err("Generated image exceeds the figure source limit".into());
+            }
+            let image = api::validate_image_bytes(bytes)?;
+            runtime::write_file_atomically(
+                &store::directory(workspace, id)?.join("figure.source"),
+                &image.bytes,
+            )
+            .map_err(|e| e.to_string())?;
+            runtime::write_file_atomically(
+                &store::directory(workspace, id)?.join(format!("figure.{}", image.extension)),
+                &image.bytes,
+            )
+            .map_err(|e| e.to_string())?;
+            runtime::write_file_atomically(
+                &store::directory(workspace, id)?.join("generation.json"),
+                serde_json::to_vec_pretty(&output).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            store::update(workspace, id, |r| {
+                r.source_mime = Some(image.mime_type.to_string());
+                r.source_hash = Some(store::hash(&image.bytes));
+                Ok(())
+            })?;
+        }
+        raster::ensure_raster(workspace, id)?;
+        set_stage("image_ready")?;
+        return Ok(());
+    }
+    let (executor, reviewer) =
+        crate::engine::figure_connections(Some(&run.executor.model), Some(&run.reviewer.model))?;
     if executor.identity != run.executor || reviewer.figure_identity() != run.reviewer {
         return Err(
             "Configured model connection changed. Create a new task to use the new settings."
                 .into(),
         );
     }
-    let image_connection = if run.source_mode == "generate" {
-        let prepared = crate::image_api::prepare_figure_image(
-            image_prompt(&run.method, &run.style),
-            run.image_identity
-                .as_ref()
-                .map(|identity| identity.model.clone()),
-        )?;
-        if Some(&prepared.identity) != run.image_identity.as_ref() {
-            return Err(
-                "SomniImage settings changed; create a new task before submitting paid requests"
-                    .into(),
-            );
-        }
-        Some(prepared)
-    } else {
-        None
-    };
     set_stage("probing")?;
     let executor_vision = probe(workspace, id, run.executor.clone(), "executor", |request| {
-        executor.run(request, 1024, cancelled.clone())
+        executor.run(&store::routing_session_id(workspace, id, "executor"), request, 1024, cancelled.clone())
     })?;
     if !executor_vision {
         store::update(workspace, id, |run| {
@@ -612,7 +727,7 @@ fn process(
         return Err("The configured Executor did not pass the real image probe. Choose a vision model before creating a new task.".into());
     }
     let reviewer_vision = probe(workspace, id, run.reviewer.clone(), "reviewer", |request| {
-        reviewer.run_figure_request(request, 1024, cancelled.clone())
+        reviewer.run_figure_request(&store::routing_session_id(workspace, id, "reviewer"), request, 1024, cancelled.clone())
     })?;
     store::update(workspace, id, |run| {
         run.executor_vision = executor_vision;
@@ -621,80 +736,6 @@ fn process(
     })?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Task cancelled".into());
-    }
-    if run.source_mode == "generate" {
-        set_stage("generating")?;
-        let prepared = image_connection
-            .as_ref()
-            .ok_or("Missing SomniImage snapshot")?;
-        let request = store::begin_request(
-            workspace,
-            id,
-            "generate_image",
-            "image",
-            prepared.identity.clone(),
-            0,
-        )?;
-        let started = Instant::now();
-        let output: Value = match prepared.generate(workspace, cancelled.clone()) {
-            Ok(output) => output,
-            Err(error) => {
-                store::update(workspace, id, |r| {
-                    let entry = r.requests.iter_mut().find(|e| e.id == request.id).unwrap();
-                    entry.status = if known_rejection(&error) {
-                        "failed"
-                    } else {
-                        "unknown"
-                    }
-                    .into();
-                    entry.error = Some(error.clone());
-                    entry.finished_at = Some(runtime::now_iso8601());
-                    entry.duration_ms = started.elapsed().as_millis() as u64;
-                    Ok(())
-                })?;
-                return Err(error);
-            }
-        };
-        let relative = output["images"][0]["path"]
-            .as_str()
-            .ok_or("SomniImage returned no image")?;
-        let path = workspace
-            .join(relative)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        if !path.starts_with(&workspace.canonicalize().map_err(|e| e.to_string())?) {
-            return Err("Generated image escaped its project".into());
-        }
-        let bytes = fs::read(path).map_err(|e| e.to_string())?;
-        if bytes.len() > store::MAX_SOURCE_BYTES {
-            return Err("Generated image exceeds the figure source limit".into());
-        }
-        let image = api::validate_image_bytes(bytes)?;
-        runtime::write_file_atomically(
-            &store::directory(workspace, id)?.join("figure.source"),
-            &image.bytes,
-        )
-        .map_err(|e| e.to_string())?;
-        runtime::write_file_atomically(
-            &store::directory(workspace, id)?.join(format!("figure.{}", image.extension)),
-            &image.bytes,
-        )
-        .map_err(|e| e.to_string())?;
-        runtime::write_file_atomically(
-            &store::directory(workspace, id)?.join("generation.json"),
-            serde_json::to_vec_pretty(&output).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        store::update(workspace, id, |r| {
-            r.source_mime = Some(image.mime_type.to_string());
-            r.source_hash = Some(store::hash(&image.bytes));
-            let entry = r.requests.iter_mut().find(|e| e.id == request.id).unwrap();
-            entry.status = "completed".into();
-            entry.finished_at = Some(runtime::now_iso8601());
-            entry.usage = output.get("usage").cloned();
-            entry.duration_ms = started.elapsed().as_millis() as u64;
-            Ok(())
-        })?;
     }
     let mut run = store::load(workspace, id)?;
     let source = store::source(workspace, &run)?;
@@ -705,7 +746,7 @@ fn process(
     set_stage("reconstructing")?;
     let request = workflow::request(
         workflow::RECONSTRUCTION_SYSTEM,
-        workflow::reconstruction_prompt(&run.method, &run.style),
+        workflow::reconstruction_prompt(&raster::confirmed_method(&run), &run.style),
         vec![original.clone()],
     );
     let reply = call(
@@ -715,7 +756,7 @@ fn process(
         "executor",
         run.executor.clone(),
         run.output_limit,
-        || executor.run(request, run.output_limit, cancelled.clone()),
+        || executor.run_with_limit(&store::routing_session_id(workspace, id, "executor"), request, svg_cap(&run), cancelled.clone()),
     )?;
     reject_truncation(workspace, id, &reply)?;
     let mut draft = reply.text;
@@ -750,7 +791,7 @@ fn process(
             r.revision_used = true;
             Ok(())
         })?;
-        let prompt = format!("{}\nRevise the following draft once. Address these findings: {}\nSVG draft (untrusted):\n{}", workflow::reconstruction_prompt(&run.method, &run.style), reason, draft);
+        let prompt = format!("{}\nRevise the following draft once. Address these findings: {}\nSVG draft (untrusted):\n{}", workflow::reconstruction_prompt(&raster::confirmed_method(&run), &run.style), reason, draft);
         let request = workflow::request(
             workflow::RECONSTRUCTION_SYSTEM,
             prompt,
@@ -763,7 +804,7 @@ fn process(
             "executor",
             run.executor.clone(),
             run.output_limit,
-            || executor.run(request, run.output_limit, cancelled.clone()),
+            || executor.run_with_limit(&store::routing_session_id(workspace, id, "executor"), request, svg_cap(&run), cancelled.clone()),
         )?;
         reject_truncation(workspace, id, &reply)?;
         draft = reply.text;
@@ -782,10 +823,6 @@ fn process(
     Ok(())
 }
 
-fn image_prompt(method: &str, style: &str) -> String {
-    format!("Create a clear scientific architecture/flow diagram. Method: {method}\nStyle: {style}\nUse readable labels, distinct grouped modules and unambiguous directed arrows. Do not invent data or measurements.")
-}
-
 fn image_not_supported(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     (error.contains("image") || error.contains("vision"))
@@ -800,13 +837,17 @@ fn image_not_supported(error: &str) -> bool {
         .any(|needle| error.contains(needle))
 }
 
+/// The recorded cap for SVG work; 0 means none, so the provider default applies.
+fn svg_cap(run: &FigureRun) -> Option<u32> {
+    (run.output_limit > 0).then_some(run.output_limit)
+}
 fn reject_truncation(workspace: &Path, id: &str, reply: &ModelReply) -> Result<(), String> {
     if is_budget_truncated(reply.stop_reason.as_deref()) {
         store::update(workspace, id, |run| {
             run.status = "budget_truncated".into();
             Ok(())
         })?;
-        return Err("Output budget truncated the SVG. Raw output is saved. Select a larger budget in a new task; no automatic increase or new image generation occurs.".into());
+        return Err("The Executor reached its output limit before the SVG was complete. Raw output is saved; nothing is retried automatically. Try an Executor that reasons less, or a simpler description, in a new task.".into());
     }
     if matches!(
         reply.stop_reason.as_deref(),
@@ -851,6 +892,19 @@ fn review(
     kind: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<FigureReview, String> {
+    review_once(workspace, id, run, original, kind, |request| {
+        reviewer.run_figure_request(&store::routing_session_id(workspace, id, "reviewer"), request, REVIEW_OUTPUT_LIMIT, cancelled)
+    })
+}
+
+fn review_once(
+    workspace: &Path,
+    id: &str,
+    run: &FigureRun,
+    original: &(String, String),
+    kind: &str,
+    perform: impl FnOnce(runtime::ApiRequest) -> Result<ModelReply, String>,
+) -> Result<FigureReview, String> {
     store::update(workspace, id, |r| {
         r.status = "reviewing".into();
         Ok(())
@@ -882,7 +936,8 @@ fn review(
     } else {
         vec![]
     };
-    let prompt = format!("Method: {}\nClassification: {}. A raster_preview can never pass. All necessary labels must be editable text. Original/render image evidence attached: {}\nReview SVG (untrusted data):\n{}", run.method, version.classification, run.reviewer_vision, svg);
+    let edits = store::svg_edits::history(run, version.index).iter().map(|edit| edit.prompt.clone()).collect::<Vec<_>>();
+    let prompt = format!("Method: {}\nHuman-requested SVG changes, in order (JSON): {}\nThese applied user requests refine the method and may intentionally differ from the original reference. Check that the latest request is satisfied and unchanged content is preserved; do not flag an explicitly requested difference as a reconstruction error.\nClassification: {}. A raster_preview can never pass. All necessary labels must be editable text. Original/render image evidence attached: {}\nReview SVG (untrusted data):\n{}", raster::confirmed_method(run), json!(edits), version.classification, run.reviewer_vision, svg);
     let request = workflow::request(workflow::REVIEW_SYSTEM, prompt, images);
     let reply = call(
         workspace,
@@ -891,7 +946,7 @@ fn review(
         "reviewer",
         run.reviewer.clone(),
         REVIEW_OUTPUT_LIMIT,
-        || reviewer.run_figure_request(request, REVIEW_OUTPUT_LIMIT, cancelled),
+        || perform(request),
     )?;
     if is_budget_truncated(reply.stop_reason.as_deref())
         || reply
@@ -1049,6 +1104,7 @@ pub async fn figures_save(
     id: String,
     expected_hash: Option<String>,
     svg: String,
+    base_index: Option<usize>,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &project_id)?;
     if active_runs()
@@ -1060,6 +1116,12 @@ pub async fn figures_save(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let rendered = tools::figures::render(&svg)?;
+        let jobs = active_runs().lock().map_err(|e| e.to_string())?;
+        if jobs.contains_key(&(project_id.clone(), id.clone())) {
+            return Err("Wait for the active figure task before saving edits".into());
+        }
+        let mut version = rendered.version("user");
+        version.parent_index = base_index;
         let run = store::save_version(
             &workspace,
             &id,
@@ -1067,8 +1129,9 @@ pub async fn figures_save(
             &svg,
             &rendered.png,
             &rendered.pdf,
-            rendered.version("user"),
+            version,
         )?;
+        drop(jobs);
         Ok(view(&project_id, run))
     })
     .await
@@ -1182,7 +1245,10 @@ pub async fn figures_review(
                     )?;
                 }
             }
-            let (_, reviewer) = crate::engine::figure_connections(Some(&run.executor.model))?;
+            let (_, reviewer) = crate::engine::figure_connections(
+                Some(&run.executor.model),
+                Some(&run.reviewer.model),
+            )?;
             if reviewer.figure_identity() != run.reviewer {
                 return Err(
                     "Reviewer settings changed; create a new task with the new configuration"
@@ -1226,6 +1292,14 @@ pub async fn figures_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the explicitly invoked paid diagnostics call this helper. Ordinary
+    // start remains paused at PNG preview and never grants confirmation.
+    fn process_confirmed_sample(workspace: &Path, id: &str) -> Result<(), String> {
+        process(workspace, id, Arc::new(AtomicBool::new(false)), || {})?;
+        let paused = store::load(workspace, id)?;
+        store::confirm_image(workspace, id, paused.source_hash.as_deref().ok_or("Missing PNG")?)?;
+        process(workspace, id, Arc::new(AtomicBool::new(false)), || {})
+    }
     #[test]
     fn editor_protocol_only_serves_its_static_assets_to_the_opaque_frame() {
         for path in [
@@ -1252,7 +1326,7 @@ mod tests {
     #[ignore = "Read-only diagnostic of the user's configured model identities"]
     fn configured_figure_connections_diagnostic() {
         let (executor, reviewer) =
-            crate::engine::figure_connections(None).expect("Figure model setup is incomplete");
+            crate::engine::figure_connections(None, None).expect("Figure model setup is incomplete");
         println!(
             "Executor: {} / {}",
             executor.identity.provider, executor.identity.model
@@ -1271,7 +1345,7 @@ mod tests {
             std::env::var("SOMNIQ_FIGURE_P0_WORKSPACE")
                 .expect("Set the diagnostic project workspace"),
         );
-        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let (executor, reviewer) = crate::engine::figure_connections(None, None).unwrap();
         let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
         let now = runtime::now_iso8601();
         let run: FigureRun = serde_json::from_value(json!({
@@ -1286,7 +1360,7 @@ mod tests {
             &id,
             executor.identity.clone(),
             "executor",
-            |request| executor.run(request, 1024, cancellation.clone()),
+            |request| executor.run(&store::routing_session_id(&workspace, &id, "executor"), request, 1024, cancellation.clone()),
         );
         let review = if execute.is_ok() {
             probe(
@@ -1294,7 +1368,7 @@ mod tests {
                 &id,
                 reviewer.figure_identity(),
                 "reviewer",
-                |request| reviewer.run_figure_request(request, 1024, cancellation.clone()),
+                |request| reviewer.run_figure_request(&store::routing_session_id(&workspace, &id, "reviewer"), request, 1024, cancellation.clone()),
             )
         } else {
             Err("Not attempted after Executor request failed".into())
@@ -1326,7 +1400,7 @@ mod tests {
             std::env::var("SOMNIQ_FIGURE_P0_WORKSPACE")
                 .expect("Set the diagnostic project workspace"),
         );
-        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let (executor, reviewer) = crate::engine::figure_connections(None, None).unwrap();
         let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
         let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='900' height='240'><rect width='900' height='240' fill='white'/><defs><marker id='arrow' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='8' markerHeight='8' orient='auto'><path d='M0 0L10 5L0 10Z' fill='#334155'/></marker></defs><g font-family='sans-serif' font-size='24' text-anchor='middle' fill='#16243b'><rect x='40' y='80' width='220' height='80' rx='12' fill='#dbeafe'/><rect x='340' y='80' width='220' height='80' rx='12' fill='#dcfce7'/><rect x='640' y='80' width='220' height='80' rx='12' fill='#ede9fe'/><text x='150' y='130'>研究问题</text><text x='450' y='130'>独立审查</text><text x='750' y='130'>证据产物</text></g><g stroke='#334155' stroke-width='3' marker-end='url(#arrow)'><path d='M260 120H335'/><path d='M560 120H635'/></g></svg>";
         let png = tools::figures::render(svg).unwrap().png;
@@ -1346,7 +1420,7 @@ mod tests {
             serde_json::to_vec_pretty(&sample).unwrap(),
         )
         .unwrap();
-        let result = process(&workspace, &id, Arc::new(AtomicBool::new(false)), || {});
+        let result = process_confirmed_sample(&workspace, &id);
         if let Err(error) = &result {
             store::update(&workspace, &id, |run| {
                 if run.status != "budget_truncated" {
@@ -1431,7 +1505,7 @@ mod tests {
         ] {
             assert_eq!(sample[key], frozen[key], "Frozen fixture changed: {key}");
         }
-        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let (executor, reviewer) = crate::engine::figure_connections(None, None).unwrap();
         let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
         let now = runtime::now_iso8601();
         let run: FigureRun = serde_json::from_value(json!({
@@ -1454,7 +1528,7 @@ mod tests {
             serde_json::to_vec_pretty(&json!({"sampleId": "DEV-02", "runId": id, "inputHash": sample["inputHash"], "outputLimit": sample["outputLimit"]})).unwrap(),
         )
         .unwrap();
-        let result = process(&workspace, &id, Arc::new(AtomicBool::new(false)), || {});
+        let result = process_confirmed_sample(&workspace, &id);
         if let Err(error) = &result {
             store::update(&workspace, &id, |run| {
                 if run.status != "budget_truncated" {
@@ -1536,7 +1610,7 @@ mod tests {
         );
         let validated = api::validate_image_bytes(png.clone()).unwrap();
         assert_eq!(validated.mime_type, "image/png");
-        let (executor, reviewer) = crate::engine::figure_connections(None).unwrap();
+        let (executor, reviewer) = crate::engine::figure_connections(None, None).unwrap();
         let id = format!("{:032x}", rand::thread_rng().gen::<u128>());
         let now = runtime::now_iso8601();
         let run: FigureRun = serde_json::from_value(json!({
@@ -1562,7 +1636,7 @@ mod tests {
         let result = if let Some(svg) = local_svg {
             persist_svg(&workspace, &id, None, &svg, "manual_reference_redraw").map(|_| ())
         } else {
-            process(&workspace, &id, Arc::new(AtomicBool::new(false)), || {})
+            process_confirmed_sample(&workspace, &id)
         };
         if let Err(error) = &result {
             store::update(&workspace, &id, |run| {
@@ -1604,6 +1678,24 @@ mod tests {
         assert!(image_not_supported(
             "HTTP 400: image content is not supported by this model"
         ));
+    }
+    #[test]
+    fn imported_image_pauses_before_any_probe_or_svg_request() {
+        let workspace = tempfile::tempdir().unwrap(); let id = "e".repeat(32);
+        // Deliberately invalid model identities: preview must not resolve or call them.
+        let run: FigureRun = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": id, "title": "Preview", "method": "A to B", "style": "paper", "sourceMode": "import", "sourceMime": "image/png", "sourceHash": null,
+            "status": "ready", "outputLimit": 0, "executor": ModelIdentity::default(), "reviewer": ModelIdentity::default(),
+            "executorVision": false, "reviewerVision": false, "revisionUsed": false, "versions": [], "requests": [], "review": null, "error": null, "createdAt": "now", "updatedAt": "now"
+        })).unwrap();
+        // Use the bundled renderer to obtain a valid PNG; no model/network involved.
+        let rendered = tools::figures::render("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='3'><rect width='4' height='3' fill='red'/></svg>").unwrap();
+        store::create(workspace.path(), run, Some(&rendered.png)).unwrap();
+        process(workspace.path(), &id, Arc::new(AtomicBool::new(false)), || {}).unwrap();
+        let paused = store::load(workspace.path(), &id).unwrap();
+        assert_eq!(paused.status, "image_ready"); assert!(paused.can_confirm_image());
+        assert_eq!(paused.raster_versions.len(), 1); assert!(paused.requests.is_empty()); assert!(paused.versions.is_empty());
+        assert_eq!(store::recover(workspace.path(), &id).unwrap().status, "image_ready");
     }
     #[test]
     fn text_reviewer_can_never_establish_visual_acceptance() {

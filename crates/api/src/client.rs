@@ -42,6 +42,39 @@ pub fn is_opencode_base_url(base_url: &str) -> bool {
     })
 }
 
+/// Resolve session propagation from connection metadata, never from a model.
+/// A managed gateway receives the session before it selects an upstream; its
+/// OpenCode channel must forward it. This does not identify every channel as
+/// OpenCode. Unrelated connections do not inherit the gateway's policy.
+#[must_use]
+pub fn connection_uses_routing_session_header(
+    provider: &str,
+    base_url: &str,
+    managed_base_url: Option<&str>,
+) -> bool {
+    if provider == "opencode" || is_opencode_base_url(base_url) {
+        return true;
+    }
+    let normalize = |raw: &str| {
+        let mut url = reqwest::Url::parse(raw.trim()).ok()?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return None;
+        }
+        let path = url.path().trim_end_matches('/');
+        let path = path
+            .strip_suffix("/chat/completions")
+            .or_else(|| path.strip_suffix("/responses"))
+            .unwrap_or(path)
+            .to_string();
+        url.set_path(&path);
+        Some(url)
+    };
+    match (normalize(base_url), managed_base_url.and_then(normalize)) {
+        (Some(connection), Some(managed)) => connection == managed,
+        _ => false,
+    }
+}
+
 /// Apply OpenCode's routing header only to OpenCode-owned endpoints.
 ///
 /// Session IDs produced by SomniQ are header-safe. Imported/custom IDs that are
@@ -58,13 +91,12 @@ pub fn apply_opencode_session_header(
     apply_routing_session_header(request, session_id)
 }
 
-/// Apply a stable routing identity when an intermediary has revealed that its
-/// downstream provider is OpenCode Go.
+/// Apply a stable session identity to OpenCode or a configured managed gateway.
 ///
 /// Unlike [`apply_opencode_session_header`], this helper is deliberately not
 /// host-scoped: an OpenAI-compatible proxy can hide the final OpenCode host.
-/// Callers must first identify that route (from managed gateway configuration
-/// or OpenCode's explicit `MissingSessionID` response) before using it.
+/// Callers resolve propagation from connection metadata, or negotiate it within
+/// a normal Chat call after an explicit `MissingSessionID` response.
 #[must_use]
 pub fn apply_routing_session_header(
     request: reqwest::RequestBuilder,
@@ -97,7 +129,7 @@ fn routing_session_header_value(session_id: &str) -> reqwest::header::HeaderValu
         .expect("the deterministic OpenCode session header is always valid ASCII")
 }
 
-fn build_http_client() -> reqwest::Client {
+fn build_http_client(wait_policy: StreamWaitPolicy) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
@@ -105,7 +137,7 @@ fn build_http_client() -> reqwest::Client {
     // Idle-between-reads backstop rather than a whole-request deadline: LLM
     // streams legitimately run for many minutes, and an overall
     // ClientBuilder::timeout would abort a healthy stream.
-    if let Some(read_timeout) = StreamWaitPolicy::from_env().read_timeout_backstop() {
+    if let Some(read_timeout) = wait_policy.read_timeout_backstop() {
         builder = builder.read_timeout(read_timeout);
     }
     builder
@@ -115,8 +147,9 @@ fn build_http_client() -> reqwest::Client {
 
 async fn send_with_response_header_timeout(
     request: reqwest::RequestBuilder,
+    header_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, ApiError> {
-    let Some(header_timeout) = resolve_response_header_timeout() else {
+    let Some(header_timeout) = header_timeout else {
         return request.send().await.map_err(ApiError::from);
     };
     match tokio::time::timeout(header_timeout, request.send()).await {
@@ -222,6 +255,7 @@ impl From<OAuthTokenSet> for AuthSource {
 #[derive(Clone)]
 pub struct AnthropicClient {
     http: reqwest::Client,
+    wait_policy: StreamWaitPolicy,
     auth: AuthSource,
     base_url: String,
     max_retries: u32,
@@ -239,6 +273,7 @@ impl std::fmt::Debug for AnthropicClient {
             .field("max_retries", &self.max_retries)
             .field("initial_backoff", &self.initial_backoff)
             .field("max_backoff", &self.max_backoff)
+            .field("wait_policy", &self.wait_policy)
             .field("send_betas", &self.send_betas)
             .field("trace_enabled", &self.trace_sink.is_some())
             .finish_non_exhaustive()
@@ -248,8 +283,10 @@ impl std::fmt::Debug for AnthropicClient {
 impl AnthropicClient {
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
+        let wait_policy = StreamWaitPolicy::from_env();
         Self {
-            http: build_http_client(),
+            http: build_http_client(wait_policy),
+            wait_policy,
             auth: AuthSource::ApiKey(api_key.into()),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -263,8 +300,10 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn from_auth(auth: AuthSource) -> Self {
+        let wait_policy = StreamWaitPolicy::from_env();
         Self {
-            http: build_http_client(),
+            http: build_http_client(wait_policy),
+            wait_policy,
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -349,9 +388,18 @@ impl AnthropicClient {
 
     /// One HTTP attempt, including the response stream. For paid artifact jobs
     /// an accepted-but-lost response must be reconciled, never silently resent.
+    /// Uses the shared artifact header wait, with the HTTP backstop updated too.
     #[must_use]
     pub fn with_single_request(mut self) -> Self {
         self.max_retries = 0;
+        self.with_wait_policy(StreamWaitPolicy::single_request_from_env())
+    }
+
+    /// Keep the HTTP read backstop consistent with the explicit stream waits.
+    #[must_use]
+    pub fn with_wait_policy(mut self, wait_policy: StreamWaitPolicy) -> Self {
+        self.http = build_http_client(wait_policy);
+        self.wait_policy = wait_policy;
         self
     }
 
@@ -406,7 +454,7 @@ impl AnthropicClient {
             has_emitted_meaningful_content: false,
             stream_retries_remaining: if self.max_retries == 0 { 0 } else { read_stream_retry_budget() },
             observed_terminal: false,
-            idle_timeout: resolve_stream_idle_timeout(),
+            idle_timeout: self.wait_policy.stream_idle_timeout,
             timeout_resends,
             done: false,
         })
@@ -422,6 +470,7 @@ impl AnthropicClient {
                 .post(&config.token_url)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .form(&request.form_params()),
+            self.wait_policy.response_header_timeout,
         )
         .await?;
         let response = expect_success(response).await?;
@@ -441,6 +490,7 @@ impl AnthropicClient {
                 .post(&config.token_url)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .form(&request.form_params()),
+            self.wait_policy.response_header_timeout,
         )
         .await?;
         let response = expect_success(response).await?;
@@ -564,7 +614,11 @@ impl AnthropicClient {
         );
 
         request_builder = request_builder.json(request);
-        send_with_response_header_timeout(request_builder).await
+        send_with_response_header_timeout(
+            request_builder,
+            self.wait_policy.response_header_timeout,
+        )
+        .await
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
@@ -917,6 +971,10 @@ pub fn resolve_stream_idle_timeout() -> Option<Duration> {
 /// 143–166s in production. The former 120s cap abandoned those requests while
 /// the gateway kept serving (and billing) them, then re-sent the same body.
 const RESPONSE_HEADER_TIMEOUT_DEFAULT_SECS: i64 = 600;
+// A complete image-to-SVG request can remain silent through a buffering
+// gateway longer than a short Chat turn. Single-submission artifact jobs wait
+// longer instead of abandoning and resending an already accepted request.
+const SINGLE_REQUEST_HEADER_TIMEOUT_DEFAULT_SECS: i64 = 1800;
 const RESPONSE_HEADER_TIMEOUT_MIN_SECS: i64 = 30;
 const RESPONSE_HEADER_TIMEOUT_MAX_SECS: i64 = 3600;
 
@@ -937,11 +995,15 @@ pub const MAX_TIMEOUT_RESENDS: u32 = 1;
 /// Unparseable / missing / blank → default 600s.
 #[must_use]
 pub(crate) fn parse_response_header_timeout_secs(raw: Option<&str>) -> Option<Duration> {
+    parse_header_timeout_secs(raw, RESPONSE_HEADER_TIMEOUT_DEFAULT_SECS)
+}
+
+fn parse_header_timeout_secs(raw: Option<&str>, default_secs: i64) -> Option<Duration> {
     let secs = raw
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(RESPONSE_HEADER_TIMEOUT_DEFAULT_SECS);
+        .unwrap_or(default_secs);
     if secs <= 0 {
         return None;
     }
@@ -979,6 +1041,30 @@ impl StreamWaitPolicy {
         Self {
             response_header_timeout: resolve_response_header_timeout(),
             stream_idle_timeout: resolve_stream_idle_timeout(),
+        }
+    }
+
+    /// Paid single-submission artifact jobs wait up to 30 minutes for headers
+    /// by default. Explicit ARIS_RESPONSE_HEADER_TIMEOUT_SECS values, including
+    /// disabling the wait, retain the same meaning as in Chat. Chunk-idle limits
+    /// are unchanged; this is not a total deadline for a healthy stream.
+    #[must_use]
+    pub fn single_request_from_env() -> Self {
+        Self::single_request_with_header_setting(
+            std::env::var("ARIS_RESPONSE_HEADER_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+            resolve_stream_idle_timeout(),
+        )
+    }
+
+    fn single_request_with_header_setting(raw: Option<&str>, idle: Option<Duration>) -> Self {
+        Self {
+            response_header_timeout: parse_header_timeout_secs(
+                raw,
+                SINGLE_REQUEST_HEADER_TIMEOUT_DEFAULT_SECS,
+            ),
+            stream_idle_timeout: idle,
         }
     }
 

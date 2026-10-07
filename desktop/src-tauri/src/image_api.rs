@@ -133,6 +133,23 @@ pub(crate) fn prepare_figure_image(prompt: String, model: Option<String>) -> Res
 }
 
 impl PreparedFigureImage {
+    pub fn set_prompt(&mut self, prompt: String) -> Result<(), String> {
+        let mut request = self.request.clone();
+        request.prompt = prompt;
+        request.validate()?;
+        self.request = request;
+        Ok(())
+    }
+    pub fn edit(&self, reference: ImageReference, mask: &api::ImageEditMask, cancelled: Arc<AtomicBool>) -> Result<api::ImageGenerationResult, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+        runtime.block_on(async {
+            tokio::select! {
+                biased;
+                () = wait_for_cancel(&cancelled) => Err("图片修改已取消；服务器可能仍在处理，请先核对账户用量。".into()),
+                result = self.client.edit(&self.request, reference, mask) => result,
+            }
+        })
+    }
     pub fn generate(&self, workspace: &Path, cancelled: Arc<AtomicBool>) -> Result<Value, String> {
         let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
@@ -140,6 +157,13 @@ impl PreparedFigureImage {
         let run_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(24).map(char::from).collect();
         save_result(&workspace, &run_id, &self.request, &[], result)
     }
+}
+
+pub(crate) fn prepare_figure_edit(prompt: String, model: Option<String>) -> Result<PreparedFigureImage, String> {
+    let mut prepared = prepare_figure_image(prompt, model)?;
+    prepared.request.size = "auto".into();
+    prepared.identity.transport = "images_edits".into();
+    Ok(prepared)
 }
 
 #[derive(Deserialize)]

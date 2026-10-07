@@ -9,7 +9,7 @@ fs.cpSync(source, output, {
   recursive: true,
   filter: (file) => !file.includes(`${path.sep}tests`) && !file.endsWith(".map") && !file.endsWith(".html"),
 });
-for (const file of ["index.html", "bridge.js", "NOTICE.md"]) {
+for (const file of ["index.html", "bridge.js", "theme.css", "preserve-group-styles.js", "NOTICE.md"]) {
   fs.copyFileSync(path.join(root, "figure-editor", file), path.join(output, file));
 }
 fs.copyFileSync(path.join(root, "node_modules/svgedit/LICENSE-MIT.txt"), path.join(output, "LICENSE-MIT.txt"));

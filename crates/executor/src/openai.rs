@@ -461,41 +461,12 @@ fn mark_chat_requires_responses(base_url: &str, model: &str) {
     record_transport_verdict(base_url, model, "responses");
 }
 
-/// OpenCode Go can sit behind a generic OpenAI-compatible gateway, so the
-/// configured base URL alone is not always enough to decide whether its
-/// vendor routing header is required. Learn the exact `(gateway, model)` pair
-/// from OpenCode's explicit `MissingSessionID` response and retain that fact
-/// for later clients/turns in this process.
-fn opencode_session_required_registry(
-) -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-fn opencode_session_known_required(base_url: &str, model: &str) -> bool {
-    api::is_opencode_base_url(base_url)
-        || opencode_session_required_registry()
-            .lock()
-            .is_ok_and(|registry| registry.contains(&transport_registry_key(base_url, model)))
-}
-
-fn mark_opencode_session_required(base_url: &str, model: &str) -> bool {
-    if let Ok(mut registry) = opencode_session_required_registry().lock() {
-        registry.insert(transport_registry_key(base_url, model));
-        true
-    } else {
-        false
-    }
-}
-
 fn apply_openai_routing_session_header(
     request: reqwest::RequestBuilder,
-    base_url: &str,
-    model: &str,
+    routing_session_header_enabled: bool,
     session_id: &str,
 ) -> reqwest::RequestBuilder {
-    if opencode_session_known_required(base_url, model) {
+    if routing_session_header_enabled {
         api::apply_routing_session_header(request, Some(session_id))
     } else {
         request
@@ -1300,8 +1271,10 @@ fn non_stream_compat_enabled() -> bool {
 /// Optional output-token cap for OpenAI-compatible gateways whose default
 /// budget is much larger than the task needs. Kept opt-in so normal provider
 /// behavior remains unchanged; useful for bounded benchmark runs against
-/// proxies that otherwise spend many minutes in reasoning mode.
-fn openai_max_tokens_override() -> Option<u32> {
+/// proxies that otherwise spend many minutes in reasoning mode. Chat sends it
+/// on chat/completions only; figure jobs reuse the same rule.
+#[must_use]
+pub fn openai_max_tokens_override() -> Option<u32> {
     std::env::var("ARIS_OPENAI_MAX_TOKENS")
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
@@ -1754,9 +1727,9 @@ fn sse_data_payload(line: &str) -> Option<&str> {
 async fn stream_restart_send(
     http: &reqwest::Client,
     url: &str,
-    base_url: &str,
     api_key: &str,
     session_id: &str,
+    routing_session_header_enabled: bool,
     body: &Value,
     trace_sink: &Option<std::sync::Arc<dyn ExecutorTraceSink>>,
     model: &str,
@@ -1790,7 +1763,7 @@ async fn stream_restart_send(
             .header("content-type", "application/json")
             .json(body);
         let send_result = send_with_response_header_timeout(
-            apply_openai_routing_session_header(http_request, base_url, model, session_id),
+            apply_openai_routing_session_header(http_request, routing_session_header_enabled, session_id),
             header_timeout,
             observer,
         )
@@ -1948,6 +1921,23 @@ pub struct OpenAIRuntimeClient {
     wait_policy: api::StreamWaitPolicy,
     single_request: bool,
     max_output_tokens: Option<u32>,
+    /// Explicit provider identity for this connection, never written to a
+    /// model registry by a configuration flag.
+    send_routing_session_header: bool,
+}
+
+fn build_runtime_http_client(wait_policy: api::StreamWaitPolicy) -> Result<reqwest::Client, String> {
+    let mut http = reqwest::Client::builder()
+        .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(HTTP_TCP_KEEPALIVE);
+    // A read backstop, never a whole-request deadline: streams may run longer
+    // than either individual wait. Rebuild it when changing the wait policy.
+    if let Some(read_timeout) = wait_policy.read_timeout_backstop() {
+        http = http.read_timeout(read_timeout);
+    }
+    http.build().map_err(|error| error.to_string())
 }
 
 impl OpenAIRuntimeClient {
@@ -1959,20 +1949,9 @@ impl OpenAIRuntimeClient {
         observer: Box<dyn StreamObserver>,
     ) -> Result<Self, String> {
         let wait_policy = api::StreamWaitPolicy::from_env();
-        let mut http = reqwest::Client::builder()
-            .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
-            .tcp_keepalive(HTTP_TCP_KEEPALIVE);
-        // Idle read backstop, never a whole-request timeout: a healthy
-        // streaming answer may run for many minutes. It sits above the
-        // explicit header/idle waits so those (traced, cancellable) fire first.
-        if let Some(read_timeout) = wait_policy.read_timeout_backstop() {
-            http = http.read_timeout(read_timeout);
-        }
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
-            http: http.build().map_err(|error| error.to_string())?,
+            http: build_runtime_http_client(wait_policy)?,
             api_key: config.api_key,
             base_url: config.base_url,
             session_id: crate::new_routing_session_id(),
@@ -1986,6 +1965,7 @@ impl OpenAIRuntimeClient {
             wait_policy,
             single_request: false,
             max_output_tokens: None,
+            send_routing_session_header: false,
         })
     }
 
@@ -1995,11 +1975,11 @@ impl OpenAIRuntimeClient {
         self
     }
 
-    /// Override the explicit header/idle waits (tests use sub-second values;
-    /// the reqwest backstop stays at the env-derived default).
-    #[cfg(test)]
+    /// Override both the explicit waits and reqwest's read backstop together.
     #[must_use]
     pub(crate) fn with_wait_policy(mut self, wait_policy: api::StreamWaitPolicy) -> Self {
+        self.http = build_runtime_http_client(wait_policy)
+            .expect("static OpenAI HTTP client configuration must be valid");
         self.wait_policy = wait_policy;
         self
     }
@@ -2015,11 +1995,19 @@ impl OpenAIRuntimeClient {
 
     /// Pin a bounded artifact job to one submission; no route negotiation,
     /// request-shape retry, network retry or stream restart is permitted.
+    /// Uses the shared artifact header wait without imposing a total deadline.
     #[must_use]
-    pub fn with_single_request(mut self, max_output_tokens: u32) -> Self {
+    pub fn with_single_request(self, max_output_tokens: u32) -> Self {
+        self.with_single_request_limit(Some(max_output_tokens))
+    }
+
+    /// [`Self::with_single_request`] with an optional cap. `None` sends no
+    /// output-token field, so the provider default applies as it does in Chat.
+    #[must_use]
+    pub fn with_single_request_limit(mut self, max_output_tokens: Option<u32>) -> Self {
         self.single_request = true;
-        self.max_output_tokens = Some(max_output_tokens);
-        self
+        self.max_output_tokens = max_output_tokens;
+        self.with_wait_policy(api::StreamWaitPolicy::single_request_from_env())
     }
 
     pub fn selected_transport(&self) -> OpenAiTransport {
@@ -2028,14 +2016,12 @@ impl OpenAIRuntimeClient {
         } else { OpenAiTransport::ChatCompletions }
     }
 
-    /// Enable the OpenCode-compatible routing header before the first request.
-    /// This is used by a known intermediary (such as SomniQ's managed NewAPI
-    /// gateway) whose public hostname does not reveal its downstream provider.
+    /// Propagate the session to OpenCode or a configured managed gateway.
+    /// This flag is local to the connection and does not identify its selected
+    /// upstream or classify any model.
     #[must_use]
-    pub fn with_routing_session_header(self, enabled: bool) -> Self {
-        if enabled {
-            let _ = mark_opencode_session_required(&self.base_url, &self.model);
-        }
+    pub fn with_routing_session_header(mut self, enabled: bool) -> Self {
+        self.send_routing_session_header = enabled;
         self
     }
 }
@@ -2109,13 +2095,16 @@ impl ApiClient for OpenAIRuntimeClient {
         };
 
         let mut endpoint = endpoint_for_transport(use_responses_api);
-        if let Some(limit) = self.max_output_tokens {
+        if self.single_request {
+            // The job's recorded cap is authoritative, including "none".
             body.as_object_mut().expect("request object").remove("max_tokens");
-            let field = if use_responses_api { "max_output_tokens" }
-                else if self.model.starts_with("gpt-5") || self.model.starts_with("gpt-6") || self.model.starts_with("o1") || self.model.starts_with("o3") || self.model.starts_with("o4") { "max_completion_tokens" }
-                else { "max_tokens" };
-            body[field] = json!(limit);
-            // An artifact budget must leave room for visible SVG/JSON rather
+            if let Some(limit) = self.max_output_tokens {
+                let field = if use_responses_api { "max_output_tokens" }
+                    else if self.model.starts_with("gpt-5") || self.model.starts_with("gpt-6") || self.model.starts_with("o1") || self.model.starts_with("o3") || self.model.starts_with("o4") { "max_completion_tokens" }
+                    else { "max_tokens" };
+                body[field] = json!(limit);
+            }
+            // An artifact job must leave room for visible SVG/JSON rather
             // than inheriting a chat's high reasoning budget.
             if let Some(level) = crate::reasoning_effort::closest_level(&self.model, "low") {
                 if use_responses_api { body["reasoning"]["effort"] = json!(level); }
@@ -2153,6 +2142,11 @@ impl ApiClient for OpenAIRuntimeClient {
             }),
         );
         let trace_sink = self.trace_sink.clone();
+
+        // A gateway can rotate upstreams even for identical credentials and
+        // model selectors. Never carry error-derived identity into later calls.
+        let mut routing_session_header_enabled = self.send_routing_session_header
+            || api::is_opencode_base_url(&self.base_url);
 
         let result = self.runtime.block_on(async {
             const MAX_ATTEMPTS: u32 = 4;
@@ -2200,13 +2194,11 @@ impl ApiClient for OpenAIRuntimeClient {
                     .bearer_auth(&self.api_key)
                     .header("content-type", "application/json")
                     .json(&body);
-                let routing_session_header_sent =
-                    opencode_session_known_required(&self.base_url, &self.model);
+                let routing_session_header_sent = routing_session_header_enabled;
                 let send_result = send_with_response_header_timeout(
                     apply_openai_routing_session_header(
                         http_request,
-                        &self.base_url,
-                        &self.model,
+                        routing_session_header_enabled,
                         &self.session_id,
                     ),
                     header_timeout,
@@ -2245,21 +2237,35 @@ impl ApiClient for OpenAIRuntimeClient {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
                         let body_text = resp.text().await.unwrap_or_default();
-                        if self.single_request {
-                            let safe_body = body_text.replace(&self.api_key, "[REDACTED]");
-                            return Err(RuntimeError::new(format!("HTTP {status}: {}", safe_body.chars().take(500).collect::<String>())));
-                        }
                         let missing_opencode_session =
                             is_missing_opencode_session_error(status.as_u16(), &body_text);
+                        if self.single_request {
+                            let safe_body = body_text.replace(&self.api_key, "[REDACTED]");
+                            if routing_session_header_sent
+                                && missing_opencode_session
+                            {
+                                return Err(RuntimeError::new(format!(
+                                    "HTTP {status}: the routing header was sent to {}, but the gateway did not forward it to OpenCode Go. Configure this NewAPI channel's header override as `x-opencode-session: {{client_header:x-opencode-session}}`. Provider response: {}",
+                                    self.base_url, safe_body.chars().take(500).collect::<String>()
+                                )));
+                            }
+                            if missing_opencode_session {
+                                return Err(RuntimeError::new(format!(
+                                    "HTTP {status}: this upstream requires x-opencode-session. Configure this fixed channel as an explicit OpenCode connection; a model selector cannot identify a gateway channel. No request was resent. Provider response: {}",
+                                    safe_body.chars().take(500).collect::<String>()
+                                )));
+                            }
+                            return Err(RuntimeError::new(format!("HTTP {status}: {}", safe_body.chars().take(500).collect::<String>())));
+                        }
 
                         // A generic gateway can proxy OpenCode Go while hiding
-                        // `opencode.ai` from our configured base URL. Learn that
-                        // route from the downstream's precise error, then resend
-                        // the unchanged request with the stable conversation ID.
+                        // `opencode.ai` from our configured base URL. Ordinary
+                        // Chat can negotiate this request using the exact error;
+                        // this decision is never cached for another invocation.
                         if !routing_session_header_sent
                             && missing_opencode_session
-                            && mark_opencode_session_required(&self.base_url, &self.model)
                         {
+                            routing_session_header_enabled = true;
                             trace_record(
                                 &trace_sink,
                                 "llm.request_adjusted",
@@ -2692,9 +2698,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.base_url,
                                     &self.api_key,
                                     &self.session_id,
+                                    routing_session_header_enabled,
                                     &body,
                                     &trace_sink,
                                     &self.model,
@@ -2785,9 +2791,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.base_url,
                                     &self.api_key,
                                     &self.session_id,
+                                    routing_session_header_enabled,
                                     &body,
                                     &trace_sink,
                                     &self.model,
@@ -2847,9 +2853,9 @@ impl ApiClient for OpenAIRuntimeClient {
                             response = stream_restart_send(
                                 &self.http,
                                 &url,
-                                &self.base_url,
                                 &self.api_key,
                                 &self.session_id,
+                                routing_session_header_enabled,
                                 &body,
                                 &trace_sink,
                                 &self.model,
@@ -2995,9 +3001,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.base_url,
                                     &self.api_key,
                                     &self.session_id,
+                                    routing_session_header_enabled,
                                     &body,
                                     &trace_sink,
                                     &self.model,

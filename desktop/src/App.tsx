@@ -869,7 +869,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
-  const navigationShell = chatShell || renderedTab === "settings";
+  const navigationShell = chatShell || renderedTab === "settings" || renderedTab === "figures";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);

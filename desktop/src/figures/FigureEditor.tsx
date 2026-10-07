@@ -4,7 +4,9 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { isTauri } from "../api/tauri";
 
 export interface FigureEditorHandle { serialize: () => Promise<string> }
-const FigureEditor = forwardRef<FigureEditorHandle, { svg: string; onDirty: () => void; onError: (error: string) => void }>(function FigureEditor({ svg, onDirty, onError }, ref) {
+const FigureEditor = forwardRef<FigureEditorHandle, { svg: string; readOnly?: boolean; onDirty: () => void; onError: (error: string) => void }>(function FigureEditor({ svg, readOnly = false, onDirty, onError }, ref) {
+  const host = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (host.current) host.current.inert = readOnly; }, [readOnly]);
   const frame = useRef<HTMLIFrameElement>(null);
   const channel = useRef(crypto.randomUUID());
   const [ready, setReady] = useState(false);
@@ -35,6 +37,22 @@ const FigureEditor = forwardRef<FigureEditorHandle, { svg: string; onDirty: () =
       pending.current.clear();
     };
   }, []);
+  // Send presentation tokens, never stylesheets, markup or SVG changes.
+  useEffect(() => {
+    if (!ready) return;
+    const root = window.document.documentElement;
+    const post = () => {
+      const accent = getComputedStyle(root).getPropertyValue("--accent").trim();
+      const style = getComputedStyle(root);
+      const colors = Object.fromEntries(Object.entries({ bg: "--bg-2", surface: "--bg-1", raised: "--bg", border: "--border", text: "--text", muted: "--text-dim", accent: "--accent" })
+        .map(([name, token]) => [name, style.getPropertyValue(token).trim()]));
+      frame.current?.contentWindow?.postMessage({ channel: channel.current, type: "theme", mode: root.dataset.theme === "light" ? "light" : "dark", accent, colors, fontSize: parseFloat(style.fontSize) * .75, fontFamily: style.getPropertyValue("--font-sans").trim() }, "*");
+    };
+    post();
+    const observer = new MutationObserver(post);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "data-ui-color", "data-custom-accent", "data-surface", "data-ui-font", "style"] });
+    return () => observer.disconnect();
+  }, [ready]);
   useEffect(() => {
     if (!ready) return;
     setLoaded(false);
@@ -50,6 +68,6 @@ const FigureEditor = forwardRef<FigureEditorHandle, { svg: string; onDirty: () =
     }),
   }), [loaded]);
   const location = isTauri() ? `${convertFileSrc("", "somniq-figure")}figure-editor/index.html` : "./figure-editor/index.html";
-  return <iframe ref={frame} className="figure-editor" title="SVG-Edit" src={`${location}#${channel.current}`} sandbox="allow-scripts" />;
+  return <div ref={host} className="figure-editor-host"><iframe ref={frame} className="figure-editor" title="SVG-Edit" src={`${location}#${channel.current}`} sandbox="allow-scripts" /></div>;
 });
 export default FigureEditor;

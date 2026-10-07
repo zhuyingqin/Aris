@@ -65,6 +65,118 @@ pub struct ImageReference {
     pub image: GeneratedImage,
 }
 
+/// Validated binary PNG mask: transparent pixels are editable, opaque pixels
+/// are protected. Keeping construction here avoids sending malformed masks.
+pub struct ImageEditMask {
+    image: GeneratedImage,
+}
+
+impl ImageEditMask {
+    /// Opaque vision evidence: white means editable, black means protected.
+    /// Mask RGB and transparent display backgrounds cannot invert the scope.
+    pub fn selection_preview(&self) -> Result<GeneratedImage, String> {
+        let mut pixels = ::image::load_from_memory(&self.image.bytes)
+            .map_err(|e| e.to_string())?.to_rgba8();
+        for pixel in pixels.pixels_mut() {
+            let value = if pixel[3] == 0 { 255 } else { 0 };
+            *pixel = ::image::Rgba([value, value, value, 255]);
+        }
+        let mut output = Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut output, ::image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        validate_image_bytes(output.into_inner())
+    }
+}
+
+pub fn validate_edit_mask(
+    bytes: Vec<u8>,
+    reference: &GeneratedImage,
+) -> Result<ImageEditMask, String> {
+    if bytes.len() >= 4 * 1024 * 1024 {
+        return Err("圈选蒙版必须小于 4 MB。".into());
+    }
+    let image = validate_image_bytes(bytes)?;
+    if image.mime_type != "image/png"
+        || (image.width, image.height) != (reference.width, reference.height)
+    {
+        return Err("圈选蒙版必须是与原图尺寸一致的 PNG。".into());
+    }
+    let pixels = ::image::load_from_memory(&image.bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    if pixels.pixels().any(|pixel| !matches!(pixel[3], 0 | 255))
+        || !pixels.pixels().any(|pixel| pixel[3] == 0)
+    {
+        return Err("请圈选需要修改的区域；蒙版只接受全透明和不透明像素。".into());
+    }
+    Ok(ImageEditMask { image })
+}
+
+/// Only encoder rounding is safe to align without interrupting an area edit.
+/// Both axes must differ by at most two pixels and 0.5% of the smaller axis.
+#[must_use]
+pub fn image_dimensions_match_with_rounding(original: (u32, u32), returned: (u32, u32)) -> bool {
+    [(original.0, returned.0), (original.1, returned.1)].into_iter().all(|(base, result)| {
+        (1..=8192).contains(&base) && (1..=8192).contains(&result)
+            && base.abs_diff(result) <= 2
+            && u64::from(base.abs_diff(result)) * 200 <= u64::from(base.min(result))
+    })
+}
+
+/// Local normalization for encoder rounding or a previewed user choice.
+/// Callers retain the raw result and composite only the original edit mask.
+pub fn resize_image_exact(image: &GeneratedImage, width: u32, height: u32) -> Result<GeneratedImage, String> {
+    if width == 0 || height == 0 || width > 8192 || height > 8192 {
+        return Err("Invalid target image dimensions".into());
+    }
+    let pixels = ::image::load_from_memory(&image.bytes).map_err(|e| e.to_string())?
+        .resize_exact(width, height, ::image::imageops::FilterType::Lanczos3);
+    let mut output = Cursor::new(Vec::new());
+    pixels.write_to(&mut output, ::image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    validate_image_bytes(output.into_inner())
+}
+
+/// Guarantees that the model cannot change any protected pixel. Different-size
+/// results must be normalized or adopted as a whole image first.
+pub fn composite_masked_edit(
+    original: &GeneratedImage,
+    edited: &GeneratedImage,
+    mask: &ImageEditMask,
+) -> Result<GeneratedImage, String> {
+    if (original.width, original.height) != (edited.width, edited.height) {
+        return Err(
+            "图片尺寸不同，请先选择整图采用或缩放后应用圈选。".into(),
+        );
+    }
+    if (original.width, original.height) != (mask.image.width, mask.image.height) {
+        return Err("圈选与原图尺寸不一致。".into());
+    }
+    let mut pixels = ::image::load_from_memory(&original.bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    let result = ::image::load_from_memory(&edited.bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    let selection = ::image::load_from_memory(&mask.image.bytes)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    for ((pixel, replacement), selected) in pixels
+        .pixels_mut()
+        .zip(result.pixels())
+        .zip(selection.pixels())
+    {
+        if selected[3] == 0 {
+            *pixel = *replacement;
+        }
+    }
+    let mut output = Cursor::new(Vec::new());
+    pixels
+        .write_to(&mut output, ::image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    validate_image_bytes(output.into_inner())
+}
+
 pub struct ImageGenerationResult {
     pub images: Vec<GeneratedImage>,
     pub usage: Option<Value>,
@@ -104,6 +216,18 @@ pub fn validate_image_bytes(bytes: Vec<u8>) -> Result<GeneratedImage, String> {
         height,
         revised_prompt: None,
     })
+}
+
+pub fn image_as_png(image: GeneratedImage) -> Result<GeneratedImage, String> {
+    if image.mime_type == "image/png" {
+        return Ok(image);
+    }
+    let pixels = ::image::load_from_memory(&image.bytes).map_err(|e| e.to_string())?;
+    let mut output = Cursor::new(Vec::new());
+    pixels
+        .write_to(&mut output, ::image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    validate_image_bytes(output.into_inner())
 }
 
 pub struct ImageApiClient {
@@ -147,6 +271,28 @@ impl ImageApiClient {
         request: &ImageGenerationRequest,
         references: Vec<ImageReference>,
     ) -> Result<ImageGenerationResult, String> {
+        self.submit(request, references, None).await
+    }
+
+    pub async fn edit(
+        &self,
+        request: &ImageGenerationRequest,
+        reference: ImageReference,
+        mask: &ImageEditMask,
+    ) -> Result<ImageGenerationResult, String> {
+        if (reference.image.width, reference.image.height) != (mask.image.width, mask.image.height)
+        {
+            return Err("圈选与原图尺寸不一致。".into());
+        }
+        self.submit(request, vec![reference], Some(mask)).await
+    }
+
+    async fn submit(
+        &self,
+        request: &ImageGenerationRequest,
+        references: Vec<ImageReference>,
+        mask: Option<&ImageEditMask>,
+    ) -> Result<ImageGenerationResult, String> {
         request.validate()?;
         if references.len() > 16 {
             return Err("每次最多使用 16 张参考图片。".into());
@@ -175,6 +321,15 @@ impl ImageApiClient {
                     .mime_str(reference.image.mime_type)
                     .map_err(|_| "参考图片格式无效。")?;
                 form = form.part("image[]", part);
+            }
+            if let Some(mask) = mask {
+                form = form.part(
+                    "mask",
+                    multipart::Part::bytes(mask.image.bytes.clone())
+                        .file_name("selection.png")
+                        .mime_str("image/png")
+                        .map_err(|e| e.to_string())?,
+                );
             }
             builder.multipart(form)
         };

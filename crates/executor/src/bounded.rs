@@ -33,6 +33,7 @@ impl StreamObserver for Observer {
 
 pub fn perform(
     build: impl FnOnce(Box<dyn StreamObserver>) -> Result<ExecutorClient, String>,
+    session_id: &str,
     request: ApiRequest,
     cancelled: Arc<AtomicBool>,
 ) -> Result<ModelReply, String> {
@@ -44,6 +45,7 @@ pub fn perform(
         cancelled,
         text: partial.clone(),
     }))?;
+    client.set_session_id(session_id);
     match client.stream(request) {
         Ok(events) => Ok(collect(events)),
         Err(error) => Ok(ModelReply {
