@@ -17,9 +17,35 @@
         "command": "aris.askAris",
         "title": "Ask Aris about this selection",
         "category": "Aris"
+      },
+      {
+        "command": "aris.switchModule",
+        "title": "%switchModule%",
+        "category": "SomniQ",
+        "icon": "$(apps)"
+      },
+      {
+        "command": "aris.switchProject",
+        "title": "%switchProject%",
+        "category": "SomniQ",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "aris.account",
+        "title": "%account%",
+        "category": "SomniQ",
+        "icon": "$(account)"
       }
     ],
     "menus": {
+      "statusBar/remoteIndicator": [
+        { "command": "aris.switchModule", "group": "somniq@1" },
+        { "command": "aris.switchProject", "group": "somniq@2" },
+        { "command": "aris.account", "group": "somniq@3" }
+      ],
+      "view/title": [
+        { "command": "aris.switchProject", "when": "view == workbench.explorer.fileView", "group": "navigation@0" }
+      ],
       "editor/context": [
         {
           "command": "aris.askAris",

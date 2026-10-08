@@ -214,7 +214,7 @@ vi.mock("../../api/browserPreview", async (importOriginal) => {
   };
 });
 
-vi.mock("pdfjs-dist", () => ({
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   GlobalWorkerOptions: { workerSrc: "" },
   getDocument: pdfMocks.getDocument,
 }));
@@ -620,14 +620,14 @@ describe("Typeset start page", () => {
     mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
     mocks.latexDocumentContext.mockResolvedValueOnce({ sourcePath: "paper.tex", rootPath: "paper.tex", outputPath: "paper.pdf" });
     render(<Typeset />);
-    await waitFor(() => expect(screen.getByText("paper.pdf")).toBeTruthy());
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("paper.pdf"));
 
     act(() => useStore.setState({ pendingTypesetFilePath: "figures/result.png" }));
     expect(await screen.findByLabelText("Image preview")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Return to compiled PDF" }));
 
     expect(await screen.findByLabelText("PDF preview")).toBeTruthy();
-    expect(screen.getByText("paper.pdf")).toBeTruthy();
+    expect(mocks.fileReadBytes).toHaveBeenLastCalledWith("paper.pdf");
   });
 
   it("shows root documents and filters the document library", async () => {
@@ -1150,7 +1150,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(nav.textContent).toContain("1 / 2"));
   });
 
-  it("navigates all seven drawer changes after reviewer edits leave only two editor anchors", async () => {
+  it("navigates remaining editor anchors while preserving all seven review decisions", async () => {
     const opened = Array.from({ length: 7 }, (_, index) => (
       `unchanged ${index}\nold ${index}\nseparator ${index}`
     )).join("\n");
@@ -1164,21 +1164,25 @@ describe("Typeset start page", () => {
     fireEvent.click(within(review).getByRole("button", { name: "Show changes" }));
     const drawer = within(review).getByLabelText("paper.tex changes");
     expect(within(drawer).getAllByRole("listitem")).toHaveLength(7);
-    // The exact failure: reviewed lines no longer have all their editor
-    // markers, but their original hunks remain part of the seven decisions.
+    // The arrows navigate live source anchors; original decisions remain
+    // available in the drawer even after the reviewer edits those lines.
     await waitFor(() => expect(typesetCodeView()!.dom.querySelectorAll(".cm-review-hunk-controls")).toHaveLength(2));
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(typesetCodeView()!.state.doc.toString()).toContain("reviewer 4"));
     const nav = review.querySelector(".typeset-external-review-nav")!;
-    for (let position = 1; position <= 7; position += 1) {
+    for (let position = 1; position <= 2; position += 1) {
       fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
-      expect(nav.textContent).toContain(`${position} / 7`);
-      expect(drawer.querySelector('[aria-current="true"]')?.textContent).toContain(`old ${position - 1}`);
+      expect(nav.textContent).toContain(`${position} / 2`);
+      const view = typesetCodeView()!;
+      expect(view.state.doc.lineAt(view.state.selection.main.head).text).toBe(`new ${position + 4}`);
     }
     fireEvent.click(within(review).getByRole("button", { name: "Previous change" }));
-    expect(nav.textContent).toContain("6 / 7");
+    expect(nav.textContent).toContain("1 / 2");
+    expect(within(drawer).getAllByRole("listitem")).toHaveLength(7);
     expect(mocks.fileWriteText).not.toHaveBeenCalled();
   });
 
-  it("collapsed arrows visit seven changes with two surviving anchors", async () => {
+  it("collapsed arrows cycle through surviving source anchors without answering review decisions", async () => {
     const opened = Array.from({ length: 7 }, (_, index) => (
       `unchanged ${index}\nold ${index}\nseparator ${index}`
     )).join("\n");
@@ -1190,7 +1194,8 @@ describe("Typeset start page", () => {
       fireEvent.click(within(review).getByRole("button", { name: "Next change" }));
       visited.add(review.querySelector(".typeset-external-review-nav")!.textContent!);
     }
-    expect(visited.size).toBe(7);
+    expect(visited.size).toBe(2);
+    expect(within(review).getByText("0 of 7 answered")).toBeTruthy();
   });
 
   it("still compiles while a review is open, and says what the PDF was built from", async () => {
@@ -1560,7 +1565,7 @@ describe("Typeset start page", () => {
     expect(screen.getByRole("dialog", { name: "Compare both versions" }).textContent).toContain("newer 0");
   });
 
-  it("does not let a bulk decision bypass an oversized file in a multi-file ChangeSet", async () => {
+  it("records an explicit batch answer for oversized files without writing a file early", async () => {
     mockProjectFiles();
     const paper = "paper";
     const hugeBase = Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n");
@@ -1601,8 +1606,11 @@ describe("Typeset start page", () => {
     const review = await screen.findByLabelText("Review project change set");
     fireEvent.click(within(review).getByRole("button", { name: "Accept change set" }));
 
-    await waitFor(() => expect(screen.getByText(/large\.tex is too large for hunk review/)).toBeTruthy());
-    expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(changeSet.id, expect.arrayContaining([
+      expect.objectContaining({ path: "chapters/large.tex", decision: "accept" }),
+      expect.objectContaining({ path: "paper.tex", decision: "accept" }),
+    ])));
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
   });
 
   it("does not fold an audited Chat turn into drift found at project open", async () => {
@@ -1952,7 +1960,7 @@ describe("Typeset start page", () => {
     editReviewSurface("edited paper.tex", "corrected paper text");
     fireEvent.click(within(await openChangeSetMenu()).getByRole("menuitem", { name: "local.tex" }));
     await screen.findByLabelText("Review external changes to local.tex");
-    fireEvent.click(within(await openChangeSetMenu()).getByRole("button", { name: "Accept change set" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept change set" }));
     await waitFor(() => expect(mocks.typesetChangeSetStageText).toHaveBeenCalledWith(expect.objectContaining({
       id: batch.id, path: "paper.tex", content: "corrected paper text",
     })));
@@ -2133,7 +2141,7 @@ describe("Typeset start page", () => {
     })));
   });
 
-  it("offers one accept/reject pair while a file in the change set is being reviewed", async () => {
+  it("keeps batch answers visible beside file answers while a change set is being reviewed", async () => {
     mockProjectFiles();
     const opened = "\\documentclass{article}\n\\begin{document}\nOpened\n\\end{document}";
     const incoming = opened.replace("Opened", "Chat update");
@@ -2175,19 +2183,18 @@ describe("Typeset start page", () => {
     act(() => notifyChatDone?.(auditedChatDone(changeSet)));
     await screen.findByLabelText("Review external changes to paper.tex");
 
-    // The dock used to stack the transaction's banner above the open file's,
-    // each with its own accept and reject — one diff that read as though it had
-    // to be confirmed twice. The blanket answers now sit behind the file picker.
+    // File answers stage one file, while the visible batch buttons settle the
+    // transaction. The picker menu retains file selection without duplicates.
     const dock = container.querySelector(".typeset-review-dock")!;
     expect(dock.classList.contains("docked-unified")).toBe(true);
     expect(within(dock as HTMLElement).getByRole("button", { name: "Accept all in this file" })).toBeTruthy();
     expect(within(dock as HTMLElement).getByRole("button", { name: "Reject all in this file" })).toBeTruthy();
-    expect(within(dock as HTMLElement).queryByRole("button", { name: "Accept change set" })).toBeNull();
-    expect(within(dock as HTMLElement).queryByRole("button", { name: "Reject change set" })).toBeNull();
+    expect(within(dock as HTMLElement).getByRole("button", { name: "Accept change set" })).toBeTruthy();
+    expect(within(dock as HTMLElement).getByRole("button", { name: "Reject change set" })).toBeTruthy();
 
     const menu = await openChangeSetMenu();
-    expect(within(menu).getByRole("button", { name: "Accept change set" })).toBeTruthy();
-    expect(within(menu).getByRole("button", { name: "Reject change set" })).toBeTruthy();
+    expect(within(menu).queryByRole("button", { name: "Accept change set" })).toBeNull();
+    expect(within(menu).queryByRole("button", { name: "Reject change set" })).toBeNull();
   });
 
   it("carries review-time typing into a blanket change-set acceptance", async () => {
@@ -2260,8 +2267,7 @@ describe("Typeset start page", () => {
     // The blanket answer resolves to the raw incoming bytes for every file it
     // still owns. The one file the reviewer was actually reading has to carry
     // their corrections into the same transaction, not lose them to it.
-    const menu = await openChangeSetMenu();
-    fireEvent.click(within(menu).getByRole("button", { name: "Accept change set" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept change set" }));
     await waitFor(() => expect(stagedContent).toBe(corrected));
   });
 
@@ -2311,6 +2317,26 @@ describe("Typeset start page", () => {
     });
     return { changeSet, answered };
   }
+
+  it("accepts an external change set without waiting for unrelated file previews", async () => {
+    const { changeSet, answered } = driftedChangeSetTest();
+    mocks.typesetChangeSetList.mockResolvedValue([{ ...changeSet, actor: "external", origin: "watcher" }]);
+    mocks.typesetChangeSetResolve.mockResolvedValue({ ...changeSet, status: "accepted", decisions: answered });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const review = await screen.findByLabelText("Review project change set");
+    // A preview of this unopened chapter may be slow or unavailable; accepting
+    // its recorded change does not need to fetch its entire text first.
+    mocks.typesetChangeSetReadText.mockClear();
+    mocks.typesetChangeSetReadText.mockImplementation(() => new Promise(() => {}));
+    fireEvent.click(within(review).getByRole("button", { name: "Accept change set" }));
+    await waitFor(() => expect(mocks.typesetChangeSetResolve).toHaveBeenCalledWith(
+      changeSet.id,
+      [expect.objectContaining(answered[0])],
+    ));
+    expect(mocks.typesetChangeSetReadText).not.toHaveBeenCalled();
+  });
 
   it("retries a change set the project moved under instead of leaving the click dead", async () => {
     const { changeSet, answered } = driftedChangeSetTest();
@@ -3815,7 +3841,7 @@ describe("Typeset start page", () => {
 
     expect(await screen.findByText("Latexmk: processing paper.tex")).toBeTruthy();
     resolveCompile?.({ success: true, outputPath: "paper.pdf", engine: "latexmk -pdf", durationMs: 12 });
-    await waitFor(() => expect(screen.getAllByText("latexmk -pdf in 12 ms").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByText("latexmk -pdf · 0.1s")).toBeTruthy());
   });
 
   it("opens file actions from the Typeset tree context menu", async () => {
@@ -5308,7 +5334,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
     await waitFor(() => expect(container.querySelector(".typeset-pdf-status.success")).toBeTruthy());
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("chapters/body.tex"));
-    await waitFor(() => expect(screen.getByText("paper.pdf")).toBeTruthy());
+    await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("paper.pdf"));
 
     const pdfText = await waitFor(() => {
       const button = container.querySelector<HTMLButtonElement>(".typeset-pdf-scroll .typeset-pdf-page-source-target");
@@ -5339,7 +5365,8 @@ describe("Typeset start page", () => {
       64,
     ));
     await waitForSourceOpen(container, "chapters/body.tex", "body.tex");
-    expect(screen.getByText("paper.pdf")).toBeTruthy();
+    expect(screen.getByLabelText("PDF preview")).toBeTruthy();
+    expect(mocks.fileReadBytes).toHaveBeenLastCalledWith("paper.pdf");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
     await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(chapter));
     // TeX only ever reports `Column:-1`, so the column comes from the word that
@@ -6285,7 +6312,8 @@ describe("Typeset start page", () => {
     fireEvent.click(included);
     await waitForSourceOpen(container, "chapters/ch2.tex");
     await waitFor(() => expect(mocks.latexForwardSearch).toHaveBeenCalledWith("chapters/ch2.tex", "paper.pdf", 1, 1));
-    expect(screen.getByText("paper.pdf")).toBeTruthy();
+    expect(screen.getByLabelText("PDF preview")).toBeTruthy();
+    expect(mocks.fileReadBytes).toHaveBeenLastCalledWith("paper.pdf");
     expect(within(screen.getByLabelText("Document outline")).getByRole("button", { name: /Introduction/ })).toBeTruthy();
   });
 

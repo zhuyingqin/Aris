@@ -1,0 +1,47 @@
+/* Each theme uses a readable shade. The default keeps the existing palette. */
+:root[data-ui-color="default"], .settings-color-swatch[data-color="default"] {
+  --ui-color-light: #256fc7; --ui-color-dark: #71b5ff;
+}
+:root[data-ui-color="purple"], .settings-color-swatch[data-color="purple"] {
+  --ui-color-light: #7c3aed; --ui-color-dark: #b69cfb;
+}
+:root[data-ui-color="teal"], .settings-color-swatch[data-color="teal"] {
+  --ui-color-light: #0e7490; --ui-color-dark: #67d4e8;
+}
+:root[data-ui-color="green"], .settings-color-swatch[data-color="green"] {
+  --ui-color-light: #16734a; --ui-color-dark: #6bcea2;
+}
+:root[data-ui-color="orange"], .settings-color-swatch[data-color="orange"] {
+  --ui-color-light: #b45309; --ui-color-dark: #f4b56c;
+}
+:root[data-ui-color="pink"], .settings-color-swatch[data-color="pink"] {
+  --ui-color-light: #be185d; --ui-color-dark: #f49ac2;
+}
+:root[data-ui-color]:not([data-ui-color="default"]):not([data-custom-accent="true"]) {
+  --ui-accent: var(--ui-color-dark);
+  --ui-on-accent: #0e1116;
+  --accent: var(--ui-accent);
+  --accent-2: var(--ui-accent);
+  --product-module-accent: var(--ui-accent);
+}
+:root[data-theme="light"][data-ui-color]:not([data-ui-color="default"]):not([data-custom-accent="true"]) {
+  --ui-accent: var(--ui-color-light);
+  --ui-on-accent: #fff;
+}
+.settings-color-swatch { background: var(--ui-color-dark); }
+:root[data-theme="light"] .settings-color-swatch { background: var(--ui-color-light); }
+
+/* Library surfaces define their own blue; let a selected global color reach them. */
+:root[data-ui-color]:not([data-ui-color="default"]) :is(.lit-page, .lit-topbar-embedded) {
+  --accent: var(--ui-accent);
+  --lit-blue: var(--ui-accent);
+  --lit-selected: color-mix(in srgb, var(--ui-accent) 10%, var(--bg));
+}
+:root[data-ui-color]:not([data-ui-color="default"]) :is(button.primary, .sp-btn-primary, .ext-primary-btn) {
+  color: var(--ui-on-accent);
+}
+:root[data-ui-color]:not([data-ui-color="default"]) .ext-primary-btn {
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--ui-accent) 30%, transparent);
+}

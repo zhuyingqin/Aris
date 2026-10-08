@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+pub mod figures;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -96,6 +97,7 @@ static LATEX_OUTPUT_DIRECTORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex
 pub mod knowledge;
 pub mod layout;
 pub mod literature;
+mod literature_boolean;
 pub mod notebook;
 pub mod pdf_rag;
 pub mod runs;
@@ -116,6 +118,7 @@ pub struct ToolSpec {
 pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
+        | "read_docx"
         | "read_files"
         | "ReadMediaFile"
         | "WorkspaceLayout"
@@ -233,7 +236,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
+            description: "Read a text file, quality-labelled PDF text, or indexed DOCX paragraphs in the workspace. DOCX offset/limit count paragraphs and return the read_docx schema with protected equation boundaries; use edit_docx for changes. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large text files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached text reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -247,8 +250,38 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "read_docx",
+            description: "Read a DOCX as indexed paragraphs, including body, tables, headers, footers and notes. Returns a sha256 revision, exact editable text segments and protected native-equation boundaries. offset/limit count paragraphs; follow nextOffset. Formula placeholders are not formula contents or editable text. Use edit_docx for precise changes, never paragraph.text assignment or raw ZIP/XML string rewrites. Legacy .doc files require conversion to DOCX first.",
+            input_schema: json!({
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }, "required": ["path"], "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "edit_docx",
+            description: "Apply 1-64 ordered exact text edits to an existing DOCX. Copy paragraph_id and expected_revision from the latest read_docx or DOCX read_file result. Each old_string must be unique within an editable segment. Matches may span formatting runs but cannot cross equations, links, bookmarks or objects. Replacement text inherits the first matched run's formatting; other runs, native equations and package parts remain intact. Fields, tracked changes, managed content controls and signed documents require a specialised editor and are rejected. The batch is atomic, audited and reversible through change_revert. This tool edits text, not equation XML or paragraph structure.",
+            input_schema: json!({
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "expected_revision": { "type": "string", "description": "Copy the exact revision from the latest read_docx/read_file result; reread after a conflict." },
+                    "edits": { "type": "array", "minItems": 1, "maxItems": 64, "items": {
+                        "type": "object", "properties": {
+                            "paragraph_id": { "type": "string" },
+                            "old_string": { "type": "string", "minLength": 1 },
+                            "new_string": { "type": "string" }
+                        }, "required": ["paragraph_id", "old_string", "new_string"], "additionalProperties": false
+                    }}
+                }, "required": ["path", "expected_revision", "edits"], "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "read_files",
-            description: "Read up to 16 independent text/PDF file windows in one call. Results preserve request order and report per-file errors without discarding successful reads. Prefer this over repeated read_file calls when the paths or line windows are already known; each successful item has the same revision-bearing payload as read_file.",
+            description: "Read up to 16 independent text/PDF/DOCX file windows in one call. Results preserve request order and report per-file errors without discarding successful reads. Prefer this over repeated read_file calls when the paths or windows are already known; each successful item has the same revision-bearing payload as read_file. DOCX windows count paragraphs.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -721,23 +754,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers. Run an explicit bounded metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv, then use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. This tool automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Write `query` in English academic terms: these indexes carry English titles and abstracts, so translate the user's concepts yourself rather than passing non-English text through — a built-in research glossary covers common Chinese terms as a fallback and reports whatever it could not translate. Scopus requires SCOPUS_API_KEY; Semantic Scholar requires SEMANTIC_SCHOLAR_API_KEY (its anonymous pool only returns HTTP 429), and a source without its credential is recorded as an explicit coverage gap rather than silently dropped. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms." },
-                    "sources": {
-                        "type": "array",
-                        "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
-                        "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
-                    },
-                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
-                    "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
-                    "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
+            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers — the one external scholarly search, from a quick lookup to a systematic search. It queries Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv; use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. Every call saves a project-local SearchProtocol and a durable SearchRun with canonical records, request/response artifacts, quotas and failures, then refreshes the library view; do not call LiteratureLibraryUpsert afterwards. A quick search needs only `query`. A systematic search carries its design in the same call: write the concept blocks once as `booleanQuery` (compiled into each source's own syntax), or give `queries` per source when one needs exact provider syntax; record `inclusionCriteria`/`exclusionCriteria`; list `knownKeyPapers` so the result reports which of them were retrieved (revise the strategy when one is missed). `coverage: \"saturate\"` keeps paging until new pages stop adding records, and `snowball` follows citations one hop from seed papers — both are bounded, but can fetch several hundred records, so preview first and confirm the scope with the user before a large run. To show the plan without any request, call LiteratureSearchPreview with `search` set to these same arguments. A partial result returns `continuation.continueRunId`; repeat the same query with it to fetch the next page. Write `query`, `booleanQuery` and `queries` in English academic terms: the indexes carry English titles and abstracts (a built-in glossary translates common Chinese terms in `query` as a fallback and reports what it could not). Scopus requires SCOPUS_API_KEY and Semantic Scholar SEMANTIC_SCHOLAR_API_KEY; a source without its credential is recorded as an explicit coverage gap rather than silently dropped.",
+            input_schema: literature_search_input_schema(),
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
@@ -877,7 +895,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearchProtocolCreate",
-            description: "Create a versioned, project-local literature SearchProtocol. The protocol records the research question, scope, source-specific queries, time window, eligibility criteria and known papers. This only saves a plan; call LiteratureSearchPreview and obtain explicit user confirmation before executing a network search.",
+            description: "Compatibility alias kept for older skills; prefer LiteratureSearch, which saves the same protocol (question, scope, booleanQuery, per-source queries, time window, criteria, known papers) and runs it in one call, and LiteratureSearchPreview with `search` to plan without saving. This only saves a plan; it never opens a connection.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -888,6 +906,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                             "scope": { "type": "string" },
                             "timeWindow": { "type": "string" },
                             "databases": { "type": "array", "items": { "type": "string" } },
+                            "booleanQuery": { "type": "string" },
                             "queries": { "type": "object", "additionalProperties": { "type": "string" } },
                             "queryVariants": {
                                 "type": "object",
@@ -922,18 +941,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearchPreview",
-            description: "Preview a saved SearchProtocol before execution. Returns each effective source, complete query and adapter availability; it never performs a network request or a full export.",
+            description: "Show exactly what a literature search would send — every source, each compiled query stream and its result budget, adapter availability, and any saturation or snowball bounds — without opening a connection or saving anything. Pass `search` with the arguments you would give LiteratureSearch to review a strategy (for instance a booleanQuery's per-source compilation) before running it, or `protocolId` to inspect a saved protocol. Use it to show the user a systematic or large search before running it.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "protocolId": { "type": "string", "minLength": 1 } },
-                "required": ["protocolId"],
+                "properties": {
+                    "protocolId": { "type": "string", "minLength": 1, "description": "A saved SearchProtocol id." },
+                    "search": literature_search_input_schema()
+                },
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "LiteratureSearchExecute",
-            description: "Execute a previously previewed SearchProtocol and persist a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. Use only after the user has reviewed the preview and explicitly agreed to the bounded scope. The `confirmation` field must be exactly `execute`. A `resumeRunId` resumes one interrupted running operation; a `continueRunId` starts a new bounded page from a terminal partial run's per-source cursors.",
+            description: "Compatibility alias kept for older skills; prefer LiteratureSearch (with `continueRunId` for further pages). Executes a saved SearchProtocol and persists a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. The `confirmation` field must be exactly `execute`. A `resumeRunId` resumes one interrupted running operation; a `continueRunId` starts a new bounded page from a terminal partial run's per-source cursors.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1439,6 +1460,51 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     specs
 }
 
+/// Input schema of `LiteratureSearch`, shared with the `search` argument of
+/// `LiteratureSearchPreview` so a preview always accepts exactly what the
+/// search would run.
+fn literature_search_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms. Always required; it names the protocol and ranks results, and a continuation must repeat it." },
+            "sources": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
+                "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
+            },
+            "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target per page (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
+            "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
+            "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." },
+            "booleanQuery": { "type": "string", "description": "One provider-independent boolean expression, compiled into every source's syntax: terms in [brackets] or \"quotes\", upper-case AND / OR / AND NOT, parentheses for concept blocks. Example: ([continual learning] OR [lifelong learning]) AND ([time series] OR [time-series]) AND [anomaly detection]. Sources that parse no boolean syntax (Crossref, Semantic Scholar) receive a few keyword streams rotating through each block's synonyms." },
+            "queries": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Optional per-source queries in that provider's own syntax, keyed by source. Each is sent exactly as written and overrides booleanQuery for its source."
+            },
+            "scope": { "type": "string", "description": "What is in and out of scope, recorded in the protocol." },
+            "inclusionCriteria": { "type": "array", "items": { "type": "string" } },
+            "exclusionCriteria": { "type": "array", "items": { "type": "string" } },
+            "knownKeyPapers": { "type": "array", "items": { "type": "string" }, "description": "Papers a good strategy must retrieve: DOI, arXiv id, or exact title. The result reports each as found or missed." },
+            "continueRunId": { "type": "string", "minLength": 1, "description": "Fetch the next bounded page of a previous partial run of this same query (from `continuation.continueRunId`). Other fields are taken from that run's protocol." },
+            "coverage": { "type": "string", "enum": ["bounded", "saturate"], "description": "`bounded` (default): one page per source. `saturate`: keep paging unexhausted sources, up to 5 pages, until a page adds under 10% new records; the result names why it stopped." },
+            "snowball": {
+                "type": "object",
+                "description": "One-hop citation chasing after the search. Seeds: `seeds`, then any knownKeyPapers given as DOI/arXiv id, then the `topRecords` best-ranked results (default 5 when no explicit seeds). At most 10 seeds.",
+                "properties": {
+                    "seeds": { "type": "array", "items": { "type": "string" }, "description": "Seed papers as DOI or arXiv id." },
+                    "topRecords": { "type": "integer", "minimum": 0, "maximum": 10 },
+                    "direction": { "type": "string", "enum": ["citing", "references", "both"], "description": "Default both." },
+                    "maxPerSeed": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Default 25." }
+                },
+                "additionalProperties": false
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })
+}
+
 /// Identity of the external request a tool call will actually issue, for tools
 /// that compile their input into something else before sending it.
 ///
@@ -1521,6 +1587,27 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "bash" => from_value::<BashCommandInput>(input)
             .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "read_docx" => from_value::<ReadFileInput>(input).and_then(|input| {
+            to_pretty_json(
+                runtime::docx::read_docx(&input.path, input.offset, input.limit)
+                    .map_err(io_to_string)?,
+            )
+        }),
+        "edit_docx" => from_value::<EditDocxInput>(input).and_then(|input| {
+            validate_file_tool_payload_bytes(
+                "edit_docx",
+                &serde_json::to_string(&input.edits).map_err(|e| e.to_string())?,
+            )?;
+            to_pretty_json(
+                runtime::docx::edit_docx(
+                    &input.path,
+                    &input.expected_revision,
+                    &input.edits,
+                    &context.mutation_context("edit_docx"),
+                )
+                .map_err(io_to_string)?,
+            )
+        }),
         "read_files" => from_value::<ReadFilesInput>(input).and_then(run_read_files),
         "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
@@ -1560,7 +1647,7 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "WebSearch" => from_value::<web::WebSearchInput>(input)
             .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
-            .and_then(literature::run_literature_search),
+            .and_then(|input| literature::run_literature_search_with_cancel(input, should_cancel)),
         "LiteratureCitations" => from_value::<literature::LiteratureCitationsInput>(input)
             .and_then(literature::run_literature_citations),
         "RetrievalPlan" => to_pretty_json(json!({
@@ -1687,6 +1774,15 @@ fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) 
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
+    if Path::new(&input.path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))
+    {
+        return to_pretty_json(
+            runtime::docx::read_docx(&input.path, input.offset, input.limit)
+                .map_err(io_to_string)?,
+        );
+    }
     let cache_key = read_file_cache_key(&input);
     if let Some(cache_key) = cache_key.as_ref() {
         if let Some(output) = read_file_cache_get(cache_key) {
@@ -1713,14 +1809,21 @@ fn run_read_files(input: ReadFilesInput) -> Result<String, String> {
         ));
     }
 
+    let project_context = runtime::active_project_execution_context();
     let results = std::thread::scope(|scope| {
         input
             .requests
             .into_iter()
             .map(|request| {
+                let project_context = project_context.clone();
                 scope.spawn(move || {
                     let path = request.path.clone();
-                    match run_read_file(request) {
+                    let read = || run_read_file(request);
+                    let output = match project_context {
+                        Some(context) => runtime::with_project_execution_context(&context, read),
+                        None => read(),
+                    };
+                    match output {
                         Ok(output) => {
                             let value = serde_json::from_str::<Value>(&output)
                                 .unwrap_or_else(|_| Value::String(output));
@@ -2586,6 +2689,14 @@ struct ReadFileInput {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditDocxInput {
+    path: String,
+    expected_revision: String,
+    edits: Vec<runtime::docx::DocxTextEdit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4037,6 +4148,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4049,6 +4161,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4064,6 +4177,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4078,6 +4192,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-code-guide" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4092,6 +4207,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "statusline-setup" => vec![
             "bash",
             "read_file",
+            "read_docx",
             "read_files",
             "write_file",
             "write_files",
@@ -4105,6 +4221,8 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "read_docx",
+            "edit_docx",
             "read_files",
             "ReadMediaFile",
             "write_file",
@@ -7519,6 +7637,8 @@ pub struct PreparedLlmReview {
     api_key: String,
     base_url: String,
     model: String,
+    figure_transport: Option<aris_executor::OpenAiTransport>,
+    send_routing_session_header: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -7528,6 +7648,87 @@ enum ReviewerProtocol {
 }
 
 impl PreparedLlmReview {
+    /// An explicit OpenAI-compatible connection. Unlike `prepare_llm_review`,
+    /// it reads no process environment, so callers can pick a per-task model
+    /// without changing the Reviewer that chat review resolves.
+    pub fn openai_compatible(api_key: String, base_url: String, model: String) -> Self {
+        Self {
+            protocol: ReviewerProtocol::OpenAiCompat,
+            api_key,
+            base_url,
+            model,
+            figure_transport: None,
+            send_routing_session_header: false,
+        }
+    }
+    /// Propagate session metadata to this connection, never a model rule.
+    pub fn with_routing_session_header(mut self, enabled: bool) -> Self {
+        self.send_routing_session_header = enabled;
+        self
+    }
+    pub fn freeze_for_figures(mut self) -> Self {
+        if matches!(self.protocol, ReviewerProtocol::OpenAiCompat) { self.figure_transport = Some(aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model)); }
+        self
+    }
+    fn figure_transport(&self) -> aris_executor::OpenAiTransport {
+        self.figure_transport.unwrap_or_else(|| aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model))
+    }
+    /// A separate Reviewer connection and context, with actual multimodal
+    /// content and a single submission. Existing text-review callers are intact.
+    pub fn run_figure_request(
+        &self,
+        session_id: &str,
+        request: ApiRequest,
+        budget: u32,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<aris_executor::bounded::ModelReply, String> {
+        aris_executor::bounded::perform(
+            |observer| match self.protocol {
+                ReviewerProtocol::OpenAiCompat => aris_executor::OpenAIRuntimeClient::new(
+                    aris_executor::OpenAIExecutorConfig {
+                        api_key: self.api_key.clone(),
+                        base_url: openai_executor_base_url(&self.base_url),
+                    },
+                    self.model.clone(),
+                    false,
+                    Vec::new(),
+                    observer,
+                )
+                .map(|client| {
+                    aris_executor::ExecutorClient::OpenAI(
+                        client.with_transport(self.figure_transport())
+                            .with_routing_session_header(self.send_routing_session_header)
+                            .with_single_request(budget),
+                    )
+                }),
+                ReviewerProtocol::AnthropicCompat => SharedAnthropicRuntimeClient::new(
+                    AuthSource::BearerToken(self.api_key.clone()),
+                    anthropic_executor_base_url(&self.base_url),
+                    false,
+                    self.model.clone(),
+                    false,
+                    Vec::new(),
+                    budget,
+                    observer,
+                )
+                .map(|client| aris_executor::ExecutorClient::Anthropic(client.with_single_request(budget))),
+            },
+            session_id,
+            request,
+            cancelled,
+        )
+    }
+
+    pub fn figure_identity(&self) -> runtime::figures::ModelIdentity {
+        let (provider, base, transport) = match self.protocol {
+            ReviewerProtocol::OpenAiCompat => ("openai-compatible", openai_executor_base_url(&self.base_url), self.figure_transport().as_config_value()),
+            ReviewerProtocol::AnthropicCompat => ("anthropic-compatible", anthropic_executor_base_url(&self.base_url), "anthropic_messages"),
+        };
+        let endpoint = base;
+        let signature = runtime::figures::hash(format!("reviewer|{}|{}|{}|session-header={}|somniq-figure-vision-v2-light-reasoning", self.model, endpoint, transport, self.send_routing_session_header).as_bytes());
+        runtime::figures::ModelIdentity { model: self.model.clone(), provider: provider.into(), endpoint, transport: transport.into(), signature }
+    }
+
     /// Send one review request. Honors cancellation before and during the call.
     pub fn run(&self, prompt: &str, cancelled: Arc<AtomicBool>) -> Result<LlmReviewRun, String> {
         if cancelled.load(Ordering::SeqCst) {
@@ -7548,6 +7749,7 @@ impl PreparedLlmReview {
                 &self.model,
                 prompt,
                 cancelled,
+                self.send_routing_session_header,
             ),
             ReviewerProtocol::AnthropicCompat => call_anthropic_compat_reviewer(
                 &self.api_key,
@@ -7593,7 +7795,7 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
     // Custom OpenAI-compatible reviewer mode. Uses ARIS_REVIEWER_AUTH_TOKEN as
     // the API key and ARIS_REVIEWER_BASE_URL for the endpoint. Routes through
     // the same OpenAI-compat call path — no third routing path added.
-    if reviewer_provider.as_deref() == Some("custom") {
+    if matches!(reviewer_provider.as_deref(), Some("custom" | "opencode")) {
         let key = std::env::var("ARIS_REVIEWER_AUTH_TOKEN")
             .ok()
             .filter(|k| !k.is_empty())
@@ -7618,11 +7820,17 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
+        let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
+        let send_routing_session_header = api::connection_uses_routing_session_header(
+            reviewer_provider.as_deref().unwrap_or_default(), &base, managed_base.as_deref(),
+        );
         return Ok(PreparedLlmReview {
             protocol: ReviewerProtocol::OpenAiCompat,
             api_key: key,
             base_url: base,
             model: model.to_string(),
+            figure_transport: None,
+            send_routing_session_header,
         });
     }
 
@@ -7658,6 +7866,8 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
             api_key: key,
             base_url: base,
             model: model.to_string(),
+            figure_transport: None,
+            send_routing_session_header: false,
         });
     }
 
@@ -7685,11 +7895,17 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         .filter(|k| !k.is_empty())
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
+    let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
+    let send_routing_session_header = api::connection_uses_routing_session_header(
+        "", &base_url, managed_base.as_deref(),
+    );
     Ok(PreparedLlmReview {
         protocol: ReviewerProtocol::OpenAiCompat,
         api_key: key,
         base_url,
         model: model.to_string(),
+        figure_transport: None,
+        send_routing_session_header,
     })
 }
 
@@ -7772,6 +7988,7 @@ fn call_openai_compat_reviewer(
     model: &str,
     prompt: &str,
     cancelled: Option<Arc<AtomicBool>>,
+    send_routing_session_header: bool,
 ) -> Result<LlmReviewRun, String> {
     let client = aris_executor::OpenAIRuntimeClient::new(
         aris_executor::OpenAIExecutorConfig {
@@ -7783,7 +8000,7 @@ fn call_openai_compat_reviewer(
         Vec::new(),
         reviewer_stream_observer(cancelled),
     )
-    .map(aris_executor::ExecutorClient::OpenAI)
+    .map(|client| aris_executor::ExecutorClient::OpenAI(client.with_routing_session_header(send_routing_session_header)))
     .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
     run_reviewer_turn(client, prompt)
 }

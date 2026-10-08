@@ -47,6 +47,7 @@ describe("somniqWorkbenchColors", () => {
     "--text": "#d7dee7",
     "--text-dim": "#8a97a6",
     "--accent": "#4f9cf9",
+    "--ui-on-accent": "#0e1116",
     "--red": "#f85149",
     "--amber": "#d29922",
     "--green": "#3fb950",
@@ -87,10 +88,9 @@ describe("somniqWorkbenchColors", () => {
     expect(colors["editor.background"]).toBe("#0e1116");
     expect(colors["focusBorder"]).toBeUndefined();
     expect(colors["button.background"]).toBeUndefined();
+    expect(colors["button.hoverBackground"]).toBeUndefined();
   });
 
-  /// Sending only the fixed foregrounds would recolour badges to white on the
-  /// stock background and read as a rendering bug.
   it("sends nothing at all when no token resolves", () => {
     expect(somniqWorkbenchColors(() => "")).toEqual({});
   });
@@ -98,7 +98,25 @@ describe("somniqWorkbenchColors", () => {
   it("pairs the accent with a foreground that reads on it", () => {
     const colors = somniqWorkbenchColors(reader(dark));
     expect(colors["button.background"]).toBe("#4f9cf9");
-    expect(colors["button.foreground"]).toBe("#ffffff");
+    expect(colors["button.foreground"]).toBe("#0e1116");
+    expect(colors["activityBarBadge.foreground"]).toBe("#0e1116");
+    expect(colors["badge.foreground"]).toBe("#0e1116");
+    expect(colors["statusBarItem.remoteForeground"]).toBe("#0e1116");
+    expect(colors["button.hoverBackground"]).toBe("#5da3f7");
+  });
+
+  it("uses the light theme's foreground with darker accent presets", () => {
+    const colors = somniqWorkbenchColors(reader({
+      ...dark, "--accent": "#7c3aed", "--ui-on-accent": "#fff", "--text": "#1f2937",
+    }));
+    expect(colors["button.background"]).toBe("#7c3aed");
+    expect(colors["button.foreground"]).toBe("#fff");
+    expect(colors["button.hoverBackground"]).toBe("#7338db");
+  });
+
+  it("retains the selected accent's alpha when deriving hover feedback", () => {
+    const colors = somniqWorkbenchColors(reader({ ...dark, "--accent": "#f008", "--text": "#fff" }));
+    expect(colors["button.hoverBackground"]).toBe("#ff1a1a88");
   });
 
   it("emits only values VS Code can parse", () => {

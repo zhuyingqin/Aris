@@ -357,6 +357,17 @@ export function oracleWebSummaryFromTool(block: ChatToolBlock): OracleWebToolSum
   };
 }
 
+export function somniImageSummaryFromTool(block: ChatToolBlock) {
+  if (block.name !== "SomniImage") return null;
+  const input = parseToolBlockObject(block, "input");
+  const output = parseToolBlockObject(block, "output");
+  return {
+    prompt: nonEmptyString(input?.prompt) ?? nonEmptyString(output?.prompt),
+    model: nonEmptyString(output?.model) ?? nonEmptyString(input?.model),
+    imageCount: Array.isArray(output?.images) ? output.images.length : 0,
+  };
+}
+
 export function evidenceSourcesFromTool(block: ChatToolBlock): MarkdownEvidenceSource[] {
   if (block.name !== "ProjectEvidenceSearch") return [];
   const output = parseToolBlockObject(block, "output");
@@ -616,7 +627,7 @@ export function imagePathsFromTool(
   // Those two paths contain the same pixels. Only project the canonical result
   // so one generation appears once, and never render input reference images as
   // though they were newly generated while the tool is still running.
-  if (block.name === "ChatGptWebImage") {
+  if (block.name === "ChatGptWebImage" || block.name === "SomniImage") {
     const output = parseToolBlockObject(block, "output");
     const images = Array.isArray(output?.images) ? output.images : [];
     for (const image of images) {
@@ -756,7 +767,7 @@ function diffsFromTool(block: ChatToolBlock): FileChange[] {
   // Old receipts still show their recorded counts, explicitly without a patch.
   const receipt = objectValue(output?.diff_summary);
   if (receipt || changeId || [
-    "write_file", "append_file", "edit_file", "multi_edit",
+    "write_file", "append_file", "edit_file", "edit_docx", "multi_edit",
     "str_replace_based_edit_tool", "commit_large_write",
   ].includes(block.name)) {
     const changes: FileChange[] = [{

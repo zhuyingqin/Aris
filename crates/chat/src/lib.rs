@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+pub mod figures;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -443,6 +444,13 @@ const PINNED_CORE_TOOLS: &[&str] = &[
 /// known.
 const SECONDARY_CORE_TOOLS: &[&str] = &["AskUserQuestion", "session_search", "memory", "TodoWrite"];
 
+/// Tools kept only so older skills and transcripts still resolve. Intent
+/// routing never offers them — `LiteratureSearch` runs the same protocol in one
+/// call and `LiteratureSearchPreview` plans it — so they stay deferred, reachable
+/// through ToolSearch or by naming them.
+const COMPATIBILITY_ALIAS_TOOLS: &[&str] =
+    &["LiteratureSearchProtocolCreate", "LiteratureSearchExecute"];
+
 /// Upper bound on pins, so the LRU always keeps rotating slots for whatever the
 /// turn turns out to need.
 const MAX_PINNED_TOOLS: usize = MAX_ACTIVE_TOOLS - 8;
@@ -790,6 +798,53 @@ fn strip_attachment_boilerplate(text: &str) -> String {
 /// order.
 fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
     let mut groups = Vec::new();
+    let terms = lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .collect::<Vec<_>>();
+    let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))
+        || (terms.contains(&"word")
+            && contains_any(
+                lowered,
+                &[
+                    "document", "file", "edit", "formula", "equation", "export", "convert",
+                    "office", "文档", "文件", "编辑", "修改", "改稿", "公式", "导出", "转换",
+                    "排版", "准确",
+                ],
+            ));
+    if word_document {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "Word document intent",
+            required: resolve_named(catalog, &["read_docx", "edit_docx"]),
+            optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
+    let drawing_intent = contains_any(
+        lowered,
+        &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],
+    ) || (contains_any(
+        lowered,
+        &["image", "illustration", "picture", "图片", "图像", "插画", "的图", "张图"],
+    ) && contains_any(
+        lowered,
+        &["generate", "create", "edit", "生成", "画", "绘", "修改", "编辑"],
+    ));
+    if drawing_intent {
+        // Prefer the configured API before generic file creation/media extras.
+        // A request mentioning GPT alone does not select webpage automation.
+        let webpage = contains_any(lowered, &["oracle", "webpage", "网页", "image assist"]);
+        let preferred = if webpage {
+            resolve_named(catalog, &["ChatGptWebImage"])
+        } else {
+            resolve_named(catalog, &["SomniImage"])
+        };
+        groups.push(ToolGroup {
+            profile: "drawing",
+            reason: "image intent with configured drawing tool",
+            required: preferred,
+            optional: resolve_named(catalog, &["ReadMediaFile"]),
+        });
+    }
     if contains_any(
         lowered,
         &[
@@ -1047,7 +1102,10 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
                     "retrieval",
                     "zotero",
                 ],
-            ),
+            )
+            .into_iter()
+            .filter(|name| !COMPATIBILITY_ALIAS_TOOLS.contains(&name.as_str()))
+            .collect(),
         });
     }
     if contains_any(
@@ -2136,9 +2194,9 @@ pub enum ChatExecutorConfig {
     OpenAiCompatible {
         api_key: String,
         base_url: String,
-        /// Send the conversation-scoped routing header from the first request.
-        /// Managed NewAPI gateways need this so a channel passthrough rule can
-        /// forward it to an OpenCode Go upstream without an initial 400 probe.
+        /// Propagate the session to OpenCode or the configured account gateway.
+        /// This connection setting does not identify the selected upstream or
+        /// classify any model as OpenCode.
         send_routing_session_header: bool,
         /// Which endpoint to use. `Auto` keeps the historical base-URL-derived
         /// choice; an explicit `Responses` preference still falls back to
@@ -2269,9 +2327,15 @@ pub fn resolve_settings_executor_config(
                     "No API key configured for provider '{provider}'. Add it on the Settings page."
                 )
             })?;
-            let base_url =
-                get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
-            let send_routing_session_header = is_managed_newapi_gateway(obj, &base_url);
+            let base_url = if provider == "opencode" {
+                get("executor_base_url").ok_or("Set the endpoint of this fixed OpenCode connection")?
+            } else {
+                get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
+            };
+            let send_routing_session_header = api::connection_uses_routing_session_header(
+                &provider, &base_url,
+                obj.get("newapi_executor_base_url").and_then(Value::as_str),
+            );
             // Absent/unknown → `Auto`, i.e. the historical behaviour. A
             // per-model override lives on the verified-executor entry and is
             // merged into this object before it reaches here.

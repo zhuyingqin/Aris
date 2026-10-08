@@ -5,6 +5,9 @@
 本文件是交底包 ``skills/patent-disclosure/tools/md_to_docx.py`` 的**包内副本**。
 申请文件禁止跨包调用交底工具；出权利要求书 / 说明书 Word 只用本路径。
 
+默认要求公式全部转换为原生 Office Math；失败时不覆盖上一版 DOCX。
+仅显式 --allow-math-fallback 或 --no-omml 才允许图片/原文输出。
+
 用法：
   python skills/patent-application/tools/md_to_docx.py -i 说明书.md -o 说明书.docx
 """
@@ -12,6 +15,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 import re
 import sys
 from dataclasses import dataclass, field
@@ -111,6 +116,18 @@ _MATH_STATS = MathOutcomeStats()
 
 def get_math_stats() -> MathOutcomeStats:
     return _MATH_STATS
+
+
+def save_docx_atomically(doc: Document, destination: Path) -> None:
+    """只在完整 DOCX 保存成功后替换目标，失败不覆盖上一版。"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".docx", delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        doc.save(str(temporary_path))
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 _OMML_IMPORT_WARNED = False
@@ -1043,9 +1060,12 @@ def convert_md_to_docx(
     image_max_w_in: float = _DEFAULT_IMAGE_MAX_W_IN,
     image_max_h_in: float = _DEFAULT_IMAGE_MAX_H_IN,
     prefer_omml: bool = True,
+    require_editable_math: bool | None = None,
 ) -> Document:
     global _PREFER_OMML
     _PREFER_OMML = bool(prefer_omml)
+    if require_editable_math and not prefer_omml:
+        raise ValueError("editable_math_required: native math cannot be disabled")
     _MATH_STATS.reset()
     doc = Document()
     # 默认正文样式
@@ -1333,6 +1353,14 @@ def convert_md_to_docx(
         i += 1
 
     flush_paragraph()
+    require_native = prefer_omml if require_editable_math is None else require_editable_math
+    if require_native and (_MATH_STATS.png or _MATH_STATS.text):
+        _MATH_STATS.report()
+        raise ValueError(
+            "editable_math_required: "
+            f"{_MATH_STATS.text} text / {_MATH_STATS.png} image fallbacks; "
+            "no DOCX was published. Correct the formula or explicitly allow fallback."
+        )
     return doc
 
 
@@ -1391,6 +1419,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="不写入可编辑 Office Math，仅用 PNG/原文（旧行为）",
     )
+    p.add_argument(
+        "--allow-math-fallback",
+        action="store_true",
+        help="明确允许公式转换失败时使用图片/原文；此输出不能称为全公式可编辑",
+    )
     args = p.parse_args(argv)
 
     in_path = Path(args.input).resolve()
@@ -1402,24 +1435,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         md_text = in_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        md_text = in_path.read_text(encoding="utf-8", errors="replace")
-        print("警告：输入文件含非 UTF-8 字节，已使用替换字符解码后继续转换。", file=sys.stderr)
+        print("DOCX: ok=0 reason=invalid_utf8 输入无法无损解码；未修改输出文件。", file=sys.stderr)
+        return 1
 
     _warn_bare_paren_latex(md_text)
 
     if args.math_render:
         md_text = _maybe_render_math_md(md_text, base)
 
-    doc = convert_md_to_docx(
-        md_text,
-        base_dir=base,
-        image_max_w_in=args.image_max_width_inches,
-        image_max_h_in=args.image_max_height_inches,
-        prefer_omml=not args.no_omml,
-    )
+    try:
+        doc = convert_md_to_docx(
+            md_text,
+            base_dir=base,
+            image_max_w_in=args.image_max_width_inches,
+            image_max_h_in=args.image_max_height_inches,
+            prefer_omml=not args.no_omml,
+            require_editable_math=not (args.no_omml or args.allow_math_fallback),
+        )
+    except ValueError as error:
+        print(f"DOCX: ok=0 reason=conversion_failed {error}", file=sys.stderr)
+        return 1
     out_path = Path(args.output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(out_path))
+    save_docx_atomically(doc, out_path)
     print(f"DOCX: ok=1", file=sys.stderr)
     print(f"已写入: {out_path}")
     _MATH_STATS.report()

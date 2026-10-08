@@ -70,7 +70,7 @@ const apiMocks = vi.hoisted(() => ({
   fileSearch: vi.fn(() => Promise.resolve([])),
   chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
-  chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
+  chatModelSet: vi.fn((model: string, _persist?: boolean) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
   chatReasoningEffortGet: vi.fn<(model?: string | null) => Promise<ChatReasoningEffortView>>(),
   chatReasoningEffortSet: vi.fn<(
     effort: string,
@@ -135,6 +135,7 @@ vi.mock("../../git/GitWorkspace", () => ({
 vi.mock("../ChatThread", () => ({
   default: ({
     turns,
+    visible,
     onContinue,
     onRetry,
     onOpenIndependentReview,
@@ -143,6 +144,7 @@ vi.mock("../ChatThread", () => ({
     onLoadEarlierTurns,
   }: {
     turns: ChatTurn[];
+    visible?: boolean;
     onContinue: () => void;
     onRetry: (turn: ChatTurn) => void;
     onOpenIndependentReview?: () => void;
@@ -150,7 +152,7 @@ vi.mock("../ChatThread", () => ({
     loadingEarlierTurns?: boolean;
     onLoadEarlierTurns?: () => void | Promise<void>;
   }) => (
-    <div data-testid="chat-thread">
+    <div data-testid="chat-thread" data-visible={String(visible)}>
       <div
         data-testid="chat-history-scroll"
         onScroll={(event) => {
@@ -309,8 +311,8 @@ const defaultProject: DesktopProject = {
   lastOpenedAt: 0,
 };
 
-// What Settings last saved. The composer switches models per session without
-// persisting them, so this stays put while the session runs something else.
+// Initial configured executor used by the reasoning-capability fixtures.
+// A restored session can still run its own pinned model.
 const CONFIGURED_EXECUTOR_MODEL = "MiniMax-M3";
 
 // Mirrors `chat_reasoning_effort_get`/`_set`: the capability describes the model
@@ -327,6 +329,26 @@ function reasoningViewFor(model: string | null | undefined, effort: string): Cha
     transport: supported ? "provider_native" : "unsupported",
     message: supported ? undefined : "The active model does not expose a configurable reasoning effort.",
   };
+}
+
+function mockModelPreference(initialModel = CONFIGURED_EXECUTOR_MODEL) {
+  let savedModel = initialModel;
+  const statusFor = (model: string) => ({
+    ready: true, model, provider: "anthropic-compat",
+    contextWindow: 120_000, compactionBudget: 100_000,
+  });
+  apiMocks.chatStatus.mockImplementation(() => Promise.resolve(statusFor(savedModel)));
+  apiMocks.chatModelOptions.mockImplementation(() => Promise.resolve({
+    provider: "anthropic-compat", current: savedModel,
+    options: [CONFIGURED_EXECUTOR_MODEL, "gpt-6.1-sol"].map((model) => ({
+      value: model, label: model, description: null,
+    })),
+  }));
+  apiMocks.chatModelSet.mockImplementation(async (model, persist) => {
+    if (persist) savedModel = model;
+    return statusFor(model);
+  });
+  return () => savedModel;
 }
 
 function seedChatWithTurns() {
@@ -350,6 +372,11 @@ describe("Chat export action", () => {
     vi.clearAllMocks();
     apiMocks.isTauri.mockReturnValue(true);
     apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 });
+    apiMocks.chatModelOptions.mockResolvedValue({
+      provider: "anthropic-compat", current: CONFIGURED_EXECUTOR_MODEL,
+      options: [{ value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null }],
+    });
+    apiMocks.chatModelSet.mockImplementation(async (model) => ({ ready: true, model, provider: "anthropic-compat" }));
     apiMocks.chatPermissionGet.mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
@@ -426,6 +453,21 @@ describe("Chat export action", () => {
   it("does not portal head actions into the header when embedded", () => {
     render(<Chat embedded />);
     expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
+  it("tells the kept-alive transcript when the Chat page is reopened", () => {
+    render(<Chat />);
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
+    act(() => useStore.setState({ tab: "typeset" }));
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("false");
+    act(() => useStore.setState({ tab: "chat" }));
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
+  });
+
+  it("keeps an embedded transcript visible on its host page", () => {
+    useStore.setState({ tab: "typeset" });
+    render(<Chat embedded />);
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
   });
 
   it("keeps the host tab when an embedded Chat starts a session", async () => {
@@ -528,7 +570,7 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: session.title }));
-    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
     const workflow = await screen.findByTitle("Repairing task persistence");
     await userEvent.click(workflow);
     expect(screen.getByText("Repairing task persistence")).toBeTruthy();
@@ -729,7 +771,7 @@ describe("Chat export action", () => {
     render(<Chat />);
     await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
 
-    await waitFor(() => expect(apiMocks.chatContextTokens).toHaveBeenCalledWith(session.id));
+    await waitFor(() => expect(apiMocks.chatContextTokens).toHaveBeenCalledWith(session.id, session.projectId));
     await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
       expect.objectContaining({ id: session.id, contextTokens: 32_768 }),
     ));
@@ -1025,7 +1067,7 @@ describe("Chat export action", () => {
 
     await userEvent.click(exportButton);
 
-    await waitFor(() => expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(session.id, "/export"));
+    await waitFor(() => expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(session.id, "/export", session.projectId));
     expect(await screen.findByText("Exported conversation to C:\\Users\\wt\\chat.md")).toBeTruthy();
   });
 
@@ -1048,6 +1090,7 @@ describe("Chat export action", () => {
       expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(
         expect.any(String),
         '/research-lit "retrieval agents"',
+        session.projectId,
       ),
     );
     expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
@@ -1158,11 +1201,82 @@ describe("Chat export action", () => {
     expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value).toBe("");
     expect(apiMocks.chatSend).not.toHaveBeenCalled();
 
+    // The send is still preparing its attachments when the user moves to
+    // another project. Its request must retain the originating session.
+    const otherProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Other", path: "F:/Other" };
+    act(() => useStore.setState({ projects: [defaultProject, otherProject], currentProject: otherProject }));
     resolveFileRead?.("# Notes");
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
       session.id,
-      expect.objectContaining({ text: expect.stringContaining("# Notes") }),
+      expect.objectContaining({ text: expect.stringContaining("# Notes"), projectId: session.projectId }),
     ));
+  });
+
+  it("keeps concurrent chats and completed replies in their independent projects", async () => {
+    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
+    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
+    const first = { ...makeSession(firstProject.id), id: "chat-first-project", title: "First project chat" };
+    const second = { ...makeSession(secondProject.id), id: "chat-second-project", title: "Second project chat" };
+    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First history" }] }];
+    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
+    localStorage.setItem(CURRENT_KEY, first.id);
+    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
+
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: first.title }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      first.id, expect.objectContaining({ projectId: firstProject.id }),
+    ));
+
+    act(() => useStore.setState({ currentProject: secondProject }));
+    await userEvent.click(await screen.findByRole("button", { name: second.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      second.id, expect.objectContaining({ projectId: secondProject.id }),
+    ));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    act(() => finishFirst?.("First project answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        projectId: firstProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First project answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First project answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    act(() => finishSecond?.("Second project answer"));
+    expect(await screen.findByText("Second project answer")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: second.id,
+        projectId: secondProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "Second project answer" }]),
+        })]),
+      }),
+    ));
+    act(() => useStore.setState({ currentProject: firstProject }));
+    await userEvent.click(screen.getByRole("button", { name: first.title }));
+    expect(await screen.findByText("First project answer")).toBeTruthy();
+    expect(screen.queryByText("Second project answer")).toBeNull();
   });
 
   it("resumes an unpreserved failed turn by appending its work, never replacing history", async () => {
@@ -1207,6 +1321,7 @@ describe("Chat export action", () => {
         { role: "assistant", text: "Partial answer" },
       ],
       "append",
+      session.projectId,
     ));
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
     expect(screen.getByText("Partial answer")).toBeTruthy();
@@ -1256,6 +1371,7 @@ describe("Chat export action", () => {
         { role: "assistant", text: "Partial answer" },
       ],
       "append",
+      session.projectId,
     ));
   });
 
@@ -1543,7 +1659,8 @@ describe("Chat export action", () => {
       .toHaveBeenCalledWith(CONFIGURED_EXECUTOR_MODEL));
     expect(screen.queryByTestId("reasoning-pill")).toBeNull();
 
-    // Picking a model in the composer does not persist it (`persist: false`).
+    // Explicit picks persist the default, but reasoning still targets the
+    // session's model rather than a possibly stale configured-model snapshot.
     await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-5.6" }));
     expect(await screen.findByText(/Reasoning: high/)).toBeTruthy();
 
@@ -1555,6 +1672,84 @@ describe("Chat export action", () => {
       .toHaveBeenCalledWith("medium", "gpt-5.6"));
     expect(await screen.findByText(/Reasoning: medium/)).toBeTruthy();
     expect(screen.queryByText(/provider default/)).toBeNull();
+  });
+
+  it("uses the last explicit model choice for a new chat", async () => {
+    const savedModel = mockModelPreference();
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" }));
+    await waitFor(() => expect(savedModel()).toBe("gpt-6.1-sol"));
+    expect(apiMocks.chatModelSet).toHaveBeenCalledWith("gpt-6.1-sol", true);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message SomniQ" }), {
+      target: { value: "A draft that will be cleared" },
+    });
+    const statusCalls = apiMocks.chatStatus.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+
+    await waitFor(() => expect(apiMocks.chatStatus.mock.calls.length).toBeGreaterThan(statusCalls));
+    expect(await screen.findByText("Model: gpt-6.1-sol")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("restores the saved model after Chat is remounted without a started session", async () => {
+    const savedModel = mockModelPreference();
+    const first = render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" }));
+    await waitFor(() => expect(savedModel()).toBe("gpt-6.1-sol"));
+    first.unmount();
+
+    apiMocks.chatModelSet.mockClear();
+    render(<Chat />);
+
+    expect(await screen.findByText("Model: gpt-6.1-sol")).toBeTruthy();
+    expect(apiMocks.chatModelSet).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite the saved default when opening an older model session", async () => {
+    const savedModel = mockModelPreference("gpt-6.1-sol");
+    const session = { ...makeSession("default"), id: "older-model-session", title: "Earlier model", model: CONFIGURED_EXECUTOR_MODEL };
+    apiMocks.chatUiSessionsList.mockResolvedValue([{ ...session, turnsLoaded: false }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(session);
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatModelSet).toHaveBeenCalledWith(CONFIGURED_EXECUTOR_MODEL, false));
+    expect(await screen.findByText(`Model: ${CONFIGURED_EXECUTOR_MODEL}`)).toBeTruthy();
+    expect(savedModel()).toBe("gpt-6.1-sol");
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    expect(await screen.findByText("Model: gpt-6.1-sol")).toBeTruthy();
+    expect(apiMocks.chatModelSet.mock.calls.every(([, persist]) => persist === false)).toBe(true);
+  });
+
+  it("remembers an explicit pick of the model already active in a saved session", async () => {
+    const savedModel = mockModelPreference("gpt-6.1-sol");
+    const session = { ...makeSession("default"), id: "reselected-model-session", title: "Reselect model", model: CONFIGURED_EXECUTOR_MODEL };
+    apiMocks.chatUiSessionsList.mockResolvedValue([{ ...session, turnsLoaded: false }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(session);
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    expect(await screen.findByText(`Model: ${CONFIGURED_EXECUTOR_MODEL}`)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: `Model option: ${CONFIGURED_EXECUTOR_MODEL}` }));
+
+    await waitFor(() => expect(savedModel()).toBe(CONFIGURED_EXECUTOR_MODEL));
+    expect(apiMocks.chatModelSet).toHaveBeenCalledWith(CONFIGURED_EXECUTOR_MODEL, true);
+  });
+
+  it("keeps the previous model when saving a new selection fails", async () => {
+    const savedModel = mockModelPreference();
+    render(<Chat />);
+    const option = await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" });
+    apiMocks.chatModelSet.mockRejectedValueOnce(new Error("Could not save model preference"));
+
+    await userEvent.click(option);
+
+    await waitFor(() => expect(useStore.getState().error).toContain("Could not save model preference"));
+    expect(savedModel()).toBe(CONFIGURED_EXECUTOR_MODEL);
+    expect(screen.getByText(`Model: ${CONFIGURED_EXECUTOR_MODEL}`)).toBeTruthy();
   });
 
   it("keeps model choices visible when a saved session model cannot restore", async () => {

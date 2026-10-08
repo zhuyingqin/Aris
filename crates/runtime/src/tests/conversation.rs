@@ -4501,6 +4501,86 @@ fn the_main_line_reminder_can_be_switched_off() {
         .all(|block| !matches!(block, ContentBlock::ToolResult { output, .. } if output.contains("Main-line check"))));
 }
 
+#[test]
+fn failed_shell_retry_budget_preserves_a_path_to_read_and_repair() {
+    struct RecoveryClient {
+        calls: usize,
+    }
+    impl ApiClient for RecoveryClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 4 {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .flat_map(|message| &message.blocks)
+                        .any(|block| {
+                            matches!(block, ContentBlock::ToolResult { output, is_error: true, .. }
+                        if output.contains("repeated_failed_tool_request"))
+                        }),
+                    "the third unchanged call must be refused with actionable recovery"
+                );
+            }
+            let (name, input) = match self.calls {
+                1..=3 | 6 => (
+                    "bash",
+                    r#"{"command":"python broken_inline_edit","description":"edit source"}"#,
+                ),
+                4 => ("read_file", r#"{"path":"main.tex"}"#),
+                5 => ("multi_edit", r#"{"path":"main.tex","edits":[]}"#),
+                _ => {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "source repaired and command verified".to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+            };
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: format!("recovery-{}", self.calls),
+                    name: name.to_string(),
+                    input: input.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = std::sync::Arc::clone(&executions);
+    let tools = StaticToolExecutor::new()
+        .register("bash", move |_| {
+            let count = observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 2 {
+                Ok(r#"{"stderr":"re.error: bad escape \\e at position 0","returnCodeInterpretation":"exit_code:1"}"#.to_string())
+            } else {
+                Ok(r#"{"stdout":"verified","returnCodeInterpretation":null}"#.to_string())
+            }
+        })
+        .register("read_file", |_| Ok("current source and revision".to_string()))
+        .register("multi_edit", |_| Ok("source corrected".to_string()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        RecoveryClient { calls: 0 },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_evidence_guard_mode(crate::EvidenceGuardMode::Off)
+    .with_focus_nudge(false);
+    let result = runtime
+        .run_turn("correct this file", None)
+        .expect("repair remains possible");
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "two failed executions plus one successful execution after a real correction"
+    );
+    assert!(assistant_text_from_turn_summary(&result).contains("source repaired"));
+}
+
 /// A non-converging ordinary turn enters a bounded delivery phase and returns
 /// visible status instead of surfacing an internal budget error.
 #[test]

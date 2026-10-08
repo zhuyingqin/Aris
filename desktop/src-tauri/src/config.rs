@@ -601,6 +601,17 @@ fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+pub(crate) fn set_somni_image_preferences(enabled: bool, model: Option<String>) -> Result<(), String> {
+    let mut obj = load_object();
+    obj.insert("somni_image_enabled".into(), Value::Bool(enabled));
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        obj.insert("somni_image_model".into(), Value::String(model.trim().to_string()));
+    } else {
+        obj.remove("somni_image_model");
+    }
+    save_object(&obj)
+}
+
 /// Merge `values` into the saved config and persist. Used by the managed-login
 /// flow to stash the new-api session (base URL, user id, access token) so the
 /// account bootstrap can refresh later without re-prompting for a password.
@@ -1158,13 +1169,17 @@ fn normalize_managed_model_slots(obj: &mut Map<String, Value>) -> Result<bool, S
     let before = obj.clone();
     backfill_managed_executor_credentials(obj);
     if let Some(model) = get_non_empty(obj, "executor_model") {
-        if managed_model_contains(obj, &model) {
+        if managed_model_contains(obj, &model)
+            && get_non_empty(obj, "executor_provider").as_deref() != Some("opencode")
+        {
             apply_managed_executor(obj, &model)?;
         }
     }
 
     if let Some(model) = get_non_empty(obj, "reviewer_model") {
-        if managed_model_contains(obj, &model) {
+        if managed_model_contains(obj, &model)
+            && get_non_empty(obj, "reviewer_provider").as_deref() != Some("opencode")
+        {
             let Some((base_url, api_key)) = managed_executor_credentials(obj) else {
                 return Err(
                     "New API account token is not available. Sign in again, then sync models."
@@ -1193,6 +1208,13 @@ pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String
         return Err("model id must not be empty".to_string());
     }
     let mut obj = load_object();
+    // A configured fixed channel takes precedence over the account's model
+    // list. Matching model names must never replace its endpoint or identity.
+    if get_non_empty(&obj, "executor_provider").as_deref() == Some("opencode")
+        && get_non_empty(&obj, "executor_model").as_deref() == Some(model)
+    {
+        return Ok(Some(obj));
+    }
     if managed_model_contains(&obj, model) {
         apply_managed_executor(&mut obj, model)?;
         return Ok(Some(obj));
@@ -1218,6 +1240,30 @@ pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String
         return Ok(Some(obj));
     }
     Ok(None)
+}
+
+/// Text models synced to the signed-in Somni account; image models excluded.
+pub(crate) fn managed_text_models() -> Vec<String> {
+    read_string_list(&load_object(), "managed_models")
+        .into_iter()
+        .filter(|model| !api::is_image_generation_model(model))
+        .collect()
+}
+
+/// A synced account model as a one-off figure Reviewer. Settings and the
+/// process-wide reviewer environment stay unchanged.
+pub(crate) fn managed_figure_reviewer(model: &str) -> Result<tools::PreparedLlmReview, String> {
+    let obj = load_object();
+    if !managed_model_contains(&obj, model) || api::is_image_generation_model(model) {
+        return Err("Choose a Reviewer from the text models synced to your Somni account".into());
+    }
+    let (base_url, api_key) = managed_executor_credentials(&obj)
+        .ok_or("Sign in to your Somni account again, then sync models.")?;
+    Ok(tools::PreparedLlmReview::openai_compatible(
+        api_key,
+        base_url,
+        model.to_string(),
+    ).with_routing_session_header(true))
 }
 
 pub(crate) fn switch_to_managed_executor(model: &str) -> Result<bool, String> {
@@ -1686,6 +1732,7 @@ fn clear_forced_reviewer_environment(force: bool) {
         "ARIS_REVIEWER_MODEL",
         "ARIS_REVIEWER_BASE_URL",
         "ARIS_REVIEWER_AUTH_TOKEN",
+        "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL",
     ] {
         std::env::remove_var(key);
     }
@@ -1711,6 +1758,13 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     set_env_if_allowed("ARIS_REVIEWER_PROVIDER", provider.clone(), force);
     set_env_if_allowed("ARIS_REVIEWER_MODEL", model, force);
     set_env_if_allowed("ARIS_REVIEWER_BASE_URL", base_url, force);
+    // Endpoint-scoped metadata: an inherited/custom Reviewer at another
+    // endpoint must not receive this account gateway's session policy.
+    set_env_if_allowed(
+        "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL",
+        managed_executor_base_url(obj),
+        force,
+    );
     set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
     set_env_if_allowed(
         "ARIS_REASONING_EFFORT",
@@ -1771,7 +1825,7 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
             set_env_if_allowed("DEEPSEEK_API_KEY", key.clone(), force);
             set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
         }
-        Some("anthropic-compat" | "custom") => {
+        Some("anthropic-compat" | "custom" | "opencode") => {
             set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
         }
         _ => {}

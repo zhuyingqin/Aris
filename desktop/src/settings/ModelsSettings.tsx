@@ -1,13 +1,18 @@
 import { useEffect } from "react";
 import type { NewApiAccount } from "../api/tauri";
+import { isImageGenerationModel } from "../imageModels";
+import SomniImageSettings from "./SomniImageSettings";
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
 import KeyInput from "./KeyInput";
 import PresetTextInput from "./PresetTextInput";
-import TestDetail from "./TestDetail";
 import type { SettingsConnectionState } from "./useSettingsConnectionState";
+import { SettingRow, SettingsAdvanced, SettingsFeedback, SettingsSection } from "./SettingsPrimitives";
+import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
+import { GENERAL_PAGE_COPY } from "./generalPageCopy";
+import "./ModelsSettings.css";
 import {
   ANTHROPIC_COMPAT_URLS,
   OPENAI_COMPAT_URLS,
@@ -28,7 +33,7 @@ interface Props {
   connection: SettingsConnectionState;
 }
 
-export default function ModelsSettings({ language, configView, account, managedModels, connection }: Props) {
+export default function ModelsSettings({ language, configView, managedModels, connection }: Props) {
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const {
@@ -37,9 +42,9 @@ export default function ModelsSettings({ language, configView, account, managedM
     scopusKey, setScopusKey,
     braveSearchKey, setBraveSearchKey,
     exaKey, setExaKey,
-    saveState, testState, testResult, webProviderTestState,
+    modelAutoSave, webProviderTestState,
     managedModelsLoading, managedModelsError,
-    resetOpState, save, test, testWebProvider, clearWebProviderKey, resetWebProviderTests,
+    resetOpState, testWebProvider, clearWebProviderKey, resetWebProviderTests,
     applyManagedModel, applyManagedReviewerModel, loadManagedModels,
     chooseSummaryProvider,
   } = connection;
@@ -93,16 +98,13 @@ export default function ModelsSettings({ language, configView, account, managedM
     [configView.executorModel, advForm.executorModel],
     configView.managedModels,
     (configView.verifiedExecutors ?? []).map((item) => item.model),
-  ).map((model) => ({ label: model, value: model }));
+  ).filter((model) => !isImageGenerationModel(model)).map((model) => ({ label: model, value: model }));
 
   const currentManagedModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const availableManagedModels = uniqueModelList(
     managedModels,
-    configView.managedModels,
     [configView.executorModel, configView.reviewerModel],
-    account?.models,
-  );
-  const managedModelPreview = availableManagedModels.slice(0, 12);
+  ).filter((model) => !isImageGenerationModel(model));
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
   // Endpoint actually used for the selected executor model. Prefer the entry
   // probed for this exact model over the live slot, since a model switch
@@ -119,351 +121,227 @@ export default function ModelsSettings({ language, configView, account, managedM
 
   return (
     <>
-      <div className="sp-update-section">
-        <div className="sp-section-head">
-          <div className="sp-section-head-text">
-            <div className="sp-section-title">{copy.modelServiceTitle}</div>
-            <div className="sp-section-sub">{copy.modelServiceSub}</div>
-          </div>
-          <div className="sp-update-actions">
-            <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
-              <SvgIcon name={managedModelsLoading ? "spinner" : "refresh"} size={13} />
-              {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
-            </button>
-          </div>
-        </div>
-        <div className="sp-model-pair">
-          <label className="sp-model-select-row">
-            <span>{copy.executorModel}</span>
-            {availableManagedModels.length > 0 ? (
-              <select
-                value={configView.executorModel ?? ""}
-                onChange={(event) => void applyManagedModel(event.target.value)}
-                className="sp-settings-select"
-              >
-                {availableManagedModels.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-            ) : (
-              <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
-            )}
-            {executorTransport ? (
-              <span
-                className={`sp-model-transport${executorTransport === "responses" ? " is-responses" : ""}`}
-                title={copy.transportHint}
-              >
-                {executorTransport === "responses" ? copy.transportResponses : copy.transportChat}
-              </span>
-            ) : null}
-          </label>
-          <label className="sp-model-select-row">
-            <span>{copy.reviewerModel}</span>
-            {availableManagedModels.length > 0 ? (
-              <select
-                value={currentReviewerModel}
-                onChange={(event) => void applyManagedReviewerModel(event.target.value)}
-                className="sp-settings-select"
-              >
-                <option value="">{copy.reviewerModelOff}</option>
-                {availableManagedModels.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-            ) : (
-              <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
-            )}
-          </label>
-        </div>
-        <div className="sp-update-panel sp-update-panel-current">
-          <div className="sp-update-main">
-            <span className="sp-update-dot sp-update-dot-current" />
-            <div className="sp-update-copy">
-              <div className="sp-update-title">
-                {copy.currentExecutor(currentManagedModel)}
-                {currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff}
-              </div>
-              <div className="sp-update-meta">
-                {managedModelsLoading
-                  ? copy.modelSyncingStatus
-                  : managedModelsError
-                    ? managedModelsError
-                    : availableManagedModels.length > 0
-                      ? copy.modelSynced(availableManagedModels.length)
-                      : copy.modelSyncAfterLoginStatus}
-              </div>
-              {managedModelPreview.length > 0 && (
-                <div className="sp-model-preview" aria-label={copy.modelSynced(availableManagedModels.length)}>
-                  {managedModelPreview.map((model) => (
-                    <span key={model}>{model}</span>
-                  ))}
-                  {availableManagedModels.length > managedModelPreview.length && (
-                    <span>+{availableManagedModels.length - managedModelPreview.length}</span>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="sp-advanced-wrap sp-advanced-wrap-tab">
-        <div className="sp-advanced-body">
-          <div className="sp-adv-main-header">
-            <div className="sp-section-title">{copy.advancedSummaryTools}</div>
-            <div className="sp-section-sub">{copy.advancedSummaryToolsSub}</div>
-          </div>
-
-          {/* Section 1: Auxiliary Models */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionAuxiliaryModels}</span>
-              <span className="sp-adv-section-sub">{copy.sectionAuxiliaryModelsSub}</span>
-            </div>
-            <div className="sp-adv-rows">
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.summaryProvider}</span>
-                  {copy.summaryProviderHint ? <span className="st-hint">{copy.summaryProviderHint}</span> : null}
-                </div>
-                <div className="st-row-control">
-                  <select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value, summaryProviderOptions)}>
-                    <option value="">{copy.summaryFollowExecutor}</option>
-                    <option value="__manual">{copy.summaryManual}</option>
-                    {summaryProviderOptions.map((item) => (
-                      <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {isManualSummaryProvider && (
-                <>
-                  <div className="st-row">
-                    <div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div>
-                    <div className="st-row-control">
-                      <select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}>
-                        <option value="openai">{copy.protocolOpenAiCompatible}</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="anthropic-compat">{copy.protocolAnthropicCompatible}</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="st-row">
-                    <div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div>
-                    <div className="st-row-control">
-                      <PresetTextInput
-                        value={advForm.summarizerBaseUrl ?? ""}
-                        placeholder="https://api.openai.com/v1"
-                        options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]}
-                        formatValue={(value) => displayServerValue(value, language)}
-                        onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }}
-                      />
-                    </div>
-                  </div>
-                  <div className="st-row">
-                    <div className="st-row-label">
-                      <span className="st-label">{copy.summaryApiKey}</span>
-                      <span className="st-hint">{configView.hasSummarizerKey ? copy.keySaved(configView.summarizerKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span>
-                    </div>
-                    <div className="st-row-control">
-                      <KeyInput
-                        value={summaryKey}
-                        placeholder={configView.hasSummarizerKey ? copy.keyKeep : copy.keyPasteSummary}
-                        masked={configView.summarizerKeyMasked}
-                        secretKind="summarizerApiKey"
-                        language={language}
-                        onChange={(value) => { resetOpState(); setSummaryKey(value); }}
-                      />
-                    </div>
-                  </div>
-                </>
-              )}
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.summaryModel}</span>
-                  <span className="st-hint">{copy.summaryModelHint}</span>
-                </div>
-                <div className="st-row-control">
-                  <PresetTextInput
-                    value={advForm.summarizerModel ?? ""}
-                    placeholder={copy.automaticPlaceholder}
-                    options={summaryModelOptions}
-                    onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }}
-                  />
-                </div>
-              </div>
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.retrievalCardModel}</span>
-                  <span className="st-hint">{copy.retrievalCardModelHint}</span>
-                </div>
-                <div className="st-row-control">
-                  <PresetTextInput
-                    value={advForm.retrievalCardModel ?? ""}
-                    placeholder={copy.retrievalCardFollowExecutor}
-                    options={retrievalCardModelOptions}
-                    onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 2: Literature APIs */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionLiteratureServices}</span>
-              <span className="sp-adv-section-sub">{copy.sectionLiteratureServicesSub}</span>
-            </div>
-            <div className="sp-adv-rows">
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldScopusKey}</span>
-                  <span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span>
-                </div>
-                <div className="st-row-control">
-                  <KeyInput
-                    value={scopusKey}
-                    placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus}
-                    masked={configView.scopusKeyMasked}
-                    secretKind="scopusApiKey"
-                    language={language}
-                    onChange={(value) => { resetOpState(); setScopusKey(value); }}
-                  />
-                </div>
-              </div>
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldOpenalexKey}</span>
-                  <span className="st-hint">{copy.openalexGatewayHint}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 3: Web Search & Community */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-section-head">
-              <span className="sp-adv-section-title">{copy.sectionWebSearchServices}</span>
-              <span className="sp-adv-section-sub">{copy.sectionWebSearchServicesSub}</span>
-            </div>
-            <div className="sp-adv-rows">
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldWebProxyUrl}</span>
-                  <span className="st-hint">{copy.webProxyHint}</span>
-                </div>
-                <div className="st-row-control">
-                  <input
-                    value={advForm.webProxyUrl ?? ""}
-                    placeholder={copy.webProxyPlaceholder}
-                    spellCheck={false}
-                    autoComplete="off"
-                    onChange={(event) => {
-                      resetOpState();
-                      setAdvForm((current) => ({ ...current, webProxyUrl: event.target.value }));
-                    }}
-                  />
-                </div>
-              </div>
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldBraveSearchKey}</span>
-                  <span className="st-hint">
-                    {configView.hasBraveSearchKey ? copy.keySaved(configView.braveSearchKeyMasked ?? copy.keyConfigured) : copy.keyNone}
-                  </span>
-                  {webProviderTestState.brave && (
-                    <span className={`st-hint${webProviderTestState.brave.ok ? " ok" : " failed"}`}>
-                      {webProviderTestState.brave.message}
-                    </span>
-                  )}
-                </div>
-                <div className="st-row-control st-search-service-control">
-                  <KeyInput
-                    value={braveSearchKey}
-                    placeholder={configView.hasBraveSearchKey ? copy.keyKeep : copy.keyPasteBraveSearch}
-                    masked={configView.braveSearchKeyMasked}
-                    secretKind="braveSearchApiKey"
-                    language={language}
-                    onChange={(value) => { resetOpState(); setBraveSearchKey(value); }}
-                  />
-                  <button type="button" onClick={() => void testWebProvider("brave")} disabled={webProviderTestState.brave?.testing}>
-                    {language === "cn" ? "测试" : "Test"}
-                  </button>
-                  {configView.hasBraveSearchKey && (
-                    <button type="button" className="danger" onClick={() => void clearWebProviderKey("brave", "braveSearchApiKey")}>
-                      {language === "cn" ? "清除" : "Clear"}
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldExaKey}</span>
-                  <span className="st-hint">
-                    {configView.hasExaKey ? copy.keySaved(configView.exaKeyMasked ?? copy.keyConfigured) : copy.keyNone}
-                  </span>
-                  {webProviderTestState.exa && (
-                    <span className={`st-hint${webProviderTestState.exa.ok ? " ok" : " failed"}`}>
-                      {webProviderTestState.exa.message}
-                    </span>
-                  )}
-                </div>
-                <div className="st-row-control st-search-service-control">
-                  <KeyInput
-                    value={exaKey}
-                    placeholder={configView.hasExaKey ? copy.keyKeep : copy.keyPasteExa}
-                    masked={configView.exaKeyMasked}
-                    secretKind="exaApiKey"
-                    language={language}
-                    onChange={(value) => { resetOpState(); setExaKey(value); }}
-                  />
-                  <button type="button" onClick={() => void testWebProvider("exa")} disabled={webProviderTestState.exa?.testing}>
-                    {language === "cn" ? "测试" : "Test"}
-                  </button>
-                  {configView.hasExaKey && (
-                    <button type="button" className="danger" onClick={() => void clearWebProviderKey("exa", "exaApiKey")}>
-                      {language === "cn" ? "清除" : "Clear"}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 4: System / Config File */}
-          <div className="sp-adv-section">
-            <div className="sp-adv-rows">
-              <div className="st-row">
-                <div className="st-row-label">
-                  <span className="st-label">{copy.fieldConfigFile}</span>
-                </div>
-                <div className="st-row-control">
-                  <input className="st-readonly-input" value={configView.configPath} readOnly />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {testResult && (
-            <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
-              <div className="st-test-summary">{testResult.message}</div>
-              <div className="st-test-grid">
-                {testResult.executor && <TestDetail detail={testResult.executor} language={language} />}
-                {testResult.reviewer && <TestDetail detail={testResult.reviewer} language={language} />}
-              </div>
-            </div>
+      <SettingsSection title={copy.modelServiceTitle} actions={
+        <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
+          <SvgIcon name={managedModelsLoading ? "spinner" : "refresh"} size={13} />
+          {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
+        </button>
+      }>
+        <SettingRow title={copy.executorModel} description={executorTransport ? executorTransport === "responses" ? copy.transportResponses : copy.transportChat : undefined}>
+          {availableManagedModels.length > 0 ? (
+            <select
+              aria-label={copy.executorModel}
+              title={executorTransport ? copy.transportHint : undefined}
+              value={configView.executorModel ?? ""}
+              onChange={(event) => void applyManagedModel(event.target.value)}
+              className="sp-settings-select"
+            >
+              {availableManagedModels.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
           )}
-          <div className="sp-detail-actions sp-advanced-actions">
-            <button className="sp-btn sp-btn-secondary" onClick={() => void test()} disabled={testState === "testing" || saveState === "saving"} type="button">
-              {testState === "testing" ? copy.testTesting : copy.testConnectionConfig}
-            </button>
-            <button className="sp-btn sp-btn-primary" onClick={() => void save()} disabled={saveState === "saving" || testState === "testing"} type="button">
-              {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.saveConnectionConfig}
-            </button>
-            {saveState === "saved" && <span className="st-save-info">{copy.saveConnectionSavedInfo}</span>}
-          </div>
+        </SettingRow>
+        <SettingRow title={copy.reviewerModel}>
+          {availableManagedModels.length > 0 ? (
+            <select
+              aria-label={copy.reviewerModel}
+              value={currentReviewerModel}
+              onChange={(event) => void applyManagedReviewerModel(event.target.value)}
+              className="sp-settings-select"
+            >
+              <option value="">{copy.reviewerModelOff}</option>
+              {availableManagedModels.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
+          )}
+        </SettingRow>
+        <div className="settings-model-status">
+          <p>
+            {copy.currentExecutor(currentManagedModel)}
+            {currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff}
+          </p>
+          <SettingsFeedback state={managedModelsError ? "error" : managedModelsLoading ? "saving" : "saved"}
+            message={managedModelsLoading
+              ? copy.modelSyncingStatus
+              : managedModelsError
+                ? managedModelsError
+                : availableManagedModels.length > 0
+                  ? copy.modelSynced(availableManagedModels.length)
+                  : copy.modelSyncAfterLoginStatus} />
         </div>
+      </SettingsSection>
+
+      <SomniImageSettings language={language} models={managedModels} />
+
+      <div className="settings-model-sections">
+
+        {/* Section 1: Auxiliary Models */}
+        <SettingsSection title={copy.sectionAuxiliaryModels}>
+          <SettingRow title={copy.summaryProvider}>
+            <select aria-label={copy.summaryProvider} value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value, summaryProviderOptions)}>
+              <option value="">{copy.summaryFollowExecutor}</option>
+              <option value="__manual">{copy.summaryManual}</option>
+              {summaryProviderOptions.map((item) => (
+                <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>
+              ))}
+            </select>
+          </SettingRow>
+          {isManualSummaryProvider && (
+            <>
+              <SettingRow title={copy.summaryProtocol}>
+                <select aria-label={copy.summaryProtocol} value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}>
+                  <option value="openai">{copy.protocolOpenAiCompatible}</option>
+                  <option value="opencode">{language === "cn" ? "OpenCode（固定渠道）" : "OpenCode (fixed channel)"}</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="anthropic-compat">{copy.protocolAnthropicCompatible}</option>
+                </select>
+              </SettingRow>
+              <SettingRow title={copy.summaryBaseUrl}>
+                <PresetTextInput
+                  label={copy.summaryBaseUrl}
+                  value={advForm.summarizerBaseUrl ?? ""}
+                  placeholder="https://api.openai.com/v1"
+                  options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]}
+                  formatValue={(value) => displayServerValue(value, language)}
+                  onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }}
+                />
+              </SettingRow>
+              <SettingRow title={copy.summaryApiKey} description={configView.hasSummarizerKey ? copy.keySaved(configView.summarizerKeyMasked ?? copy.keyConfigured) : copy.keyNone}>
+                <KeyInput
+                  label={copy.summaryApiKey}
+                  value={summaryKey}
+                  placeholder={configView.hasSummarizerKey ? copy.keyKeep : copy.keyPasteSummary}
+                  masked={configView.summarizerKeyMasked}
+                  secretKind="summarizerApiKey"
+                  language={language}
+                  onChange={(value) => { resetOpState(); setSummaryKey(value); }}
+                />
+              </SettingRow>
+            </>
+          )}
+          <SettingRow title={copy.summaryModel} description={copy.summaryModelHint}>
+            <PresetTextInput
+              label={copy.summaryModel}
+              value={advForm.summarizerModel ?? ""}
+              placeholder={copy.automaticPlaceholder}
+              options={summaryModelOptions}
+              onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }}
+            />
+          </SettingRow>
+          <SettingRow title={copy.retrievalCardModel} description={copy.retrievalCardModelHint}>
+            <PresetTextInput
+              label={copy.retrievalCardModel}
+              value={advForm.retrievalCardModel ?? ""}
+              placeholder={copy.retrievalCardFollowExecutor}
+              options={retrievalCardModelOptions}
+              onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }}
+            />
+          </SettingRow>
+        </SettingsSection>
+
+        {/* Section 2: Literature APIs */}
+        <SettingsSection title={copy.sectionLiteratureServices}>
+          <SettingRow title={copy.fieldScopusKey} description={configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}>
+            <KeyInput
+              label={copy.fieldScopusKey}
+              value={scopusKey}
+              placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus}
+              masked={configView.scopusKeyMasked}
+              secretKind="scopusApiKey"
+              language={language}
+              onChange={(value) => { resetOpState(); setScopusKey(value); }}
+            />
+          </SettingRow>
+          <SettingRow title={copy.fieldOpenalexKey} description={copy.openalexGatewayHint} children={null} />
+        </SettingsSection>
+
+        {/* Section 3: Web Search & Community */}
+        <SettingsSection title={copy.sectionWebSearchServices}>
+          <SettingRow title={copy.fieldWebProxyUrl} description={copy.webProxyHint}>
+            <input
+              aria-label={copy.fieldWebProxyUrl}
+              value={advForm.webProxyUrl ?? ""}
+              placeholder={copy.webProxyPlaceholder}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => {
+                resetOpState();
+                setAdvForm((current) => ({ ...current, webProxyUrl: event.target.value }));
+              }}
+            />
+          </SettingRow>
+          <SettingRow title={copy.fieldBraveSearchKey}
+            description={configView.hasBraveSearchKey ? copy.keySaved(configView.braveSearchKeyMasked ?? copy.keyConfigured) : copy.keyNone}
+            feedback={webProviderTestState.brave && <SettingsFeedback state={webProviderTestState.brave.testing ? "saving" : webProviderTestState.brave.ok ? "saved" : "error"} message={webProviderTestState.brave.message} />}>
+            <div className="settings-model-search-control">
+              <KeyInput
+                label={copy.fieldBraveSearchKey}
+                value={braveSearchKey}
+                placeholder={configView.hasBraveSearchKey ? copy.keyKeep : copy.keyPasteBraveSearch}
+                masked={configView.braveSearchKeyMasked}
+                secretKind="braveSearchApiKey"
+                language={language}
+                onChange={(value) => { resetOpState(); setBraveSearchKey(value); }}
+              />
+              <div className="settings-model-service-actions">
+                <button type="button" className="sp-btn sp-btn-secondary" onClick={() => void testWebProvider("brave")} disabled={webProviderTestState.brave?.testing}>
+                  {webProviderTestState.brave?.testing && <SvgIcon name="spinner" size={13} />}
+                  {language === "cn" ? "测试" : "Test"}
+                </button>
+                {configView.hasBraveSearchKey && (
+                  <button type="button" className="sp-btn sp-btn-secondary settings-model-button-danger" onClick={() => void clearWebProviderKey("brave", "braveSearchApiKey")}>
+                    {language === "cn" ? "清除" : "Clear"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </SettingRow>
+          <SettingRow title={copy.fieldExaKey}
+            description={configView.hasExaKey ? copy.keySaved(configView.exaKeyMasked ?? copy.keyConfigured) : copy.keyNone}
+            feedback={webProviderTestState.exa && <SettingsFeedback state={webProviderTestState.exa.testing ? "saving" : webProviderTestState.exa.ok ? "saved" : "error"} message={webProviderTestState.exa.message} />}>
+            <div className="settings-model-search-control">
+              <KeyInput
+                label={copy.fieldExaKey}
+                value={exaKey}
+                placeholder={configView.hasExaKey ? copy.keyKeep : copy.keyPasteExa}
+                masked={configView.exaKeyMasked}
+                secretKind="exaApiKey"
+                language={language}
+                onChange={(value) => { resetOpState(); setExaKey(value); }}
+              />
+              <div className="settings-model-service-actions">
+                <button type="button" className="sp-btn sp-btn-secondary" onClick={() => void testWebProvider("exa")} disabled={webProviderTestState.exa?.testing}>
+                  {webProviderTestState.exa?.testing && <SvgIcon name="spinner" size={13} />}
+                  {language === "cn" ? "测试" : "Test"}
+                </button>
+                {configView.hasExaKey && (
+                  <button type="button" className="sp-btn sp-btn-secondary settings-model-button-danger" onClick={() => void clearWebProviderKey("exa", "exaApiKey")}>
+                    {language === "cn" ? "清除" : "Clear"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </SettingRow>
+        </SettingsSection>
+
+        {/* Section 4: System / Config File */}
+        <SettingsAdvanced title={SETTINGS_LAYOUT_COPY[language].advanced}>
+          <div className="settings-section-body">
+            <SettingRow title={copy.fieldConfigFile}>
+              <input aria-label={copy.fieldConfigFile} className="st-readonly-input" value={configView.configPath} title={configView.configPath} readOnly />
+            </SettingRow>
+          </div>
+        </SettingsAdvanced>
+
+        {modelAutoSave.error && <SettingsFeedback state="error"
+          message={`${GENERAL_PAGE_COPY[language].saveFailed} ${modelAutoSave.error}`}
+          retryLabel={GENERAL_PAGE_COPY[language].retry} onRetry={modelAutoSave.retry} />}
       </div>
     </>
   );

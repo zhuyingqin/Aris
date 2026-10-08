@@ -324,6 +324,7 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
     let activity = crate::load_project_activity(workspace).ok().flatten();
     let goal = load_project_goal(workspace).ok().flatten();
     let mut lines = vec!["# Project continuity".to_string()];
+    lines.push("The latest explicit user request defines this turn's authorized task, including a new task outside the saved main line. Complete that request without asking the user to approve it again merely because it is absent from the project summary. Intent, activity and milestone state provide background; they do not veto or replace the current request. Ask only when an actual ambiguity or conflicting constraint prevents a necessary decision.".to_string());
     if let Some(intent) = intent {
         lines.push(format!("Long-term project intent: {}", intent.objective));
         lines.push(format!("Intent confidence: {}%", intent.confidence));
@@ -337,6 +338,7 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
     // left entirely to the user. See `ProjectActivity`.
     if let Some(activity) = activity {
         lines.push(format!("Current main line: {}", activity.core_focus));
+        lines.push(format!("Main-line summary last reviewed: {}. This is a saved historical summary and may omit newer requests; it is not a live authorization policy.", activity.reviewed_at));
         if !activity.related_work.is_empty() {
             lines.push(format!(
                 "Secondary work streams: {}",
@@ -344,17 +346,17 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
             ));
         }
         lines.push("The main line is what this project is actually working on now, curated from all of its conversations. It is not the milestone below: the milestone is one step, the main line is the through-line the steps serve.".to_string());
-        lines.push("Before starting a sub-investigation, and again whenever one has run long, state which of these the current work serves: the main line, a listed secondary stream, or neither. If neither, say so explicitly and get the user's agreement before continuing — do not drift onto it silently, and do not redefine the main line to match what you happen to be doing.".to_string());
+        lines.push("Before an agent-initiated sub-investigation, check whether it is necessary for the current user request or recorded completion checks. If it is necessary, proceed within that request's scope. If it is unrelated, do not drift onto it silently: defer it and continue the requested work, or ask before expanding scope when the expansion is necessary. A user-requested side task already has agreement; do not require a main-line classification or another confirmation. Do not redefine the stable project intent merely to match a short-term task.".to_string());
         if let Some(drift) = &activity.drift {
             lines.push(format!(
                 "Main-line deviation flagged by the last project review: {}",
                 drift.evidence
             ));
             lines.push(format!("Suggested way back: {}", drift.suggestion));
-            lines.push("Treat this as the reminder the user would otherwise have to give you. Resolve it before sinking further effort into the deviation: either finish the deviation in the next few steps, or park it and return to the main line.".to_string());
+            lines.push("This is an advisory from the last review. Apply it to unrequested detours only; it must not stop, shorten, or redirect the latest explicit user task. Finish the authorized task before considering a return to the saved main line.".to_string());
         }
     } else {
-        lines.push("Current main line: not curated yet (too few saved conversations, or the project summary review is disabled). Fall back to the intent and milestone below, and ask the user what the main thread is rather than assuming the sub-problem in front of you is it.".to_string());
+        lines.push("Current main line: not curated yet (too few saved conversations, or the project summary review is disabled). Use the latest user request as the active task and the intent and milestone as background. Missing summary state alone is not a reason to ask for confirmation or delay the request.".to_string());
     }
     if let Some(goal) = goal.filter(|goal| goal.status == ProjectGoalStatus::Active) {
         lines.push(format!("Current milestone: {}", goal.objective));

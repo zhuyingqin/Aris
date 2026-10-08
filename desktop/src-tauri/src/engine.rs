@@ -559,6 +559,19 @@ fn with_bound_project_environment<T>(
     Ok(runtime::with_project_execution_context(&context, action))
 }
 
+/// Scope a synchronous Chat operation to its session's project. Enter this
+/// on the worker that does the work; a thread-local binding cannot cross await.
+pub(crate) fn with_chat_project<T>(
+    project_id: Option<&str>,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let Some(project_id) = project_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return action();
+    };
+    let workspace = registered_project_workspace(project_id)?;
+    with_bound_project_environment(&workspace, project_id, action)?
+}
+
 impl Default for ChatState {
     fn default() -> Self {
         Self {
@@ -1198,6 +1211,7 @@ fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
             | "PowerShell"
             | ASK_USER_QUESTION_TOOL
             | CHATGPT_WEB_IMAGE_TOOL
+            | SOMNI_IMAGE_TOOL
             | LATEX_COMPILE_TOOL
     )
 }
@@ -2059,6 +2073,31 @@ where
     }
 }
 
+// Use one dispatch list for rich results and batch scheduling. Desktop tools
+// are not implemented by the shared registry, even when ToolSearch exposes
+// their schemas. Paid image calls and budgeted probes must stay serial.
+fn is_desktop_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        ASK_USER_QUESTION_TOOL
+            | REVIEW_WORKFLOW_STATE_TOOL
+            | WORKFLOW_SCOPUS_PROBE_TOOL
+            | PROJECT_EVIDENCE_SEARCH_TOOL
+            | COMPUTE_NODES_TOOL
+            | COMPUTE_JOB_SUBMIT_TOOL
+            | SOMNI_IMAGE_TOOL
+            | CHATGPT_WEB_CONSULT_TOOL
+            | CHATGPT_WEB_IMAGE_TOOL
+    )
+}
+
+fn desktop_tool_output(
+    tool_name: &str,
+    execute: impl FnOnce() -> Result<String, ToolError>,
+) -> Option<Result<ToolOutput, ToolError>> {
+    is_desktop_tool(tool_name).then(|| execute().map(ToolOutput::text))
+}
+
 impl<T> ToolExecutor for DesktopToolExecutor<T>
 where
     T: ToolExecutor,
@@ -2169,6 +2208,9 @@ where
                 serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
             })
             .map_err(ToolError::new)
+        } else if tool_name == SOMNI_IMAGE_TOOL {
+            crate::image_api::execute_tool(&self.workspace, input, self.cancelled.clone())
+                .map_err(ToolError::new)
         } else if tool_name == CHATGPT_WEB_CONSULT_TOOL {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -2230,21 +2272,10 @@ where
         // Local desktop-only tools keep their existing UI/question/progress
         // path. MCP and other wrapped tools use the rich path so inline image
         // blocks survive the desktop adapter instead of being stringified.
-        let desktop_only = matches!(
-            tool_name,
-            ASK_USER_QUESTION_TOOL
-                | REVIEW_WORKFLOW_STATE_TOOL
-                | WORKFLOW_SCOPUS_PROBE_TOOL
-                | PROJECT_EVIDENCE_SEARCH_TOOL
-                | COMPUTE_NODES_TOOL
-                | COMPUTE_JOB_SUBMIT_TOOL
-                | CHATGPT_WEB_CONSULT_TOOL
-                | CHATGPT_WEB_IMAGE_TOOL
-        );
-        if desktop_only {
-            return self
-                .execute_with_id(tool_use_id, tool_name, input)
-                .map(ToolOutput::text);
+        if let Some(result) = desktop_tool_output(tool_name, || {
+            self.execute_with_id(tool_use_id, tool_name, input)
+        }) {
+            return result;
         }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
@@ -2291,19 +2322,7 @@ where
         if self.source_only {
             return ToolExecution::Serial;
         }
-        if matches!(
-            tool_name,
-            ASK_USER_QUESTION_TOOL
-                | REVIEW_WORKFLOW_STATE_TOOL
-                // Serial so the per-turn probe budget is actually counted; a
-                // parallel batch could spend it several times over.
-                | WORKFLOW_SCOPUS_PROBE_TOOL
-                | PROJECT_EVIDENCE_SEARCH_TOOL
-                | COMPUTE_NODES_TOOL
-                | COMPUTE_JOB_SUBMIT_TOOL
-                | CHATGPT_WEB_CONSULT_TOOL
-                | CHATGPT_WEB_IMAGE_TOOL
-        ) {
+        if is_desktop_tool(tool_name) {
             ToolExecution::Serial
         } else {
             self.inner.execution(tool_name)
@@ -2823,7 +2842,10 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     if !is_blocked_tool(COMPUTE_JOB_SUBMIT_TOOL, extra_blocked_tools) {
         specs.push(compute_job_submit_tool_spec());
     }
-    // The model sees one image tool with one unchanged schema. Whether it runs
+    if crate::image_api::tool_available() && !is_blocked_tool(SOMNI_IMAGE_TOOL, extra_blocked_tools) {
+        specs.push(somni_image_tool_spec());
+    }
+    // The model sees one webpage image tool with one unchanged schema. Whether it runs
     // on this machine's own ChatGPT account or is brokered to another user's
     // is an execution detail, decided at call time with local account first.
     if (crate::oracle_web::image_tool_available() || crate::image_assist::helper_online())
@@ -2975,6 +2997,30 @@ const COMPUTE_NODES_TOOL: &str = "ComputeNodes";
 const COMPUTE_JOB_SUBMIT_TOOL: &str = "ComputeJobSubmit";
 const CHATGPT_WEB_CONSULT_TOOL: &str = "ChatGptWebConsult";
 const CHATGPT_WEB_IMAGE_TOOL: &str = "ChatGptWebImage";
+const SOMNI_IMAGE_TOOL: &str = "SomniImage";
+
+fn somni_image_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: SOMNI_IMAGE_TOOL,
+        description: "Generate or edit images through the user's Somni account and its configured drawing model. When the user asks for an image, compose a complete prompt describing the subject, composition, relationships, style, exact labels, and requested changes, then call this tool. Prefer this API for ordinary image requests when available; use the webpage or Image Assist only when the user requests that route. Files are optional reference images within the current project. Generated images and a record of the actual prompt/model are saved locally under `.somniq/artifacts/somni-images/`. The request spends the user's gateway quota. For scientific plots of measured data, use plotting code with the real data. Do not automatically resubmit a failed or timed-out paid request.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 120000,
+                    "description": "Complete drawing instruction constructed from the user's request and relevant conversation context."},
+                "files": {"type": "array", "maxItems": 16, "items": {"type": "string"},
+                    "description": "Optional project-relative reference image paths. With references the images/edits API is used."},
+                "model": {"type": "string", "description": "Optional drawing model ID. Omit to use the drawing model selected in Settings > Models."},
+                "size": {"type": "string", "enum": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+                    "description": "Defaults to 1024x1024. Landscape is 1536x1024 and portrait is 1024x1536."},
+                "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
+                "n": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Defaults to one image."}
+            },
+            "required": ["prompt"], "additionalProperties": false
+        }),
+        required_permission: PermissionMode::DangerFullAccess,
+    }
+}
 
 fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
@@ -3020,7 +3066,7 @@ fn chatgpt_web_consult_tool_spec() -> tools::ToolSpec {
 fn chatgpt_web_image_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
         name: CHATGPT_WEB_IMAGE_TOOL,
-        description: "Generate image artifacts through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. Use it only when the user asks to create or edit an image. Reference files must be inside the active project; generated files are imported into `.somniq/artifacts/oracle-images/` and returned as local paths.",
+        description: "Generate image artifacts through the user's explicitly assigned, isolated ChatGPT Web account using the open-source Oracle browser runtime. This is a third-party webpage automation action, not the OpenAI API. When SomniImage is available, use this tool only if the user explicitly requests the webpage, Oracle or Image Assist route. A request to use GPT or GPT Image is an API image request, not a webpage selection. Reference files must be inside the active project; generated files are imported into `.somniq/artifacts/oracle-images/` and returned as local paths.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -3042,7 +3088,7 @@ fn chatgpt_web_image_tool_spec() -> tools::ToolSpec {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional ChatGPT UI model label; omit to use the account default."
+                    "description": "Optional ChatGPT UI model label. Set only when the user explicitly requests a model; otherwise omit to keep the assigned account's current webpage model."
                 }
             },
             "required": ["prompt"],
@@ -3698,9 +3744,12 @@ fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
 pub fn chat_permission_get(
     state: State<ChatState>,
     session_id: String,
+    project_id: Option<String>,
 ) -> Result<PermissionModeView, String> {
     validate_session_id(&session_id)?;
-    permission_mode_for(&state, &session_id).map(permission_mode_view)
+    with_chat_project(project_id.as_deref(), || {
+        permission_mode_for(&state, &session_id).map(permission_mode_view)
+    })
 }
 
 #[tauri::command]
@@ -4823,6 +4872,44 @@ pub fn chat_run_command(
     state: State<ChatState>,
     session_id: String,
     input: String,
+    project_id: Option<String>,
+) -> Result<ChatCommandResult, String> {
+    with_chat_project(project_id.as_deref(), || {
+        run_chat_command(app, state.inner(), session_id, input)
+    })
+}
+
+/// `reviewer_model` other than the configured Reviewer must be a synced
+/// account model; it is resolved for this task only.
+pub(crate) fn figure_connections(model: Option<&str>, reviewer_model: Option<&str>) -> Result<(aris_chat::figures::FigureExecutor, tools::PreparedLlmReview), String> {
+    let _setup = project_env_lock().lock().map_err(|e| e.to_string())?;
+    let current = resolve_executor()?;
+    let (model, provider, config) = if model.is_some_and(|requested| !requested.eq_ignore_ascii_case(&current.0)) { resolve_executor_for_model(model)? } else { current };
+    let configured = configured_reviewer_identity();
+    let requested = reviewer_model.map(str::trim).filter(|requested| !requested.is_empty() && configured.as_ref().is_none_or(|(_, configured)| !configured.eq_ignore_ascii_case(requested)));
+    let (reviewer_model, reviewer) = if let Some(requested) = requested {
+        (requested.to_string(), crate::config::managed_figure_reviewer(requested)?)
+    } else {
+        let (reviewer_provider, reviewer_model) = configured.ok_or("Choose an independent Reviewer before starting a figure task")?;
+        if reviewer_provider == "oracle-web" { return Err("Figures currently require an API Reviewer; choose one for this task".into()); }
+        crate::config::apply_reviewer_environment(true);
+        (reviewer_model.clone(), tools::prepare_llm_review(Some(reviewer_model))?)
+    };
+    if !reviewer_is_independent("", &reviewer_model, &provider, &model) { return Err("Figure Executor and independent Reviewer must use different models".into()); }
+    let reviewer = reviewer.freeze_for_figures();
+    let executor = aris_chat::figures::FigureExecutor::new(model, provider, config);
+    for identity in [&executor.identity, &reviewer.figure_identity()] {
+        let url = reqwest::Url::parse(&identity.endpoint).map_err(|_| "Invalid model endpoint")?;
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() { return Err("Model endpoints must not contain embedded credentials or query parameters".into()); }
+    }
+    Ok((executor, reviewer))
+}
+
+fn run_chat_command(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    input: String,
 ) -> Result<ChatCommandResult, String> {
     validate_session_id(&session_id)?;
     let trimmed = input.trim();
@@ -5124,7 +5211,7 @@ pub async fn chat_suggest_title(request: ChatTitleRequest) -> Result<String, Str
 
 #[tauri::command]
 pub fn project_brief_get(project_id: String) -> Result<runtime::ProjectBrief, String> {
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     runtime::project_brief(&workspace)
 }
 
@@ -5147,7 +5234,7 @@ pub async fn project_brief_review(
     trigger: ProjectActivityReviewTrigger,
 ) -> Result<runtime::ProjectBrief, String> {
     validate_session_id(&trigger.session_id)?;
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let Some(_guard) = ProjectActivityReviewGuard::begin(&project_id)? else {
             return runtime::project_brief(&workspace);
@@ -5165,7 +5252,7 @@ pub async fn project_intent_observe(
     observations: Vec<runtime::ProjectIntentObservation>,
 ) -> Result<runtime::ProjectBrief, String> {
     validate_session_id(&session_id)?;
-    let workspace = active_project_workspace(&project_id)?;
+    let workspace = registered_project_workspace(&project_id)?;
     let state = runtime::record_project_intent_observations(&workspace, &session_id, observations)?;
     if !runtime::project_intent_needs_review(&state) {
         return runtime::project_brief(&workspace);
@@ -5184,20 +5271,19 @@ pub async fn project_intent_observe(
     runtime::project_brief(&workspace)
 }
 
-fn active_project_workspace(project_id: &str) -> Result<PathBuf, String> {
+fn registered_project_workspace(project_id: &str) -> Result<PathBuf, String> {
     if !crate::state::valid_project_id(project_id) {
         return Err("invalid project id".to_string());
     }
-    let active = std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string());
-    if active != project_id {
+    let workspace = crate::projects::project_path_for_registered_id(project_id)
+        .ok_or_else(|| "project not found".to_string())?;
+    if project_id != "default" && !workspace.is_dir() {
         return Err(format!(
-            "project `{project_id}` is not active; switch projects before reading its goal"
+            "project directory does not exist: {}",
+            workspace.display()
         ));
     }
-    std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .map_err(|error| error.to_string())
+    Ok(workspace)
 }
 
 #[derive(Debug, Deserialize)]
@@ -8396,52 +8482,61 @@ async fn run_chat_turn_with_context(
     let preflight_summarizer_model = summarizer_model.clone();
     let preflight_summarizer_config = summarizer_config.clone();
     let preflight_project_id = remote_project_id_owned.clone();
+    let preflight_binding = project_binding.clone();
     let preflight_cancelled = cancelled.clone();
     let preflight = tauri::async_runtime::spawn_blocking(move || {
-        let total_started = Instant::now();
-        let load_started = Instant::now();
-        let session = if let Some(session) = cached_local_session {
-            session
-        } else if let Some(project_id) = preflight_project_id.as_deref() {
-            get_project_scoped_chat_session(project_id, &preflight_session_id)?
-        } else {
-            load_chat_session(&preflight_session_id)?
+        let prepare = || {
+            let total_started = Instant::now();
+            let load_started = Instant::now();
+            let session = if let Some(session) = cached_local_session {
+                session
+            } else if let Some(project_id) = preflight_project_id.as_deref() {
+                get_project_scoped_chat_session(project_id, &preflight_session_id)?
+            } else {
+                load_chat_session(&preflight_session_id)?
+            };
+            crate::chat_events::record_event(
+                &preflight_session_id,
+                "preflight_stage",
+                json!({
+                    "sessionId": &preflight_session_id,
+                    "stage": "session_load",
+                    "elapsedMs": load_started.elapsed().as_millis(),
+                }),
+            );
+            if preflight_cancelled.load(Ordering::SeqCst) {
+                return Err("interrupted by user".to_string());
+            }
+            let result = maybe_auto_compact(
+                &preflight_app,
+                &preflight_session_id,
+                &preflight_model,
+                preflight_executor_config,
+                preflight_summarizer_model,
+                preflight_summarizer_config,
+                session,
+                emit_desktop_chat_events,
+                event_delivery,
+                &preflight_cancelled,
+            );
+            crate::chat_events::record_event(
+                &preflight_session_id,
+                "preflight_stage",
+                json!({
+                    "sessionId": &preflight_session_id,
+                    "stage": "total",
+                    "elapsedMs": total_started.elapsed().as_millis(),
+                    "completed": result.is_ok(),
+                }),
+            );
+            result
         };
-        crate::chat_events::record_event(
-            &preflight_session_id,
-            "preflight_stage",
-            json!({
-                "sessionId": &preflight_session_id,
-                "stage": "session_load",
-                "elapsedMs": load_started.elapsed().as_millis(),
-            }),
-        );
-        if preflight_cancelled.load(Ordering::SeqCst) {
-            return Err("interrupted by user".to_string());
+        match preflight_binding {
+            Some(binding) => {
+                with_bound_project_environment(&binding.workspace, &binding.project_id, prepare)?
+            }
+            None => prepare(),
         }
-        let result = maybe_auto_compact(
-            &preflight_app,
-            &preflight_session_id,
-            &preflight_model,
-            preflight_executor_config,
-            preflight_summarizer_model,
-            preflight_summarizer_config,
-            session,
-            emit_desktop_chat_events,
-            event_delivery,
-            &preflight_cancelled,
-        );
-        crate::chat_events::record_event(
-            &preflight_session_id,
-            "preflight_stage",
-            json!({
-                "sessionId": &preflight_session_id,
-                "stage": "total",
-                "elapsedMs": total_started.elapsed().as_millis(),
-                "completed": result.is_ok(),
-            }),
-        );
-        result
     })
     .await;
     let session = match preflight {
@@ -8491,7 +8586,7 @@ async fn run_chat_turn_with_context(
             state.question_prompts.clone(),
         )
     } else {
-        match permission_mode_for(&state, &session_id) {
+        match with_chat_project(project_id.as_deref(), || permission_mode_for(&state, &session_id)) {
             Ok(permission_mode) => (
                 permission_mode,
                 state.permission_prompts.clone(),
@@ -8811,6 +8906,12 @@ async fn run_chat_turn_with_context(
                             .join(", ")
                     ));
                 }
+            }
+            if crate::image_api::tool_available() {
+                system_prompt.push(
+                    "Configured integration: SomniImage generates or edits images through the user's Somni gateway account. When the user asks to draw, create an illustration, or edit an image, build the complete prompt yourself from their request and context, then call SomniImage. Include the intended composition, relationships, style and exact labels. Use project image paths as files for editing. The drawing model is configured separately from your chat model; omit model unless the user requests a specific drawing model. In this drawing context, GPT / GPT Image / GPT2 refers to the configured GPT Image drawing family; do not reinterpret it as the historical GPT-2 text model or as an Oracle webpage selection. Prefer this service for ordinary image requests, respect any explicit request for the webpage or Image Assist, and do not automatically resubmit a failed paid request. Use size (auto, 1024x1024, 1536x1024, 1024x1536), never the webpage tool's aspectRatio parameter. When the user requests API generation, do not substitute SVG, plotting code, webpage automation or Image Assist after a failure; report the actual API error. Return the local image path and describe the result without claiming to have inspected pixels unless you actually read the image."
+                        .to_string(),
+                );
             }
             if crate::oracle_web::consult_tool_available() {
                 system_prompt.push(
@@ -9702,6 +9803,17 @@ pub async fn chat_rewind_to_user_message(
     state: State<'_, ChatState>,
     session_id: String,
     message: ChatContextUserMessage,
+    project_id: Option<String>,
+) -> Result<Option<u64>, String> {
+    with_chat_project(project_id.as_deref(), || {
+        rewind_chat_context(state.inner(), session_id, message)
+    })
+}
+
+fn rewind_chat_context(
+    state: &ChatState,
+    session_id: String,
+    message: ChatContextUserMessage,
 ) -> Result<Option<u64>, String> {
     validate_session_id(&session_id)?;
     release_cancelled_turn_for_replacement(&state, &session_id)?;
@@ -9741,6 +9853,7 @@ pub async fn chat_rewind_to_user_message(
 pub async fn chat_context_tokens(
     state: State<'_, ChatState>,
     session_id: String,
+    project_id: Option<String>,
 ) -> Result<Option<u64>, String> {
     validate_session_id(&session_id)?;
     let cached = state
@@ -9753,28 +9866,42 @@ pub async fn chat_context_tokens(
         return Ok(Some(runtime::estimate_session_tokens(&session) as u64));
     }
 
-    let path = chat_session_path(&session_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
     tauri::async_runtime::spawn_blocking(move || {
-        Session::load_from_path(path)
-            .map(|session| Some(runtime::estimate_session_tokens(&session) as u64))
-            .map_err(|error| error.to_string())
+        with_chat_project(project_id.as_deref(), || {
+            let path = chat_session_path(&session_id)?;
+            if !path.exists() {
+                return Ok(None);
+            }
+            Session::load_from_path(path)
+                .map(|session| Some(runtime::estimate_session_tokens(&session) as u64))
+                .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn chat_tasks_get(session_id: String) -> Result<Vec<Value>, String> {
+pub fn chat_tasks_get(session_id: String, project_id: Option<String>) -> Result<Vec<Value>, String> {
     validate_session_id(&session_id)?;
-    read_session_tasks(&session_id)
+    with_chat_project(project_id.as_deref(), || read_session_tasks(&session_id))
 }
 
 #[tauri::command]
 pub async fn chat_set_context(
     state: State<'_, ChatState>,
+    session_id: String,
+    messages: Vec<ChatContextMessage>,
+    mode: Option<String>,
+    project_id: Option<String>,
+) -> Result<u64, String> {
+    with_chat_project(project_id.as_deref(), || {
+        set_chat_context(state.inner(), session_id, messages, mode)
+    })
+}
+
+fn set_chat_context(
+    state: &ChatState,
     session_id: String,
     messages: Vec<ChatContextMessage>,
     mode: Option<String>,
@@ -10094,18 +10221,15 @@ fn resolve_summarizer_config(
             let api_key = api_key.ok_or_else(|| {
                 "No API key configured for the selected summary provider.".to_string()
             })?;
-            let base_url =
-                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string());
-            let send_routing_session_header = obj
-                .get("newapi_executor_base_url")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some_and(|managed| {
-                    managed.trim_end_matches('/').eq_ignore_ascii_case(
-                        base_url.trim().trim_end_matches('/'),
-                    )
-                });
+            let base_url = if provider == "opencode" {
+                base_url.ok_or("Set the endpoint of this fixed OpenCode connection")?
+            } else {
+                base_url.unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string())
+            };
+            let managed_base_url = crate::config::managed_executor_base_url(obj);
+            let send_routing_session_header = api::connection_uses_routing_session_header(
+                &provider, &base_url, managed_base_url.as_deref(),
+            );
             aris_chat::ChatExecutorConfig::OpenAiCompatible {
                 api_key,
                 base_url,
@@ -10547,9 +10671,9 @@ fn skill_prompt(name: &str, args: &str) -> String {
 }
 
 fn aris_tasks_path() -> PathBuf {
-    std::env::var("CLAWD_TODO_STORE")
+    runtime::execution_env_var_os("CLAWD_TODO_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::state::config_dir().join("tasks.json"))
+        .unwrap_or_else(|| crate::state::config_dir().join("tasks.json"))
 }
 
 fn session_tasks_path(session_id: &str) -> PathBuf {
@@ -11308,11 +11432,14 @@ pub fn chat_debug_zip_export(
     state: State<ChatState>,
     session_id: String,
     path: Option<String>,
+    project_id: Option<String>,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
-    let session = get_cached_or_disk_session(&state, &session_id)?;
-    let export = export_debug_zip(&session_id, &session, path.as_deref())?;
-    Ok(export.path.display().to_string())
+    with_chat_project(project_id.as_deref(), || {
+        let session = get_cached_or_disk_session(&state, &session_id)?;
+        let export = export_debug_zip(&session_id, &session, path.as_deref())?;
+        Ok(export.path.display().to_string())
+    })
 }
 
 fn resolve_debug_zip_path(
@@ -11790,7 +11917,7 @@ fn render_desktop_repl_help() -> String {
 /// content. `status_context` itself is still right for `/status` and prompt
 /// building, where the git context is actually used.
 fn memory_file_count() -> Option<usize> {
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = runtime::execution_current_dir().ok()?;
     let hot_memory_count = runtime::load_hot_memory(&cwd)
         .map(|memory| memory.memory.len() + memory.user.len())
         .unwrap_or_default();
@@ -11799,7 +11926,7 @@ fn memory_file_count() -> Option<usize> {
 }
 
 fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered_config_files = loader.discover().len();
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
@@ -11842,7 +11969,7 @@ fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<S
 fn find_git_root() -> Result<PathBuf, String> {
     let output = crate::process::hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(std::env::current_dir().map_err(|e| e.to_string())?)
+        .current_dir(runtime::execution_current_dir().map_err(|e| e.to_string())?)
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -11853,12 +11980,12 @@ fn find_git_root() -> Result<PathBuf, String> {
 }
 
 fn render_config_report(section: Option<&str>) -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     runtime::render_config_report(&cwd, section)
 }
 
 fn render_memory_report() -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     runtime::render_memory_report(&cwd)
 }
 
@@ -11867,7 +11994,7 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
         None | Some("show") => render_memory_report(),
         Some("pending") => {
             let scope = runtime::project_scope(
-                &std::env::current_dir().map_err(|error| error.to_string())?,
+                &runtime::execution_current_dir().map_err(|error| error.to_string())?,
             );
             serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)
                 .map_err(|error| error.to_string())
@@ -11901,10 +12028,7 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
 }
 
 fn handle_goal_command(action: Option<&str>, objective: Option<&str>) -> Result<String, String> {
-    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_dir())
-        .map_err(|error| error.to_string())?;
+    let workspace = runtime::workspace_root_from_env();
     let manual_draft = |value: &str| runtime::ProjectGoalDraft {
         objective: value.to_string(),
         success_criteria: Vec::new(),
@@ -11936,7 +12060,7 @@ fn handle_goal_command(action: Option<&str>, objective: Option<&str>) -> Result<
 }
 
 fn init_desktop_repo() -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let gitignore = cwd.join(".gitignore");
     let agents_md = cwd.join("AGENTS.md");
     let mut lines = vec![
@@ -12034,7 +12158,7 @@ fn render_diff_report() -> Result<String, String> {
 }
 
 fn render_teleport_report(target: &str) -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::execution_current_dir().map_err(|e| e.to_string())?;
     let file_matches = crate::process::hidden_command("rg")
         .args(["--files"])
         .current_dir(&cwd)
@@ -12309,7 +12433,7 @@ fn render_export_text(session: &Session) -> String {
 fn git_output(args: &[&str]) -> Result<String, String> {
     let output = crate::process::hidden_command("git")
         .args(args)
-        .current_dir(std::env::current_dir().map_err(|e| e.to_string())?)
+        .current_dir(runtime::execution_current_dir().map_err(|e| e.to_string())?)
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {

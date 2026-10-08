@@ -102,13 +102,27 @@ describe("ImageWorkflowPanel", () => {
     })));
   });
 
+  it("imports Somni tool prompts, actual models and lineage into the same canvas", () => {
+    const somniTurn: ChatTurn = { id: "somni-result", role: "assistant", blocks: [{ kind: "tool", name: "SomniImage",
+      input: JSON.stringify({ prompt: "Improve the diagram labels", files: ["F:/project/esn-v1.png"] }),
+      output: JSON.stringify({ model: "gpt-image-2.5-flare", images: [{ path: "F:/project/esn-v2.png" }] }),
+    }] };
+    const calls = imageWorkflowCallsFromTurns([...turns, somniTurn]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].model).toBe("gpt-image-2.5-flare");
+    expect(calls[1].prompt).toBe("Improve the diagram labels");
+    expect(calls[1].sourceIds).toEqual([calls[0].generations[0].id]);
+    expect(layoutImageWorkflow(calls).edges.some((edge) => edge.kind === "lineage")).toBe(true);
+  });
+
   it("offers a first-generation starter when the canvas is empty", async () => {
     const onSendToChat = vi.fn();
     render(<ImageWorkflowPanel sessionId="starter" turns={[]} language="en" onSendToChat={onSendToChat} />);
 
     await userEvent.click(screen.getByRole("button", { name: /Draft the first generation/ }));
 
-    expect(onSendToChat.mock.calls[0][0]).toContain("ChatGptWebImage");
+    expect(onSendToChat.mock.calls[0][0]).toContain("complete drawing prompt");
+    expect(onSendToChat.mock.calls[0][0]).toContain("configured drawing service");
     expect(await screen.findByText("Added to composer — press Enter")).toBeTruthy();
   });
 

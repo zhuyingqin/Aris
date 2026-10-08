@@ -22,13 +22,22 @@ export interface DesktopCloseHazards {
   hasUnsavedChanges: boolean;
   /** Active, non-cancelled conversation turns owned by this desktop instance. */
   runningConversationCount: number;
+  runningFigureCount?: number;
+  hasUnsavedFigureChanges?: boolean;
 }
 
 export function desktopCloseConfirmationMessage(
   language: "cn" | "en",
-  { hasUnsavedChanges, runningConversationCount }: DesktopCloseHazards,
+  { hasUnsavedChanges, runningConversationCount, runningFigureCount = 0, hasUnsavedFigureChanges = false }: DesktopCloseHazards,
 ): string {
   const count = Math.max(0, Math.trunc(runningConversationCount));
+  const figures = Math.max(0, Math.trunc(runningFigureCount));
+  if (figures > 0 || hasUnsavedFigureChanges) {
+    const total = count + figures;
+    return language === "cn"
+      ? `${total > 0 ? `当前有 ${total} 个任务仍在运行。` : ""}${hasUnsavedChanges ? "有未保存的绘图或文档修改。" : ""}关闭 SomniQ Studio 会中断正在执行的任务并丢弃未保存修改。仍要关闭吗？`
+      : `${total > 0 ? `${total} task${total === 1 ? " is" : "s are"} still running. ` : ""}${hasUnsavedChanges ? "There are unsaved figure or document changes. " : ""}Closing SomniQ Studio interrupts active tasks and discards unsaved changes. Close anyway?`;
+  }
   if (language === "cn") {
     if (count > 0 && hasUnsavedChanges) {
       return `当前有 ${count} 个对话仍在运行，且有未保存的 LaTeX 修改。关闭 SomniQ Studio 会中断对话并丢弃未保存修改。仍要关闭吗？`;
@@ -49,8 +58,8 @@ export function desktopCloseConfirmationMessage(
 }
 
 export function shouldPreventDesktopClose(
-  { hasUnsavedChanges, runningConversationCount }: DesktopCloseHazards,
+  { hasUnsavedChanges, runningConversationCount, runningFigureCount = 0 }: DesktopCloseHazards,
   confirmClose: () => boolean,
 ): boolean {
-  return (hasUnsavedChanges || runningConversationCount > 0) && !confirmClose();
+  return (hasUnsavedChanges || runningConversationCount > 0 || runningFigureCount > 0) && !confirmClose();
 }

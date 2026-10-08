@@ -24,6 +24,23 @@ pub(crate) struct ManagedJob {
 }
 
 impl ManagedJob {
+    /// Adopt an async child before it can launch long-lived descendants.
+    pub(crate) fn adopt_tokio(child: &tokio::process::Child) -> Option<Self> {
+        let leader = child.id()?;
+        #[cfg(windows)]
+        {
+            let handle = platform::create_job()?;
+            if !platform::assign_handle(&handle, child.raw_handle()?) {
+                return None;
+            }
+            Some(Self { handle, leader })
+        }
+        #[cfg(not(windows))]
+        {
+            Some(Self { leader })
+        }
+    }
+
     /// Create a job and put `child` in it. Returns `None` when the platform
     /// refuses (older Windows in a locked-down job, missing permissions); the
     /// caller then falls back to the best-effort tree walk.
@@ -185,7 +202,11 @@ mod platform {
     }
 
     pub(super) fn assign(job: &JobHandle, child: &Child) -> bool {
-        unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle().cast::<c_void>()) != 0 }
+        assign_handle(job, child.as_raw_handle())
+    }
+
+    pub(super) fn assign_handle(job: &JobHandle, process: std::os::windows::io::RawHandle) -> bool {
+        unsafe { AssignProcessToJobObject(job.0, process.cast::<c_void>()) != 0 }
     }
 
     pub(super) fn live_pids(job: &JobHandle) -> Vec<u32> {

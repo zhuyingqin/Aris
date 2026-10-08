@@ -74,6 +74,12 @@ pub struct ReadFileOutput {
     #[serde(rename = "type")]
     pub kind: String,
     pub file: TextFilePayload,
+    #[serde(
+        default,
+        rename = "pdfExtraction",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pdf_extraction: Option<crate::PdfExtractionMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,18 +504,28 @@ pub fn read_file(
     }
     let bytes = fs::read(&absolute_path)?;
     let revision = content_revision(&bytes);
-    let content = if is_pdf_path(&absolute_path) {
-        extract_pdf_text_bytes(&absolute_path, &bytes)?
+    let pdf = if is_pdf_path(&absolute_path) {
+        Some(crate::extract_pdf_text_with_quality(&bytes).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("`{}` is not a PDF file", absolute_path.display()),
+            )
+        })?)
     } else {
-        decode_text_bytes(&bytes)?
+        None
     };
-    Ok(read_text_payload(
-        absolute_path,
-        &content,
-        offset,
-        limit,
-        revision,
-    ))
+    let content = match &pdf {
+        Some(extraction) if extraction.metadata.quality == crate::PdfTextQuality::NoText => {
+            extraction.text_for_reading()
+        }
+        Some(extraction) => extraction.text.clone(),
+        None => decode_text_bytes(&bytes)?,
+    };
+    let mut output = read_text_payload(absolute_path, &content, offset, limit, revision);
+    // Metadata is outside the paginated content, so even a later read window
+    // carries the quality ceiling. Keep the original text's line numbers stable.
+    output.pdf_extraction = pdf.map(|extraction| extraction.metadata);
+    Ok(output)
 }
 
 /// Entry point for tool dispatch: like `read_file`, but recognized image
@@ -630,6 +646,7 @@ fn read_text_payload(
         let content = long_file_preview(&lines, total_chars);
         return ReadFileOutput {
             kind: String::from("text"),
+            pdf_extraction: None,
             file: TextFilePayload {
                 file_path: display_path(&absolute_path),
                 num_lines: content.lines().count(),
@@ -652,6 +669,7 @@ fn read_text_payload(
 
     ReadFileOutput {
         kind: String::from("text"),
+        pdf_extraction: None,
         file: TextFilePayload {
             file_path: display_path(&absolute_path),
             content,
@@ -837,6 +855,7 @@ impl StreamingTextAccumulator {
             let start = self.start_index.min(self.total_lines);
             return ReadFileOutput {
                 kind: "text".to_string(),
+                pdf_extraction: None,
                 file: TextFilePayload {
                     file_path: display_path(path),
                     num_lines: self.selected.len(),
@@ -887,6 +906,7 @@ impl StreamingTextAccumulator {
         let preview_lines = content.lines().count();
         ReadFileOutput {
             kind: "text".to_string(),
+            pdf_extraction: None,
             file: TextFilePayload {
                 file_path: display_path(path),
                 num_lines: preview_lines,
@@ -1037,6 +1057,14 @@ pub(crate) fn replace_file_contents_unlocked(
 }
 
 fn read_optional_utf8(path: &Path) -> io::Result<Option<String>> {
+    if path.extension().is_some_and(|ext| {
+        ["doc", "docx", "docm", "dotx", "dotm"]
+            .iter()
+            .any(|kind| ext.eq_ignore_ascii_case(kind))
+    }) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            "Word files are binary packages: use read_docx/edit_docx for DOCX; do not overwrite them with text tools. Legacy .doc requires conversion first."));
+    }
     match fs::read(path) {
         Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
             io::Error::new(
@@ -3032,30 +3060,8 @@ fn is_pdf_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
-fn extract_pdf_text_bytes(path: &Path, bytes: &[u8]) -> io::Result<String> {
-    let Some(normalized) = extract_pdf_text_from_bytes(&bytes) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("`{}` is not a PDF file", path.display()),
-        ));
-    };
-    if normalized.trim().is_empty() {
-        Ok(format!(
-            "[PDF text extraction found no readable text in `{}`. The PDF may be scanned/image-only or use an unsupported encoding.]",
-            path.display()
-        ))
-    } else {
-        Ok(normalized)
-    }
-}
-
-/// Extracts readable text from in-memory PDF bytes.
-///
-/// Returns `None` when the bytes are not a PDF, and an empty string when the
-/// document carries no extractable text layer (scanned or image-only). Callers
-/// that already have the bytes in hand — a downloaded HTTP body, for instance —
-/// use this instead of round-tripping through a temporary file.
-pub fn extract_pdf_text_from_bytes(bytes: &[u8]) -> Option<String> {
+/// Best-effort scanner used only when the mature extractor rejects a document.
+pub(crate) fn extract_pdf_text_legacy(bytes: &[u8]) -> Option<String> {
     if !bytes.starts_with(b"%PDF") {
         return None;
     }
@@ -4295,7 +4301,7 @@ fn unified_range(start: usize, lines: usize) -> String {
     }
 }
 
-fn normalize_path(path: &str) -> io::Result<PathBuf> {
+pub(crate) fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
     let canonical = canonicalize_with_hint(&candidate)?;
@@ -4305,7 +4311,7 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 
-fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
+pub(crate) fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
     let canonical = canonicalize_with_hint(&candidate)?;

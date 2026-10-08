@@ -1,6 +1,173 @@
 use super::*;
 
 #[test]
+fn managed_gateway_migration_preserves_identity_and_copies_only_the_legacy_secret() {
+    use std::cell::RefCell;
+    let mut store = RemoteStore {
+        enabled: true,
+        gateway_url: Some(format!("{LEGACY_MANAGED_REMOTE_GATEWAY_URL}/")),
+        device_id: Some(DeviceId::new().to_string()),
+        pending_gateway_revocations: vec!["paired-phone".into()],
+        ..RemoteStore::default()
+    };
+    let mut expected = store.clone();
+    expected.gateway_url = Some("https://ensuanx.com".into());
+    let legacy = gateway_token_secret_account(LEGACY_MANAGED_REMOTE_GATEWAY_URL);
+    let canonical = gateway_token_secret_account(MANAGED_REMOTE_GATEWAY_URL);
+    let secrets = RefCell::new(BTreeMap::from([(
+        legacy.clone(),
+        b"legacy-test-device-token".to_vec(),
+    )]));
+    migrate_managed_gateway_profile(
+        &mut store,
+        |account| Ok(secrets.borrow().get(account).cloned()),
+        |account, secret| {
+            secrets.borrow_mut().insert(account.into(), secret.to_vec());
+            Ok(())
+        },
+    )
+    .expect("managed origin migrates");
+    assert_eq!(
+        serde_json::to_value(&store).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    assert_eq!(
+        secrets.borrow().get(&canonical),
+        secrets.borrow().get(&legacy)
+    );
+    assert_eq!(
+        secrets.borrow().len(),
+        2,
+        "the old credential remains recoverable"
+    );
+}
+
+#[test]
+fn managed_gateway_migration_keeps_a_newer_canonical_credential() {
+    let mut store = RemoteStore {
+        gateway_url: Some(LEGACY_MANAGED_REMOTE_GATEWAY_URL.into()),
+        ..RemoteStore::default()
+    };
+    let canonical = gateway_token_secret_account(MANAGED_REMOTE_GATEWAY_URL);
+    migrate_managed_gateway_profile(
+        &mut store,
+        |account| {
+            assert_eq!(account, canonical);
+            Ok(Some(b"newer-canonical-test-token".to_vec()))
+        },
+        |_, _| panic!("an existing canonical credential must not be overwritten"),
+    )
+    .unwrap();
+    assert_eq!(
+        store.gateway_url.as_deref(),
+        Some(MANAGED_REMOTE_GATEWAY_URL)
+    );
+}
+
+#[test]
+fn managed_gateway_migration_does_not_redirect_custom_profiles_or_read_their_secrets() {
+    for url in [
+        MANAGED_REMOTE_GATEWAY_URL,
+        "https://custom.example.test",
+        "https://somni.chat.example.test",
+        "https://somni.chat/custom",
+    ] {
+        let mut store = RemoteStore {
+            gateway_url: Some(url.into()),
+            ..RemoteStore::default()
+        };
+        migrate_managed_gateway_profile(
+            &mut store,
+            |_| panic!("unrelated profiles must not access the legacy keyring entry"),
+            |_, _| panic!("unrelated profiles must not copy credentials"),
+        )
+        .unwrap();
+        assert_eq!(store.gateway_url.as_deref(), Some(url));
+    }
+}
+
+#[test]
+fn managed_gateway_migration_leaves_the_route_unchanged_if_secret_copy_fails() {
+    let mut store = RemoteStore {
+        gateway_url: Some(LEGACY_MANAGED_REMOTE_GATEWAY_URL.into()),
+        ..RemoteStore::default()
+    };
+    let canonical = gateway_token_secret_account(MANAGED_REMOTE_GATEWAY_URL);
+    let result = migrate_managed_gateway_profile(
+        &mut store,
+        |account| {
+            Ok(if account == canonical {
+                None
+            } else {
+                Some(b"legacy-test-token".to_vec())
+            })
+        },
+        |_, _| Err("keyring write failed".into()),
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        store.gateway_url.as_deref(),
+        Some(LEGACY_MANAGED_REMOTE_GATEWAY_URL)
+    );
+}
+
+#[test]
+fn managed_gateway_migration_can_update_an_unenrolled_profile() {
+    let mut store = RemoteStore {
+        gateway_url: Some(LEGACY_MANAGED_REMOTE_GATEWAY_URL.into()),
+        ..RemoteStore::default()
+    };
+    migrate_managed_gateway_profile(
+        &mut store,
+        |_| Ok(None),
+        |_, _| panic!("no credential to copy"),
+    )
+    .unwrap();
+    assert_eq!(store.gateway_url.as_deref(), Some("https://ensuanx.com"));
+    assert!(store.device_id.is_none());
+}
+
+#[test]
+fn disconnected_signal_requests_cannot_fill_the_outbound_queue() {
+    let state = RemoteAgentState::at_path(
+        std::env::temp_dir().join(format!("somniq-signal-{}.json", DeviceId::new())),
+    );
+    let (sender, mut receiver) = mpsc::channel(MAX_PENDING_GATEWAY_SIGNALS);
+    set_signal_outbound_for_generation(&state, 0, Some(sender)).unwrap();
+    send_image_assist_frame(&state, ImageAssistClientFrame::RequestRoster).unwrap();
+    set_signal_outbound_for_generation(&state, 0, None).unwrap();
+    for _ in 0..MAX_PENDING_GATEWAY_SIGNALS * 3 {
+        let error =
+            send_image_assist_frame(&state, ImageAssistClientFrame::RequestRoster).unwrap_err();
+        assert!(
+            error.contains("unavailable"),
+            "offline requests must not become busy"
+        );
+    }
+    assert!(
+        receiver.try_recv().is_ok(),
+        "the connected request reached the queue"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "no offline request was queued"
+    );
+}
+
+#[test]
+fn obsolete_signal_runners_cannot_clear_the_replacement_queue() {
+    let state = RemoteAgentState::at_path(
+        std::env::temp_dir().join(format!("somniq-signal-generation-{}.json", DeviceId::new())),
+    );
+    state.transport_generation.store(2, Ordering::SeqCst);
+    let (sender, mut receiver) = mpsc::channel(MAX_PENDING_GATEWAY_SIGNALS);
+    set_signal_outbound_for_generation(&state, 2, Some(sender)).unwrap();
+    assert!(set_signal_outbound_for_generation(&state, 1, None).is_err());
+    send_image_assist_frame(&state, ImageAssistClientFrame::RequestRoster).unwrap();
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[test]
 fn system_desktop_names_are_safe_for_signed_device_descriptors() {
     assert_eq!(
         normalized_system_desktop_name("  LAB-WORKSTATION  "),

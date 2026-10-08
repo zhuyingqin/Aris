@@ -175,12 +175,29 @@ jobs:
         working-directory: desktop
         run: |
           npm run test:scripts
-          npx vitest run src/platform.test.ts src/windowControls.test.ts src/chat/ChatCompanion.test.tsx
+          npx vitest run src/platform.test.ts src/windowControls.test.ts src/chat/ChatCompanion.test.tsx src/chat/tests/Chat.test.tsx src/chat/tests/ChatThreadLanding.test.tsx src/chat/tests/docxReview.test.ts
           npm run typecheck
           npm run build
       - name: Native macOS checks
         run: |
           cargo check --manifest-path desktop/src-tauri/Cargo.toml --locked
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib platform::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib change_review -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib watcher::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib projects::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib state::tests -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib pinned_runtime_matches_the_offline_build_script -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib latex_toolchain_prompt -- --test-threads=1
+
+  docx-converters:
+    name: native Word equation and atomic-save regressions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install focused converter dependencies
+        run: python -m pip install 'python-docx==1.2.0' 'latex2mathml==3.78.1'
+      - name: Verify both distributed converters
+        run: python -B crates/runtime/assets/skills/patent-disclosure-skill/tests/test_docx_accuracy.py -v

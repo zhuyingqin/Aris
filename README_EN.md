@@ -18,7 +18,7 @@
 
 > **The desktop app for SomniQ** — Executor acts · Reviewer critiques · Iterate to excellence.
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](https://github.com/zhuyingqin/SomniQ/releases)
+[![Version](https://img.shields.io/badge/version-0.4.81-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/SomniQ)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
 [![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
