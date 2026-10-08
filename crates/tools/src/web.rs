@@ -813,6 +813,9 @@ fn continue_web_fetch(
             serde_json::from_str::<WebFetchSnapshotMetadata>(&body)
                 .map_err(|error| format!("web_fetch_error:invalid_cursor {error}"))
         })?;
+    if metadata.extraction == "pdf_text" {
+        return Err("web_fetch_error:outdated_pdf_extraction this PDF snapshot used the old simplified decoder. Fetch the original URL again without the cursor to obtain a quality-checked extraction; do not use the old text to verify formulas or quotations.".to_string());
+    }
     if metadata.schema_version != WEB_FETCH_SCHEMA_VERSION
         || metadata.artifact_id != cursor.artifact_id
         || metadata.capture_id != cursor.capture_id
@@ -5014,14 +5017,13 @@ fn normalize_fetched_markdown(
 }
 
 fn pdf_document_to_markdown(bytes: &[u8]) -> NormalizedWebFetch {
-    let text = runtime::extract_pdf_text_from_bytes(bytes).unwrap_or_default();
-    let text = text.trim();
-    if text.is_empty() {
+    let extraction = runtime::extract_pdf_text_with_quality(bytes);
+    let Some(extraction) = extraction.filter(|result| !result.text.trim().is_empty()) else {
         return NormalizedWebFetch {
             markdown: "[PDF text extraction found no readable text. The PDF may be scanned/image-only or use an unsupported encoding.]"
                 .to_string(),
             title: None,
-            extraction: "pdf_text".to_string(),
+            extraction: "pdf_text_v2".to_string(),
             extraction_complete: false,
             truncated_reason: Some("pdf_no_text_layer".to_string()),
             warnings: vec![
@@ -5029,14 +5031,17 @@ fn pdf_document_to_markdown(bytes: &[u8]) -> NormalizedWebFetch {
                     .to_string(),
             ],
         };
-    }
+    };
+    let confirmed = extraction.metadata.quality == runtime::PdfTextQuality::Readable;
+    let mut warnings = extraction.metadata.warnings.clone();
+    warnings.push(extraction.metadata.verification_hint.clone());
     NormalizedWebFetch {
-        title: bounded_web_fetch_title(first_nonempty_line(text)),
-        markdown: text.to_string(),
-        extraction: "pdf_text".to_string(),
-        extraction_complete: true,
-        truncated_reason: None,
-        warnings: Vec::new(),
+        title: bounded_web_fetch_title(first_nonempty_line(&extraction.text)),
+        markdown: extraction.text_for_reading(),
+        extraction: "pdf_text_v2".to_string(),
+        extraction_complete: confirmed,
+        truncated_reason: (!confirmed).then(|| "pdf_text_quality_unconfirmed".to_string()),
+        warnings,
     }
 }
 

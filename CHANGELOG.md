@@ -1,5 +1,34 @@
 # ARIS-Code Changelog
 
+## v0.4.81 (2026-10-08)
+
+- **Chat opens at the latest message** — returning to a kept-alive Chat waits
+  for loaded history and a visible viewport before aligning the final turn.
+  Delayed row measurements retain bottom alignment; scrolling into history
+  preserves the reader's position when new messages arrive.
+- **PDF evidence carries an explicit quality ceiling** — shared local reads and
+  WebFetch use a mature extractor and label incomplete or questionable text.
+  Unconfirmed text cannot become verification evidence. Formula, quotation and
+  numeric checks still require original-page verification.
+- **Current requests retain their authority** — saved project summaries provide
+  context without blocking an explicitly requested task. Known path, quoting,
+  regular-expression and edit-anchor failures provide concrete recovery hints;
+  unchanged deterministic failures have a bounded retry limit.
+- **Precise, reversible DOCX text editing** — Chat routes Word requests to
+  indexed paragraph reads and revision-checked exact edits. Native equations,
+  untouched formatting and package parts survive local text changes. Atomic
+  batches, review snapshots and byte-exact undo integrate with the shared
+  change ledger; protected document structures report an explicit limitation.
+- **Editable native Word equations** — the bundled converters preserve command
+  names, accents, limits, delimiters and matrix structure. Native OMML is the
+  default requirement; unsupported conversion fails without replacing the old
+  document. Image/text fallback requires an explicit option. Structural checks
+  cover a nine-equation document; Word/LibreOffice page rendering remains a
+  separate acceptance check.
+- **Version consistency** — manifests, product lockfiles and README badges use
+  0.4.81. The release workflow builds Windows/macOS installers, updater signatures
+  and the combined update manifest.
+
 ## v0.4.80 (2026-10-07)
 
 - **SomniFig research figure workspace** — generate or import a reference,

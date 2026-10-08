@@ -652,6 +652,7 @@ pub struct ConversationRuntime<C, T> {
     /// so one long stretch is reminded periodically rather than every
     /// iteration. Cleared when a new user turn starts a fresh window.
     last_focus_nudge_tool_calls: Option<usize>,
+    tool_recovery: crate::tool_recovery::ToolRecoveryState,
     /// Deterministic per-turn retrieval convergence and source-scope state.
     retrieval_guard: RetrievalGuard,
     /// Whether that state is consulted at all. See [`Self::without_retrieval_guard`].
@@ -821,6 +822,7 @@ where
             compaction_session_id,
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
+            tool_recovery: crate::tool_recovery::ToolRecoveryState::default(),
             retrieval_guard: RetrievalGuard::default(),
             retrieval_guard_enabled: true,
             resume_retrieval_on_next_user_message: false,
@@ -1086,6 +1088,7 @@ where
         // A new user turn opens a fresh focus window, so the previous turn's
         // reminder must not suppress this turn's first one.
         self.last_focus_nudge_tool_calls = None;
+        self.tool_recovery.reset();
         self.browser_timeout_requests.clear();
         self.evidence_ledger = EvidenceLedger::default();
         self.evidence_observed_tool_uses.clear();
@@ -1513,6 +1516,18 @@ where
                             continue;
                         }
                     }
+                    if let Some(output) = self
+                        .tool_recovery
+                        .before_tool(&invocation.tool_name, &invocation.input)
+                    {
+                        ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                            tool_use_id: invocation.tool_use_id,
+                            tool_name: invocation.tool_name,
+                            output,
+                            is_error: true,
+                        }]);
+                        continue;
+                    }
                     let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                         self.permission_policy.authorize(
                             &invocation.tool_name,
@@ -1892,7 +1907,9 @@ where
             .as_deref()
             .unwrap_or(&tool_output.text)
             .to_string();
-        let mut output = tool_output.text;
+        let mut output = self
+            .tool_recovery
+            .observe(&tool_name, &input, tool_output.text, is_error);
         // The same identity `before_tool` keyed on, so a transient failure
         // releases the exact entry it reserved and the retry is not refused as
         // a duplicate.

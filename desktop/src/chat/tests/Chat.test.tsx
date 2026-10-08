@@ -135,6 +135,7 @@ vi.mock("../../git/GitWorkspace", () => ({
 vi.mock("../ChatThread", () => ({
   default: ({
     turns,
+    visible,
     onContinue,
     onRetry,
     onOpenIndependentReview,
@@ -143,6 +144,7 @@ vi.mock("../ChatThread", () => ({
     onLoadEarlierTurns,
   }: {
     turns: ChatTurn[];
+    visible?: boolean;
     onContinue: () => void;
     onRetry: (turn: ChatTurn) => void;
     onOpenIndependentReview?: () => void;
@@ -150,7 +152,7 @@ vi.mock("../ChatThread", () => ({
     loadingEarlierTurns?: boolean;
     onLoadEarlierTurns?: () => void | Promise<void>;
   }) => (
-    <div data-testid="chat-thread">
+    <div data-testid="chat-thread" data-visible={String(visible)}>
       <div
         data-testid="chat-history-scroll"
         onScroll={(event) => {
@@ -451,6 +453,21 @@ describe("Chat export action", () => {
   it("does not portal head actions into the header when embedded", () => {
     render(<Chat embedded />);
     expect(document.querySelectorAll(".chat-head-actions")).toHaveLength(0);
+  });
+
+  it("tells the kept-alive transcript when the Chat page is reopened", () => {
+    render(<Chat />);
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
+    act(() => useStore.setState({ tab: "typeset" }));
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("false");
+    act(() => useStore.setState({ tab: "chat" }));
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
+  });
+
+  it("keeps an embedded transcript visible on its host page", () => {
+    useStore.setState({ tab: "typeset" });
+    render(<Chat embedded />);
+    expect(screen.getByTestId("chat-thread").dataset.visible).toBe("true");
   });
 
   it("keeps the host tab when an embedded Chat starts a session", async () => {

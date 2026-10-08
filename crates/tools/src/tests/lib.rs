@@ -80,6 +80,8 @@ impl Drop for EnvGuard {
 
 #[path = "lib/agent.rs"]
 mod agent;
+#[path = "lib/docx.rs"]
+mod docx;
 #[path = "lib/file_ops.rs"]
 mod file_ops;
 #[path = "lib/latex.rs"]

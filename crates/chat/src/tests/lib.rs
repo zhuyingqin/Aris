@@ -91,6 +91,8 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
         "AskUserQuestion",
         "bash",
         "read_file",
+        "read_docx",
+        "edit_docx",
         "read_files",
         "glob_search",
         "grep_search",
@@ -131,6 +133,23 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
     .into_iter()
     .map(routing_spec)
     .collect()
+}
+
+#[test]
+fn word_requests_route_native_docx_tools_without_using_partial_keywords() {
+    let specs = desktop_like_catalog();
+    for request in ["修改论文.docx 中这段正文", "编辑 Word 文档并保留公式", "开始修改doc准确的问题", "Review a WORD file"] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        for name in ["read_docx", "edit_docx"] {
+            assert!(plan.active_names.contains(name), "{request}: {plan:?}");
+            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+        }
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
+    }
+    for request in ["Explain word embeddings", "Review the document routing code", "Check keyword matching"] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(!plan.active_names.contains("edit_docx"), "{request}: {plan:?}");
+    }
 }
 
 #[test]

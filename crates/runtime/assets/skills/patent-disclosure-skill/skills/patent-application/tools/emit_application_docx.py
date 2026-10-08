@@ -16,7 +16,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from md_to_docx import convert_md_to_docx
+from md_to_docx import convert_md_to_docx, save_docx_atomically
 from stdio_utf8 import ensure_utf8_stdio
 
 DEFAULT_STEMS = ("权利要求书", "说明书", "说明书摘要", "说明书附图")
@@ -59,7 +59,7 @@ def emit_one(md_path: Path, prefer_omml: bool = True) -> Path:
     if n:
         raise LatexDelimError(md_path, n)
     doc = convert_md_to_docx(text, base_dir=md_path.parent, prefer_omml=prefer_omml)
-    doc.save(str(out))
+    save_docx_atomically(doc, out)
     return out
 
 

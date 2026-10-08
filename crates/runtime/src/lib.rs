@@ -9,6 +9,7 @@ mod change_ledger;
 mod compact;
 mod config;
 mod conversation;
+pub mod docx;
 pub mod event_sink;
 mod evidence_ledger;
 mod execution_context;
@@ -29,6 +30,7 @@ mod mcp_client;
 mod mcp_stdio;
 mod oauth;
 mod paths;
+mod pdf_text;
 mod permissions;
 mod process;
 mod process_registry;
@@ -48,10 +50,15 @@ mod session;
 mod session_index;
 pub mod skill_registry;
 mod tool_outcome;
+mod tool_recovery;
 mod tool_output_artifact;
 mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
+pub use pdf_text::{
+    extract_pdf_text_from_bytes, extract_pdf_text_with_quality, PdfExtractionMetadata,
+    PdfTextExtraction, PdfTextQuality,
+};
 pub use bash::{
     adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
@@ -98,6 +105,7 @@ pub use evidence_ledger::{
     NO_NEW_EVIDENCE_NUDGE_CALLS,
 };
 pub use execution_context::{
+    active_project_execution_context,
     execution_current_dir, execution_env_var_os, with_project_execution_context,
     ProjectExecutionContext,
 };
@@ -105,7 +113,7 @@ pub use file_ops::{
     abort_large_write, append_file, append_file_with_context, append_file_with_context_expected,
     append_write_chunk, begin_large_write, cleanup_stale_large_writes_at, commit_large_write,
     content_revision, decode_process_text, edit_file, edit_file_with_context,
-    edit_file_with_context_expected, extract_pdf_text_from_bytes, file_revision, glob_search,
+    edit_file_with_context_expected, file_revision, glob_search,
     grep_search, multi_edit_file, multi_edit_file_with_context,
     multi_edit_file_with_context_expected, parse_image_tool_output, read_file,
     read_file_with_images, recover_pending_batch_writes_at, write_file, write_file_with_context,

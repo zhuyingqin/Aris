@@ -266,6 +266,7 @@ function StarterIcon({ id }: { id: ChatStarter["id"] }) {
 
 interface Props {
   sessionId: string;
+  visible?: boolean;
   language: Language;
   turns: ChatTurn[];
   loading?: boolean;
@@ -390,6 +391,7 @@ function turnRenderKey(turn: ChatTurn): string {
 
 export default function ChatThread({
   sessionId,
+  visible = true,
   language,
   turns,
   loading = false,
@@ -414,8 +416,8 @@ export default function ChatThread({
   // The message column, which is what row heights actually depend on: the
   // scroller's own width also counts its (reserved) scrollbar gutters.
   const listRef = useRef<HTMLDivElement>(null);
-  // The transcript is reader-controlled. New messages and layout changes must
-  // never move its viewport; only explicit user navigation may do that.
+  // Opening the transcript lands at the end. After that, the reader controls
+  // whether to follow new messages or browse history.
   const [following, setFollowing] = useState(false);
   const [firstVisibleTurnIndex, setFirstVisibleTurnIndex] = useState(0);
   const [historyRevealEnabled, setHistoryRevealEnabled] = useState(false);
@@ -473,6 +475,7 @@ export default function ChatThread({
     compensateAboveViewportResize(item, instance)
   );
   const virtualItems = virtualizer.getVirtualItems();
+  const virtualTotalSize = virtualizer.getTotalSize();
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems[virtualItems.length - 1];
   const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
@@ -501,8 +504,16 @@ export default function ChatThread({
    *  fetches more of it hangs off this rather than off a `scrollTop` delta. */
   const noteReaderIntent = useCallback((upward: boolean) => {
     readerIntentUntilRef.current = window.performance.now() + READER_INTENT_WINDOW_MS;
-    if (upward) markHistoryRevealEnabled();
-  }, [markHistoryRevealEnabled]);
+    // Reader input takes precedence over a landing or measurement correction.
+    programmaticScrollUntilRef.current = 0;
+    navigationScrollUntilRef.current = 0;
+    if (upward) {
+      setFollowingValue(false);
+      markHistoryRevealEnabled();
+      const element = scrollRef.current;
+      if (element) virtualizer.scrollToOffset(element.scrollTop);
+    }
+  }, [markHistoryRevealEnabled, setFollowingValue, virtualizer]);
 
   const scrollToBottom = useCallback((smooth = false) => {
     if (turns.length === 0) return;
@@ -620,7 +631,10 @@ export default function ChatThread({
     };
     const applyWidth = () => {
       frame = null;
-      const columns = textColumnsForWidth(contentWidth());
+      const width = contentWidth();
+      // A kept-alive Chat has no layout while another page is showing.
+      if (width <= 0) return;
+      const columns = textColumnsForWidth(width);
       if (columns === currentMessageColumns()) return;
       setMessageColumns(columns);
       const mounted = virtualizer.getVirtualItems().map((item) => item.index);
@@ -655,11 +669,9 @@ export default function ChatThread({
     writeTurnMeasurements(sessionId, virtualizer.takeSnapshot());
   }, [sessionId, virtualizer]);
 
-  // Reset transient history state between conversations. Opening a session is
-  // the one moment the transcript may be repositioned (see the landing effect
-  // below); once the reader is in a conversation, new messages and layout
-  // measurements must never pull the viewport.
-  useEffect(() => {
+  // Chat stays mounted behind other pages. Reopening that surface needs the
+  // same fresh landing as opening a different conversation.
+  useLayoutEffect(() => {
     historyRevealEnabledRef.current = false;
     setHistoryRevealEnabled(false);
     previousScrollTopRef.current = null;
@@ -667,24 +679,53 @@ export default function ChatThread({
     readerIntentUntilRef.current = 0;
     landedSessionRef.current = null;
     setFollowingValue(false);
-  }, [sessionId, setFollowingValue]);
+  }, [sessionId, setFollowingValue, visible]);
 
-  // Land on the newest turn once per conversation, as soon as its first turns
-  // render. `scrollToIndex` on the last row resolves to the live maximum scroll
-  // offset and virtual-core then re-targets it every frame until the height holds
-  // still, so measured rows arriving after the estimate no longer leave the
-  // reader partway up. Once it settles, `anchorTo: "end"` keeps the bottom pinned
-  // for as long as the reader stays there — there is no fixed budget to run out.
-  useEffect(() => {
-    if (turns.length === 0 || landedSessionRef.current === sessionId) return;
-    if (!scrollRef.current) return;
-    landedSessionRef.current = sessionId;
-    markProgrammaticScroll();
-    // Suppresses the top-edge history fetch while the height is still moving.
-    navigationScrollUntilRef.current = window.performance.now() + 240;
-    setFollowingValue(true);
-    virtualizer.scrollToIndex(turns.length - 1, { align: "end" });
-  }, [markProgrammaticScroll, sessionId, setFollowingValue, turns.length, virtualizer]);
+  // Wait for loaded turns and a visible viewport. A scroll attempted while the
+  // parent is hidden resolves to zero, and must not consume this opening's
+  // landing. The frame also lets the virtualizer observe the restored layout.
+  useLayoutEffect(() => {
+    if (!visible || loading || !hasTurns || landedSessionRef.current === sessionId) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    let frame: number | null = null;
+    let observer: ResizeObserver | undefined;
+    const land = () => {
+      frame = null;
+      if (element.clientHeight <= 0 || element.clientWidth <= 0) return;
+      landedSessionRef.current = sessionId;
+      // Suppress top-edge history fetching while rows are being measured.
+      navigationScrollUntilRef.current = window.performance.now() + 240;
+      scrollToBottom();
+      observer?.disconnect();
+    };
+    const scheduleLanding = () => {
+      if (frame != null || landedSessionRef.current === sessionId) return;
+      frame = window.requestAnimationFrame(land);
+    };
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(scheduleLanding);
+      observer.observe(element);
+    }
+    scheduleLanding();
+    return () => {
+      observer?.disconnect();
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+  }, [hasTurns, loading, scrollToBottom, sessionId, visible]);
+
+  // A measured row can grow before React commits the list's new height. The
+  // virtualizer's immediate correction is then clamped to the old DOM maximum,
+  // losing the composer inset. Finish following after the new height commits.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (
+      !visible || loading || !followingRef.current
+      || landedSessionRef.current !== sessionId
+      || !element || element.clientHeight <= 0 || element.clientWidth <= 0
+    ) return;
+    scrollToBottom();
+  }, [loading, scrollToBottom, sessionId, virtualTotalSize, visible]);
 
   return (
     <div className={chatThreadClassName(hasEarlierTurns, questionMarkers.length)}>
@@ -778,7 +819,7 @@ export default function ChatThread({
           <div
             className="chat-virtual-list"
             ref={listRef}
-            style={{ height: virtualizer.getTotalSize() }}
+            style={{ height: virtualTotalSize }}
           >
             {virtualItems.map((item) => {
               const turn = turns[item.index];

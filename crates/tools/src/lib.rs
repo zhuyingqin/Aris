@@ -118,6 +118,7 @@ pub struct ToolSpec {
 pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
+        | "read_docx"
         | "read_files"
         | "ReadMediaFile"
         | "WorkspaceLayout"
@@ -235,7 +236,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
+            description: "Read a text file, quality-labelled PDF text, or indexed DOCX paragraphs in the workspace. DOCX offset/limit count paragraphs and return the read_docx schema with protected equation boundaries; use edit_docx for changes. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large text files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached text reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -249,8 +250,38 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "read_docx",
+            description: "Read a DOCX as indexed paragraphs, including body, tables, headers, footers and notes. Returns a sha256 revision, exact editable text segments and protected native-equation boundaries. offset/limit count paragraphs; follow nextOffset. Formula placeholders are not formula contents or editable text. Use edit_docx for precise changes, never paragraph.text assignment or raw ZIP/XML string rewrites. Legacy .doc files require conversion to DOCX first.",
+            input_schema: json!({
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }, "required": ["path"], "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "edit_docx",
+            description: "Apply 1-64 ordered exact text edits to an existing DOCX. Copy paragraph_id and expected_revision from the latest read_docx or DOCX read_file result. Each old_string must be unique within an editable segment. Matches may span formatting runs but cannot cross equations, links, bookmarks or objects. Replacement text inherits the first matched run's formatting; other runs, native equations and package parts remain intact. Fields, tracked changes, managed content controls and signed documents require a specialised editor and are rejected. The batch is atomic, audited and reversible through change_revert. This tool edits text, not equation XML or paragraph structure.",
+            input_schema: json!({
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "expected_revision": { "type": "string", "description": "Copy the exact revision from the latest read_docx/read_file result; reread after a conflict." },
+                    "edits": { "type": "array", "minItems": 1, "maxItems": 64, "items": {
+                        "type": "object", "properties": {
+                            "paragraph_id": { "type": "string" },
+                            "old_string": { "type": "string", "minLength": 1 },
+                            "new_string": { "type": "string" }
+                        }, "required": ["paragraph_id", "old_string", "new_string"], "additionalProperties": false
+                    }}
+                }, "required": ["path", "expected_revision", "edits"], "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "read_files",
-            description: "Read up to 16 independent text/PDF file windows in one call. Results preserve request order and report per-file errors without discarding successful reads. Prefer this over repeated read_file calls when the paths or line windows are already known; each successful item has the same revision-bearing payload as read_file.",
+            description: "Read up to 16 independent text/PDF/DOCX file windows in one call. Results preserve request order and report per-file errors without discarding successful reads. Prefer this over repeated read_file calls when the paths or windows are already known; each successful item has the same revision-bearing payload as read_file. DOCX windows count paragraphs.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1556,6 +1587,27 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "bash" => from_value::<BashCommandInput>(input)
             .and_then(|input| run_bash(input, should_cancel, &mut on_progress, context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "read_docx" => from_value::<ReadFileInput>(input).and_then(|input| {
+            to_pretty_json(
+                runtime::docx::read_docx(&input.path, input.offset, input.limit)
+                    .map_err(io_to_string)?,
+            )
+        }),
+        "edit_docx" => from_value::<EditDocxInput>(input).and_then(|input| {
+            validate_file_tool_payload_bytes(
+                "edit_docx",
+                &serde_json::to_string(&input.edits).map_err(|e| e.to_string())?,
+            )?;
+            to_pretty_json(
+                runtime::docx::edit_docx(
+                    &input.path,
+                    &input.expected_revision,
+                    &input.edits,
+                    &context.mutation_context("edit_docx"),
+                )
+                .map_err(io_to_string)?,
+            )
+        }),
         "read_files" => from_value::<ReadFilesInput>(input).and_then(run_read_files),
         "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
@@ -1722,6 +1774,15 @@ fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) 
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
+    if Path::new(&input.path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))
+    {
+        return to_pretty_json(
+            runtime::docx::read_docx(&input.path, input.offset, input.limit)
+                .map_err(io_to_string)?,
+        );
+    }
     let cache_key = read_file_cache_key(&input);
     if let Some(cache_key) = cache_key.as_ref() {
         if let Some(output) = read_file_cache_get(cache_key) {
@@ -1748,14 +1809,21 @@ fn run_read_files(input: ReadFilesInput) -> Result<String, String> {
         ));
     }
 
+    let project_context = runtime::active_project_execution_context();
     let results = std::thread::scope(|scope| {
         input
             .requests
             .into_iter()
             .map(|request| {
+                let project_context = project_context.clone();
                 scope.spawn(move || {
                     let path = request.path.clone();
-                    match run_read_file(request) {
+                    let read = || run_read_file(request);
+                    let output = match project_context {
+                        Some(context) => runtime::with_project_execution_context(&context, read),
+                        None => read(),
+                    };
+                    match output {
                         Ok(output) => {
                             let value = serde_json::from_str::<Value>(&output)
                                 .unwrap_or_else(|_| Value::String(output));
@@ -2621,6 +2689,14 @@ struct ReadFileInput {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditDocxInput {
+    path: String,
+    expected_revision: String,
+    edits: Vec<runtime::docx::DocxTextEdit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4072,6 +4148,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4084,6 +4161,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4099,6 +4177,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4113,6 +4192,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-code-guide" => vec![
             "read_file",
+            "read_docx",
             "read_files",
             "ReadMediaFile",
             "glob_search",
@@ -4127,6 +4207,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "statusline-setup" => vec![
             "bash",
             "read_file",
+            "read_docx",
             "read_files",
             "write_file",
             "write_files",
@@ -4140,6 +4221,8 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "read_docx",
+            "edit_docx",
             "read_files",
             "ReadMediaFile",
             "write_file",

@@ -271,12 +271,48 @@ mod tests {
 
     fn snapshot(hash: &str) -> FileSnapshot {
         FileSnapshot {
+            content_kind: None,
             exists: true,
             content_hash: Some(hash.to_string()),
             blob_ref: None,
             byte_len: None,
             line_count: None,
         }
+    }
+
+    #[test]
+    fn native_docx_changes_project_an_explicit_text_preview_into_review() {
+        let root = tempfile::tempdir().unwrap();
+        let execution = runtime::ProjectExecutionContext::new(root.path())
+            .with_env(runtime::ARIS_WORKSPACE_ROOT_ENV, root.path());
+        runtime::with_project_execution_context(&execution, || {
+            let path = root.path().join("sample.docx");
+            std::fs::write(&path, include_bytes!("../../../crates/runtime/src/tests/fixtures/docx-native-math.docx")).unwrap();
+            let read = runtime::docx::read_docx(path.to_str().unwrap(), None, Some(100)).unwrap();
+            let paragraph = read.paragraphs.iter().find(|p| p.text.starts_with("跨格式文本")).unwrap();
+            let context = runtime::FileMutationContext {
+                session_id: Some("docx-review".into()), turn_id: Some("docx-turn".into()),
+                tool_use_id: Some("docx-call".into()), tool_name: "edit_docx".into(),
+            };
+            let edited = runtime::docx::edit_docx(path.to_str().unwrap(), &read.revision, &[
+                runtime::docx::DocxTextEdit {
+                    paragraph_id: paragraph.id.clone(),
+                    old_string: "跨格式文本".into(), new_string: "准确修改".into(),
+                }
+            ], &context).unwrap();
+            let output = super::tool_output_for_review(root.path(), "docx-review", "docx-call",
+                &serde_json::to_string(&edited).unwrap());
+            let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(output["audit"]["availability"], "exact");
+            let patch = output["audit"]["unifiedDiff"].as_str().unwrap();
+            assert!(patch.contains("跨格式文本") && patch.contains("准确修改"));
+            assert!(patch.contains("[native equation 1]"));
+            let record = runtime::get_file_change_for_workspace(root.path(), runtime::FileChangeGetInput {
+                change_id: edited.change_id.unwrap(), session_id: Some("docx-review".into()),
+            }).unwrap().record;
+            let preview = super::snapshot_text(root.path(), "docx-review", &record.before).unwrap().unwrap();
+            assert!(preview.starts_with("[DOCX text preview; native equations and layout are not rendered]"));
+        });
     }
 
     fn record(id: &str, before: &str, after: &str) -> FileChangeRecord {

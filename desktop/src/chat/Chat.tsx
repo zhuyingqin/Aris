@@ -1684,6 +1684,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         <ChatThread
           key={currentId}
           sessionId={currentId}
+          visible={embedded || tab === "chat"}
           language={language}
           turns={turns}
           loading={currentSessionLoading}

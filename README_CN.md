@@ -18,7 +18,7 @@
 
 > **SomniQ 的桌面应用** —— Executor 执行 · Reviewer 审查 · 迭代精进。
 
-[![Version](https://img.shields.io/badge/version-0.4.80-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
+[![Version](https://img.shields.io/badge/version-0.4.81-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/SomniQ)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
 [![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
