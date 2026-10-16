@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "observedDate": "2026-10-06",
+  "scope": "First implementation smoke; not a complete P0 or P3 evaluation",
+  "upstreamCommit": "16f3749e9d512bdf7b7b55c162307bc289750b7a",
+  "upstreamFileSha256": "1286f865d7bb9e10614edfd78943f28a9b8693b21a870a1be552c3739806d3bc",
+  "executor": "deepseek-v4.1-flash",
+  "reviewer": "MiniMax-M3",
+  "transport": "chat_completions",
+  "visionPreflight": {
+    "runId": "b22009dfb4352b7980c2d793f99b5ba2",
+    "executorPassed": true,
+    "reviewerPassed": true,
+    "requests": 2,
+    "perRequestOutputLimit": 1024,
+    "method": "Read four random digits visible only in the actual PNG attachment",
+    "generatedImages": 0
+  },
+  "developmentSmoke": {
+    "sampleId": "DEV-01",
+    "split": "development",
+    "runId": "5209b7b7b02c2e2e3aa5f3dc4439e584",
+    "sourceProvenance": "Deterministic local Chinese SVG fixture rendered to PNG; Executor only received PNG",
+    "inputSha256": "fc268c012d0f7b93c66af9b0d26b0d72fc36e08fcfb27de50b5980f054477ba3",
+    "svgSha256": "f1d2fb18f73e6a4a4db9e24919d332c1bb02302d6d95a3269b88934814b6177b",
+    "pngSha256": "2b1283f07d034423575608b43aee11e79b732c6c40b0742bc419fdd55b4e246e",
+    "fontFingerprint": "2ad2fc5bb31d338c0fa95213340b33bc0e6e6a8387bb41beed87b7de46739a62",
+    "renderer": "resvg-0.45.1/svg2pdf-0.13.0",
+    "requiredLabels": ["研究问题", "独立审查", "证据产物"],
+    "requiredRelations": [["研究问题", "独立审查"], ["独立审查", "证据产物"]],
+    "status": "accepted",
+    "classification": "editable_vector",
+    "textCount": 3,
+    "vectorCount": 5,
+    "revisionUsed": false,
+    "reviewerReceivedOriginalAndRenderedImages": true,
+    "confirmedBudgetTruncation": false,
+    "requests": [
+      {"kind": "reconstruct", "outputLimit": 16384, "stopReason": "stop", "inputTokens": 472, "outputTokens": 1296, "durationMs": 10501},
+      {"kind": "review", "outputLimit": 2048, "stopReason": "stop", "inputTokens": 1468, "outputTokens": 703, "cacheReadInputTokens": 147, "durationMs": 13359}
+    ],
+    "coldTestDurationSeconds": 61.17,
+    "fee": null,
+    "feeNote": "Actual currency charge unavailable; token fields are recorded usage, not a monetary cost claim",
+    "artifactsLocation": ".somniq/artifacts/figures/5209b7b7b02c2e2e3aa5f3dc4439e584/"
+  },
+  "browserValidation": {
+    "engine": "Chromium via local Playwright",
+    "modelRequests": 0,
+    "passed": ["Chinese text edit inside transformed clip group", "Text undo and redo", "Group movement", "SVG serialization and reopening", "Markers and clipPath retained", "Opaque-origin iframe and narrow message bridge", "Actual generated SVG loaded and serialized"],
+    "nativeWebView2Validated": false
+  },
+  "remainingGates": ["Full five-sample P0 output-budget comparison", "Disjoint twenty-sample P3 acceptance set", "Actual fee and supported-complexity evidence", "Packaged native WebView2 editing", "Paid SomniImage generation branch", "Paper compilation with exported PDF and PNG"]
+}

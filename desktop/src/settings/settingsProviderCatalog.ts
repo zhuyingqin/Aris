@@ -89,6 +89,7 @@ export const ANTHROPIC_COMPAT_URLS: PresetOption[] = [
 ];
 
 export const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
+  opencode: { defaultModel: "", models: EXECUTOR_MODELS },
   anthropic: {
     defaultModel: "claude-opus-4-7",
     models: EXECUTOR_MODELS.filter((model) => model.hintKey === "anthropic"),
@@ -120,6 +121,7 @@ export const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
 };
 
 export const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
+  opencode: { defaultModel: "", models: REVIEWER_MODELS },
   "": { defaultModel: "" },
   openai: {
     defaultModel: "gpt-5.5",

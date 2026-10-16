@@ -14,6 +14,53 @@ use crate::client::{
 };
 use crate::types::{ContentBlockDelta, MessageRequest};
 
+#[test]
+fn session_propagation_is_scoped_to_the_configured_connection() {
+    let managed = Some("https://gateway.test/v1/");
+    for endpoint in [
+        "https://gateway.test/v1",
+        "https://GATEWAY.test/v1/chat/completions",
+        "https://gateway.test/v1/responses/",
+    ] {
+        assert!(super::connection_uses_routing_session_header(
+            "openai", endpoint, managed
+        ));
+    }
+    for endpoint in [
+        "https://other.test/v1",
+        "https://gateway.test/another/v1",
+        "https://gateway.test/V1",
+        "https://gateway.test/v1?route=other",
+        "invalid",
+        "",
+    ] {
+        assert!(
+            !super::connection_uses_routing_session_header("custom", endpoint, managed),
+            "{endpoint}"
+        );
+    }
+    assert!(!super::connection_uses_routing_session_header(
+        "openai",
+        "https://gateway.test/v1",
+        None
+    ));
+    assert!(!super::connection_uses_routing_session_header(
+        "openai",
+        "https://gateway.test/v1",
+        Some("")
+    ));
+    assert!(super::connection_uses_routing_session_header(
+        "opencode",
+        "https://fixed.test/v1",
+        None
+    ));
+    assert!(super::connection_uses_routing_session_header(
+        "custom",
+        "https://opencode.ai/go/v1",
+        None
+    ));
+}
+
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -757,5 +804,74 @@ fn read_timeout_backstop_never_fires_before_the_explicit_waits() {
         },
     ] {
         assert_eq!(policy.read_timeout_backstop(), None);
+    }
+}
+
+#[test]
+fn artifact_header_wait_is_longer_without_changing_explicit_settings_or_idle_waits() {
+    use super::{parse_response_header_timeout_secs, StreamWaitPolicy};
+    let idle = Some(Duration::from_secs(300));
+    for raw in [None, Some(""), Some("  "), Some("invalid")] {
+        let policy = StreamWaitPolicy::single_request_with_header_setting(raw, idle);
+        assert_eq!(policy.response_header_timeout, Some(Duration::from_secs(1800)));
+        assert_eq!(policy.stream_idle_timeout, idle);
+        assert_eq!(policy.read_timeout_backstop(), Some(Duration::from_secs(1830)));
+        assert_eq!(parse_response_header_timeout_secs(raw), Some(Duration::from_secs(600)));
+    }
+    for raw in ["900", "30", "5", "99999", "0", "-1"] {
+        let policy = StreamWaitPolicy::single_request_with_header_setting(Some(raw), idle);
+        assert_eq!(policy.response_header_timeout, parse_response_header_timeout_secs(Some(raw)));
+        assert_eq!(policy.stream_idle_timeout, idle);
+        if policy.response_header_timeout.is_none() {
+            assert!(policy.read_timeout_backstop().is_none());
+        }
+    }
+}
+
+#[test]
+fn anthropic_artifact_waits_for_late_headers_and_never_resends_a_timeout() {
+    use super::StreamWaitPolicy;
+    for (timeout, succeeds) in [(Duration::from_millis(50), false), (Duration::from_secs(2), true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            thread::sleep(Duration::from_millis(200));
+            let body = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            assert!(listener.accept().is_err(), "artifact request must not be resent");
+        });
+        let client = AnthropicClient::new("test-key")
+            .with_base_url(format!("http://{address}"))
+            .with_single_request();
+        assert_eq!(client.wait_policy, StreamWaitPolicy::single_request_from_env());
+        let client = client.with_wait_policy(StreamWaitPolicy {
+            response_header_timeout: Some(timeout),
+            stream_idle_timeout: Some(Duration::from_secs(2)),
+        });
+        let request = MessageRequest {
+            model: "claude-test".into(), max_tokens: 64, messages: vec![],
+            system: None, tools: None, tool_choice: None, thinking: None, stream: true,
+        };
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            match client.stream_message(&request).await {
+                Ok(mut stream) => {
+                    assert!(succeeds);
+                    assert!(stream.next_event().await.unwrap().is_some());
+                    assert!(stream.next_event().await.unwrap().is_none());
+                }
+                Err(error) => {
+                    assert!(!succeeds, "{error}");
+                    assert!(error.is_post_send_timeout(), "{error}");
+                }
+            }
+        });
+        server.join().unwrap();
     }
 }

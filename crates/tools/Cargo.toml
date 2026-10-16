@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 api = { path = "../api" }
+base64 = "0.22"
 aris-executor = { path = "../executor" }
 dom_query = "0.27"
 encoding_rs = "0.8"
@@ -17,6 +18,8 @@ rand = "0.8"
 runtime = { path = "../runtime" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "cookies", "gzip", "json", "native-tls"] }
 roxmltree = "0.20"
+resvg = "=0.45.1"
+svg2pdf = "=0.13.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

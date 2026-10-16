@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <title>科研执行与证据闭环</title>
+  <desc>DEV-02 reference: thirteen modules, sixteen directed relations, two parallel splits and two feedback loops. This SVG is never sent to the reconstruction model.</desc>
+  <defs>
+    <marker id="forward" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1L11 6L1 11Z" fill="#334e75"/></marker>
+    <marker id="pass" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1L11 6L1 11Z" fill="#15803d"/></marker>
+    <marker id="revision" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1L11 6L1 11Z" fill="#c26a10"/></marker>
+    <marker id="feedback" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1L11 6L1 11Z" fill="#64748b"/></marker>
+    <clipPath id="left-clip"><rect x="40" y="142" width="430" height="800" rx="20"/></clipPath>
+    <clipPath id="middle-clip"><rect x="505" y="142" width="540" height="800" rx="20"/></clipPath>
+    <clipPath id="right-clip"><rect x="1080" y="142" width="480" height="800" rx="20"/></clipPath>
+  </defs>
+  <rect width="1600" height="1000" fill="#ffffff"/>
+  <g font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <text x="60" y="65" font-size="36" font-weight="700" fill="#182b49">科研执行与证据闭环</text>
+    <text x="62" y="105" font-size="20" fill="#64748b">并行输入与验证 · 独立条件验收 · 可追溯反馈</text>
+    <g id="lanes" stroke-width="1.5">
+      <rect x="40" y="142" width="430" height="800" rx="20" fill="#f3f7fd" stroke="#cedced"/>
+      <rect x="505" y="142" width="540" height="800" rx="20" fill="#f2f9f7" stroke="#cbe3da"/>
+      <rect x="1080" y="142" width="480" height="800" rx="20" fill="#f8f5fc" stroke="#ded4ed"/>
+      <text x="75" y="183" font-size="20" font-weight="700" fill="#46658c">01 研究与证据</text>
+      <text x="540" y="183" font-size="20" font-weight="700" fill="#3d7560">02 执行与验证</text>
+      <text x="1115" y="183" font-size="20" font-weight="700" fill="#785ba0">03 独立审查与产物</text>
+    </g>
+    <g id="relations" fill="none" stroke="#334e75" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#forward)">
+      <path id="question-literature" d="M255 300V330H160V355"/>
+      <path id="question-data" d="M255 300V330H360V355"/>
+      <path id="literature-evidence" d="M160 440V480H210V515"/>
+      <path id="data-evidence" d="M360 440V480H300V515"/>
+      <path id="evidence-method" d="M255 600V735"/>
+      <path id="method-executor" d="M355 780H545V260H635"/>
+      <path id="executor-experiment" d="M770 300V345H670V390"/>
+      <path id="executor-check" d="M770 300V345H905V390"/>
+      <path id="experiment-summary" d="M670 475V520H720V555"/>
+      <path id="check-summary" d="M905 475V520H820V555"/>
+      <path id="summary-candidate" d="M770 640V760"/>
+      <path id="candidate-reviewer" d="M900 805H1125V260H1175"/>
+      <path id="reviewer-gate" d="M1320 300V410"/>
+      <path id="gate-archive" d="M1320 585V760" stroke="#15803d" marker-end="url(#pass)"/>
+      <path id="gate-executor" d="M1435 500H1535V202H770V215" stroke="#c26a10" stroke-dasharray="8 5" marker-end="url(#revision)"/>
+      <path id="archive-question" d="M1320 845V918H60V260H150" stroke="#64748b" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#feedback)"/>
+    </g>
+    <g id="left-content" clip-path="url(#left-clip)" stroke="#9cb6d6" stroke-width="2" fill="#ffffff">
+      <g id="question"><rect x="155" y="220" width="200" height="80" rx="12" fill="#dce9fc"/><text x="255" y="269" text-anchor="middle" font-size="27" fill="#233e64" stroke="none">研究问题</text></g>
+      <g id="literature"><rect x="75" y="360" width="170" height="80" rx="12"/><path d="M89 383H101L108 388V414L101 409H89ZM108 388L115 383H127V409H115L108 414" fill="#dce9fc" stroke-width="1.5"/><text x="182" y="409" text-anchor="middle" font-size="24" fill="#233e64" stroke="none">文献检索</text></g>
+      <g id="data"><rect x="275" y="360" width="170" height="80" rx="12"/><path d="M289 388C289 380 313 380 313 388V410C313 418 289 418 289 410ZM289 388C289 396 313 396 313 388M289 399C289 407 313 407 313 399" fill="#dce9fc" stroke-width="1.5"/><text x="377" y="409" text-anchor="middle" font-size="24" fill="#233e64" stroke="none">数据与代码</text></g>
+      <g id="evidence"><rect x="155" y="520" width="200" height="80" rx="12" fill="#e6effc"/><text x="255" y="569" text-anchor="middle" font-size="27" fill="#233e64" stroke="none">证据整合</text></g>
+      <g id="method"><rect x="155" y="740" width="200" height="80" rx="12" fill="#dce9fc"/><text x="255" y="789" text-anchor="middle" font-size="27" fill="#233e64" stroke="none">方法设计</text></g>
+    </g>
+    <g id="middle-content" clip-path="url(#middle-clip)" stroke="#91bdac" stroke-width="2" fill="#ffffff">
+      <g id="executor"><rect x="640" y="220" width="260" height="80" rx="12" fill="#d9efe5"/><text x="770" y="255" text-anchor="middle" font-size="27" fill="#275c48" stroke="none">执行器</text><text x="770" y="282" text-anchor="middle" font-size="18" fill="#4b806b" stroke="none">Executor</text></g>
+      <g id="experiment"><rect x="570" y="395" width="200" height="80" rx="12"/><path d="M586 427L596 435L586 443M604 444H616" fill="none" stroke="#4b806b" stroke-width="2.2"/><text x="682" y="444" text-anchor="middle" font-size="25" fill="#275c48" stroke="none">实验运行</text></g>
+      <g id="check"><rect x="805" y="395" width="200" height="80" rx="12"/><rect x="822" y="420" width="25" height="28" rx="4" fill="#e6f4ed" stroke-width="1.5"/><path d="M826 433L832 439L843 427" fill="none" stroke="#4b806b" stroke-width="2.2"/><text x="920" y="444" text-anchor="middle" font-size="25" fill="#275c48" stroke="none">静态检查</text></g>
+      <g id="summary"><rect x="640" y="560" width="260" height="80" rx="12" fill="#e4f2eb"/><text x="770" y="609" text-anchor="middle" font-size="27" fill="#275c48" stroke="none">结果汇总</text></g>
+      <g id="candidate"><rect x="640" y="765" width="260" height="80" rx="12" fill="#d9efe5"/><text x="770" y="814" text-anchor="middle" font-size="27" fill="#275c48" stroke="none">候选图与报告</text></g>
+    </g>
+    <g id="right-content" clip-path="url(#right-clip)" stroke="#bba6d5" stroke-width="2" fill="#ffffff">
+      <g id="reviewer"><rect x="1180" y="220" width="280" height="80" rx="12" fill="#ece2f7"/><text x="1320" y="255" text-anchor="middle" font-size="27" fill="#664587" stroke="none">独立审查</text><text x="1320" y="282" text-anchor="middle" font-size="18" fill="#84649e" stroke="none">Reviewer</text></g>
+      <g id="gate"><polygon points="1320,415 1435,500 1320,585 1205,500" fill="#fff5dc" stroke="#d7ac57"/><text x="1320" y="509" text-anchor="middle" font-size="25" fill="#8b611b" stroke="none">质量达标？</text></g>
+      <g id="archive"><rect x="1180" y="765" width="280" height="80" rx="12" fill="#ece2f7"/><text x="1320" y="803" text-anchor="middle" font-size="27" fill="#664587" stroke="none">归档与导出</text><text x="1320" y="831" text-anchor="middle" font-size="18" fill="#84649e" stroke="none">SVG · PNG · PDF</text></g>
+    </g>
+    <g id="edge-labels" font-size="19" fill="#566a85">
+      <text x="274" y="670">可追溯证据</text>
+      <text x="401" y="763">冻结计划</text>
+      <text x="791" y="711">可复现结果</text>
+      <text x="971" y="793">候选产物</text>
+      <text x="1352" y="671" fill="#15803d">是：通过</text>
+      <text x="1464" y="489" fill="#c26a10">否</text>
+      <text x="1035" y="192" text-anchor="middle" fill="#c26a10">定向修订</text>
+      <text x="788" y="906" text-anchor="middle" fill="#64748b">新证据 / 新问题</text>
+    </g>
+    <text x="60" y="979" font-size="16" fill="#7b8798">DEV-02 · 13 个模块 · 16 条有向关系 · 2 条反馈回路</text>
+  </g>
+</svg>

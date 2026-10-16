@@ -15,10 +15,11 @@ Local wire traces (`*.wire.jsonl`, same gateway) show the client side:
 ## Invariants
 
 - **One shared wait policy** (`api::StreamWaitPolicy`) for the Anthropic and OpenAI-compatible clients:
-  - Response-header wait `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`: default **600s**, clamp [30, 3600], `0` disables.
+  - Response-header wait `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`: ordinary Chat defaults to **600s**; single-submission artifact clients default to **1800s**. An explicit value applies to both, clamped to [30, 3600]; `0` disables. Missing, blank or invalid values use the appropriate default.
   - Chunk idle `ARIS_STREAM_IDLE_TIMEOUT_SECS`: default **300s** (was 120s), clamp [10, 1800], `0` disables.
   - reqwest `read_timeout` is only a backstop: `max(header, idle) + 30s`. It is removed when either wait is disabled, so it never fires before the traced, cancellable waits.
 - **Post-send timeouts are re-sent at most `api::MAX_TIMEOUT_RESENDS` (= 1) time per request**, across the send loop and all stream restarts. These are the header wait, stream idle, and reqwest read timeout without connect. The gateway accepted such a request and is usually still running and billing it, so re-sending does not make a slow model faster. Connect failures, 429 and 5xx keep their existing budgets.
+- Single-submission artifact jobs are an exception: **zero resends** on any error, including header/idle timeout, HTTP rejection and endpoint negotiation. Changing their wait policy rebuilds the HTTP client so the old read backstop cannot still abort at the shorter Chat deadline. Their idle wait, provider output limit, low-reasoning request and connection/session routing retain their existing semantics.
 - When the budget is exhausted, the error says the request is not re-sent again and why, and names the two env knobs.
 - An idle timeout with **nothing emitted** is an error, never a "partial output" stop reason.
 - The OpenAI send phase, backoff sleeps and restart sends are all cancellable through the observer (`select!` on `wait_for_stream_cancel`), matching the Anthropic executor.

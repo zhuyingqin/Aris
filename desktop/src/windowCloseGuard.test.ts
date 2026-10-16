@@ -66,4 +66,10 @@ describe("window close guards", () => {
       runningConversationCount: 1,
     })).toContain("1 conversation is still running");
   });
+  it("guards paid figure jobs and describes unsaved drawings", () => {
+    const hazards = { hasUnsavedChanges: true, hasUnsavedFigureChanges: true, runningConversationCount: 0, runningFigureCount: 1 };
+    expect(shouldPreventDesktopClose(hazards, () => false)).toBe(true);
+    expect(desktopCloseConfirmationMessage("cn", hazards)).toContain("绘图");
+    expect(shouldPreventDesktopClose({ ...hazards, hasUnsavedChanges: false }, () => true)).toBe(false);
+  });
 });

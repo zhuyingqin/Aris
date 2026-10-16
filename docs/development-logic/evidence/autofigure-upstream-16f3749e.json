@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "verifiedAtUtc": "2026-10-06T06:41:48.9753838+00:00",
+  "repository": "https://github.com/ResearAI/AutoFigure-Edit",
+  "commit": "16f3749e9d512bdf7b7b55c162307bc289750b7a",
+  "method": "Downloaded raw HTTP response bytes to disk without text or newline normalization; SHA-256 over file bytes; source anchors use one-based physical lines, not browser-rendered line labels.",
+  "source": {
+    "path": "autofigure2.py",
+    "rawUrl": "https://raw.githubusercontent.com/ResearAI/AutoFigure-Edit/16f3749e9d512bdf7b7b55c162307bc289750b7a/autofigure2.py",
+    "sizeBytes": 137575,
+    "physicalLineCount": 3747,
+    "sha256": "1286f865d7bb9e10614edfd78943f28a9b8693b21a870a1be552c3739806d3bc",
+    "anchorAssertions": [
+      {
+        "line": 2335,
+        "contains": "def generate_svg_template("
+      },
+      {
+        "line": 2365,
+        "contains": "figure_img = Image.open(figure_path)"
+      },
+      {
+        "line": 2366,
+        "contains": "samed_img = Image.open(samed_path)"
+      },
+      {
+        "line": 2441,
+        "contains": "contents = [prompt_text, figure_img, samed_img]"
+      },
+      {
+        "line": 2451,
+        "contains": "max_tokens=50000"
+      },
+      {
+        "line": 2466,
+        "contains": "svg_code = check_and_fix_svg("
+      },
+      {
+        "line": 2536,
+        "contains": "def fix_svg_with_llm("
+      },
+      {
+        "line": 2638,
+        "contains": "fixed_svg = fix_svg_with_llm("
+      },
+      {
+        "line": 2707,
+        "contains": "def replace_icons_in_svg("
+      },
+      {
+        "line": 2867,
+        "contains": "data:image/png;base64"
+      },
+      {
+        "line": 2947,
+        "contains": "def svg_to_png("
+      },
+      {
+        "line": 2951,
+        "contains": "cairosvg.svg2png("
+      },
+      {
+        "line": 2953,
+        "contains": "except ImportError:"
+      },
+      {
+        "line": 2959,
+        "contains": "renderPM.drawToFile(drawing, output_path, fmt=\"PNG\")"
+      },
+      {
+        "line": 2967,
+        "contains": "except Exception as e:"
+      },
+      {
+        "line": 3143,
+        "contains": "optimized_svg = fix_svg_with_llm("
+      },
+      {
+        "line": 3359,
+        "contains": "步骤二：SAM3 分割"
+      },
+      {
+        "line": 3360,
+        "contains": "samed_path, boxlib_path, valid_boxes = segment_with_sam3("
+      },
+      {
+        "line": 3371,
+        "contains": "no_icon_mode = len(valid_boxes) == 0"
+      },
+      {
+        "line": 3475,
+        "contains": "步骤五：图标替换"
+      },
+      {
+        "line": 3517,
+        "contains": "replace_icons_in_svg("
+      }
+    ]
+  },
+  "requirements": {
+    "path": "requirements.txt",
+    "rawUrl": "https://raw.githubusercontent.com/ResearAI/AutoFigure-Edit/16f3749e9d512bdf7b7b55c162307bc289750b7a/requirements.txt",
+    "sizeBytes": 728,
+    "sha256": "cdcf155982bdadab8b8812a6fe02f6bfb46aa365d07d49fe6869e29e17c0cc25"
+  },
+  "mainObservation": {
+    "rawUrl": "https://raw.githubusercontent.com/ResearAI/AutoFigure-Edit/main/autofigure2.py",
+    "sizeBytes": 137575,
+    "sha256": "1286f865d7bb9e10614edfd78943f28a9b8693b21a870a1be552c3739806d3bc",
+    "identicalToPinnedFile": true,
+    "scope": "Comparison of this file at fetch time only; not a claim about all repository files or future main content."
+  },
+  "scope": "Planning evidence only. No product dependency lock, model-generation experiment, renderer compatibility test, or paid inference was performed."
+}

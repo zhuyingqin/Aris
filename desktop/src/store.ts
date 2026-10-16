@@ -46,6 +46,7 @@ export type Tab =
   | "chat"
   | "lab"
   | "typeset"
+  | "figures"
   | "literature"
   | "workflows"
   | "mail"
@@ -351,6 +352,8 @@ interface AppState {
   /** True while the LaTeX editor contains changes not persisted to disk. */
   typesetDirty: boolean;
   setTypesetDirty: (dirty: boolean) => void;
+  figureDirty: boolean;
+  setFigureDirty: (dirty: boolean) => void;
 
   theme: Theme;
   /** False only on a fresh profile that still needs the first-run choice. */
@@ -546,6 +549,8 @@ export const useStore = create<AppState>((set, get) => ({
   setPendingCodeFilePath: (pendingCodeFilePath) => set({ pendingCodeFilePath }),
   typesetDirty: false,
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
+  figureDirty: false,
+  setFigureDirty: (figureDirty) => set({ figureDirty }),
 
   theme: initialTheme,
   themeMode: initialThemeMode,

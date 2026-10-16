@@ -197,6 +197,7 @@ export default function ModelsSettings({ language, configView, managedModels, co
               <SettingRow title={copy.summaryProtocol}>
                 <select aria-label={copy.summaryProtocol} value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}>
                   <option value="openai">{copy.protocolOpenAiCompatible}</option>
+                  <option value="opencode">{language === "cn" ? "OpenCode（固定渠道）" : "OpenCode (fixed channel)"}</option>
                   <option value="anthropic">Anthropic</option>
                   <option value="anthropic-compat">{copy.protocolAnthropicCompatible}</option>
                 </select>

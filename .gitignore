@@ -86,3 +86,4 @@ site/temp_release_*/
 # Local UI audit screenshots and private company business documents.
 /desktop/.audit/
 /docs/business/
+desktop/public/figure-editor/

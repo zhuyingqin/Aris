@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+pub mod figures;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -7553,6 +7554,8 @@ pub struct PreparedLlmReview {
     api_key: String,
     base_url: String,
     model: String,
+    figure_transport: Option<aris_executor::OpenAiTransport>,
+    send_routing_session_header: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -7562,6 +7565,87 @@ enum ReviewerProtocol {
 }
 
 impl PreparedLlmReview {
+    /// An explicit OpenAI-compatible connection. Unlike `prepare_llm_review`,
+    /// it reads no process environment, so callers can pick a per-task model
+    /// without changing the Reviewer that chat review resolves.
+    pub fn openai_compatible(api_key: String, base_url: String, model: String) -> Self {
+        Self {
+            protocol: ReviewerProtocol::OpenAiCompat,
+            api_key,
+            base_url,
+            model,
+            figure_transport: None,
+            send_routing_session_header: false,
+        }
+    }
+    /// Propagate session metadata to this connection, never a model rule.
+    pub fn with_routing_session_header(mut self, enabled: bool) -> Self {
+        self.send_routing_session_header = enabled;
+        self
+    }
+    pub fn freeze_for_figures(mut self) -> Self {
+        if matches!(self.protocol, ReviewerProtocol::OpenAiCompat) { self.figure_transport = Some(aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model)); }
+        self
+    }
+    fn figure_transport(&self) -> aris_executor::OpenAiTransport {
+        self.figure_transport.unwrap_or_else(|| aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model))
+    }
+    /// A separate Reviewer connection and context, with actual multimodal
+    /// content and a single submission. Existing text-review callers are intact.
+    pub fn run_figure_request(
+        &self,
+        session_id: &str,
+        request: ApiRequest,
+        budget: u32,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<aris_executor::bounded::ModelReply, String> {
+        aris_executor::bounded::perform(
+            |observer| match self.protocol {
+                ReviewerProtocol::OpenAiCompat => aris_executor::OpenAIRuntimeClient::new(
+                    aris_executor::OpenAIExecutorConfig {
+                        api_key: self.api_key.clone(),
+                        base_url: openai_executor_base_url(&self.base_url),
+                    },
+                    self.model.clone(),
+                    false,
+                    Vec::new(),
+                    observer,
+                )
+                .map(|client| {
+                    aris_executor::ExecutorClient::OpenAI(
+                        client.with_transport(self.figure_transport())
+                            .with_routing_session_header(self.send_routing_session_header)
+                            .with_single_request(budget),
+                    )
+                }),
+                ReviewerProtocol::AnthropicCompat => SharedAnthropicRuntimeClient::new(
+                    AuthSource::BearerToken(self.api_key.clone()),
+                    anthropic_executor_base_url(&self.base_url),
+                    false,
+                    self.model.clone(),
+                    false,
+                    Vec::new(),
+                    budget,
+                    observer,
+                )
+                .map(|client| aris_executor::ExecutorClient::Anthropic(client.with_single_request(budget))),
+            },
+            session_id,
+            request,
+            cancelled,
+        )
+    }
+
+    pub fn figure_identity(&self) -> runtime::figures::ModelIdentity {
+        let (provider, base, transport) = match self.protocol {
+            ReviewerProtocol::OpenAiCompat => ("openai-compatible", openai_executor_base_url(&self.base_url), self.figure_transport().as_config_value()),
+            ReviewerProtocol::AnthropicCompat => ("anthropic-compatible", anthropic_executor_base_url(&self.base_url), "anthropic_messages"),
+        };
+        let endpoint = base;
+        let signature = runtime::figures::hash(format!("reviewer|{}|{}|{}|session-header={}|somniq-figure-vision-v2-light-reasoning", self.model, endpoint, transport, self.send_routing_session_header).as_bytes());
+        runtime::figures::ModelIdentity { model: self.model.clone(), provider: provider.into(), endpoint, transport: transport.into(), signature }
+    }
+
     /// Send one review request. Honors cancellation before and during the call.
     pub fn run(&self, prompt: &str, cancelled: Arc<AtomicBool>) -> Result<LlmReviewRun, String> {
         if cancelled.load(Ordering::SeqCst) {
@@ -7582,6 +7666,7 @@ impl PreparedLlmReview {
                 &self.model,
                 prompt,
                 cancelled,
+                self.send_routing_session_header,
             ),
             ReviewerProtocol::AnthropicCompat => call_anthropic_compat_reviewer(
                 &self.api_key,
@@ -7627,7 +7712,7 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
     // Custom OpenAI-compatible reviewer mode. Uses ARIS_REVIEWER_AUTH_TOKEN as
     // the API key and ARIS_REVIEWER_BASE_URL for the endpoint. Routes through
     // the same OpenAI-compat call path — no third routing path added.
-    if reviewer_provider.as_deref() == Some("custom") {
+    if matches!(reviewer_provider.as_deref(), Some("custom" | "opencode")) {
         let key = std::env::var("ARIS_REVIEWER_AUTH_TOKEN")
             .ok()
             .filter(|k| !k.is_empty())
@@ -7652,11 +7737,17 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
+        let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
+        let send_routing_session_header = api::connection_uses_routing_session_header(
+            reviewer_provider.as_deref().unwrap_or_default(), &base, managed_base.as_deref(),
+        );
         return Ok(PreparedLlmReview {
             protocol: ReviewerProtocol::OpenAiCompat,
             api_key: key,
             base_url: base,
             model: model.to_string(),
+            figure_transport: None,
+            send_routing_session_header,
         });
     }
 
@@ -7692,6 +7783,8 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
             api_key: key,
             base_url: base,
             model: model.to_string(),
+            figure_transport: None,
+            send_routing_session_header: false,
         });
     }
 
@@ -7719,11 +7812,17 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         .filter(|k| !k.is_empty())
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
+    let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
+    let send_routing_session_header = api::connection_uses_routing_session_header(
+        "", &base_url, managed_base.as_deref(),
+    );
     Ok(PreparedLlmReview {
         protocol: ReviewerProtocol::OpenAiCompat,
         api_key: key,
         base_url,
         model: model.to_string(),
+        figure_transport: None,
+        send_routing_session_header,
     })
 }
 
@@ -7806,6 +7905,7 @@ fn call_openai_compat_reviewer(
     model: &str,
     prompt: &str,
     cancelled: Option<Arc<AtomicBool>>,
+    send_routing_session_header: bool,
 ) -> Result<LlmReviewRun, String> {
     let client = aris_executor::OpenAIRuntimeClient::new(
         aris_executor::OpenAIExecutorConfig {
@@ -7817,7 +7917,7 @@ fn call_openai_compat_reviewer(
         Vec::new(),
         reviewer_stream_observer(cancelled),
     )
-    .map(aris_executor::ExecutorClient::OpenAI)
+    .map(|client| aris_executor::ExecutorClient::OpenAI(client.with_routing_session_header(send_routing_session_header)))
     .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
     run_reviewer_turn(client, prompt)
 }

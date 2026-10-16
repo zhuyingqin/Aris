@@ -17,6 +17,7 @@ mod files;
 mod git;
 mod image_assist;
 mod image_api;
+mod figures;
 mod knowledge;
 mod literature;
 mod paper_reading;
@@ -640,6 +641,7 @@ pub fn run() {
     hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
+        .register_uri_scheme_protocol("somniq-figure", |context, request| figures::editor_asset(context.app_handle(), &request))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -928,6 +930,24 @@ pub fn run() {
             newapi::newapi_send_verification,
             newapi::newapi_models,
             image_api::somni_image_settings,
+            figures::figures_connections,
+            figures::figures_running_count,
+            figures::figures_prepare,
+            figures::figures_list,
+            figures::figures_start,
+            figures::raster::figures_raster_document,
+            figures::raster::figures_select_raster,
+            figures::raster::figures_edit_image,
+            figures::raster::figures_export_raster,
+            figures::raster_result::figures_edit_result_document,
+            figures::raster_result::figures_resolve_edit_result,
+            figures::figures_cancel,
+            figures::figures_document,
+            figures::figures_save,
+            figures::figures_export,
+            figures::figures_review,
+            figures::svg_edit::figures_edit_svg,
+            figures::figures_delete,
             image_api::somni_image_settings_set,
             newapi::newapi_bootstrap,
             newapi::newapi_usage_logs,

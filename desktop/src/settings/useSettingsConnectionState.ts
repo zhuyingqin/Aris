@@ -351,9 +351,9 @@ export function useSettingsConnectionState({
       return;
     }
     try {
-      const next = await configSet({ executorModel: model });
+      const next = await configSet({ executorProvider: "openai", executorModel: model });
       setConfigView(next);
-      setAdvForm((current) => ({ ...current, executorModel: next.executorModel ?? "" }));
+      setAdvForm((current) => ({ ...current, executorProvider: next.executorProvider ?? "openai", executorBaseUrl: next.executorBaseUrl ?? "", executorModel: next.executorModel ?? "" }));
       setAccount((current) => (current ? { ...current, model } : current));
       notifyChatModelsUpdated();
     } catch (error) {
@@ -370,7 +370,7 @@ export function useSettingsConnectionState({
     }
     try {
       const patch: ConfigPatch = model
-        ? { reviewerModel: model }
+        ? { reviewerProvider: "custom", reviewerModel: model }
         : { reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" };
       const next = await configSet(patch);
       setConfigView(next);

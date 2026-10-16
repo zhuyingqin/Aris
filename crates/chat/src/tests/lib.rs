@@ -1218,10 +1218,26 @@ while True:
 }
 
 #[test]
-fn managed_newapi_settings_enable_the_initial_routing_header() {
+fn opencode_settings_route_by_endpoint_without_model_name_rules() {
+    for model in ["gpt-5.5", "deepseek-v4-flash-free", "MiniMax-M3"] {
+        let obj = json!({
+            "executor_provider": "openai", "executor_model": model,
+            "executor_api_key": "test-key", "executor_base_url": "https://opencode.ai/zen/v1",
+        });
+        let (_, _, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
+        match config {
+            ChatExecutorConfig::OpenAiCompatible { send_routing_session_header, .. } => assert!(send_routing_session_header),
+            _ => panic!("expected OpenAI-compatible config"),
+        }
+    }
+}
+
+#[test]
+fn managed_gateway_propagates_session_without_reclassifying_models() {
+    for model in ["MiniMax-M3", "deepseek-v4.1-flash", "gpt-5.5", "unknown-alias"] {
     let obj = json!({
         "executor_provider": "openai",
-        "executor_model": "MiniMax-M3",
+        "executor_model": model,
         "executor_api_key": "sk-test",
         "executor_base_url": "https://gateway.test/v1/",
         "newapi_executor_base_url": "https://gateway.test/v1"
@@ -1230,7 +1246,9 @@ fn managed_newapi_settings_enable_the_initial_routing_header() {
     .cloned()
     .expect("object");
 
-    let (_, _, config) = resolve_settings_executor_config(&obj).expect("config");
+    let (resolved_model, provider, config) = resolve_settings_executor_config(&obj).expect("config");
+    assert_eq!(resolved_model, model);
+    assert_eq!(provider, "openai");
     match config {
         ChatExecutorConfig::OpenAiCompatible {
             send_routing_session_header,
@@ -1238,6 +1256,22 @@ fn managed_newapi_settings_enable_the_initial_routing_header() {
         } => assert!(send_routing_session_header),
         ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
     }
+    }
+}
+
+#[test]
+fn explicit_opencode_settings_identify_the_connection_without_model_rules() {
+    for model in ["gpt-5.5", "MiniMax-M3", "opencode/alias", "unknown-model"] {
+        let obj = json!({
+            "executor_provider": "opencode", "executor_model": model,
+            "executor_api_key": "own-key", "executor_base_url": "https://fixed-channel.test/v1"
+        });
+        let (_, provider, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
+        assert_eq!(provider, "opencode");
+        assert!(matches!(config, ChatExecutorConfig::OpenAiCompatible { send_routing_session_header: true, .. }));
+    }
+    let missing_endpoint = json!({"executor_provider": "opencode", "executor_api_key": "own-key"});
+    assert!(resolve_settings_executor_config(missing_endpoint.as_object().unwrap()).is_err());
 }
 
 #[test]

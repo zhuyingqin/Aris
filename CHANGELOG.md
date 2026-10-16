@@ -1,5 +1,34 @@
 # ARIS-Code Changelog
 
+## v0.4.80 (2026-10-07)
+
+- **SomniFig research figure workspace** — generate or import a reference,
+  preview it, and explicitly continue to editable SVG reconstruction. The
+  Executor and independent Reviewer share the project's configured models.
+  Local canvas edits, immutable versions and SVG/PNG/PDF exports preserve
+  the reference and review evidence.
+- **Edit SVG through conversation** — request changes to labels, arrows and
+  layout against the current saved SVG. Successive turns retain applied
+  requirements and create new versions, followed by independent review.
+  The SVG source editor now highlights tags, attributes, strings and comments,
+  with line numbers, search and undo/redo. Unsaved work and version conflicts
+  are protected; failed, cancelled or unresolved requests are not replayed.
+- **PNG editing with preserved history** — select a region or the whole image
+  and describe the change. The Executor prepares the image instruction, while
+  local composition protects pixels outside the selection. Small dimension
+  differences are aligned; larger changes can be previewed and explicitly
+  adopted without sending another image request.
+- **Reliable model routing and waits** — account-gateway and explicit OpenCode
+  connections retain separate Executor/Reviewer routing sessions from the first
+  request. SVG output limits follow Chat, and figure requests allow longer waits
+  for initial responses while retaining cancellation and recorded request state.
+- **Consistent figure editing** — shared theme and typography, responsive panels,
+  compact task titles and grouped SVG styles that survive ungrouping,
+  undo/redo and save/reopen. The standard application navigation remains available.
+- **Version consistency** — desktop and shared Rust manifests, lockfiles and
+  README badges use 0.4.80. The release workflow builds Windows/macOS installers,
+  updater signatures and the combined update manifest.
+
 ## v0.4.79 (2026-10-05)
 
 - **Native Code workspace controls** — module, project and account menus now

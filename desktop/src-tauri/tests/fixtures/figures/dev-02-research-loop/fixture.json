@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "DEV-02",
+  "split": "development",
+  "title": "科研执行与证据闭环",
+  "sourceProvenance": "Hand-authored SVG with frozen ground truth; only rendered PNG is attached to the reconstruction request",
+  "sourceWidth": 1600,
+  "sourceHeight": 1000,
+  "outputLimit": 16384,
+  "method": "还原一个科研执行闭环，共有以下十三个主体模块：研究问题、文献检索、数据与代码、证据整合、方法设计、执行器、实验运行、静态检查、结果汇总、候选图与报告、独立审查、质量达标？、归档与导出。研究问题分别进入文献检索和数据与代码，两者汇入证据整合，再进入方法设计；方法设计交给执行器。执行器分别进入实验运行和静态检查，两者汇入结果汇总，再形成候选图与报告并交给独立审查。独立审查进入菱形判断质量达标？；是则归档与导出，否则通过虚线返回执行器定向修订。归档与导出还有一条虚线反馈到研究问题，表示新证据或新问题。保留十三个主体标签、两个并行分支和十六条有向关系。必要标签必须可直接改字，主体组件应可单独移动。保留原图标题、三个区域、配色、箭头方向、判断形状、反馈线型和整体布局。不要增加未给出的研究数据或关系。",
+  "style": "平面学术架构图；按原始图片保留布局、配色、大小关系与线型。反馈虚线保持可辨认；中文必须可编辑。",
+  "requiredLabels": ["研究问题", "文献检索", "数据与代码", "证据整合", "方法设计", "执行器", "实验运行", "静态检查", "结果汇总", "候选图与报告", "独立审查", "质量达标？", "归档与导出"],
+  "requiredRelations": [
+    {"from": "研究问题", "to": "文献检索", "kind": "forward"},
+    {"from": "研究问题", "to": "数据与代码", "kind": "forward"},
+    {"from": "文献检索", "to": "证据整合", "kind": "forward"},
+    {"from": "数据与代码", "to": "证据整合", "kind": "forward"},
+    {"from": "证据整合", "to": "方法设计", "kind": "forward"},
+    {"from": "方法设计", "to": "执行器", "kind": "forward"},
+    {"from": "执行器", "to": "实验运行", "kind": "forward"},
+    {"from": "执行器", "to": "静态检查", "kind": "forward"},
+    {"from": "实验运行", "to": "结果汇总", "kind": "forward"},
+    {"from": "静态检查", "to": "结果汇总", "kind": "forward"},
+    {"from": "结果汇总", "to": "候选图与报告", "kind": "forward"},
+    {"from": "候选图与报告", "to": "独立审查", "kind": "forward"},
+    {"from": "独立审查", "to": "质量达标？", "kind": "forward"},
+    {"from": "质量达标？", "to": "归档与导出", "kind": "conditional", "label": "是：通过"},
+    {"from": "质量达标？", "to": "执行器", "kind": "feedback", "label": "否／定向修订", "dashed": true},
+    {"from": "归档与导出", "to": "研究问题", "kind": "feedback", "label": "新证据 / 新问题", "dashed": true}
+  ],
+  "checks": ["Thirteen required labels remain editable text", "Sixteen directed relations preserve targets and arrow orientation", "Two parallel splits and joins remain distinguishable", "Decision remains a diamond with yes/no branches", "Both feedback loops remain dashed", "Three lanes and source aspect ratio are preserved", "No label clipping or arrow occlusion", "Generated SVG can be serialized and reopened in SVG-Edit"],
+  "scope": "One moderate development sample, not a P3 holdout or a complete budget comparison"
+}
