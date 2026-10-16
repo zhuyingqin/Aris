@@ -767,7 +767,7 @@ function diffsFromTool(block: ChatToolBlock): FileChange[] {
   // Old receipts still show their recorded counts, explicitly without a patch.
   const receipt = objectValue(output?.diff_summary);
   if (receipt || changeId || [
-    "write_file", "append_file", "edit_file", "multi_edit",
+    "write_file", "append_file", "edit_file", "edit_docx", "multi_edit",
     "str_replace_based_edit_tool", "commit_large_write",
   ].includes(block.name)) {
     const changes: FileChange[] = [{

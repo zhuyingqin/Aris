@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 import re
 import sys
 from dataclasses import dataclass, field
@@ -111,6 +113,18 @@ _MATH_STATS = MathOutcomeStats()
 
 def get_math_stats() -> MathOutcomeStats:
     return _MATH_STATS
+
+
+def save_docx_atomically(doc: Document, destination: Path) -> None:
+    """只在完整 DOCX 保存成功后替换目标，失败不覆盖上一版。"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".docx", delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        doc.save(str(temporary_path))
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 _OMML_IMPORT_WARNED = False
@@ -1426,7 +1440,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     out_path = Path(args.output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(out_path))
+    save_docx_atomically(doc, out_path)
     print(f"DOCX: ok=1", file=sys.stderr)
     print(f"已写入: {out_path}")
     _MATH_STATS.report()

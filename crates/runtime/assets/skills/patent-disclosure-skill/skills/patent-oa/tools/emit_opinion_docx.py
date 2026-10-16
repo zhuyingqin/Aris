@@ -17,7 +17,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from md_to_docx import convert_md_to_docx  # noqa: E402
+from md_to_docx import convert_md_to_docx, save_docx_atomically  # noqa: E402
 from stdio_utf8 import ensure_utf8_stdio  # noqa: E402
 
 
@@ -42,7 +42,7 @@ def emit_opinion_docx(md_path: Path, docx_path: Path | None = None) -> Path:
     text = md_path.read_text(encoding="utf-8")
     _warn_bare_paren_latex(md_path, text)
     doc = convert_md_to_docx(text, base_dir=md_path.parent, prefer_omml=False)
-    doc.save(str(out))
+    save_docx_atomically(doc, out)
     return out
 
 

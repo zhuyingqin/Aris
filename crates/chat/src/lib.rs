@@ -798,6 +798,27 @@ fn strip_attachment_boilerplate(text: &str) -> String {
 /// order.
 fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
     let mut groups = Vec::new();
+    let terms = lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .collect::<Vec<_>>();
+    let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))
+        || (terms.contains(&"word")
+            && contains_any(
+                lowered,
+                &[
+                    "document", "file", "edit", "formula", "equation", "export", "convert",
+                    "office", "文档", "文件", "编辑", "修改", "改稿", "公式", "导出", "转换",
+                    "排版", "准确",
+                ],
+            ));
+    if word_document {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "Word document intent",
+            required: resolve_named(catalog, &["read_docx", "edit_docx"]),
+            optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
     let drawing_intent = contains_any(
         lowered,
         &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],

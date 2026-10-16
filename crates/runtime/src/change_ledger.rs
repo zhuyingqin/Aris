@@ -67,6 +67,8 @@ pub enum FileChangeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
     pub exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
@@ -169,6 +171,11 @@ enum RevertApplication {
     },
 }
 
+enum BinaryRevertApplication {
+    Conflict(String),
+    Applied(Vec<u8>),
+}
+
 pub fn record_text_file_change(
     context: &FileMutationContext,
     path: &Path,
@@ -201,6 +208,58 @@ pub fn record_text_file_change(
         compact_ledger_diff(&unified_diff)
     };
 
+    record_file_change_bytes(
+        context,
+        path,
+        operation,
+        before_content.map(str::as_bytes),
+        after_content.map(str::as_bytes),
+        true,
+        structured_patch,
+        unified_diff,
+        reverts,
+    )
+}
+
+pub fn record_binary_file_change(
+    context: &FileMutationContext,
+    path: &Path,
+    before: &[u8],
+    after: &[u8],
+    unified_diff: String,
+    reverts: Option<String>,
+) -> io::Result<Option<FileChangeRecord>> {
+    record_file_change_bytes(
+        context,
+        path,
+        if reverts.is_some() {
+            FileChangeOperation::Revert
+        } else {
+            FileChangeOperation::Update
+        },
+        Some(before),
+        Some(after),
+        false,
+        Vec::new(),
+        compact_ledger_diff(&unified_diff),
+        reverts,
+    )
+}
+
+fn record_file_change_bytes(
+    context: &FileMutationContext,
+    path: &Path,
+    operation: FileChangeOperation,
+    before_content: Option<&[u8]>,
+    after_content: Option<&[u8]>,
+    text: bool,
+    structured_patch: Vec<StructuredPatchHunk>,
+    unified_diff: String,
+    reverts: Option<String>,
+) -> io::Result<Option<FileChangeRecord>> {
+    if before_content == after_content {
+        return Ok(None);
+    }
     let session_id = context
         .session_id
         .as_deref()
@@ -211,8 +270,8 @@ pub fn record_text_file_change(
     let session_dir = session_change_dir(&ledger_root, &session_id);
     fs::create_dir_all(&session_dir)?;
 
-    let before = snapshot_for_content(&session_dir, before_content)?;
-    let after = snapshot_for_content(&session_dir, after_content)?;
+    let before = snapshot_for_bytes(&session_dir, before_content, text)?;
+    let after = snapshot_for_bytes(&session_dir, after_content, text)?;
     let reversible = is_reversible(&operation, &before);
     let non_reversible_reason = (!reversible).then(|| {
         "the pre-change content exceeded the revert blob limit and this operation cannot be restored safely from its recorded length alone; hashes and a bounded patch were recorded".to_string()
@@ -452,6 +511,11 @@ pub fn revert_file_change(
         });
     }
 
+    if record.before.content_kind.as_deref() == Some("binary")
+        || record.after.content_kind.as_deref() == Some("binary")
+    {
+        return revert_binary_change(&ledger_root, record, context);
+    }
     let path = PathBuf::from(&record.canonical_path);
     let before_blob = if record.before.blob_ref.is_some() {
         load_snapshot_content(&ledger_root, &record.session_id, &record.before)?
@@ -575,9 +639,14 @@ fn non_empty_env(key: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn snapshot_for_content(session_dir: &Path, content: Option<&str>) -> io::Result<FileSnapshot> {
+fn snapshot_for_bytes(
+    session_dir: &Path,
+    content: Option<&[u8]>,
+    text: bool,
+) -> io::Result<FileSnapshot> {
     let Some(content) = content else {
         return Ok(FileSnapshot {
+            content_kind: None,
             exists: false,
             content_hash: None,
             blob_ref: None,
@@ -586,13 +655,18 @@ fn snapshot_for_content(session_dir: &Path, content: Option<&str>) -> io::Result
         });
     };
 
-    let content_hash = sha256_hex(content.as_bytes());
-    let blob_ref = if content.len() <= MAX_REVERT_BLOB_BYTES {
+    let content_hash = sha256_hex(content);
+    let limit = if text {
+        MAX_REVERT_BLOB_BYTES
+    } else {
+        64 * 1024 * 1024
+    };
+    let blob_ref = if content.len() <= limit {
         let blobs_dir = session_dir.join(BLOBS_DIR_NAME);
         fs::create_dir_all(&blobs_dir)?;
         let blob_path = blobs_dir.join(&content_hash);
         if !blob_path.exists() {
-            crate::atomic_file::write_replace(&blob_path, content.as_bytes())?;
+            crate::atomic_file::write_replace(&blob_path, content)?;
         }
         Some(content_hash.clone())
     } else {
@@ -600,11 +674,18 @@ fn snapshot_for_content(session_dir: &Path, content: Option<&str>) -> io::Result
     };
 
     Ok(FileSnapshot {
+        content_kind: (!text).then(|| "binary".to_string()),
         exists: true,
         content_hash: Some(content_hash),
         blob_ref,
         byte_len: Some(content.len()),
-        line_count: Some(content.lines().count()),
+        line_count: if text {
+            std::str::from_utf8(content)
+                .ok()
+                .map(|value| value.lines().count())
+        } else {
+            None
+        },
     })
 }
 
@@ -708,11 +789,105 @@ fn apply_reverted_status(records: &mut [FileChangeRecord]) {
     }
 }
 
+/// Roll back an unaudited write only if no subsequent external edit intervened.
+pub(crate) fn binary_audit_rollback_error(
+    path: &Path,
+    written: &[u8],
+    previous: &[u8],
+    audit_error: io::Error,
+) -> io::Error {
+    let rollback = crate::atomic_file::with_path_lock(path, || {
+        if fs::read(path)? != written {
+            return Err(io::Error::other("file changed before audit rollback"));
+        }
+        crate::atomic_file::write_replace_unlocked(path, previous)
+    });
+    io::Error::other(format!(
+        "could not record binary write: {audit_error}; rollback: {rollback:?}"
+    ))
+}
+
+fn revert_binary_change(
+    ledger_root: &Path,
+    record: FileChangeRecord,
+    context: &FileMutationContext,
+) -> io::Result<FileChangeRevertOutput> {
+    let path = PathBuf::from(&record.canonical_path);
+    let before = load_snapshot_bytes(ledger_root, &record.session_id, &record.before)?
+        .ok_or_else(|| io::Error::other("binary pre-change snapshot is missing"))?;
+    let mut revert_context = context.clone();
+    revert_context.session_id = Some(record.session_id.clone());
+    let application = crate::atomic_file::with_path_lock(&path, || {
+        let current = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(BinaryRevertApplication::Conflict(
+                    "current file is missing".to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let expected = record.after.content_hash.as_deref().unwrap_or_default();
+        let actual = sha256_hex(&current);
+        if actual != expected {
+            return Ok(BinaryRevertApplication::Conflict(format!(
+                "current file hash {actual} does not match recorded after hash {expected}"
+            )));
+        }
+        crate::atomic_file::write_replace_unlocked(&path, &before)?;
+        Ok::<_, io::Error>(BinaryRevertApplication::Applied(current))
+    })?;
+    let current = match application {
+        BinaryRevertApplication::Conflict(conflict) => {
+            return Ok(FileChangeRevertOutput {
+                change_id: record.change_id,
+                file_path: record.path,
+                reverted: false,
+                revert_change_id: None,
+                reason: None,
+                conflict: Some(conflict),
+            });
+        }
+        BinaryRevertApplication::Applied(current) => current,
+    };
+    let revert = record_binary_file_change(
+        &revert_context,
+        &path,
+        &current,
+        &before,
+        format!("Restored binary DOCX bytes for {}", record.path),
+        Some(record.change_id.clone()),
+    )
+    .map_err(|error| binary_audit_rollback_error(&path, &before, &current, error))?;
+    Ok(FileChangeRevertOutput {
+        change_id: record.change_id,
+        file_path: record.path,
+        reverted: true,
+        revert_change_id: revert.map(|item| item.change_id),
+        conflict: None,
+        reason: None,
+    })
+}
+
 fn load_snapshot_content(
     ledger_root: &Path,
     session_id: &str,
     snapshot: &FileSnapshot,
 ) -> io::Result<Option<String>> {
+    let Some(bytes) = load_snapshot_bytes(ledger_root, session_id, snapshot)? else {
+        return Ok(None);
+    };
+    if snapshot.content_kind.as_deref() == Some("binary") {
+        return crate::docx::review_text(&bytes).map(Some);
+    }
+    String::from_utf8(bytes).map(Some).map_err(io::Error::other)
+}
+
+fn load_snapshot_bytes(
+    ledger_root: &Path,
+    session_id: &str,
+    snapshot: &FileSnapshot,
+) -> io::Result<Option<Vec<u8>>> {
     if !snapshot.exists {
         return Ok(None);
     }
@@ -729,8 +904,8 @@ fn load_snapshot_content(
     let path = session_change_dir(ledger_root, session_id)
         .join(BLOBS_DIR_NAME)
         .join(blob_ref);
-    let content = fs::read_to_string(path)?;
-    if snapshot.content_hash.as_deref() != Some(sha256_hex(content.as_bytes()).as_str()) {
+    let content = fs::read(path)?;
+    if snapshot.content_hash.as_deref() != Some(sha256_hex(&content).as_str()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "snapshot hash mismatch",

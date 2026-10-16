@@ -128,6 +128,19 @@ fn project_goal_prompt_carries_the_curated_main_line_and_its_drift() {
     assert!(prompt.contains("do not drift onto it silently"));
     assert!(prompt.contains("one MiniMax tool-call parsing bug"));
     assert!(prompt.contains("Suggested way back: Park the parsing bug"));
+    assert!(prompt.contains("Main-line summary last reviewed:"));
+    assert!(prompt.contains("A user-requested side task already has agreement"));
+    assert!(prompt.contains("must not stop, shorten, or redirect the latest explicit user task"));
+    assert!(!prompt.contains("get the user's agreement before continuing"));
+}
+
+#[test]
+fn missing_main_line_does_not_require_confirmation_of_the_current_request() {
+    let root = tempfile::tempdir().expect("temp project");
+    let prompt = render_project_goal_prompt(root.path());
+    assert!(prompt.contains("The latest explicit user request defines this turn's authorized task"));
+    assert!(prompt.contains("Missing summary state alone is not a reason to ask for confirmation"));
+    assert!(!prompt.contains("ask the user what the main thread is"));
 }
 
 #[test]
