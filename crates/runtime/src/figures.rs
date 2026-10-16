@@ -10,6 +10,8 @@ use std::{
 };
 
 pub mod svg_edits;
+pub mod drafts;
+mod cleanup;
 pub use svg_edits::FigureSvgEdit;
 
 static WRITES: Mutex<()> = Mutex::new(());
@@ -186,14 +188,19 @@ pub fn validate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Canonicalize each level, including existing directories, before writing.
+/// Resolve an existing task without recreating a deleted one. Only `create`
+/// may create its directories; late document reads or drafts must fail.
 pub fn directory(workspace: &Path, id: &str) -> Result<PathBuf, String> {
+    resolve_directory(workspace, id, false)
+}
+
+fn resolve_directory(workspace: &Path, id: &str, create: bool) -> Result<PathBuf, String> {
     validate_id(id)?;
     let root = workspace.canonicalize().map_err(|e| e.to_string())?;
     let mut path = root.clone();
     for component in [".somniq", "artifacts", "figures", id] {
         path.push(component);
-        if !path.exists() {
+        if create && !path.exists() {
             fs::create_dir(&path).map_err(|e| e.to_string())?;
         }
         path = path.canonicalize().map_err(|e| e.to_string())?;
@@ -218,7 +225,7 @@ pub fn create(
     source: Option<&[u8]>,
 ) -> Result<FigureRun, String> {
     let _lock = WRITES.lock().map_err(|e| e.to_string())?;
-    let dir = directory(workspace, &run.id)?;
+    let dir = resolve_directory(workspace, &run.id, true)?;
     if dir.join("manifest.json").exists() {
         let existing = load(workspace, &run.id)?;
         if existing.method != run.method
@@ -319,7 +326,7 @@ pub fn delete(workspace: &Path, id: &str) -> Result<(), String> {
     let _lock = WRITES.lock().map_err(|e| e.to_string())?;
     let root = workspace.canonicalize().map_err(|e| e.to_string())?;
     let path = root.join(".somniq").join("artifacts").join("figures").join(id);
-    if !path.exists() {
+    if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(());
     }
     let figures = root
@@ -327,9 +334,11 @@ pub fn delete(workspace: &Path, id: &str) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-    if !figures.starts_with(&root) || canonical.parent() != Some(figures.as_path()) || !canonical.is_dir() {
+    if !figures.starts_with(&root) || canonical.parent() != Some(figures.as_path()) || !canonical.is_dir()
+        || !canonical.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case(id)) {
         return Err("Figure directory must remain inside its project".into());
     }
+    cleanup::remove_legacy_generation(&root, &canonical)?;
     fs::remove_dir_all(&canonical).map_err(|e| e.to_string())
 }
 
@@ -617,12 +626,16 @@ pub fn save_version(
     }
     // This is the editor source of truth even while visual review is pending.
     crate::write_file_atomically(&dir.join("current.svg"), svg).map_err(|e| e.to_string())?;
+    let user_save = version.author == "user";
     run.versions.push(version);
     run.review = None;
     run.error = None;
     run.status = "draft".into();
     run.updated_at = crate::now_iso8601();
     write_run(&dir, &run)?;
+    if user_save {
+        drafts::remove_locked(&dir)?;
+    }
     // The last accepted snapshot lives in its immutable version. Do not leave
     // a stale `final.svg` looking like the newly edited source.
     let final_path = dir.join("final.svg");
@@ -803,8 +816,28 @@ mod tests {
         let (kept, gone) = ("c".repeat(32), "d".repeat(32));
         create(temp.path(), run(&kept), Some(b"source")).unwrap();
         create(temp.path(), run(&gone), Some(b"source")).unwrap();
+        let gone_path = directory(temp.path(), &gone).unwrap();
+        let kept_path = directory(temp.path(), &kept).unwrap();
+        drafts::save(temp.path(), &gone, None, "<svg>draft</svg>".into(), None).unwrap();
+        fs::create_dir(gone_path.join("versions")).unwrap();
+        for file in ["versions/0001.svg", "versions/0001.png", "versions/0001.pdf", "raster-001.image",
+            "request-01.prompt-input.json", "request-01.response.txt", "request-02.mask.png",
+            "request-02.selection.png", "request-02.result.png", "request-02.application.json", "final.svg"] {
+            fs::write(gone_path.join(file), b"fixture").unwrap();
+        }
+        let shared_cache = gone_path.parent().unwrap().join("vision-capabilities.json");
+        fs::write(&shared_cache, b"shared").unwrap();
         assert!(delete(temp.path(), "../../outside").is_err());
         delete(temp.path(), &gone).unwrap();
+        assert!(!gone_path.exists(), "the entire task directory must be physically removed");
+        assert!(load(temp.path(), &gone).is_err());
+        assert!(read_artifact(temp.path(), &gone, "current.svg", MAX_SVG_BYTES).is_err());
+        assert!(drafts::load(temp.path(), &gone).is_err());
+        assert!(drafts::save(temp.path(), &gone, None, "late draft".into(), None).is_err());
+        assert!(update(temp.path(), &gone, |_| Ok(())).is_err());
+        assert!(!gone_path.exists(), "late reads and writes must not recreate deleted directories");
+        assert_eq!(fs::read(kept_path.join("figure.source")).unwrap(), b"source");
+        assert_eq!(fs::read(shared_cache).unwrap(), b"shared");
         delete(temp.path(), &gone).unwrap();
         let ids: Vec<_> = list(temp.path()).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![kept]);

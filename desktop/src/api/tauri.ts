@@ -2,6 +2,7 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
@@ -2499,6 +2500,8 @@ export interface IndependentReviewResult {
   executorModel: string;
   independent: boolean;
   exhausted: boolean;
+  /** What a Reviewer thread opened with its own read-only tools, as the controller recorded the calls. Absent for a one-shot review. */
+  toolChecks?: string[];
 }
 
 export interface IndependentReviewEvent {

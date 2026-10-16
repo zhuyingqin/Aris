@@ -222,6 +222,21 @@ fn dynamic_tool_router_serves_a_multi_file_investigation() {
 }
 
 #[test]
+fn collaboration_and_recovered_child_continuation_keep_all_six_actions_visible() {
+    let mut catalog=desktop_like_catalog();
+    catalog.extend(crate::chat_tool_specs(tools::collaboration::tool_specs()));
+    for prompt in ["检查后端恢复与前端状态同步", "继续子任务 /root/backend，在原有子会话中续派", "Investigate two independent modules in parallel"] {
+        let plan=route_chat_tools(prompt,&catalog,ToolRoutingMode::Active);
+        for name in tools::collaboration::ACTIONS {
+            assert!(plan.active_names.contains(name),"{prompt}: missing {name}: {plan:?}");
+        }
+        assert!(plan.active_names.len()<=MAX_ROUTED_TOOLS);
+    }
+    let simple=route_chat_tools("解释这个函数",&catalog,ToolRoutingMode::Active);
+    assert!(!simple.active_names.contains("spawn_agent"));
+}
+
+#[test]
 fn dynamic_tool_router_pins_core_tools_within_the_hard_cap() {
     let specs = desktop_like_catalog();
     let every_name = specs

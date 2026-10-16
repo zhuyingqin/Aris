@@ -2,8 +2,8 @@ use super::{
     apply_bundled_internal_config, apply_deepseek_executor, apply_patch,
     apply_reviewer_environment_from, build_view, clear_newapi_session, deepseek_executor_key,
     normalize_managed_model_slots, normalize_web_proxy_patch, read_verified, review_enabled_from,
-    sanitize_legacy_managed_http,
-    upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
+    review_mode_from, sanitize_legacy_managed_http,
+    upsert_verified, write_verified, ConfigPatch, ReviewMode, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -215,6 +215,63 @@ fn automatic_review_defaults_off_and_can_be_enabled_without_clearing_reviewer() 
     assert_eq!(obj["reviewer_provider"], "openai");
     assert_eq!(obj["reviewer_model"], "gpt-5.5");
     assert_eq!(obj["reviewer_api_key"], "reviewer-token");
+}
+
+#[test]
+fn review_mode_defaults_to_the_thread_and_only_an_explicit_oneshot_goes_back() {
+    let mut obj = Map::new();
+    assert_eq!(review_mode_from(&obj), ReviewMode::Thread);
+    assert_eq!(build_view(&obj).review_mode, "thread");
+
+    for (stored, expected) in [
+        ("oneshot", ReviewMode::Oneshot),
+        ("  OneShot ", ReviewMode::Oneshot),
+        ("thread", ReviewMode::Thread),
+        // A typo must not quietly pick the old path.
+        ("one-shot", ReviewMode::Thread),
+        ("", ReviewMode::Thread),
+    ] {
+        obj.insert("review_mode".to_string(), Value::String(stored.to_string()));
+        assert_eq!(review_mode_from(&obj), expected, "{stored:?}");
+    }
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            review_mode: Some("Oneshot".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(obj["review_mode"], "oneshot");
+    assert_eq!(build_view(&obj).review_mode, "oneshot");
+    // Other settings leave it alone.
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            review_enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(obj["review_mode"], "oneshot");
+    // A blank or unknown value is "no preference": the key goes, the default returns.
+    for blank in ["", "  ", "sideways"] {
+        apply_patch(
+            &mut obj,
+            ConfigPatch {
+                review_mode: Some("oneshot".to_string()),
+                ..Default::default()
+            },
+        );
+        apply_patch(
+            &mut obj,
+            ConfigPatch {
+                review_mode: Some(blank.to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(!obj.contains_key("review_mode"), "{blank:?}");
+        assert_eq!(review_mode_from(&obj), ReviewMode::Thread);
+    }
 }
 
 #[test]

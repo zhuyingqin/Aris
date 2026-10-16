@@ -1,16 +1,24 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FigureView } from "./types";
+import type { FigureEditingDraft, FigureView } from "./types";
 
 const state = vi.hoisted(() => ({ currentProject: { id: "project-a", name: "Research" }, language: "cn", setTab: vi.fn(), setFigureDirty: vi.fn() }));
-const api = vi.hoisted(() => ({ figureEditSvg: vi.fn(), figureList: vi.fn(), figureConnections: vi.fn(), figurePrepare: vi.fn(), figureStart: vi.fn(), figureDocument: vi.fn(), figureSave: vi.fn(), figureReview: vi.fn(), figureCancel: vi.fn(), figureExport: vi.fn(), figureDelete: vi.fn(), figureSelectRaster: vi.fn(), figureEditImage: vi.fn(), figureEditResultDocument: vi.fn(), figureResolveEditResult: vi.fn(), figureRasterDocument: vi.fn(), figureExportRaster: vi.fn(), onFigureUpdated: vi.fn() }));
+const api = vi.hoisted(() => ({ figureSaveDraft: vi.fn(), figureDiscardDraft: vi.fn(), figureEditSvg: vi.fn(), figureList: vi.fn(), figureConnections: vi.fn(), figurePrepare: vi.fn(), figureStart: vi.fn(), figureDocument: vi.fn(), figureSave: vi.fn(), figureReview: vi.fn(), figureCancel: vi.fn(), figureExport: vi.fn(), figureDelete: vi.fn(), figureSelectRaster: vi.fn(), figureEditImage: vi.fn(), figureEditResultDocument: vi.fn(), figureResolveEditResult: vi.fn(), figureRasterDocument: vi.fn(), figureExportRaster: vi.fn(), onFigureUpdated: vi.fn() }));
+const canvas = vi.hoisted(() => ({ serialize: vi.fn() }));
 vi.mock("../store", () => ({ useStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state }) }));
 vi.mock("../api/tauri", () => ({ isTauri: () => false }));
 vi.mock("./figureApi", () => ({ ...api, figuresAvailable: () => true }));
-vi.mock("./FigureEditor", async () => ({ default: (await import("react")).forwardRef(() => <div data-testid="editor" />) }));
+vi.mock("./FigureEditor", async () => {
+  const { forwardRef, useImperativeHandle } = await import("react");
+  return { default: forwardRef(({ onDirty, readOnly }: { onDirty: () => void; readOnly: boolean }, ref) => {
+    useImperativeHandle(ref, () => ({ serialize: canvas.serialize }));
+    return <div data-testid="editor"><button disabled={readOnly} onClick={onDirty}>模拟画布修改</button></div>;
+  }) };
+});
 vi.mock("./FigureSourceEditor", () => ({ default: ({ value, readOnly, onChange }: { value: string; readOnly: boolean; onChange: (svg: string) => void }) => <textarea aria-label="SVG" value={value} readOnly={readOnly} onChange={(event) => onChange(event.target.value)} /> }));
 import FigureStudio from "./FigureStudio";
+import { parseFigureStyle } from "./figureStyles";
 
 const identity = { model: "vision-executor", provider: "custom", endpoint: "https://local.example/v1", transport: "chat_completions", signature: "executor" };
 function fixture(): FigureView {
@@ -29,10 +37,216 @@ beforeEach(() => {
   api.figureDocument.mockResolvedValue({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>', sourceDataUrl: null, previewDataUrl: null });
   api.figureRasterDocument.mockResolvedValue({ dataUrl: "data:image/png;base64,AAAA", hash: "source", index: 1, width: 100, height: 100 });
   api.onFigureUpdated.mockResolvedValue(() => {});
+  canvas.serialize.mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>Canvas edit</text></svg>');
+  api.figureSaveDraft.mockImplementation(async (_project, _id, expectedHash, svg, baseIndex) => ({ svg, expectedHash, baseIndex, updatedAt: "now" }));
+  api.figureDiscardDraft.mockResolvedValue(undefined);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("SomniQ figure application", () => {
+  it("debounces source edits into a draft without adding a version or calling models", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    const source = screen.getByLabelText("SVG");
+    fireEvent.change(source, { target: { value: "first" } });
+    fireEvent.change(source, { target: { value: "<svg>unfinished" } });
+    await screen.findByText("草稿已自动保存");
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(1);
+    expect(api.figureSaveDraft).toHaveBeenCalledWith("project-a", "a".repeat(32), "parent", "<svg>unfinished", 1);
+    expect(api.figureSave).not.toHaveBeenCalled(); expect(api.figureReview).not.toHaveBeenCalled(); expect(api.figureStart).not.toHaveBeenCalled();
+    expect(canvas.serialize).not.toHaveBeenCalled();
+    expect(within(screen.getByLabelText("版本")).getAllByRole("option")).toHaveLength(2);
+    expect((screen.getByRole("button", { name: /保存新版本/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: /^审查/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(false);
+  });
+  it("autosaves successive canvas changes even while the version remains uncommitted", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    fireEvent.click(await screen.findByRole("button", { name: "模拟画布修改" }));
+    await screen.findByText("草稿已自动保存");
+    expect(api.figureSaveDraft.mock.calls[0][3]).toContain("Canvas edit");
+    canvas.serialize.mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>Second edit</text></svg>');
+    fireEvent.click(screen.getByRole("button", { name: "模拟画布修改" }));
+    await screen.findByText("草稿已自动保存");
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(2);
+    expect(api.figureSaveDraft.mock.calls[1][3]).toContain("Second edit");
+    expect(api.figureSave).not.toHaveBeenCalled();
+    expect(api.figureDocument).toHaveBeenCalledTimes(1);
+  });
+  it("restores an autosaved draft after switching figures and after remounting", async () => {
+    const original = fixture(), other = fixture(); other.run.id = "b".repeat(32); other.run.title = "另一个绘图";
+    api.figureList.mockResolvedValue([original, other]);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>Recovered</text></svg>';
+    let persisted: FigureEditingDraft | null = null;
+    api.figureSaveDraft.mockImplementation(async (_project, _id, expectedHash, svg, baseIndex) => persisted = { expectedHash, svg, baseIndex, updatedAt: "now" });
+    api.figureDocument.mockImplementation(async (_project, id, index) => ({ svg: id === original.run.id && index == null && persisted ? persisted.svg : "original", sourceDataUrl: null, previewDataUrl: null, draft: id === original.run.id && index == null ? persisted : null }));
+    const mounted = render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: svg } });
+    await screen.findByText("草稿已自动保存");
+    fireEvent.click(screen.getByText("另一个绘图"));
+    await screen.findByRole("heading", { name: "另一个绘图" });
+    fireEvent.click(screen.getByText("架构草稿"));
+    await screen.findByText("草稿已自动保存");
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    expect((await screen.findByLabelText("SVG") as HTMLTextAreaElement).value).toBe(svg);
+    mounted.unmount(); render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByText("草稿已自动保存"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    expect((await screen.findByLabelText("SVG") as HTMLTextAreaElement).value).toBe(svg);
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(1); expect(api.figureSave).not.toHaveBeenCalled();
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(false);
+  });
+  it("restores incomplete draft source directly into the source editor", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    api.figureDocument.mockResolvedValue({ svg: null, sourceDataUrl: null, previewDataUrl: null, draft: { svg: "<svg>partial", expectedHash: "parent", baseIndex: 1, updatedAt: "now" } });
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    expect((await screen.findByLabelText("SVG") as HTMLTextAreaElement).value).toBe("<svg>partial");
+    expect(screen.queryByTestId("editor")).toBeNull();
+    expect(screen.getByText("草稿已自动保存")).toBeTruthy();
+    expect(api.figureSaveDraft).not.toHaveBeenCalled(); expect(api.figureSave).not.toHaveBeenCalled();
+  });
+  it("ignores a late canvas serialization after selecting a different figure", async () => {
+    const other = fixture(); other.run.id = "b".repeat(32); other.run.title = "另一张图";
+    api.figureList.mockResolvedValue([fixture(), other]);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    fireEvent.click(await screen.findByRole("button", { name: "模拟画布修改" }));
+    await screen.findByText("草稿已自动保存");
+    let finish!: (svg: string) => void;
+    canvas.serialize.mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.click(screen.getByText("另一张图"));
+    await screen.findByRole("heading", { name: "另一张图" });
+    await act(async () => { finish("previous figure source"); });
+    expect(screen.queryByLabelText("SVG")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    expect((await screen.findByLabelText("SVG") as HTMLTextAreaElement).value).not.toContain("previous figure");
+    expect(api.figureSave).not.toHaveBeenCalled();
+  });
+  it("keeps newer edits unsaved until their own autosave finishes", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    let finish!: (draft: FigureEditingDraft) => void;
+    api.figureSaveDraft.mockImplementationOnce(() => new Promise<FigureEditingDraft>((resolve) => { finish = resolve; }));
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "old edit" } });
+    await waitFor(() => expect(api.figureSaveDraft).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "new edit" } });
+    await act(async () => { finish({ svg: "old edit", expectedHash: "parent", baseIndex: 1, updatedAt: "now" }); });
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(true);
+    expect(screen.queryByText("草稿已自动保存")).toBeNull();
+    await screen.findByText("草稿已自动保存");
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(2);
+    expect(api.figureSaveDraft.mock.calls[1][3]).toBe("new edit");
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(false);
+  });
+  it("allows a project switch after autosave and restores the draft only in its owning project", async () => {
+    api.figureList.mockImplementation(async (projectId) => projectId === "project-a" ? [fixture()] : []);
+    let persisted: FigureEditingDraft | null = null;
+    api.figureSaveDraft.mockImplementation(async (_project, _id, expectedHash, svg, baseIndex) => persisted = { expectedHash, svg, baseIndex, updatedAt: "now" });
+    api.figureDocument.mockImplementation(async (projectId) => ({ svg: persisted?.svg ?? "original", sourceDataUrl: null, previewDataUrl: null, draft: projectId === "project-a" ? persisted : null }));
+    const mounted = render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "project A draft" } });
+    await screen.findByText("草稿已自动保存"); expect(state.setFigureDirty).toHaveBeenLastCalledWith(false);
+    state.currentProject = { id: "project-b", name: "Other project" }; mounted.rerender(<FigureStudio />);
+    await screen.findByText("还没有绘图任务。");
+    expect(screen.queryByText("草稿已自动保存")).toBeNull();
+    state.currentProject = { id: "project-a", name: "Research" }; mounted.rerender(<FigureStudio />);
+    fireEvent.click(await screen.findByText("架构草稿")); await screen.findByText("草稿已自动保存");
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    expect((await screen.findByLabelText("SVG") as HTMLTextAreaElement).value).toBe("project A draft");
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the current draft when viewing the immutable latest saved version", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    const draft = { svg: "draft source", expectedHash: "parent", baseIndex: 1, updatedAt: "now" };
+    api.figureDocument.mockImplementation(async (_project, _id, index) => ({ svg: index === 1 ? "saved source" : draft.svg, sourceDataUrl: null, previewDataUrl: null, draft: index === 1 ? null : draft }));
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿")); await screen.findByText("草稿已自动保存");
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("版本"), { target: { value: "1" } });
+    await waitFor(() => expect((screen.getByLabelText("SVG") as HTMLTextAreaElement).value).toBe("saved source"));
+    expect(screen.queryByText("草稿已自动保存")).toBeNull();
+    fireEvent.change(screen.getByLabelText("版本"), { target: { value: "latest" } });
+    await screen.findByText("草稿已自动保存");
+    expect((screen.getByLabelText("SVG") as HTMLTextAreaElement).value).toBe("draft source");
+    expect(api.figureDiscardDraft).not.toHaveBeenCalled(); expect(api.figureSave).not.toHaveBeenCalled();
+  });
+  it("keeps failed autosaves unsaved and retries when the source changes", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    api.figureSaveDraft.mockRejectedValueOnce(new Error("Disk full"));
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "retain this" } });
+    await screen.findByText("草稿自动保存失败：Error: Disk full");
+    expect((screen.getByLabelText("SVG") as HTMLTextAreaElement).value).toBe("retain this");
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "新建绘图" }));
+    expect(screen.getByText("请等待草稿自动保存完成，或放弃当前编辑。")).toBeTruthy();
+    expect(screen.queryByLabelText(/图形描述/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "retry" } });
+    await screen.findByText("草稿已自动保存");
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(2);
+    expect(state.setFigureDirty).toHaveBeenLastCalledWith(false);
+  });
+  it.each(["commit", "discard", "delete"])("waits for an in-flight autosave before %s", async (action) => {
+    api.figureList.mockResolvedValue([fixture()]);
+    let finish!: (draft: FigureEditingDraft) => void;
+    api.figureSaveDraft.mockImplementation(() => new Promise<FigureEditingDraft>((resolve) => { finish = resolve; }));
+    const saved = fixture(); saved.run.versions.push({ ...saved.run.versions[0], index: 2, hash: "new", author: "user" });
+    api.figureSave.mockResolvedValue(saved);
+    api.figureDelete.mockResolvedValue(undefined);
+    if (action === "delete") vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "latest edit" } });
+    await waitFor(() => expect(api.figureSaveDraft).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: action === "commit" ? /保存新版本/ : action === "discard" ? "放弃编辑" : "删除 架构草稿" }));
+    expect(api.figureSave).not.toHaveBeenCalled(); expect(api.figureDiscardDraft).not.toHaveBeenCalled(); expect(api.figureDelete).not.toHaveBeenCalled();
+    await act(async () => { finish({ svg: "latest edit", expectedHash: "parent", baseIndex: 1, updatedAt: "now" }); });
+    await waitFor(() => expect(action === "commit" ? api.figureSave : action === "discard" ? api.figureDiscardDraft : api.figureDelete).toHaveBeenCalledTimes(1));
+    if (action === "delete") await waitFor(() => expect(screen.queryByLabelText("删除 架构草稿")).toBeNull());
+    else await waitFor(() => expect((screen.getByRole("button", { name: /保存新版本/ }) as HTMLButtonElement).disabled).toBe(true));
+    if (action === "commit") {
+      expect(api.figureSave).toHaveBeenCalledWith("project-a", "a".repeat(32), "parent", "latest edit", 1);
+      expect(within(screen.getByLabelText("版本")).getAllByRole("option")).toHaveLength(3);
+    } else expect(action === "discard" ? api.figureDiscardDraft : api.figureDelete).toHaveBeenCalledWith("project-a", "a".repeat(32));
+    expect(api.figureSaveDraft).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("草稿已自动保存")).toBeNull();
+  });
+  it("retains the original draft parent when a newer version arrives", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    let notify!: (view: FigureView) => void;
+    api.onFigureUpdated.mockImplementation(async (callback) => { notify = callback; return () => {}; });
+    api.figureSave.mockRejectedValue(new Error("Figure changed"));
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    await screen.findByTestId("editor"); fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.change(screen.getByLabelText("SVG"), { target: { value: "my draft" } });
+    await screen.findByText("草稿已自动保存");
+    const newer = fixture(); newer.run.versions.push({ ...newer.run.versions[0], index: 2, hash: "other" }); api.figureList.mockResolvedValue([newer]);
+    act(() => notify(newer));
+    fireEvent.click(screen.getByRole("button", { name: /保存新版本/ }));
+    await screen.findByText("Error: Figure changed");
+    expect(api.figureSave).toHaveBeenCalledWith("project-a", "a".repeat(32), "parent", "my draft", 1);
+    expect((screen.getByLabelText("SVG") as HTMLTextAreaElement).value).toBe("my draft");
+  });
+  it("restores a historical draft with its base version and opens it on the canvas without committing", async () => {
+    const run = fixture(); run.run.versions.push({ ...run.run.versions[0], index: 2, hash: "latest" });
+    api.figureList.mockResolvedValue([run]);
+    const draft = { svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Historical edit</text></svg>', expectedHash: "latest", baseIndex: 1, updatedAt: "now" };
+    api.figureDocument.mockResolvedValue({ svg: draft.svg, sourceDataUrl: null, previewDataUrl: null, draft });
+    api.figureSave.mockResolvedValue(run);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿")); await screen.findByText("草稿已自动保存");
+    fireEvent.click(screen.getByRole("button", { name: "SVG 源码" }));
+    fireEvent.click(screen.getByRole("button", { name: "画布" }));
+    await waitFor(() => expect(screen.queryByLabelText("SVG")).toBeNull());
+    expect(api.figureSave).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /保存新版本/ }));
+    await waitFor(() => expect(api.figureSave).toHaveBeenCalled());
+    expect(api.figureSave.mock.calls[0][2]).toBe("latest");
+    expect(api.figureSave.mock.calls[0][4]).toBe(1);
+  });
   it("submits SVG conversation turns once against the latest version and retains their history", async () => {
     const original = fixture(); api.figureList.mockResolvedValue([original]);
     api.figureEditSvg.mockImplementation(async (input) => {
@@ -249,7 +463,7 @@ describe("SomniQ figure application", () => {
     expect(within(ledger).getByText(/16,384\/16K/)).toBeTruthy();
     expect(api.figureStart).not.toHaveBeenCalled(); expect(api.figureReview).not.toHaveBeenCalled();
   });
-  it("submits an imported figure once with the displayed budget and current project", async () => {
+  it("submits an imported figure once with the current project", async () => {
     const prepared = fixture(); prepared.run.status = "ready"; prepared.run.versions = [];
     api.figurePrepare.mockResolvedValue(prepared); api.figureStart.mockResolvedValue({ ...prepared, active: true });
     render(<FigureStudio />);
@@ -282,10 +496,16 @@ describe("SomniQ figure application", () => {
     fireEvent.change(reviewer, { target: { value: "second-reviewer" } });
     await waitFor(() => expect(api.figureConnections).toHaveBeenCalledWith(null, "second-reviewer"));
     fireEvent.change(screen.getByLabelText("生图模型"), { target: { value: "somni-image-pro" } });
+    fireEvent.change(screen.getByLabelText("布局"), { target: { value: "vertical" } });
+    fireEvent.change(screen.getByLabelText("配色"), { target: { value: "mono" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /印刷适配/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "张量与空间" }));
     fireEvent.change(screen.getByLabelText(/图形描述/), { target: { value: "## 研究流程\nA → B" } });
     fireEvent.click(await screen.findByText("生成图形"));
     await waitFor(() => expect(api.figureStart).toHaveBeenCalledTimes(1));
     expect(api.figurePrepare.mock.calls[0][0]).toMatchObject({ title: "研究流程", sourceMode: "generate", sourceBase64: null, reviewerModel: "second-reviewer", imageModel: "somni-image-pro" });
+    expect(parseFigureStyle(api.figurePrepare.mock.calls[0][0].style)).toEqual({ family: "tensors", layout: "vertical", palette: "mono", density: "balanced", print: true });
+    expect(api.figurePrepare.mock.calls[0][0].style).toContain("stacked planes");
   });
   it("deletes a figure only after confirmation and never while it runs", async () => {
     const running = fixture(); running.run.id = "b".repeat(32); running.run.title = "运行中"; running.active = true;
@@ -302,14 +522,54 @@ describe("SomniQ figure application", () => {
     expect(screen.getByText("生成图形")).toBeTruthy();
     expect(api.figureStart).not.toHaveBeenCalled();
   });
+  it("keeps the figure visible and blocks repeated deletion until disk cleanup succeeds", async () => {
+    api.figureList.mockResolvedValue([fixture()]);
+    let fail!: (error: Error) => void;
+    api.figureDelete.mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<FigureStudio />); fireEvent.click(await screen.findByText("架构草稿"));
+    fireEvent.click(screen.getByLabelText("删除 架构草稿"));
+    await waitFor(() => expect(api.figureDelete).toHaveBeenCalledTimes(1));
+    expect((screen.getByLabelText("删除 架构草稿") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("heading", { name: "架构草稿" })).toBeTruthy();
+    await act(async () => fail(new Error("Cannot remove figure usage records")));
+    expect(await screen.findByText(/Cannot remove figure usage records/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "架构草稿" })).toBeTruthy();
+    expect((screen.getByLabelText("删除 架构草稿") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("loads a domain scenario explicitly, preserves visual choices and forwards it only after submission", async () => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function(this: HTMLDialogElement) { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.removeAttribute("open"); } });
+    const prepared = fixture(); prepared.run.status = "ready"; prepared.run.versions = []; prepared.run.sourceMode = "generate";
+    api.figurePrepare.mockResolvedValue(prepared); api.figureStart.mockResolvedValue({ ...prepared, active: true });
+    render(<FigureStudio />); await screen.findByRole("option", { name: "independent-reviewer" });
+    fireEvent.change(screen.getByLabelText("图形描述"), { target: { value: "我的研究需求" } });
+    fireEvent.change(screen.getByLabelText("配色"), { target: { value: "mono" } });
+    fireEvent.change(screen.getByLabelText("间距"), { target: { value: "compact" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /印刷适配/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "张量与空间" }));
+    expect((screen.getByLabelText("图形描述") as HTMLTextAreaElement).value).toBe("我的研究需求");
+    fireEvent.click(screen.getByRole("button", { name: "学科示例" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看Transformer 编码器细节" }));
+    fireEvent.click(screen.getByRole("button", { name: "替换描述并载入场景" }));
+    expect((screen.getByLabelText("图形描述") as HTMLTextAreaElement).value).toMatch(/^Transformer 编码器与多头自注意力展开/);
+    expect((screen.getByLabelText("配色") as HTMLSelectElement).value).toBe("mono");
+    expect((screen.getByLabelText("间距") as HTMLSelectElement).value).toBe("compact");
+    expect(api.figurePrepare).not.toHaveBeenCalled(); expect(api.figureStart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "生成图形" }));
+    await waitFor(() => expect(api.figureStart).toHaveBeenCalledTimes(1));
+    expect(api.figurePrepare.mock.calls[0][0].method).toContain("第一条残差");
+    expect(api.figurePrepare.mock.calls[0][0].method).toContain("QKᵀ / √dₖ");
+    expect(parseFigureStyle(api.figurePrepare.mock.calls[0][0].style)).toEqual({ family: "tensors", layout: "auto", palette: "mono", density: "compact", print: true });
+  });
   it("starts from a quick example and a visual style preset", async () => {
     render(<FigureStudio />); await screen.findByRole("option", { name: "independent-reviewer" });
     fireEvent.click(screen.getByText("训练流程"));
     expect((screen.getByLabelText(/图形描述/) as HTMLTextAreaElement).value).toMatch(/^模型训练流程图\n/);
     expect(screen.queryByText("快速示例")).toBeNull();
-    fireEvent.click(screen.getByRole("radio", { name: "极简线框" }));
-    expect(screen.getByRole("radio", { name: "极简线框" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("radio", { name: "学术扁平" }).getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(screen.getByRole("radio", { name: "抽象关系图" }));
+    expect(screen.getByRole("radio", { name: "抽象关系图" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "技术框图" }).getAttribute("aria-checked")).toBe("false");
   });
   it("starts a new task from a submitted one, reusing its reference image", async () => {
     api.figureList.mockResolvedValue([fixture()]);

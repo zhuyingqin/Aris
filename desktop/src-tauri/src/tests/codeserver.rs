@@ -1,11 +1,12 @@
 use super::{
     apply_patch, asset_name, asset_revision, brand_runtime, bundled_archive, bundled_asset_name,
     bust_static_cache, download_urls, download_verified_to, ensure, expected_sha256,
-    folder_uri_path, generate_nls_bundle, hex_digest, is_installed, marker_path, node_binary,
-    parse_bound_port, random_token, runtime_file, server_args, server_entry, set_nls_base_url,
-    target_slug, version_dir, workbench_host, workbench_locale, workbench_url, Inner, Patch, Phase,
-    SilentSink, BRANDING_DIR, BRAND_ASSETS, CODE_HOST, LOCALE_ENV, PATCHES, PORT_RANGE,
-    RUNTIME_VERSION, SERVER_BUNDLE, WORKBENCH_BUNDLE,
+    folder_uri_path, generate_nls_bundle, hex_digest, install_workspace_trust_bridge, is_installed,
+    marker_path, node_binary, parse_bound_port, random_token, runtime_file, server_args,
+    server_entry, set_nls_base_url, target_slug, version_dir, workbench_host, workbench_locale,
+    workbench_url, Inner, Patch, Phase, SilentSink, BRANDING_DIR, BRAND_ASSETS, CODE_HOST,
+    LOCALE_ENV, PATCHES, PORT_RANGE, RUNTIME_VERSION, SERVER_BUNDLE, WORKBENCH_BUNDLE,
+    WORKSPACE_TRUST_BRIDGE, WORKSPACE_TRUST_PRELUDE,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,34 @@ fn temp_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
+}
+
+#[test]
+fn workspace_trust_is_mirrored_before_workbench_start_and_before_the_delayed_storage_flush() {
+    let root = temp_dir("trust-bridge");
+    let bundle = runtime_file(&root, WORKBENCH_BUNDLE);
+    std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+    let original = "async saveTrustInfo(){this.storageService.store(this.storageKey,JSON.stringify(this._trustStateInfo),-2,1),this._onDidChangeTrustedFolders.fire()}";
+    let mut source = original.to_string();
+    let patch = PATCHES
+        .iter()
+        .find(|patch| patch.find.starts_with("async saveTrustInfo()"))
+        .unwrap();
+    assert!(apply_patch(&mut source, patch));
+    assert!(source.contains("await globalThis.somniqSaveWorkspaceTrust?."));
+    assert!(!apply_patch(&mut source, patch));
+    std::fs::write(&bundle, &source).unwrap();
+    install_workspace_trust_bridge(&root).unwrap();
+    install_workspace_trust_bridge(&root).unwrap();
+    let source = std::fs::read_to_string(&bundle).unwrap();
+    assert!(source.starts_with(WORKSPACE_TRUST_PRELUDE));
+    assert_eq!(source.matches(WORKSPACE_TRUST_PRELUDE).count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(bundle.with_file_name("somniq-workspace-trust.js")).unwrap(),
+        WORKSPACE_TRUST_BRIDGE
+    );
+    assert!(WORKSPACE_TRUST_BRIDGE.contains("vscode-web-state-db-global-shared"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Lay out a directory that looks like a finished install for the *current*

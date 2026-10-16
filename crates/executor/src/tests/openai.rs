@@ -1806,6 +1806,7 @@ fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
     assert!(supports_reasoning_content_replay("deepseek-r1"));
     assert!(supports_reasoning_content_replay("deepseek-reasoner"));
     assert!(supports_reasoning_content_replay("deepseek-v4-flash-free"));
+    assert!(supports_reasoning_content_replay("deepseek-v4.1-flash"));
     assert!(supports_reasoning_content_replay("glm-4.6-thinking"));
 
     assert!(!supports_reasoning_content_replay("gpt-5.6-terra"));
@@ -1891,31 +1892,272 @@ fn reasoning_content_replayed_from_thinking_block_for_replay_families_only() {
 }
 
 #[test]
-fn reasoning_content_replay_budget_keeps_oldest_drops_newest() {
-    // The 128k budget is exactly four 32k turns. Six turns → the oldest four
-    // carry reasoning_content and the newest two are dropped, so already-sent
-    // historical bytes stay stable while the request stays bounded.
+fn reasoning_content_replay_keeps_every_retained_tool_exchange() {
+    // A long tool turn crosses the former 128k replay budget. Its newest calls
+    // must retain their reasoning just like the oldest, without rewriting the
+    // already-sent prefix. Overall size is managed by runtime compaction.
     let big = "r".repeat(MAX_REASONING_CHARS_PER_TURN);
     let mut messages = vec![ConversationMessage::user_text("go")];
+    let mut prefix = Vec::new();
     for n in 0..6 {
-        messages.push(reasoning_content_thinking_turn(
-            &big,
-            &format!("answer {n}"),
+        let mut assistant = reasoning_content_thinking_turn(&big, &format!("answer {n}"));
+        assistant.blocks.push(ContentBlock::ToolUse {
+            id: format!("call_{n}"),
+            name: "read_files".to_string(),
+            input: "{}".to_string(),
+        });
+        messages.push(assistant);
+        messages.push(ConversationMessage::tool_result(
+            format!("call_{n}"),
+            "read_files",
+            "verified",
+            false,
         ));
-        messages.push(ConversationMessage::user_text("next"));
+        if n == 3 {
+            prefix = convert_messages_openai(&messages, None, "deepseek-v4.1-flash");
+        }
     }
 
-    let out = convert_messages_openai(&messages, None, "kimi-k3");
-    let asst = assistant_messages(&out);
-    let replayed = asst
+    for model in ["deepseek-v4.1-flash", "kimi-k3", "mimo-v2.5-pro"] {
+        let out = convert_messages_openai(&messages, None, model);
+        let asst = assistant_messages(&out);
+        assert_eq!(asst.len(), 6);
+        for message in asst {
+            assert_eq!(message["reasoning_content"], big);
+        }
+        assert_eq!(out[..prefix.len()], prefix);
+    }
+}
+
+#[test]
+fn reasoning_content_tool_only_history_uses_empty_field_without_inventing_thinking() {
+    // Covers a provider response without reasoning and a persisted tool call
+    // from another model. Display-only thinking is never repurposed as input.
+    let messages = vec![
+        ConversationMessage::user_text("continue"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "display only".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::ToolUse {
+                id: "call_no_thinking".to_string(),
+                name: "read_files".to_string(),
+                input: "{}".to_string(),
+            },
+        ]),
+        ConversationMessage::tool_result("call_no_thinking", "read_files", "done", false),
+    ];
+    for model in ["deepseek-v4.1-flash", "kimi-k3", "mimo-v2.5-pro"] {
+        let out = convert_messages_openai(&messages, None, model);
+        assert_eq!(assistant_messages(&out)[0]["reasoning_content"], "");
+        assert_eq!(out[2]["tool_call_id"], "call_no_thinking");
+    }
+    for model in ["gpt-5.5", "MiniMax-M3"] {
+        let out = convert_messages_openai(&messages, None, model);
+        assert!(assistant_messages(&out)[0]
+            .get("reasoning_content")
+            .is_none());
+    }
+}
+
+#[test]
+fn deepseek_tool_reasoning_survives_stream_compaction_and_session_reload() {
+    use runtime::{
+        CompactionConfig, ConversationRuntime, PermissionMode, PermissionPolicy, Session,
+        StaticToolExecutor,
+    };
+
+    let reasoning = "保留原始推理。".repeat(6_000);
+    let expected_reasoning = reasoning.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for index in 0..3 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "missing request {index}"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let wire = read_mock_http_request(&mut stream);
+            let request: Value =
+                serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+            let valid = assistant_messages(request["messages"].as_array().unwrap())
+                .iter()
+                .all(|message| {
+                    message.get("tool_calls").is_none() || message["reasoning_content"].is_string()
+                });
+            requests.push(request);
+            if !valid {
+                write_mock_http_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    r#"{"error":{"message":"The `reasoning_content` in the thinking mode must be passed back to the API."}}"#,
+                );
+                break;
+            }
+            if index == 2 {
+                write_mock_sse_success(&mut stream);
+                break;
+            }
+            let mut delta = json!({"tool_calls":[{"index":0,"id":format!("call_{index}"),"function":{"name":"read_files","arguments":"{}"}}]});
+            if index == 0 {
+                delta["reasoning_content"] = json!(expected_reasoning);
+            }
+            let chunk = json!({"choices":[{"delta":delta,"finish_reason":"tool_calls"}]});
+            let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        requests
+    });
+    let config = OpenAIExecutorConfig {
+        api_key: "test-key".into(),
+        base_url: format!("http://{address}/v1"),
+    };
+    let make_client = || {
+        OpenAIRuntimeClient::new(
+            config.clone(),
+            "deepseek-v4.1-flash".into(),
+            true,
+            vec![ExecutorToolSpec::new(
+                "read_files",
+                "Read local evidence",
+                json!({"type":"object","properties":{}}),
+            )],
+            Box::new(crate::NoopStreamObserver),
+        )
+        .unwrap()
+        .with_transport(OpenAiTransport::ChatCompletions)
+    };
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("inspect evidence"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "older reasoning".into(),
+                signature: OPENAI_REASONING_CONTENT_SIGNATURE.into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call_archived".into(),
+                name: "read_files".into(),
+                input: "{}".into(),
+            },
+        ]),
+        ConversationMessage::tool_result("call_archived", "read_files", "older result", false),
+    ];
+    // Two earlier calls plus the long streamed call and a streamed tool-only
+    // call recreate the four retained exchanges in the exported failing turn.
+    for index in 0..2 {
+        let id = format!("call_earlier_{index}");
+        let mut assistant = reasoning_content_thinking_turn("earlier reasoning", "checking");
+        assistant.blocks.push(ContentBlock::ToolUse {
+            id: id.clone(),
+            name: "read_files".into(),
+            input: "{}".into(),
+        });
+        session.messages.push(assistant);
+        session.messages.push(ConversationMessage::tool_result(
+            id,
+            "read_files",
+            "verified",
+            false,
+        ));
+    }
+    let mut client = make_client();
+    for _ in 0..2 {
+        let events = client
+            .stream(ApiRequest {
+                system_prompt: vec![],
+                messages: session.messages.clone(),
+            })
+            .unwrap();
+        let mut blocks = Vec::new();
+        let mut tool_id = None;
+        for event in events {
+            match event {
+                AssistantEvent::Thinking {
+                    thinking,
+                    signature,
+                } => blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
+                AssistantEvent::ToolUse { id, name, input } => {
+                    tool_id = Some(id.clone());
+                    blocks.push(ContentBlock::ToolUse { id, name, input });
+                }
+                _ => {}
+            }
+        }
+        session
+            .messages
+            .push(ConversationMessage::assistant(blocks));
+        session.messages.push(ConversationMessage::tool_result(
+            tool_id.unwrap(),
+            "read_files",
+            "verified",
+            false,
+        ));
+    }
+    let mut runtime = ConversationRuntime::new(
+        session,
+        client,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::ReadOnly),
+        vec![],
+    );
+    let compacted = runtime.compact(CompactionConfig::overflow(8));
+    assert_eq!(compacted.preserved_message_count, 8);
+    assert_eq!(compacted.compacted_session.messages.len(), 9);
+    // Exercise the durable session codec and a fresh provider client, as on
+    // reload/retry. No tool is executed again to repair the request history.
+    let directory = std::env::temp_dir().join(format!(
+        "aris-deepseek-reasoning-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let session_path = directory.join("session.json");
+    compacted
+        .compacted_session
+        .save_to_path(&session_path)
+        .unwrap();
+    let restored = Session::load_from_path(&session_path).unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    let events = make_client()
+        .stream(ApiRequest {
+            system_prompt: vec![],
+            messages: restored.messages,
+        })
+        .unwrap();
+    assert!(events
         .iter()
-        .filter(|message| message.get("reasoning_content").is_some())
-        .count();
-    assert_eq!(replayed, 4);
-    assert!(asst[0].get("reasoning_content").is_some());
-    assert!(asst[3].get("reasoning_content").is_some());
-    assert!(asst[4].get("reasoning_content").is_none());
-    assert!(asst[5].get("reasoning_content").is_none());
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "ok")));
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let messages = requests[2]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 9);
+    let assistants = assistant_messages(messages);
+    assert_eq!(assistants.len(), 4);
+    assert_eq!(assistants[2]["reasoning_content"], reasoning);
+    assert_eq!(assistants[3]["reasoning_content"], "");
+    assert_eq!(messages[8]["tool_call_id"], "call_1");
 }
 
 #[test]

@@ -18,7 +18,7 @@ let evidenceRequestSequence = 0;
  * edited-file summaries, markdown links, the workflow strip and the path menu.
  *
  * Editable sources take over their workspace tab (Code for code, LaTeX for
- * `.tex`), while read-only material (PDF) opens as a reading tab in Chat's side
+ * `.tex`), while read-only material (PDF and images) opens in Chat's side
  * panel so the conversation stays visible. Anything SomniQ cannot render falls
  * back to the operating system.
  */
@@ -38,7 +38,7 @@ export function useOpenChatFile(): (path: string) => void {
       setTab("lab");
       return;
     }
-    if (target === "pdf") {
+    if (target === "pdf" || target === "image") {
       setPendingSidePanelFilePath(path);
       setTab("chat");
       return;

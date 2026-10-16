@@ -1,0 +1,34 @@
+\documentclass[aspectratio=169,UTF8,fontset=fandol]{ctexbeamer}
+\usepackage{amsmath}
+\input{diagram-styles}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{frametitle}{fg=sqBlue}
+\setbeamertemplate{footline}[frame number]
+\begin{document}
+\begin{frame}{从观测到候选：求解条件不等于完成证明}
+  \centering
+  \input{pipeline}
+  \par\vspace{0.7cm}
+  特征模型与最优性条件成立时，构造候选集合。\\[0.2cm]
+  唯一性、可行性和全局最优性仍需另外验证。
+\end{frame}
+\begin{frame}{有边界的修订：验证通过或明确报告未通过}
+  \centering
+  \input{decision-loop}
+  \par\vspace{0.35cm}
+  未通过验证时，仅在预算允许的范围内继续修订。
+\end{frame}
+\begin{frame}{负反馈：控制、扰动与测量分别流向哪里}
+  \centering
+  \input{feedback-loop}
+  \par\vspace{0.35cm}
+  这是信号关系示意，不代表系统已被证明稳定。
+\end{frame}
+\begin{frame}{同一候选的两类检查，支持不同判断}
+  \centering
+  \input{parallel-checks}
+  \par\vspace{0.35cm}
+  拟合误差小，不自动意味着重解控制与专家一致。\\[0.15cm]
+  两条检查路径不表示实际执行一定并发。
+\end{frame}
+\end{document}

@@ -22,6 +22,16 @@ const workerSrc = new URL(
 
 let pdfJsPromise: Promise<PdfJsModule> | null = null;
 
+function pdfFontResources() {
+  // Resolve from the app document, not the hashed worker in assets/. This also
+  // respects Vite's relative base in the packaged Tauri app and nested hosting.
+  const base = new URL(import.meta.env.BASE_URL, document.baseURI);
+  return {
+    cMapUrl: new URL("pdfjs/cmaps/", base).href,
+    cMapPacked: true,
+  };
+}
+
 /**
  * Return the one configured PDF.js runtime for every desktop PDF surface.
  * Keeping worker setup here prevents individual viewers from racing to
@@ -43,7 +53,7 @@ export function getPdfJs(): Promise<PdfJsModule> {
  */
 export async function openPdfDocument(bytes: PdfDocumentBytes): Promise<PDFDocumentProxy> {
   const pdfjs = await getPdfJs();
-  return pdfjs.getDocument({ data: pdfBytesToArray(bytes) }).promise;
+  return pdfjs.getDocument({ ...pdfFontResources(), data: pdfBytesToArray(bytes) }).promise;
 }
 
 function pdfBytesToArray(bytes: PdfDocumentBytes): Uint8Array {
@@ -196,6 +206,7 @@ async function loadPdfDocumentFromPath(path: string): Promise<PDFDocumentProxy> 
     path.split(/[\\/]/).pop() ?? "document.pdf",
   );
   const loadingTask = pdfjs.getDocument({
+    ...pdfFontResources(),
     range,
     rangeChunkSize: PDF_RANGE_CHUNK_SIZE,
     disableStream: true,

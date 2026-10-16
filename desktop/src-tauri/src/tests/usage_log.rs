@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn deleting_usage_records_preserves_other_sessions_unknown_rows_and_future_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("usage-log.jsonl");
+    let kept = b"{\"sessionId\":\"chat-b\",\"futureField\":42}\r\ninvalid legacy row\n{\"sessionId\":\"figure-ab\"}";
+    let mut content = b"{\"sessionId\":\"figure-a\",\"futureField\":42}\n".to_vec();
+    content.extend_from_slice(kept);
+    fs::write(&path, content).unwrap();
+    remove_session_usage_at(&path, "figure-a").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), kept);
+    remove_session_usage_at(&path, "figure-a").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), kept);
+    fs::write(&path, b"{\"sessionId\":\"figure-a\"}\n").unwrap();
+    remove_session_usage_at(&path, "figure-a").unwrap();
+    assert!(!path.exists());
+    remove_session_usage_at(&path, "figure-a").unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
 fn append_skips_empty_usage() {
     let usage = TokenUsage::default();
     assert!(!has_billable_tokens(&usage));

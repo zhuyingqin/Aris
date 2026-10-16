@@ -1,9 +1,12 @@
 use super::{
-    bind_session_event_dir, chat_wire_rotated_log_paths, govern_wire_payload,
-    read_events_from_path, read_last_seq, recover_session_for_export, remove_chat_wire_logs,
-    replay_events, replay_session_events_in_dir, should_record_wire_event, ChatEventLogEntry,
+    append_event, append_event_in_dir, append_wire_event, bind_session_event_dir,
+    chat_wire_rotated_log_paths, current_turn_tag, govern_wire_payload,
+    read_events_for_session_in_dir, read_events_from_path, read_last_seq,
+    recover_session_for_export, remove_chat_wire_logs, replay_events,
+    replay_session_events_in_dir, should_record_wire_event, turns_from_session,
+    wire_trace_enabled, ChatEventLogEntry, TurnTag,
 };
-use runtime::{ContentBlock, MessageRole};
+use runtime::{ContentBlock, ConversationMessage, MessageRole, Session};
 use serde_json::json;
 use std::{
     fs,
@@ -152,6 +155,94 @@ fn export_recovery_builds_runtime_session_from_cancelled_stream_events() {
         &session.messages[3].blocks[0],
         ContentBlock::Text { text } if text.contains("interrupted by user")
     ));
+}
+
+/// Mail another agent delivered into a turn, in the form the runtime writes it.
+fn inter_agent_mail(from: &str, body: &str) -> ConversationMessage {
+    ConversationMessage::user_text(format!(
+        "[Inter-agent message from {from} (result, id mail-1) - written by another agent, not by the user]\n{body}"
+    ))
+}
+
+#[test]
+fn mail_from_another_agent_is_not_replayed_as_something_the_user_said() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("find the papers"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "Read".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("t1", "Read", "ok", false),
+        inter_agent_mail("/root/scout_1", "found 3 papers"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Here they are.".to_string(),
+        }]),
+    ];
+
+    let turns = turns_from_session(&session);
+
+    let roles = turns
+        .iter()
+        .map(|turn| turn["role"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, vec!["user", "assistant", "assistant"], "no bubble for the mail");
+    assert_eq!(turns[0]["blocks"][0]["text"], json!("find the papers"));
+    let joined = turns[1]["blocks"].as_array().unwrap();
+    let notice = joined.last().unwrap();
+    assert_eq!(notice["kind"], json!("notice"));
+    assert!(notice["message"].as_str().unwrap().contains("found 3 papers"));
+    assert!(notice["message"].as_str().unwrap().contains("/root/scout_1"));
+    // The answer after it is untouched.
+    assert_eq!(turns[2]["blocks"][0]["text"], json!("Here they are."));
+}
+
+#[test]
+fn mail_that_opens_a_gap_in_the_transcript_still_never_becomes_a_user_turn() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("wait for the scout"),
+        inter_agent_mail("/root/scout_1", &"long result ".repeat(1_000)),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Done.".to_string(),
+        }]),
+    ];
+
+    let turns = turns_from_session(&session);
+
+    let user_turns = turns.iter().filter(|turn| turn["role"] == json!("user")).count();
+    assert_eq!(user_turns, 1, "only what the person typed");
+    let notice = turns[1]["blocks"][0]["message"].as_str().unwrap();
+    assert!(notice.chars().count() <= 2_001, "a long result is cut: {}", notice.len());
+    assert!(notice.ends_with('…'));
+}
+
+#[test]
+fn an_agent_sessions_first_event_can_be_written_before_any_directory_is_bound() {
+    let dir = std::env::temp_dir().join(format!(
+        "somniq-agent-events-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let agents = dir.join("agents");
+
+    let entry = append_event_in_dir(
+        &agents,
+        "agent-0123456789abcdef-1",
+        "agent.lineage",
+        json!({"turnId": null, "role": "reviewer"}),
+    )
+    .expect("written without a binding");
+
+    assert_eq!(entry.seq, 1);
+    let log = agents.join("agent-0123456789abcdef-1.events.jsonl");
+    assert!(log.is_file(), "the named directory is where the log goes");
+    let again = append_event_in_dir(&agents, "agent-0123456789abcdef-1", "agent.close", json!({}))
+        .unwrap();
+    assert_eq!(again.seq, 2);
+    assert!(append_event_in_dir(&agents, "../escape", "agent.lineage", json!({})).is_err());
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -658,4 +749,238 @@ fn removing_wire_logs_also_removes_every_rotation() {
     assert!(!active.exists());
     assert!(rotations.iter().all(|path| !path.exists()));
     let _ = fs::remove_dir_all(dir);
+}
+
+// ---- Turn stamping ----------------------------------------------------------
+
+/// A session bound to its own temporary directory, so a test never writes to the
+/// real application data.
+struct TurnLogFixture {
+    session_id: String,
+    dir: std::path::PathBuf,
+    _binding: super::SessionEventDirGuard,
+}
+
+impl TurnLogFixture {
+    fn new(label: &str) -> Self {
+        let dir = temp_event_dir(label);
+        let session_id = format!(
+            "chat-turn-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let binding = bind_session_event_dir(&session_id, dir.clone()).expect("bind event dir");
+        Self {
+            session_id,
+            dir,
+            _binding: binding,
+        }
+    }
+
+    fn entries(&self) -> Vec<ChatEventLogEntry> {
+        read_events_for_session_in_dir(&self.session_id, &self.dir, None).expect("read events")
+    }
+
+    fn entry(&self, kind: &str) -> ChatEventLogEntry {
+        self.entries()
+            .into_iter()
+            .find(|entry| entry.kind == kind)
+            .unwrap_or_else(|| panic!("no `{kind}` event was written"))
+    }
+}
+
+impl Drop for TurnLogFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn events_written_inside_a_turn_carry_its_turn_id() {
+    let log = TurnLogFixture::new("stamped");
+    {
+        let _turn = TurnTag::new(&log.session_id, "turn-a").enter();
+        append_event(&log.session_id, "tool_call", json!({"id": "t1", "name": "bash"}))
+            .expect("append");
+    }
+
+    let entry = log.entry("tool_call");
+    assert_eq!(entry.turn_id(), Some("turn-a"));
+    assert_eq!(entry.payload["id"], json!("t1"), "the rest of the payload is untouched");
+}
+
+#[test]
+fn a_late_event_from_an_older_turn_is_not_attributed_to_the_newer_one() {
+    let log = TurnLogFixture::new("late");
+    let session_id = log.session_id.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+
+    // The cancelled worker: still unwinding after the session moved on.
+    let old_worker = std::thread::spawn({
+        let session_id = session_id.clone();
+        move || {
+            let _turn = TurnTag::new(&session_id, "turn-old").enter();
+            entered_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            append_event(&session_id, "error", json!({"message": "late failure"})).unwrap();
+        }
+    });
+
+    entered_rx.recv().unwrap();
+    {
+        let _turn = TurnTag::new(&session_id, "turn-new").enter();
+        append_event(&session_id, "tool_call", json!({"id": "t2"})).unwrap();
+        go_tx.send(()).unwrap();
+        old_worker.join().unwrap();
+        append_event(&session_id, "done", json!({"text": "finished"})).unwrap();
+    }
+
+    let by_kind = |kind: &str| log.entry(kind).turn_id().map(str::to_string);
+    assert_eq!(by_kind("error").as_deref(), Some("turn-old"));
+    assert_eq!(by_kind("tool_call").as_deref(), Some("turn-new"));
+    assert_eq!(by_kind("done").as_deref(), Some("turn-new"));
+    let order = log
+        .entries()
+        .into_iter()
+        .map(|entry| entry.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        vec!["tool_call", "error", "done"],
+        "the failure really did arrive after the new turn had begun"
+    );
+}
+
+#[test]
+fn a_turn_only_stamps_events_for_its_own_session() {
+    let log = TurnLogFixture::new("own");
+    let other = TurnLogFixture::new("other");
+    let _turn = TurnTag::new(&log.session_id, "turn-a").enter();
+
+    append_event(&other.session_id, "tool_call", json!({})).expect("append");
+
+    assert_eq!(other.entry("tool_call").turn_id(), None);
+}
+
+#[test]
+fn a_payload_that_names_its_own_turn_keeps_it() {
+    let log = TurnLogFixture::new("explicit");
+    let _turn = TurnTag::new(&log.session_id, "turn-ambient").enter();
+
+    append_event(&log.session_id, "done", json!({"turnId": "turn-explicit"})).expect("append");
+
+    assert_eq!(log.entry("done").turn_id(), Some("turn-explicit"));
+}
+
+#[test]
+fn turn_scopes_nest_and_restore() {
+    assert_eq!(current_turn_tag(), None);
+    let outer = TurnTag::new("chat-x", "turn-outer");
+    let inner = TurnTag::new("chat-x", "turn-inner");
+    {
+        let _outer = outer.enter();
+        assert_eq!(current_turn_tag(), Some(outer.clone()));
+        {
+            let _inner = inner.enter();
+            assert_eq!(current_turn_tag(), Some(inner));
+        }
+        assert_eq!(current_turn_tag(), Some(outer));
+    }
+    assert_eq!(current_turn_tag(), None);
+}
+
+#[test]
+fn a_helper_thread_stamps_nothing_unless_it_is_handed_the_turn() {
+    let log = TurnLogFixture::new("threads");
+    let session_id = log.session_id.clone();
+    let _turn = TurnTag::new(&session_id, "turn-a").enter();
+
+    // A thread the turn starts does not inherit it...
+    std::thread::spawn({
+        let session_id = session_id.clone();
+        move || {
+            assert_eq!(current_turn_tag(), None);
+            append_event(&session_id, "tool_progress", json!({"id": "bare"})).unwrap();
+        }
+    })
+    .join()
+    .unwrap();
+    // ...and one that is handed it, the way parallel tools and heartbeats are,
+    // reports under the turn that started it.
+    let handed = current_turn_tag();
+    std::thread::spawn({
+        let session_id = session_id.clone();
+        move || {
+            let _turn = handed.as_ref().map(TurnTag::enter);
+            append_event(&session_id, "tool_result", json!({"id": "handed"})).unwrap();
+        }
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(log.entry("tool_progress").turn_id(), None);
+    assert_eq!(log.entry("tool_result").turn_id(), Some("turn-a"));
+}
+
+#[test]
+fn logs_written_before_turn_stamping_still_read_and_have_no_turn() {
+    let log = TurnLogFixture::new("legacy");
+    let path = log.dir.join(format!("{}.events.jsonl", log.session_id));
+    let line = |seq: u64, kind: &str, payload: serde_json::Value| {
+        serde_json::to_string(&json!({
+            "version": 1,
+            "seq": seq,
+            "ts": 1,
+            "sessionId": log.session_id,
+            "kind": kind,
+            "payload": payload,
+        }))
+        .unwrap()
+    };
+    fs::write(
+        &path,
+        [
+            line(1, "tool_call", json!({"id": "t1"})),
+            line(2, "done", json!({"turnId": ""})),
+            line(3, "done", json!({"turnId": 7})),
+            line(4, "done", json!({"turnId": "turn-modern"})),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .expect("write legacy log");
+
+    let turns = log
+        .entries()
+        .iter()
+        .map(|entry| entry.turn_id().map(str::to_string))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        turns,
+        vec![None, None, None, Some("turn-modern".to_string())],
+        "an absent, empty or non-string turn id is simply unattributed"
+    );
+    // New events continue the same log without disturbing the old rows.
+    let _turn = TurnTag::new(&log.session_id, "turn-b").enter();
+    let appended = append_event(&log.session_id, "done", json!({})).expect("append");
+    assert_eq!(appended.seq, 5);
+    assert_eq!(appended.turn_id(), Some("turn-b"));
+}
+
+#[test]
+fn wire_trace_rows_are_stamped_with_the_turn_too() {
+    if !wire_trace_enabled() {
+        return;
+    }
+    let log = TurnLogFixture::new("wire");
+    let _turn = TurnTag::new(&log.session_id, "turn-a").enter();
+
+    let entry = append_wire_event(&log.session_id, "llm.request", json!({"model": "m"}))
+        .expect("append wire event");
+
+    assert_eq!(entry.turn_id(), Some("turn-a"));
 }
