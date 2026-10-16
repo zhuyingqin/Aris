@@ -24,6 +24,8 @@ beforeEach(() => {
     tab: "chat",
     language: "en",
     pendingTypesetFilePath: null,
+    pendingCodeFilePath: null,
+    currentProject: { id: "p1", name: "work", path: "D:/work", addedAt: 0, lastOpenedAt: 0 },
     pendingSidePanelEvidence: null,
   });
   apiMocks.isTauri.mockReturnValue(false);
@@ -698,9 +700,8 @@ describe("ChatMessage rendering", () => {
     expect(fileLink).toBeTruthy();
     await user.click(fileLink!);
     expect(useStore.getState().tab).toBe("lab");
-    // The workbench owns its own tabs, so the open travels over the bridge
-    // rather than through the store.
-    expect(apiMocks.codeBridgeOpenFile).toHaveBeenCalledWith("reports/result.md");
+    expect(useStore.getState().pendingCodeFilePath).toBe("D:/work/reports/result.md");
+    expect(apiMocks.codeBridgeOpenFile).not.toHaveBeenCalled();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

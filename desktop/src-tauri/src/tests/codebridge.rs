@@ -82,7 +82,30 @@ fn sending_without_a_connection_is_a_no_op() {
         dark: true,
         colors: Default::default(),
     });
+    assert!(!state.send(HostToBridge::OpenFile {
+        path: "main.py".into(),
+    }));
     assert!(state.endpoint().is_none(), "no endpoint before start()");
+}
+
+#[test]
+fn opening_a_file_reports_delivery_and_detects_a_closed_connection() {
+    let state = CodeBridgeState::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state.0.lock().expect("bridge lock").outbound = Some(tx);
+    assert!(state.send(HostToBridge::OpenFile {
+        path: "D:/work/main.py".into(),
+    }));
+    assert_eq!(
+        rx.try_recv().expect("file open command"),
+        HostToBridge::OpenFile {
+            path: "D:/work/main.py".into(),
+        }
+    );
+    drop(rx);
+    assert!(!state.send(HostToBridge::OpenFile {
+        path: "D:/work/main.py".into(),
+    }));
 }
 
 fn temp_workspace(name: &str) -> std::path::PathBuf {

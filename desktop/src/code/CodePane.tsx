@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import {
   codeBridgeSetTheme,
   codeBridgeConnected,
+  codeBridgeOpenFile,
   codeBridgeOpenDiff,
   codeServerEnsure,
   codeServerStatus,
@@ -14,6 +15,7 @@ import {
   onCodeServerStatus,
 } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
+import { useAppearance } from "../appearance";
 import { useStore } from "../store";
 import type { CodeActiveEditor, CodeBridgeAsk, CodeServerStatus } from "../types";
 import { currentSomniqColors } from "./codeTheme";
@@ -86,13 +88,18 @@ export function askPromptFor(
   return `${head}${note}\n\n${fence}${ask.languageId}\n${ask.text}\n${fence}\n`;
 }
 
-export default function CodePane() {
+export default function CodePane({ onWorkbenchReadyChange }: { onWorkbenchReadyChange?: (ready: boolean) => void }) {
   const language = useStore((state) => state.language);
   const theme = useStore((state) => state.theme);
+  const uiColor = useStore((state) => state.uiColor);
+  const surface = useAppearance((state) => state.value.surface);
+  const customAccent = useAppearance((state) => state.value.customAccent);
   const currentProject = useStore((state) => state.currentProject);
   const setPendingChatInput = useStore((state) => state.setPendingChatInput);
   const pendingCodeDiff = useStore((state) => state.pendingCodeDiff);
   const setPendingCodeDiff = useStore((state) => state.setPendingCodeDiff);
+  const pendingCodeFilePath = useStore((state) => state.pendingCodeFilePath);
+  const setPendingCodeFilePath = useStore((state) => state.setPendingCodeFilePath);
   const setTab = useStore((state) => state.setTab);
   const copy = CODE_COPY[language];
 
@@ -103,7 +110,16 @@ export default function CodePane() {
   const [activeEditor, setActiveEditor] = useState<CodeActiveEditor | null>(null);
   const [computeOpen, setComputeOpen] = useState(false);
   const startedRef = useRef(false);
+  const connectionEvents = useRef(0);
   const projectPath = currentProject?.path ?? null;
+
+  // A connected extension alone is not enough if this pane is showing the
+  // trust notice, preparation state, or an error fallback instead of an iframe.
+  const workbenchVisible = isTauri() && trusted && frameKey(status) !== null;
+  useEffect(() => {
+    onWorkbenchReadyChange?.(workbenchVisible);
+    return () => onWorkbenchReadyChange?.(false);
+  }, [onWorkbenchReadyChange, workbenchVisible]);
 
   // What the user has open inside the iframe, so the compute panel can offer
   // to submit it.
@@ -136,16 +152,38 @@ export default function CodePane() {
   useEffect(() => {
     let disposed = false;
     const pending = onCodeBridgeConnection((connected) => {
-      if (!disposed) setBridged(connected);
+      if (!disposed) {
+        connectionEvents.current += 1;
+        setBridged(connected);
+      }
     });
-    void codeBridgeConnected().then((connected) => {
-      if (!disposed) setBridged(connected);
-    });
+    void pending.then(async () => {
+      if (disposed) return;
+      const observed = connectionEvents.current;
+      const connected = await codeBridgeConnected();
+      if (!disposed && observed === connectionEvents.current) setBridged(connected);
+    }).catch(() => {});
     return () => {
       disposed = true;
       void pending.then((unlisten) => unlisten());
     };
   }, []);
+
+  useEffect(() => {
+    if (!pendingCodeFilePath || !bridged || !workbenchVisible) return;
+    let disposed = false;
+    void codeBridgeOpenFile(pendingCodeFilePath).then((delivered) => {
+      if (disposed || useStore.getState().pendingCodeFilePath !== pendingCodeFilePath) return;
+      if (delivered) setPendingCodeFilePath(null);
+      else setBridged(false); // Keep the target and retry after reconnecting.
+    }).catch((reason) => {
+      if (!disposed && useStore.getState().pendingCodeFilePath === pendingCodeFilePath) {
+        useStore.getState().setError(String(reason));
+        setBridged(false);
+      }
+    });
+    return () => { disposed = true; };
+  }, [bridged, pendingCodeFilePath, setPendingCodeFilePath, workbenchVisible]);
 
   // Review can be opened before the Code workbench has ever been mounted.
   // Keep the request in the store until the bridge is authenticated and the
@@ -186,7 +224,7 @@ export default function CodePane() {
   useEffect(() => {
     if (!bridged) return;
     void codeBridgeSetTheme(theme === "dark", currentSomniqColors());
-  }, [bridged, theme]);
+  }, [bridged, theme, uiColor, surface, customAccent]);
 
   // Progress arrives as events so a 100 MB download is not polled for.
   useEffect(() => {
@@ -249,12 +287,17 @@ export default function CodePane() {
   // Nothing pushes us a crash, so ask.
   useEffect(() => {
     if (status?.phase !== "ready") return undefined;
+    let disposed = false;
     const timer = window.setInterval(() => {
+      const observed = connectionEvents.current;
       void codeServerStatus().then((next) => {
-        if (next) setStatus(next);
+        if (!disposed && next) setStatus(next);
       });
+      void codeBridgeConnected().then((connected) => {
+        if (!disposed && observed === connectionEvents.current) setBridged(connected);
+      }).catch(() => {});
     }, LIVENESS_POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => { disposed = true; window.clearInterval(timer); };
   }, [status?.phase]);
 
   const cancel = useCallback(async () => {

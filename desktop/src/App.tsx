@@ -21,6 +21,8 @@ import AppNavigationRail from "./AppNavigationRail";
 import AppProductSwitcher from "./AppProductSwitcher";
 import AppProjectSwitcher, { type AppProjectSwitcherCopy } from "./AppProjectSwitcher";
 import AppAccountMenu from "./AppAccountMenu";
+import { useCodeShell } from "./code/useCodeShell";
+import { formatQuota } from "./settings/settingsFormatters";
 import { accountMenuPlan } from "./accountMenuPlan";
 import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 import { requestWindowAction } from "./windowControls";
@@ -453,6 +455,7 @@ export default function App() {
   // instead of conditionally mounting per tab: remounting would tear down the
   // workbench iframe and restart its extension host on every tab switch.
   const [codeMounted, setCodeMounted] = useState(false);
+  const [codeWorkbenchReady, setCodeWorkbenchReady] = useState(false);
   const [typesetMounted, setTypesetMounted] = useState(false);
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
@@ -924,6 +927,51 @@ export default function App() {
     .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
     .map((item) => ({ ...item, label: copy.nav[item.id] }));
 
+  const codeShellReady = useCodeShell({
+    enabled: codeMounted,
+    active: renderedTab === "lab",
+    shell: {
+      language,
+      modules: [...navigationItems, ...moreNavigationItems].map(({ id, label }) => ({ id, label })),
+      projects: orderedProjects.map(({ id, name, path }) => ({ id, name, path })),
+      currentProjectId: currentProject?.id ?? null,
+      projectBusy,
+      account: {
+        name: userName, plan: userPlan.label,
+        allowance: userPlan.remaining === null ? (language === "cn" ? "额度信息暂不可用" : "Allowance unavailable") : formatQuota(userPlan.remaining),
+        remainingPercent: userPlan.remainingPercent,
+      },
+    },
+    onSelectModule: (id) => selectTab(id as Tab),
+    onSelectProject: selectProject,
+    onAddProject: () => void chooseProject().catch((reason) => setError(String(reason))),
+    onRevealProject: () => {
+      if (currentProject?.path) void fileReveal(currentProject.path).catch((reason) => setError(String(reason)));
+    },
+    onSettings: () => openSettingsTab("general"),
+    onSignOut: handleLogout,
+  });
+  const codePage = renderedTab === "lab";
+  const codeShell = codePage && codeShellReady && codeWorkbenchReady;
+  // Keep a desktop-owned exit from Code when the duplicate header is removed.
+  // It must work without an extension command or an editor socket round trip.
+  const productSwitcher = (
+    <AppProductSwitcher
+      label={copy.productMenuLabel}
+      triggerLabel={copy.switchProduct(PRODUCT_NAMES[productTab] ?? copy.nav[productTab])}
+      moduleName={PRODUCT_NAMES[productTab] ?? copy.nav[productTab]}
+      activeTab={productTab}
+      items={[...navigationItems, ...moreNavigationItems.filter((item) => item.id !== "settings" && item.id !== "scheduled" && item.id !== "tasks")]}
+      utilityItems={moreNavigationItems.filter((item) => item.id === "settings")}
+      onOpen={() => {
+        setProjectMenuOpen(false);
+        setUserMenuOpen(false);
+      }}
+      onSelect={selectTab}
+      onPreload={preloadTabModule}
+    />
+  );
+
   const accountControl = (
     <AppAccountMenu
       language={language}
@@ -945,9 +993,10 @@ export default function App() {
   );
 
   return (
-    <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}`}>
+    <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}${codeShell ? " app-code-shell" : ""}`}>
       <div className="window-titlebar">
-        <div className="window-titlebar-left">
+        {codePage && <div className="window-titlebar-code-switcher">{productSwitcher}</div>}
+        {!codePage && <div className="window-titlebar-left">
           {/* The sidebar belongs to Chat, so these two go quiet on other tabs
               rather than switching modules out from under the pointer. */}
           <button
@@ -977,7 +1026,7 @@ export default function App() {
           <button className="window-titlebar-icon" type="button" disabled aria-label={copy.forward}>
             <NavArrow dir="right" />
           </button>
-        </div>
+        </div>}
         <div
           className="window-titlebar-drag"
           data-tauri-drag-region
@@ -1019,22 +1068,9 @@ export default function App() {
         onSelect={selectTab}
         onPreload={preloadTabModule}
       />}
-      <header className="app-head">
+      <header className="app-head" hidden={codeShell}>
         <div className="app-head-title">
-          <AppProductSwitcher
-            label={copy.productMenuLabel}
-            triggerLabel={copy.switchProduct(PRODUCT_NAMES[productTab] ?? copy.nav[productTab])}
-            moduleName={PRODUCT_NAMES[productTab] ?? copy.nav[productTab]}
-            activeTab={productTab}
-            items={[...navigationItems, ...moreNavigationItems.filter((item) => item.id !== "settings" && item.id !== "scheduled" && item.id !== "tasks")]}
-            utilityItems={moreNavigationItems.filter((item) => item.id === "settings")}
-            onOpen={() => {
-              setProjectMenuOpen(false);
-              setUserMenuOpen(false);
-            }}
-            onSelect={selectTab}
-            onPreload={preloadTabModule}
-          />
+          {!codePage && productSwitcher}
           <div id="app-chat-workspace-portal" hidden={!chatShell} />
           {tab === "literature" && literaturePageView !== "library" && (
             <LiteratureViewTabs
@@ -1083,7 +1119,7 @@ export default function App() {
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
-                  <CodePane />
+                  <CodePane onWorkbenchReadyChange={setCodeWorkbenchReady} />
                 </Suspense>
               </ErrorBoundary>
             </div>

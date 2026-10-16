@@ -739,6 +739,14 @@ pub(crate) const PATCHES: &[Patch] = &[
         find: r#"["vscode.nls.locale"]||"#,
         replace: r#"["vscode.nls.locale"]||process.env.ARIS_CODE_LOCALE||"#,
     },
+    // The desktop already supplies the product switcher above the workbench.
+    // Hide the duplicate app icon and its reserved width in the embedded bar.
+    Patch {
+        file: &["out", "vs", "code", "browser", "workbench", "workbench.css"],
+        anchor: None,
+        find: ".monaco-workbench .part.titlebar>.titlebar-container>.titlebar-left>.window-appicon{",
+        replace: ".monaco-workbench .part.titlebar>.titlebar-container>.titlebar-left>.window-appicon{display:none;",
+    },
     // ---- Webviews ----------------------------------------------------------
     //
     // Every extension UI that is not plain inline HTML — the Markdown preview,

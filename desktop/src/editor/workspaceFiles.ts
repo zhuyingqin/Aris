@@ -88,3 +88,10 @@ export function workspaceFileOpenTarget(path: string): WorkspaceFileOpenTarget {
   if (ext === ".pdf") return "pdf";
   return opensInCodePage(path) ? "code" : "external";
 }
+
+/** Capture a relative file's project now, before asynchronous editor startup. */
+export function resolveWorkspaceFilePath(path: string, projectPath: string | null): string {
+  const file = path.replace(/\\/g, "/");
+  if (/^(?:[a-z]:\/|\/)/i.test(file) || !projectPath) return file;
+  return `${projectPath.replace(/\\/g, "/").replace(/\/+$/, "")}/${file}`;
+}

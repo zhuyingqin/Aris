@@ -23,7 +23,8 @@ mod transport;
 mod wire;
 
 pub use code_bridge::{
-    truncate_utf8, BridgeToHost, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
+    truncate_utf8, BridgeToHost, CodeShellAccount, CodeShellAction, CodeShellModule,
+    CodeShellProject, CodeShellState, HostToBridge, CODE_BRIDGE_MAX_FRAME_BYTES,
     CODE_BRIDGE_MAX_SELECTION_BYTES, CODE_BRIDGE_PROTOCOL_VERSION, CODE_BRIDGE_TOKEN_ENV,
     CODE_BRIDGE_URL_ENV,
 };

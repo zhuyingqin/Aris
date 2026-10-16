@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   codeBridgeConnected,
   codeBridgeOpenDiff,
+  codeBridgeOpenFile,
   codeBridgeSetTheme,
   codeServerEnsure,
   codeServerStatus,
@@ -16,6 +17,7 @@ import {
   onCodeBridgeConnection,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { useAppearance } from "../appearance";
 import type { CodeBridgeAsk, CodeServerStatus } from "../types";
 import { CODE_COPY } from "./i18n";
 import CodePane, { askPromptFor, downloadPercent, frameKey } from "./CodePane";
@@ -24,6 +26,7 @@ vi.mock("../api/tauri", () => ({
   isTauri: () => true,
   codeBridgeConnected: vi.fn(() => Promise.resolve(false)),
   codeBridgeOpenDiff: vi.fn(() => Promise.resolve(true)),
+  codeBridgeOpenFile: vi.fn(() => Promise.resolve(true)),
   codeServerStatus: vi.fn(),
   codeServerEnsure: vi.fn(),
   codeServerStop: vi.fn(),
@@ -73,16 +76,24 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   localStorage.setItem("somniq-code-trust-ack", "true");
-  useStore.setState({ language: "en", theme: "dark" });
+  useStore.setState({ language: "en", theme: "dark", pendingCodeFilePath: null, pendingCodeDiff: null });
+  useStore.getState().setUiColor("default");
+  useAppearance.getState().sync(null);
   setProject("D:/work");
   vi.mocked(codeServerStatus).mockResolvedValue(status());
   vi.mocked(codeServerEnsure).mockResolvedValue(READY);
   vi.mocked(codeServerStop).mockResolvedValue(status({ installed: true }));
   vi.mocked(codeBridgeConnected).mockResolvedValue(false);
   vi.mocked(codeBridgeOpenDiff).mockResolvedValue(true);
+  vi.mocked(codeBridgeOpenFile).mockResolvedValue(true);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  for (const token of ["--bg", "--accent", "--ui-on-accent"]) {
+    document.documentElement.style.removeProperty(token);
+  }
+});
 
 describe("downloadPercent", () => {
   it("is zero before the content length is known", () => {
@@ -149,6 +160,101 @@ describe("askPromptFor", () => {
 });
 
 describe("CodePane", () => {
+  it("retains a file requested before Code starts, then opens it after the bridge connects", async () => {
+    let connection: (value: boolean) => void = () => {};
+    vi.mocked(onCodeBridgeConnection).mockImplementation((handler) => {
+      connection = handler;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(codeServerStatus).mockResolvedValue(status({ installed: true }));
+    useStore.setState({ pendingCodeFilePath: "D:/work/scripts/train.py" });
+    render(<CodePane />);
+    await waitFor(() => expect(document.querySelector("iframe.code-frame")).not.toBeNull());
+    expect(codeBridgeOpenFile).not.toHaveBeenCalled();
+    expect(useStore.getState().pendingCodeFilePath).toBe("D:/work/scripts/train.py");
+    act(() => connection(true));
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledWith("D:/work/scripts/train.py"));
+    await waitFor(() => expect(useStore.getState().pendingCodeFilePath).toBeNull());
+  });
+
+  it("waits for an actual workbench before delivering a file on an already connected bridge", async () => {
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    useStore.setState({ pendingCodeFilePath: "D:/work/main.rs" });
+    render(<CodePane />);
+    await screen.findByRole("button", { name: /Prepare and start/i });
+    expect(codeBridgeOpenFile).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: /Prepare and start/i }));
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledWith("D:/work/main.rs"));
+  });
+
+  it("retries a file after the bridge drops before delivery", async () => {
+    let connection: (value: boolean) => void = () => {};
+    vi.mocked(onCodeBridgeConnection).mockImplementation((handler) => {
+      connection = handler;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    vi.mocked(codeServerStatus).mockResolvedValue(READY);
+    vi.mocked(codeBridgeOpenFile).mockResolvedValueOnce(false).mockResolvedValue(true);
+    useStore.setState({ pendingCodeFilePath: "D:/work/train.ipynb" });
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledTimes(1));
+    expect(useStore.getState().pendingCodeFilePath).toBe("D:/work/train.ipynb");
+    act(() => connection(true));
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(useStore.getState().pendingCodeFilePath).toBeNull());
+  });
+
+  it("does not let an old delivery clear a newer file request", async () => {
+    let delivered: (value: boolean) => void = () => {};
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    vi.mocked(codeServerStatus).mockResolvedValue(READY);
+    vi.mocked(codeBridgeOpenFile).mockImplementationOnce(() => new Promise((resolve) => { delivered = resolve; }))
+      .mockResolvedValue(false);
+    useStore.setState({ pendingCodeFilePath: "D:/work/first.py" });
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledWith("D:/work/first.py"));
+    act(() => {
+      useStore.getState().setPendingCodeFilePath("D:/work/second.py");
+      delivered(true);
+    });
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledWith("D:/work/second.py"));
+    expect(useStore.getState().pendingCodeFilePath).toBe("D:/work/second.py");
+  });
+
+  it("does not overwrite a new connection event with a stale initial connection query", async () => {
+    let connection: (value: boolean) => void = () => {};
+    let queried: (value: boolean) => void = () => {};
+    vi.mocked(onCodeBridgeConnection).mockImplementation((handler) => {
+      connection = handler;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(codeBridgeConnected).mockImplementationOnce(() => new Promise((resolve) => { queried = resolve; }));
+    vi.mocked(codeServerStatus).mockResolvedValue(READY);
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeConnected).toHaveBeenCalled());
+    await act(async () => { connection(true); queried(false); await Promise.resolve(); });
+    act(() => useStore.getState().setPendingCodeFilePath("D:/work/main.m"));
+    await waitFor(() => expect(codeBridgeOpenFile).toHaveBeenCalledWith("D:/work/main.m"));
+  });
+
+  it("keeps desktop navigation available when the workbench stops rendering", async () => {
+    let emitStatus: (value: CodeServerStatus) => void = () => {};
+    const ready = vi.fn();
+    const { onCodeServerStatus } = await import("../api/tauri");
+    vi.mocked(onCodeServerStatus).mockImplementation((handler) => {
+      emitStatus = handler;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(codeServerStatus).mockResolvedValue(READY);
+    const { unmount } = render(<CodePane onWorkbenchReadyChange={ready} />);
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
+    act(() => emitStatus(status({ phase: "failed", installed: true })));
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(false));
+    unmount();
+    expect(ready).toHaveBeenLastCalledWith(false);
+  });
+
   it("shows the permission notice before anything is downloaded", async () => {
     localStorage.removeItem("somniq-code-trust-ack");
     render(<CodePane />);
@@ -308,6 +414,67 @@ describe("CodePane", () => {
     const [, colors] = vi.mocked(codeBridgeSetTheme).mock.calls.at(-1)!;
     expect(colors["editor.background"]).toBe("#0e1116");
     document.documentElement.style.removeProperty("--bg");
+  });
+
+  it("updates colors without changing theme or reloading the workbench", async () => {
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    vi.mocked(codeServerStatus).mockResolvedValue(READY);
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenCalled());
+    const frame = document.querySelector("iframe.code-frame");
+    const style = document.documentElement.style;
+
+    vi.mocked(codeBridgeSetTheme).mockClear();
+    style.setProperty("--accent", "#b69cfb");
+    style.setProperty("--ui-on-accent", "#0e1116");
+    act(() => useStore.getState().setUiColor("purple"));
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenLastCalledWith(true,
+      expect.objectContaining({ "button.background": "#b69cfb", "button.foreground": "#0e1116" })));
+
+    vi.mocked(codeBridgeSetTheme).mockClear();
+    style.setProperty("--bg", "#181512");
+    act(() => useAppearance.getState().patch({ surface: "warm" }));
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenLastCalledWith(true,
+      expect.objectContaining({ "editor.background": "#181512" })));
+
+    vi.mocked(codeBridgeSetTheme).mockClear();
+    style.setProperty("--accent", "#f49ac2");
+    act(() => useAppearance.getState().patch({ customAccent: "#f49ac2" }));
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenLastCalledWith(true,
+      expect.objectContaining({ "button.background": "#f49ac2" })));
+
+    vi.mocked(codeBridgeSetTheme).mockClear();
+    style.setProperty("--accent", "#b69cfb");
+    act(() => useAppearance.getState().patch({ customAccent: "" }));
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenLastCalledWith(true,
+      expect.objectContaining({ "button.background": "#b69cfb" })));
+    expect(document.querySelector("iframe.code-frame")).toBe(frame);
+    expect(useStore.getState().theme).toBe("dark");
+  });
+
+  it("sends the latest accent on reconnect after preferences changed offline", async () => {
+    let connection: (connected: boolean) => void = () => {};
+    vi.mocked(onCodeBridgeConnection).mockImplementation((handler) => {
+      connection = handler;
+      return Promise.resolve(() => {});
+    });
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeConnected).toHaveBeenCalled());
+    document.documentElement.style.setProperty("--accent", "#6bcea2");
+    act(() => useStore.getState().setUiColor("green"));
+    expect(codeBridgeSetTheme).not.toHaveBeenCalled();
+    act(() => connection(true));
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenLastCalledWith(true,
+      expect.objectContaining({ "button.background": "#6bcea2" })));
+  });
+
+  it("does not push a palette again for unrelated appearance changes", async () => {
+    vi.mocked(codeBridgeConnected).mockResolvedValue(true);
+    render(<CodePane />);
+    await waitFor(() => expect(codeBridgeSetTheme).toHaveBeenCalled());
+    vi.mocked(codeBridgeSetTheme).mockClear();
+    act(() => useAppearance.getState().patch({ font: "serif", wallpaperOpacity: 25 }));
+    expect(codeBridgeSetTheme).not.toHaveBeenCalled();
   });
 
   /// `compute_submit` has no other entry point in the app, so switching the
