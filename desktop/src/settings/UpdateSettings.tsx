@@ -8,7 +8,7 @@ import { SETTINGS_COPY } from "./i18n";
 import { SettingsSection } from "./SettingsPrimitives";
 import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 import { formatUpdateBytes } from "./settingsFormatters";
-import OracleWebSettings from "./OracleWebSettings";
+import "./UpdateSettings.css";
 
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
 
@@ -82,40 +82,44 @@ export default function UpdateSettings({ language, appVersion }: { language: Lan
       ? `${formatUpdateBytes(updateProgress.downloadedBytes)} / ${formatUpdateBytes(updateProgress.contentLength)}${updateProgress.percent !== null && updateProgress.percent !== undefined ? ` - ${updateProgress.percent}%` : ""}`
       : copy.updateDownloaded(formatUpdateBytes(updateProgress.downloadedBytes))
     : "";
+  const progressPercent = updateProgress?.percent;
+  const updateTitle = updateState === "available" ? copy.aboutUpdateAvailable(updateInfo?.version ?? "")
+    : updateState === "ready" ? copy.aboutUpdateReady(updateInfo?.version ?? "")
+      : updateState === "downloading" ? copy.aboutInstalling
+        : updateState === "checking" ? copy.aboutChecking
+          : updateState === "current" ? copy.updateMsgUpToDate : "SomniQ Studio";
+  // Available/current states already describe the result in the title.
+  const showMessage = updateMessage && updateMessage !== updateTitle && updateState !== "available";
 
-  return <>
-    <SettingsSection title={SETTINGS_LAYOUT_COPY[language].update} actions={
-      <div className="sp-update-actions">
-        <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
-          <SvgIcon name={updateState === "checking" ? "spinner" : "refresh"} size={13} />
-          {updateState === "checking" ? copy.aboutChecking : copy.aboutCheck}
-        </button>
-        {updateState === "available" && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">{copy.aboutDownloadInstall}</button>}
-        {updateState === "ready" && <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">{copy.aboutRestart}</button>}
-      </div>
-    }>
-      <div className={`sp-update-panel sp-update-panel-${updateState}`}>
-        <div className="sp-update-main">
-          <span className={`sp-update-dot sp-update-dot-${updateState}`} />
-          <div className="sp-update-copy">
-            <div className="sp-update-title">
-              {updateState === "available" ? copy.aboutUpdateAvailable(updateInfo?.version ?? "")
-                : updateState === "ready" ? copy.aboutUpdateReady(updateInfo?.version ?? "")
-                  : updateState === "downloading" ? copy.aboutInstalling : copy.aboutConnected}
+  return <div className="settings-updates">
+    <SettingsSection title={SETTINGS_LAYOUT_COPY[language].update}>
+      <div className={`settings-app-update is-${updateState}`}>
+        <div className="settings-app-update-summary" aria-busy={updateBusy}>
+          <span className="settings-app-update-dot" aria-hidden="true" />
+          <div className="settings-app-update-copy">
+            <div className="settings-app-update-title" role="status">{updateTitle}</div>
+            <div className="settings-app-update-meta">
+              <span>{copy.aboutCurrentVersion(appVersion)}</span>
+              {updateInfo?.version && updateState !== "current" && <span>{copy.aboutRemoteVersion(updateInfo.version)}</span>}
+              {updateInfo?.date && <span>{updateInfo.date}</span>}
             </div>
-            <div className="sp-update-meta">
-              {copy.aboutCurrentVersion(appVersion)}
-              {updateInfo?.version && updateState !== "current" ? ` -> ${copy.aboutRemoteVersion(updateInfo.version)}` : ""}
-              {updateInfo?.date ? ` · ${updateInfo.date}` : ""}
-            </div>
-            {(updateMessage || updateProgressLabel) && <div className="sp-update-message" role={updateState === "error" ? "alert" : "status"}>
-              {updateMessage}{updateProgressLabel ? ` · ${updateProgressLabel}` : ""}
-            </div>}
-            {updateInfo?.body && updateState === "available" && <div className="sp-update-notes">{updateInfo.body}</div>}
           </div>
         </div>
+        <div className="settings-app-update-actions">
+          <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
+            <SvgIcon name={updateState === "checking" ? "spinner" : "refresh"} size={13} />
+            {updateState === "checking" ? copy.aboutChecking : copy.aboutCheck}
+          </button>
+          {updateState === "available" && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">{copy.aboutDownloadInstall}</button>}
+          {updateState === "ready" && <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">{copy.aboutRestart}</button>}
+        </div>
+        {showMessage && <div className="settings-app-update-message" role={updateState === "error" ? "alert" : "status"}>{updateMessage}</div>}
+        {updateState === "downloading" && updateProgress && <div className="settings-app-update-progress">
+          <progress aria-label={copy.aboutInstalling} max={100} value={typeof progressPercent === "number" && Number.isFinite(progressPercent) ? Math.min(100, Math.max(0, progressPercent)) : undefined} />
+          <span role="status">{updateProgressLabel}</span>
+        </div>}
+        {updateInfo?.body && updateState === "available" && <div className="settings-app-update-notes">{updateInfo.body}</div>}
       </div>
     </SettingsSection>
-    <OracleWebSettings language={language} runtimeOnly />
-  </>;
+  </div>;
 }

@@ -12,6 +12,24 @@ export interface HeatmapCell {
   future: boolean;
 }
 
+export interface ProfileActivityPoint {
+  date: string;
+  endDate?: string;
+  tokens: number;
+}
+
+/** One bucket per week for bars, or one lifetime total per elapsed day for a line. */
+export function buildProfileActivitySeries(
+  daily: ProfileStats["daily"],
+  mode: "weekly" | "cumulative",
+  cumulativeTokens: number,
+  now = new Date(),
+): ProfileActivityPoint[] {
+  const weeks = buildProfileHeatmap(daily, mode, cumulativeTokens, now);
+  const cells = mode === "weekly" ? weeks.map((week) => week[0]) : weeks.flat();
+  return cells.filter((cell) => !cell.future).map(({ date, endDate, tokens }) => ({ date, endDate, tokens }));
+}
+
 /** UTC buckets match the local ledger. Keep 53 aligned columns, including
  * placeholders after today, and retain lifetime usage before the window. */
 export function buildProfileHeatmap(

@@ -1,0 +1,41 @@
+/* Models uses General's sections, setting rows, controls, and save feedback. */
+.sp-settings-shell .settings-page-models { container-type: inline-size; }
+.sp-settings-shell .settings-page-models .settings-row { min-height: var(--settings-row-height); padding-block: var(--settings-row-padding); }
+.sp-settings-shell .settings-page-models .settings-row-control:not(:empty):not(:has(.settings-switch)) { width: var(--settings-control-width); flex-basis: var(--settings-control-width); }
+.sp-settings-shell .settings-page-models .settings-row-control:has(> select) { --settings-control-width: 240px; }
+.sp-settings-shell .settings-page-models .settings-row-control > :is(input, select, .st-key-wrap, .st-preset-control, .settings-model-search-control) { width: 100%; max-width: 100%; }
+.sp-settings-shell .settings-page-models .settings-row-control:not(:empty):has(> select) > select { width: min(100%, var(--settings-control-width)); }
+/* Match General's ordinary fields, including preset and key inputs that kept
+   the old model editor's monospace face and darker surface. */
+:root[data-theme] .sp-settings-shell .settings-page.settings-page-models .settings-row .settings-row-control :is(input, select) { font-family: inherit; font-size: 13px; font-weight: 400; line-height: normal; min-height: 34px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-1); color: var(--text); }
+:root[data-theme="light"] .sp-settings-shell .settings-page.settings-page-models .settings-row .settings-row-control :is(input, select) { border-color: #cbd5e1; background: #fff; }
+:root[data-theme] .sp-settings-shell .settings-page.settings-page-models .settings-row .settings-row-control :is(input, select):focus { border-color: var(--accent); }
+.sp-settings-shell .settings-page-models .st-preset-control { grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); gap: 8px; }
+.sp-settings-shell .settings-page-models .st-preset-control > * { min-width: 0; max-width: 100%; }
+.sp-settings-shell .settings-page-models .st-key-wrap { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; max-width: 100%; }
+.sp-settings-shell .settings-page-models .st-key-eye { min-width: 0; font-weight: 600; }
+.sp-settings-shell .settings-page-models .st-key-error { grid-column: 1 / -1; color: var(--danger, #dc5050); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page-models .settings-model-search-control { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.sp-settings-shell .settings-page-models .settings-model-service-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.sp-settings-shell .settings-page-models .settings-model-button-danger { color: var(--danger, #dc5050); }
+.sp-settings-shell .settings-page-models .settings-model-button-danger:hover:not(:disabled) { color: var(--danger, #dc5050); border-color: color-mix(in srgb, var(--danger, #dc5050) 40%, var(--border)); }
+.sp-settings-shell .settings-page-models .sp-btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 90%, var(--text)); box-shadow: none; filter: none; transform: none; }
+.sp-settings-shell .settings-page-models .settings-model-status { padding-block: 14px; border-top: 1px solid var(--border); }
+.sp-settings-shell .settings-page-models .settings-model-status p { margin: 0 0 6px; color: var(--text-dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page-models .settings-model-status > .settings-feedback { margin: 0; justify-content: flex-start; }
+.sp-settings-shell .settings-page-models .settings-section-body > .sp-field-hint { margin: 0; padding-block: 14px; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page-models .settings-model-test-results { padding-block: 16px; }
+.sp-settings-shell .settings-page-models .settings-model-test-results > .settings-feedback { justify-content: flex-start; }
+.sp-settings-shell .settings-page-models .st-test-grid { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
+.sp-settings-shell .settings-page-models .st-test-detail { padding: 12px; border-color: var(--border); border-radius: 8px; background: var(--bg-2); }
+.sp-settings-shell .settings-page-models .st-test-detail.failed { border-color: color-mix(in srgb, var(--danger, #dc5050) 35%, var(--border)); }
+.sp-settings-shell .settings-page-models .st-test-detail-head { flex-wrap: wrap; }
+.sp-settings-shell .settings-page-models .st-test-label { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.sp-settings-shell .settings-page-models .st-test-meta { min-width: 0; max-width: 100%; }
+.sp-settings-shell .settings-page-models :is(.st-test-meta, .st-test-message, .st-test-url) { font-size: 12px; line-height: 1.6; }
+.sp-settings-shell .settings-page-models :is(.sp-model-select-empty, .st-test-url) { font-family: inherit; font-weight: 400; }
+.sp-settings-shell .settings-page-models .settings-model-actions > .settings-feedback { flex-basis: 100%; margin: 0; }
+@container (max-width: 620px) {
+  .sp-settings-shell .settings-page-models .settings-row-control:not(:empty):not(:has(.settings-switch)) { width: 100%; flex-basis: 100%; align-items: stretch; }
+  .sp-settings-shell .settings-page-models .settings-model-service-actions { justify-content: flex-start; }
+}

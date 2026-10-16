@@ -211,20 +211,12 @@ describe("OracleWebSettings", () => {
     expect(screen.getByRole("button", { name: "更新运行时" })).toBeTruthy();
   });
 
-  it("reuses the runtime update in the Update page without showing account setup", async () => {
-    render(<OracleWebSettings language="en" runtimeOnly />);
-    expect(await screen.findByText("Oracle Web")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create account" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Update runtime" }));
-    expect(await screen.findByText("The runtime is already on the current compatible version.")).toBeTruthy();
-  });
-
   it("disables Update and Refresh while an update is pending", async () => {
     let resolveInstall: ((status: OracleWebStatusView) => void) | undefined;
     vi.mocked(oracleWebRuntimeInstall).mockImplementationOnce(
       () => new Promise<OracleWebStatusView>((resolve) => { resolveInstall = resolve; }),
     );
-    render(<OracleWebSettings language="en" />);
+    render(<OracleWebSettings language="en" embedded />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Update runtime" }));
 

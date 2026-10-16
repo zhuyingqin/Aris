@@ -1,14 +1,13 @@
 import { useId, type ReactNode } from "react";
 import type { Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import { GENERAL_PAGE_COPY } from "./generalPageCopy";
 import type { PreferenceSave } from "./usePreferenceSave";
 
-export function SettingsPage({ title, scope, children, kind, hidden = false }: {
-  title: string; scope?: string; children: ReactNode; kind: string; hidden?: boolean;
+export function SettingsPage({ title, children, kind, hidden = false }: {
+  title: string; children: ReactNode; kind: string; hidden?: boolean;
 }) {
-  const id = useId();
-  return <section className={`settings-page settings-page-${kind}`} data-settings-page={kind} hidden={hidden} aria-labelledby={id}>
-    <header className="settings-page-heading"><h1 id={id}>{title}</h1>{scope && <span className="settings-scope">{scope}</span>}</header>
+  return <section className={`settings-page settings-page-${kind}`} data-settings-page={kind} hidden={hidden} aria-label={title}>
     {children}
   </section>;
 }
@@ -22,7 +21,7 @@ export function SettingsSection({ title, description, actions, children }: { tit
 }
 
 export function SettingsAdvanced({ title, children }: { title: string; children: ReactNode }) {
-  return <details className="settings-advanced settings-page-advanced"><summary>{title}<span aria-hidden="true">⌄</span></summary><div className="settings-advanced-body">{children}</div></details>;
+  return <details className="settings-advanced settings-page-advanced"><summary>{title}<SvgIcon name="chevronDown" size={14} /></summary><div className="settings-advanced-body">{children}</div></details>;
 }
 
 export function SettingRow({ title, description, children, feedback }: { title: string; description?: string; children: ReactNode; feedback?: ReactNode }) {

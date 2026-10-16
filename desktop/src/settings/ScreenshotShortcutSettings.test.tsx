@@ -8,6 +8,7 @@ vi.mock("../api/tauri", () => ({
   isTauri: vi.fn(() => true), screenshotShortcutSet: vi.fn(), screenshotShortcutStatus: vi.fn(),
 }));
 const original = { shortcut: "CmdOrCtrl+Shift+A", registered: true, error: null };
+const conflict = "HotKey already registered: HotKey { mods: Modifiers(CONTROL | SHIFT), key: KeyA, id: 34078739 }";
 beforeEach(() => {
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(screenshotShortcutStatus).mockResolvedValue(original);
@@ -67,6 +68,52 @@ it("keeps the actual shortcut on registration failure and retries the requested 
   await screen.findByText("已保存");
   expect(button.textContent).toBe("Alt + B");
   expect(screenshotShortcutSet).toHaveBeenLastCalledWith("Alt+KeyB");
+});
+
+it.each(["cn", "en"] as const)("retries a startup conflict without changing the shortcut (%s)", async (language) => {
+  vi.mocked(screenshotShortcutStatus).mockResolvedValue({ ...original, registered: false, error: conflict });
+  render(<ScreenshotShortcutSettings language={language} />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain(language === "cn" ? "已被占用" : "in use");
+  expect(alert.textContent).not.toContain("HotKey {");
+  expect(screenshotShortcutSet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: language === "cn" ? "重试" : "Retry" }));
+  expect(screenshotShortcutSet).toHaveBeenCalledWith(original.shortcut);
+  await screen.findByText(language === "cn" ? "已保存" : "Saved");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps the current binding and retry available when the startup conflict persists", async () => {
+  vi.mocked(screenshotShortcutStatus).mockResolvedValue({ ...original, registered: false, error: conflict });
+  vi.mocked(screenshotShortcutSet).mockRejectedValueOnce(new Error(conflict));
+  render(<ScreenshotShortcutSettings language="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "重试" }));
+  await waitFor(() => expect(screenshotShortcutStatus).toHaveBeenCalledTimes(2));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("修改快捷键");
+  expect(alert.textContent).not.toContain("34078739");
+  expect(screen.getByRole("button", { name: "修改截图快捷键" }).textContent).toBe("Ctrl + Shift + A");
+  expect(screen.queryByText("已保存")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await screen.findByText("已保存");
+  expect(screenshotShortcutSet).toHaveBeenCalledTimes(2);
+  expect(screenshotShortcutSet).toHaveBeenLastCalledWith(original.shortcut);
+});
+
+it("hides the stale startup error and prevents repeated retries while registration is pending", async () => {
+  vi.mocked(screenshotShortcutStatus).mockResolvedValue({ ...original, registered: false, error: conflict });
+  let resolveRegistration!: (value: typeof original) => void;
+  vi.mocked(screenshotShortcutSet).mockImplementationOnce(() => new Promise(resolve => { resolveRegistration = resolve; }));
+  render(<ScreenshotShortcutSettings language="cn" />);
+  fireEvent.click(await screen.findByRole("button", { name: "重试" }));
+  expect(screen.getByText("保存中…")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  expect(screen.getByRole("button", { name: "修改截图快捷键" })).toHaveProperty("disabled", true);
+  expect(screenshotShortcutSet).toHaveBeenCalledTimes(1);
+  resolveRegistration(original);
+  await screen.findByText("已保存");
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
 it("disables editing during save and reflects the backend state if rollback fails", async () => {

@@ -22,11 +22,12 @@ export type SettingsNavId =
   | "about";
 
 export type SettingsNavGroupId = "personal" | "integration" | "system";
+export type SettingsPageId = Exclude<SettingsNavId, "account" | "environment" | "update">;
 
 export interface SettingsNavItemDef {
-  id: SettingsNavId;
+  id: SettingsPageId;
   icon: ReactNode;
-  /** Renders a trailing ↗ affordance (e.g. account opens the gateway). */
+  /** Renders a trailing ↗ affordance for external destinations. */
   external?: boolean;
 }
 
@@ -124,7 +125,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     items: [
       { id: "profile", icon: NAV_ICONS.profile },
       { id: "general", icon: NAV_ICONS.general },
-      { id: "account", icon: NAV_ICONS.account },
     ],
   },
   {
@@ -140,7 +140,6 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
   {
     id: "system",
     items: [
-      { id: "update", icon: NAV_ICONS.update },
       { id: "about", icon: NAV_ICONS.about },
     ],
   },
@@ -164,8 +163,18 @@ export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([
   ...SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
   "environment",
+  "account",
+  "update",
 ]);
 
 export function isSettingsNavId(value: unknown): value is SettingsNavId {
   return typeof value === "string" && SETTINGS_NAV_ID_SET.has(value as SettingsNavId);
+}
+
+/** Keep stored requests and old links working after categories are merged. */
+export function resolveSettingsPageId(value: unknown): SettingsPageId | null {
+  if (!isSettingsNavId(value)) return null;
+  if (value === "account") return "profile";
+  if (value === "environment" || value === "update") return "about";
+  return value;
 }

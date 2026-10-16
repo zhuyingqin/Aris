@@ -13,6 +13,12 @@ function displayShortcut(value: string) {
     .split("+").join(" + ");
 }
 
+function shortcutError(reason: unknown, language: Language) {
+  const message = formatUserFacingError(reason, language);
+  return /HotKey already registered/i.test(message)
+    ? GENERAL_PAGE_COPY[language].shortcutConflict : message;
+}
+
 export default function ScreenshotShortcutSettings({ language }: { language: Language }) {
   const copy = GENERAL_PAGE_COPY[language];
   const [status, setStatus] = useState<ScreenshotShortcutStatus | null>(null);
@@ -43,7 +49,7 @@ export default function ScreenshotShortcutSettings({ language }: { language: Lan
     } catch (reason) {
       // Refresh actual registration state, including the rare rollback failure.
       try { setStatus(await screenshotShortcutStatus()); } catch { /* keep last known state */ }
-      setError(formatUserFacingError(reason, language));
+      setError(shortcutError(reason, language));
       setSaveState("error");
     }
   };
@@ -52,8 +58,9 @@ export default function ScreenshotShortcutSettings({ language }: { language: Lan
     <SettingsFeedback state={saveState} message={saveState === "error" ? error
       : saveState === "saving" ? copy.preferenceSaving : copy.preferenceSaved}
       retryLabel={copy.retry} onRetry={pendingShortcut ? () => void save(pendingShortcut) : undefined} />
-    {saveState !== "error" && status && !status.registered &&
-      <SettingsFeedback state="error" message={SETTINGS_COPY[language].general.screenshotUnavailable(status.error ?? "")} />}
+    {saveState !== "error" && saveState !== "saving" && status && !status.registered &&
+      <SettingsFeedback state="error" message={SETTINGS_COPY[language].general.screenshotUnavailable(shortcutError(status.error ?? "", language))}
+        retryLabel={copy.retry} onRetry={isTauri() && !loading && !recording ? () => void save(status.shortcut) : undefined} />}
   </>}>
     <button type="button" className="sp-btn sp-btn-secondary settings-shortcut-editor"
       aria-label={recording ? copy.shortcutRecording : copy.shortcutEdit}

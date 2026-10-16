@@ -250,6 +250,27 @@ describe("Extensions global MCP settings", () => {
     await waitFor(() => expect(screen.getByText("运行时已安装。")).toBeTruthy());
   });
 
+  it("updates and refreshes a ready Oracle runtime from its plugin details on demand", async () => {
+    vi.mocked(mcpConfigGet).mockResolvedValue(view("ready"));
+    vi.mocked(oracleWebStatus).mockResolvedValue(oracleRuntimeStatus("ready"));
+    vi.mocked(oracleWebRuntimeInstall).mockResolvedValue(oracleRuntimeStatus("ready"));
+    render(<Extensions />);
+
+    const oraclePlugin = await screen.findByRole("button", { name: /oracle-web/ });
+    expect(oracleWebStatus).not.toHaveBeenCalled();
+    fireEvent.click(oraclePlugin);
+
+    expect(await screen.findByText("v0.21.4")).toBeTruthy();
+    expect(oracleWebRuntimeInstall).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("button", { name: "更新运行时" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "更新运行时" }));
+
+    expect(await screen.findByText("运行时已是当前兼容版本。")).toBeTruthy();
+    expect(oracleWebRuntimeInstall).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(oracleWebStatus).toHaveBeenCalledTimes(2));
+  });
+
   it("adds only a backend-resolved available preset", async () => {
     render(<Extensions />);
     fireEvent.click(await screen.findByRole("button", { name: "添加" }));

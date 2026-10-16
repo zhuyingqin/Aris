@@ -145,16 +145,11 @@ export interface SettingsGeneralCopy {
   envUnknownVersion: string;
   envNotOnPath: string;
   envInstallInChat: string;
-  envCategories: Record<"python" | "jupyter" | "matlab" | "latex", string>;
+  envCategories: Record<"python" | "jupyter" | "matlab" | "node" | "uv" | "tesseract" | "pdftoppm" | "latex", string>;
   envExecutableWarning: string;
   envAvailable: string;
   envMissingInstallable: (label: string) => string;
   envMissing: (label: string) => string;
-  aboutLinksTitle: string;
-  aboutLinksSub: string;
-  aboutLinkRepo: string;
-  aboutLinkReleases: string;
-  aboutLinkLicense: string;
   updateMsgNewVersion: (version: string) => string;
   updateMsgUpToDate: string;
   updateMsgDownloading: string;
@@ -299,11 +294,6 @@ export interface SettingsProfileCopy {
   statsUnavailable: string;
   statsRefreshFailed: string;
   accountRefreshFailed: string;
-  partialData: string;
-  localScope: string;
-  refresh: string;
-  refreshing: string;
-  updatedAt: (time: string) => string;
   utcDays: string;
   less: string;
   more: string;
@@ -325,6 +315,7 @@ export interface SettingsProfileCopy {
   modeDaily: string;
   modeWeekly: string;
   modeCumulative: string;
+  activityChartHint: string;
   activityEmpty: string;
   activitySince: (date: string) => string;
   insightsTitle: string;
@@ -696,7 +687,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       localBehaviorSub: "AI 助手记忆提取与写入策略，仅保存在这台设备。",
       screenshotTitle: "截图快捷键",
       screenshotSub: "全局热键，在任何应用中按下都会冻结屏幕。拖动框选或点击某个窗口直接框住它，可用矩形/箭头/荧光笔/马赛克/文字圈重点，确认后发送到聊天输入框或复制到剪贴板。",
-      screenshotUnavailable: (error) => `快捷键未能注册（通常是被其他软件占用）：${error}`,
+      screenshotUnavailable: (error) => error ? `截图快捷键未能注册：${error}` : "截图快捷键尚未注册，请重试或选择其他快捷键。",
       confirmBeforeWrite: "写入前确认",
       autoWrite: "自动写入",
       saveBehavior: "保存行为",
@@ -796,16 +787,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envUnknownVersion: "未获取",
       envNotOnPath: "未加入 PATH",
       envInstallInChat: "前往对话安装",
-      envCategories: { python: "运行环境", jupyter: "笔记本", matlab: "数值计算", latex: "论文排版" },
+      envCategories: { python: "运行环境", jupyter: "笔记本", matlab: "数值计算", node: "MCP", uv: "MCP / Python", tesseract: "文献识别", pdftoppm: "文献识别", latex: "论文排版" },
       envExecutableWarning: "已找到可执行文件，但版本检查未完成。",
       envAvailable: "已检测到可用环境。",
       envMissingInstallable: (label) => `未检测到 ${label}，可以转到对话完成安装与验证。`,
       envMissing: (label) => `未检测到 ${label}。`,
-      aboutLinksTitle: "资源链接",
-      aboutLinksSub: "源码、更新日志与许可协议。",
-      aboutLinkRepo: "GitHub 仓库",
-      aboutLinkReleases: "更新日志",
-      aboutLinkLicense: "许可协议",
       updateMsgNewVersion: (version) => `发现新版本 v${version}`,
       updateMsgUpToDate: "当前已是最新版本",
       updateMsgDownloading: "正在下载安装包",
@@ -988,13 +974,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       avatarTooLarge: "图片不能超过 10 MB。",
       avatarSaveFailed: "头像无法保存到本机，请检查应用存储权限。",
       statsUnavailable: "暂时无法读取本机活动统计。",
-      statsRefreshFailed: "刷新失败，当前显示上次成功读取的统计。请稍后重试。",
+      statsRefreshFailed: "刷新失败，当前显示上次成功读取的统计，稍后将自动重试。",
       accountRefreshFailed: "账户信息刷新失败。",
-      partialData: "部分历史记录无法读取，以下统计仅包含已成功读取的数据。",
-      localScope: "本机所有项目的活动记录",
-      refresh: "刷新资料与统计",
-      refreshing: "刷新中…",
-      updatedAt: (time) => `更新于 ${time}`,
       utcDays: "按 UTC 日期统计",
       less: "少",
       more: "多",
@@ -1016,6 +997,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       modeDaily: "每日",
       modeWeekly: "每周",
       modeCumulative: "累计",
+      activityChartHint: "悬停查看数值；聚焦图表后可用左右方向键切换日期。",
       activityEmpty: "暂无活动记录，开始对话后显示。",
       activitySince: (date) => `自 ${date} 起`,
       insightsTitle: "活动洞察",
@@ -1368,7 +1350,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       screenshotTitle: "Screenshot Shortcut",
       screenshotSub: "A system-wide hotkey: press it from any application to freeze the screen. Drag a region or click a window to capture it, mark it up with shapes, a highlighter, mosaic or text, then send it to the chat composer or copy it.",
       screenshotUnavailable: (error) =>
-        `The shortcut could not be registered — usually another application owns it: ${error}`,
+        error ? `The screenshot shortcut could not be registered: ${error}` : "The screenshot shortcut is not registered. Retry or choose a different shortcut.",
       confirmBeforeWrite: "Confirm before writing",
       autoWrite: "Write automatically",
       saveBehavior: "Save behavior",
@@ -1465,19 +1447,14 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       envStatusMissing: "Not detected",
       envVersion: "Version",
       envPath: "Path",
-      envUnknownVersion: "Unavailable",
+      envUnknownVersion: "Not reported",
       envNotOnPath: "Not on PATH",
       envInstallInChat: "Install with Chat",
-      envCategories: { python: "Runtime", jupyter: "Notebook", matlab: "Numerical computing", latex: "Typesetting" },
+      envCategories: { python: "Runtime", jupyter: "Notebook", matlab: "Numerical computing", node: "MCP", uv: "MCP / Python", tesseract: "Document processing", pdftoppm: "Document processing", latex: "Typesetting" },
       envExecutableWarning: "The executable was found, but its version check did not complete.",
       envAvailable: "The runtime is available.",
       envMissingInstallable: (label) => `${label} was not detected. Open Chat to install and verify it.`,
       envMissing: (label) => `${label} was not detected.`,
-      aboutLinksTitle: "Resources",
-      aboutLinksSub: "Source code, changelog, and license.",
-      aboutLinkRepo: "GitHub repository",
-      aboutLinkReleases: "Changelog",
-      aboutLinkLicense: "License",
       updateMsgNewVersion: (version) => `New version available: v${version}`,
       updateMsgUpToDate: "You are on the latest version",
       updateMsgDownloading: "Downloading the installer",
@@ -1660,13 +1637,8 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       avatarTooLarge: "The image must be no larger than 10 MB.",
       avatarSaveFailed: "The avatar could not be saved locally. Check the app's storage permissions.",
       statsUnavailable: "Local activity statistics are unavailable.",
-      statsRefreshFailed: "Refresh failed. Showing the last successfully loaded statistics. Please retry.",
+      statsRefreshFailed: "Refresh failed. Showing the last successfully loaded statistics. Updates will retry automatically.",
       accountRefreshFailed: "Account refresh failed.",
-      partialData: "Some historical records could not be read. Statistics include only readable records.",
-      localScope: "Activity recorded across projects on this device",
-      refresh: "Refresh profile and statistics",
-      refreshing: "Refreshing…",
-      updatedAt: (time) => `Updated at ${time}`,
       utcDays: "Days are counted in UTC",
       less: "Less",
       more: "More",
@@ -1688,6 +1660,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       modeDaily: "Daily",
       modeWeekly: "Weekly",
       modeCumulative: "Cumulative",
+      activityChartHint: "Hover to inspect values; focus the chart and use the arrow keys to move through dates.",
       activityEmpty: "No activity yet. Start a conversation to see it here.",
       activitySince: (date) => `Since ${date}`,
       insightsTitle: "Activity insights",
