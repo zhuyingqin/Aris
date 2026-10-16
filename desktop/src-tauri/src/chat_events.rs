@@ -977,20 +977,31 @@ pub fn export_wire_to_path(session_id: &str, target: &Path) -> Result<(), String
 pub async fn chat_events_read(
     session_id: String,
     kinds: Option<Vec<String>>,
+    project_id: Option<String>,
 ) -> Result<Vec<ChatEventLogEntry>, String> {
     crate::blocking::off_main_thread(move || {
         let kinds = kinds
             .as_ref()
             .map(|kinds| kinds.iter().map(String::as_str).collect::<Vec<_>>());
-        read_events_for_session(&session_id, kinds.as_deref())
+        crate::engine::with_chat_project(project_id.as_deref(), || {
+            read_events_for_session(&session_id, kinds.as_deref())
+        })
     })
     .await
 }
 
 /// See [`chat_events_read`] for why this is async.
 #[tauri::command]
-pub async fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String> {
-    crate::blocking::off_main_thread(move || replay_session_events(&session_id)).await
+pub async fn chat_events_replay(
+    session_id: String,
+    project_id: Option<String>,
+) -> Result<ChatEventsReplay, String> {
+    crate::blocking::off_main_thread(move || {
+        crate::engine::with_chat_project(project_id.as_deref(), || {
+            replay_session_events(&session_id)
+        })
+    })
+    .await
 }
 
 /// Build the bounded UI transcript from an explicitly scoped event stream.

@@ -354,6 +354,7 @@ fn run_literature_help_flow(
                 max_results: Some(limit),
                 time_window: None,
                 sort_order: None,
+                ..Default::default()
             },
         )?;
         let mut papers: Vec<tools::literature::RemotePaper> =

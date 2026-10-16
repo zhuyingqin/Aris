@@ -113,7 +113,7 @@ describe("useIndependentReview", () => {
         },
       },
     ]);
-    const { result: hook } = renderHook(() => useIndependentReview("session-restored"));
+    const { result: hook } = renderHook(() => useIndependentReview("session-restored", "project-aaaaaaaaaaaaaaaa"));
 
     await waitFor(() => expect(hook.current?.phase).toBe("complete"));
     expect(hook.current?.rounds[0].result).toMatchObject({
@@ -123,7 +123,7 @@ describe("useIndependentReview", () => {
     });
     // A session log is mostly streaming deltas. Restoring the panel must ask
     // for its own kind, not drag the whole log across the IPC boundary.
-    expect(mocks.chatEventsRead).toHaveBeenCalledWith("session-restored", ["independent_review"]);
+    expect(mocks.chatEventsRead).toHaveBeenCalledWith("session-restored", ["independent_review"], "project-aaaaaaaaaaaaaaaa");
   });
 
   it("merges restored history with a live round that arrives while the log is loading", async () => {

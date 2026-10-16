@@ -37,7 +37,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "reqwest",
  "runtime",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "aris-chat"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "api",
  "aris-executor",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "aris-executor"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "api",
  "reqwest",
@@ -1087,7 +1087,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "notebook"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "jupyter-protocol",
  "jupyter-zmq-client",
@@ -1502,7 +1502,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "runtime"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.4.15"
+version = "0.4.76"
 dependencies = [
  "api",
  "aris-executor",

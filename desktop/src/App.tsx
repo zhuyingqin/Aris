@@ -929,7 +929,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app${chatShell ? " app-navigation-shell app-chat-shell" : ""}`}>
+    <div className={`app${chatShell ? " app-navigation-shell app-chat-shell chat-background-surface" : ""}`}>
       <div className="window-titlebar">
         <div className="window-titlebar-left">
           {/* The sidebar belongs to Chat, so these two go quiet on other tabs
@@ -982,7 +982,7 @@ export default function App() {
               </svg>
             </button>
           )}
-          {renderUpdateIndicator()}
+          {!chatShell && renderUpdateIndicator()}
           <WindowControlButtons
             labels={{
               minimize: copy.minimizeWindow,
@@ -998,6 +998,7 @@ export default function App() {
         items={navigationItems}
         moreItems={moreNavigationItems}
         activeTab={renderedTab}
+        update={renderUpdateIndicator()}
         account={accountControl}
         onSelect={selectTab}
         onPreload={preloadTabModule}

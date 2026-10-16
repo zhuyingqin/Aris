@@ -7,6 +7,7 @@ import { OUTLINE_PANEL_DEFAULT_H, OUTLINE_PANEL_MAX_H, OUTLINE_PANEL_MIN_H } fro
 import { clampNumber } from "./pdfGeometry";
 
 const PROJECT_PANEL_DEFAULT_W = 204;
+const CHAT_PANEL_DEFAULT_W = 360;
 const PROJECT_PANEL_MIN_W = 136;
 const PROJECT_PANEL_MAX_W = 720;
 const PDF_PANEL_DEFAULT_W = 760;
@@ -25,10 +26,15 @@ function coordinateForAxis(axis: TypesetResizeAxis, event: { clientX: number; cl
   return axis === "y" ? event.clientY : event.clientX;
 }
 
-export function useTypesetPanels() {
+export function useTypesetPanels(chatPanel = false) {
   const [projectPanelVisible, setProjectPanelVisible] = useState(true);
   const [pdfPanelVisible, setPdfPanelVisible] = useState(true);
-  const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
+  const [filePanelWidth, setFilePanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
+  const [chatPanelWidth, setChatPanelWidth] = useState(CHAT_PANEL_DEFAULT_W);
+  // Reading a conversation needs more room than browsing a file tree. Keep each
+  // width while switching tabs, including explicit pointer and keyboard changes.
+  const projectPanelWidth = chatPanel ? chatPanelWidth : filePanelWidth;
+  const setProjectPanelWidth = chatPanel ? setChatPanelWidth : setFilePanelWidth;
   const [pdfPanelWidth, setPdfPanelWidth] = useState(PDF_PANEL_DEFAULT_W);
   const [outlinePanelHeight, setOutlinePanelHeight] = useState<number | null>(null);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
@@ -121,7 +127,7 @@ export function useTypesetPanels() {
     window.addEventListener("mouseup", cleanup, captureOptions);
     window.addEventListener("blur", cleanup);
     document.addEventListener("keydown", onEscape, captureOptions);
-  }, []);
+  }, [setProjectPanelWidth]);
 
   const beginPanelResizeFromPointer = useCallback((panel: TypesetResizePanel, event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -217,7 +223,7 @@ export function useTypesetPanels() {
       return;
     }
     setPdfPanelWidth((width) => clampNumber(width - direction * step, PDF_PANEL_MIN_W, PDF_PANEL_MAX_W));
-  }, []);
+  }, [setProjectPanelWidth]);
 
   const handleOutlineResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;

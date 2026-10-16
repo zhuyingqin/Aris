@@ -19,6 +19,7 @@ fn draft() -> SearchProtocolDraft {
         time_window: "2022-2026".to_string(),
         sort_order: "relevance".to_string(),
         databases: vec!["crossref".to_string(), "arxiv".to_string()],
+        boolean_query: String::new(),
         queries: BTreeMap::from([
             (
                 "crossref".to_string(),

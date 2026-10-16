@@ -443,6 +443,13 @@ const PINNED_CORE_TOOLS: &[&str] = &[
 /// known.
 const SECONDARY_CORE_TOOLS: &[&str] = &["AskUserQuestion", "session_search", "memory", "TodoWrite"];
 
+/// Tools kept only so older skills and transcripts still resolve. Intent
+/// routing never offers them — `LiteratureSearch` runs the same protocol in one
+/// call and `LiteratureSearchPreview` plans it — so they stay deferred, reachable
+/// through ToolSearch or by naming them.
+const COMPATIBILITY_ALIAS_TOOLS: &[&str] =
+    &["LiteratureSearchProtocolCreate", "LiteratureSearchExecute"];
+
 /// Upper bound on pins, so the LRU always keeps rotating slots for whatever the
 /// turn turns out to need.
 const MAX_PINNED_TOOLS: usize = MAX_ACTIVE_TOOLS - 8;
@@ -1047,7 +1054,10 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
                     "retrieval",
                     "zotero",
                 ],
-            ),
+            )
+            .into_iter()
+            .filter(|name| !COMPATIBILITY_ALIAS_TOOLS.contains(&name.as_str()))
+            .collect(),
         });
     }
     if contains_any(

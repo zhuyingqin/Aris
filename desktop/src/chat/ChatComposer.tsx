@@ -7,6 +7,7 @@ import {
   type GitWorkspaceSnapshot,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { useAppearance } from "../appearance";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import ChatImagePreview from "./ChatImagePreview";
@@ -400,6 +401,7 @@ function ChatComposer({
 }: Props) {
   const language = useStore((state) => state.language);
   const uiTextScale = useStore((state) => state.uiFontMode === "manual" ? state.uiFontSize : state.uiRecommendedFontSize);
+  const readingStyle = useAppearance(({ value }) => `${value.font}:${value.bodySize}:${value.lineHeight}:${value.readingWidth}`);
   const copy = CHAT_COPY[language];
   const modelGroups = useMemo(
     () => groupChatModels(modelOptions ?? [], language === "cn" ? "其他模型" : "Other models"),
@@ -539,7 +541,7 @@ function ChatComposer({
 
   useLayoutEffect(() => {
     if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
-  }, [input, uiTextScale]);
+  }, [input, uiTextScale, readingStyle]);
   useEffect(() => {
     if (focusRequest > 0) textareaRef.current?.focus();
   }, [focusRequest]);

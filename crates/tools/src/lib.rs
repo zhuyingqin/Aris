@@ -96,6 +96,7 @@ static LATEX_OUTPUT_DIRECTORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex
 pub mod knowledge;
 pub mod layout;
 pub mod literature;
+mod literature_boolean;
 pub mod notebook;
 pub mod pdf_rag;
 pub mod runs;
@@ -721,23 +722,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers. Run an explicit bounded metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv, then use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. This tool automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Write `query` in English academic terms: these indexes carry English titles and abstracts, so translate the user's concepts yourself rather than passing non-English text through — a built-in research glossary covers common Chinese terms as a fallback and reports whatever it could not translate. Scopus requires SCOPUS_API_KEY; Semantic Scholar requires SEMANTIC_SCHOLAR_API_KEY (its anonymous pool only returns HTTP 429), and a source without its credential is recorded as an explicit coverage gap rather than silently dropped. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms." },
-                    "sources": {
-                        "type": "array",
-                        "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
-                        "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
-                    },
-                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
-                    "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
-                    "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
+            description: "Preferred first discovery tool when the user asks to find, identify, compare, or survey academic papers — the one external scholarly search, from a quick lookup to a systematic search. It queries Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv; use WebSearch only for missing coverage, official/full-text entry points, or an explicit web-search request. If the papers may already be in the project library, call LibraryRetrieve first — it answers from indexed full text without a network request. Every call saves a project-local SearchProtocol and a durable SearchRun with canonical records, request/response artifacts, quotas and failures, then refreshes the library view; do not call LiteratureLibraryUpsert afterwards. A quick search needs only `query`. A systematic search carries its design in the same call: write the concept blocks once as `booleanQuery` (compiled into each source's own syntax), or give `queries` per source when one needs exact provider syntax; record `inclusionCriteria`/`exclusionCriteria`; list `knownKeyPapers` so the result reports which of them were retrieved (revise the strategy when one is missed). `coverage: \"saturate\"` keeps paging until new pages stop adding records, and `snowball` follows citations one hop from seed papers — both are bounded, but can fetch several hundred records, so preview first and confirm the scope with the user before a large run. To show the plan without any request, call LiteratureSearchPreview with `search` set to these same arguments. A partial result returns `continuation.continueRunId`; repeat the same query with it to fetch the next page. Write `query`, `booleanQuery` and `queries` in English academic terms: the indexes carry English titles and abstracts (a built-in glossary translates common Chinese terms in `query` as a fallback and reports what it could not). Scopus requires SCOPUS_API_KEY and Semantic Scholar SEMANTIC_SCHOLAR_API_KEY; a source without its credential is recorded as an explicit coverage gap rather than silently dropped.",
+            input_schema: literature_search_input_schema(),
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
@@ -877,7 +863,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearchProtocolCreate",
-            description: "Create a versioned, project-local literature SearchProtocol. The protocol records the research question, scope, source-specific queries, time window, eligibility criteria and known papers. This only saves a plan; call LiteratureSearchPreview and obtain explicit user confirmation before executing a network search.",
+            description: "Compatibility alias kept for older skills; prefer LiteratureSearch, which saves the same protocol (question, scope, booleanQuery, per-source queries, time window, criteria, known papers) and runs it in one call, and LiteratureSearchPreview with `search` to plan without saving. This only saves a plan; it never opens a connection.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -888,6 +874,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                             "scope": { "type": "string" },
                             "timeWindow": { "type": "string" },
                             "databases": { "type": "array", "items": { "type": "string" } },
+                            "booleanQuery": { "type": "string" },
                             "queries": { "type": "object", "additionalProperties": { "type": "string" } },
                             "queryVariants": {
                                 "type": "object",
@@ -922,18 +909,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearchPreview",
-            description: "Preview a saved SearchProtocol before execution. Returns each effective source, complete query and adapter availability; it never performs a network request or a full export.",
+            description: "Show exactly what a literature search would send — every source, each compiled query stream and its result budget, adapter availability, and any saturation or snowball bounds — without opening a connection or saving anything. Pass `search` with the arguments you would give LiteratureSearch to review a strategy (for instance a booleanQuery's per-source compilation) before running it, or `protocolId` to inspect a saved protocol. Use it to show the user a systematic or large search before running it.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "protocolId": { "type": "string", "minLength": 1 } },
-                "required": ["protocolId"],
+                "properties": {
+                    "protocolId": { "type": "string", "minLength": 1, "description": "A saved SearchProtocol id." },
+                    "search": literature_search_input_schema()
+                },
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "LiteratureSearchExecute",
-            description: "Execute a previously previewed SearchProtocol and persist a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. Use only after the user has reviewed the preview and explicitly agreed to the bounded scope. The `confirmation` field must be exactly `execute`. A `resumeRunId` resumes one interrupted running operation; a `continueRunId` starts a new bounded page from a terminal partial run's per-source cursors.",
+            description: "Compatibility alias kept for older skills; prefer LiteratureSearch (with `continueRunId` for further pages). Executes a saved SearchProtocol and persists a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. The `confirmation` field must be exactly `execute`. A `resumeRunId` resumes one interrupted running operation; a `continueRunId` starts a new bounded page from a terminal partial run's per-source cursors.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1439,6 +1428,51 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     specs
 }
 
+/// Input schema of `LiteratureSearch`, shared with the `search` argument of
+/// `LiteratureSearchPreview` so a preview always accepts exactly what the
+/// search would run.
+fn literature_search_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "minLength": 2, "description": "The research question or topic, in English academic terms. Always required; it names the protocol and ranks results, and a continuation must repeat it." },
+            "sources": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
+                "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
+            },
+            "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source unique-result target per page (default 50). It is persisted in the protocol; adapters paginate within provider limits and report truncation explicitly." },
+            "timeWindow": { "type": "string", "description": "Publication-date bound applied by every adapter: `2020..2025`, `since 2023`, `until 2019`, or explicit dates `2024-06-01..2024-12-31`. Omit for no bound." },
+            "sortOrder": { "type": "string", "enum": ["relevance", "date"], "description": "Provider ordering; defaults to relevance. Use `date` only when the user asked for the newest work rather than the most relevant." },
+            "booleanQuery": { "type": "string", "description": "One provider-independent boolean expression, compiled into every source's syntax: terms in [brackets] or \"quotes\", upper-case AND / OR / AND NOT, parentheses for concept blocks. Example: ([continual learning] OR [lifelong learning]) AND ([time series] OR [time-series]) AND [anomaly detection]. Sources that parse no boolean syntax (Crossref, Semantic Scholar) receive a few keyword streams rotating through each block's synonyms." },
+            "queries": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Optional per-source queries in that provider's own syntax, keyed by source. Each is sent exactly as written and overrides booleanQuery for its source."
+            },
+            "scope": { "type": "string", "description": "What is in and out of scope, recorded in the protocol." },
+            "inclusionCriteria": { "type": "array", "items": { "type": "string" } },
+            "exclusionCriteria": { "type": "array", "items": { "type": "string" } },
+            "knownKeyPapers": { "type": "array", "items": { "type": "string" }, "description": "Papers a good strategy must retrieve: DOI, arXiv id, or exact title. The result reports each as found or missed." },
+            "continueRunId": { "type": "string", "minLength": 1, "description": "Fetch the next bounded page of a previous partial run of this same query (from `continuation.continueRunId`). Other fields are taken from that run's protocol." },
+            "coverage": { "type": "string", "enum": ["bounded", "saturate"], "description": "`bounded` (default): one page per source. `saturate`: keep paging unexhausted sources, up to 5 pages, until a page adds under 10% new records; the result names why it stopped." },
+            "snowball": {
+                "type": "object",
+                "description": "One-hop citation chasing after the search. Seeds: `seeds`, then any knownKeyPapers given as DOI/arXiv id, then the `topRecords` best-ranked results (default 5 when no explicit seeds). At most 10 seeds.",
+                "properties": {
+                    "seeds": { "type": "array", "items": { "type": "string" }, "description": "Seed papers as DOI or arXiv id." },
+                    "topRecords": { "type": "integer", "minimum": 0, "maximum": 10 },
+                    "direction": { "type": "string", "enum": ["citing", "references", "both"], "description": "Default both." },
+                    "maxPerSeed": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Default 25." }
+                },
+                "additionalProperties": false
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })
+}
+
 /// Identity of the external request a tool call will actually issue, for tools
 /// that compile their input into something else before sending it.
 ///
@@ -1560,7 +1594,7 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "WebSearch" => from_value::<web::WebSearchInput>(input)
             .and_then(|input| web::run_web_search(input, should_cancel)),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
-            .and_then(literature::run_literature_search),
+            .and_then(|input| literature::run_literature_search_with_cancel(input, should_cancel)),
         "LiteratureCitations" => from_value::<literature::LiteratureCitationsInput>(input)
             .and_then(literature::run_literature_citations),
         "RetrievalPlan" => to_pretty_json(json!({

@@ -32,6 +32,7 @@ import {
   saveUiTypographyPreference,
   type UiFontMode,
 } from "./uiTypography";
+import { applyUiColor, parseUiColor, readUiColor, saveUiColor, type UiColor } from "./uiColors";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -54,7 +55,10 @@ export type Tab =
   | "scheduled";
 
 export type Theme = "dark" | "light";
+export type ThemeMode = Theme | "system";
 export type Language = "cn" | "en";
+
+type PreferenceOptions = { requirePersistence?: boolean };
 
 /** One-shot request to inspect a cited local-PDF source beside Chat. */
 export interface SidePanelEvidenceTarget {
@@ -119,16 +123,25 @@ function requestedTheme(): Theme | null {
   return null;
 }
 
-function readStoredThemePreference(): Theme | null {
+function readStoredThemePreference(): ThemeMode | null {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY);
-    return stored === "light" || stored === "dark" ? stored : null;
+    return stored === "light" || stored === "dark" || stored === "system" ? stored : null;
   } catch {
     return null;
   }
 }
 
-function applyTheme(theme: Theme, persist = true) {
+function persistPreference(key: string, value: string, required = false) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    if (required) throw error;
+  }
+}
+
+function applyTheme(theme: Theme, persist = true, required = false, nativeTheme: Theme | null = theme) {
+  if (persist) persistPreference(THEME_STORAGE_KEY, theme, required);
   if (typeof document !== "undefined") {
     document.documentElement.dataset.theme = theme;
   }
@@ -136,11 +149,10 @@ function applyTheme(theme: Theme, persist = true) {
   // app-level theme also covers the companion window; the browser preview has
   // no native chrome, so it remains unaffected by this guarded call.
   if (isTauri() && isMacOS()) {
-    void setNativeAppTheme(theme).catch(() => undefined);
+    void setNativeAppTheme(nativeTheme).catch(() => undefined);
   }
   if (!persist) return;
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
     localStorage.removeItem(THEME_LEGACY_STORAGE_KEY);
   } catch {
     // Private mode / storage disabled — theme still applies for this session.
@@ -173,10 +185,10 @@ function reflectPlatform() {
   }
 }
 
-function applyLanguage(language: Language) {
+function applyLanguage(language: Language, required = false) {
+  persistPreference(LANGUAGE_STORAGE_KEY, language, required);
   reflectLanguage(language);
   try {
-    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     localStorage.removeItem(LANGUAGE_LEGACY_STORAGE_KEY);
   } catch {
     // Storage may be unavailable; the current render still uses the in-memory value.
@@ -340,29 +352,35 @@ interface AppState {
   theme: Theme;
   /** False only on a fresh profile that still needs the first-run choice. */
   themePreferenceSet: boolean;
-  setTheme: (theme: Theme) => void;
+  themeMode: ThemeMode;
+  setTheme: (theme: ThemeMode, options?: PreferenceOptions) => void;
+  syncTheme: (stored: string | null) => void;
+
+  uiColor: UiColor;
+  setUiColor: (color: UiColor, options?: PreferenceOptions) => void;
+  syncUiColor: (storedValue: string | null) => void;
 
   uiFontMode: UiFontMode;
   /** Remember the user's custom size when switching back to automatic mode. */
   uiFontSize: number;
   uiRecommendedFontSize: number;
-  setUiFontMode: (mode: UiFontMode) => void;
-  setUiFontSize: (fontSize: number) => void;
+  setUiFontMode: (mode: UiFontMode, options?: PreferenceOptions) => void;
+  setUiFontSize: (fontSize: number, options?: PreferenceOptions) => void;
   refreshUiTypography: () => void;
   syncUiTypography: (storedValue: string | null) => void;
 
   language: Language;
   /** False only on a fresh profile that still needs the first-run choice. */
   languagePreferenceSet: boolean;
-  setLanguage: (language: Language) => void;
+  setLanguage: (language: Language, options?: PreferenceOptions & { syncRuntime?: boolean }) => void;
 
   /** When true, Mail is hidden from the primary navigation and switcher. */
   hideMail: boolean;
-  setHideMail: (hide: boolean) => void;
+  setHideMail: (hide: boolean, options?: PreferenceOptions) => void;
 
   /** When true, Workflows is hidden from the primary navigation and switcher. */
   hideWorkflows: boolean;
-  setHideWorkflows: (hide: boolean) => void;
+  setHideWorkflows: (hide: boolean, options?: PreferenceOptions) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
@@ -432,16 +450,22 @@ interface AppState {
 }
 
 const storedThemePreference = readStoredThemePreference();
-const initialTheme = requestedTheme() ?? storedThemePreference ?? "dark";
+function resolvedTheme(mode: ThemeMode): Theme {
+  return mode === "system" ? (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light") : mode;
+}
+const initialThemeMode = requestedTheme() ?? storedThemePreference ?? "dark";
+const initialTheme = resolvedTheme(initialThemeMode);
 const storedLanguage = readStoredLanguage();
 const initialLanguage = storedLanguage ?? "en";
 const initialTypography = readUiTypographyPreference();
+const initialUiColor = readUiColor();
 const initialRecommendedFontSize = currentRecommendedUiFontSize();
 // A default preview must not count as a first-run choice. The preference is
 // written only after the user explicitly selects a theme.
 reflectPlatform();
-applyTheme(initialTheme, false);
+applyTheme(initialTheme, false, false, initialThemeMode === "system" ? null : initialTheme);
 applyUiTypography(initialTypography, initialRecommendedFontSize);
+applyUiColor(initialUiColor);
 if (storedLanguage) {
   // Migrate the legacy key while preserving an explicit prior choice.
   applyLanguage(storedLanguage);
@@ -519,27 +543,48 @@ export const useStore = create<AppState>((set, get) => ({
   setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 
   theme: initialTheme,
+  themeMode: initialThemeMode,
   themePreferenceSet: storedThemePreference !== null,
-  setTheme: (theme) => {
-    applyTheme(theme);
-    set({ theme, themePreferenceSet: true });
+  setTheme: (themeMode, options) => {
+    persistPreference(THEME_STORAGE_KEY, themeMode, options?.requirePersistence);
+    const theme = resolvedTheme(themeMode);
+    applyTheme(theme, false, false, themeMode === "system" ? null : theme);
+    set({ theme, themeMode, themePreferenceSet: true });
+  },
+  syncTheme: (stored) => {
+    const themeMode = stored === "light" || stored === "system" ? stored : "dark";
+    const theme = resolvedTheme(themeMode);
+    applyTheme(theme, false, false, themeMode === "system" ? null : theme); set({ theme, themeMode });
+  },
+
+  uiColor: initialUiColor,
+  setUiColor: (color, options) => {
+    const next = parseUiColor(color);
+    saveUiColor(next, options?.requirePersistence);
+    applyUiColor(next);
+    set({ uiColor: next });
+  },
+  syncUiColor: (storedValue) => {
+    const next = parseUiColor(storedValue);
+    applyUiColor(next);
+    set({ uiColor: next });
   },
 
   uiFontMode: initialTypography.mode,
   uiFontSize: initialTypography.fontSize,
   uiRecommendedFontSize: initialRecommendedFontSize,
-  setUiFontMode: (mode) => {
+  setUiFontMode: (mode, options) => {
     const preference = { mode, fontSize: get().uiFontSize };
     const recommended = currentRecommendedUiFontSize();
+    saveUiTypographyPreference(preference, options?.requirePersistence);
     applyUiTypography(preference, recommended);
-    saveUiTypographyPreference(preference);
     set({ uiFontMode: mode, uiRecommendedFontSize: recommended });
   },
-  setUiFontSize: (fontSize) => {
+  setUiFontSize: (fontSize, options) => {
     const preference = { mode: "manual" as const, fontSize: normalizeUiFontSize(fontSize) };
     const recommended = currentRecommendedUiFontSize();
+    saveUiTypographyPreference(preference, options?.requirePersistence);
     applyUiTypography(preference, recommended);
-    saveUiTypographyPreference(preference);
     set({ uiFontMode: "manual", uiFontSize: preference.fontSize, uiRecommendedFontSize: recommended });
   },
   refreshUiTypography: () => {
@@ -557,19 +602,20 @@ export const useStore = create<AppState>((set, get) => ({
 
   language: initialLanguage,
   languagePreferenceSet: storedLanguage !== null,
-  setLanguage: (language) => {
+  setLanguage: (language, options) => {
     const next = normalizeLanguage(language);
-    applyLanguage(next);
+    applyLanguage(next, options?.requirePersistence);
     set({ language: next, languagePreferenceSet: true });
-    if (isTauri()) {
+    if (isTauri() && options?.syncRuntime !== false) {
       // Keep the model/runtime language aligned with the visible UI choice.
       void configSet({ language: next }).catch(() => undefined);
     }
   },
 
   hideMail: readStoredHideMail(),
-  setHideMail: (hide) => {
-    applyHideMail(hide);
+  setHideMail: (hide, options) => {
+    if (options?.requirePersistence) persistPreference(HIDE_MAIL_STORAGE_KEY, String(hide), true);
+    else applyHideMail(hide);
     set((state) => ({
       hideMail: hide,
       tab: hide && state.tab === "mail" ? "chat" : state.tab,
@@ -577,8 +623,9 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   hideWorkflows: readStoredHideWorkflows(),
-  setHideWorkflows: (hide) => {
-    applyHideWorkflows(hide);
+  setHideWorkflows: (hide, options) => {
+    if (options?.requirePersistence) persistPreference(HIDE_WORKFLOWS_STORAGE_KEY, String(hide), true);
+    else applyHideWorkflows(hide);
     set((state) => ({
       hideWorkflows: hide,
       tab: hide && state.tab === "workflows" ? "chat" : state.tab,

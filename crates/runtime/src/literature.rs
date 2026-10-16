@@ -76,6 +76,12 @@ pub struct SearchProtocolDraft {
     /// Adapter identifiers, for example `scopus` or `arxiv`.
     #[serde(default)]
     pub databases: Vec<String>,
+    /// One provider-independent boolean expression (`[a] OR [b]) AND [c]`),
+    /// kept verbatim so a run can be audited against what the caller wrote.
+    /// Planning compiles it into each source's own syntax; a source-specific
+    /// entry in `queries` still overrides it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub boolean_query: String,
     /// Complete, source-specific queries. Keys are adapter identifiers.
     #[serde(default)]
     pub queries: BTreeMap<String, String>,
@@ -2318,6 +2324,68 @@ impl LiteratureStore {
             .transpose()
     }
 
+    /// The canonical record a caller-supplied reference already names, if the
+    /// library holds one. Identifiers go through the same alias table that
+    /// write-time identity resolution uses, so a DOI, its arXiv-DOI spelling and
+    /// a versioned arXiv id all land on one record; a title must match the
+    /// normalized title exactly, because a fuzzy title is not a work identity.
+    pub fn find_record_id_by_reference(
+        &self,
+        doi: Option<&str>,
+        arxiv_id: Option<&str>,
+        title: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let mut aliases = Vec::new();
+        if let Some(doi) = doi.map(str::trim).filter(|value| !value.is_empty()) {
+            let doi = doi.to_ascii_lowercase();
+            if let Some(arxiv_id) = doi.strip_prefix("10.48550/arxiv.") {
+                aliases.push(format!("arxiv:{}", strip_arxiv_version(arxiv_id)));
+            }
+            aliases.push(format!("doi:{doi}"));
+        }
+        if let Some(arxiv_id) = arxiv_id.map(str::trim).filter(|value| !value.is_empty()) {
+            aliases.push(format!(
+                "arxiv:{}",
+                strip_arxiv_version(&arxiv_id.to_ascii_lowercase())
+            ));
+        }
+        let normalized_title = title
+            .map(normalized_record_title)
+            .filter(|value| !value.is_empty());
+        if let Some(title) = &normalized_title {
+            aliases.push(format!("title:{title}"));
+        }
+        for alias in aliases {
+            let record_id = self
+                .connection
+                .query_row(
+                    "SELECT record_id FROM canonical_record_aliases WHERE alias = ?1",
+                    [&alias],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(to_error)?;
+            if record_id.is_some() {
+                return Ok(record_id);
+            }
+        }
+        // A colliding title has no alias row (see `upsert_record_aliases`), so
+        // fall back to the column itself and accept only an unambiguous hit.
+        let Some(title) = normalized_title else {
+            return Ok(None);
+        };
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM canonical_records WHERE normalized_title = ?1 LIMIT 2")
+            .map_err(to_error)?;
+        let ids = statement
+            .query_map([&title], |row| row.get::<_, String>(0))
+            .map_err(to_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_error)?;
+        Ok((ids.len() == 1).then(|| ids[0].clone()))
+    }
+
     pub fn append_screen_decision(&mut self, decision: &ScreenDecision) -> Result<(), String> {
         self.ensure_record_exists(&decision.record_id)?;
         self.ensure_protocol_exists(&decision.protocol_id)?;
@@ -2402,6 +2470,7 @@ impl LiteratureStore {
                 time_window: String::new(),
                 sort_order: "relevance".to_string(),
                 databases: vec!["legacy_library".to_string()],
+                boolean_query: String::new(),
                 queries: BTreeMap::new(),
                 query_variants: BTreeMap::new(),
                 max_results: Some(papers.len().max(1)),

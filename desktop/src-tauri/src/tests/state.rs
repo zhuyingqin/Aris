@@ -42,6 +42,31 @@ fn project_runtime_dir_uses_stable_desktop_base() {
     );
 }
 
+#[test]
+fn project_bound_state_directories_ignore_the_active_project() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    let bound = temp.path().join("bound");
+    let _runtime = EnvGuard::set("ARIS_RUNTIME_ROOT", &active);
+    let _sessions = EnvGuard::set("ARIS_SESSIONS_DIR", active.join("sessions"));
+    let _run_state = EnvGuard::set("ARIS_RUN_STATE_DIR", active.join("run-state"));
+    let context = runtime::ProjectExecutionContext::new(&bound)
+        .with_env("ARIS_RUNTIME_ROOT", bound.as_os_str())
+        .with_env("ARIS_SESSIONS_DIR", bound.join("sessions").into_os_string())
+        .with_env("ARIS_RUN_STATE_DIR", bound.join("run-state").into_os_string());
+
+    runtime::with_project_execution_context(&context, || {
+        assert_eq!(super::runtime_dir(), bound);
+        assert_eq!(super::sessions_dir(), bound.join("sessions"));
+        assert_eq!(super::state_root(), bound.join("run-state"));
+    });
+    assert_eq!(super::sessions_dir(), active.join("sessions"));
+    assert_eq!(super::state_root(), active.join("run-state"));
+}
+
 /// The retrieval protocol's four tools have to travel together.
 ///
 /// Its refusals name the next tool by hand — "call RetrievalPlan", "call

@@ -37,8 +37,8 @@ const WEB_PROXY_URL_ENV: &str = "ARIS_WEB_PROXY_URL";
 const ZHIHU_SEARCH_URL: &str = "https://developer.zhihu.com/api/v1/content/zhihu_search";
 /// Shared research gateway. It owns the paid upstream credentials, so a
 /// SomniQ user can search without configuring Bocha or Zhihu individually.
-pub(crate) const SOMNIQ_RESEARCH_GATEWAY_ORIGIN: &str =
-    "https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com";
+/// This base includes the deployment's `/research` path prefix.
+pub(crate) const SOMNIQ_RESEARCH_GATEWAY_BASE_URL: &str = "https://somni.ensuanx.com/research";
 const ZHIHU_SEARCH_MAX_RESULTS: usize = 10;
 const ZHIHU_CHINESE_SUPPLEMENT_MIN_RESULTS: usize = 4;
 // Textual bodies are decoded in full, so they keep the historical ceiling;
@@ -462,7 +462,7 @@ impl WebProvider {
 
 pub(crate) fn somniq_research_gateway_url(path: &str) -> Result<Url, String> {
     let path = path.strip_prefix('/').unwrap_or(path);
-    Url::parse(&format!("{SOMNIQ_RESEARCH_GATEWAY_ORIGIN}/{path}"))
+    Url::parse(&format!("{SOMNIQ_RESEARCH_GATEWAY_BASE_URL}/{path}"))
         .map_err(|error| format!("invalid built-in research gateway URL: {error}"))
 }
 

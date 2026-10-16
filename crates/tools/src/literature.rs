@@ -190,7 +190,14 @@ pub struct LiteraturePdfRecordImportReport {
 
 // ── Tool inputs ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+/// The one network-facing literature search.
+///
+/// Everything a reviewed protocol records can be supplied here, so a systematic
+/// search no longer has to be split across create/preview/execute calls just to
+/// carry its own design. The call still persists a complete `SearchProtocol`
+/// and `SearchRun`; `LiteratureSearchPreview` with the same arguments shows the
+/// exact compiled requests without opening a connection.
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiteratureSearchInput {
     pub query: String,
@@ -209,6 +216,51 @@ pub struct LiteratureSearchInput {
     pub time_window: Option<String>,
     #[serde(default)]
     pub sort_order: Option<String>,
+    /// One provider-independent boolean expression, compiled per source. See
+    /// `literature_boolean` for the syntax.
+    #[serde(default)]
+    pub boolean_query: Option<String>,
+    /// Source-specific queries; each overrides `booleanQuery` and the planner
+    /// for its source and is sent exactly as written.
+    #[serde(default)]
+    pub queries: BTreeMap<String, String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub inclusion_criteria: Vec<String>,
+    #[serde(default)]
+    pub exclusion_criteria: Vec<String>,
+    /// Papers the result must contain (DOI, arXiv id, or exact title). Each
+    /// run reports which of them it retrieved — the benchmark-recall check a
+    /// systematic search is validated by.
+    #[serde(default)]
+    pub known_key_papers: Vec<String>,
+    /// Fetch the next bounded page of a previous partial run of this search.
+    #[serde(default)]
+    pub continue_run_id: Option<String>,
+    /// `bounded` (default) fetches one bounded page per source; `saturate`
+    /// keeps paging unexhausted sources until a page stops adding new records.
+    #[serde(default)]
+    pub coverage: Option<String>,
+    /// Optional one-hop citation expansion around seed papers.
+    #[serde(default)]
+    pub snowball: Option<LiteratureSnowballInput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureSnowballInput {
+    /// Explicit seed papers (DOI or arXiv id).
+    #[serde(default)]
+    pub seeds: Vec<String>,
+    /// How many of this search's best-ranked records to expand as well.
+    #[serde(default)]
+    pub top_records: Option<usize>,
+    /// `citing`, `references`, or `both` (default).
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub max_per_seed: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,10 +326,25 @@ pub struct LiteratureSearchProtocolCreateInput {
     pub protocol: runtime::SearchProtocolDraft,
 }
 
-#[derive(Debug, Deserialize)]
+/// Preview never opens a connection. It reads a saved protocol by id, or plans
+/// an unsaved one from exactly the arguments `LiteratureSearch` would receive.
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiteratureSearchPreviewInput {
-    pub protocol_id: String,
+    #[serde(default)]
+    pub protocol_id: Option<String>,
+    #[serde(default)]
+    pub search: Option<LiteratureSearchInput>,
+}
+
+impl LiteratureSearchPreviewInput {
+    #[must_use]
+    pub fn for_protocol(protocol_id: impl Into<String>) -> Self {
+        Self {
+            protocol_id: Some(protocol_id.into()),
+            search: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,86 +402,891 @@ impl ParsedTimeWindow {
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
 
 pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, String> {
-    let base = runtime::workspace_root_from_env();
-    serde_json::to_string_pretty(&literature_search_ad_hoc_at(&base, input)?)
-        .map_err(|error| error.to_string())
+    run_literature_search_with_cancel(input, &|| false)
 }
 
-/// Execute an explicit casual Chat search through the same durable path as a
-/// reviewed protocol. The tool invocation itself is the user's request for a
-/// bounded search, so this deliberately creates a lightweight ad-hoc protocol
-/// and immediately executes it instead of requiring a second confirmation
-/// turn. The resulting `SearchRun` still preserves the exact source queries,
-/// raw artifacts, quota/failure details, and canonical record identities.
+pub fn run_literature_search_with_cancel(
+    input: LiteratureSearchInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let base = runtime::workspace_root_from_env();
+    serde_json::to_string_pretty(&literature_search_ad_hoc_at_with_cancel(
+        &base,
+        input,
+        should_cancel,
+    )?)
+    .map_err(|error| error.to_string())
+}
+
+/// Execute an explicit Chat search through the same durable path as a reviewed
+/// protocol. The tool invocation itself is the user's request for a bounded
+/// search, so this creates the protocol and executes it in one call instead of
+/// requiring a second confirmation turn. The resulting `SearchRun` still
+/// preserves the exact source queries, raw artifacts, quota/failure details,
+/// and canonical record identities, and `LiteratureSearchPreview` with the same
+/// arguments shows that plan beforehand without a request.
 pub fn literature_search_ad_hoc_at(
     base: &Path,
     input: LiteratureSearchInput,
 ) -> Result<Value, String> {
-    let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
-    let draft = casual_search_protocol_draft_with_limit(&input, limit)?;
-    let protocol = {
-        let mut store = runtime::open_literature_store_at(base)?;
-        store.create_protocol(draft)?
-    };
-    let execution = literature_search_execute_at(
-        base,
-        LiteratureSearchExecuteInput {
-            protocol_id: protocol.id.clone(),
-            confirmation: "execute".to_string(),
-            max_results: None,
-            resume_run_id: None,
-            continue_run_id: None,
-            variant_budgets: None,
-        },
-        |_| {},
-    )?;
-    let run: runtime::SearchRun = serde_json::from_value(execution["searchRun"].clone())
-        .map_err(|error| format!("ad-hoc search returned an invalid SearchRun: {error}"))?;
-    let papers = {
-        let store = runtime::open_literature_store_at(base)?;
-        let mut papers = Vec::new();
-        for record_id in &run.record_ids {
-            if let Some(record) = store.load_canonical_record(record_id)? {
-                papers.push(remote_paper_from_canonical(&record));
-            }
+    literature_search_ad_hoc_at_with_cancel(base, input, &|| false)
+}
+
+pub fn literature_search_ad_hoc_at_with_cancel(
+    base: &Path,
+    input: LiteratureSearchInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Value, String> {
+    let coverage = CoverageMode::parse(input.coverage.as_deref())?;
+    let snowball = input
+        .snowball
+        .as_ref()
+        .map(SnowballPlan::from_input)
+        .transpose()?;
+    let continue_run_id = input
+        .continue_run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty());
+    let (protocol, continue_run_id) = match continue_run_id {
+        Some(run_id) => (
+            continued_protocol(base, run_id, &input.query)?,
+            Some(run_id.to_string()),
+        ),
+        None => {
+            let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
+            let draft = search_protocol_draft(&input, limit)?;
+            let mut store = runtime::open_literature_store_at(base)?;
+            (store.create_protocol(draft)?, None)
         }
-        papers
     };
+
+    let first = execute_pass(base, &protocol.id, continue_run_id, should_cancel)?;
+    let (run, warnings, saturation) = match coverage {
+        CoverageMode::Bounded => (first.run, first.warnings, None),
+        CoverageMode::Saturate => {
+            let saturated = saturate(base, &protocol, first, should_cancel)?;
+            (saturated.run, saturated.warnings, Some(saturated.report))
+        }
+    };
+    let snowball = snowball
+        .map(|plan| run_snowball(base, &protocol, &run, &plan, should_cancel))
+        .transpose()?;
+
+    let store = runtime::open_literature_store_at(base)?;
+    let mut papers = Vec::new();
+    for record_id in &run.record_ids {
+        if let Some(record) = store.load_canonical_record(record_id)? {
+            papers.push(remote_paper_from_canonical(&record));
+        }
+    }
+    let snowball_ids = snowball
+        .as_ref()
+        .map(|outcome| outcome.record_ids.clone())
+        .unwrap_or_default();
+    let recall = known_paper_recall(
+        &store,
+        &protocol.draft.known_key_papers,
+        &run.record_ids,
+        &snowball_ids,
+    )?;
+    drop(store);
     // Materialise the compatibility view only after the canonical run and
     // records are committed. This is a one-way projection, not a second write
     // path for Chat.
     let library = library_load_at(base)?;
-    let source_counts = run
-        .source_attempts
-        .iter()
-        .map(|attempt| SourceCount {
-            source: attempt.source.clone(),
-            count: usize::try_from(attempt.returned_count).unwrap_or(usize::MAX),
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
+    let resumable = resumable_sources(&protocol, &run);
+    let source_counts = cumulative_source_counts(&protocol, &run);
+    let run_id = run.id.clone();
+    let mut output = json!({
         "protocol": protocol,
         "searchRun": run,
         "papers": papers,
-        "warnings": execution["warnings"],
+        "warnings": warnings,
         "sourceCounts": source_counts,
         "libraryPath": library_path_at(base),
         "libraryRecordCount": library["papers"].as_array().map_or(0, Vec::len),
-        "note": "This explicit casual search created and executed an automatic ad-hoc SearchProtocol. Its records are already canonical in the local literature database; the compatibility projection has been refreshed. Do not call LiteratureLibraryUpsert to ingest them."
-    }))
+        "note": "This search created and executed a SearchProtocol. Its records are already canonical in the local literature database; the compatibility projection has been refreshed. Do not call LiteratureLibraryUpsert to ingest them."
+    });
+    if let Some(recall) = recall {
+        output["knownPaperRecall"] = recall;
+    }
+    if let Some(saturation) = saturation {
+        output["coverage"] = saturation;
+    }
+    if let Some(snowball) = snowball {
+        output["snowball"] = snowball.report;
+    }
+    if !resumable.is_empty() {
+        output["continuation"] = json!({
+            "continueRunId": run_id,
+            "sources": resumable,
+            "how": "Call LiteratureSearch with the same query and this continueRunId to fetch the next bounded page of these sources.",
+        });
+    }
+    Ok(output)
+}
+
+/// The protocol a continuation re-runs. A continuation is a further page of
+/// one specific search, so accepting it under a different question would file
+/// one search's pages under another's.
+fn continued_protocol(
+    base: &Path,
+    run_id: &str,
+    query: &str,
+) -> Result<runtime::SearchProtocol, String> {
+    let store = runtime::open_literature_store_at(base)?;
+    let previous = store
+        .load_run(run_id)?
+        .ok_or_else(|| format!("unknown continuation search run: {run_id}"))?;
+    let protocol = store.load_protocol(&previous.protocol_id)?.ok_or_else(|| {
+        format!("search run {run_id} names a protocol this project no longer has")
+    })?;
+    let same_question = collapse_whitespace(&protocol.draft.question).to_lowercase()
+        == collapse_whitespace(query).to_lowercase();
+    if !same_question {
+        return Err(format!(
+            "continueRunId {run_id} belongs to the search {:?}; repeat that query to continue it, or start a new search without continueRunId",
+            protocol.draft.question
+        ));
+    }
+    Ok(protocol)
+}
+
+/// How many unique records each source has contributed to the run so far.
+/// A continuation run carries the earlier pages' records but only this pass's
+/// attempts, so counting attempts would under-report a saturated search.
+fn cumulative_source_counts(
+    protocol: &runtime::SearchProtocol,
+    run: &runtime::SearchRun,
+) -> Vec<SourceCount> {
+    effective_protocol_sources(protocol)
+        .into_iter()
+        .map(|source| SourceCount {
+            count: run
+                .ranked_records
+                .iter()
+                .filter(|ranked| ranked.source_ranks.contains_key(&source))
+                .count(),
+            source,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverageMode {
+    Bounded,
+    Saturate,
+}
+
+impl CoverageMode {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("" | "bounded") => Ok(Self::Bounded),
+            Some("saturate") => Ok(Self::Saturate),
+            Some(other) => Err(format!(
+                "unsupported coverage {other:?}; use \"bounded\" or \"saturate\""
+            )),
+        }
+    }
+}
+
+/// One executed page of a protocol.
+struct ExecutedPass {
+    run: runtime::SearchRun,
+    warnings: Vec<String>,
+    elapsed: Duration,
+    cancelled: bool,
+}
+
+fn execute_pass(
+    base: &Path,
+    protocol_id: &str,
+    continue_run_id: Option<String>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<ExecutedPass, String> {
+    let started = Instant::now();
+    let execution = with_polled_cancel(should_cancel, |stop| {
+        literature_search_execute_at_with_cancel(
+            base,
+            LiteratureSearchExecuteInput {
+                protocol_id: protocol_id.to_string(),
+                confirmation: "execute".to_string(),
+                max_results: None,
+                resume_run_id: None,
+                continue_run_id,
+                variant_budgets: None,
+            },
+            |_| {},
+            stop,
+        )
+    })?;
+    let run = serde_json::from_value(execution["searchRun"].clone())
+        .map_err(|error| format!("search returned an invalid SearchRun: {error}"))?;
+    let warnings = execution["warnings"]
+        .as_array()
+        .map(|warnings| {
+            warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ExecutedPass {
+        run,
+        warnings,
+        elapsed: started.elapsed(),
+        cancelled: execution["cancelled"].as_bool().unwrap_or(false),
+    })
+}
+
+/// Run `body` on a scoped worker while this thread polls `should_cancel`.
+///
+/// Execution fans sources out to threads that share one stop predicate, so it
+/// needs a `Sync` one; the tool runner's cancel hook is not. Polling the hook
+/// here and publishing the answer through an atomic bridges the two without
+/// requiring every caller's hook to be thread-safe.
+fn with_polled_cancel<T: Send>(
+    should_cancel: &dyn Fn() -> bool,
+    body: impl FnOnce(&(dyn Fn() -> bool + Sync)) -> T + Send,
+) -> T {
+    let stop = AtomicBool::new(should_cancel());
+    std::thread::scope(|scope| {
+        let stop = &stop;
+        let worker = scope.spawn(move || body(&|| stop.load(Ordering::SeqCst)));
+        while !worker.is_finished() {
+            if should_cancel() {
+                stop.store(true, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// Sources a continuation would still fetch from: those whose latest attempt
+/// left results behind a resumable cursor, and those this run never reached —
+/// a run stopped before a source started records no attempt for it at all.
+fn resumable_sources(protocol: &runtime::SearchProtocol, run: &runtime::SearchRun) -> Vec<String> {
+    let attempts = latest_source_attempts(run);
+    effective_protocol_sources(protocol)
+        .into_iter()
+        .filter(|source| match attempts.get(source) {
+            Some(attempt) => !attempt.coverage.exhausted && attempt.coverage.next_cursor.is_some(),
+            None => true,
+        })
+        .collect()
+}
+
+/// Pages a saturating search may fetch per source, counting the first.
+const MAX_SATURATION_PASSES: usize = 5;
+/// A continuation page that adds fewer new records than this share of what it
+/// could have fetched has stopped paying for itself.
+const SATURATION_MIN_YIELD_PERCENT: usize = 10;
+const SATURATION_MIN_NEW_RECORDS: usize = 3;
+
+struct SaturatedSearch {
+    run: runtime::SearchRun,
+    warnings: Vec<String>,
+    report: Value,
+}
+
+/// Keep paging unexhausted sources until a page stops adding new records.
+///
+/// A fixed `maxResults` is a cost bound, not a coverage claim: a source with
+/// four hundred hits answered with its first thirty is not "searched". Each
+/// continuation is its own bounded `SearchRun` carrying the earlier records, so
+/// the stop condition is auditable page by page. Several conditions can end it
+/// — no source has more, a page's yield fell below the floor, the page or time
+/// budget ran out, or the user stopped — and the report names which one did,
+/// because "we stopped" and "there was nothing left" are different claims.
+fn saturate(
+    base: &Path,
+    protocol: &runtime::SearchProtocol,
+    first: ExecutedPass,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SaturatedSearch, String> {
+    let limit = protocol
+        .draft
+        .max_results
+        .unwrap_or(DEFAULT_RESULT_LIMIT)
+        .max(1);
+    let budget = search_time_budget();
+    let mut spent = Duration::ZERO;
+    let mut last_elapsed = first.elapsed;
+    let mut cancelled = first.cancelled;
+    let mut run = first.run;
+    let mut warnings = first.warnings;
+    let mut pages = vec![json!({
+        "runId": run.id,
+        "newRecords": run.record_ids.len(),
+        "status": run.status,
+    })];
+    let stop_reason = loop {
+        if cancelled || should_cancel() {
+            break "cancelled";
+        }
+        match run.status {
+            runtime::SearchRunStatus::Completed => break "exhausted",
+            runtime::SearchRunStatus::Failed => break "failed",
+            _ => {}
+        }
+        let resumable = resumable_sources(protocol, &run);
+        if resumable.is_empty() {
+            let all_exhausted = latest_source_attempts(&run)
+                .values()
+                .all(|attempt| attempt.coverage.exhausted);
+            break if all_exhausted {
+                "exhausted"
+            } else {
+                "unresumable"
+            };
+        }
+        if pages.len() >= MAX_SATURATION_PASSES {
+            break "pass_limit";
+        }
+        // Predictive: a page is not started unless one more like the last one
+        // still fits, so the budget bounds the whole call rather than the start
+        // of its final page.
+        if spent + last_elapsed > budget {
+            break "time_budget";
+        }
+        let before = run.record_ids.len();
+        let pass = execute_pass(base, &protocol.id, Some(run.id.clone()), should_cancel)?;
+        spent += pass.elapsed;
+        last_elapsed = pass.elapsed;
+        cancelled = pass.cancelled;
+        let added = pass.run.record_ids.len().saturating_sub(before);
+        let capacity = limit.saturating_mul(resumable.len()).max(1);
+        pages.push(json!({
+            "runId": pass.run.id,
+            "newRecords": added,
+            "sources": resumable,
+            "status": pass.run.status,
+        }));
+        run = pass.run;
+        warnings = pass.warnings;
+        if !cancelled
+            && (added < SATURATION_MIN_NEW_RECORDS
+                || added.saturating_mul(100)
+                    < capacity.saturating_mul(SATURATION_MIN_YIELD_PERCENT))
+        {
+            break "low_yield";
+        }
+    };
+    let explanation = match stop_reason {
+        "exhausted" => {
+            "Every source returned its complete result set for these queries.".to_string()
+        }
+        "low_yield" => format!(
+            "The last page added fewer than {SATURATION_MIN_YIELD_PERCENT}% new records (or under {SATURATION_MIN_NEW_RECORDS}), so later pages were judged not worth fetching. Sources still hold unread results: this is saturation of new material, not an exhausted index."
+        ),
+        "pass_limit" => format!(
+            "Stopped at the {MAX_SATURATION_PASSES}-page limit while sources still had results; continue with continueRunId if more are needed."
+        ),
+        "time_budget" => "Stopped before another page would exceed the time budget; continue with continueRunId if more are needed.".to_string(),
+        "unresumable" => "Some sources report more results but expose no cursor beyond their result window; narrow the query or the time window to reach them.".to_string(),
+        "failed" => "Every source failed on the last page; see the run's source attempts.".to_string(),
+        _ => "Stopped by the user; continue with continueRunId to resume.".to_string(),
+    };
+    Ok(SaturatedSearch {
+        report: json!({
+            "mode": "saturate",
+            "pages": pages,
+            "stopReason": stop_reason,
+            "explanation": explanation,
+            "maxPages": MAX_SATURATION_PASSES,
+        }),
+        run,
+        warnings,
+    })
+}
+
+const MAX_SNOWBALL_SEEDS: usize = 10;
+const DEFAULT_SNOWBALL_TOP_RECORDS: usize = 5;
+const DEFAULT_SNOWBALL_PER_SEED: usize = 25;
+const MAX_SNOWBALL_PER_SEED: usize = 200;
+const SNOWBALL_PREVIEW_RECORDS: usize = 20;
+
+#[derive(Debug, Clone)]
+struct SnowballPlan {
+    seeds: Vec<String>,
+    top_records: usize,
+    directions: Vec<CitationDirection>,
+    max_per_seed: usize,
+}
+
+impl SnowballPlan {
+    fn from_input(input: &LiteratureSnowballInput) -> Result<Self, String> {
+        let directions = match input
+            .direction
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("" | "both") => {
+                vec![CitationDirection::Citing, CitationDirection::References]
+            }
+            Some(direction) => vec![CitationDirection::parse(Some(direction))?],
+        };
+        let mut seeds = Vec::new();
+        for seed in &input.seeds {
+            let anchor = normalize_citation_anchor(seed)?;
+            if anchor.openalex_id.is_none() {
+                return Err(format!(
+                    "snowball seed {seed:?} must be a DOI or an arXiv id"
+                ));
+            }
+            if !seeds.contains(&anchor.label) {
+                seeds.push(anchor.label);
+            }
+        }
+        if seeds.len() > MAX_SNOWBALL_SEEDS {
+            return Err(format!(
+                "snowball takes at most {MAX_SNOWBALL_SEEDS} seeds; choose the most central ones"
+            ));
+        }
+        let default_top = if seeds.is_empty() {
+            DEFAULT_SNOWBALL_TOP_RECORDS
+        } else {
+            0
+        };
+        Ok(Self {
+            top_records: input
+                .top_records
+                .unwrap_or(default_top)
+                .min(MAX_SNOWBALL_SEEDS),
+            seeds,
+            directions,
+            max_per_seed: input
+                .max_per_seed
+                .unwrap_or(DEFAULT_SNOWBALL_PER_SEED)
+                .clamp(1, MAX_SNOWBALL_PER_SEED),
+        })
+    }
+
+    fn describe(&self) -> Value {
+        json!({
+            "seeds": self.seeds,
+            "topRecords": self.top_records,
+            "knownKeyPapersAreSeeds": true,
+            "directions": self
+                .directions
+                .iter()
+                .map(|direction| direction.as_str())
+                .collect::<Vec<_>>(),
+            "maxPerSeed": self.max_per_seed,
+            "maxSeeds": MAX_SNOWBALL_SEEDS,
+        })
+    }
+}
+
+struct SnowballOutcome {
+    report: Value,
+    record_ids: BTreeSet<String>,
+}
+
+/// The citation anchor label (`doi:` / `arxiv:`) a record can be expanded from.
+fn record_citation_label(record: &runtime::CanonicalRecord) -> Option<String> {
+    record
+        .identifiers
+        .doi
+        .as_deref()
+        .map(str::trim)
+        .filter(|doi| !doi.is_empty())
+        .map(|doi| format!("doi:{}", doi.to_ascii_lowercase()))
+        .or_else(|| {
+            record
+                .identifiers
+                .arxiv_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| format!("arxiv:{}", strip_version(&id.to_ascii_lowercase())))
+        })
+}
+
+/// One-hop citation chasing around the search's most trustworthy papers.
+///
+/// Keyword search cannot reach a paper that names the same idea in different
+/// words; the papers that cite, or are cited by, an on-topic paper often do.
+/// Seeds are the caller's explicit papers, then its known key papers, then the
+/// search's best-ranked records. Each traversal is persisted as its own
+/// citation `SearchRun`, so every record found this way carries the edge that
+/// found it.
+fn run_snowball(
+    base: &Path,
+    protocol: &runtime::SearchProtocol,
+    run: &runtime::SearchRun,
+    plan: &SnowballPlan,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SnowballOutcome, String> {
+    let mut anchors: Vec<(String, &'static str)> = Vec::new();
+    let push = |label: String, origin: &'static str, anchors: &mut Vec<(String, &'static str)>| {
+        if anchors.len() < MAX_SNOWBALL_SEEDS
+            && !anchors.iter().any(|(existing, _)| existing == &label)
+        {
+            anchors.push((label, origin));
+        }
+    };
+    for seed in &plan.seeds {
+        push(seed.clone(), "seed", &mut anchors);
+    }
+    for known in &protocol.draft.known_key_papers {
+        if let Ok(anchor) = normalize_citation_anchor(known) {
+            if anchor.openalex_id.is_some() {
+                push(anchor.label, "knownKeyPaper", &mut anchors);
+            }
+        }
+    }
+    {
+        let store = runtime::open_literature_store_at(base)?;
+        let mut taken = 0;
+        for record_id in &run.record_ids {
+            if taken >= plan.top_records {
+                break;
+            }
+            let Some(label) = store
+                .load_canonical_record(record_id)?
+                .as_ref()
+                .and_then(record_citation_label)
+            else {
+                continue;
+            };
+            push(label, "topRecord", &mut anchors);
+            taken += 1;
+        }
+    }
+
+    let search_ids = run.record_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut found = BTreeSet::new();
+    let mut new_records = BTreeMap::<String, String>::new();
+    let mut traversals = Vec::new();
+    let mut warnings = Vec::new();
+    let budget = search_time_budget();
+    let started = Instant::now();
+    let mut stopped = None;
+    'seeds: for (label, origin) in &anchors {
+        for direction in &plan.directions {
+            if should_cancel() {
+                stopped = Some("cancelled");
+                break 'seeds;
+            }
+            if started.elapsed() >= budget {
+                stopped = Some("time_budget");
+                break 'seeds;
+            }
+            let traversal = literature_citations_at(
+                base,
+                LiteratureCitationsInput {
+                    paper_id: label.clone(),
+                    direction: Some(direction.as_str().to_string()),
+                    max_results: Some(plan.max_per_seed),
+                    cursor: None,
+                },
+                should_cancel,
+            );
+            match traversal {
+                Ok(result) => {
+                    let record_ids = result["searchRun"]["recordIds"]
+                        .as_array()
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let mut added = 0;
+                    for record_id in &record_ids {
+                        found.insert(record_id.clone());
+                        if !search_ids.contains(record_id) && !new_records.contains_key(record_id) {
+                            new_records.insert(
+                                record_id.clone(),
+                                format!("{} {label}", direction.as_str()),
+                            );
+                            added += 1;
+                        }
+                    }
+                    if let Some(items) = result["warnings"].as_array() {
+                        warnings.extend(
+                            items.iter().filter_map(Value::as_str).map(|warning| {
+                                format!("{label} {}: {warning}", direction.as_str())
+                            }),
+                        );
+                    }
+                    traversals.push(json!({
+                        "seed": label,
+                        "origin": origin,
+                        "direction": direction.as_str(),
+                        "provider": result["provider"],
+                        "runId": result["searchRun"]["id"],
+                        "returned": record_ids.len(),
+                        "newRecords": added,
+                    }));
+                }
+                Err(error) => {
+                    if is_cancelled_error(&error) {
+                        stopped = Some("cancelled");
+                        break 'seeds;
+                    }
+                    warnings.push(format!("{label} {}: {error}", direction.as_str()));
+                    traversals.push(json!({
+                        "seed": label,
+                        "origin": origin,
+                        "direction": direction.as_str(),
+                        "error": error,
+                    }));
+                }
+            }
+        }
+    }
+
+    // A citation neighbourhood is mostly off-topic; rank what it added by the
+    // same title-term coverage the search itself is re-ranked by, so the few
+    // relevant arrivals are the ones a reader sees first.
+    let terms = RankingTerms::from_question(&protocol.draft.question);
+    let store = runtime::open_literature_store_at(base)?;
+    let mut ranked = Vec::new();
+    for (record_id, via) in &new_records {
+        if let Some(record) = store.load_canonical_record(record_id)? {
+            let coverage = title_coverage_millis(&record.title, &terms);
+            let cited_by = record.metadata["legacyKernel"]["citedBy"]
+                .as_u64()
+                .unwrap_or(0);
+            ranked.push((coverage, cited_by, record, via.clone()));
+        }
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then(right.1.cmp(&left.1))
+            .then(left.2.id.cmp(&right.2.id))
+    });
+    let preview = ranked
+        .iter()
+        .take(SNOWBALL_PREVIEW_RECORDS)
+        .map(|(_, _, record, via)| {
+            json!({
+                "id": record.id,
+                "title": record.title,
+                "year": record.year,
+                "venue": record.venue,
+                "via": via,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(SnowballOutcome {
+        report: json!({
+            "plan": plan.describe(),
+            "traversals": traversals,
+            "newRecordCount": new_records.len(),
+            "newRecords": preview,
+            "warnings": warnings,
+            "stopReason": stopped.unwrap_or("completed"),
+            "note": "Each traversal is a citation SearchRun with its own provenance. New records are ordered by how well their titles cover the question; a citation neighbourhood is mostly off-topic, so screen these before relying on them.",
+        }),
+        record_ids: found,
+    })
+}
+
+/// One caller-supplied key paper, parsed into the identity it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaperReference {
+    Doi(String),
+    Arxiv(String),
+    Title(String),
+}
+
+fn parse_paper_reference(raw: &str) -> Option<PaperReference> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let stripped = [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi.org/",
+        "https://arxiv.org/abs/",
+        "http://arxiv.org/abs/",
+        "arxiv.org/abs/",
+        "https://arxiv.org/pdf/",
+        "arxiv.org/pdf/",
+    ]
+    .iter()
+    .find_map(|prefix| lower.strip_prefix(prefix))
+    .map(|rest| rest.trim_end_matches(".pdf").to_string());
+    let candidate = stripped.as_deref().unwrap_or(text);
+    match normalize_citation_anchor(candidate) {
+        Ok(anchor) if anchor.label.starts_with("doi:") => Some(PaperReference::Doi(
+            anchor.label.trim_start_matches("doi:").to_string(),
+        )),
+        Ok(anchor) if anchor.label.starts_with("arxiv:") => Some(PaperReference::Arxiv(
+            anchor.label.trim_start_matches("arxiv:").to_string(),
+        )),
+        _ => Some(PaperReference::Title(text.to_string())),
+    }
+}
+
+/// Lower-case alphanumeric words, so `Lifelong Anomaly Detection: A Survey`
+/// and `lifelong anomaly detection - a survey` compare equal.
+fn loose_title(value: &str) -> String {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn record_matches_reference(record: &runtime::CanonicalRecord, reference: &PaperReference) -> bool {
+    let doi = record
+        .identifiers
+        .doi
+        .as_deref()
+        .map(|doi| doi.trim().to_ascii_lowercase());
+    let arxiv = record
+        .identifiers
+        .arxiv_id
+        .as_deref()
+        .map(|id| strip_version(&id.trim().to_ascii_lowercase()))
+        .or_else(|| {
+            doi.as_deref()
+                .and_then(|doi| doi.strip_prefix("10.48550/arxiv."))
+                .map(strip_version)
+        });
+    match reference {
+        PaperReference::Doi(wanted) => {
+            doi.as_deref() == Some(wanted.as_str())
+                || wanted
+                    .strip_prefix("10.48550/arxiv.")
+                    .is_some_and(|id| arxiv.as_deref() == Some(strip_version(id).as_str()))
+        }
+        PaperReference::Arxiv(wanted) => arxiv.as_deref() == Some(strip_version(wanted).as_str()),
+        PaperReference::Title(wanted) => {
+            let wanted = loose_title(wanted);
+            let title = loose_title(&record.title);
+            if wanted.is_empty() || title.is_empty() {
+                return false;
+            }
+            // A subtitle or a trailing year on either side is still the same
+            // paper; a short generic title is not, so containment needs length.
+            wanted == title
+                || (wanted.split(' ').count() >= 4
+                    && title.split(' ').count() >= 4
+                    && (title.contains(&wanted) || wanted.contains(&title)))
+        }
+    }
+}
+
+/// Which of the caller's known key papers this search retrieved.
+///
+/// This is the benchmark-recall check systematic reviews validate a strategy
+/// with: a strategy that misses a paper the researcher already knows is
+/// relevant will miss the ones nobody knows about yet. A miss that the library
+/// already holds is reported as such, because it means the paper is reachable
+/// and the *query* did not reach it — the actionable kind of miss.
+fn known_paper_recall(
+    store: &runtime::LiteratureStore,
+    references: &[String],
+    record_ids: &[String],
+    snowball_ids: &BTreeSet<String>,
+) -> Result<Option<Value>, String> {
+    let references = references
+        .iter()
+        .filter_map(|raw| parse_paper_reference(raw).map(|parsed| (raw.trim().to_string(), parsed)))
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(None);
+    }
+    let mut candidates = Vec::new();
+    let search_ids = record_ids.iter().collect::<BTreeSet<_>>();
+    for (record_id, origin) in record_ids.iter().map(|id| (id, "search")).chain(
+        snowball_ids
+            .iter()
+            .filter(|id| !search_ids.contains(id))
+            .map(|id| (id, "snowball")),
+    ) {
+        if let Some(record) = store.load_canonical_record(record_id)? {
+            candidates.push((record, origin));
+        }
+    }
+    let mut found = Vec::new();
+    let mut missed = Vec::new();
+    for (raw, reference) in &references {
+        if let Some((record, origin)) = candidates
+            .iter()
+            .find(|(record, _)| record_matches_reference(record, reference))
+        {
+            found.push(json!({
+                "reference": raw,
+                "recordId": record.id,
+                "title": record.title,
+                "foundBy": origin,
+            }));
+            continue;
+        }
+        let library_record_id = match reference {
+            PaperReference::Doi(doi) => store.find_record_id_by_reference(Some(doi), None, None)?,
+            PaperReference::Arxiv(id) => store.find_record_id_by_reference(None, Some(id), None)?,
+            PaperReference::Title(title) => {
+                store.find_record_id_by_reference(None, None, Some(title))?
+            }
+        };
+        let library_record = match library_record_id {
+            Some(id) => store.load_canonical_record(&id)?,
+            None => None,
+        };
+        missed.push(match library_record {
+            Some(record) => json!({
+                "reference": raw,
+                "inLibrary": { "recordId": record.id, "title": record.title },
+                "diagnosis": "Already in the library from another search, so it is reachable: this search's queries do not match its wording. Compare its title and abstract with the query terms.",
+            }),
+            None => json!({
+                "reference": raw,
+                "diagnosis": "Neither retrieved nor in the library. Either the queries miss its vocabulary or no searched source indexes it; look it up directly (LiteratureCitations with its DOI, or a title search) before revising the strategy.",
+            }),
+        });
+    }
+    let total = references.len();
+    let note = if missed.is_empty() {
+        "Every known key paper was retrieved."
+    } else {
+        "Revise the strategy until the known key papers are retrieved, or record why a miss is acceptable: a strategy that misses known papers will miss unknown ones too."
+    };
+    Ok(Some(json!({
+        "total": total,
+        "found": found.len(),
+        "recallPercent": found.len() * 100 / total,
+        "matches": found,
+        "missed": missed,
+        "note": note,
+    })))
 }
 
 #[cfg(test)]
 fn casual_search_protocol_draft(
     input: &LiteratureSearchInput,
 ) -> Result<runtime::SearchProtocolDraft, String> {
-    casual_search_protocol_draft_with_limit(
+    search_protocol_draft(
         input,
         input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1),
     )
 }
 
-fn casual_search_protocol_draft_with_limit(
+/// Build the protocol a `LiteratureSearch` call (or a preview of one) runs.
+fn search_protocol_draft(
     input: &LiteratureSearchInput,
     limit: usize,
 ) -> Result<runtime::SearchProtocolDraft, String> {
@@ -444,42 +1316,145 @@ fn casual_search_protocol_draft_with_limit(
         }
     };
     let databases = casual_search_sources(&input.sources);
-    let query_variants = databases
-        .iter()
-        .map(|source| (source.clone(), plan_source_query_variants(question, source)))
-        .collect::<BTreeMap<_, _>>();
+    let mut queries = BTreeMap::new();
+    for (source, query) in &input.queries {
+        let query = query.trim();
+        if query.is_empty() {
+            continue;
+        }
+        let source = canonical_source_name(source);
+        if !databases.contains(&source) {
+            return Err(format!(
+                "queries.{source} names a source this search does not query ({}); add it to sources or drop the entry",
+                databases.join(", ")
+            ));
+        }
+        queries.insert(source, query.to_string());
+    }
+    let clean = |values: &[String]| {
+        values
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let scope = input
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map_or_else(
+            || "Created by a Chat LiteratureSearch call. Refine this protocol before relying on it for screening, evidence synthesis, or novelty claims.".to_string(),
+            str::to_string,
+        );
+    let mut draft = runtime::SearchProtocolDraft {
+        question: question.to_string(),
+        scope,
+        time_window,
+        sort_order,
+        databases,
+        boolean_query: input
+            .boolean_query
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        queries,
+        query_variants: BTreeMap::new(),
+        max_results: Some(limit),
+        inclusion_criteria: clean(&input.inclusion_criteria),
+        exclusion_criteria: clean(&input.exclusion_criteria),
+        known_key_papers: clean(&input.known_key_papers),
+    };
+    plan_protocol_queries(&mut draft)?;
     // One source that cannot compile the question is a coverage gap the run
     // records per source. Failing the whole call for it — which is what the old
     // Scopus/CJK pre-flight did, and Scopus joins the default set whether or not
     // its key is configured — threw away the four sources that could have
     // answered. Only a question no requested source can express is an error.
-    if query_variants.values().all(Vec::is_empty) {
+    let expressible = draft.databases.iter().any(|source| {
+        draft.queries.contains_key(source)
+            || draft
+                .query_variants
+                .get(source)
+                .is_some_and(|variants| !variants.is_empty())
+    });
+    if !expressible {
         return Err(format!(
             "no requested source can express this query: {}. The metadata indexes carry English titles and abstracts, so restate the question using English academic terms.",
-            databases.join(", ")
+            draft.databases.join(", ")
         ));
     }
-    let queries = query_variants
-        .iter()
-        .filter_map(|(source, variants)| {
-            variants
-                .first()
-                .map(|variant| (source.clone(), variant.query.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    Ok(runtime::SearchProtocolDraft {
-        question: question.to_string(),
-        scope: "Automatically created for an explicit casual Chat search. Refine this protocol before relying on it for screening, evidence synthesis, or novelty claims.".to_string(),
-        time_window,
-        sort_order,
-        databases,
-        queries,
-        query_variants,
-        max_results: Some(limit),
-        inclusion_criteria: Vec::new(),
-        exclusion_criteria: Vec::new(),
-        known_key_papers: Vec::new(),
-    })
+    Ok(draft)
+}
+
+fn canonical_source_name(source: &str) -> String {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "semantic_scholar" | "semanticscholar" => "semantic-scholar".to_string(),
+        source => source.to_string(),
+    }
+}
+
+/// Fill in each source's query streams, in the order the caller's intent wins:
+/// a query written for that source, then streams the caller already planned,
+/// then the `booleanQuery` compiled for that source, then variants planned
+/// from the question.
+///
+/// A caller query used to be shadowed here: variants were always planned from
+/// the question, and execution prefers variants, so a hand-built Scopus string
+/// reached no provider while a keyword dump of the question sentence did.
+fn plan_protocol_queries(draft: &mut runtime::SearchProtocolDraft) -> Result<(), String> {
+    let boolean = Some(draft.boolean_query.trim())
+        .filter(|expression| !expression.is_empty())
+        .map(crate::literature_boolean::parse)
+        .transpose()?;
+    let question = draft.question.clone();
+    for source in draft.databases.clone() {
+        let caller_query = draft.queries.iter().any(|(name, query)| {
+            (name.eq_ignore_ascii_case(&source) || name.eq_ignore_ascii_case("default"))
+                && !query.trim().is_empty()
+        });
+        if caller_query {
+            continue;
+        }
+        let planned = draft
+            .query_variants
+            .get(&source)
+            .is_some_and(|variants| !variants.is_empty());
+        if !planned {
+            let compiled = boolean
+                .as_ref()
+                .map(|expression| {
+                    crate::literature_boolean::compile_for_source(expression, &source)
+                        .into_iter()
+                        .map(|stream| runtime::SearchQueryVariant {
+                            kind: stream.kind,
+                            query: stream.query,
+                            rationale: stream.rationale,
+                            max_results: None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let variants = if compiled.is_empty() {
+                plan_source_query_variants(&question, &source)
+            } else {
+                compiled
+            };
+            draft.query_variants.insert(source.clone(), variants);
+        }
+        if let Some(primary) = draft
+            .query_variants
+            .get(&source)
+            .and_then(|variants| variants.first())
+        {
+            draft
+                .queries
+                .entry(source.clone())
+                .or_insert_with(|| primary.query.clone());
+        }
+    }
+    Ok(())
 }
 
 /// The identity of the provider requests a `LiteratureSearch` call will send.
@@ -493,22 +1468,47 @@ fn casual_search_protocol_draft_with_limit(
 /// more rows is a continuation, which the duplicate notice already directs
 /// callers to do with the previous run's cursor. `timeWindow` and `sortOrder`
 /// are *not* excluded — they change which records the provider returns, so the
-/// same question under a different bound is a different request.
+/// same question under a different bound is a different request. Neither are
+/// caller queries, `booleanQuery`, coverage or snowball options: the
+/// fingerprint is taken over the very plan execution runs, so two calls that
+/// differ only in those are different requests, not duplicates.
 #[must_use]
 pub fn literature_search_provider_fingerprint(input: &str) -> Option<String> {
     let input = serde_json::from_str::<LiteratureSearchInput>(input).ok()?;
-    let question = collapse_whitespace(&input.query);
-    if question.is_empty() {
-        return None;
+    let options = format!(
+        "\u{1f}coverage={}\u{1f}snowball={:?}",
+        input
+            .coverage
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default(),
+        input.snowball
+    );
+    // A continuation fetches that run's next page, so continuing the same run
+    // twice is the duplicate — not re-asking its question.
+    if let Some(run_id) = input
+        .continue_run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+    {
+        return Some(format!("continue\u{1f}{run_id}{options}"));
     }
-    let mut requests = casual_search_sources(&input.sources)
-        .into_iter()
+    let draft = search_protocol_draft(&input, 1).ok()?;
+    let mut requests = draft
+        .databases
+        .iter()
         .flat_map(|source| {
-            plan_source_query_variants(&question, &source)
+            let queries = match draft.query_variants.get(source) {
+                Some(variants) if !variants.is_empty() => variants
+                    .iter()
+                    .map(|variant| variant.query.clone())
+                    .collect::<Vec<_>>(),
+                _ => draft.queries.get(source).cloned().into_iter().collect(),
+            };
+            queries
                 .into_iter()
-                .map(move |variant| {
-                    format!("{source}\u{1f}{}", collapse_whitespace(&variant.query))
-                })
+                .map(move |query| format!("{source}\u{1f}{}", collapse_whitespace(&query)))
         })
         .collect::<Vec<_>>();
     if requests.is_empty() {
@@ -528,7 +1528,21 @@ pub fn literature_search_provider_fingerprint(input: &str) -> Option<String> {
             .trim()
             .to_ascii_lowercase()
     );
-    Some(requests.join("\u{1e}") + &bounds)
+    Some(requests.join("\u{1e}") + &bounds + &options)
+}
+
+/// An in-memory protocol for a plan that has not been saved, so preview
+/// renders it through exactly the code execution uses.
+fn unsaved_protocol(draft: runtime::SearchProtocolDraft) -> runtime::SearchProtocol {
+    let now = runtime::now_iso8601();
+    runtime::SearchProtocol {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        id: "unsaved-preview".to_string(),
+        revision: 0,
+        draft,
+        created_at: now.clone(),
+        updated_at: now,
+    }
 }
 
 fn casual_search_sources(sources: &[String]) -> Vec<String> {
@@ -735,21 +1749,52 @@ pub fn literature_citations_at(
     // pages both directions. OpenAlex is the fallback rather than a merge
     // partner, so a working provider is never delayed by a broken one.
     let mut warnings = Vec::new();
-    let outcome = match search_semantic_scholar_citations(
-        &client,
-        &anchor,
-        direction,
-        limit,
-        input.cursor.as_deref(),
-        should_cancel,
-    ) {
-        Ok(outcome) => Ok(("semantic-scholar", outcome)),
-        Err(error) if is_cancelled_error(&error) => Err(error),
-        Err(error) => {
-            warnings.push(format!("semantic-scholar: {error}"));
-            search_openalex_citations(&client, &anchor, direction, limit, should_cancel)
-                .map(|outcome| ("openalex", outcome))
-                .map_err(|fallback| format!("{error}; openalex: {fallback}"))
+    let semantic_scholar = |warnings: &mut Vec<String>| {
+        search_semantic_scholar_citations(
+            &client,
+            &anchor,
+            direction,
+            limit,
+            input.cursor.as_deref(),
+            should_cancel,
+        )
+        .map(|outcome| ("semantic-scholar", outcome))
+        .inspect_err(|error| {
+            if !is_cancelled_error(error) {
+                warnings.push(format!("semantic-scholar: {error}"));
+            }
+        })
+    };
+    let openalex = |warnings: &mut Vec<String>| {
+        search_openalex_citations(&client, &anchor, direction, limit, should_cancel)
+            .map(|outcome| ("openalex", outcome))
+            .inspect_err(|error| {
+                if !is_cancelled_error(error) {
+                    warnings.push(format!("openalex: {error}"));
+                }
+            })
+    };
+    // Without a key, Semantic Scholar's anonymous pool answers 429 (measured
+    // 4/4) and only burns retries before the fallback runs, so the gateway
+    // OpenAlex goes first. A continuation cursor is a Semantic Scholar offset,
+    // and an anchor OpenAlex cannot resolve still needs Semantic Scholar.
+    let openalex_first = semantic_scholar_api_key().is_none()
+        && input.cursor.is_none()
+        && anchor.openalex_id.is_some();
+    let outcome = if openalex_first {
+        match openalex(&mut warnings) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if is_cancelled_error(&error) => Err(error),
+            Err(error) => semantic_scholar(&mut warnings)
+                .map_err(|fallback| format!("openalex: {error}; semantic-scholar: {fallback}")),
+        }
+    } else {
+        match semantic_scholar(&mut warnings) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if is_cancelled_error(&error) => Err(error),
+            Err(error) => {
+                openalex(&mut warnings).map_err(|fallback| format!("{error}; openalex: {fallback}"))
+            }
         }
     }?;
     let (provider, outcome) = outcome;
@@ -766,6 +1811,7 @@ pub fn literature_citations_at(
         // own citation order, which `relevance` is the protocol's name for.
         sort_order: "relevance".to_string(),
         databases: vec![provider.to_string()],
+        boolean_query: String::new(),
         queries: BTreeMap::from([(provider.to_string(), question.clone())]),
         query_variants: BTreeMap::new(),
         max_results: Some(limit),
@@ -949,19 +1995,7 @@ pub fn literature_search_protocol_create_at(
         draft.databases = casual_search_sources(&[]);
     }
     draft.max_results = Some(draft.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1));
-    let question = draft.question.clone();
-    for source in &draft.databases {
-        let variants = draft
-            .query_variants
-            .entry(source.clone())
-            .or_insert_with(|| plan_source_query_variants(&question, source));
-        if let Some(primary) = variants.first() {
-            draft
-                .queries
-                .entry(source.clone())
-                .or_insert_with(|| primary.query.clone());
-        }
-    }
+    plan_protocol_queries(&mut draft)?;
     let mut store = runtime::open_literature_store_at(base)?;
     let protocol = store.create_protocol(draft)?;
     Ok(json!({
@@ -983,10 +2017,91 @@ pub fn literature_search_preview_at(
     base: &Path,
     input: LiteratureSearchPreviewInput,
 ) -> Result<Value, String> {
-    let store = runtime::open_literature_store_at(base)?;
-    let protocol = store
-        .load_protocol(&input.protocol_id)?
-        .ok_or_else(|| format!("unknown search protocol: {}", input.protocol_id))?;
+    let protocol_id = input
+        .protocol_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    match (protocol_id, input.search) {
+        (Some(protocol_id), None) => {
+            let store = runtime::open_literature_store_at(base)?;
+            let protocol = store
+                .load_protocol(protocol_id)?
+                .ok_or_else(|| format!("unknown search protocol: {protocol_id}"))?;
+            let mut preview = render_protocol_preview(&protocol)?;
+            preview["saved"] = json!(true);
+            preview["confirmationRequired"] = json!(true);
+            preview["confirmationValue"] = json!("execute");
+            Ok(preview)
+        }
+        (None, Some(search)) => preview_unsaved_search(&search),
+        (Some(_), Some(_)) => Err(
+            "pass either protocolId (a saved protocol) or search (LiteratureSearch arguments), not both"
+                .to_string(),
+        ),
+        (None, None) => Err(
+            "pass protocolId (a saved protocol) or search (the LiteratureSearch arguments to plan)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Plan exactly what `LiteratureSearch` would run for these arguments, without
+/// saving the protocol or opening a connection.
+fn preview_unsaved_search(search: &LiteratureSearchInput) -> Result<Value, String> {
+    if search
+        .continue_run_id
+        .as_deref()
+        .is_some_and(|run_id| !run_id.trim().is_empty())
+    {
+        return Err(
+            "a continuation re-runs the saved protocol of its run; preview that protocol by its protocolId instead"
+                .to_string(),
+        );
+    }
+    let coverage = CoverageMode::parse(search.coverage.as_deref())?;
+    let snowball = search
+        .snowball
+        .as_ref()
+        .map(SnowballPlan::from_input)
+        .transpose()?;
+    let limit = search.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
+    let protocol = unsaved_protocol(search_protocol_draft(search, limit)?);
+    let mut preview = render_protocol_preview(&protocol)?;
+    preview["saved"] = json!(false);
+    preview["executeWith"] = json!(
+        "Call LiteratureSearch with these same arguments: it saves this protocol and runs exactly this plan."
+    );
+    preview["coverage"] = match coverage {
+        CoverageMode::Bounded => json!({
+            "mode": "bounded",
+            "maxRecordsPerSource": limit,
+        }),
+        CoverageMode::Saturate => json!({
+            "mode": "saturate",
+            "maxPages": MAX_SATURATION_PASSES,
+            "maxRecordsPerSource": limit.saturating_mul(MAX_SATURATION_PASSES),
+            "stopsWhen": format!(
+                "every source is exhausted, a page adds under {SATURATION_MIN_YIELD_PERCENT}% new records, {MAX_SATURATION_PASSES} pages were fetched, or the time budget would be exceeded"
+            ),
+        }),
+    };
+    if let Some(plan) = snowball {
+        preview["snowball"] = plan.describe();
+    }
+    if !protocol.draft.known_key_papers.is_empty() {
+        preview["knownKeyPapers"] = json!({
+            "papers": protocol.draft.known_key_papers,
+            "note": "Execution reports which of these the search retrieved.",
+        });
+    }
+    Ok(preview)
+}
+
+/// The per-source plan of a protocol: every query stream, its budget, and
+/// whether the adapter can run it. Never opens a connection.
+fn render_protocol_preview(protocol: &runtime::SearchProtocol) -> Result<Value, String> {
+    let protocol = protocol.clone();
     let max_results = protocol
         .draft
         .max_results
@@ -1034,8 +2149,6 @@ pub fn literature_search_preview_at(
     Ok(json!({
         "protocol": protocol,
         "plan": plan,
-        "confirmationRequired": true,
-        "confirmationValue": "execute",
         "maxResults": max_results,
         "fullExport": {
             "requiresExplicitConfirmation": true,
@@ -1205,6 +2318,11 @@ pub fn literature_search_execute_at_with_cancel(
     // earlier page already wrote, which have to be loaded once so a later page
     // cannot silently outrank them for want of a title.
     let ranking_terms = RankingTerms::from_question(&protocol.draft.question);
+    // Validated when the protocol was created; a protocol saved before
+    // booleanQuery existed simply has none.
+    let boolean_expression = Some(protocol.draft.boolean_query.trim())
+        .filter(|expression| !expression.is_empty())
+        .and_then(|expression| crate::literature_boolean::parse(expression).ok());
     let ranking_year = current_year();
     let mut record_features = BTreeMap::<String, RankingFeatures>::new();
     for record_id in &all_record_ids {
@@ -1519,6 +2637,11 @@ pub fn literature_search_execute_at_with_cancel(
         let continuation_attempt = continuation_attempts.get(&source);
         match outcome {
             Ok(mut outcome) => {
+                let boolean_filtered =
+                    local_boolean_filter(&protocol, &source, boolean_expression.as_ref())
+                        .map_or(0, |expression| {
+                            apply_local_boolean_filter(&mut outcome, expression)
+                        });
                 let mut artifact_ids = Vec::new();
                 for provider_artifact in outcome.raw_artifacts {
                     let artifact = store.write_run_artifact(
@@ -1545,6 +2668,10 @@ pub fn literature_search_execute_at_with_cancel(
                     "hitCount": outcome.hit_count,
                     "coverage": outcome.coverage,
                     "quota": outcome.quota,
+                    // Records the provider returned that fail booleanQuery on
+                    // their own title and abstract. The raw provider artifacts
+                    // above still hold them.
+                    "booleanFilterDropped": boolean_filtered,
                 }))
                 .map_err(|error| error.to_string())?;
                 let artifact = store.write_run_artifact(
@@ -1824,10 +2951,17 @@ pub fn literature_search_execute_at_with_cancel(
             }));
         }
     }
+    let recall = known_paper_recall(
+        &store,
+        &protocol.draft.known_key_papers,
+        &run.record_ids,
+        &BTreeSet::new(),
+    )?;
     Ok(json!({
         "searchRun": run,
         "warnings": warnings,
         "cancelled": cancelled,
+        "knownPaperRecall": recall,
         "recordPreview": record_preview,
         // Both notes used to direct the model at `ScreenDecision` and
         // `EvidenceCard`. Those types and their `append_*` writers exist in the
@@ -1843,6 +2977,71 @@ pub fn literature_search_execute_at_with_cancel(
             "Review the run and its canonical records before relying on them. Screening judgements belong in RetrievalEvidence, which binds each verdict to a quoted span; this payload stores none."
         }
     }))
+}
+
+/// The expression a source's records must be checked against locally: only
+/// for a keyword source whose streams were compiled from `booleanQuery`. A
+/// query the caller wrote for that source carries its own semantics and is
+/// left alone, and boolean-capable sources already applied the expression over
+/// fields (keywords, full text) a local title-and-abstract check cannot see.
+fn local_boolean_filter<'a>(
+    protocol: &runtime::SearchProtocol,
+    source: &str,
+    expression: Option<&'a crate::literature_boolean::BoolExpr>,
+) -> Option<&'a crate::literature_boolean::BoolExpr> {
+    let expression = expression?;
+    let compiled = protocol_query_variants_for(protocol, source)
+        .iter()
+        .any(|variant| variant.kind.starts_with("boolean"));
+    (crate::literature_boolean::evaluated_locally(source) && compiled).then_some(expression)
+}
+
+/// Keep only records whose title and abstract satisfy the expression; returns
+/// how many were dropped. Ranks stay aligned with the records they describe,
+/// and the drop is named in the attempt's coverage note.
+fn apply_local_boolean_filter(
+    outcome: &mut AdapterSearchOutcome,
+    expression: &crate::literature_boolean::BoolExpr,
+) -> usize {
+    let keep = outcome
+        .papers
+        .iter()
+        .map(|paper| {
+            crate::literature_boolean::matches_text(
+                expression,
+                &format!("{} {}", paper.title, paper.summary),
+            )
+        })
+        .collect::<Vec<_>>();
+    let dropped = keep.iter().filter(|kept| !**kept).count();
+    if dropped == 0 {
+        return 0;
+    }
+    let returned = keep.len();
+    let ranks_aligned = outcome.variant_ranks.len() == returned;
+    let mut index = 0;
+    outcome.papers.retain(|_| {
+        index += 1;
+        keep[index - 1]
+    });
+    if ranks_aligned {
+        let mut index = 0;
+        outcome.variant_ranks.retain(|_| {
+            index += 1;
+            keep[index - 1]
+        });
+    } else {
+        outcome.variant_ranks.clear();
+    }
+    outcome.coverage.unique = u64::try_from(outcome.papers.len()).unwrap_or(u64::MAX);
+    let note = format!(
+        "{dropped} of {returned} records this keyword source returned do not satisfy booleanQuery in their title or abstract and were not kept; the raw provider response retains them."
+    );
+    outcome.coverage_note = Some(match outcome.coverage_note.take() {
+        Some(existing) => format!("{existing} {note}"),
+        None => note,
+    });
+    dropped
 }
 
 fn effective_protocol_sources(protocol: &runtime::SearchProtocol) -> Vec<String> {
@@ -1971,6 +3170,12 @@ fn source_indexes_original_language(source: &str) -> bool {
 /// topic without turning the query into an identity check on one paper.
 const BROAD_CONJUNCTION_TERMS: usize = 4;
 
+/// Scopus has no ranked bag-of-words mode: every term of its broad stream is a
+/// required clause. A long question compiled term for term — thirteen ANDed
+/// words — is the narrowest query of the plan rather than the broadest, so the
+/// broad Scopus stream keeps only the most specific few.
+const SCOPUS_BROAD_CONJUNCTION_TERMS: usize = 6;
+
 /// The most discriminative terms first, capped.
 fn leading_specific_terms(terms: &[String], cap: usize) -> Vec<String> {
     arxiv_terms_by_specificity(terms.to_vec())
@@ -2005,9 +3210,14 @@ fn plan_source_query_variants(question: &str, source: &str) -> Vec<runtime::Sear
     }
 
     let broad_terms = leading_specific_terms(&compiled.terms, BROAD_CONJUNCTION_TERMS);
+    let broad_query_terms = if source == "scopus" {
+        leading_specific_terms(&compiled.terms, SCOPUS_BROAD_CONJUNCTION_TERMS)
+    } else {
+        compiled.terms.clone()
+    };
     variants.push(runtime::SearchQueryVariant {
         kind: "broad_keywords".to_string(),
-        query: source_terms_query(&source, &compiled.terms, false),
+        query: source_terms_query(&source, &broad_query_terms, false),
         rationale: if compiled.translated {
             let mut rationale = format!(
                 "High-recall content terms, translated from the caller's wording ({}).",
@@ -2511,6 +3721,40 @@ fn dedupe_query_atoms(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Words that frame a request for literature rather than name its topic.
+/// `Which papers study X, including Y?` is about X and Y; left in, `papers`,
+/// `study` and `including` became required terms of every conjunctive stream
+/// (`all:(time-series AND papers AND continual)`). Only words that are almost
+/// never the subject of a search belong here — `survey` and `review` do not,
+/// because asking for surveys is a real constraint.
+const QUESTION_SCAFFOLDING: &[&str] = &[
+    "paper",
+    "papers",
+    "article",
+    "articles",
+    "publication",
+    "publications",
+    "literature",
+    "study",
+    "studies",
+    "studied",
+    "studying",
+    "including",
+    "include",
+    "includes",
+    "regarding",
+    "concerning",
+    "related",
+    "relevant",
+    "find",
+    "identify",
+    "list",
+];
+
+fn is_stopword(term: &str) -> bool {
+    STOPWORDS.contains(&term) || QUESTION_SCAFFOLDING.contains(&term)
+}
+
 /// Function words that carry no retrieval signal. Removing them is what lets a
 /// three-term conjunction spend its slots on the words the question is about.
 const STOPWORDS: &[&str] = &[
@@ -2837,7 +4081,7 @@ fn query_content_terms(query: &str) -> Vec<String> {
             continue;
         }
         if !contains_cjk(&normalized) {
-            if !STOPWORDS.contains(&normalized.as_str()) {
+            if !is_stopword(&normalized) {
                 push(normalized, &mut terms);
             }
             continue;
@@ -2849,7 +4093,7 @@ fn query_content_terms(query: &str) -> Vec<String> {
                 for term in segment_cjk_run(&part) {
                     push(term, &mut terms);
                 }
-            } else if !STOPWORDS.contains(&part.as_str()) {
+            } else if !is_stopword(&part) {
                 push(part, &mut terms);
             }
         }
@@ -3302,12 +4546,17 @@ fn is_cancelled_error(error: &str) -> bool {
 
 fn source_failure_status(error: &str) -> runtime::SourceAttemptStatus {
     let normalized = error.to_ascii_lowercase();
-    if normalized.contains("api key") || normalized.contains("401") || normalized.contains("403") {
+    // Status codes are whole tokens. Errors quote the request URL, and the
+    // OpenAlex gateway host (`1312640372-…`) contains "403" as a substring,
+    // which filed a TLS failure as missing authorisation.
+    let has_code = |code: &str| {
+        normalized
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == code)
+    };
+    if normalized.contains("api key") || has_code("401") || has_code("403") {
         runtime::SourceAttemptStatus::Unauthorised
-    } else if normalized.contains("429")
-        || normalized.contains("rate limit")
-        || normalized.contains("quota")
-    {
+    } else if has_code("429") || normalized.contains("rate limit") || normalized.contains("quota") {
         runtime::SourceAttemptStatus::RateLimited
     } else {
         runtime::SourceAttemptStatus::Failed
@@ -7555,7 +8804,7 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
         }),
         "openalex" => json!({
             "method": "GET",
-            "url": format!("{}/openalex/works", crate::web::SOMNIQ_RESEARCH_GATEWAY_ORIGIN),
+            "url": format!("{}/openalex/works", crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL),
             "query": {
                 "search": query,
                 "per-page": limit.min(OPENALEX_PAGE_MAX),
@@ -8460,9 +9709,12 @@ fn search_source_with_audit(
 /// after", which is the only claim the planner can actually support.
 fn variant_weight(kind: &str) -> usize {
     match kind {
-        "broad_keywords" | "primary" | "topic_anchor" | "explicit_arxiv" => 4,
+        "broad_keywords" | "primary" | "topic_anchor" | "explicit_arxiv" | "boolean" => 4,
         "named_anchor" | "phrase_anchor" => 3,
         "precision_terms" | "exact_phrase" | "topic_alt_anchor" => 2,
+        // Synonym rotations of a caller's boolean expression on a source that
+        // cannot parse one: each is a full alternative wording of the design.
+        kind if kind.starts_with("boolean_synonyms") => 2,
         _ => 1,
     }
 }

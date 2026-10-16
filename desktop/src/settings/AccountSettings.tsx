@@ -16,6 +16,7 @@ import {
   usageLogMeta,
 } from "./settingsFormatters";
 import { PREVIEW_SETTINGS_DATA, USAGE_LOG_PAGE_SIZE } from "./settingsPreviewData";
+import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 
 interface Props {
   language: Language;
@@ -148,8 +149,7 @@ export default function AccountSettings({
     <div className="sp-update-section sp-account-section sp-account-usage-section">
       <div className="sp-section-head">
         <div className="sp-section-head-text">
-          <div className="sp-section-title">{copy.authAccountTitle}</div>
-          <div className="sp-section-sub">{copy.authAccountSub}</div>
+          <div className="sp-section-title">{SETTINGS_LAYOUT_COPY[language].accountOverview}</div>
         </div>
         <div className="sp-update-actions">
           <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={accountPageRefreshing} type="button">

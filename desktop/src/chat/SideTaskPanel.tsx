@@ -242,7 +242,7 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
   }, [handoff, onMetadataChange, taskId, title]);
 
   return (
-    <aside className="side-task-panel" aria-label={copy.title}>
+    <aside className="side-task-panel chat-background-surface" aria-label={copy.title}>
       <div className={`side-task-chat${turns.length === 0 ? " is-empty" : ""}`}>
         <ChatThread
           sessionId={sessionId}

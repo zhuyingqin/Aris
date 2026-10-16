@@ -11020,6 +11020,28 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* A stacked file-tree row is too short for a conversation and its composer.
+   The narrow Chat panel uses the workbench height; the rail still switches or
+   closes it, and the editor and PDF keep their state underneath. */
+@container (max-width: 640px) {
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) {
+    grid-template-rows: minmax(160px, 1fr) var(--typeset-resizer-w) var(--typeset-preview-stack-h);
+  }
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) .typeset-left-panel {
+    position: absolute;
+    z-index: 65;
+    inset: 0 0 0 var(--typeset-rail-w);
+    grid-column: auto;
+    grid-row: auto;
+    background: var(--bg);
+  }
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) .typeset-resize-handle.project { display: none; }
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) .typeset-editor-pane { grid-row: 1; }
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) .typeset-resize-handle.pdf { grid-row: 2; }
+  .typeset-main-grid.ai-chat-active:not(.project-hidden) .typeset-preview-stack { grid-row: 3; }
+  .typeset-main-grid.ai-chat-active.pdf-hidden:not(.project-hidden) { grid-template-rows: minmax(0, 1fr); }
+}
+
 /* Keep the embedded assistant at the same density as the compact writing
    companion. The Typeset project rail is resizable, so viewport media queries
    are not enough here: these rules must be scoped to the host itself and must

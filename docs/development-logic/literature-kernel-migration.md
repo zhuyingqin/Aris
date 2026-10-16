@@ -65,14 +65,14 @@ the Desktop screening contract.
 
 ## Execution policy
 
-The deliberate protocol workflow is split into protocol/preview and confirmed
-execution. An explicit casual Chat `LiteratureSearch` is the bounded-search
-exception: it automatically creates an ad-hoc `SearchProtocol` (using the
-user's request as its question and the actual selected source queries) and
-executes one `SearchRun`. It is therefore a workspace-write tool, not a
-read-only metadata shortcut. Its output is already canonical and projected;
-`LiteratureLibraryUpsert` may only refresh that projection for known canonical
-ids and rejects raw/untracked papers.
+Planning and execution stay separate operations, but since M8 they are
+separated by whether a connection opens, not by how many tool calls a protocol
+takes. `LiteratureSearchPreview` plans without a request (a saved protocol by
+id, or the exact arguments `LiteratureSearch` would receive); `LiteratureSearch`
+saves a complete `SearchProtocol` and executes one `SearchRun`. It is therefore
+a workspace-write tool, not a read-only metadata shortcut. Its output is
+already canonical and projected; `LiteratureLibraryUpsert` may only refresh
+that projection for known canonical ids and rejects raw/untracked papers.
 
 Full export, Scopus view downgrade, rate-limit failures, unavailable sources
 and coverage gaps become explicit `SourceAttempt` data. Full text acquisition
@@ -218,3 +218,58 @@ remote library identifiers, credentials, upload/download queues, conflict
 reconciliation, or remote permissions. Local keys, versions, audit events, and
 source payloads are retained so a future sync adapter can be added without
 changing the local Library model or the downstream research workflow.
+
+## M8 Unified search entry and coverage (2026-10)
+
+The Chat surface had three protocol tools (create, preview, execute) beside
+`LiteratureSearch`. In use, that split failed in ways the protocol itself never
+required: a caller's per-source queries were shadowed by variants planned from
+the question sentence (execution prefers variants), so a hand-built Scopus
+boolean string never reached Scopus while a sixteen-term conjunction of the
+question's words did; `inclusionCriteria` and `knownKeyPapers` were stored and
+never read; and membership gated the three tools as a separate tier although
+they reach the same adapters. Earlier releases had already moved `timeWindow`
+and `sortOrder` into `LiteratureSearch` for the same reason.
+
+`LiteratureSearch` now carries the whole protocol: `booleanQuery`, per-source
+`queries`, `scope`, criteria, `knownKeyPapers`, `continueRunId`, `coverage` and
+`snowball`. `LiteratureSearchPreview` accepts the same arguments as `search`.
+`LiteratureSearchProtocolCreate` and `LiteratureSearchExecute` remain
+registered as compatibility aliases; Chat routing keeps them deferred.
+
+Invariants kept from the three-tool design:
+
+- Every search is still a saved, versioned `SearchProtocol` plus an auditable
+  `SearchRun`; a continuation re-runs its own protocol revision and refuses a
+  different question.
+- Planning never opens a connection and never spends retrieval budget;
+  `retrieval_guard` still counts only `LiteratureSearch`,
+  `LiteratureCitations` and `LiteratureSearchExecute` as discovery.
+- Review-workflow retrieval stages still give the Executor only
+  `LiteratureSearchPreview`; the controller executes with its own budgets
+  through the unchanged Desktop protocol commands.
+- The Literature page remains the explicit confirmation surface. In Chat the
+  request authorises a bounded search; the skill requires a preview and user
+  confirmation before a systematic, saturating or snowballing run.
+
+Query precedence per source: a caller `queries` entry (sent verbatim), then
+caller-planned variants, then `booleanQuery` compiled into that source's
+dialect (`literature_boolean.rs`: Scopus `TITLE-ABS-KEY`, OpenAlex boolean,
+arXiv `all:`/`ANDNOT`, and up to four synonym-rotating keyword streams for
+Crossref and Semantic Scholar, with dropped `NOT` clauses named), then
+variants planned from the question. Question scaffolding (`papers`, `study`,
+`including`, ...) is no longer a search term, and Scopus' broad stream keeps at
+most six terms because every Scopus term is a required clause.
+
+Coverage is reported, not assumed:
+
+- `knownPaperRecall` lists which known key papers a run retrieved; a miss the
+  library already holds is diagnosed as a query problem rather than an index
+  gap. Protocol execution reports it too.
+- `coverage: "saturate"` pages unexhausted sources (at most five pages) until
+  a page adds under 10% new records, and names its stop reason; `low_yield` is
+  saturation of new material, not an exhausted index.
+- `snowball` runs one-hop citation traversals from explicit seeds, known key
+  papers and top records (at most ten seeds), each persisted as its own
+  citation `SearchRun`. Without a Semantic Scholar key, traversals use the
+  OpenAlex gateway first.

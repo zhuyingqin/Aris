@@ -64,7 +64,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   spellCheckLanguage: "en-US",
 };
 
-const STORAGE_KEY = "somniq-editor-settings-v1";
+export const EDITOR_SETTINGS_STORAGE_KEY = "somniq-editor-settings-v1";
+const STORAGE_KEY = EDITOR_SETTINGS_STORAGE_KEY;
 
 const LINE_HEIGHT_RATIO: Record<EditorLineHeight, number> = {
   compact: 1.33,
@@ -113,19 +114,25 @@ export function getEditorSettings(): EditorSettings {
   return current;
 }
 
-export function setEditorSettings(patch: Partial<EditorSettings>): EditorSettings {
+export function setEditorSettings(patch: Partial<EditorSettings>, options?: { requirePersistence?: boolean }): EditorSettings {
   const next = coerce({ ...current, ...patch });
   // `useSyncExternalStore` compares snapshots by identity, so an unchanged
   // write must not produce a new object or every editor reconfigures on focus.
   if (EDITOR_SETTING_KEYS.every((key) => next[key] === current[key])) return current;
-  current = next;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  } catch {
+  } catch (error) {
+    if (options?.requirePersistence) throw error;
     // The choice still applies for this session.
   }
+  current = next;
   for (const listener of listeners) listener();
   return next;
+}
+
+export function syncEditorSettings(raw: string | null): void {
+  try { current = coerce(raw ? JSON.parse(raw) : null); } catch { current = { ...DEFAULT_EDITOR_SETTINGS }; }
+  for (const listener of listeners) listener();
 }
 
 export const EDITOR_SETTING_KEYS = Object.keys(DEFAULT_EDITOR_SETTINGS) as (keyof EditorSettings)[];

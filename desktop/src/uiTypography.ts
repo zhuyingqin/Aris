@@ -38,10 +38,11 @@ export function readUiTypographyPreference(): UiTypographyPreference {
   }
 }
 
-export function saveUiTypographyPreference(preference: UiTypographyPreference) {
+export function saveUiTypographyPreference(preference: UiTypographyPreference, required = false) {
   try {
     localStorage.setItem(UI_TYPOGRAPHY_STORAGE_KEY, JSON.stringify(preference));
-  } catch {
+  } catch (error) {
+    if (required) throw error;
     // Apply in memory even when the WebView denies local storage.
   }
 }

@@ -1094,6 +1094,7 @@ fn chinese_questions_are_segmented_and_translated_into_the_index_language() {
         max_results: Some(5),
         time_window: None,
         sort_order: None,
+        ..Default::default()
     })
     .expect("a translatable Chinese question compiles");
     let query = &draft.queries["scopus"];
@@ -1118,6 +1119,7 @@ fn a_chinese_question_still_searches_the_other_default_sources() {
         max_results: Some(5),
         time_window: None,
         sort_order: None,
+        ..Default::default()
     })
     .expect("a Chinese question must not fail the whole default-source search");
     for source in ["openalex", "crossref", "arxiv"] {
@@ -1138,6 +1140,7 @@ fn an_untranslatable_question_reports_every_source_it_could_not_express() {
         max_results: Some(5),
         time_window: None,
         sort_order: None,
+        ..Default::default()
     })
     .expect_err("an untranslatable question cannot be searched");
     assert!(error.contains("scopus"), "{error}");
@@ -1504,6 +1507,7 @@ fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonic
             time_window: String::new(),
             sort_order: "relevance".to_string(),
             databases: vec!["arxiv".to_string()],
+            boolean_query: String::new(),
             queries: BTreeMap::from([("arxiv".to_string(), "local-first review".to_string())]),
             query_variants: BTreeMap::new(),
             max_results: Some(50),
@@ -1601,6 +1605,7 @@ fn hides_deleted_search_runs_without_destroying_the_canonical_audit_record() {
             time_window: String::new(),
             sort_order: "relevance".to_string(),
             databases: vec!["arxiv".to_string()],
+            boolean_query: String::new(),
             queries: BTreeMap::new(),
             query_variants: BTreeMap::new(),
             max_results: Some(50),
@@ -1665,6 +1670,7 @@ fn deleting_a_search_run_hides_the_run_and_trashes_its_exclusive_papers() {
             time_window: String::new(),
             sort_order: "relevance".to_string(),
             databases: vec!["arxiv".to_string()],
+            boolean_query: String::new(),
             queries: BTreeMap::new(),
             query_variants: BTreeMap::new(),
             max_results: Some(50),
@@ -1731,6 +1737,7 @@ fn base_with_one_completed_run(name: &str, record_id: &str) -> (PathBuf, String)
             time_window: String::new(),
             sort_order: "relevance".to_string(),
             databases: vec!["arxiv".to_string()],
+            boolean_query: String::new(),
             queries: BTreeMap::new(),
             query_variants: BTreeMap::new(),
             max_results: Some(50),
@@ -2061,6 +2068,7 @@ fn protocol_preview_uses_explicit_sources_and_source_queries() {
                 "ARXIV".to_string(),
                 "crossref".to_string(),
             ],
+            boolean_query: String::new(),
             queries: std::collections::BTreeMap::from([
                 ("arxiv".to_string(), "cat:cs.AI".to_string()),
                 ("default".to_string(), "fallback query".to_string()),
@@ -2090,6 +2098,7 @@ fn casual_search_creates_source_specific_query_variants_and_bound() {
         max_results: Some(12),
         time_window: None,
         sort_order: None,
+        ..Default::default()
     })
     .expect("casual query should create a draft");
 
@@ -2116,7 +2125,9 @@ fn casual_search_creates_source_specific_query_variants_and_bound() {
             .collect::<Vec<_>>(),
         vec!["broad_keywords"]
     );
-    assert!(draft.scope.contains("Automatically created"));
+    assert!(draft
+        .scope
+        .contains("Created by a Chat LiteratureSearch call"));
 }
 
 #[test]
@@ -2586,6 +2597,7 @@ fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
                 time_window: String::new(),
                 sort_order: "relevance".to_string(),
                 databases: vec!["arxiv".to_string()],
+                boolean_query: String::new(),
                 queries: BTreeMap::new(),
                 query_variants: BTreeMap::new(),
                 max_results: Some(10),
@@ -2600,8 +2612,11 @@ fn protocol_preview_exposes_the_same_per_variant_budget_used_by_execution() {
         .as_str()
         .expect("protocol id")
         .to_string();
-    let preview = literature_search_preview_at(&base, LiteratureSearchPreviewInput { protocol_id })
-        .expect("preview protocol");
+    let preview = literature_search_preview_at(
+        &base,
+        LiteratureSearchPreviewInput::for_protocol(protocol_id),
+    )
+    .expect("preview protocol");
     let variant_plan = preview["plan"][0]["queryVariantPlan"]
         .as_array()
         .expect("variant plan");
@@ -2634,6 +2649,7 @@ fn a_stopped_run_finishes_partial_and_stays_continuable() {
                 time_window: String::new(),
                 sort_order: "relevance".to_string(),
                 databases: vec!["openalex".to_string(), "arxiv".to_string()],
+                boolean_query: String::new(),
                 queries: BTreeMap::new(),
                 query_variants: BTreeMap::new(),
                 max_results: Some(10),
@@ -2712,6 +2728,7 @@ fn protocol_preview_preserves_explicit_path_budgets() {
                 time_window: String::new(),
                 sort_order: "relevance".to_string(),
                 databases: vec!["arxiv".to_string()],
+                boolean_query: String::new(),
                 queries: BTreeMap::from([("arxiv".to_string(), "matrix coverage".to_string())]),
                 query_variants: BTreeMap::from([(
                     "arxiv".to_string(),
@@ -2754,8 +2771,11 @@ fn protocol_preview_preserves_explicit_path_budgets() {
         .as_str()
         .expect("protocol id")
         .to_string();
-    let preview = literature_search_preview_at(&base, LiteratureSearchPreviewInput { protocol_id })
-        .expect("preview protocol");
+    let preview = literature_search_preview_at(
+        &base,
+        LiteratureSearchPreviewInput::for_protocol(protocol_id),
+    )
+    .expect("preview protocol");
     let planned = preview["plan"][0]["queryVariantPlan"]
         .as_array()
         .expect("variant plan");
@@ -2790,6 +2810,7 @@ fn continuation_runs_preserve_cumulative_records_ranks_and_coverage() {
             time_window: String::new(),
             sort_order: "relevance".to_string(),
             databases: vec!["crossref".to_string()],
+            boolean_query: String::new(),
             queries: BTreeMap::from([(
                 "crossref".to_string(),
                 "cumulative search coverage".to_string(),
@@ -3260,6 +3281,7 @@ fn a_casual_search_can_bound_its_time_window_and_sort_order() {
         max_results: Some(5),
         time_window: Some("2023..2025".to_string()),
         sort_order: Some("date".to_string()),
+        ..Default::default()
     })
     .expect("draft");
     assert_eq!(draft.time_window, "2023..2025");
@@ -3271,6 +3293,7 @@ fn a_casual_search_can_bound_its_time_window_and_sort_order() {
         max_results: Some(5),
         time_window: Some("last tuesday".to_string()),
         sort_order: None,
+        ..Default::default()
     });
     assert!(
         rejected.is_err(),
@@ -3751,4 +3774,503 @@ fn renaming_attachments_never_moves_files_we_do_not_own() {
     assert!(reasons.contains("linked external file is not ours to move"));
     assert!(reasons.contains("attachment has no local file"));
     let _ = std::fs::remove_dir_all(base);
+}
+
+/// A protocol's per-source query is what the user reviewed. It used to be
+/// shadowed by variants planned from the question sentence, so a hand-built
+/// Scopus boolean string was never sent while a sixteen-term conjunction of
+/// the question's words (`papers AND study AND including …`) was.
+#[test]
+fn protocol_executes_the_query_the_caller_wrote_for_each_source() {
+    let base = temp_base("caller-queries");
+    let scopus = r#"TITLE-ABS-KEY(("continual learning" OR "lifelong learning") AND ("time series") AND ("anomaly detection"))"#;
+    let created = literature_search_protocol_create_at(
+        &base,
+        LiteratureSearchProtocolCreateInput {
+            protocol: runtime::SearchProtocolDraft {
+                question:
+                    "Which papers study continual learning for time-series anomaly detection?"
+                        .to_string(),
+                scope: "caller queries".to_string(),
+                time_window: String::new(),
+                sort_order: "relevance".to_string(),
+                databases: vec!["scopus".to_string(), "crossref".to_string()],
+                boolean_query: String::new(),
+                queries: BTreeMap::from([("scopus".to_string(), scopus.to_string())]),
+                query_variants: BTreeMap::new(),
+                max_results: Some(30),
+                inclusion_criteria: Vec::new(),
+                exclusion_criteria: Vec::new(),
+                known_key_papers: Vec::new(),
+            },
+        },
+    )
+    .expect("create protocol");
+    let protocol_id = created["protocol"]["id"]
+        .as_str()
+        .expect("protocol id")
+        .to_string();
+    let preview = literature_search_preview_at(
+        &base,
+        LiteratureSearchPreviewInput::for_protocol(protocol_id),
+    )
+    .expect("preview protocol");
+    let executed = |source: &str| {
+        preview["plan"]
+            .as_array()
+            .expect("plan")
+            .iter()
+            .find(|entry| entry["source"] == source)
+            .expect("source planned")["queryVariantPlan"]
+            .as_array()
+            .expect("variant plan")
+            .iter()
+            .map(|variant| variant["query"].as_str().expect("query").to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(executed("scopus"), vec![scopus.to_string()]);
+    // A source the caller left without a query is still planned from the question.
+    assert!(!executed("crossref").is_empty());
+    let _ = std::fs::remove_dir_all(base);
+}
+
+const CONTINUAL_TS_QUESTION: &str =
+    "Which papers study continual learning for time-series anomaly detection, including concept drift?";
+const CONTINUAL_TS_BOOLEAN: &str = "([continual learning] OR [lifelong learning] OR [catastrophic forgetting]) AND ([time series] OR [time-series]) AND [anomaly detection]";
+
+fn systematic_input() -> LiteratureSearchInput {
+    LiteratureSearchInput {
+        query: CONTINUAL_TS_QUESTION.to_string(),
+        sources: vec![
+            "scopus".to_string(),
+            "crossref".to_string(),
+            "arxiv".to_string(),
+        ],
+        max_results: Some(30),
+        boolean_query: Some(CONTINUAL_TS_BOOLEAN.to_string()),
+        queries: BTreeMap::from([(
+            "scopus".to_string(),
+            "TITLE-ABS-KEY(\"continual learning\" AND \"anomaly detection\")".to_string(),
+        )]),
+        inclusion_criteria: vec!["time-series anomaly or fault detection".to_string()],
+        known_key_papers: vec!["10.1000/known".to_string()],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_search_compiles_its_boolean_query_per_source_and_keeps_caller_queries() {
+    let draft = casual_search_protocol_draft(&systematic_input()).expect("draft");
+    assert_eq!(draft.boolean_query, CONTINUAL_TS_BOOLEAN);
+    assert_eq!(draft.inclusion_criteria.len(), 1);
+    assert_eq!(draft.known_key_papers, vec!["10.1000/known".to_string()]);
+    // A caller query is the reviewed plan for its source: no planned variants
+    // may shadow it.
+    assert!(!draft.query_variants.contains_key("scopus"));
+    assert!(draft.queries["scopus"].starts_with("TITLE-ABS-KEY(\"continual learning\""));
+    let kinds = |source: &str| {
+        draft.query_variants[source]
+            .iter()
+            .map(|variant| variant.kind.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kinds("arxiv"), vec!["boolean"]);
+    assert!(draft.query_variants["arxiv"][0]
+        .query
+        .starts_with("(all:\"continual learning\" OR"));
+    assert_eq!(
+        kinds("crossref"),
+        vec!["boolean", "boolean_synonyms_1", "boolean_synonyms_2"]
+    );
+}
+
+#[test]
+fn preview_plans_exactly_what_the_search_would_send_without_saving_it() {
+    let base = temp_base("unsaved-preview");
+    let preview = literature_search_preview_at(
+        &base,
+        LiteratureSearchPreviewInput {
+            protocol_id: None,
+            search: Some(systematic_input()),
+        },
+    )
+    .expect("preview");
+    assert_eq!(preview["saved"], false);
+    assert_eq!(preview["protocol"]["id"], "unsaved-preview");
+    let plan = preview["plan"].as_array().expect("plan");
+    let scopus = plan
+        .iter()
+        .find(|entry| entry["source"] == "scopus")
+        .expect("scopus planned");
+    assert_eq!(
+        scopus["queryVariantPlan"][0]["query"],
+        "TITLE-ABS-KEY(\"continual learning\" AND \"anomaly detection\")"
+    );
+    assert_eq!(preview["coverage"]["mode"], "bounded");
+    assert_eq!(preview["knownKeyPapers"]["papers"][0], "10.1000/known");
+    // Nothing was saved: the store holds no protocol to execute.
+    let store = runtime::open_literature_store_at(&base).expect("store");
+    assert!(store
+        .load_protocol("unsaved-preview")
+        .expect("load")
+        .is_none());
+
+    for (input, fragment) in [
+        (LiteratureSearchPreviewInput::default(), "pass protocolId"),
+        (
+            LiteratureSearchPreviewInput {
+                protocol_id: Some("p".to_string()),
+                search: Some(systematic_input()),
+            },
+            "not both",
+        ),
+        (
+            LiteratureSearchPreviewInput {
+                protocol_id: None,
+                search: Some(LiteratureSearchInput {
+                    continue_run_id: Some("run-1".to_string()),
+                    ..systematic_input()
+                }),
+            },
+            "continuation",
+        ),
+    ] {
+        let error = literature_search_preview_at(&base, input).expect_err(fragment);
+        assert!(error.contains(fragment), "{error}");
+    }
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn search_arguments_are_validated_before_any_request() {
+    let unsearched = casual_search_protocol_draft(&LiteratureSearchInput {
+        queries: BTreeMap::from([("openalex".to_string(), "x".to_string())]),
+        ..systematic_input()
+    })
+    .expect_err("openalex is not in sources");
+    assert!(unsearched.contains("queries.openalex"), "{unsearched}");
+
+    let malformed = casual_search_protocol_draft(&LiteratureSearchInput {
+        boolean_query: Some("[continual learning] AND".to_string()),
+        ..systematic_input()
+    })
+    .expect_err("malformed boolean");
+    assert!(malformed.contains("booleanQuery"), "{malformed}");
+
+    let base = temp_base("bad-coverage");
+    let coverage = literature_search_ad_hoc_at_with_cancel(
+        &base,
+        LiteratureSearchInput {
+            coverage: Some("everything".to_string()),
+            ..systematic_input()
+        },
+        &|| true,
+    )
+    .expect_err("unknown coverage mode");
+    assert!(coverage.contains("unsupported coverage"), "{coverage}");
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn the_fingerprint_follows_the_executed_plan_not_the_prose() {
+    let fingerprint = |input: Value| {
+        literature_search_provider_fingerprint(&input.to_string()).expect("fingerprint")
+    };
+    let plain = fingerprint(json!({ "query": CONTINUAL_TS_QUESTION }));
+    let boolean = fingerprint(json!({
+        "query": CONTINUAL_TS_QUESTION,
+        "booleanQuery": CONTINUAL_TS_BOOLEAN,
+    }));
+    assert_ne!(
+        plain, boolean,
+        "a booleanQuery changes every provider request"
+    );
+    assert_ne!(
+        boolean,
+        fingerprint(json!({
+            "query": CONTINUAL_TS_QUESTION,
+            "booleanQuery": CONTINUAL_TS_BOOLEAN,
+            "coverage": "saturate",
+        })),
+        "saturation fetches further pages"
+    );
+    // Continuing a run is its own request, and continuing it twice is the duplicate.
+    let continuation = json!({ "query": CONTINUAL_TS_QUESTION, "continueRunId": "run-7" });
+    assert_eq!(
+        fingerprint(continuation.clone()),
+        fingerprint(continuation.clone())
+    );
+    assert_ne!(plain, fingerprint(continuation));
+}
+
+#[test]
+fn question_scaffolding_is_never_a_required_search_term() {
+    for source in ["scopus", "openalex", "arxiv"] {
+        for variant in plan_source_query_variants(CONTINUAL_TS_QUESTION, source) {
+            let query = variant.query.to_ascii_lowercase();
+            for scaffold in ["papers", "study", "including"] {
+                assert!(
+                    !query
+                        .split(|character: char| !character.is_alphanumeric())
+                        .any(|word| word == scaffold),
+                    "{source} {}: {query}",
+                    variant.kind
+                );
+            }
+        }
+    }
+    // Scopus ANDs every term of its broad stream, so a long question must not
+    // become a dozen-clause conjunction.
+    let long = "continual lifelong learning time-series anomaly detection mitigation catastrophic forgetting sequential tasks concept drift";
+    let broad = plan_source_query_variants(long, "scopus")
+        .into_iter()
+        .find(|variant| variant.kind == "broad_keywords")
+        .expect("broad stream");
+    assert!(broad.query.matches(" AND ").count() <= 5, "{}", broad.query);
+}
+
+#[test]
+fn known_paper_recall_reports_found_and_diagnoses_misses() {
+    let base = temp_base("known-paper-recall");
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let retrieved = store
+        .upsert_canonical_record(&canonical_record_from_remote(
+            &record(
+                "arxiv:2601.00001",
+                "Lifelong Anomaly Detection for Streaming Time Series",
+            ),
+            "run-a",
+            "artifact-a",
+        ))
+        .expect("persist")
+        .record;
+    store
+        .upsert_canonical_record(&canonical_record_from_remote(
+            &record(
+                "arxiv:2601.00002",
+                "Replay Buffers for Sensor Fault Detection",
+            ),
+            "run-b",
+            "artifact-b",
+        ))
+        .expect("persist");
+    let recall = known_paper_recall(
+        &store,
+        &[
+            "arXiv:2601.00001v2".to_string(),
+            "Lifelong anomaly detection for streaming time series (2026)".to_string(),
+            "https://arxiv.org/abs/2601.00002".to_string(),
+            "10.9999/never-seen".to_string(),
+        ],
+        std::slice::from_ref(&retrieved.id),
+        &BTreeSet::new(),
+    )
+    .expect("recall")
+    .expect("references were given");
+    assert_eq!(recall["total"], 4);
+    assert_eq!(recall["found"], 2);
+    assert_eq!(recall["recallPercent"], 50);
+    let missed = recall["missed"].as_array().expect("missed");
+    // Reachable but not retrieved: the query, not the index, missed it.
+    assert_eq!(missed[0]["reference"], "https://arxiv.org/abs/2601.00002");
+    assert!(missed[0]["inLibrary"]["recordId"].is_string());
+    assert!(missed[1]["inLibrary"].is_null());
+    assert!(known_paper_recall(&store, &[], &[], &BTreeSet::new())
+        .expect("recall")
+        .is_none());
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Saturation, snowball and the recall gate all run on the result of a pass.
+/// Stopping up front exercises their plumbing without a provider request, and
+/// a stop has to be reported as a stop — never as an exhausted search.
+#[test]
+fn a_stopped_saturating_search_says_why_and_stays_continuable() {
+    let base = temp_base("saturating-stop");
+    let input = LiteratureSearchInput {
+        query: "spiking neural network hardware".to_string(),
+        sources: vec!["openalex".to_string(), "arxiv".to_string()],
+        max_results: Some(10),
+        known_key_papers: vec!["10.1000/known".to_string()],
+        coverage: Some("saturate".to_string()),
+        snowball: Some(LiteratureSnowballInput::default()),
+        ..Default::default()
+    };
+    let output = literature_search_ad_hoc_at_with_cancel(&base, input, &|| true)
+        .expect("a stopped search still returns its record");
+    assert_eq!(output["coverage"]["stopReason"], "cancelled");
+    assert_eq!(output["snowball"]["stopReason"], "cancelled");
+    assert_eq!(output["knownPaperRecall"]["found"], 0);
+    assert_eq!(
+        output["continuation"]["sources"],
+        json!(["openalex", "arxiv"]),
+        "sources a stop never reached are still to be fetched"
+    );
+    let run_id = output["searchRun"]["id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+
+    let wrong = literature_search_ad_hoc_at_with_cancel(
+        &base,
+        LiteratureSearchInput {
+            query: "a different question".to_string(),
+            continue_run_id: Some(run_id.clone()),
+            ..Default::default()
+        },
+        &|| true,
+    )
+    .expect_err("a continuation belongs to its own search");
+    assert!(wrong.contains("belongs to the search"), "{wrong}");
+
+    let continued = literature_search_ad_hoc_at_with_cancel(
+        &base,
+        LiteratureSearchInput {
+            query: "Spiking  neural network hardware".to_string(),
+            continue_run_id: Some(run_id),
+            ..Default::default()
+        },
+        &|| true,
+    )
+    .expect("continue the same search");
+    assert_eq!(continued["protocol"]["id"], output["protocol"]["id"]);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn snowball_plans_are_bounded_and_seeds_must_be_identifiers() {
+    let plan = SnowballPlan::from_input(&LiteratureSnowballInput::default()).expect("plan");
+    assert_eq!(plan.top_records, 5);
+    assert_eq!(plan.directions.len(), 2);
+    assert_eq!(plan.max_per_seed, 25);
+
+    let seeded = SnowballPlan::from_input(&LiteratureSnowballInput {
+        seeds: vec![
+            "arXiv:2601.00001v3".to_string(),
+            "10.1000/ABC.1".to_string(),
+        ],
+        direction: Some("references".to_string()),
+        max_per_seed: Some(10_000),
+        ..Default::default()
+    })
+    .expect("plan");
+    assert_eq!(seeded.seeds, vec!["arxiv:2601.00001", "doi:10.1000/abc.1"]);
+    assert_eq!(
+        seeded.top_records, 0,
+        "explicit seeds replace the default top records"
+    );
+    assert_eq!(seeded.max_per_seed, 200);
+
+    let title = SnowballPlan::from_input(&LiteratureSnowballInput {
+        seeds: vec!["Attention is all you need".to_string()],
+        ..Default::default()
+    })
+    .expect_err("a title cannot anchor a citation traversal");
+    assert!(title.contains("DOI or an arXiv id"), "{title}");
+
+    let too_many = SnowballPlan::from_input(&LiteratureSnowballInput {
+        seeds: (0..11)
+            .map(|index| format!("10.1000/seed{index}"))
+            .collect(),
+        ..Default::default()
+    })
+    .expect_err("seed cap");
+    assert!(too_many.contains("at most"), "{too_many}");
+}
+
+#[test]
+fn a_status_code_inside_a_quoted_url_is_not_a_status() {
+    // The OpenAlex gateway host contains "403" as a substring.
+    let transport = "OpenAlex request failed after 3 attempts: error sending request for url (https://1312640372-g6j27ofl05.ap-hongkong.tencentscf.com/openalex/works?search=x)";
+    assert_eq!(
+        source_failure_status(transport),
+        runtime::SourceAttemptStatus::Failed
+    );
+    assert_eq!(
+        source_failure_status("Scopus returned HTTP 403: entitlement"),
+        runtime::SourceAttemptStatus::Unauthorised
+    );
+    assert_eq!(
+        source_failure_status("arXiv returned HTTP 429"),
+        runtime::SourceAttemptStatus::RateLimited
+    );
+}
+
+fn keyword_outcome(titles: &[&str]) -> AdapterSearchOutcome {
+    AdapterSearchOutcome {
+        papers: titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| {
+                serde_json::from_value(json!({
+                    "id": format!("doi:10.1000/k{index}"),
+                    "title": title,
+                    "authors": [],
+                    "abstract": "",
+                    "venue": "",
+                    "source": "Crossref",
+                }))
+                .expect("paper")
+            })
+            .collect(),
+        variant_ranks: titles
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                BTreeMap::from([("boolean".to_string(), u32::try_from(index + 1).unwrap())])
+            })
+            .collect(),
+        request: Value::Null,
+        raw_artifacts: Vec::new(),
+        hit_count: None,
+        quota: Value::Null,
+        warnings: Vec::new(),
+        coverage_note: None,
+        coverage: runtime::SearchCoverage::default(),
+    }
+}
+
+#[test]
+fn keyword_sources_keep_only_records_that_satisfy_the_boolean_design() {
+    let draft = casual_search_protocol_draft(&LiteratureSearchInput {
+        queries: BTreeMap::new(),
+        ..systematic_input()
+    })
+    .expect("draft");
+    let protocol = unsaved_protocol(draft);
+    let expression = crate::literature_boolean::parse(CONTINUAL_TS_BOOLEAN).expect("parse");
+    // Only a keyword source whose streams were compiled from booleanQuery.
+    assert!(local_boolean_filter(&protocol, "crossref", Some(&expression)).is_some());
+    assert!(local_boolean_filter(&protocol, "scopus", Some(&expression)).is_none());
+    assert!(local_boolean_filter(&protocol, "crossref", None).is_none());
+    let hand_written = unsaved_protocol(
+        casual_search_protocol_draft(&LiteratureSearchInput {
+            queries: BTreeMap::from([("crossref".to_string(), "anything".to_string())]),
+            ..systematic_input()
+        })
+        .expect("draft"),
+    );
+    assert!(local_boolean_filter(&hand_written, "crossref", Some(&expression)).is_none());
+
+    let mut outcome = keyword_outcome(&[
+        "Laparoscopic detection and resection of insulinomas",
+        "Continual learning for time series anomaly detection",
+        "Detection of hepatic micrometastases",
+    ]);
+    assert_eq!(apply_local_boolean_filter(&mut outcome, &expression), 2);
+    assert_eq!(outcome.papers.len(), 1);
+    assert_eq!(
+        outcome.papers[0].title,
+        "Continual learning for time series anomaly detection"
+    );
+    // The surviving record keeps its own rank, not the first one's.
+    assert_eq!(
+        outcome.variant_ranks,
+        vec![BTreeMap::from([("boolean".to_string(), 2)])]
+    );
+    assert_eq!(outcome.coverage.unique, 1);
+    assert!(outcome
+        .coverage_note
+        .as_deref()
+        .is_some_and(|note| note.contains("2 of 3 records")));
 }

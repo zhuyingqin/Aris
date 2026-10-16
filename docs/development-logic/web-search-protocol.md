@@ -62,7 +62,11 @@ depth, or launch `providers=["all"]` for cross-provider diversity. Therefore a
 50-result batch ceiling never prevents a longer search.
 
 The desktop uses the built-in gateway for Bocha, Zhihu, and OpenAlex, so users
-do not configure their upstream credentials. The gateway is an allow-listed
+do not configure their upstream credentials. Desktop and CLI share the
+`https://somni.ensuanx.com/research/` base: `bocha` and `zhihu` are POST routes,
+while `openalex/works` and `openalex/works/{id-or-doi}` are GET routes. Every
+request, connectivity probe, and request preview must retain the `/research`
+path prefix. The gateway is an allow-listed
 service with deployment-owned provider keys; desktop audit records identify
 the provider and gateway route without exposing those keys. Brave and Exa
 remain optional direct integrations. Operator-provided Bocha and Zhihu keys

@@ -14,12 +14,13 @@ interface Props {
   items: AppNavigationItem[];
   moreItems: AppNavigationItem[];
   activeTab: Tab;
+  update?: ReactNode;
   account: ReactNode;
   onSelect: (tab: Tab) => void;
   onPreload: (tab: Tab) => void;
 }
 
-export default function AppNavigationRail({ label, moreLabel, items, moreItems, activeTab, account, onSelect, onPreload }: Props) {
+export default function AppNavigationRail({ label, moreLabel, items, moreItems, activeTab, update, account, onSelect, onPreload }: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const moreRef = useRef<HTMLDivElement>(null);
@@ -147,7 +148,10 @@ export default function AppNavigationRail({ label, moreLabel, items, moreItems, 
           </div>
         )}
       </div>
-      <div className="app-rail-account">{account}</div>
+      <div className="app-rail-footer">
+        {update}
+        <div className="app-rail-account">{account}</div>
+      </div>
     </nav>
   );
 }

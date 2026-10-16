@@ -27,7 +27,7 @@
         "es": "Go"
       },
       "features": {
-        "systematicSearch": false,
+        "systematicSearch": true,
         "latexCloud": false
       }
     },

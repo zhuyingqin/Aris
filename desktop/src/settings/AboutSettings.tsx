@@ -7,6 +7,8 @@ import EnvironmentSettings from "./EnvironmentSettings";
 import BuiltinToolAvailabilitySettings from "./BuiltinToolAvailabilitySettings";
 import type { AppUpdateInfo, AppUpdateProgress, ConfigView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
+import { SettingsSection } from "./SettingsPrimitives";
+import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 import { formatUpdateBytes } from "./settingsFormatters";
 
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
@@ -99,12 +101,7 @@ export default function AboutSettings({
 
   return (
     <>
-      <div className="sp-update-section sp-about-section">
-        <div className="sp-section-head">
-          <div className="sp-section-head-text">
-            <div className="sp-section-title">{copy.aboutUpdateTitle}</div>
-            <div className="sp-section-sub">{copy.aboutUpdateSub}</div>
-          </div>
+      <SettingsSection title={SETTINGS_LAYOUT_COPY[language].update} actions={
           <div className="sp-update-actions">
             <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
               <SvgIcon name={updateState === "checking" ? "spinner" : "refresh"} size={13} />
@@ -113,7 +110,7 @@ export default function AboutSettings({
             {updateCanInstall && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">{copy.aboutDownloadInstall}</button>}
             {updateCanRestart && <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">{copy.aboutRestart}</button>}
           </div>
-        </div>
+      }>
         <div className={`sp-update-panel sp-update-panel-${updateState}`}>
           <div className="sp-update-main">
             <span className={`sp-update-dot sp-update-dot-${updateState}`} />
@@ -142,11 +139,8 @@ export default function AboutSettings({
             </div>
           </div>
         </div>
-        <div className="sp-about-links">
-          <div className="sp-section-head-text">
-            <div className="sp-section-title">{copy.aboutLinksTitle}</div>
-            <div className="sp-section-sub">{copy.aboutLinksSub}</div>
-          </div>
+      </SettingsSection>
+      <SettingsSection title={SETTINGS_LAYOUT_COPY[language].links}>
           <div className="sp-about-links-row">
             <a className="sp-about-link" href="https://github.com/zhuyingqin/Aris" target="_blank" rel="noreferrer">
               <SvgIcon name="externalLink" size={13} />{copy.aboutLinkRepo}
@@ -159,8 +153,7 @@ export default function AboutSettings({
               <SvgIcon name="externalLink" size={13} />{copy.aboutLinkLicense}
             </a>
           </div>
-        </div>
-      </div>
+      </SettingsSection>
 
       <EnvironmentSettings
         language={language}

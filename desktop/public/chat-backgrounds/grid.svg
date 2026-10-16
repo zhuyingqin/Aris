@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360" viewBox="0 0 360 360"><defs><pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0v30" fill="none" stroke="#7d968d" stroke-width="1" opacity=".6"/></pattern></defs><path fill="#e9e3d3" d="M0 0h360v360H0z"/><path fill="url(#grid)" d="M0 0h360v360H0z"/></svg>

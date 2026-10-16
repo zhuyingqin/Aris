@@ -4,6 +4,7 @@ import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
 import type { BuiltinToolAvailability } from "../types";
+import { SettingsSection } from "./SettingsPrimitives";
 
 const COPY = {
   cn: {
@@ -50,19 +51,14 @@ export default function BuiltinToolAvailabilitySettings({ language }: { language
   useEffect(() => { void refresh(); }, []);
 
   return (
-    <section className="sp-update-section sp-tool-availability-section">
-      <div className="sp-section-head">
-        <div className="sp-section-head-text">
-          <div className="sp-section-title">{copy.title}</div>
-          <div className="sp-section-sub">{copy.subtitle}</div>
-        </div>
+    <SettingsSection title={copy.title} description={copy.subtitle} actions={
         <div className="sp-update-actions">
           <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void refresh()} disabled={loading || !isTauri()}>
             <SvgIcon name={loading ? "spinner" : "refresh"} size={13} />
             {loading ? copy.checking : copy.refresh}
           </button>
         </div>
-      </div>
+    }>
       {!isTauri() ? (
         <div className="sp-field-hint">{copy.preview}</div>
       ) : error ? (
@@ -82,6 +78,6 @@ export default function BuiltinToolAvailabilitySettings({ language }: { language
           ))}
         </div>
       )}
-    </section>
+    </SettingsSection>
   );
 }
