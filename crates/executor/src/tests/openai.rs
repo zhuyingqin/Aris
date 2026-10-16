@@ -2246,3 +2246,169 @@ fn null_and_repeated_usage_frames_do_not_flood_the_event_stream() {
     assert_eq!(usage_events[0].output_tokens, 7);
     server.join().expect("mock gateway thread");
 }
+
+/// Mock gateway that accepts every request, optionally writes `prelude`
+/// (status line + headers), then holds the connection open without sending
+/// anything else — a relay still waiting on a long-reasoning model. Returns
+/// how many requests reached it once `stop` is set.
+fn spawn_silent_gateway(
+    prelude: Option<&'static str>,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread::JoinHandle<usize>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking mock listener");
+    let address = listener.local_addr().expect("mock gateway address");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = std::sync::Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let mut held = Vec::new();
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking mock stream");
+                    read_mock_http_request(&mut stream);
+                    if let Some(prelude) = prelude {
+                        stream
+                            .write_all(prelude.as_bytes())
+                            .expect("write mock prelude");
+                        stream.flush().expect("flush mock prelude");
+                    }
+                    held.push(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("mock gateway accept failed: {error}"),
+            }
+        }
+        held.len()
+    });
+    (format!("http://{address}/v1"), stop, server)
+}
+
+fn silent_gateway_client(
+    base_url: String,
+    model: &str,
+    observer: Box<dyn StreamObserver>,
+    wait_policy: api::StreamWaitPolicy,
+) -> OpenAIRuntimeClient {
+    OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url,
+        },
+        model.to_string(),
+        false,
+        Vec::new(),
+        observer,
+    )
+    .expect("OpenAI client")
+    .with_transport(OpenAiTransport::ChatCompletions)
+    .with_wait_policy(wait_policy)
+}
+
+fn hello_request() -> ApiRequest {
+    ApiRequest {
+        system_prompt: Vec::new(),
+        messages: vec![ConversationMessage::user_text("hello")],
+    }
+}
+
+/// Regression: a gateway that holds headers until the model's first event
+/// (NewAPI → Sub2API → OpenAI under max reasoning) was abandoned at 120s and
+/// re-sent up to 4 times — ~8 minutes of silence and 4 billed requests.
+#[test]
+fn post_send_header_timeout_is_resent_at_most_once() {
+    let (base_url, stop, server) = spawn_silent_gateway(None);
+    let mut client = silent_gateway_client(
+        base_url,
+        "silent-header-model",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_millis(300)),
+            stream_idle_timeout: Some(Duration::from_secs(30)),
+        },
+    );
+    let error = client
+        .stream(hello_request())
+        .expect_err("a gateway that never answers must fail");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert_eq!(requests, 1 + api::MAX_TIMEOUT_RESENDS as usize);
+    let message = error.to_string();
+    assert!(message.contains("no response headers within"), "{message}");
+    assert!(message.contains("Not re-sending again"), "{message}");
+}
+
+/// Regression: an idle timeout before any output used to end the turn with a
+/// fake `stream_error_after_partial_output`, which the runtime answered with
+/// an automatic continuation request — another hidden resend.
+#[test]
+fn idle_timeout_before_output_fails_visibly_after_one_resend() {
+    let (base_url, stop, server) = spawn_silent_gateway(Some(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+    ));
+    let mut client = silent_gateway_client(
+        base_url,
+        "silent-stream-model",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(30)),
+            stream_idle_timeout: Some(Duration::from_millis(300)),
+        },
+    );
+    let error = client
+        .stream(hello_request())
+        .expect_err("no output at all must surface as an error, not a continuation");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert_eq!(requests, 1 + api::MAX_TIMEOUT_RESENDS as usize);
+    let message = error.to_string();
+    assert!(message.contains("produced no output"), "{message}");
+    assert!(message.contains("Not re-sending again"), "{message}");
+}
+
+/// Regression: desktop Stop only flips the observer's cancel flag, which the
+/// send phase never checked — Stop did nothing while waiting for headers.
+#[test]
+fn stop_interrupts_the_response_header_wait() {
+    struct CancelAfter(std::time::Instant);
+    impl StreamObserver for CancelAfter {
+        fn is_cancelled(&self) -> bool {
+            std::time::Instant::now() >= self.0
+        }
+    }
+
+    let (base_url, stop, server) = spawn_silent_gateway(None);
+    let mut client = silent_gateway_client(
+        base_url,
+        "stop-during-header-wait-model",
+        Box::new(CancelAfter(
+            std::time::Instant::now() + Duration::from_millis(300),
+        )),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(60)),
+            stream_idle_timeout: Some(Duration::from_secs(60)),
+        },
+    );
+    let started = std::time::Instant::now();
+    let error = client
+        .stream(hello_request())
+        .expect_err("Stop must end the wait");
+    let elapsed = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("mock gateway thread");
+
+    assert!(error.to_string().contains("interrupted by user"), "{error}");
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    assert_eq!(requests, 1);
+}

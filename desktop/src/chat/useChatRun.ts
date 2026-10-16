@@ -693,8 +693,9 @@ export function useChatRun({
   const canSwitchModel = modelSelectOptions.length > 1;
 
   const changeModel = useCallback(async (model: string) => {
-    if (!model || model === activeModel || !currentSession) return;
+    if (!model || !currentSession) return;
     if (currentSession.remoteAgent) {
+      if (model === activeModel) return;
       setModelBusy(true);
       try {
         const binding = currentSession.remoteAgent;
@@ -731,7 +732,9 @@ export function useChatRun({
     const requestId = ++statusRequestIdRef.current;
     setModelBusy(true);
     try {
-      const nextStatus = await chatModelSet(model, false);
+      // An explicit choice also becomes the default for new chats and app
+      // restarts. Restoring an existing session above remains non-persistent.
+      const nextStatus = await chatModelSet(model, true);
       if (requestId === statusRequestIdRef.current) setStatus(nextStatus);
       updateSession(currentSession.id, (session) => ({
         ...session,

@@ -2313,9 +2313,9 @@ export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
   invoke<ChatStatus>("chat_model_set", { model, persist });
-// Both calls carry the model the session actually runs on: the composer can
-// switch models without persisting them, so the backend must not answer from
-// the configured executor.
+// Both calls carry the model the session actually runs on: an older session can
+// restore its pinned model without changing the saved default, so the backend
+// must not answer from the configured executor.
 export const chatReasoningEffortGet = (model?: string | null) =>
   invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model: model ?? null });
 export const chatReasoningEffortSet = (effort: string, model?: string | null) =>

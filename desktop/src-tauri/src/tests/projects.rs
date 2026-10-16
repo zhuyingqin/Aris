@@ -9,6 +9,121 @@ use std::{
     sync::Mutex,
 };
 
+struct ConfigRootGuard(Option<std::ffi::OsString>);
+
+impl ConfigRootGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("ARIS_CONFIG_ROOT");
+        std::env::set_var("ARIS_CONFIG_ROOT", path);
+        Self(previous)
+    }
+}
+
+impl Drop for ConfigRootGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("ARIS_CONFIG_ROOT", value),
+            None => std::env::remove_var("ARIS_CONFIG_ROOT"),
+        }
+    }
+}
+
+#[test]
+fn background_registry_lookup_preserves_an_unavailable_current_project() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRootGuard::set(temp.path());
+    let unavailable = temp.path().join("offline-volume/project");
+    let project_id = project_id(&unavailable);
+    let mut registry = super::default_registry();
+    registry.projects.push(DesktopProject {
+        id: project_id.clone(),
+        name: "Offline project".to_string(),
+        path: unavailable.to_string_lossy().into_owned(),
+        added_at: 1,
+        last_opened_at: 1,
+    });
+    registry.current_project_id = project_id.clone();
+    super::save_registry(&registry).unwrap();
+
+    assert_eq!(super::load_registry().current_project_id, project_id);
+    assert_eq!(
+        super::project_path_for_registered_id(&project_id),
+        Some(unavailable)
+    );
+    assert_eq!(
+        super::project_path_for_registered_id("default"),
+        Some(crate::state::default_workspace_dir())
+    );
+    assert_eq!(super::load_registry().current_project_id, project_id);
+}
+
+#[test]
+fn project_execution_recovers_only_that_workspace_once_before_first_use() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRootGuard::set(&temp.path().join("config"));
+    let opened = temp.path().join("opened");
+    let unopened = temp.path().join("unopened");
+    let stage_interrupted_write = |root: &Path| {
+        std::fs::create_dir_all(root).unwrap();
+        let target = root.join("draft.txt");
+        std::fs::write(&target, "partial publication").unwrap();
+        let journal_root = runtime::somniq_project_tmp_dir(root).join("file-write-batches");
+        std::fs::create_dir_all(&journal_root).unwrap();
+        std::fs::write(
+            journal_root.join("bat_interrupted.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "batchId": "bat_interrupted",
+                "entries": [{
+                    "path": target.to_string_lossy(),
+                    "original": "original draft",
+                    "beforeRevision": runtime::content_revision(b"original draft"),
+                    "afterRevision": runtime::content_revision(b"partial publication")
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    stage_interrupted_write(&opened);
+    stage_interrupted_write(&unopened);
+    // A malformed old journal must not make later execution contexts rerun
+    // recovery over fresh publications from this process.
+    std::fs::write(
+        runtime::somniq_project_tmp_dir(&opened).join("file-write-batches/corrupt.json"),
+        "{broken",
+    )
+    .unwrap();
+    crate::state::project_execution_context(&opened, &project_id(&opened)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(opened.join("draft.txt")).unwrap(),
+        "original draft"
+    );
+    assert_eq!(
+        std::fs::read_to_string(unopened.join("draft.txt")).unwrap(),
+        "partial publication"
+    );
+    // A new journal belongs to the live process. Preparing another turn or
+    // reopening this project must not roll it back as startup debris.
+    stage_interrupted_write(&opened);
+    crate::state::project_execution_context(&opened, &project_id(&opened)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(opened.join("draft.txt")).unwrap(),
+        "partial publication"
+    );
+    crate::state::project_execution_context(&unopened, &project_id(&unopened)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(unopened.join("draft.txt")).unwrap(),
+        "original draft"
+    );
+}
+
 fn test_project(id: &str, name: &str, last_opened_at: u64) -> DesktopProject {
     DesktopProject {
         id: id.to_string(),

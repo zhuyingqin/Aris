@@ -79,12 +79,12 @@ describe("ChatSidebar session menu", () => {
     expect(screen.queryByRole("dialog", { name: "New task" })).toBeNull();
   });
 
-  it("opens To-dos as a Chat destination instead of a separate product", () => {
+  it("keeps scheduled tasks and to-dos out of the conversation sidebar", () => {
     renderSidebar();
 
-    fireEvent.click(screen.getByRole("button", { name: "To-dos" }));
-
-    expect(useStore.getState().tab).toBe("tasks");
+    expect(screen.queryByRole("button", { name: "To-dos" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Scheduled tasks" })).toBeNull();
+    expect(screen.getByRole("button", { name: "New task" })).toBeTruthy();
   });
 
   it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
@@ -325,25 +325,35 @@ describe("ChatSidebar execution workspace", () => {
     onReorderProjects: async () => undefined,
   };
 
-  it("switches computers from the top of the left sidebar", async () => {
+  it("switches computers from the icon beside SomniQ in the header", async () => {
     const user = userEvent.setup();
     const onWorkspaceSelect = vi.fn();
     const onLoadRemoteTargets = vi.fn();
     render(
-      <ChatSidebar
-        {...baseProps}
-        sessions={[{ ...makeSession("project-a"), id: "chat-local", title: "Local chat" }]}
-        remotePeers={[remotePeer]}
-        onLoadRemoteTargets={onLoadRemoteTargets}
-        onWorkspaceSelect={onWorkspaceSelect}
-      />,
+      <>
+        <header><span>SomniQ Chat</span><div id="app-chat-workspace-portal" /></header>
+        <ChatSidebar
+          {...baseProps}
+          sessions={[{ ...makeSession("project-a"), id: "chat-local", title: "Local chat" }]}
+          remotePeers={[remotePeer]}
+          onLoadRemoteTargets={onLoadRemoteTargets}
+          onWorkspaceSelect={onWorkspaceSelect}
+        />
+      </>
     );
 
-    await user.click(screen.getByRole("button", { name: "Switch local or remote computer" }));
+    const trigger = screen.getByRole("button", { name: "Switch local or remote computer" });
+    expect(trigger.closest("header")).not.toBeNull();
+    expect(trigger.closest("aside")).toBeNull();
+    expect(trigger.textContent).toBe("");
+    expect(trigger.title).toBe("This computer · Local Alpha");
+    await user.click(trigger);
     expect(onLoadRemoteTargets).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("menuitem", { name: /Lab computer/ }));
 
     expect(onWorkspaceSelect).toHaveBeenCalledWith("node-a");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("lets users enter an authorized offline computer while automatic reconnection continues", async () => {

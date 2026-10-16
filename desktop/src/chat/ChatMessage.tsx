@@ -5,6 +5,7 @@ import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
+import ModelWaitIndicator from "./ModelWaitIndicator";
 import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
@@ -1219,6 +1220,7 @@ function ChatMessage({
         </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor" aria-hidden="true" />}
+      {turn.streaming && turn.role === "assistant" && <ModelWaitIndicator turn={turn} />}
       {turn.error && (
         <div className="chat-error-card">
           <strong>{copy.responseFailed}</strong>

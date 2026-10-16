@@ -50,6 +50,23 @@ impl ApiError {
         }
     }
 
+    /// A timeout that fired after the gateway accepted the request (waiting
+    /// for headers or reading the body), as opposed to a connect failure. The
+    /// upstream is usually still running and billing that request, so resends
+    /// are capped by [`crate::MAX_TIMEOUT_RESENDS`].
+    #[must_use]
+    pub fn is_post_send_timeout(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_timeout() && !error.is_connect(),
+            Self::Api { error_type, .. } => matches!(
+                error_type.as_deref(),
+                Some("response_header_timeout" | "stream_idle_timeout")
+            ),
+            Self::RetriesExhausted { last_error, .. } => last_error.is_post_send_timeout(),
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {

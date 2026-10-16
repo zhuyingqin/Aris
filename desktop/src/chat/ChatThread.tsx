@@ -255,6 +255,9 @@ function StarterIcon({ id }: { id: ChatStarter["id"] }) {
   if (id === "research" || id === "explain") {
     return <svg {...common}><path d="M4 6.5h16M4 12h16M4 17.5h10" /><path d="M18 15.5v5M15.5 18h5" /></svg>;
   }
+  if (id === "patent") {
+    return <svg {...common}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 12h8m-8 4h3m2 2 1.5 1.5L18 16" /></svg>;
+  }
   if (id === "review" || id === "check") {
     return <svg {...common}><circle cx="12" cy="12" r="8" /><path d="m8.5 12 2.3 2.3 4.8-5" /></svg>;
   }

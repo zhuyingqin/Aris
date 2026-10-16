@@ -43,6 +43,57 @@ native window behavior. Tectonic packaging is retired on every OS.
 
 ## Development and release
 
+### Files and Folders consent
+
+Opening a project under Desktop, Documents, Downloads, iCloud Drive or a
+removable/network volume may require macOS Files and Folders consent. A grant
+for one protected location does not grant all of the other locations.
+
+To avoid asking for unrelated folders during launch:
+
+- Reading the project registry resolves metadata without probing the saved
+  current directory. Only startup or explicit activation checks that folder.
+- Interrupted batch-write recovery and stale staged-write cleanup run before
+  that project's first execution context is prepared, including an authorized
+  background task. Startup no longer reads these directories for every saved
+  project. Recovery is attempted once per workspace per process so reopening
+  it cannot roll back a live write, even if an older journal reported an error.
+- A successful native workspace watch is reused without a directory probe on
+  every 500ms tick. A permission-denied binding waits for explicit project
+  reactivation; other binding failures retry after 1, 2, 4, 8, 16, 32 and then
+  at most once every 60 seconds. Reopening or changing projects resets the wait.
+
+These changes reduce unnecessary access requests. They cannot preserve a
+system grant across different application identities. The release workflow
+currently configures only `TAURI_SIGNING_PRIVATE_KEY`, which authenticates
+Tauri updater archives; it does not sign the application with an Apple
+Developer ID. Apple's default designated requirement for an ad-hoc signature
+is specific to that code version. Replacing/rebuilding an ad-hoc application
+can therefore require consent again even after the user approved the previous
+version. An application-side `authorized: true` flag cannot replace the system
+grant.
+
+For consent continuity across releases, keep `com.aris.studio` and the normal
+installation location stable and distribute Developer ID Application signed
+builds with compatible designated requirements. Provision the certificate and
+private key first, then configure `APPLE_SIGNING_IDENTITY` and signing for all
+distributed Mach-O helpers, including those inside runtime archives. The Node
+helpers need appropriate hardened-runtime entitlements; enabling main-app
+signing alone is not a complete signing/notarization pipeline. Do not substitute
+an identifier-only custom designated requirement or reset TCC on each launch.
+
+References:
+- https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web
+- https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
+- https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac
+
+Physical-Mac regression still required: use projects in two protected folders;
+confirm opening one does not request the other; approve and relaunch the same
+installed build; deny a workspace watch and confirm it does not loop; grant
+access in System Settings and reopen the project; then repeat an update with
+two Developer ID signed versions. Windows unit tests do not verify macOS TCC
+behavior or permission continuity after an update.
+
 ```sh
 cd desktop
 npm ci

@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { uiTypographyPostcss } from "./src/uiTypographyPostcss";
 
 // Tauri expects a fixed dev port and quiet logging.
 export default defineConfig({
@@ -8,6 +9,7 @@ export default defineConfig({
   base: "./",
   cacheDir: "../.vite-cache/desktop",
   clearScreen: false,
+  css: { postcss: { plugins: [uiTypographyPostcss()] } },
   resolve: {
     // Dedupe CodeMirror too: multiple @codemirror/state or @codemirror/view
     // instances break decoration identity checks ("Block decorations may not be

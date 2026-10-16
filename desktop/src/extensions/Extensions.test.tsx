@@ -59,7 +59,7 @@ const oracleRuntimeStatus = (runtimeStatus: "missing" | "ready" = "missing"): Or
   runtime: {
     status: runtimeStatus,
     source: runtimeStatus === "ready" ? "managed" : "none",
-    version: runtimeStatus === "ready" ? "0.18.0" : null,
+    version: runtimeStatus === "ready" ? "0.21.3" : null,
     commandPath: runtimeStatus === "ready" ? "C:/SomniQ/oracle-mcp.js" : null,
     nodePath: runtimeStatus === "ready" ? "C:/SomniQ/node.exe" : null,
     installSupported: true,

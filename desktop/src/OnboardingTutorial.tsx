@@ -56,16 +56,16 @@ interface OnboardingStep {
 const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     kicker: "功能入口",
-    title: "左上角菜单：在研究工作区间切换",
-    body: "点击当前模块名即可打开功能菜单，切换到适合当前任务的工作区。当前模块会保持高亮。",
+    title: "左侧图标栏：在研究工作区间切换",
+    body: "点击左侧图标切换到对话、代码、LaTeX 或文献库，当前模块会保持高亮。其他功能位于更多菜单中。",
     points: [
       "Chat：提出任务，查看代理执行过程和结果",
       "文献：检索、整理和引用研究资料",
       "代码 / LaTeX：编写程序、运行实验和排版论文",
-      "Git、研究流程、邮箱和插件按需使用",
+      "更多：打开研究流程、邮箱和设置",
     ],
-    targetSelectors: ['[data-onboarding-target="product-switcher"]'],
-    placement: "bottom",
+    targetSelectors: ['[data-onboarding-target="module-navigation"]'],
+    placement: "right",
   },
   {
     kicker: "主工作区",
@@ -84,9 +84,9 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     title: "项目切换器：告诉代理在哪个目录工作",
     body: "顶部这里决定当前工作目录。切错项目时，代理会读错文件，所以开始任务前先确认这里。",
     points: [
-      "点击项目名切换已有项目",
-      "点 Add 添加新的项目目录",
-      "右侧路径用来确认当前目录是否正确",
+      "点击顶部项目名，展开已有项目列表",
+      "在面板底部选择“添加本地项目…”来添加目录",
+      "查看项目下方的路径，或选择“打开项目文件夹”确认目录",
     ],
     targetSelectors: ['[data-onboarding-target="project-switcher"]'],
     placement: "bottom",
@@ -94,14 +94,14 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     kicker: "个性化设置",
     title: "Settings：按你的习惯调整工作区",
-    body: "登录后即可开始使用，不需要额外填写 API Key。需要改变外观或功能范围时，再打开 Settings。",
+    body: "点击左侧图标栏底部的头像，查看账户信息、用量或打开设置。需要改变外观或功能范围时，再打开 Settings。",
     points: [
       "在通用设置中切换亮色 / 暗色主题和界面语言",
       "按需显示或隐藏邮箱、研究流程等可选模块",
       "账户设置可以查看账号、订阅和剩余用量",
     ],
     targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
-    placement: "bottom",
+    placement: "right",
   },
 ];
 

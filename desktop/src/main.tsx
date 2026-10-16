@@ -12,7 +12,12 @@ import { ImageAssistApproval } from "./remote/ImageAssistApproval";
 import { RemoteAccountConnectionApproval } from "./remote/RemoteAccountConnectionApproval";
 import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
 import { useStore } from "./store";
+import { useUiTypography } from "./useUiTypography";
 import "./styles.css";
+import "./AppNavigationRail.css";
+import "./AppAccountMenu.css";
+import "./AppChrome.css";
+import "./chat/ChatHome.css";
 
 /** Browser-preview escape hatch: ?loginPreview=1 forces the sign-in screen
  * (plain browsers are always "authed", so Login is otherwise unreachable). */
@@ -55,6 +60,7 @@ function AuthenticatedRoot() {
 }
 
 function Root() {
+  useUiTypography();
   // Same reasoning as the companion below: the overlay is only ever created by
   // the authenticated main process, and it must paint instantly.
   if (isScreenshotOverlayMode()) return <ScreenshotOverlay />;

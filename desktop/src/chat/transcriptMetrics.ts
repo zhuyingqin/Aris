@@ -11,7 +11,9 @@ import type { ChatTurn } from "../types";
  * below are the rendered chrome of each block kind, so an unmeasured row starts
  * within a line or two of its real height instead of an order of magnitude off.
  */
-const TURN_CHROME = 48;
+// Action row (24px), its top gap (4px), and the turn's bottom inset (8px).
+const TURN_CHROME = 36;
+const USER_BUBBLE_CHROME = 18;
 const COLLAPSED_TOOL_ROW = 34;
 const RUNNING_TOOL_ROW = 120;
 const TOOL_IMAGE_BLOCK = 240;
@@ -19,7 +21,8 @@ const ATTACHMENT_ROW = 30;
 const NOTICE_ROW = 34;
 const REVIEW_ROW = 52;
 const PERMISSION_CARD = 96;
-const COLLAPSED_THINKING_ROW = 32;
+// Toggle (28px), border (2px), and the thinking card's margins (10px).
+const COLLAPSED_THINKING_ROW = 40;
 const LINE_HEIGHT = 23;
 /** Columns in the 820px message body at the transcript's own font size. */
 const TEXT_COLUMNS = 92;
@@ -29,7 +32,7 @@ const COLUMN_WIDTH = 820 / TEXT_COLUMNS;
 const MESSAGE_COLUMN_MAX = 820;
 /** Below this the estimate is guesswork either way; keeps the arithmetic safe. */
 const MIN_TEXT_COLUMNS = 24;
-const MIN_TURN_SIZE = 56;
+const MIN_TURN_SIZE = 48;
 /** Beyond this the estimate stops helping; the real measurement lands anyway. */
 const MAX_TURN_SIZE = 4_000;
 /** Only used when a turn is missing entirely (a torn render). */
@@ -108,7 +111,7 @@ export function currentMessageColumns(): number {
 
 export function estimateTurnSize(turn: ChatTurn | undefined, columns = messageColumns): number {
   if (!turn) return FALLBACK_TURN_SIZE;
-  let height = TURN_CHROME;
+  let height = TURN_CHROME + (turn.role === "user" ? USER_BUBBLE_CHROME : 0);
   height += (turn.attachments?.length ?? 0) * ATTACHMENT_ROW;
   for (const block of turn.blocks) {
     switch (block.kind) {

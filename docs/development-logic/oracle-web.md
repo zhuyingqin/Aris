@@ -16,7 +16,7 @@ Oracle and its Node.js 24 runtime are also excluded from the main installer. On 
 
 1. downloads the current Node.js 24 archive from the official `nodejs.org/dist/latest-v24.x` release endpoint;
 2. verifies it against the official `SHASUMS256.txt` entry;
-3. installs the pinned `@steipete/oracle@0.18.0` npm package with development dependencies and install scripts disabled;
+3. installs the pinned `@steipete/oracle@0.21.3` npm package with development dependencies and install scripts disabled;
 4. atomically activates it under the user configuration directory.
 
 The MCP detail action is state-aware: a missing runtime is offered as **Install**, while a detected incompatible runtime is offered as **Update**. Updates install the Oracle version pinned to the current SomniQ release and preserve account profiles and role bindings because those live outside `runtime/current`. SomniQ does not silently follow the newest upstream Oracle release; compatibility moves with a reviewed SomniQ release. Runtime installation and replacement are serialized with webpage jobs so an active MCP worker is never updated in place.
@@ -44,6 +44,8 @@ SomniQ rewrites a deterministic account-local Oracle browser policy before every
 
 ## Capability boundary
 
+Image tasks keep the assigned account's current webpage model by default. Only an explicit image-task `model` requests strict model selection; the saved account default remains in force for consultation and independent review. This keeps image generation from depending on a text-consultation model picker. Settings labels that saved preference as the consultation/review model. Oracle 0.21.3 is a reviewed stable target, not a moving `latest` dependency; later ChatGPT layout changes can still require a subsequent compatibility update.
+
 Oracle MCP is not registered as a generic project MCP server. Generic registration would expose every Oracle tool and inherit the broad MCP permission class. Instead, SomniQ starts an ephemeral, account-scoped Oracle MCP worker and exposes only first-class host capabilities:
 
 - `ChatGptWebImage` accepts a prompt and at most 20 files canonicalized inside the active project. Oracle output must originate under that account's `oracle-home/generated` directory. SomniQ copies validated image files into `.somniq/artifacts/oracle-images/<run-id>/` before returning paths to the agent.
@@ -56,7 +58,7 @@ All paths force `ORACLE_ENGINE=browser`, use an account-specific `ORACLE_HOME_DI
 
 - Missing Oracle runtime: account setup remains available, but automation tools are not exposed.
 - Incompatible or unverifiable system Oracle runtime: report the detected version, keep webpage tools disabled, and offer the pinned SomniQ-managed Node + Oracle runtime without modifying the system installation. Executable presence alone never means ready.
-- The Windows managed-runtime extractor supports Deflate entries used by the checksum-verified official Node.js ZIP while retaining enclosed-path validation. SomniQ pins Oracle MCP 0.18.0 on isolated Node 24 and never silently falls back to an incompatible system 0.9.0 runtime.
+- The Windows managed-runtime extractor supports Deflate entries used by the checksum-verified official Node.js ZIP while retaining enclosed-path validation. SomniQ pins Oracle MCP 0.21.3 on isolated Node 24 and never silently falls back to an incompatible system or old managed runtime.
 - Windows canonical paths are kept for local validation, then converted from the `\\?\` extended-length form before they are passed to Node.js as command-line arguments. Node 24 otherwise resolves an extended-path main-module argument as the drive root (for example `C:`) and exits before the MCP handshake.
 - Missing browser: account creation is disabled until a compatible browser is detected.
 - Uninitialized account profile: fail before starting the Oracle worker and direct the user to open the dedicated sign-in window. A successful webpage task verifies the sign-in automatically; an unsuccessful one reports Oracle's login error without recording a verified state.

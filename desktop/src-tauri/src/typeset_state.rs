@@ -27,6 +27,12 @@ const TYPESET_STATE_DIR: &str = ".somniq/typeset";
 const MAX_STATE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROJECT_SEARCH_MATCHES: usize = 5_000;
 const SEARCHABLE_EXTENSIONS: &[&str] = &["tex", "bib", "cls", "sty"];
+/// Authored LaTeX sources and figure inputs. General project code, notes and
+/// data belong to Chat's file audit, not the manuscript review or restore.
+const TYPESET_REVISION_EXTENSIONS: &[&str] = &[
+    "tex", "ltx", "latex", "bib", "bst", "cls", "sty", "clo", "def", "fd", "cfg", "bbx", "cbx", "lbx",
+    "dtx", "ins", "tikz", "pgf", "pdf", "png", "jpg", "jpeg", "eps", "ps", "svg", "webp",
+];
 const REVISION_LEDGER_VERSION: u32 = 1;
 const REVISION_LEDGER_FILE: &str = "ledger.json";
 
@@ -508,25 +514,41 @@ fn change_set_directory(root: &Path) -> PathBuf {
     revision_directory(root).join("changesets")
 }
 
-/// Read a change set, dropping decisions about files a revision can no longer
-/// contain: atomic-write scratch files and build output.
-///
-/// The counterpart to the ledger normalization: the reviewable operations are
-/// recomputed from the cleaned ledger, and `typeset_changeset_resolve` requires
-/// the submitted decisions to correspond exactly. A stale scratch decision left
-/// in a stored change set would fail that check instead of the drift check.
-/// Only the suffix rule applies here — there is no manifest at this level to
-/// tell an output PDF from an authored figure, so that case is left to the
-/// recomputing call sites.
-fn read_change_set(path: &Path) -> Result<Option<TypesetChangeSet>, String> {
-    let suffix_only = BTreeSet::new();
-    Ok(read_json::<TypesetChangeSet>(path)?.map(|mut change_set| {
-        change_set.decisions.retain(|decision| {
-            !is_transient_revision_path(&decision.path)
-                && !is_derived_artifact_path(&decision.path, &suffix_only)
-        });
-        change_set
-    }))
+/// Normalize old queues at every entry point, including after an app restart.
+/// Decisions must match the scoped operations used by resolve; hiding a file
+/// only in the UI would leave the transaction impossible to finish.
+fn read_change_set(root: &Path, path: &Path) -> Result<Option<TypesetChangeSet>, String> {
+    let Some(mut change_set) = read_json::<TypesetChangeSet>(path)? else {
+        return Ok(None);
+    };
+    let stems = document_stems(change_set.decisions.iter().map(|item| item.path.as_str()));
+    change_set.decisions.retain(|decision| {
+        decision.operation_id.starts_with("comment:")
+            || is_typeset_revision_path(&decision.path, &stems)
+    });
+    change_set
+        .carried_paths
+        .retain(|path| is_typeset_revision_path(path, &stems));
+    if change_set.status == "pending" {
+        if change_set.audited_turn.is_some() {
+            audit::refresh_projection(root, &mut change_set)?;
+        } else {
+            let ledger = load_revision_ledger(root)?;
+            let stems = change_set_stems(&ledger, &change_set)?;
+            let operations = audit::review_operations(root, &ledger, &change_set)?;
+            change_set.decisions.retain(|decision| {
+                operations.iter().any(|operation| {
+                    operation.id == decision.operation_id
+                        && operation.path == decision.path
+                        && reviewable_change_operation(operation, &stems)
+                })
+            });
+            if change_set.decisions.is_empty() {
+                change_set.status = "ignored".to_string();
+            }
+        }
+    }
+    Ok(Some(change_set))
 }
 
 fn stored_change_sets(root: &Path) -> Result<Vec<TypesetChangeSet>, String> {
@@ -539,7 +561,7 @@ fn stored_change_sets(root: &Path) -> Result<Vec<TypesetChangeSet>, String> {
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
         .map(|entry| {
-            read_change_set(&entry.path())?
+            read_change_set(root, &entry.path())?
                 .ok_or_else(|| "Typeset change set disappeared while listing".to_string())
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -613,7 +635,10 @@ fn document_stems<'a>(paths: impl Iterator<Item = &'a str>) -> BTreeSet<String> 
     let mut stems = BTreeSet::new();
     for path in paths {
         let lowered = normalized_artifact_path(path);
-        if let Some(stem) = lowered.strip_suffix(".tex") {
+        if let Some(stem) = [".tex", ".ltx", ".latex"]
+            .iter()
+            .find_map(|suffix| lowered.strip_suffix(suffix))
+        {
             stems.insert(stem.to_string());
             continue;
         }
@@ -642,6 +667,16 @@ fn is_derived_artifact_path(path: &str, stems: &BTreeSet<String>) -> bool {
     })
 }
 
+fn is_typeset_revision_path(path: &str, stems: &BTreeSet<String>) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized
+        .rsplit('.')
+        .next()
+        .is_some_and(|extension| TYPESET_REVISION_EXTENSIONS.contains(&extension))
+        && !is_transient_revision_path(&normalized)
+        && !is_derived_artifact_path(&normalized, stems)
+}
+
 fn load_revision_ledger(root: &Path) -> Result<TypesetRevisionLedger, String> {
     let mut ledger: TypesetRevisionLedger =
         read_json(&revision_ledger_path(root))?.unwrap_or(TypesetRevisionLedger {
@@ -649,18 +684,19 @@ fn load_revision_ledger(root: &Path) -> Result<TypesetRevisionLedger, String> {
             head_revision_id: None,
             revisions: Vec::new(),
         });
-    // A ledger written before scratch files and build output were filtered still
-    // records them. Dropping them on load makes the repair retroactive: without
+    // Old ledgers can include unrelated files, scratch files and build output.
+    // Dropping them on load makes the repair retroactive: without
     // it, a revision holding a file that the live walk no longer reports can
     // never match the project, so its review stays unacceptable forever — and
     // every recorded artifact would surface as a phantom deletion.
     for revision in &mut ledger.revisions {
         let stems = document_stems(revision.files.iter().map(|file| file.path.as_str()));
-        let excluded =
-            |path: &str| is_transient_revision_path(path) || is_derived_artifact_path(path, &stems);
+        let excluded = |path: &str| !is_typeset_revision_path(path, &stems);
         revision.files.retain(|file| !excluded(&file.path));
         revision.operations.retain(|operation| {
-            !excluded(&operation.path) && !operation.previous_path.as_deref().is_some_and(&excluded)
+            operation.kind.starts_with("comment-")
+                || (!excluded(&operation.path)
+                    && !operation.previous_path.as_deref().is_some_and(&excluded))
         });
     }
     Ok(ledger)
@@ -694,6 +730,19 @@ fn is_revision_internal_directory(name: &str) -> bool {
 /// symmetric by construction: an excluded file is never snapshotted, never
 /// diffed and never deleted by a restore.
 fn project_revision_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let candidates = project_revision_candidates(root)?;
+    let stems = document_stems(candidates.iter().map(|(_, path)| path.as_str()));
+    Ok(candidates
+        .into_iter()
+        .filter(|(_, path)| is_typeset_revision_path(path, &stems))
+        .map(|(path, _)| path)
+        .collect())
+}
+
+/// Keep artifact names long enough to recognize PDFs built in output folders.
+/// The audit projection uses the same context even when a turn only changed
+/// the PDF, without editing its source or recording its auxiliary files.
+fn project_revision_candidates(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let mut files = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -722,15 +771,7 @@ fn project_revision_files(root: &Path) -> Result<Vec<PathBuf>, String> {
         .iter()
         .map(|path| revision_relative_path(root, path))
         .collect::<Result<Vec<_>, String>>()?;
-    let stems = document_stems(relative.iter().map(String::as_str));
-    let mut kept = files
-        .into_iter()
-        .zip(relative)
-        .filter(|(_, relative)| !is_derived_artifact_path(relative, &stems))
-        .map(|(path, _)| path)
-        .collect::<Vec<_>>();
-    kept.sort();
-    Ok(kept)
+    Ok(files.into_iter().zip(relative).collect())
 }
 
 fn store_revision_blob(root: &Path, bytes: &[u8]) -> Result<String, String> {
@@ -913,7 +954,7 @@ fn reviewable_change_operation(
     if operation.kind.starts_with("comment-") {
         return true;
     }
-    !is_derived_artifact_path(&operation.path, stems)
+    is_typeset_revision_path(&operation.path, stems)
 }
 
 /// The `.tex` stems a change set is judged against: the union of both sides, so
@@ -1658,7 +1699,7 @@ fn create_change_set_at(
         })?;
         let id = format!("changeset-{}", revision.id);
         let path = change_set_path(&root, &id)?;
-        if let Some(existing) = read_change_set(&path)? {
+        if let Some(existing) = read_change_set(&root, &path)? {
             return Ok(existing);
         }
         let actor = normalize_revision_text(input.actor, "external", 80);
@@ -1876,7 +1917,7 @@ pub async fn typeset_changeset_read_text(
     off_main_thread(move || {
         let _guard = lock_revision_state()?;
         let root = files::workspace_root()?;
-        let change_set = read_change_set(&change_set_path(&root, &id)?)?
+        let change_set = read_change_set(&root, &change_set_path(&root, &id)?)?
             .ok_or_else(|| "Typeset change set not found".to_string())?;
         let ledger = load_revision_ledger(&root)?;
         let operations = audit::review_operations(&root, &ledger, &change_set)?;
@@ -1929,7 +1970,7 @@ pub async fn typeset_changeset_stage_text(
         let root = files::workspace_root()?;
         let path = change_set_path(&root, &input.id)?;
         let mut change_set =
-            read_change_set(&path)?.ok_or_else(|| "Typeset change set not found".to_string())?;
+            read_change_set(&root, &path)?.ok_or_else(|| "Typeset change set not found".to_string())?;
         if change_set.status != "pending" {
             return Err("this Typeset change set has already been resolved".to_string());
         }
@@ -1986,260 +2027,267 @@ pub async fn typeset_changeset_resolve(
     off_main_thread(move || {
         let _guard = lock_revision_state()?;
         let root = files::workspace_root()?;
-        let path = change_set_path(&root, &input.id)?;
-        let mut change_set =
-            read_change_set(&path)?.ok_or_else(|| "Typeset change set not found".to_string())?;
-        if change_set.status != "pending" {
-            return Ok(change_set);
-        }
-        if change_set.audited_turn.is_some() {
-            return audit::resolve_at(&root, change_set, input.decisions);
-        }
-        let ledger = load_revision_ledger(&root)?;
-        let review_target = find_revision(&ledger, &change_set.revision_id)?.clone();
-        let base = find_revision(&ledger, &change_set.base_revision_id)?.clone();
-        let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
-            &base.files,
-            &review_target.files,
-            &base.comments,
-            &review_target.comments,
-        ))?;
-        let stems = change_stems(&base, &review_target);
-        let expected = operations
-            .iter()
-            .filter(|operation| reviewable_change_operation(operation, &stems))
-            .map(|operation| (operation.id.as_str(), operation))
-            .collect::<BTreeMap<_, _>>();
-        // A change set stored before build output was excluded still carries
-        // decisions for operations that are no longer reviewable. Dropping those
-        // keeps the "every reviewable operation has exactly one decision" invariant
-        // without leaving the change set permanently unresolvable.
-        let mut decisions = input.decisions;
-        decisions.retain(|decision| expected.contains_key(decision.operation_id.as_str()));
-        let mut seen = BTreeSet::new();
-        let invalid_decisions = decisions.len() != expected.len()
-            || decisions.iter().any(|decision| {
-                let Some(operation) = expected.get(decision.operation_id.as_str()) else {
-                    return true;
-                };
-                if !seen.insert(decision.operation_id.as_str()) || decision.path != operation.path {
-                    return true;
-                }
-                match decision.decision.as_str() {
-                    "pending" | "accept" | "reject" => false,
-                    "partial" => {
-                        !matches!(operation.kind.as_str(), "create" | "modify")
-                            || decision.resolved_hash.as_deref().is_none_or(|hash| {
-                                revision_blob_path(&root, hash).map_or(true, |path| !path.is_file())
-                            })
-                            || decision.resolved_bytes.is_none()
-                    }
-                    _ => true,
-                }
-            });
-        if invalid_decisions {
-            return Err("invalid Typeset change set decisions".to_string());
-        }
-        change_set.decisions = decisions;
-        change_set.updated_at_ms = now_ms();
-        if change_set
-            .decisions
-            .iter()
-            .any(|decision| decision.decision == "pending")
-        {
-            write_json(&path, &change_set)?;
-            return Ok(change_set);
-        }
-        let head_id = ledger
-            .head_revision_id
-            .as_deref()
-            .ok_or_else(|| "the project has no revision to rebase this ChangeSet onto".to_string())?;
-        if rebase_pending_change_set(&root, &ledger, &mut change_set, head_id)? {
-            if change_set.status != "pending"
-                || change_set
-                    .decisions
-                    .iter()
-                    .any(|decision| decision.decision == "pending")
-            {
-                write_json(&path, &change_set)?;
-                return Ok(change_set);
-            }
-        }
-        let target = find_revision(&ledger, &change_set.revision_id)?.clone();
-        let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
-            &base.files,
-            &target.files,
-            &base.comments,
-            &target.comments,
-        ))?;
-        // The watcher and ledger are asynchronous relative to another process. A
-        // matching ledger HEAD is not enough: verify the live project manifest so
-        // a just-arrived external write can never be overwritten by review.
-        let live_files = snapshot_project_files(&root)?;
-        let live_comments = snapshot_comments(&root)?;
-        if live_files != target.files || live_comments != target.comments {
-            let drift = capture_project_revision_at_unlocked(
-                &root,
-                None,
-                "review-drift".to_string(),
-                "external".to_string(),
-                "review-verify".to_string(),
-                Some(change_set.id.clone()),
-            )?;
-            let rebased_ledger = load_revision_ledger(&root)?;
-            rebase_pending_change_set(&root, &rebased_ledger, &mut change_set, &drift.id)?;
-            write_json(&path, &change_set)?;
-            return Ok(change_set);
-        }
-        if change_set
-            .decisions
-            .iter()
-            .all(|decision| decision.decision == "accept")
-        {
-            let result = capture_project_revision_at_unlocked(
-                &root,
-                Some("Review accepted".to_string()),
-                "changeset-review".to_string(),
-                "user".to_string(),
-                "review".to_string(),
-                Some(change_set.id.clone()),
-            )?;
-            change_set.status = "accepted".to_string();
-            change_set.resulting_revision_id = Some(result.id);
-            write_json(&path, &change_set)?;
-            return Ok(change_set);
-        }
-        let decision_by_operation = change_set
-            .decisions
-            .iter()
-            .map(|decision| (decision.operation_id.as_str(), decision))
-            .collect::<BTreeMap<_, _>>();
-        let base_files = revision_file_map(&base.files);
-        // Audited Chat operations are reviewed separately. Begin from the
-        // current target so resolving external changes cannot restore an old
-        // global baseline over excluded or unrelated paths.
-        let mut desired = revision_file_map(&target.files);
-        let target_files = revision_file_map(&target.files);
-        for operation in &operations {
-            if operation.kind.starts_with("comment-") {
-                continue;
-            }
-            let Some(decision) = decision_by_operation.get(operation.id.as_str()) else {
-                continue;
+        resolve_change_set_at(&root, input)
+    })
+    .await
+}
+
+fn resolve_change_set_at(
+    root: &Path,
+    input: TypesetChangeSetResolveInput,
+) -> Result<TypesetChangeSet, String> {
+    let path = change_set_path(&root, &input.id)?;
+    let mut change_set =
+        read_change_set(&root, &path)?.ok_or_else(|| "Typeset change set not found".to_string())?;
+    if change_set.status != "pending" {
+        return Ok(change_set);
+    }
+    if change_set.audited_turn.is_some() {
+        return audit::resolve_at(&root, change_set, input.decisions);
+    }
+    let ledger = load_revision_ledger(&root)?;
+    let review_target = find_revision(&ledger, &change_set.revision_id)?.clone();
+    let base = find_revision(&ledger, &change_set.base_revision_id)?.clone();
+    let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
+        &base.files,
+        &review_target.files,
+        &base.comments,
+        &review_target.comments,
+    ))?;
+    let stems = change_stems(&base, &review_target);
+    let expected = operations
+        .iter()
+        .filter(|operation| reviewable_change_operation(operation, &stems))
+        .map(|operation| (operation.id.as_str(), operation))
+        .collect::<BTreeMap<_, _>>();
+    // A change set stored before build output was excluded still carries
+    // decisions for operations that are no longer reviewable. Dropping those
+    // keeps the "every reviewable operation has exactly one decision" invariant
+    // without leaving the change set permanently unresolvable.
+    let mut decisions = input.decisions;
+    decisions.retain(|decision| expected.contains_key(decision.operation_id.as_str()));
+    let mut seen = BTreeSet::new();
+    let invalid_decisions = decisions.len() != expected.len()
+        || decisions.iter().any(|decision| {
+            let Some(operation) = expected.get(decision.operation_id.as_str()) else {
+                return true;
             };
+            if !seen.insert(decision.operation_id.as_str()) || decision.path != operation.path {
+                return true;
+            }
             match decision.decision.as_str() {
-                "reject" => {
-                    desired.remove(&operation.path);
-                    let original_path = operation.previous_path.as_deref().unwrap_or(&operation.path);
-                    if let Some(file) = base_files.get(original_path) {
-                        desired.insert(original_path.to_string(), file.clone());
-                    }
-                }
+                "pending" | "accept" | "reject" => false,
                 "partial" => {
-                    let Some(content_hash) = decision.resolved_hash.clone() else {
-                        return Err("partial Typeset decision has no resolved content".to_string());
-                    };
-                    desired.insert(
-                        operation.path.clone(),
-                        TypesetRevisionFile {
-                            path: operation.path.clone(),
-                            content_hash,
-                            bytes: decision.resolved_bytes.unwrap_or_default(),
-                        },
-                    );
+                    !matches!(operation.kind.as_str(), "create" | "modify")
+                        || decision.resolved_hash.as_deref().is_none_or(|hash| {
+                            revision_blob_path(&root, hash).map_or(true, |path| !path.is_file())
+                        })
+                        || decision.resolved_bytes.is_none()
                 }
-                "accept" => match operation.kind.as_str() {
-                    "create" | "modify" => {
-                        if let Some(file) = target_files.get(&operation.path) {
-                            desired.insert(operation.path.clone(), file.clone());
-                        }
-                    }
-                    "delete" => {
-                        desired.remove(&operation.path);
-                    }
-                    "move" => {
-                        if let Some(previous_path) = operation.previous_path.as_deref() {
-                            desired.remove(previous_path);
-                        }
-                        if let Some(file) = target_files.get(&operation.path) {
-                            desired.insert(operation.path.clone(), file.clone());
-                        }
-                    }
-                    _ => return Err("unsupported Typeset change set operation".to_string()),
-                },
-                _ => return Err("unresolved Typeset change set decision".to_string()),
+                _ => true,
             }
-        }
-        let mut desired_comments = revision_file_map(&base.comments);
-        let target_comments = revision_file_map(&target.comments);
-        for operation in operations
-            .iter()
-            .filter(|operation| operation.kind.starts_with("comment-"))
+        });
+    if invalid_decisions {
+        return Err("invalid Typeset change set decisions".to_string());
+    }
+    change_set.decisions = decisions;
+    change_set.updated_at_ms = now_ms();
+    if change_set
+        .decisions
+        .iter()
+        .any(|decision| decision.decision == "pending")
+    {
+        write_json(&path, &change_set)?;
+        return Ok(change_set);
+    }
+    let head_id = ledger
+        .head_revision_id
+        .as_deref()
+        .ok_or_else(|| "the project has no revision to rebase this ChangeSet onto".to_string())?;
+    if rebase_pending_change_set(&root, &ledger, &mut change_set, head_id)? {
+        if change_set.status != "pending"
+            || change_set
+                .decisions
+                .iter()
+                .any(|decision| decision.decision == "pending")
         {
-            let Some(decision) = decision_by_operation.get(operation.id.as_str()) else {
-                continue;
-            };
-            let kind = operation.kind.trim_start_matches("comment-");
-            match decision.decision.as_str() {
-                "reject" => continue,
-                "accept" => match kind {
-                    "create" | "modify" => {
-                        if let Some(file) = target_comments.get(&operation.path) {
-                            desired_comments.insert(operation.path.clone(), file.clone());
-                        }
-                    }
-                    "delete" => {
-                        desired_comments.remove(&operation.path);
-                    }
-                    "move" => {
-                        if let Some(previous_path) = operation.previous_path.as_deref() {
-                            desired_comments.remove(previous_path);
-                        }
-                        if let Some(file) = target_comments.get(&operation.path) {
-                            desired_comments.insert(operation.path.clone(), file.clone());
-                        }
-                    }
-                    _ => return Err("unsupported Typeset comment change operation".to_string()),
-                },
-                _ => return Err("unresolved Typeset comment change decision".to_string()),
-            }
+            write_json(&path, &change_set)?;
+            return Ok(change_set);
         }
-        let desired_revision = TypesetProjectRevision {
-            files: desired.values().cloned().collect(),
-            comments: desired_comments.values().cloned().collect(),
-            ..target.clone()
-        };
-        if let Err(apply_error) = apply_project_revision_manifest(&root, &desired_revision) {
-            let rollback = apply_project_revision_manifest(&root, &target);
-            return Err(match rollback {
-                Ok(()) => format!("could not apply Typeset ChangeSet; project was rolled back: {apply_error}"),
-                Err(rollback_error) => format!(
-                    "could not apply Typeset ChangeSet ({apply_error}); rollback also failed ({rollback_error})"
-                ),
-            });
-        }
-        let result = capture_project_revision_at_unlocked(
+    }
+    let target = find_revision(&ledger, &change_set.revision_id)?.clone();
+    let operations = audit::unattributed_operations(&root, revision_operations_with_comments(
+        &base.files,
+        &target.files,
+        &base.comments,
+        &target.comments,
+    ))?;
+    // The watcher and ledger are asynchronous relative to another process. A
+    // matching ledger HEAD is not enough: verify the live project manifest so
+    // a just-arrived external write can never be overwritten by review.
+    let live_files = snapshot_project_files(&root)?;
+    let live_comments = snapshot_comments(&root)?;
+    if live_files != target.files || live_comments != target.comments {
+        let drift = capture_project_revision_at_unlocked(
             &root,
             None,
+            "review-drift".to_string(),
+            "external".to_string(),
+            "review-verify".to_string(),
+            Some(change_set.id.clone()),
+        )?;
+        let rebased_ledger = load_revision_ledger(&root)?;
+        rebase_pending_change_set(&root, &rebased_ledger, &mut change_set, &drift.id)?;
+        write_json(&path, &change_set)?;
+        return Ok(change_set);
+    }
+    if change_set
+        .decisions
+        .iter()
+        .all(|decision| decision.decision == "accept")
+    {
+        let result = capture_project_revision_at_unlocked(
+            &root,
+            Some("Review accepted".to_string()),
             "changeset-review".to_string(),
             "user".to_string(),
             "review".to_string(),
             Some(change_set.id.clone()),
         )?;
-        change_set.status = if change_set
-            .decisions
-            .iter()
-            .all(|decision| decision.decision == "reject")
-        {
-            "rejected".to_string()
-        } else {
-            "partially-accepted".to_string()
-        };
+        change_set.status = "accepted".to_string();
         change_set.resulting_revision_id = Some(result.id);
         write_json(&path, &change_set)?;
-        Ok(change_set)
-    })
-    .await
+        return Ok(change_set);
+    }
+    let decision_by_operation = change_set
+        .decisions
+        .iter()
+        .map(|decision| (decision.operation_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    let base_files = revision_file_map(&base.files);
+    // Audited Chat operations are reviewed separately. Begin from the
+    // current target so resolving external changes cannot restore an old
+    // global baseline over excluded or unrelated paths.
+    let mut desired = revision_file_map(&target.files);
+    let target_files = revision_file_map(&target.files);
+    for operation in &operations {
+        if operation.kind.starts_with("comment-") {
+            continue;
+        }
+        let Some(decision) = decision_by_operation.get(operation.id.as_str()) else {
+            continue;
+        };
+        match decision.decision.as_str() {
+            "reject" => {
+                desired.remove(&operation.path);
+                let original_path = operation.previous_path.as_deref().unwrap_or(&operation.path);
+                if let Some(file) = base_files.get(original_path) {
+                    desired.insert(original_path.to_string(), file.clone());
+                }
+            }
+            "partial" => {
+                let Some(content_hash) = decision.resolved_hash.clone() else {
+                    return Err("partial Typeset decision has no resolved content".to_string());
+                };
+                desired.insert(
+                    operation.path.clone(),
+                    TypesetRevisionFile {
+                        path: operation.path.clone(),
+                        content_hash,
+                        bytes: decision.resolved_bytes.unwrap_or_default(),
+                    },
+                );
+            }
+            "accept" => match operation.kind.as_str() {
+                "create" | "modify" => {
+                    if let Some(file) = target_files.get(&operation.path) {
+                        desired.insert(operation.path.clone(), file.clone());
+                    }
+                }
+                "delete" => {
+                    desired.remove(&operation.path);
+                }
+                "move" => {
+                    if let Some(previous_path) = operation.previous_path.as_deref() {
+                        desired.remove(previous_path);
+                    }
+                    if let Some(file) = target_files.get(&operation.path) {
+                        desired.insert(operation.path.clone(), file.clone());
+                    }
+                }
+                _ => return Err("unsupported Typeset change set operation".to_string()),
+            },
+            _ => return Err("unresolved Typeset change set decision".to_string()),
+        }
+    }
+    let mut desired_comments = revision_file_map(&base.comments);
+    let target_comments = revision_file_map(&target.comments);
+    for operation in operations
+        .iter()
+        .filter(|operation| operation.kind.starts_with("comment-"))
+    {
+        let Some(decision) = decision_by_operation.get(operation.id.as_str()) else {
+            continue;
+        };
+        let kind = operation.kind.trim_start_matches("comment-");
+        match decision.decision.as_str() {
+            "reject" => continue,
+            "accept" => match kind {
+                "create" | "modify" => {
+                    if let Some(file) = target_comments.get(&operation.path) {
+                        desired_comments.insert(operation.path.clone(), file.clone());
+                    }
+                }
+                "delete" => {
+                    desired_comments.remove(&operation.path);
+                }
+                "move" => {
+                    if let Some(previous_path) = operation.previous_path.as_deref() {
+                        desired_comments.remove(previous_path);
+                    }
+                    if let Some(file) = target_comments.get(&operation.path) {
+                        desired_comments.insert(operation.path.clone(), file.clone());
+                    }
+                }
+                _ => return Err("unsupported Typeset comment change operation".to_string()),
+            },
+            _ => return Err("unresolved Typeset comment change decision".to_string()),
+        }
+    }
+    let desired_revision = TypesetProjectRevision {
+        files: desired.values().cloned().collect(),
+        comments: desired_comments.values().cloned().collect(),
+        ..target.clone()
+    };
+    if let Err(apply_error) = apply_project_revision_manifest(&root, &desired_revision) {
+        let rollback = apply_project_revision_manifest(&root, &target);
+        return Err(match rollback {
+            Ok(()) => format!("could not apply Typeset ChangeSet; project was rolled back: {apply_error}"),
+            Err(rollback_error) => format!(
+                "could not apply Typeset ChangeSet ({apply_error}); rollback also failed ({rollback_error})"
+            ),
+        });
+    }
+    let result = capture_project_revision_at_unlocked(
+        &root,
+        None,
+        "changeset-review".to_string(),
+        "user".to_string(),
+        "review".to_string(),
+        Some(change_set.id.clone()),
+    )?;
+    change_set.status = if change_set
+        .decisions
+        .iter()
+        .all(|decision| decision.decision == "reject")
+    {
+        "rejected".to_string()
+    } else {
+        "partially-accepted".to_string()
+    };
+    change_set.resulting_revision_id = Some(result.id);
+    write_json(&path, &change_set)?;
+    Ok(change_set)
 }
 
 #[tauri::command]
@@ -2609,6 +2657,10 @@ pub async fn typeset_project_replace(
     .await
     .map_err(|error| error.to_string())?
 }
+
+#[cfg(test)]
+#[path = "tests/typeset_scope.rs"]
+mod scope_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3198,7 +3250,7 @@ mod tests {
             ("main.pdf", "%PDF-1.7 compiled"),
             ("main.aux", "\\relax"),
             ("main.synctex(busy)", "partial"),
-            ("notes.md", "reviewable prose"),
+            ("notes.md", "unrelated notes"),
         ] {
             fs::write(project.join(name), body).expect("write");
         }
@@ -3212,7 +3264,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             paths,
-            vec!["Final/main.tex", "Final/notes.md", "figures/plot.pdf"]
+            vec!["Final/main.tex", "figures/plot.pdf"]
         );
 
         // `apply_project_revision_manifest` deletes whatever the manifest does
@@ -3234,6 +3286,10 @@ mod tests {
         apply_project_revision_manifest(root.path(), &revision).expect("restore");
         assert!(project.join("main.pdf").is_file());
         assert!(project.join("main.aux").is_file());
+        assert_eq!(
+            fs::read_to_string(project.join("notes.md")).unwrap(),
+            "unrelated notes"
+        );
         assert!(root.path().join("figures/plot.pdf").is_file());
     }
 

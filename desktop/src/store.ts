@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { setTheme as setNativeAppTheme } from "@tauri-apps/api/app";
 import type { ChatAttachment, ChatTurn, DesktopProject } from "./types";
 import {
+  configGet,
   configSet,
   isTauri,
   newapiBootstrap,
@@ -22,6 +23,15 @@ import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFac
 import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
 import { isMacOS } from "./platform";
 import { MANAGED_NEWAPI_BASE_URL, approvedManagedNewApiBaseUrl } from "./managedNewApi";
+import {
+  applyUiTypography,
+  currentRecommendedUiFontSize,
+  normalizeUiFontSize,
+  parseUiTypographyPreference,
+  readUiTypographyPreference,
+  saveUiTypographyPreference,
+  type UiFontMode,
+} from "./uiTypography";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -332,6 +342,15 @@ interface AppState {
   themePreferenceSet: boolean;
   setTheme: (theme: Theme) => void;
 
+  uiFontMode: UiFontMode;
+  /** Remember the user's custom size when switching back to automatic mode. */
+  uiFontSize: number;
+  uiRecommendedFontSize: number;
+  setUiFontMode: (mode: UiFontMode) => void;
+  setUiFontSize: (fontSize: number) => void;
+  refreshUiTypography: () => void;
+  syncUiTypography: (storedValue: string | null) => void;
+
   language: Language;
   /** False only on a fresh profile that still needs the first-run choice. */
   languagePreferenceSet: boolean;
@@ -416,10 +435,13 @@ const storedThemePreference = readStoredThemePreference();
 const initialTheme = requestedTheme() ?? storedThemePreference ?? "dark";
 const storedLanguage = readStoredLanguage();
 const initialLanguage = storedLanguage ?? "en";
+const initialTypography = readUiTypographyPreference();
+const initialRecommendedFontSize = currentRecommendedUiFontSize();
 // A default preview must not count as a first-run choice. The preference is
 // written only after the user explicitly selects a theme.
 reflectPlatform();
 applyTheme(initialTheme, false);
+applyUiTypography(initialTypography, initialRecommendedFontSize);
 if (storedLanguage) {
   // Migrate the legacy key while preserving an explicit prior choice.
   applyLanguage(storedLanguage);
@@ -435,7 +457,9 @@ export const useStore = create<AppState>((set, get) => ({
   login: async (server, username, password, twoFactorCode) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
     if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
-    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password, twoFactorCode);
+    const config = await configGet();
+    const model = config.executorModel?.trim() || DEFAULT_MODEL;
+    const result = await newapiLogin(trimmedServer, model, username, password, twoFactorCode);
     await persistManagedAuthResult(result, get().language);
     markAuthed(trimmedServer);
     set({ authed: true, authServer: trimmedServer });
@@ -499,6 +523,36 @@ export const useStore = create<AppState>((set, get) => ({
   setTheme: (theme) => {
     applyTheme(theme);
     set({ theme, themePreferenceSet: true });
+  },
+
+  uiFontMode: initialTypography.mode,
+  uiFontSize: initialTypography.fontSize,
+  uiRecommendedFontSize: initialRecommendedFontSize,
+  setUiFontMode: (mode) => {
+    const preference = { mode, fontSize: get().uiFontSize };
+    const recommended = currentRecommendedUiFontSize();
+    applyUiTypography(preference, recommended);
+    saveUiTypographyPreference(preference);
+    set({ uiFontMode: mode, uiRecommendedFontSize: recommended });
+  },
+  setUiFontSize: (fontSize) => {
+    const preference = { mode: "manual" as const, fontSize: normalizeUiFontSize(fontSize) };
+    const recommended = currentRecommendedUiFontSize();
+    applyUiTypography(preference, recommended);
+    saveUiTypographyPreference(preference);
+    set({ uiFontMode: "manual", uiFontSize: preference.fontSize, uiRecommendedFontSize: recommended });
+  },
+  refreshUiTypography: () => {
+    const state = get();
+    const recommended = currentRecommendedUiFontSize();
+    applyUiTypography({ mode: state.uiFontMode, fontSize: state.uiFontSize }, recommended);
+    if (recommended !== state.uiRecommendedFontSize) set({ uiRecommendedFontSize: recommended });
+  },
+  syncUiTypography: (storedValue) => {
+    const preference = parseUiTypographyPreference(storedValue);
+    const recommended = currentRecommendedUiFontSize();
+    applyUiTypography(preference, recommended);
+    set({ uiFontMode: preference.mode, uiFontSize: preference.fontSize, uiRecommendedFontSize: recommended });
   },
 
   language: initialLanguage,

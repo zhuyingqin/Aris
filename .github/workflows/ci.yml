@@ -182,5 +182,8 @@ jobs:
         run: |
           cargo check --manifest-path desktop/src-tauri/Cargo.toml --locked
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib platform::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib watcher::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib projects::tests -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib state::tests -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib pinned_runtime_matches_the_offline_build_script -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib latex_toolchain_prompt -- --test-threads=1

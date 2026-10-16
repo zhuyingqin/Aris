@@ -19,6 +19,7 @@ import type {
   DesktopCommandSpec,
 } from "../types";
 import { makeId, textFromTurn } from "./model";
+import { noteTurnActivity } from "./modelWait";
 
 export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
@@ -349,7 +350,10 @@ export function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn 
 }
 
 export function assistantTurn(): ChatTurn {
-  return { id: makeId("turn"), role: "assistant", blocks: [], streaming: true };
+  const blocks: ChatBlock[] = [];
+  // The model-wait clock starts at send time, not when the turn is first drawn.
+  noteTurnActivity(blocks);
+  return { id: makeId("turn"), role: "assistant", blocks, streaming: true };
 }
 
 export function assistantTextTurn(text: string): ChatTurn {

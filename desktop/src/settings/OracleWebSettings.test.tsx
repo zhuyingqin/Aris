@@ -35,7 +35,7 @@ const baseStatus = (): OracleWebStatusView => ({
   runtime: {
     status: "ready",
     source: "managed",
-    version: "0.18.0",
+    version: "0.21.3",
     commandPath: "C:/SomniQ/oracle-mcp.js",
     nodePath: "C:/SomniQ/node.exe",
     installSupported: true,
@@ -139,7 +139,7 @@ describe("OracleWebSettings", () => {
     vi.mocked(oracleWebStatus).mockResolvedValue(statusWithAccount());
     render(<OracleWebSettings language="cn" />);
 
-    fireEvent.change(await screen.findByRole("combobox", { name: "FPT · 默认模型" }), {
+    fireEvent.change(await screen.findByRole("combobox", { name: "FPT · 咨询/审稿模型" }), {
       target: { value: "gpt-5.6" },
     });
 
@@ -185,7 +185,7 @@ describe("OracleWebSettings", () => {
         commandPath: "C:/Users/test/AppData/Roaming/npm/oracle-mcp.cmd",
         nodePath: null,
         installSupported: true,
-        message: "Detected Oracle MCP 0.9.0, but SomniQ requires 0.18.0.",
+        message: "Detected Oracle MCP 0.9.0, but SomniQ requires 0.21.3.",
       },
     });
     render(<OracleWebSettings language="cn" />);

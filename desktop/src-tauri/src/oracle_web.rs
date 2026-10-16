@@ -15,7 +15,7 @@ use crate::state;
 
 const STORE_VERSION: u32 = 1;
 const CHATGPT_URL: &str = "https://chatgpt.com/";
-const ORACLE_NPM_VERSION: &str = "0.18.0";
+const ORACLE_NPM_VERSION: &str = "0.21.3";
 const NODE_RELEASE_BASE_URL: &str = "https://nodejs.org/dist/latest-v24.x";
 const MAX_NODE_ARCHIVE_BYTES: u64 = 120 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -612,25 +612,11 @@ async fn run_generate_image(
     let account = stored_account(&root, &input.account_id)?;
     ensure_account_browser_ready(&root, &account)?;
     let files = resolve_workspace_files(&input.files)?;
-    let has_files = !files.is_empty();
-    let model =
-        validate_optional_model(input.model)?.or(validate_optional_model(account.model.clone())?);
+    // Image tasks keep the current webpage model unless explicitly overridden.
+    // The account default is used for consultation and independent review.
+    let model = validate_optional_model(input.model)?;
     let aspect_ratio = validate_aspect_ratio(input.aspect_ratio)?;
-
-    let mut arguments = serde_json::json!({
-        "prompt": prompt,
-        "files": files,
-        "browserModelStrategy": browser_model_strategy(model.as_deref()),
-        "browserAttachments": if has_files { "always" } else { "auto" },
-        "browserKeepBrowser": false,
-        "browserArchive": "auto"
-    });
-    if let Some(model) = model {
-        arguments["model"] = serde_json::Value::String(model);
-    }
-    if let Some(aspect_ratio) = aspect_ratio {
-        arguments["aspectRatio"] = serde_json::Value::String(aspect_ratio);
-    }
+    let arguments = image_tool_arguments(prompt, files, model, aspect_ratio);
     let result =
         call_oracle_mcp_tool(&root, &account, "chatgpt_image", arguments, cancelled).await?;
     mark_account_login_verified(&root, &account.id)?;
@@ -651,6 +637,30 @@ async fn run_generate_image(
             .unwrap_or_else(|| mcp_text_content(&result.content)),
         images,
     })
+}
+
+fn image_tool_arguments(
+    prompt: String,
+    files: Vec<String>,
+    model: Option<String>,
+    aspect_ratio: Option<String>,
+) -> serde_json::Value {
+    let has_files = !files.is_empty();
+    let mut arguments = serde_json::json!({
+        "prompt": prompt,
+        "files": files,
+        "browserModelStrategy": browser_model_strategy(model.as_deref()),
+        "browserAttachments": if has_files { "always" } else { "auto" },
+        "browserKeepBrowser": false,
+        "browserArchive": "auto"
+    });
+    if let Some(model) = model {
+        arguments["model"] = serde_json::Value::String(model);
+    }
+    if let Some(aspect_ratio) = aspect_ratio {
+        arguments["aspectRatio"] = serde_json::Value::String(aspect_ratio);
+    }
+    arguments
 }
 
 fn oracle_job_lock() -> &'static tokio::sync::Mutex<()> {
@@ -3096,19 +3106,24 @@ mod tests {
             .join("package.json");
         fs::create_dir_all(package_path.parent().expect("package parent")).expect("package parent");
         fs::write(&shim, b"oracle shim").expect("oracle shim");
-        fs::write(
-            &package_path,
-            br#"{"name":"@steipete/oracle","version":"0.9.0"}"#,
-        )
-        .expect("old package fixture");
+        for outdated in ["0.9.0", "0.18.0"] {
+            fs::write(
+                &package_path,
+                serde_json::to_vec(&serde_json::json!({
+                    "name": "@steipete/oracle", "version": outdated
+                }))
+                .expect("old package bytes"),
+            )
+            .expect("old package fixture");
 
-        let incompatible = runtime_view(OracleCommand::System(shim.clone()), "system");
-        assert_eq!(incompatible.status, "incompatible");
-        assert_eq!(incompatible.version.as_deref(), Some("0.9.0"));
-        assert!(incompatible.message.contains(ORACLE_NPM_VERSION));
-        assert!(!oracle_command_is_compatible(&OracleCommand::System(
-            shim.clone()
-        )));
+            let incompatible = runtime_view(OracleCommand::System(shim.clone()), "system");
+            assert_eq!(incompatible.status, "incompatible");
+            assert_eq!(incompatible.version.as_deref(), Some(outdated));
+            assert!(incompatible.message.contains(ORACLE_NPM_VERSION));
+            assert!(!oracle_command_is_compatible(&OracleCommand::System(
+                shim.clone()
+            )));
+        }
 
         fs::write(
             package_path,
@@ -3150,6 +3165,32 @@ mod tests {
     fn browser_model_picker_is_skipped_only_when_no_model_was_requested() {
         assert_eq!(browser_model_strategy(None), "current");
         assert_eq!(browser_model_strategy(Some("gpt-5.5-pro")), "select");
+    }
+
+    #[test]
+    fn image_requests_keep_the_current_model_without_an_explicit_model() {
+        let arguments = image_tool_arguments("Generate a diagram".into(), vec![], None, None);
+        assert_eq!(arguments["browserModelStrategy"], "current");
+        assert!(arguments.get("model").is_none());
+        assert_eq!(arguments["browserAttachments"], "auto");
+    }
+
+    #[test]
+    fn image_requests_keep_explicit_models_and_reference_uploads() {
+        let arguments = image_tool_arguments(
+            "Edit this reference".into(),
+            vec!["C:/project/reference.png".into()],
+            Some("gpt-6".into()),
+            Some("16:9".into()),
+        );
+        assert_eq!(arguments["model"], "gpt-6");
+        assert_eq!(arguments["browserModelStrategy"], "select");
+        assert_eq!(arguments["browserAttachments"], "always");
+        assert_eq!(
+            arguments["files"],
+            serde_json::json!(["C:/project/reference.png"])
+        );
+        assert_eq!(arguments["aspectRatio"], "16:9");
     }
 
     #[test]

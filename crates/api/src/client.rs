@@ -23,7 +23,6 @@ const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_RETRIES: u32 = 2;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 pub const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
@@ -99,14 +98,17 @@ fn routing_session_header_value(session_id: &str) -> reqwest::header::HeaderValu
 }
 
 fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        // `read_timeout` is idle-between-reads rather than a whole-request
-        // deadline. LLM streams may legitimately run longer than two minutes;
-        // an overall ClientBuilder::timeout would abort a healthy stream.
-        .read_timeout(HTTP_RESPONSE_HEADER_TIMEOUT)
         .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
-        .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+        .tcp_keepalive(HTTP_TCP_KEEPALIVE);
+    // Idle-between-reads backstop rather than a whole-request deadline: LLM
+    // streams legitimately run for many minutes, and an overall
+    // ClientBuilder::timeout would abort a healthy stream.
+    if let Some(read_timeout) = StreamWaitPolicy::from_env().read_timeout_backstop() {
+        builder = builder.read_timeout(read_timeout);
+    }
+    builder
         .build()
         .expect("static Anthropic HTTP client configuration must be valid")
 }
@@ -114,14 +116,17 @@ fn build_http_client() -> reqwest::Client {
 async fn send_with_response_header_timeout(
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, ApiError> {
-    match tokio::time::timeout(HTTP_RESPONSE_HEADER_TIMEOUT, request.send()).await {
+    let Some(header_timeout) = resolve_response_header_timeout() else {
+        return request.send().await.map_err(ApiError::from);
+    };
+    match tokio::time::timeout(header_timeout, request.send()).await {
         Ok(result) => result.map_err(ApiError::from),
         Err(_) => Err(ApiError::Api {
             status: reqwest::StatusCode::REQUEST_TIMEOUT,
             error_type: Some("response_header_timeout".to_string()),
             message: Some(format!(
                 "upstream returned no response headers within {} seconds",
-                HTTP_RESPONSE_HEADER_TIMEOUT.as_secs()
+                header_timeout.as_secs()
             )),
             body: "Anthropic response-header timeout".to_string(),
             retryable: true,
@@ -361,7 +366,7 @@ impl AnthropicClient {
             stream: false,
             ..request.clone()
         };
-        let response = self.send_with_retry(&request).await?;
+        let response = self.send_with_retry(&request, &mut 0).await?;
         let request_id = request_id_from_headers(response.headers());
         let mut response = response
             .json::<MessageResponse>()
@@ -378,7 +383,10 @@ impl AnthropicClient {
         request: &MessageRequest,
     ) -> Result<MessageStream, ApiError> {
         let streaming_request = request.clone().with_streaming();
-        let response = self.send_with_retry(&streaming_request).await?;
+        let mut timeout_resends = 0;
+        let response = self
+            .send_with_retry(&streaming_request, &mut timeout_resends)
+            .await?;
         Ok(MessageStream {
             inner: self.clone(),
             request: streaming_request,
@@ -391,6 +399,7 @@ impl AnthropicClient {
             stream_retries_remaining: read_stream_retry_budget(),
             observed_terminal: false,
             idle_timeout: resolve_stream_idle_timeout(),
+            timeout_resends,
             done: false,
         })
     }
@@ -433,9 +442,13 @@ impl AnthropicClient {
             .map_err(ApiError::from)
     }
 
+    /// `timeout_resends` is shared by every send of one logical request
+    /// (including stream restarts) so post-send timeouts are re-sent at most
+    /// [`MAX_TIMEOUT_RESENDS`] times in total.
     async fn send_with_retry(
         &self,
         request: &MessageRequest,
+        timeout_resends: &mut u32,
     ) -> Result<reqwest::Response, ApiError> {
         let mut attempts = 0;
         let mut last_error: Option<ApiError>;
@@ -458,7 +471,10 @@ impl AnthropicClient {
                     let response_trace = response_trace_value(response.headers());
                     match expect_success(response).await {
                         Ok(response) => return Ok(response),
-                        Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => {
+                        Err(error) if self.may_resend(&error, attempts, *timeout_resends) => {
+                            if error.is_post_send_timeout() {
+                                *timeout_resends += 1;
+                            }
                             self.record_trace(
                                 "llm.retry",
                                 json!({
@@ -477,7 +493,10 @@ impl AnthropicClient {
                         Err(error) => return Err(error),
                     }
                 }
-                Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => {
+                Err(error) if self.may_resend(&error, attempts, *timeout_resends) => {
+                    if error.is_post_send_timeout() {
+                        *timeout_resends += 1;
+                    }
                     self.record_trace(
                         "llm.retry",
                         json!({
@@ -506,6 +525,12 @@ impl AnthropicClient {
             attempts,
             last_error: Box::new(last_error.expect("retry loop must capture an error")),
         })
+    }
+
+    fn may_resend(&self, error: &ApiError, attempts: u32, timeout_resends: u32) -> bool {
+        error.is_retryable()
+            && attempts <= self.max_retries + 1
+            && !(error.is_post_send_timeout() && timeout_resends >= MAX_TIMEOUT_RESENDS)
     }
 
     async fn send_raw_request(
@@ -829,8 +854,10 @@ fn read_stream_retry_budget() -> u8 {
 const STREAM_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Default chunk-idle timeout when `ARIS_STREAM_IDLE_TIMEOUT_SECS` is unset
-/// or unparseable: 120s.
-const STREAM_IDLE_TIMEOUT_DEFAULT_SECS: i64 = 120;
+/// or unparseable: 300s. 120s cut healthy xhigh/max reasoning streams whose
+/// gateway stays silent while the model thinks (wire traces showed >120s
+/// gaps right after `response.created`).
+const STREAM_IDLE_TIMEOUT_DEFAULT_SECS: i64 = 300;
 /// Lower clamp for the chunk-idle timeout (10s). Smaller values would
 /// race normal long-thinking turns.
 const STREAM_IDLE_TIMEOUT_MIN_SECS: i64 = 10;
@@ -841,7 +868,7 @@ const STREAM_IDLE_TIMEOUT_MAX_SECS: i64 = 1800;
 /// v0.4.14 C11 — pure helper for parsing the chunk-idle timeout string.
 /// Returns `None` when the parsed value is `<= 0` (caller treats as
 /// "indefinite chunk wait"), otherwise clamps into `[10, 1800]` seconds.
-/// Unparseable / missing / blank → default 120s. Pure so it's testable
+/// Unparseable / missing / blank → default 300s. Pure so it's testable
 /// without `std::env::set_var` racing the cargo test harness.
 #[must_use]
 pub(crate) fn parse_stream_idle_timeout_secs(raw: Option<&str>) -> Option<Duration> {
@@ -858,7 +885,7 @@ pub(crate) fn parse_stream_idle_timeout_secs(raw: Option<&str>) -> Option<Durati
 }
 
 /// Resolve the chunk-idle timeout for streaming reads from the
-/// `ARIS_STREAM_IDLE_TIMEOUT_SECS` env var. Default 120s, clamp
+/// `ARIS_STREAM_IDLE_TIMEOUT_SECS` env var. Default 300s, clamp
 /// `[10, 1800]`, `0` / negative disables. Returning `None` means
 /// "do not wrap chunk().await in tokio::time::timeout" — chunks may
 /// block indefinitely if the upstream proxy stops sending keepalives.
@@ -873,6 +900,91 @@ pub fn resolve_stream_idle_timeout() -> Option<Duration> {
             .ok()
             .as_deref(),
     )
+}
+
+/// Default wait for response headers when `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`
+/// is unset or unparseable: 600s. Relay gateway chains (New API → Sub2API →
+/// upstream) hold the HTTP headers until the model's first event, so for xhigh/max
+/// reasoning "waiting for headers" is time-to-first-output, which measured
+/// 143–166s in production. The former 120s cap abandoned those requests while
+/// the gateway kept serving (and billing) them, then re-sent the same body.
+const RESPONSE_HEADER_TIMEOUT_DEFAULT_SECS: i64 = 600;
+const RESPONSE_HEADER_TIMEOUT_MIN_SECS: i64 = 30;
+const RESPONSE_HEADER_TIMEOUT_MAX_SECS: i64 = 3600;
+
+/// Slack added on top of the explicit waits for reqwest's own `read_timeout`,
+/// so the traced, cancellable timeouts always fire first.
+const HTTP_READ_TIMEOUT_BACKSTOP_SLACK: Duration = Duration::from_secs(30);
+
+/// How many times one model request may be re-sent after a timeout that
+/// happened *after* the gateway accepted it (response-header wait, stream
+/// idle, mid-body read timeout). Such a request is usually still running —
+/// and billed — upstream, and a slow model is not faster on a second try, so
+/// resends are capped across all phases of one request. Connect failures,
+/// 429 and 5xx keep their own retry budgets: those never reached the model.
+pub const MAX_TIMEOUT_RESENDS: u32 = 1;
+
+/// Pure parser for `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`. `<= 0` disables the
+/// header wait limit, otherwise clamps into `[30, 3600]` seconds.
+/// Unparseable / missing / blank → default 600s.
+#[must_use]
+pub(crate) fn parse_response_header_timeout_secs(raw: Option<&str>) -> Option<Duration> {
+    let secs = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(RESPONSE_HEADER_TIMEOUT_DEFAULT_SECS);
+    if secs <= 0 {
+        return None;
+    }
+    let clamped = secs.clamp(
+        RESPONSE_HEADER_TIMEOUT_MIN_SECS,
+        RESPONSE_HEADER_TIMEOUT_MAX_SECS,
+    ) as u64;
+    Some(Duration::from_secs(clamped))
+}
+
+/// Resolve the response-header wait from `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`.
+/// Default 600s, clamp `[30, 3600]`, `0` / negative disables.
+#[must_use]
+pub fn resolve_response_header_timeout() -> Option<Duration> {
+    parse_response_header_timeout_secs(
+        std::env::var("ARIS_RESPONSE_HEADER_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// How long an LLM client waits on a gateway before giving up, shared by the
+/// Anthropic and OpenAI-compatible clients so the two cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamWaitPolicy {
+    /// From sending the request until response headers arrive.
+    pub response_header_timeout: Option<Duration>,
+    /// Silence between body chunks once the response has started.
+    pub stream_idle_timeout: Option<Duration>,
+}
+
+impl StreamWaitPolicy {
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            response_header_timeout: resolve_response_header_timeout(),
+            stream_idle_timeout: resolve_stream_idle_timeout(),
+        }
+    }
+
+    /// reqwest `read_timeout` to configure on the HTTP client. It covers reads
+    /// the explicit waits do not wrap (error bodies, non-stream bodies), and
+    /// must never fire before them: reqwest's bare "operation timed out" was
+    /// what cut every slow request at exactly 120s. `None` when either wait is
+    /// disabled, so opting out of a limit actually removes it.
+    #[must_use]
+    pub fn read_timeout_backstop(&self) -> Option<Duration> {
+        let header = self.response_header_timeout?;
+        let idle = self.stream_idle_timeout?;
+        Some(header.max(idle) + HTTP_READ_TIMEOUT_BACKSTOP_SLACK)
+    }
 }
 
 /// Whether a reqwest::Error represents a transient stream-body failure
@@ -1016,6 +1128,9 @@ pub struct MessageStream {
     /// On elapse the stream goes through the existing mid-body abort
     /// retry path (same gates as a transient reqwest::Error).
     idle_timeout: Option<Duration>,
+    /// Post-send timeout resends already spent on this request, shared with
+    /// `send_with_retry`; capped by [`MAX_TIMEOUT_RESENDS`].
+    timeout_resends: u32,
     done: bool,
 }
 
@@ -1208,9 +1323,12 @@ impl MessageStream {
                 Some(dur) => match tokio::time::timeout(dur, chunk_future).await {
                     Ok(inner) => inner,
                     Err(_elapsed) => {
-                        if !self.has_emitted_meaningful_content && self.stream_retries_remaining > 0
+                        if !self.has_emitted_meaningful_content
+                            && self.stream_retries_remaining > 0
+                            && self.timeout_resends < MAX_TIMEOUT_RESENDS
                         {
                             self.stream_retries_remaining -= 1;
+                            self.timeout_resends += 1;
                             eprintln!(
                                 "stream restart (idle timeout {}s, {} attempt(s) left)",
                                 dur.as_secs(),
@@ -1256,11 +1374,16 @@ impl MessageStream {
                     // `events_emitted`, so a stream that only sent
                     // `MessageStart` before aborting is still safe
                     // to restart.
+                    let timed_out = error.is_timeout();
                     if !self.has_emitted_meaningful_content
                         && self.stream_retries_remaining > 0
                         && stream_chunk_error_is_retryable(&error)
+                        && !(timed_out && self.timeout_resends >= MAX_TIMEOUT_RESENDS)
                     {
                         self.stream_retries_remaining -= 1;
+                        if timed_out {
+                            self.timeout_resends += 1;
+                        }
                         eprintln!(
                             "stream restart (body abort: {}, {} attempt(s) left)",
                             error, self.stream_retries_remaining
@@ -1283,7 +1406,10 @@ impl MessageStream {
     /// died before any event reached the caller.
     async fn try_refresh_stream(&mut self) -> Result<(), ApiError> {
         tokio::time::sleep(STREAM_RETRY_BACKOFF).await;
-        let response = self.inner.send_with_retry(&self.request).await?;
+        let response = self
+            .inner
+            .send_with_retry(&self.request, &mut self.timeout_resends)
+            .await?;
         self.request_id = request_id_from_headers(response.headers());
         self.response = response;
         self.parser = SseParser::new();

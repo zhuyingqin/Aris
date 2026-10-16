@@ -8,6 +8,7 @@ import type {
   DesktopProject,
 } from "../types";
 import type { ChatSession } from "./types";
+import { noteTurnActivity } from "./modelWait";
 
 export const SESSIONS_KEY = "somniq-chat-sessions-v2";
 export const LEGACY_SESSIONS_KEY = "aris-chat-sessions-v2";
@@ -93,11 +94,17 @@ export function patchLastAssistantTurn(
   const copy = turns.slice();
   for (let index = copy.length - 1; index >= 0; index -= 1) {
     if (copy[index].role === "assistant") {
-      copy[index] = fn(copy[index]);
+      const previous = copy[index];
+      copy[index] = fn(previous);
+      // Every live stream update funnels through here; stamping it keeps the
+      // model-wait clock honest even while this session is not on screen.
+      if (copy[index].blocks !== previous.blocks) noteTurnActivity(copy[index].blocks);
       return copy;
     }
   }
-  copy.push(fn({ id: makeId("turn"), role: "assistant", blocks: [], streaming: true }));
+  const created = fn({ id: makeId("turn"), role: "assistant", blocks: [], streaming: true });
+  noteTurnActivity(created.blocks);
+  copy.push(created);
   return copy;
 }
 

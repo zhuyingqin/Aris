@@ -20,7 +20,7 @@ interface OracleWebSettingsProps {
 
 type RoleKey = "consult" | "reviewer" | "image";
 
-const MODEL_OPTIONS = ["gpt-5.6-sol", "gpt-5.6", "gpt-5.5-pro", "gpt-5.5"] as const;
+const MODEL_OPTIONS = ["gpt-6", "gpt-6-pro", "gpt-5.6-sol", "gpt-5.6", "gpt-5.5-pro", "gpt-5.5"] as const;
 
 /** The panel shows one short line per control. Everything that is read once —
  * the third-party boundary, the credential/cookie rules, the sign-in caveat —
@@ -81,7 +81,7 @@ const COPY = {
     opening: "打开中…",
     signedIn: "已登录",
     notConfirmed: "待验证",
-    model: "默认模型",
+    model: "咨询/审稿模型",
     currentModel: "保持 ChatGPT 当前模型",
     modelSaving: "保存模型中…",
     lastOpened: "上次打开",
@@ -99,7 +99,7 @@ const COPY = {
     reviewerRoleHint: "可选：用 ChatGPT 网页账号替代默认 Reviewer",
     reviewerFallbackHint: "关闭时使用「模型服务」Reviewer",
     imageRole: "图片生成",
-    imageRoleHint: "用网页生成图片，存入项目 artifacts",
+    imageRoleHint: "生图沿用网页当前模型；任务明确指定模型时才切换",
     accountCreated: "账号已创建，接着打开登录窗口。",
     loginOpened: "浏览器用户已打开。登录完成后关闭窗口；之后会自动复用该用户。",
     modelUpdated: "账号默认模型已保存。",
@@ -169,7 +169,7 @@ const COPY = {
     opening: "Opening…",
     signedIn: "Signed in",
     notConfirmed: "Pending verification",
-    model: "Default model",
+    model: "Consult/review model",
     currentModel: "Keep ChatGPT's current model",
     modelSaving: "Saving model…",
     lastOpened: "Last opened",
@@ -187,7 +187,7 @@ const COPY = {
     reviewerRoleHint: "Optional: replace the default Reviewer with a ChatGPT webpage account",
     reviewerFallbackHint: "When off, uses the Model Services Reviewer",
     imageRole: "Image generation",
-    imageRoleHint: "Generates images into the project artifacts",
+    imageRoleHint: "Images keep the current webpage model unless the task explicitly requests one",
     accountCreated: "Account created. Open its sign-in window next.",
     loginOpened: "Browser user opened. Close it after sign-in; later calls reuse this user automatically.",
     modelUpdated: "The account default model is saved.",

@@ -19,6 +19,19 @@ export interface SettingsGeneralCopy {
   appearanceTitle: string;
   appearanceSub: string;
   themeLabel: string;
+  fontSizeLabel: string;
+  fontSizeDescription: string;
+  fontSizeModeLabel: string;
+  fontSizeAuto: string;
+  fontSizeManual: string;
+  fontSizeCurrent: (size: number) => string;
+  fontSizeRecommended: (size: number) => string;
+  fontSizeAutoHint: string;
+  fontSizeManualHint: string;
+  fontSizePreviewTitle: string;
+  fontSizePreviewHeading: string;
+  fontSizePreviewBody: string;
+  fontSizePreviewMeta: string;
   light: string;
   dark: string;
   localBehaviorTitle: string;
@@ -644,9 +657,22 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       saveSaving: "保存中...",
       saveSaved: "已保存",
       savePrefs: "保存偏好",
-      appearanceTitle: "外观主题",
-      appearanceSub: "选择应用的明暗主题，立即生效。",
+      appearanceTitle: "外观",
+      appearanceSub: "调整明暗主题和整体字号，立即生效。",
       themeLabel: "主题",
+      fontSizeLabel: "整体字体大小",
+      fontSizeDescription: "统一调整界面文字，立即生效并自动保存。",
+      fontSizeModeLabel: "字号模式",
+      fontSizeAuto: "自动适应",
+      fontSizeManual: "自定义",
+      fontSizeCurrent: (size) => `当前字号 ${size}px`,
+      fontSizeRecommended: (size) => `当前窗口推荐 ${size}px`,
+      fontSizeAutoHint: "根据可用屏幕和窗口空间自动调整，窗口大小变化时更新。",
+      fontSizeManualHint: "自定义字号保持固定；选择自动适应可恢复推荐值。",
+      fontSizePreviewTitle: "文字预览",
+      fontSizePreviewHeading: "SomniQ，让研究更清晰",
+      fontSizePreviewBody: "从想法、文献到实验和写作，让每一步都有据可查。",
+      fontSizePreviewMeta: "侧栏、菜单和正文将按同一比例调整。",
       light: "浅色",
       dark: "深色",
       localBehaviorTitle: "记忆策略",
@@ -1286,8 +1312,21 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       saveSaved: "Saved",
       savePrefs: "Save preference",
       appearanceTitle: "Appearance",
-      appearanceSub: "Choose the light or dark theme. Changes apply immediately.",
+      appearanceSub: "Adjust the theme and overall text size. Changes apply immediately.",
       themeLabel: "Theme",
+      fontSizeLabel: "Overall text size",
+      fontSizeDescription: "Resize interface text. Changes apply and save immediately.",
+      fontSizeModeLabel: "Text size mode",
+      fontSizeAuto: "Automatic",
+      fontSizeManual: "Custom",
+      fontSizeCurrent: (size) => `Current text size ${size}px`,
+      fontSizeRecommended: (size) => `Recommended for this window: ${size}px`,
+      fontSizeAutoHint: "Adapts to available screen and window space as the window size changes.",
+      fontSizeManualHint: "Your custom size stays fixed. Select Automatic to restore the recommendation.",
+      fontSizePreviewTitle: "Text preview",
+      fontSizePreviewHeading: "SomniQ brings research into focus",
+      fontSizePreviewBody: "From ideas and literature to experiments and writing, keep every step grounded in evidence.",
+      fontSizePreviewMeta: "Sidebars, menus, and body text resize proportionally.",
       light: "Light",
       dark: "Dark",
       localBehaviorTitle: "Memory Policy",

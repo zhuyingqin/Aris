@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,6 +14,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::state;
 
 const PROJECTS_FILE: &str = "projects.json";
+static PROJECT_ACTIVATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -263,9 +267,9 @@ fn load_registry() -> ProjectRegistry {
         // error instead.
         usable_project_record(project) && seen.insert(normalize_path(Path::new(&project.path)))
     });
-    // Keep an offline project in the registry for when its drive returns, but
-    // do not make application startup depend on that drive being mounted.
-    fallback_missing_current_project(&mut registry);
+    // Registry reads also serve background tasks. Keep them metadata-only:
+    // probing the saved current path can trigger macOS Files and Folders
+    // consent even when the caller is resolving a different project.
     if !registry
         .projects
         .iter()
@@ -332,8 +336,54 @@ fn activate_with_environment_lock(registry: &mut ProjectRegistry, id: &str) -> R
     aris_chat::clear_mcp_discovery_cache();
     registry.current_project_id = project_id.clone();
     save_registry(registry)?;
+    PROJECT_ACTIVATION_GENERATION.fetch_add(1, Ordering::Relaxed);
     spawn_session_index_repair(&project_id);
     Ok(())
+}
+
+/// Recovery touches workspace files, so run it only when that project is
+/// opened or starts an authorized background turn. Visiting the registry must
+/// not request access to every saved folder on application startup.
+pub(crate) fn recover_project_writes(project_id: &str, path: &Path) {
+    static RECOVERY_ATTEMPTED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+    // Recovery must finish before a project's first foreground or scheduled
+    // turn. Never roll back a live publication when that project is reopened.
+    let Ok(mut attempted) = RECOVERY_ATTEMPTED.lock() else {
+        return;
+    };
+    if !attempted
+        .get_or_insert_with(HashSet::new)
+        .insert(path.to_path_buf())
+    {
+        return;
+    }
+    match runtime::recover_pending_batch_writes_at(path) {
+        Ok(report) if report.recovered > 0 || report.conflicts > 0 || !report.errors.is_empty() => {
+            eprintln!(
+                "SomniQ batch-write recovery for {project_id}: recovered {}, conflicts {}, errors {}",
+                report.recovered,
+                report.conflicts,
+                report.errors.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("SomniQ batch-write recovery skipped for {project_id}: {error}");
+        }
+    }
+    match runtime::cleanup_stale_large_writes_at(path, runtime::DEFAULT_STAGED_WRITE_MAX_AGE) {
+        Ok(report) if report.removed > 0 || !report.errors.is_empty() => {
+            eprintln!(
+                "SomniQ staged-write cleanup for {project_id}: removed {}, errors {}",
+                report.removed,
+                report.errors.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("SomniQ staged-write cleanup skipped for {project_id}: {error}");
+        }
+    }
 }
 
 /// Projects whose projection repair is already in flight. A status surface that
@@ -466,6 +516,23 @@ pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> 
     current_project(&registry).map(|project| PathBuf::from(project.path))
 }
 
+/// Read the path and activation revision under the same lock as activation.
+/// Otherwise a project switch can pair an old denied path with a new retry
+/// revision, requesting permission for a folder the user just left.
+pub(crate) fn current_project_watch_binding(
+    projects: &ProjectState,
+) -> Result<(PathBuf, u64), String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    let project = current_project(&registry)?;
+    Ok((
+        PathBuf::from(project.path),
+        PROJECT_ACTIVATION_GENERATION.load(Ordering::Relaxed),
+    ))
+}
+
 /// Resolve a registered project's workspace without changing the active
 /// project. Long-running chat turns use this immutable binding so they can
 /// continue safely after the user changes the project shown in the desktop.
@@ -542,6 +609,9 @@ pub fn init(projects: &ProjectState) -> Result<(), String> {
         .lock()
         .map_err(|_| "project state poisoned".to_string())?;
     *registry = load_registry();
+    // Only startup checks the saved current folder. Background registry
+    // lookups preserve offline records without touching their workspace.
+    fallback_missing_current_project(&mut registry);
     let current_id = registry.current_project_id.clone();
     activate(&mut registry, &current_id)
 }
