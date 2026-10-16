@@ -200,27 +200,16 @@ const OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX: &str = "openai-responses-reas
 const OPENAI_RESPONSES_REASONING_V2_TAG: &str = "v2:";
 
 /// Marker signature for a `reasoning_content`-family (Kimi/Moonshot, MiMo,
-/// DeepSeek-R1) reasoning block. Unlike the Responses encrypted signature, the
+/// DeepSeek V4/R1) reasoning block. Unlike the Responses encrypted signature, the
 /// text *is* the payload — this prefix only tags a persisted Thinking block as
 /// "replay me as `reasoning_content` on the chat transport". An empty signature
 /// marks a display-only thinking block that is never replayed on any transport.
 const OPENAI_REASONING_CONTENT_SIGNATURE: &str = "openai-reasoning-content:";
 
-/// Per-turn reasoning size cap (chars; rough proxy for tokens ~4:1). Captures
-/// up to ~8K tokens of thinking per assistant turn before truncating, so a
-/// single runaway reasoning trace cannot bloat the persisted session block. Long
-/// reasoning still streams to the UI in real time; only what is *persisted* for
-/// replay/display is capped.
+/// Per-turn cap for display-only reasoning (chars). Reasoning that a provider
+/// requires back as protocol input must be persisted verbatim; the runtime's
+/// context accounting and compaction bound the complete request instead.
 const MAX_REASONING_CHARS_PER_TURN: usize = 32_000;
-
-/// Total `reasoning_content` replay budget across all assistant turns in one
-/// request (chars). Enforced at request-build time in [`convert_messages_openai`]:
-/// oldest turns get `reasoning_content` first and the newest are dropped once the
-/// budget is spent. This keeps already-sent historical bytes stable (preserving
-/// the provider's automatic prefix cache) while bounding how much reasoning a
-/// long session replays every turn. ~32K tokens for ASCII; multi-byte trims
-/// faster (a conservative bound for non-ASCII reasoning).
-const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
 /// Which OpenAI-compatible transport to use for a request.
 ///
@@ -1530,7 +1519,7 @@ fn responses_prompt_cache_key(
     format!("aris-{hash:016x}")
 }
 
-/// Cap one turn's reasoning text to [`MAX_REASONING_CHARS_PER_TURN`] before it
+/// Cap display-only reasoning to [`MAX_REASONING_CHARS_PER_TURN`] before it
 /// is persisted as a Thinking block, UTF-8-safe at a char boundary. Truncation
 /// happens once, before the block is ever sent, so its stored bytes stay stable
 /// afterwards (preserving the provider's automatic prefix cache). Empty in →
@@ -3318,7 +3307,12 @@ impl ApiClient for OpenAIRuntimeClient {
                 } else {
                     String::new()
                 };
-                let thinking = truncate_reasoning_per_turn(std::mem::take(&mut current_reasoning));
+                let thinking = std::mem::take(&mut current_reasoning);
+                let thinking = if !use_responses_api && supports_reasoning {
+                    thinking
+                } else {
+                    truncate_reasoning_per_turn(thinking)
+                };
                 // Skip a block that carries neither display text nor a replay
                 // payload (nothing to persist).
                 if !thinking.is_empty() || !signature.is_empty() {
@@ -3426,11 +3420,10 @@ fn convert_messages_openai(
     let mut orphan_tool_results: Vec<String> = Vec::new();
     // `reasoning_content` replay is only for the families whose chat API accepts
     // it back as input; for everyone else the persisted Thinking block stays
-    // display-only. Oldest turns spend the shared budget first, so a long
-    // session drops the *newest* reasoning replay while keeping already-sent
-    // historical bytes stable (see [`MAX_REASONING_CONTENT_REPLAY_CHARS`]).
+    // display-only. Never drop required protocol fields to meet a separate
+    // replay budget: runtime compaction accounts for and removes complete
+    // exchanges, preserving the reasoning attached to each retained call.
     let replay_reasoning_content = supports_reasoning_content_replay(model);
-    let mut reasoning_replay_used: usize = 0;
 
     // System message first
     if let Some(prompt) = system_prompt {
@@ -3566,27 +3559,28 @@ fn convert_messages_openai(
                     msg["tool_calls"] = json!(tool_calls);
                 }
                 // Replay this turn's `reasoning_content` for the families whose
-                // chat API accepts it back (Kimi/Moonshot, MiMo, DeepSeek-R1),
+                // chat API accepts it back (Kimi/Moonshot, MiMo, DeepSeek),
                 // sourced from the persisted Thinking block tagged with
-                // `OPENAI_REASONING_CONTENT_SIGNATURE`. Bounded by the shared
-                // budget so a long session does not replay unbounded reasoning.
-                if replay_reasoning_content
-                    && reasoning_replay_used < MAX_REASONING_CONTENT_REPLAY_CHARS
-                {
-                    if let Some(reasoning) = message.blocks.iter().find_map(|block| match block {
-                        ContentBlock::Thinking {
-                            thinking,
-                            signature,
-                        } if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE)
-                            && !thinking.is_empty() =>
-                        {
-                            Some(thinking.as_str())
-                        }
-                        _ => None,
-                    }) {
+                // `OPENAI_REASONING_CONTENT_SIGNATURE`. A provider may emit a
+                // tool call without thinking; DeepSeek still requires the field
+                // on that assistant message, even when its actual value is empty.
+                // This also permits older saved tool-only turns to continue.
+                if replay_reasoning_content {
+                    let reasoning = message
+                        .blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Thinking {
+                                thinking,
+                                signature,
+                            } if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE) => {
+                                Some(thinking.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if !reasoning.is_empty() || !tool_calls.is_empty() {
                         msg["reasoning_content"] = json!(reasoning);
-                        reasoning_replay_used =
-                            reasoning_replay_used.saturating_add(reasoning.len());
                     }
                 }
                 result.push(msg);

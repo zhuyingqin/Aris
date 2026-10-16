@@ -1,3 +1,4 @@
+pub mod collaboration;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub mod figures;
 use std::fs;
@@ -11,21 +12,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // Bundled skills are compiled into the runtime crate and re-exported
 use runtime::BUNDLED_SKILLS;
 
-use api::{read_base_url, read_send_betas, AuthSource};
+use api::AuthSource;
 use aris_executor::{
-    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, ExecutorToolSpec, NoopStreamObserver,
+    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, NoopStreamObserver,
     StreamObserver,
 };
 use runtime::{
     abort_large_write, append_file_with_context_expected, append_write_chunk, begin_large_write,
     commit_large_write, edit_file_with_context_expected, get_file_change, glob_search, grep_search,
-    list_file_changes, load_system_prompt, multi_edit_file_with_context_expected,
+    list_file_changes, multi_edit_file_with_context_expected,
     read_file_with_images, record_text_file_change, revert_file_change,
-    write_file_with_context_expected, write_files_with_context_expected, ApiClient, ApiRequest,
-    AssistantEvent, BashCommandInput, BatchWriteRequest, ConversationRuntime, FileChangeGetInput,
+    write_file_with_context_expected, write_files_with_context_expected, ApiRequest,
+    BashCommandInput, BatchWriteRequest, ConversationRuntime, FileChangeGetInput,
     FileChangeListInput, FileChangeOperation, FileChangeRecord, FileChangeRevertInput,
     FileMutationContext, GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor,
+    Session, StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor,
     ToolInvocation, MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde::{Deserialize, Serialize};
@@ -209,7 +210,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "bash",
             description: concat!(
-                "Execute a shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. ",
+                "Execute a POSIX shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. Requires Bash/sh; never falls back to cmd.exe or PowerShell. On Windows prefer the PowerShell tool unless POSIX syntax is required. ",
+                "Word/WPS COM automation and editor process termination are blocked to protect open documents; use read_docx/read_file on saved files or copies. ",
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "When a command does change workspace files, the result lists them under `changes`, and each entry carries the `revision` the file now has: pass that value as expected_revision for your next file-tool edit of that path instead of re-reading or inventing one. ",
@@ -236,7 +238,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file, quality-labelled PDF text, or indexed DOCX paragraphs in the workspace. DOCX offset/limit count paragraphs and return the read_docx schema with protected equation boundaries; use edit_docx for changes. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large text files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached text reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
+            description: "Read a text file, quality-labelled PDF text, or indexed DOCX paragraphs in the workspace. Reads the saved file snapshot without opening or closing Word/WPS; unsaved editor changes are not included. If locked, use a saved copy and keep the editor open. DOCX offset/limit count paragraphs and return the read_docx schema with protected equation boundaries; use edit_docx for changes. The result includes a sha256 revision; pass it as expected_revision to any mutation based on this read. Large text files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Cached text reads are keyed by the current content hash, so same-size rewrites cannot return a stale revision.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -251,7 +253,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_docx",
-            description: "Read a DOCX as indexed paragraphs, including body, tables, headers, footers and notes. Returns a sha256 revision, exact editable text segments and protected native-equation boundaries. offset/limit count paragraphs; follow nextOffset. Formula placeholders are not formula contents or editable text. Use edit_docx for precise changes, never paragraph.text assignment or raw ZIP/XML string rewrites. Legacy .doc files require conversion to DOCX first.",
+            description: "Read a DOCX saved file snapshot as indexed paragraphs, including body, tables, headers, footers and notes, without opening or closing Word/WPS. Unsaved editor changes are not included; if locked, use a saved copy and keep the editor open. Returns a sha256 revision, exact editable text segments and protected native-equation boundaries. offset/limit count paragraphs; follow nextOffset. Formula placeholders are not formula contents or editable text. Use edit_docx for precise changes, never paragraph.text assignment or raw ZIP/XML string rewrites. Legacy .doc files require conversion of a copy to DOCX first.",
             input_schema: json!({
                 "type": "object", "properties": {
                     "path": { "type": "string" },
@@ -1299,23 +1301,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "Agent",
-            description: "Launch a specialized agent task and persist its handoff metadata.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "description": { "type": "string" },
-                    "prompt": { "type": "string" },
-                    "subagent_type": { "type": "string" },
-                    "name": { "type": "string" },
-                    "model": { "type": "string" }
-                },
-                "required": ["description", "prompt"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
             name: "ToolSearch",
             description: concat!(
                 "Search for deferred or specialized tools by exact name or keywords, and make every match callable. ",
@@ -1414,6 +1399,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "REPL",
             description: concat!(
                 "Execute code in a REPL-like subprocess for computation, data wrangling, and text/byte-level analysis (counting characters, inspecting encodings, transforming structured data). ",
+                "Word/WPS COM automation and editor process termination are blocked; parse saved files or copies instead. ",
                 "Do not use this as a workaround for running external build tools, compilers, or CLI programs — use bash/PowerShell for that, and use LaTeXCompile specifically to compile a LaTeX `.tex` file to PDF instead of shelling out to pdflatex/latexmk here. ",
                 "stdout/stderr are decoded as UTF-8 with a GB18030/GBK fallback for Windows console output; still prefer ASCII-safe prints when the exact byte layout matters."
             ),
@@ -1432,7 +1418,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "PowerShell",
             description: concat!(
-                "Execute a PowerShell command when Windows-specific shell semantics are needed. ",
+                "Execute a PowerShell command using pwsh or Windows PowerShell, never cmd.exe. Preferred shell tool on Windows. Use PowerShell syntax, not CMD or Bash syntax; avoid &&/|| for Windows PowerShell compatibility and check exit codes explicitly for dependent commands. ",
+                "Word/WPS COM automation and editor process termination are blocked to protect open documents; use read_docx/read_file on saved files or copies. ",
                 "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
@@ -1457,7 +1444,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     // General-web search remains before scholarly discovery in the default
     // registry because most conversations are not paper searches. The runtime
     // enforces LiteratureSearch first for paper-identification requests.
-    specs
+    specs.into_iter().chain(collaboration::tool_specs()).collect()
 }
 
 /// Input schema of `LiteratureSearch`, shared with the `search` argument of
@@ -1590,7 +1577,7 @@ fn execute_tool_with_cancel_and_progress_in_context(
         "read_docx" => from_value::<ReadFileInput>(input).and_then(|input| {
             to_pretty_json(
                 runtime::docx::read_docx(&input.path, input.offset, input.limit)
-                    .map_err(io_to_string)?,
+                    .map_err(runtime::document_safety::document_read_error)?,
             )
         }),
         "edit_docx" => from_value::<EditDocxInput>(input).and_then(|input| {
@@ -1710,7 +1697,7 @@ fn execute_tool_with_cancel_and_progress_in_context(
         }
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, context)),
+        name if collaboration::is_tool(name) => Err("collaboration requires a session-bound AgentControl host; unmanaged Agent execution has been removed".into()),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => {
@@ -1780,7 +1767,7 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
     {
         return to_pretty_json(
             runtime::docx::read_docx(&input.path, input.offset, input.limit)
-                .map_err(io_to_string)?,
+                .map_err(runtime::document_safety::document_read_error)?,
         );
     }
     let cache_key = read_file_cache_key(&input);
@@ -1790,7 +1777,8 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
         }
     }
     let output = to_pretty_json(
-        read_file_with_images(&input.path, input.offset, input.limit).map_err(io_to_string)?,
+        read_file_with_images(&input.path, input.offset, input.limit)
+            .map_err(runtime::document_safety::document_read_error)?,
     )?;
     if let Some(cache_key) = cache_key {
         read_file_cache_put(cache_key, output.clone());
@@ -2302,13 +2290,6 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput, context: &ToolRunContext) -> Result<String, String> {
-    let output = match context.project_execution_context.clone() {
-        Some(project_context) => execute_agent_with_project_context(input, Some(project_context))?,
-        None => execute_agent(input)?,
-    };
-    to_pretty_json(output)
-}
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
     to_pretty_json(execute_tool_search(input))
@@ -2895,14 +2876,6 @@ struct SkillInput {
     args: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct AgentInput {
-    description: String,
-    prompt: String,
-    subagent_type: Option<String>,
-    name: Option<String>,
-    model: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct ToolSearchInput {
@@ -3129,50 +3102,6 @@ struct HelperEntry {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct AgentTokenUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-    cache_creation_input_tokens: u32,
-    cache_read_input_tokens: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentOutput {
-    #[serde(rename = "agentId")]
-    agent_id: String,
-    name: String,
-    description: String,
-    #[serde(rename = "subagentType")]
-    subagent_type: Option<String>,
-    model: Option<String>,
-    status: String,
-    #[serde(rename = "outputFile")]
-    output_file: String,
-    #[serde(rename = "manifestFile")]
-    manifest_file: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
-    started_at: Option<String>,
-    #[serde(rename = "completedAt", skip_serializing_if = "Option::is_none")]
-    completed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<AgentTokenUsage>,
-}
-
-#[derive(Debug, Clone)]
-struct AgentJob {
-    manifest: AgentOutput,
-    prompt: String,
-    system_prompt: Vec<String>,
-    allowed_tools: BTreeSet<String>,
-    project_execution_context: Option<runtime::ProjectExecutionContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3893,531 +3822,6 @@ fn parse_skill_frontmatter(dir_name: &str, content: &str, path: std::path::PathB
     }
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
-/// Subagent fallback when DEFAULT_AGENT_MODEL is unavailable on the account
-/// (404 not_found). Mirrors the main session's DEFAULT_MODEL_FALLBACK so a
-/// user without Opus 4.8 access doesn't hit hard subagent failures.
-const DEFAULT_AGENT_MODEL_FALLBACK: &str = "claude-opus-4-7";
-/// Iterations one sub-agent turn may run. Tighter than the main loop's ceiling
-/// because a sub-agent is dispatched for a bounded errand and cannot ask the
-/// user anything: when it stops converging, nobody is watching it.
-pub const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
-const AGENT_MAX_ITERATIONS_ENV_VAR: &str = "ARIS_AGENT_MAX_ITERATIONS";
-
-/// The sub-agent ceiling, overridable for a genuinely long errand. `0` disables
-/// it, in which case the runtime's own per-turn budget still applies.
-///
-/// Resolved once per process: a sub-agent can be dispatched from any thread, and
-/// `std::env::var` racing another thread's `set_var` is undefined behaviour.
-#[must_use]
-pub fn agent_max_iterations_from_env() -> usize {
-    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        match std::env::var(AGENT_MAX_ITERATIONS_ENV_VAR)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok())
-        {
-            Some(0) => usize::MAX,
-            Some(limit) => limit,
-            None => DEFAULT_AGENT_MAX_ITERATIONS,
-        }
-    })
-}
-
-/// Subagent system date — use the same dynamic today as the main runtime
-/// (`runtime::today_iso`) so subagents don't get a frozen `"2026-03-31"`
-/// in their system prompt. Helper fn rather than a const so it stays live.
-fn default_agent_system_date() -> String {
-    runtime::today_iso()
-}
-
-fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
-    execute_agent_with_spawn(input, spawn_agent_job)
-}
-
-fn execute_agent_with_project_context(
-    input: AgentInput,
-    project_execution_context: Option<runtime::ProjectExecutionContext>,
-) -> Result<AgentOutput, String> {
-    execute_agent_with_spawn_and_tools_in_context(
-        input,
-        spawn_agent_job,
-        None,
-        project_execution_context,
-    )
-}
-
-fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
-where
-    F: FnOnce(AgentJob) -> Result<(), String>,
-{
-    execute_agent_with_spawn_and_tools_in_context(input, spawn_fn, None, None)
-}
-
-fn execute_agent_with_spawn_and_tools_in_context<F>(
-    input: AgentInput,
-    spawn_fn: F,
-    allowed_tools_override: Option<BTreeSet<String>>,
-    project_execution_context: Option<runtime::ProjectExecutionContext>,
-) -> Result<AgentOutput, String>
-where
-    F: FnOnce(AgentJob) -> Result<(), String>,
-{
-    if input.description.trim().is_empty() {
-        return Err(String::from("description must not be empty"));
-    }
-    if input.prompt.trim().is_empty() {
-        return Err(String::from("prompt must not be empty"));
-    }
-
-    let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    let output_file = output_dir.join(format!("{agent_id}.md"));
-    let manifest_file = output_dir.join(format!("{agent_id}.json"));
-    let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
-    let model = resolve_agent_model(input.model.as_deref());
-    let agent_name = input
-        .name
-        .as_deref()
-        .map(slugify_agent_name)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| slugify_agent_name(&input.description));
-    let created_at = iso8601_now();
-    let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
-    let allowed_tools = allowed_tools_override
-        .unwrap_or_else(|| allowed_tools_for_subagent(&normalized_subagent_type));
-
-    let output_contents = format!(
-        "# Agent Task
-
-- id: {}
-- name: {}
-- description: {}
-- subagent_type: {}
-- created_at: {}
-
-## Prompt
-
-{}
-",
-        agent_id, agent_name, input.description, normalized_subagent_type, created_at, input.prompt
-    );
-    std::fs::write(&output_file, output_contents).map_err(|error| error.to_string())?;
-
-    let manifest = AgentOutput {
-        agent_id,
-        name: agent_name,
-        description: input.description,
-        subagent_type: Some(normalized_subagent_type),
-        model: Some(model),
-        status: String::from("running"),
-        output_file: output_file.display().to_string(),
-        manifest_file: manifest_file.display().to_string(),
-        created_at: created_at.clone(),
-        started_at: Some(created_at),
-        completed_at: None,
-        error: None,
-        usage: None,
-    };
-    write_agent_manifest(&manifest)?;
-
-    let manifest_for_spawn = manifest.clone();
-    let job = AgentJob {
-        manifest: manifest_for_spawn,
-        prompt: input.prompt,
-        system_prompt,
-        allowed_tools,
-        project_execution_context,
-    };
-    if let Err(error) = spawn_fn(job) {
-        let error = format!("failed to spawn sub-agent: {error}");
-        persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()), None)?;
-        return Err(error);
-    }
-
-    Ok(manifest)
-}
-
-fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
-    let thread_name = format!("clawd-agent-{}", job.manifest.agent_id);
-    std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || {
-            let run = || run_agent_job(&job);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                job.project_execution_context
-                    .as_ref()
-                    .map_or_else(run, |context| {
-                        runtime::with_project_execution_context(context, run)
-                    })
-            }));
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    let _ = persist_agent_terminal_state(
-                        &job.manifest,
-                        "failed",
-                        None,
-                        Some(error),
-                        None,
-                    );
-                }
-                Err(_) => {
-                    let _ = persist_agent_terminal_state(
-                        &job.manifest,
-                        "failed",
-                        None,
-                        Some(String::from("sub-agent thread panicked")),
-                        None,
-                    );
-                }
-            }
-        })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-fn run_agent_job(job: &AgentJob) -> Result<(), String> {
-    let mut runtime =
-        build_agent_runtime(job)?.with_max_iterations(agent_max_iterations_from_env());
-    let summary = runtime
-        .run_turn(job.prompt.clone(), None)
-        .map_err(|error| error.to_string())?;
-    let final_text = final_assistant_text(&summary);
-    persist_agent_terminal_state(
-        &job.manifest,
-        "completed",
-        Some(final_text.as_str()),
-        None,
-        Some(AgentTokenUsage {
-            input_tokens: summary.usage.input_tokens,
-            output_tokens: summary.usage.output_tokens,
-            cache_creation_input_tokens: summary.usage.cache_creation_input_tokens,
-            cache_read_input_tokens: summary.usage.cache_read_input_tokens,
-        }),
-    )
-}
-
-fn build_agent_runtime(
-    job: &AgentJob,
-) -> Result<ConversationRuntime<SubagentRuntimeClient, SubagentToolExecutor>, String> {
-    let model = job
-        .manifest
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
-    let allowed_tools = job.allowed_tools.clone();
-    let api_client = SubagentRuntimeClient::new(model, allowed_tools.clone())?;
-    let tool_executor = SubagentToolExecutor::new(allowed_tools)
-        .with_project_execution_context(job.project_execution_context.clone());
-    Ok(ConversationRuntime::new(
-        Session::new(),
-        api_client,
-        tool_executor,
-        agent_permission_policy(),
-        job.system_prompt.clone(),
-    ))
-}
-
-fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String> {
-    let cwd = runtime::execution_current_dir().map_err(|error| error.to_string())?;
-    let mut prompt = load_system_prompt(
-        cwd,
-        default_agent_system_date(),
-        std::env::consts::OS,
-        "unknown",
-        None,
-    )
-    .map_err(|error| error.to_string())?;
-    prompt.push(format!(
-        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. You are an individual contributor: do not spawn your own teammates or form nested teams."
-    ));
-    Ok(prompt)
-}
-
-fn resolve_agent_model(model: Option<&str>) -> String {
-    model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(DEFAULT_AGENT_MODEL)
-        .to_string()
-}
-
-fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
-    let tools = match subagent_type {
-        "Explore" => vec![
-            "read_file",
-            "read_docx",
-            "read_files",
-            "ReadMediaFile",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-        ],
-        "Plan" => vec![
-            "read_file",
-            "read_docx",
-            "read_files",
-            "ReadMediaFile",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "TodoWrite",
-            "StructuredOutput",
-            "SendUserMessage",
-        ],
-        "Verification" => vec![
-            "bash",
-            "read_file",
-            "read_docx",
-            "read_files",
-            "ReadMediaFile",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "TodoWrite",
-            "StructuredOutput",
-            "SendUserMessage",
-            "PowerShell",
-        ],
-        "claw-code-guide" => vec![
-            "read_file",
-            "read_docx",
-            "read_files",
-            "ReadMediaFile",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-            "SendUserMessage",
-        ],
-        "statusline-setup" => vec![
-            "bash",
-            "read_file",
-            "read_docx",
-            "read_files",
-            "write_file",
-            "write_files",
-            "append_file",
-            "edit_file",
-            "multi_edit",
-            "glob_search",
-            "grep_search",
-            "ToolSearch",
-        ],
-        _ => vec![
-            "bash",
-            "read_file",
-            "read_docx",
-            "edit_docx",
-            "read_files",
-            "ReadMediaFile",
-            "write_file",
-            "write_files",
-            "append_file",
-            "edit_file",
-            "multi_edit",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "TodoWrite",
-            "Skill",
-            "ToolSearch",
-            "NotebookEdit",
-            "Sleep",
-            "SendUserMessage",
-            "Config",
-            "StructuredOutput",
-            "REPL",
-            "PowerShell",
-        ],
-    };
-    apply_inherited_allowed_tools(tools.into_iter().map(str::to_string).collect())
-}
-
-fn inherited_allowed_tools() -> Option<BTreeSet<String>> {
-    std::env::var("ARIS_ALLOWED_TOOLS")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>()
-        })
-        .filter(|tools| !tools.is_empty())
-}
-
-fn apply_inherited_allowed_tools(base: BTreeSet<String>) -> BTreeSet<String> {
-    let inherited = inherited_allowed_tools();
-    if let Some(inherited) = inherited.as_ref() {
-        base.intersection(inherited)
-            .cloned()
-            .collect::<BTreeSet<_>>()
-    } else {
-        base
-    }
-}
-
-fn agent_permission_policy() -> PermissionPolicy {
-    mvp_tool_specs().into_iter().fold(
-        PermissionPolicy::new(PermissionMode::DangerFullAccess),
-        |policy, spec| policy.with_tool_requirement(spec.name, spec.required_permission),
-    )
-}
-
-fn write_agent_manifest(manifest: &AgentOutput) -> Result<(), String> {
-    std::fs::write(
-        &manifest.manifest_file,
-        serde_json::to_string_pretty(manifest).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn persist_agent_terminal_state(
-    manifest: &AgentOutput,
-    status: &str,
-    result: Option<&str>,
-    error: Option<String>,
-    usage: Option<AgentTokenUsage>,
-) -> Result<(), String> {
-    append_agent_output(
-        &manifest.output_file,
-        &format_agent_terminal_output(status, result, error.as_deref()),
-    )?;
-    let mut next_manifest = manifest.clone();
-    next_manifest.status = status.to_string();
-    next_manifest.completed_at = Some(iso8601_now());
-    next_manifest.error = error;
-    next_manifest.usage = usage.or_else(|| manifest.usage.clone());
-    write_agent_manifest(&next_manifest)
-}
-
-fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    file.write_all(suffix.as_bytes())
-        .map_err(|error| error.to_string())
-}
-
-fn format_agent_terminal_output(status: &str, result: Option<&str>, error: Option<&str>) -> String {
-    let mut sections = vec![format!("\n## Result\n\n- status: {status}\n")];
-    if let Some(result) = result.filter(|value| !value.trim().is_empty()) {
-        sections.push(format!("\n### Final response\n\n{}\n", result.trim()));
-    }
-    if let Some(error) = error.filter(|value| !value.trim().is_empty()) {
-        sections.push(format!("\n### Error\n\n{}\n", error.trim()));
-    }
-    sections.join("")
-}
-
-struct SubagentRuntimeClient {
-    auth: AuthSource,
-    base_url: String,
-    send_betas: bool,
-    model: String,
-    allowed_tools: BTreeSet<String>,
-    inner: SharedAnthropicRuntimeClient,
-    /// Latches the subagent's Opus 4.8 to 4.7 fallback so it warns once and
-    /// never re-probes on subsequent turns.
-    model_fell_back: bool,
-}
-
-impl SubagentRuntimeClient {
-    fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let auth = AuthSource::from_env_or_saved().map_err(|error| error.to_string())?;
-        let base_url = read_base_url();
-        let send_betas = read_send_betas();
-        let inner =
-            build_subagent_executor(auth.clone(), &base_url, send_betas, &model, &allowed_tools)?;
-        Ok(Self {
-            auth,
-            base_url,
-            send_betas,
-            model,
-            allowed_tools,
-            inner,
-            model_fell_back: false,
-        })
-    }
-
-    fn rebuild_inner(&mut self) -> Result<(), String> {
-        self.inner = build_subagent_executor(
-            self.auth.clone(),
-            &self.base_url,
-            self.send_betas,
-            &self.model,
-            &self.allowed_tools,
-        )?;
-        Ok(())
-    }
-}
-
-impl ApiClient for SubagentRuntimeClient {
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        match self.inner.stream(request.clone()) {
-            Ok(events) => Ok(events),
-            Err(error)
-                if error.is_model_unavailable()
-                    && self.model == DEFAULT_AGENT_MODEL
-                    && !self.model_fell_back =>
-            {
-                self.model_fell_back = true;
-                self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
-                eprintln!(
-                    "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
-                     account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
-                );
-                self.rebuild_inner().map_err(RuntimeError::new)?;
-                self.inner.stream(request)
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-fn build_subagent_executor(
-    auth: AuthSource,
-    base_url: &str,
-    send_betas: bool,
-    model: &str,
-    allowed_tools: &BTreeSet<String>,
-) -> Result<SharedAnthropicRuntimeClient, String> {
-    let tool_specs = tool_specs_for_allowed_tools(Some(allowed_tools))
-        .into_iter()
-        .map(|spec| ExecutorToolSpec::new(spec.name, spec.description, spec.input_schema))
-        .collect::<Vec<_>>();
-    SharedAnthropicRuntimeClient::new(
-        auth,
-        base_url.to_string(),
-        send_betas,
-        model.to_string(),
-        !tool_specs.is_empty(),
-        tool_specs,
-        32_000,
-        Box::new(NoopStreamObserver),
-    )
-}
-
 #[derive(Clone)]
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
@@ -4432,13 +3836,7 @@ impl SubagentToolExecutor {
         }
     }
 
-    fn with_project_execution_context(
-        mut self,
-        project_execution_context: Option<runtime::ProjectExecutionContext>,
-    ) -> Self {
-        self.project_execution_context = project_execution_context;
-        self
-    }
+
 }
 
 impl ToolExecutor for SubagentToolExecutor {
@@ -4534,13 +3932,6 @@ impl ToolExecutor for SubagentToolExecutor {
             .map(|result| result.expect("every tool invocation must produce a result"))
             .collect()
     }
-}
-
-fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolSpec> {
-    mvp_tool_specs()
-        .into_iter()
-        .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
-        .collect()
 }
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
@@ -4811,60 +4202,6 @@ pub fn canonical_tool_token(value: &str) -> String {
 #[must_use]
 pub fn canonical_tool_segment(name: &str) -> String {
     canonical_tool_token(name.rsplit("__").next().unwrap_or(name))
-}
-
-fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    runtime::migrate_legacy_project_runtime_dirs(runtime::workspace_root_from_env())
-        .map_err(|error| error.to_string())?;
-    let dir = runtime::project_agent_store_dir_from_env();
-    if dir.as_os_str().is_empty() {
-        return Err("agent store path is empty".to_string());
-    }
-    Ok(dir)
-}
-
-fn make_agent_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("agent-{nanos}")
-}
-
-fn slugify_agent_name(description: &str) -> String {
-    let mut out = description
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while out.contains("--") {
-        out = out.replace("--", "-");
-    }
-    out.trim_matches('-').chars().take(32).collect()
-}
-
-fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
-    let trimmed = subagent_type.map(str::trim).unwrap_or_default();
-    if trimmed.is_empty() {
-        return String::from("general-purpose");
-    }
-
-    match canonical_tool_token(trimmed).as_str() {
-        "general" | "generalpurpose" | "generalpurposeagent" => String::from("general-purpose"),
-        "explore" | "explorer" | "exploreagent" => String::from("Explore"),
-        "plan" | "planagent" => String::from("Plan"),
-        "verification" | "verificationagent" | "verify" | "verifier" => {
-            String::from("Verification")
-        }
-        "claudecodeguide" | "claudecodeguideagent" | "guide" => String::from("claw-code-guide"),
-        "statusline" | "statuslinesetup" => String::from("statusline-setup"),
-        _ => trimmed.to_string(),
-    }
 }
 
 fn iso8601_now() -> String {
@@ -5159,6 +4496,8 @@ fn execute_structured_output(input: StructuredOutputInput) -> StructuredOutputRe
 }
 
 fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<ReplOutput, String> {
+    runtime::document_safety::ensure_document_command_safe(&input.code)
+        .map_err(io_to_string)?;
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
@@ -5515,6 +4854,7 @@ fn execute_powershell_with_cancel(
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
+    runtime::document_safety::ensure_document_command_safe(&input.command)?;
     let shell = detect_powershell_shell()?;
     execute_shell_command(
         shell,
@@ -7727,6 +7067,65 @@ impl PreparedLlmReview {
         let endpoint = base;
         let signature = runtime::figures::hash(format!("reviewer|{}|{}|{}|session-header={}|somniq-figure-vision-v2-light-reasoning", self.model, endpoint, transport, self.send_routing_session_header).as_bytes());
         runtime::figures::ModelIdentity { model: self.model.clone(), provider: provider.into(), endpoint, transport: transport.into(), signature }
+    }
+
+    /// The model this connection talks to.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Where this connection goes and with which model, never the credential.
+    /// A conversation started on one connection must not be carried on by
+    /// another that points somewhere else, so callers compare signatures.
+    #[must_use]
+    pub fn signature(&self) -> String {
+        let protocol = match self.protocol {
+            ReviewerProtocol::OpenAiCompat => "openai",
+            ReviewerProtocol::AnthropicCompat => "anthropic",
+        };
+        format!("{protocol}|{}|{}", self.base_url, self.model)
+    }
+
+    /// A client for a Reviewer conversation that goes on over several requests,
+    /// offering `tool_specs` to the model. It reaches the same endpoint, with the
+    /// same credential and model, as [`Self::run`]; only the tools differ.
+    /// `observer` is polled for cancellation while a request is in flight.
+    pub fn chat_client(
+        &self,
+        tool_specs: Vec<aris_executor::ExecutorToolSpec>,
+        observer: Box<dyn StreamObserver>,
+    ) -> Result<aris_executor::ExecutorClient, String> {
+        let enable_tools = !tool_specs.is_empty();
+        let client = match self.protocol {
+            ReviewerProtocol::OpenAiCompat => aris_executor::OpenAIRuntimeClient::new(
+                aris_executor::OpenAIExecutorConfig {
+                    api_key: self.api_key.clone(),
+                    base_url: openai_executor_base_url(&self.base_url),
+                },
+                self.model.clone(),
+                enable_tools,
+                tool_specs,
+                observer,
+            )
+            .map(|client| {
+                aris_executor::ExecutorClient::OpenAI(
+                    client.with_routing_session_header(self.send_routing_session_header),
+                )
+            }),
+            ReviewerProtocol::AnthropicCompat => SharedAnthropicRuntimeClient::new(
+                AuthSource::BearerToken(self.api_key.clone()),
+                anthropic_executor_base_url(&self.base_url),
+                false,
+                self.model.clone(),
+                enable_tools,
+                tool_specs,
+                8192,
+                observer,
+            )
+            .map(aris_executor::ExecutorClient::Anthropic),
+        };
+        client.map_err(|error| format!("Reviewer executor setup failed: {error}"))
     }
 
     /// Send one review request. Honors cancellation before and during the call.

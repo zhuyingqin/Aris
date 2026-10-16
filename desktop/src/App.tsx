@@ -23,6 +23,7 @@ import AppProductSwitcher from "./AppProductSwitcher";
 import AppProjectSwitcher, { type AppProjectSwitcherCopy } from "./AppProjectSwitcher";
 import AppAccountMenu from "./AppAccountMenu";
 import { useCodeShell } from "./code/useCodeShell";
+import "./code/CodeShell.css";
 import { formatQuota } from "./settings/settingsFormatters";
 import { accountMenuPlan } from "./accountMenuPlan";
 import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
@@ -290,6 +291,10 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     </ModuleIcon>,
   },
   {
+    id: "figures", label: "Figures",
+    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
+  },
+  {
     id: "lab", label: "Code",
     icon: <ModuleIcon>
       <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
@@ -306,10 +311,6 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
         <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
       </g>
     </ModuleIcon>,
-  },
-  {
-    id: "figures", label: "Figures",
-    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
   },
   {
     id: "literature", label: "Literature",
@@ -504,7 +505,7 @@ export default function App() {
   }, []);
 
   const chooseProject = async () => {
-    if (figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
+    if (figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
@@ -524,7 +525,7 @@ export default function App() {
   };
 
   const selectProject = (id: string) => {
-    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
+    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
     setProjectMenuOpen(false);
     if (
       id !== currentProject?.id
@@ -978,7 +979,9 @@ export default function App() {
     onSignOut: handleLogout,
   });
   const codePage = renderedTab === "lab";
-  const codeShell = codePage && codeShellReady && codeWorkbenchReady;
+  // The page layout must be stable before the iframe/extension is ready.
+  // Desktop navigation remains available in the titlebar during preparation.
+  const codeShell = codePage;
   // Keep a desktop-owned exit from Code when the duplicate header is removed.
   // It must work without an extension command or an editor socket round trip.
   const productSwitcher = (
@@ -1018,6 +1021,21 @@ export default function App() {
     />
   );
 
+  const projectControl = (
+    <AppProjectSwitcher
+      copy={copy} projects={orderedProjects} currentProject={currentProject}
+      busy={projectBusy} open={projectMenuOpen} onOpenChange={setProjectSwitcherOpen}
+      onSelect={selectProject} onAdd={() => void chooseProject()}
+      onReveal={() => {
+        if (!currentProject?.path) return;
+        void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+      }}
+      drag={{ id: draggedProjectId, suppressClick: suppressProjectClickRef,
+        onStart: startProjectDrag, onMove: moveProjectDrag,
+        onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
+    />
+  );
+
   return (
     <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}${codeShell ? " app-code-shell" : ""}`}>
       <div className="window-titlebar">
@@ -1053,11 +1071,17 @@ export default function App() {
             <NavArrow dir="right" />
           </button>
         </div>}
-        <div
-          className="window-titlebar-drag"
-          data-tauri-drag-region
-          onDoubleClick={() => requestWindowAction("maximize")}
-        />
+        <div className="window-titlebar-center">
+          <div
+            className="window-titlebar-drag"
+            data-tauri-drag-region
+            onDoubleClick={() => requestWindowAction("maximize")}
+          />
+          {codePage && <div
+            className="window-titlebar-code-actions"
+            hidden={codeShellReady && codeWorkbenchReady && !projectMenuOpen && !userMenuOpen}
+          >{projectControl}{accountControl}</div>}
+        </div>
         <div className="window-titlebar-controls">
           {isTauri() && (
             <button
@@ -1108,20 +1132,9 @@ export default function App() {
         </div>
         {tab === "literature" && literaturePageView === "library" && <div id="literature-toolbar-slot" />}
         <div className="app-head-actions">
-          <AppProjectSwitcher
-            copy={copy} projects={orderedProjects} currentProject={currentProject}
-            busy={projectBusy} open={projectMenuOpen} onOpenChange={setProjectSwitcherOpen}
-            onSelect={selectProject} onAdd={() => void chooseProject()}
-            onReveal={() => {
-              if (!currentProject?.path) return;
-              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
-            }}
-            drag={{ id: draggedProjectId, suppressClick: suppressProjectClickRef,
-              onStart: startProjectDrag, onMove: moveProjectDrag,
-              onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
-          />
+          {!codePage && projectControl}
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
-          {!navigationShell && accountControl}
+          {!navigationShell && !codePage && accountControl}
         </div>
       </header>
 

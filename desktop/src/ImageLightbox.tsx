@@ -29,6 +29,7 @@ const LIGHTBOX_COPY = {
     reveal: "在文件管理器中显示",
     openExternal: "用系统程序打开",
     close: "关闭",
+    loading: "正在读取图片…",
     failed: "无法显示这张图片。",
   },
   en: {
@@ -42,6 +43,7 @@ const LIGHTBOX_COPY = {
     reveal: "Show in file manager",
     openExternal: "Open with system app",
     close: "Close",
+    loading: "Loading image…",
     failed: "This image cannot be displayed.",
   },
 } as const;
@@ -51,8 +53,9 @@ function clampZoom(value: number): number {
 }
 
 interface Props {
-  /** Display URL the preview already resolved, so opening costs no second read. */
-  src: string;
+  /** Resolved display URL, or null while a file opened without a preview loads. */
+  src: string | null;
+  loadError?: boolean;
   alt?: string;
   title?: string;
   /** Local path, when there is one: it names the image and fills the header actions. */
@@ -69,6 +72,7 @@ interface Props {
 
 export default function ImageLightbox({
   src,
+  loadError = false,
   alt,
   title,
   path,
@@ -293,8 +297,10 @@ export default function ImageLightbox({
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
         >
-          {failed ? (
+          {loadError || failed ? (
             <span className="image-lightbox-status">{copy.failed}</span>
+          ) : !src ? (
+            <span className="image-lightbox-status" role="status">{copy.loading}</span>
           ) : (
             <img
               ref={imageRef}

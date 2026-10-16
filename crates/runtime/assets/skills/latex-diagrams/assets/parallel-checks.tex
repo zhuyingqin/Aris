@@ -1,0 +1,15 @@
+% Body fragment; shared candidate, distinct checks, no assumed pass verdict.
+\begin{tikzpicture}
+  \node[sq process] (candidate) at (-4.7,0) {同一候选\\$\theta$};
+  \coordinate (fork) at (-2.7,0);
+  \node[sq process] (fit) at (0,1.2) {拟合检查\\$\|G\theta-b\|$};
+  \node[sq process] (control) at (0,-1.2) {重解控制\\$\hat\pi_\theta$};
+  \coordinate (join) at (2.7,0);
+  \node[sq result] (evidence) at (4.7,0) {对照检查证据\\记录适用范围};
+  \draw[sq line] (candidate.east) -- (fork);
+  \draw[sq arrow] (fork) |- (fit.west);
+  \draw[sq arrow] (fork) |- (control.west);
+  \draw[sq line] (fit.east) -| (join);
+  \draw[sq line] (control.east) -| (join);
+  \draw[sq arrow] (join) -- (evidence.west);
+\end{tikzpicture}

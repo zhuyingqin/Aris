@@ -403,6 +403,8 @@ pub struct ConfigView {
     pub reviewer_model: Option<String>,
     pub reviewer_base_url: Option<String>,
     pub review_enabled: bool,
+    /// `thread` | `oneshot`; see [`ReviewMode`].
+    pub review_mode: String,
     pub has_reviewer_key: bool,
     pub reviewer_key_masked: Option<String>,
     pub has_scopus_key: bool,
@@ -461,6 +463,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_model: get_str(obj, "reviewer_model"),
         reviewer_base_url: get_str(obj, "reviewer_base_url"),
         review_enabled: review_enabled_from(obj),
+        review_mode: review_mode_from(obj).as_str().to_string(),
         has_reviewer_key: rev_key.is_some(),
         reviewer_key_masked: rev_key.as_deref().map(mask),
         has_scopus_key: scopus_key.is_some(),
@@ -508,6 +511,44 @@ fn review_enabled_from(obj: &Map<String, Value>) -> bool {
 
 pub(crate) fn review_enabled() -> bool {
     review_enabled_from(&managed_config_object().unwrap_or_else(|_| load_object()))
+}
+
+/// How the independent Reviewer runs for a Chat turn (`review_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewMode {
+    /// A resident Reviewer thread (docs/development-logic/multi-agent-threads.md,
+    /// section 5): it keeps its conversation between rounds, is sent only what
+    /// changed, and can check the project itself with read-only tools. Falls back
+    /// to `Oneshot` for a Reviewer that cannot hold a conversation.
+    Thread,
+    /// One stateless request per round with all the evidence pasted in: how the
+    /// Reviewer worked before review threads, kept as the way back.
+    Oneshot,
+}
+
+impl ReviewMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Oneshot => "oneshot",
+        }
+    }
+}
+
+fn review_mode_from(obj: &Map<String, Value>) -> ReviewMode {
+    // Absent or unrecognised means the default, so a typo in the file cannot
+    // silently pick the old path.
+    match get_str(obj, "review_mode")
+        .map(|mode| mode.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("oneshot") => ReviewMode::Oneshot,
+        _ => ReviewMode::Thread,
+    }
+}
+
+pub(crate) fn review_mode() -> ReviewMode {
+    review_mode_from(&managed_config_object().unwrap_or_else(|_| load_object()))
 }
 
 /// The same flag without the model-slot normalization, which can write the
@@ -1352,6 +1393,8 @@ pub struct ConfigPatch {
     pub reviewer_base_url: Option<String>,
     pub reviewer_api_key: Option<String>,
     pub review_enabled: Option<bool>,
+    /// `thread` | `oneshot`; blank restores the default.
+    pub review_mode: Option<String>,
     pub scopus_api_key: Option<String>,
     pub openalex_api_key: Option<String>,
     pub bocha_api_key: Option<String>,
@@ -1625,6 +1668,17 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "web_proxy_url", patch.web_proxy_url);
     if let Some(enabled) = patch.review_enabled {
         obj.insert("review_enabled".to_string(), Value::Bool(enabled));
+    }
+    if let Some(mode) = patch.review_mode {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            mode @ ("thread" | "oneshot") => {
+                obj.insert("review_mode".to_string(), Value::String(mode.to_string()));
+            }
+            // Blank, or anything else, is "no preference".
+            _ => {
+                obj.remove("review_mode");
+            }
+        }
     }
     set_or_clear(obj, "language", patch.language);
     if let Some(enabled) = patch.memory_write_approval {

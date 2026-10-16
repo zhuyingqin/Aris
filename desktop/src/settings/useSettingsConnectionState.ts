@@ -25,6 +25,7 @@ import {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
+type ReviewMode = NonNullable<ConfigView["reviewMode"]>;
 
 /** How long the "saved" confirmation stays up before the button resets. */
 const SAVE_STATE_RESET_MS = 3000;
@@ -385,6 +386,18 @@ export function useSettingsConnectionState({
     }
   };
 
+  // Commit only this preference, like the memory policy; a full loadConfig of the
+  // response would erase the unsaved key drafts on the Models tab.
+  const applyReviewMode = async (mode: ReviewMode) => {
+    if (mode === (configView?.reviewMode ?? "thread")) return;
+    try {
+      const confirmed = hasNativeBackend() ? (await configSet({ reviewMode: mode })).reviewMode : mode;
+      setConfigView((current) => current ? { ...current, reviewMode: confirmed } : current);
+    } catch (error) {
+      setError(formatUserFacingError(error, language));
+    }
+  };
+
   const loadManagedModels = async () => {
     if (!isTauri()) {
       setManagedModels(previewManagedModels);
@@ -475,7 +488,7 @@ export function useSettingsConnectionState({
     managedModelsLoading, managedModelsError,
     canConfigureExecutor, canConfigureReviewerApi,
     loadConfig, resetOpState, save, test, testWebProvider, clearWebProviderKey, resetWebProviderTests,
-    applyManagedModel, applyManagedReviewerModel, loadManagedModels,
+    applyManagedModel, applyManagedReviewerModel, applyReviewMode, loadManagedModels,
     chooseExecProvider, chooseReviewerProvider, chooseSummaryProvider,
   };
 }

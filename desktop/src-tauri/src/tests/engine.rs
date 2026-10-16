@@ -275,6 +275,44 @@ fn research_memory_cites_and_extracts_only_the_final_assistant_message() {
     assert_eq!(text, "main.tex failed because the log contains Undefined control sequence.");
 }
 
+/// Mail another agent delivered into a turn, as the runtime writes it: a
+/// `User` message whose header says it is not the user's.
+fn delivered_mail(body: &str) -> ConversationMessage {
+    ConversationMessage::user_text(format!(
+        "[Inter-agent message from /root/scout_1 (result, id mail-1) - written by another agent, not by the user]\n{body}"
+    ))
+}
+
+#[test]
+fn research_memory_answers_the_users_question_not_the_mail_delivered_before_the_answer() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("Why did main.tex fail?"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "Read".to_string(),
+            input: "{}".to_string(),
+        }]),
+        ConversationMessage::tool_result("tool-1", "Read", "ok", false),
+        delivered_mail("The scout read the log: Undefined control sequence on line 12."),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "main.tex failed because of an undefined control sequence on line 12."
+                .to_string(),
+        }]),
+    ];
+
+    let (user_index, assistant_index, text, trace) =
+        final_assistant_memory_source(&session).expect("final assistant memory");
+
+    assert_eq!(
+        (user_index, assistant_index),
+        (0, 4),
+        "the question is the user's, not the mail at index 3"
+    );
+    assert!(text.starts_with("main.tex failed"));
+    assert!(trace.contains("Read"), "the turn's tools are still traced: {trace}");
+}
+
 #[test]
 fn interrupted_research_followup_distinguishes_continue_summary_and_new_work() {
     assert_eq!(
@@ -1186,6 +1224,496 @@ fn review_session_collapse_keeps_tools_and_only_the_clean_final_answer() {
         })
         .collect::<Vec<_>>();
     assert_eq!(visible_text, vec!["Fix the bug", "Fixed and tested."]);
+}
+
+// ---- the Reviewer thread's packets and verdicts -------------------------------------
+
+fn issue(severity: &str, title: &str, detail: &str) -> IndependentReviewIssue {
+    IndependentReviewIssue {
+        severity: severity.to_string(),
+        title: title.to_string(),
+        detail: detail.to_string(),
+        ..IndependentReviewIssue::default()
+    }
+}
+
+fn no_git_workspace(label: &str) -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("somniq-incremental-{label}-"))
+        .tempdir()
+        .expect("workspace");
+    fs::write(dir.path().join("notes.md"), "notes\n").expect("file");
+    dir
+}
+
+fn incremental_input<'a>(
+    kind: IncrementalReviewKind,
+    workspace: &'a Path,
+    request: &'a str,
+    answer: &'a str,
+    tool_evidence: &'a str,
+    file_evidence: &'a str,
+    previous: Option<&'a IndependentReviewResult>,
+) -> IncrementalReviewInput<'a> {
+    IncrementalReviewInput {
+        kind,
+        attempt: 4,
+        user_text: request,
+        answer,
+        new_tool_evidence: tool_evidence,
+        new_file_evidence: file_evidence,
+        previous,
+        workspace,
+        executor_provider: "openai",
+        executor_model: "executor-model",
+    }
+}
+
+#[test]
+fn an_incremental_review_packet_is_bounded_whatever_the_round_brings() {
+    let workspace = no_git_workspace("bounded");
+    let huge = "NEW-EVIDENCE line of output\n".repeat(60_000);
+    let previous = IndependentReviewResult {
+        issues: (0..200)
+            .map(|index| issue("high", &format!("Finding {index}"), &"detail ".repeat(500)))
+            .collect(),
+        missing_checks: vec!["run the integration test ".repeat(300)],
+        ..IndependentReviewResult::default()
+    };
+
+    for kind in [
+        IncrementalReviewKind::NewRequest,
+        IncrementalReviewKind::Revision { number: 2 },
+    ] {
+        let packet = incremental_review_packet(&incremental_input(
+            kind,
+            workspace.path(),
+            &huge,
+            &huge,
+            &huge,
+            &huge,
+            Some(&previous),
+        ));
+
+        let size = packet.chars().count();
+        assert!(
+            size <= MAX_INCREMENTAL_REVIEW_PACKET_CHARS,
+            "{kind:?}: {size} characters"
+        );
+        assert!(packet.contains("[truncated]"), "an oversized section says so");
+        // The instructions to answer survive however large the material is.
+        assert!(packet.contains("Return exactly one JSON object"), "{kind:?}");
+        assert!(packet.ends_with("\"criteriaSatisfied\":[0]}"));
+    }
+}
+
+#[test]
+fn an_incremental_review_packet_holds_the_new_round_and_not_the_ones_before_it() {
+    let workspace = no_git_workspace("delta");
+    // Three rounds of evidence, as the revision loop accumulates them.
+    let trace_sections = (1..=3)
+        .map(|round| format!("ROUND{round}-TOOL-EVIDENCE {}", "t".repeat(20_000)))
+        .collect::<Vec<_>>();
+    let evidence_sections = (1..=3)
+        .map(|round| format!("ROUND{round}-FILE-EVIDENCE {}", "f".repeat(15_000)))
+        .collect::<Vec<_>>();
+    let cumulative_trace =
+        cumulative_review_sections(&trace_sections, MAX_REVIEW_CUMULATIVE_TRACE_CHARS, "Tool evidence");
+    let cumulative_files = cumulative_review_sections(
+        &evidence_sections,
+        MAX_REVIEW_MATERIALIZED_EVIDENCE_CHARS,
+        "File evidence",
+    );
+    let previous = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        issues: vec![issue("high", "The migration has no test", "Nothing exercises the new column.")],
+        ..IndependentReviewResult::default()
+    };
+    let request = "Add the migration and test it";
+    let answer = "The migration is added and tested.";
+
+    let whole_case = independent_review_prompt(
+        request,
+        answer,
+        &cumulative_trace,
+        &cumulative_files,
+        std::slice::from_ref(&previous),
+        4,
+        workspace.path(),
+        "openai",
+        "executor-model",
+    );
+    let increment = incremental_review_packet(&incremental_input(
+        IncrementalReviewKind::Revision { number: 2 },
+        workspace.path(),
+        request,
+        answer,
+        trace_sections.last().unwrap(),
+        evidence_sections.last().unwrap(),
+        Some(&previous),
+    ));
+
+    assert!(whole_case.contains("ROUND1-TOOL-EVIDENCE") && whole_case.contains("ROUND2-FILE-EVIDENCE"));
+    assert!(increment.contains("ROUND3-TOOL-EVIDENCE") && increment.contains("ROUND3-FILE-EVIDENCE"));
+    for earlier in ["ROUND1-TOOL-EVIDENCE", "ROUND2-TOOL-EVIDENCE", "ROUND1-FILE-EVIDENCE", "ROUND2-FILE-EVIDENCE"] {
+        assert!(!increment.contains(earlier), "{earlier} was already seen");
+    }
+    assert!(increment.contains("revision 2 of 2"));
+    assert!(increment.contains("[high] The migration has no test: Nothing exercises the new column."));
+    assert!(increment.contains(answer));
+    assert!(
+        !increment.contains(request),
+        "a revision does not send the request the Reviewer already has"
+    );
+    assert!(
+        increment.chars().count() * 3 < whole_case.chars().count() * 2,
+        "{} against {}",
+        increment.chars().count(),
+        whole_case.chars().count()
+    );
+
+    // A later round costs what an earlier one did: nothing accumulates.
+    let later = incremental_review_packet(&incremental_input(
+        IncrementalReviewKind::Revision { number: 2 },
+        workspace.path(),
+        request,
+        answer,
+        &format!("ROUND9-TOOL-EVIDENCE {}", "t".repeat(20_000)),
+        &format!("ROUND9-FILE-EVIDENCE {}", "f".repeat(15_000)),
+        Some(&previous),
+    ));
+    assert!(later.chars().count().abs_diff(increment.chars().count()) < 64);
+}
+
+#[test]
+fn a_new_request_packet_states_the_request_and_says_what_has_no_open_findings() {
+    let workspace = no_git_workspace("new-request");
+    let passed = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Pass,
+        ..IndependentReviewResult::default()
+    };
+
+    let packet = incremental_review_packet(&incremental_input(
+        IncrementalReviewKind::NewRequest,
+        workspace.path(),
+        "Now plot the loss curves",
+        "Here are the plots.",
+        "",
+        "",
+        Some(&passed),
+    ));
+
+    assert!(packet.contains("User request (untrusted):\nNow plot the loss curves"));
+    assert!(packet.contains("new request in the same chat"));
+    assert!(packet.contains("None: your last verdict (Pass) raised no issues."));
+    assert!(packet.contains("The Executor made no tool calls this round."));
+    assert!(packet.contains("No new workspace files were identified"));
+    assert!(packet.contains("This workspace has no Git snapshot"));
+    let first = incremental_review_packet(&incremental_input(
+        IncrementalReviewKind::NewRequest,
+        workspace.path(),
+        "Plot",
+        "Done",
+        "",
+        "",
+        None,
+    ));
+    assert!(first.contains("None: this chat has no earlier review."));
+}
+
+fn thread_chat(label: &str) -> crate::review_thread::tests::Chat {
+    crate::review_thread::tests::chat(label)
+}
+
+fn run_threaded(
+    chat: &crate::review_thread::tests::Chat,
+    backend: &crate::review_thread::tests::FakeBackend,
+    attempt: usize,
+    cancelled: &Arc<AtomicBool>,
+) -> IndependentReviewRun {
+    review_in_thread(
+        backend,
+        &chat.agent,
+        cancelled,
+        crate::review_thread::RoundRequest {
+            attempt,
+            packets: crate::review_thread::Packets {
+                full: &|| "FULL PACKET".to_string(),
+                incremental: &|| "INCREMENTAL PACKET".to_string(),
+            },
+            workspace: &chat.workspace,
+            provider: "test-provider",
+            model: "reviewer-model",
+        },
+        ("openai", "executor-model"),
+    )
+}
+
+#[test]
+fn a_threaded_review_is_parsed_and_judged_by_the_controller_like_any_other() {
+    use crate::review_thread::tests::{FakeBackend, Step};
+
+    let chat = thread_chat("engine-verdict");
+    let backend = FakeBackend::new(
+        "model-a",
+        vec![
+            Step::Tool(crate::review_thread::REVIEWER_TOOLS[0], r#"{"path":"notes.md"}"#.to_string()),
+            Step::Say(
+                r#"Here is my review: {"verdict":"revise","summary":"one missing test","issues":[{"severity":"high","title":"No test","detail":"Nothing covers it","evidence":"notes.md","recommendation":"add one"}],"evidenceChecked":["notes.md"],"missingChecks":[],"revisionInstructions":["add a test"],"relevantToGoal":true,"progressDelta":null,"criteriaSatisfied":[]}"#
+                    .to_string(),
+            ),
+        ],
+    );
+
+    let run = run_threaded(&chat, &backend, 1, &Arc::new(AtomicBool::new(false)));
+
+    let result = &run.result;
+    assert_eq!(result.verdict, IndependentReviewVerdict::Revise);
+    assert_eq!(result.issues.len(), 1);
+    assert_eq!(result.revision_instructions, vec!["add a test".to_string()]);
+    assert!(result.independent);
+    assert_eq!(
+        (result.reviewer_provider.as_str(), result.reviewer_model.as_str()),
+        ("test-provider", "reviewer-model")
+    );
+    assert_eq!(
+        (result.executor_provider.as_str(), result.executor_model.as_str()),
+        ("openai", "executor-model")
+    );
+    assert_eq!(
+        result.tool_checks,
+        vec!["read_file notes.md".to_string()],
+        "the record of what the Reviewer opened is the controller's, not the model's"
+    );
+    assert_eq!(result.evidence_checked, vec!["notes.md".to_string()]);
+    assert_eq!(run.usages.len(), 1, "the Reviewer's tokens are accounted");
+
+    // The verdict is on the chat's record, linked to the thread that gave it.
+    let events = crate::chat_events::read_events_for_session_in_dir(
+        chat.agent.session_id(),
+        &chat.project.sessions_dir(),
+        Some(&["agent.review.verdict", "agent.review.request"]),
+    )
+    .unwrap();
+    let kinds = events.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>();
+    assert_eq!(kinds, vec!["agent.review.request", "agent.review.verdict"]);
+    assert_eq!(events[1].payload["verdict"], json!("revise"));
+    assert_eq!(events[1].payload["issueCount"], json!(1));
+    assert_eq!(events[1].payload["toolChecks"], json!(["read_file notes.md"]));
+    assert_eq!(
+        events[1].payload["reviewerSessionId"],
+        events[0].payload["reviewerSessionId"]
+    );
+}
+
+#[test]
+fn a_threaded_review_gets_the_same_goal_gating_as_a_one_shot_review() {
+    use crate::review_thread::tests::{FakeBackend, Step};
+
+    let chat = thread_chat("engine-gating");
+    // Only advisory findings: the controller does not send the Executor back.
+    let backend = FakeBackend::new(
+        "model-a",
+        vec![Step::Say(
+            r#"{"verdict":"revise","summary":"fine","issues":[{"severity":"low","title":"Naming","detail":"a nit","evidence":"","recommendation":"rename"}],"evidenceChecked":["the answer"],"missingChecks":[],"revisionInstructions":[],"relevantToGoal":true,"progressDelta":null,"criteriaSatisfied":[]}"#
+                .to_string(),
+        )],
+    );
+
+    let run = run_threaded(&chat, &backend, 1, &Arc::new(AtomicBool::new(false)));
+
+    assert_eq!(run.result.verdict, IndependentReviewVerdict::Pass);
+    assert!(run.result.summary.contains("advisory"));
+}
+
+#[test]
+fn a_threaded_review_that_cannot_be_read_or_was_stopped_is_unavailable_not_a_pass() {
+    use crate::review_thread::tests::{FakeBackend, Step};
+
+    let chat = thread_chat("engine-unavailable");
+    let rambling = FakeBackend::new("model-a", vec![Step::Say("It looks fine to me.".to_string())]);
+    let run = run_threaded(&chat, &rambling, 1, &Arc::new(AtomicBool::new(false)));
+    assert_eq!(run.result.verdict, IndependentReviewVerdict::Unavailable);
+    assert!(run.result.summary.contains("did not return a JSON object"), "{}", run.result.summary);
+    assert!(run.result.summary.contains("It looks fine to me."));
+    assert!(!run.result.independent);
+
+    let failing = FakeBackend::new("model-a", vec![Step::Fail("the provider refused this request".to_string())]);
+    let run = run_threaded(&chat, &failing, 2, &Arc::new(AtomicBool::new(false)));
+    assert_eq!(run.result.verdict, IndependentReviewVerdict::Unavailable);
+    assert!(run.result.summary.contains("Independent Reviewer failed"), "{}", run.result.summary);
+    assert!(run.result.summary.contains("refused this request"));
+
+    let stopped = run_threaded(&chat, &failing, 3, &Arc::new(AtomicBool::new(true)));
+    assert_eq!(stopped.result.verdict, IndependentReviewVerdict::Unavailable);
+    assert!(stopped.result.summary.contains("interrupted by user"), "{}", stopped.result.summary);
+}
+
+#[test]
+fn only_a_chat_turn_with_an_api_reviewer_in_thread_mode_reviews_in_a_thread() {
+    use crate::config::ReviewMode::{Oneshot, Thread};
+
+    assert!(review_runs_in_thread(Thread, true, Some("openai")));
+    assert!(review_runs_in_thread(Thread, true, Some("anthropic-compat")));
+    assert!(!review_runs_in_thread(Oneshot, true, Some("openai")), "the way back");
+    assert!(
+        !review_runs_in_thread(Thread, false, Some("openai")),
+        "a work task, or a chat that has no agent tree to hold the thread"
+    );
+    assert!(!review_runs_in_thread(Thread, true, Some("oracle-web")));
+    assert!(
+        !review_runs_in_thread(Thread, true, Some("Oracle-Web")),
+        "the browser Reviewer has no tools and one tab"
+    );
+    assert!(!review_runs_in_thread(Thread, true, None), "no Reviewer, no thread");
+}
+
+#[test]
+fn a_one_shot_result_serializes_exactly_as_it_did_before_review_threads() {
+    let oneshot = IndependentReviewResult::default();
+    let value = serde_json::to_value(&oneshot).expect("serialize");
+    assert!(value.get("toolChecks").is_none(), "{value}");
+    // An older review row, written before the field existed, still reads.
+    let old: IndependentReviewResult =
+        serde_json::from_str(r#"{"verdict":"pass","summary":"ok"}"#).expect("deserialize");
+    assert!(old.tool_checks.is_empty());
+    let threaded = IndependentReviewResult {
+        tool_checks: vec!["read_file a.rs".to_string()],
+        ..IndependentReviewResult::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&threaded).unwrap()["toolChecks"],
+        json!(["read_file a.rs"])
+    );
+}
+
+#[test]
+fn what_the_reviewers_tools_refuse_is_what_the_oneshot_evidence_path_always_refused() {
+    for secret in [".env", "config/credentials.json", "secrets/key.md", "api_key.txt", "my_apikey.py", "auth_token.log"] {
+        assert!(review_path_looks_secret(Path::new(secret)), "{secret}");
+        assert!(!review_evidence_file_is_safe(Path::new(secret)), "{secret}");
+    }
+    assert!(review_evidence_file_is_safe(Path::new("src/main.rs")));
+    assert!(review_evidence_file_is_safe(Path::new("papers/notes.TEX")));
+    assert!(!review_path_looks_secret(Path::new("figure.png")));
+    assert!(
+        !review_evidence_file_is_safe(Path::new("figure.png")),
+        "not secret, but not text either"
+    );
+}
+
+#[test]
+fn review_session_collapse_keeps_mail_delivered_during_the_revision() {
+    let user = ConversationMessage::user_text("Fix the bug");
+    let mut session = Session::new();
+    session.messages = vec![
+        user.clone(),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "edit_file".to_string(),
+            input: r#"{"path":"src/lib.rs"}"#.to_string(),
+        }]),
+        ConversationMessage::tool_result("tool-1", "edit_file", "ok", false),
+        revision_prompt(&IndependentReviewResult::default(), 1),
+        delivered_mail("The scout confirmed the failing test is gone."),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "# Replacement answer for Reviewer".to_string(),
+        }]),
+    ];
+
+    collapse_independent_review_session(&mut session, &user, "Fixed and tested.", None);
+
+    let kept_mail = session
+        .messages
+        .iter()
+        .filter(|message| runtime::is_inter_agent_message(message))
+        .count();
+    assert_eq!(kept_mail, 1, "the answer may rest on the mail, so it stays");
+    let mail_at = session
+        .messages
+        .iter()
+        .position(|message| runtime::is_inter_agent_message(message))
+        .expect("mail kept");
+    let tool_result_at = session
+        .messages
+        .iter()
+        .position(|message| message.role == MessageRole::Tool)
+        .expect("tool result kept");
+    assert!(tool_result_at < mail_at, "arrival order is preserved");
+    assert!(session
+        .messages
+        .iter()
+        .all(|message| message.role != MessageRole::System));
+    let last = session.messages.last().expect("final answer");
+    assert!(matches!(
+        &last.blocks[0],
+        ContentBlock::Text { text } if text == "Fixed and tested."
+    ));
+}
+
+#[test]
+fn review_session_collapse_never_takes_mail_for_the_users_request() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("Fix the bug"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: "Rejected draft".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "edit_file".to_string(),
+                input: "{}".to_string(),
+            },
+        ]),
+        ConversationMessage::tool_result("tool-1", "edit_file", "ok", false),
+        delivered_mail("The scout confirmed the failing test is gone."),
+    ];
+    // An anchor that no longer matches word for word (a long request is bounded
+    // on its way in) sends the search to the last user message that is not an
+    // internal one. The mail is the newest `User` message here, and must not win.
+    let anchor = ConversationMessage::user_text("Fix the bug (as first sent)");
+
+    collapse_independent_review_session(&mut session, &anchor, "Fixed and tested.", None);
+
+    let visible_text = session
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !visible_text.contains(&"Rejected draft"),
+        "the draft after the real request is dropped: {visible_text:?}"
+    );
+    assert_eq!(visible_text.first(), Some(&"Fix the bug"));
+    assert_eq!(visible_text.last(), Some(&"Fixed and tested."));
+}
+
+#[test]
+fn recent_user_context_lists_what_the_user_asked_and_not_delivered_mail() {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("Compare the two optimizers"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Working on it.".to_string(),
+        }]),
+        delivered_mail("The scout finished reading both papers."),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Here is the comparison.".to_string(),
+        }]),
+        ConversationMessage::user_text("Now plot the loss curves"),
+    ];
+
+    let context = recent_user_context(&session, 5);
+
+    assert_eq!(
+        context,
+        "1. Compare the two optimizers\n2. Now plot the loss curves"
+    );
 }
 
 #[test]
@@ -2422,6 +2950,57 @@ fn cancelled_turn_can_be_replaced_before_its_old_guard_drops() {
             .map(|turn| turn.turn_id),
         Some(2)
     );
+}
+
+#[test]
+fn retired_turn_cannot_overwrite_the_new_transcript_on_disk_or_in_cache() {
+    let state = ChatState::default();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chat-retry.json");
+    state.running_turns.lock().unwrap().insert("chat-retry".into(), RunningTurn {
+        turn_id: 2, cancelled: Arc::new(AtomicBool::new(false)), blocks_project_switch: true,
+    });
+    let mut current = Session::new();
+    current.messages.push(ConversationMessage::user_text("new question"));
+    with_current_chat_turn(&state, "chat-retry", 2, false, || {
+        current.save_to_path(&path).map_err(|error| error.to_string())?;
+        cache_chat_session(&state, "chat-retry".into(), current.clone())
+    }).unwrap().unwrap();
+
+    for allow_cancelled in [false, true] {
+        let result = with_current_chat_turn(&state, "chat-retry", 1, allow_cancelled, || {
+            let mut stale = Session::new();
+            stale.messages.push(ConversationMessage::user_text("old failed transcript"));
+            stale.save_to_path(&path).map_err(|error| error.to_string())?;
+            cache_chat_session(&state, "chat-retry".into(), stale)
+        }).unwrap();
+        assert!(result.is_none());
+    }
+    assert_eq!(Session::load_from_path(&path).unwrap(), current);
+    assert_eq!(state.sessions.lock().unwrap().get("chat-retry"), Some(&current));
+}
+
+#[test]
+fn stopped_owner_can_preserve_partial_evidence_until_its_slot_is_replaced() {
+    let state = ChatState::default();
+    state.running_turns.lock().unwrap().insert("chat-stopped".into(), RunningTurn {
+        turn_id: 1, cancelled: Arc::new(AtomicBool::new(true)), blocks_project_switch: true,
+    });
+    let mut partial = Session::new();
+    partial.messages.push(ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: "partial evidence before Stop".into(),
+    }]));
+    assert!(with_current_chat_turn::<()>(&state, "chat-stopped", 1, false, || {
+        panic!("a cancelled turn cannot complete successfully")
+    }).unwrap().is_none());
+    with_current_chat_turn(&state, "chat-stopped", 1, true, || {
+        cache_chat_session(&state, "chat-stopped".into(), partial.clone())
+    }).unwrap().unwrap();
+    assert_eq!(state.sessions.lock().unwrap().get("chat-stopped"), Some(&partial));
+    release_cancelled_turn_for_replacement(&state, "chat-stopped").unwrap();
+    assert!(with_current_chat_turn::<()>(&state, "chat-stopped", 1, true, || {
+        panic!("a released slot no longer authorizes persistence")
+    }).unwrap().is_none());
 }
 
 #[test]

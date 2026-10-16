@@ -1639,6 +1639,10 @@ fn is_internal_user_text(text: &str) -> bool {
         || trimmed.starts_with(LEGACY_BLANK_RESPONSE_CONTINUATION_PREFIX)
         || trimmed.starts_with(DIRECT_COMPACTION_TASK_PREFIX)
         || trimmed.starts_with(crate::conversation::DELIVERY_CHECKPOINT_PROMPT_PREFIX)
+        // Mail from another agent, delivered into a running turn. It is not
+        // something the user said: it must neither count as a user turn when
+        // compaction chooses what to keep nor stand in for the user's request.
+        || trimmed.starts_with(crate::conversation::INTER_AGENT_MESSAGE_PREFIX)
 }
 
 fn collect_prior_compaction_summaries(messages: &[ConversationMessage]) -> Vec<String> {

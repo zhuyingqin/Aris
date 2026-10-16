@@ -1,3 +1,4 @@
+mod agent_threads;
 mod app_ctx;
 mod blocking;
 mod change_review;
@@ -34,6 +35,7 @@ mod process;
 mod profile;
 mod projects;
 mod remote;
+mod review_thread;
 mod scheduled;
 mod screenshot;
 mod sessions;
@@ -422,6 +424,7 @@ fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
 pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
     let chat_state = app_handle.state::<engine::ChatState>();
     engine::cancel_all_running_turns(chat_state.inner());
+    agent_threads::stop_all("project work stopped; continue explicitly from the saved checkpoint");
 
     let remote_state = app_handle.state::<remote::RemoteAgentState>();
     remote::cancel_all_active_chat_messages(remote_state.inner());
@@ -435,6 +438,7 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
         playwright_pdf::shutdown();
         stop_all_running_work(app_handle);
+        agent_threads::shutdown();
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
         // its existing paired devices without a fresh connection ceremony.
@@ -944,6 +948,8 @@ pub fn run() {
             figures::figures_cancel,
             figures::figures_document,
             figures::figures_save,
+            figures::draft::figures_save_draft,
+            figures::draft::figures_discard_draft,
             figures::figures_export,
             figures::figures_review,
             figures::svg_edit::figures_edit_svg,
@@ -1095,6 +1101,10 @@ pub fn run() {
             engine::chat_reasoning_effort_get,
             engine::chat_reasoning_effort_set,
             engine::chat_permission_get,
+            engine::collaboration::chat_agent_list,
+            engine::collaboration::chat_agent_detail,
+            engine::collaboration::chat_agent_interrupt,
+            engine::collaboration::chat_agent_trace,
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,

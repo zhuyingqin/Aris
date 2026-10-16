@@ -14,7 +14,7 @@ import { SETTINGS_TAB_REQUEST_EVENT } from "../settingsTabRequest";
 import Settings from "./Settings";
 import { PREVIEW_SETTINGS_DATA } from "./settingsPreviewData";
 import { writeCachedProfileStats } from "./profileStatsCache";
-import type { ProfileStats } from "../types";
+import type { ConfigView, ProfileStats } from "../types";
 
 vi.mock("../api/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/tauri")>()),
@@ -73,6 +73,45 @@ describe("Settings against a native backend", () => {
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M2.7" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Reviewer 模型" }), { target: { value: "gpt-5.5" } });
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewerProvider: "custom", reviewerModel: "gpt-5.5" }));
+  });
+
+  it("saves the review mode by itself, reads it back on the next visit, and keeps the confirmed mode when a save fails", async () => {
+    let confirmed: ConfigView = { ...preview.configView, reviewMode: "thread" };
+    vi.mocked(configGet).mockImplementation(async () => confirmed);
+    vi.mocked(configSet).mockImplementation(async (patch) => { confirmed = { ...confirmed, ...patch }; return confirmed; });
+    const first = render(<Settings />);
+    const mode = await screen.findByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
+    await waitFor(() => expect(mode.value).toBe("thread"));
+    expect(screen.getByText(/只读工具自行核对项目文件/)).toBeTruthy();
+
+    fireEvent.change(mode, { target: { value: "oneshot" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewMode: "oneshot" }));
+    await waitFor(() => expect(mode.value).toBe("oneshot"));
+    expect(screen.getByText(/Reviewer 模型不能调用工具时选此项/)).toBeTruthy();
+    expect(screen.queryByText(/只读工具自行核对项目文件/)).toBeNull();
+
+    first.unmount();
+    sessionStorage.setItem("somniq-settings-tab-request", "models");
+    render(<Settings />);
+    const reopened = await screen.findByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
+    await waitFor(() => expect(reopened.value).toBe("oneshot"));
+
+    useStore.setState({ error: null });
+    vi.mocked(configSet).mockRejectedValueOnce(new Error("Disk is read-only"));
+    fireEvent.change(reopened, { target: { value: "thread" } });
+    await waitFor(() => expect(useStore.getState().error).toBeTruthy());
+    expect(reopened.value).toBe("oneshot");
+    expect(confirmed.reviewMode).toBe("oneshot");
+  });
+
+  it("neither sends nor discards unsaved model drafts when the review mode changes", async () => {
+    render(<Settings />);
+    fireEvent.change(await screen.findByPlaceholderText("粘贴 Elsevier 密钥"), { target: { value: "keep-scopus-draft" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "审查方式" }), { target: { value: "oneshot" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewMode: "oneshot" }));
+    // The draft goes out through its own auto-save, on its own.
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith(expect.objectContaining({ scopusApiKey: "keep-scopus-draft" })));
+    expect(vi.mocked(configSet).mock.calls.find(([patch]) => patch.scopusApiKey)?.[0]).not.toHaveProperty("reviewMode");
   });
 
   it("shows cached Profile statistics before settings configuration finishes loading", async () => {
