@@ -32,6 +32,7 @@ pub struct ManagedProcessInfo {
 #[derive(Debug)]
 pub struct ManagedProcessGuard {
     pid: u32,
+    terminate_tree_on_drop: bool,
 }
 
 #[derive(Debug)]
@@ -177,7 +178,41 @@ pub fn register_managed_process(
     kind: ManagedProcessKind,
 ) -> ManagedProcessGuard {
     insert_managed_process(pid, label, kind, None);
-    ManagedProcessGuard { pid }
+    ManagedProcessGuard {
+        pid,
+        terminate_tree_on_drop: false,
+    }
+}
+
+/// Own the descendants of an async command for exactly the guard's lifetime.
+/// Call `configure_managed_tokio_command` before spawning the child. Unlike a
+/// background service, an owned one-shot task may not leave survivors behind.
+pub fn register_owned_tokio_process(
+    child: &tokio::process::Child,
+    label: impl Into<String>,
+    kind: ManagedProcessKind,
+) -> io::Result<ManagedProcessGuard> {
+    let job = ManagedJob::adopt_tokio(child)
+        .ok_or_else(|| io::Error::other("Could not own the command's process tree."))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| io::Error::other("The command has already exited."))?;
+    let mut guard = register_managed_process(pid, label, kind);
+    attach_job(pid, Arc::new(job));
+    guard.terminate_tree_on_drop = true;
+    Ok(guard)
+}
+
+impl ManagedProcessGuard {
+    pub(crate) fn terminate_owned_tree(&self) {
+        if self.terminate_tree_on_drop {
+            // Adoption is mandatory for owned commands. Target the retained
+            // job rather than walking a PID that may have already exited.
+            if let Some(job) = job_for(self.pid) {
+                job.terminate();
+            }
+        }
+    }
 }
 
 fn insert_managed_process(
@@ -496,7 +531,10 @@ pub fn run_managed_command_with_cancel_and_progress(
     let pid = child.id();
     let label = label.into();
     insert_managed_process(pid, label.clone(), ManagedProcessKind::Foreground, None);
-    let _guard = ManagedProcessGuard { pid };
+    let _guard = ManagedProcessGuard {
+        pid,
+        terminate_tree_on_drop: false,
+    };
     let job = ManagedJob::adopt(&child).map(Arc::new);
     if let Some(job) = job.clone() {
         attach_job(pid, job);
@@ -870,6 +908,7 @@ fn send_unix_signal(signal: &str, pid: u32) {
 
 impl Drop for ManagedProcessGuard {
     fn drop(&mut self) {
+        self.terminate_owned_tree();
         unregister_managed_process(self.pid);
     }
 }

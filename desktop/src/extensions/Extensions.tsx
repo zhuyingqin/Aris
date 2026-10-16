@@ -649,7 +649,6 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
             <div className="ext-section-head">
               <div>
                 <h2>{copy.skillsHeading}</h2>
-                <p className="ext-section-sub">{copy.skillsSubtitle}</p>
               </div>
               <span className="ext-section-count">{skills.length}</span>
             </div>

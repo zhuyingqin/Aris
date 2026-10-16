@@ -455,7 +455,7 @@ describe("RemoteControlPanel", () => {
     const switches = screen.getAllByRole("switch");
     expect(switches.length).toBeGreaterThanOrEqual(3);
     for (const toggle of switches) {
-      expect((toggle as HTMLInputElement).checked).toBe(false);
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
     }
 
     await user.click(switches[0]);

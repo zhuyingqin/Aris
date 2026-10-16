@@ -2,6 +2,7 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+import { notifyChatModelsUpdated } from "../modelEvents";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
 import {
@@ -35,6 +36,17 @@ export const takeChatCompanionHandoff = () => invoke<PendingChatHandoff | null>(
 /** Receive a new handoff when an already-open companion window is focused. */
 export const onChatCompanionHandoff = (handler: (handoff: PendingChatHandoff) => void) =>
   listen<PendingChatHandoff>("chat-companion-handoff", (event) => handler(event.payload));
+
+export interface SomniImageSettingsView {
+  enabled: boolean;
+  model: string | null;
+  models: string[];
+  available: boolean;
+}
+
+export const somniImageSettings = (): Promise<SomniImageSettingsView> => invoke("somni_image_settings");
+export const somniImageSettingsSet = (enabled: boolean, model: string | null): Promise<SomniImageSettingsView> =>
+  invoke("somni_image_settings_set", { enabled, model });
 
 /** A snap target: a top-level window clipped to this monitor, device pixels. */
 export interface ScreenshotWindowRegion {
@@ -781,7 +793,10 @@ export const newapiSendVerification = (input: {
   email: string;
   turnstile?: string;
 }) => invoke<void>("newapi_send_verification", { input });
-export const newapiModels = () => invoke<string[]>("newapi_models");
+export const newapiModels = () => invoke<string[]>("newapi_models").then((models) => {
+  notifyChatModelsUpdated();
+  return models;
+});
 let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
 
 /**
@@ -791,9 +806,17 @@ let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
  */
 export const newapiBootstrap = (): Promise<NewApiAccount> => {
   if (!newapiBootstrapInFlight) {
-    newapiBootstrapInFlight = invoke<NewApiAccount>("newapi_bootstrap").finally(() => {
-      newapiBootstrapInFlight = null;
-    });
+    newapiBootstrapInFlight = invoke<NewApiAccount>("newapi_bootstrap")
+      .then((account) => {
+        // The native command has persisted the reachable model catalog. Startup
+        // and App's background account refresh must update Chat just as Settings
+        // does, including a successful empty catalog after access is removed.
+        notifyChatModelsUpdated();
+        return account;
+      })
+      .finally(() => {
+        newapiBootstrapInFlight = null;
+      });
   }
   return newapiBootstrapInFlight;
 };

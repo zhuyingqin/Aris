@@ -9,7 +9,6 @@ import { SettingsSection } from "./SettingsPrimitives";
 const COPY = {
   cn: {
     title: "检索工具可用性",
-    subtitle: "检测网页搜索与文献搜索；不可用的提供方不会发送给 Chat。",
     refresh: "重新检测",
     checking: "检测中…",
     ready: "可用",
@@ -19,7 +18,6 @@ const COPY = {
   },
   en: {
     title: "Research tool availability",
-    subtitle: "Checks web and literature search; unavailable providers stay out of Chat.",
     refresh: "Check again",
     checking: "Checking…",
     ready: "Available",
@@ -51,7 +49,7 @@ export default function BuiltinToolAvailabilitySettings({ language }: { language
   useEffect(() => { void refresh(); }, []);
 
   return (
-    <SettingsSection title={copy.title} description={copy.subtitle} actions={
+    <SettingsSection title={copy.title} actions={
         <div className="sp-update-actions">
           <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void refresh()} disabled={loading || !isTauri()}>
             <SvgIcon name={loading ? "spinner" : "refresh"} size={13} />

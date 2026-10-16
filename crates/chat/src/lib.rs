@@ -797,6 +797,32 @@ fn strip_attachment_boilerplate(text: &str) -> String {
 /// order.
 fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
     let mut groups = Vec::new();
+    let drawing_intent = contains_any(
+        lowered,
+        &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],
+    ) || (contains_any(
+        lowered,
+        &["image", "illustration", "picture", "图片", "图像", "插画", "的图", "张图"],
+    ) && contains_any(
+        lowered,
+        &["generate", "create", "edit", "生成", "画", "绘", "修改", "编辑"],
+    ));
+    if drawing_intent {
+        // Prefer the configured API before generic file creation/media extras.
+        // A request mentioning GPT alone does not select webpage automation.
+        let webpage = contains_any(lowered, &["oracle", "webpage", "网页", "image assist"]);
+        let preferred = if webpage {
+            resolve_named(catalog, &["ChatGptWebImage"])
+        } else {
+            resolve_named(catalog, &["SomniImage"])
+        };
+        groups.push(ToolGroup {
+            profile: "drawing",
+            reason: "image intent with configured drawing tool",
+            required: preferred,
+            optional: resolve_named(catalog, &["ReadMediaFile"]),
+        });
+    }
     if contains_any(
         lowered,
         &[

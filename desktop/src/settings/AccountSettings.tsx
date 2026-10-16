@@ -146,7 +146,7 @@ export default function AccountSettings({
   const canGoNextUsageLogPage = usageLogPage < usageLogPageCount && !usageLoading;
 
   return (
-    <div className="sp-update-section sp-account-section sp-account-usage-section">
+    <div className="sp-account-section sp-account-usage-section">
       <div className="sp-section-head">
         <div className="sp-section-head-text">
           <div className="sp-section-title">{SETTINGS_LAYOUT_COPY[language].accountOverview}</div>

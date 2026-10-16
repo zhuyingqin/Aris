@@ -2,6 +2,41 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn oracle_busy_profile_errors_get_specific_recovery_instructions() {
+    for tool in ["ChatGptWebConsult", "ChatGptWebImage"] {
+        for error in [
+            "This account browser is still open. Close its isolated window before starting an Oracle task.",
+            "The selected browser user is still open. Close its sign-in window before starting the Oracle task.",
+        ] {
+            let output = format_tool_error_with_recovery(tool, error);
+            assert!(output.contains("earlier failed Oracle task"), "{output}");
+            assert!(output.contains("only the browser process"), "{output}");
+            assert!(output.contains("Keep its sign-in data"), "{output}");
+            assert!(!output.contains("Use the error message to adjust"), "{output}");
+        }
+    }
+    assert!(tool_recovery_hint("bash", "This account browser is still open.").is_none());
+    assert!(tool_recovery_hint("ChatGptWebConsult", "Oracle returned no result.").is_none());
+}
+
+#[test]
+fn oracle_website_verification_errors_require_human_sign_in_without_busy_retries() {
+    for tool in ["ChatGptWebConsult", "ChatGptWebImage"] {
+        let output = format_tool_error_with_recovery(
+            tool, "Cloudflare challenge detected. Complete the Just a moment check in the open browser, then rerun.",
+        );
+        assert!(output.contains("human website verification"), "{output}");
+        assert!(output.contains("ordinary sign-in window"), "{output}");
+        assert!(
+            output.contains("then close the window and retry"),
+            "{output}"
+        );
+        assert!(output.contains("Do not repeatedly retry"), "{output}");
+    }
+    assert!(tool_recovery_hint("bash", "Cloudflare challenge detected.").is_none());
+}
+
+#[test]
 fn a_collapsed_verbatim_prefix_is_named_as_a_quoting_failure() {
     // The reported failure, verbatim: Git Bash ate one backslash of the quoted
     // `\\?\` prefix, so `exec` looked for `\?\F:\...` and found nothing.
@@ -27,8 +62,9 @@ fn an_intact_verbatim_prefix_is_recognized_too() {
     })
     .to_string();
 
-    assert!(tool_recovery_hint("bash", &output)
-        .is_some_and(|hint| hint.contains("quoting failure")));
+    assert!(
+        tool_recovery_hint("bash", &output).is_some_and(|hint| hint.contains("quoting failure"))
+    );
 }
 
 #[test]
@@ -401,7 +437,10 @@ fn the_blocked_file_name_comes_from_the_tex_report() {
         blocked_output_file_name("./x.tex:15: I can't write on file `ch2_foundations.aux'."),
         Some("ch2_foundations.aux".to_string())
     );
-    assert_eq!(blocked_output_file_name("Undefined control sequence."), None);
+    assert_eq!(
+        blocked_output_file_name("Undefined control sequence."),
+        None
+    );
 
     // An output path that does not correspond to the blocked file is ignored
     // rather than substituted for it.

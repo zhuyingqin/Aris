@@ -819,6 +819,20 @@ dialog from each.
 identities are self-signed and cheap to mint, so the M0 limits bound damage per
 identity but not the number of identities.
 
+## Helper readiness in Settings
+
+Enabling image help is standing consent, but does not bypass the local image
+capability check. The helper advertises only while its daily allowance remains
+and its bound image account has the compatible Oracle runtime described in
+[oracle-web.md](oracle-web.md). An old installed runtime can therefore leave an
+opted-in computer absent from the roster even when signaling is connected.
+
+The local capability settings now show missing or incompatible image components
+and an unbound image account beside the roster. Component installation uses the
+existing isolated Oracle installer. After a successful update, the desktop
+immediately republishes its existing consent and optional coarse location;
+checking readiness alone does not install software or enable image help.
+
 ## Requester-side integration
 
 The Chat model's view of the tool does not change: `chatgpt_web_image_tool_spec`

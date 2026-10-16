@@ -275,9 +275,9 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       zoomOut: "缩小",
       canvasHint: "拖拽空白处平移 · Ctrl+滚轮缩放 · 方向键切换节点",
       emptyTitle: "当前对话还没有图片节点",
-      emptyDescription: "在 Chat 中调用 ChatGptWebImage 后，真实提示词和生成结果会自动出现在这里。",
+      emptyDescription: "在对话中生成图片后，真实提示词和生成结果会自动出现在这里。",
       emptyAction: "在输入框起草第一次生成",
-      emptyTemplate: "请调用 ChatGptWebImage 生成图片。\n\n提示词：",
+      emptyTemplate: "请根据以下要求构建完整绘图提示词，并使用已配置的绘图服务生成图片。\n\n绘图要求：",
       prompt: "提示词",
       output: "图片输出",
       running: "生成中",
@@ -323,9 +323,9 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       zoomOut: "Zoom out",
       canvasHint: "Drag empty space to pan · Ctrl+wheel to zoom · Arrow keys move between nodes",
       emptyTitle: "No image nodes in this conversation",
-      emptyDescription: "After Chat calls ChatGptWebImage, its real prompt and output appear here automatically.",
+      emptyDescription: "After Chat generates an image, its real prompt and output appear here automatically.",
       emptyAction: "Draft the first generation",
-      emptyTemplate: "Use ChatGptWebImage to generate an image.\n\nPrompt: ",
+      emptyTemplate: "Build a complete drawing prompt from these requirements, then generate an image with the configured drawing service.\n\nRequirements: ",
       prompt: "Prompt",
       output: "Image output",
       running: "Generating",
@@ -392,11 +392,11 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       : selectedDraft.content?.trim() || copy.quick[0];
     const chatPrompt = sourcePath
       ? cn
-        ? `请基于图片 ${sourcePath} 创建一个新版本，并调用 ChatGptWebImage 完成生成。\n\n修改要求：${instruction}\n\n保留未被明确要求修改的内容。`
-        : `Create a new version from ${sourcePath} and use ChatGptWebImage to generate it.\n\nRevision: ${instruction}\n\nPreserve everything not explicitly requested to change.`
+        ? `请基于图片 ${sourcePath} 和以下修改要求构建完整绘图提示词，使用已配置的绘图服务创建新版本。\n\n修改要求：${instruction}\n\n保留未被明确要求修改的内容。`
+        : `Build a complete drawing prompt from ${sourcePath} and these changes, then create a new version with the configured drawing service.\n\nRevision: ${instruction}\n\nPreserve everything not explicitly requested to change.`
       : cn
-        ? `请调用 ChatGptWebImage 生成图片。\n\n提示词：${instruction}`
-        : `Use ChatGptWebImage to generate an image.\n\nPrompt: ${instruction}`;
+        ? `请根据以下要求构建完整绘图提示词，并使用已配置的绘图服务生成图片。\n\n绘图要求：${instruction}`
+        : `Build a complete drawing prompt from these requirements, then generate an image with the configured drawing service.\n\nRequirements: ${instruction}`;
     onSendToChat(chatPrompt);
     setHandoffSent(true);
   };

@@ -916,8 +916,8 @@ export default function TypesetPdfPreview({
     toolbarStatuses.push({ key: "dirty", tone: "idle", text: copy.unsavedChanges, live: false });
   } else if (status === "running") {
     toolbarStatuses.push({ key: "running", tone: "running", text: statusText, live: true });
-  } else if (status === "success" && statusText) {
-    toolbarStatuses.push({ key: "compile", tone: "success", text: statusText, live: false });
+  } else if ((status === "success" || status === "partial") && statusText) {
+    toolbarStatuses.push({ key: "compile", tone: status === "partial" ? "warning" : "success", text: statusText, live: false });
   }
 
   // Display order, which read backwards is also the order the actions give up

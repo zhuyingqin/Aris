@@ -1,5 +1,6 @@
 mod client;
 mod error;
+mod image;
 mod sse;
 mod types;
 
@@ -11,6 +12,10 @@ pub use client::{
     MAX_TIMEOUT_RESENDS, OPENCODE_SESSION_HEADER,
 };
 pub use error::ApiError;
+pub use image::{
+    is_image_generation_model, validate_image_bytes, GeneratedImage, ImageApiClient,
+    ImageGenerationRequest, ImageGenerationResult, ImageReference, MAX_IMAGE_BYTES,
+};
 pub use sse::{parse_frame, ParsedSseEvent, SseParser};
 pub use types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,

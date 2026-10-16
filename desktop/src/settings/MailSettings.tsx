@@ -279,7 +279,6 @@ export function MailSettingsDetail() {
         <div className="mail-settings-oauth-card">
           <div className="mail-settings-oauth-copy">
             <strong>{copy.discoverTitle}</strong>
-            <span>{copy.discoverSub}</span>
             {discoveryResult && (
               <span>{copy.discoverUsed(discoveryResult.source, discoveryResult.notes)}</span>
             )}
@@ -416,7 +415,7 @@ export function MailSettingsDetail() {
         <div className="mail-settings-panel-head">
           <div>
             <div className="sp-field-label">{copy.connectedAccounts}</div>
-            <div className="sp-field-hint">{accounts.length > 0 ? accountSummary(accounts, copy) : copy.connectedAccountsSub}</div>
+            {accounts.length > 0 && <div className="sp-field-hint">{accountSummary(accounts, copy)}</div>}
           </div>
         </div>
 

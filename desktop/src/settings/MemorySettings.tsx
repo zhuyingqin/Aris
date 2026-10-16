@@ -328,10 +328,10 @@ export default function MemorySettings({ language }: Props) {
     : error
       ? copy.unavailable
       : copy.loadingStatus;
-  const v2Title = language === "cn" ? "研究记忆 v2（活动库）" : "Research memory v2 (active store)";
+  const v2Title = language === "cn" ? "记忆运行模式" : "Memory mode";
   const v2Subtitle = language === "cn"
-    ? "R0 仍具权威性；科研记忆库中的 R1–R3 仅来自经过审核的 v2 记录。"
-    : "R0 remains authoritative; the library's R1–R3 records come only from reviewed v2 memory.";
+    ? "只使用已审核的记忆，保留原始对话。"
+    : "Uses reviewed memory and preserves source conversations.";
 
   return (
     <div className="sp-general-page memory-settings-page">
@@ -369,11 +369,11 @@ export default function MemorySettings({ language }: Props) {
             <div className="sp-section-title">{v2Title}</div>
             <div className="sp-section-sub">{v2Subtitle}</div>
             <div className="sp-section-sub memory-v2-runtime-line">
-              {language === "cn" ? "模式" : "Mode"}: {v2StatusLabel}
-              {" · "}
-              TencentDB: {v2Status?.remoteConfigured
-                ? "PostgreSQL"
-                : language === "cn" ? "未配置（R2 本地词法回退）" : "not configured (local R2 lexical fallback)"}
+              {language === "cn" ? "检索来源" : "Search source"}: {v2Status
+                ? v2Status.remoteConfigured
+                  ? language === "cn" ? "已配置远程记忆库" : "Remote memory configured"
+                  : language === "cn" ? "本地记忆库" : "Local memory"
+                : v2StatusLabel}
             </div>
           </div>
           <div className="memory-mode-picker" role="radiogroup" aria-label={language === "cn" ? "v2 运行模式" : "V2 rollout mode"}>
@@ -422,8 +422,8 @@ export default function MemorySettings({ language }: Props) {
 
         <div className="memory-v2-footer">
           <span>{language === "cn"
-            ? "筛选、审查或 TencentDB 同步失败时，不会注入。"
-            : "Screening, review, or TencentDB failures never inject memory."}</span>
+            ? "筛选、审查或同步失败的记忆不会用于对话。"
+            : "Memory with screening, review, or sync failures stays out of conversations."}</span>
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void exportMemory()}>{copy.exportMemory}</button>
         </div>
       </section>
@@ -431,11 +431,11 @@ export default function MemorySettings({ language }: Props) {
       <section className="sp-update-section memory-history-section">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
-            <div className="sp-section-title">{language === "cn" ? "从历史 Session 补录记忆" : "Backfill memory from past Sessions"}</div>
+            <div className="sp-section-title">{language === "cn" ? "补录历史记忆" : "Backfill history"}</div>
             <div className="sp-section-sub">
               {language === "cn"
-                ? "扫描历史对话在本机完成；补录记忆会调用模型并消耗额度。"
-                : "History is scanned locally. Backfilling memory calls a model and uses quota."}
+                ? "本机扫描；补录会调用模型并消耗额度。"
+                : "Scanned locally; backfilling uses model quota."}
             </div>
           </div>
         </div>

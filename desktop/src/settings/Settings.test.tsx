@@ -57,6 +57,20 @@ describe("Settings account and usage", () => {
     expect((exaInput as HTMLInputElement).value).toBe("exa-test-key");
   });
 
+  it("opens the dedicated Update category and keeps About focused on diagnostics", async () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "update");
+    render(<Settings />);
+    expect(screen.getByRole("tab", { name: "更新" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("heading", { level: 1, name: "应用更新" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+    expect(await screen.findByText("Oracle Web")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "关于与环境" }));
+    expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
+    expect(screen.getByPlaceholderText("例如 C:\\Users\\name\\anaconda3 或环境中的 python.exe")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "更新" }));
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+  });
+
   it("changes overall type from Appearance, saves immediately, and restores automatic sizing", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "general");
     useStore.getState().setUiFontMode("auto");

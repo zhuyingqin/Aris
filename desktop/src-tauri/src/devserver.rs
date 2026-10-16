@@ -38,6 +38,7 @@ use crate::engine::{ChatState, WorkflowSessionBinding, WorkflowTurnRequest};
 /// `/health` can report the surface and an unknown command fails loudly
 /// instead of silently doing nothing.
 const COMMANDS: &[&str] = &[
+    "profile_stats",
     "review_workflows_list",
     "review_workflow_load",
     "review_workflow_create",
@@ -275,6 +276,11 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
     }
 
     match command {
+        "somni_image_settings" => encode(crate::image_api::somni_image_settings()),
+        "somni_image_settings_set" => encode(crate::image_api::somni_image_settings_set(
+            parse(&args, "enabled")?, args.get("model").and_then(Value::as_str).map(ToString::to_string),
+        )?),
+        "profile_stats" => encode(crate::profile::profile_stats().await?),
         "review_workflows_list" => encode(crate::workflow::list_workflows(ctx)?),
         "review_workflow_load" => {
             encode(crate::workflow::load_workflow(ctx, &parse::<String>(&args, "id")?)?)

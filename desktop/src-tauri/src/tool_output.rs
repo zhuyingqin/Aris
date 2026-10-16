@@ -294,6 +294,18 @@ fn collapsed_verbatim_prefix_hint(output: &str) -> Option<String> {
 
 fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     let lower = output.to_ascii_lowercase();
+    if matches!(tool_name, "ChatGptWebConsult" | "ChatGptWebImage")
+        && (lower.contains("cloudflare challenge") || lower.contains("cloudflare-challenge"))
+    {
+        return Some("The assigned ChatGPT account needs a human website verification. Open that account's ordinary sign-in window from Settings > Extensions > MCP > Oracle Web, complete the ChatGPT verification there, then close the window and retry. The task's automated browser is released after failure. Do not repeatedly retry, automate the verification, delete sign-in data, or switch to another account. If verification keeps looping in the ordinary window, stop webpage tasks and report the unresolved website verification; use the configured model service only when the user permits that fallback.".to_string());
+    }
+    if matches!(tool_name, "ChatGptWebConsult" | "ChatGptWebImage")
+        && (lower.contains("browser is still open")
+            || lower.contains("browser user is still open")
+            || lower.contains("browser user is already open"))
+    {
+        return Some("The assigned ChatGPT account's isolated browser profile is in use, possibly by Chrome left behind after an earlier failed Oracle task. Close that account's isolated browser; if no window is visible, exit only the browser process using that account's profile. Keep its sign-in data and other browser profiles intact. Retry after the profile is released; repeating the call while it is busy will fail again. If the webpage action is optional, explain the fallback and continue without it.".to_string());
+    }
     if tool_name == "LaTeXCompile" {
         // Ordered ahead of the primary diagnostic on purpose. TeX reports a
         // locked output file *as* the primary diagnostic, at the source line of
