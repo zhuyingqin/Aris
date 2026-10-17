@@ -181,6 +181,11 @@ export interface SettingsProvidersCopy {
   reviewerModel: string;
   reviewerModelHint: string;
   reviewerModelOff: string;
+  reviewMode: string;
+  reviewModeThread: string;
+  reviewModeOneshot: string;
+  reviewModeThreadHint: string;
+  reviewModeOneshotHint: string;
   modelSyncAfterLogin: string;
   currentExecutor: (model: string) => string;
   currentReviewer: (model: string) => string;
@@ -224,6 +229,7 @@ export interface SettingsProvidersCopy {
   fieldScopusKey: string;
   fieldOpenalexKey: string;
   openalexGatewayHint: string;
+  scopusSchoolRouteHint: string;
   fieldBochaKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
@@ -822,6 +828,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       reviewerModel: "Reviewer 模型",
       reviewerModelHint: "默认值尚未保存",
       reviewerModelOff: "关闭 Reviewer 模型",
+      reviewMode: "审查方式",
+      reviewModeThread: "常驻 Reviewer（默认）",
+      reviewModeOneshot: "一次性审查",
+      reviewModeThreadHint: "Reviewer 保留对话，每轮只收到新变化，并用只读工具自行核对项目文件",
+      reviewModeOneshotHint: "每轮无状态，证据一次给全、不使用工具；Reviewer 模型不能调用工具时选此项",
       modelSyncAfterLogin: "登录后同步模型",
       currentExecutor: (model) => `当前执行：${model}`,
       currentReviewer: (model) => ` · Reviewer：${model}`,
@@ -865,6 +876,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus 密钥",
       fieldOpenalexKey: "OpenAlex 文献检索",
       openalexGatewayHint: "SomniQ 已内置，无需 API 密钥",
+      scopusSchoolRouteHint: "可选。未设置时，登录后通过 SomniQ 学校通道检索 Scopus",
       fieldBochaKey: "博查备用直连密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
@@ -1485,6 +1497,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       reviewerModel: "Review model",
       reviewerModelHint: "Default value is not saved yet",
       reviewerModelOff: "Disable review model",
+      reviewMode: "Review mode",
+      reviewModeThread: "Resident Reviewer (default)",
+      reviewModeOneshot: "One-shot review",
+      reviewModeThreadHint: "The Reviewer keeps its conversation, receives only what changed each round, and checks project files itself with read-only tools",
+      reviewModeOneshotHint: "Stateless every round: all evidence is sent at once and no tools are used; choose this if the review model cannot call tools",
       modelSyncAfterLogin: "Sync models after sign-in",
       currentExecutor: (model) => `Current executor: ${model}`,
       currentReviewer: (model) => ` · reviewer: ${model}`,
@@ -1528,6 +1545,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus Key",
       fieldOpenalexKey: "OpenAlex literature search",
       openalexGatewayHint: "Built into SomniQ; no API key required",
+      scopusSchoolRouteHint: "Optional. Without a key, signed-in searches go through the SomniQ school route",
       fieldBochaKey: "Bocha direct fallback key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",

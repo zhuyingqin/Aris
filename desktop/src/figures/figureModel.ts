@@ -158,14 +158,7 @@ export function titleFromDescription(text: string): string {
   return `${boundary > 10 ? clipped.slice(0, boundary) : clipped}…`;
 }
 
-export const STYLE_PRESETS: { key: string; label: Copy; value: string }[] = [
-  { key: "academic", label: ["学术扁平", "Academic"], value: "Clean academic diagram, flat vectors, readable labels, restrained colors" },
-  { key: "minimal", label: ["极简线框", "Minimal"], value: "Minimal line diagram, monochrome strokes, generous whitespace, sans-serif labels" },
-  { key: "soft", label: ["柔和分区", "Soft panels"], value: "Soft pastel grouped panels, rounded modules, clear arrows, consistent spacing" },
-  { key: "print", label: ["印刷高对比", "Print"], value: "High-contrast print-safe diagram, bold outlines, colorblind-safe palette" },
-];
-/** Preset name for a stored style; older free-text styles are shown as written. */
-export const styleLabel = (style: string, language: Language) => pick(STYLE_PRESETS.find((preset) => preset.value === style)?.label, language, style);
+export { STYLE_PRESETS, styleLabel } from "./figureStyles";
 
 export type FlowKey = "describe" | "generate" | "edit" | "export";
 export interface FlowStep { key: FlowKey; label: Copy; state: StepState; detail: string | null }

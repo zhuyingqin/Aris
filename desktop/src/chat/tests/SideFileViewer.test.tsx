@@ -129,6 +129,20 @@ describe("SideFileViewer", () => {
     });
   });
 
+  it.each([
+    ["result.png", "image/png"],
+    ["diagram.svg", "image/svg+xml"],
+    ["scan.TIFF", "image/tiff"],
+  ])("displays %s as an image without a LaTeX navigation action", async (name, mimeType) => {
+    render(<SideFileViewer tabId="image-tab" path={`F:/project/figures/${name}`}
+      onOpenInWorkspace={() => undefined} onMetadataChange={() => undefined} />);
+    expect((await screen.findByRole("img", { name })).getAttribute("src")).toBe("asset://mock-image");
+    expect(apiMocks.fileAssetUrl).toHaveBeenCalledWith(`F:/project/figures/${name}`, mimeType);
+    expect(apiMocks.fileReadText).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "在 LaTeX 页面打开" })).toBeNull();
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
   it("keeps a scrolling PDF out of chat state and still sends the current page", async () => {
     // The reader reports a new page every few hundred pixels. Folding that into
     // the tab's stored handoff made every one of them a `Chat` state change — a

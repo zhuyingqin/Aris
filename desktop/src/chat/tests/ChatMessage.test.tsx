@@ -25,6 +25,7 @@ beforeEach(() => {
     language: "en",
     pendingTypesetFilePath: null,
     pendingCodeFilePath: null,
+    pendingSidePanelFilePath: null,
     currentProject: { id: "p1", name: "work", path: "D:/work", addedAt: 0, lastOpenedAt: 0 },
     pendingSidePanelEvidence: null,
   });
@@ -755,7 +756,7 @@ describe("ChatMessage rendering", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
-  it("opens a generated figure in the LaTeX image preview", async () => {
+  it("opens an image file from a tool card beside the chat", async () => {
     const user = userEvent.setup();
     render(
       <ChatMessage
@@ -769,8 +770,9 @@ describe("ChatMessage rendering", () => {
 
     await user.click(screen.getAllByRole("button", { name: "papers/figures/result.png" })[0]!);
 
-    expect(useStore.getState().tab).toBe("typeset");
-    expect(useStore.getState().pendingTypesetFilePath).toBe("papers/figures/result.png");
+    expect(useStore.getState().tab).toBe("chat");
+    expect(useStore.getState().pendingSidePanelFilePath).toBe("papers/figures/result.png");
+    expect(useStore.getState().pendingTypesetFilePath).toBeNull();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

@@ -66,6 +66,8 @@ export interface ConfigView {
   reviewerModel?: string | null;
   reviewerBaseUrl?: string | null;
   reviewEnabled: boolean;
+  /** `thread`: a resident Reviewer that is sent only what changed and checks the project itself; `oneshot`: the stateless fallback. */
+  reviewMode?: "thread" | "oneshot";
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
@@ -157,6 +159,7 @@ export interface ConfigPatch {
   reviewerBaseUrl?: string;
   reviewerApiKey?: string;
   reviewEnabled?: boolean;
+  reviewMode?: "thread" | "oneshot";
   scopusApiKey?: string;
   openalexApiKey?: string;
   bochaApiKey?: string;

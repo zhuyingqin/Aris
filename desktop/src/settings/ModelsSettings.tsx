@@ -45,7 +45,7 @@ export default function ModelsSettings({ language, configView, managedModels, co
     modelAutoSave, webProviderTestState,
     managedModelsLoading, managedModelsError,
     resetOpState, testWebProvider, clearWebProviderKey, resetWebProviderTests,
-    applyManagedModel, applyManagedReviewerModel, loadManagedModels,
+    applyManagedModel, applyManagedReviewerModel, applyReviewMode, loadManagedModels,
     chooseSummaryProvider,
   } = connection;
 
@@ -106,6 +106,8 @@ export default function ModelsSettings({ language, configView, managedModels, co
     [configView.executorModel, configView.reviewerModel],
   ).filter((model) => !isImageGenerationModel(model));
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
+  // An absent or unrecognised mode is the backend's default, the resident Reviewer.
+  const reviewMode = configView.reviewMode === "oneshot" ? "oneshot" : "thread";
   // Endpoint actually used for the selected executor model. Prefer the entry
   // probed for this exact model over the live slot, since a model switch
   // carries the per-model verdict. Empty (unprobed) renders no badge rather
@@ -160,6 +162,17 @@ export default function ModelsSettings({ language, configView, managedModels, co
           ) : (
             <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
           )}
+        </SettingRow>
+        <SettingRow title={copy.reviewMode} description={reviewMode === "oneshot" ? copy.reviewModeOneshotHint : copy.reviewModeThreadHint}>
+          <select
+            aria-label={copy.reviewMode}
+            value={reviewMode}
+            onChange={(event) => void applyReviewMode(event.target.value === "oneshot" ? "oneshot" : "thread")}
+            className="sp-settings-select"
+          >
+            <option value="thread">{copy.reviewModeThread}</option>
+            <option value="oneshot">{copy.reviewModeOneshot}</option>
+          </select>
         </SettingRow>
         <div className="settings-model-status">
           <p>
@@ -247,7 +260,7 @@ export default function ModelsSettings({ language, configView, managedModels, co
 
         {/* Section 2: Literature APIs */}
         <SettingsSection title={copy.sectionLiteratureServices}>
-          <SettingRow title={copy.fieldScopusKey} description={configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}>
+          <SettingRow title={copy.fieldScopusKey} description={configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.scopusSchoolRouteHint}>
             <KeyInput
               label={copy.fieldScopusKey}
               value={scopusKey}

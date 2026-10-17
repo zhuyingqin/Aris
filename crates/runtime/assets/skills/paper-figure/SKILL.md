@@ -2,7 +2,7 @@
 name: paper-figure
 description: "Generate publication-quality figures and tables from experiment results. Use when user says \"画图\", \"作图\", \"generate figures\", \"paper figures\", or needs plots for a paper."
 argument-hint: [figure-plan-or-data-path]
-allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, ToolSearch, SomniImage, ReadMediaFile, LlmReview, Agent
 ---
 
 # Paper Figure: Publication-Quality Plots from Experiment Data
@@ -16,11 +16,12 @@ Generate all figures and tables for a paper based on: **$ARGUMENTS**
 | **Data-driven plots** | ✅ Yes | Line plots (training curves), bar charts (method comparison), scatter plots, heatmaps, box/violin plots |
 | **Comparison tables** | ✅ Yes | LaTeX tables comparing prior bounds, method features, ablation results |
 | **Multi-panel figures** | ✅ Yes | Subfigure grids combining multiple plots (e.g., 3×3 dataset × method) |
-| **Architecture/pipeline diagrams** | ❌ No — manual | Model architecture, data flow diagrams, system overviews. At best can generate a rough TikZ skeleton, but **expect to draw these yourself** using tools like draw.io, Figma, or TikZ |
+| **Architecture/pipeline diagrams** | Via diagram skills | Use `/latex-diagrams` for native TikZ explanations in LaTeX/Beamer, or `/figure-spec` for editable SVG; compile/render and inspect the result |
+| **Conceptual/scenario illustrations** | Via existing image service | Use `SomniImage` when available, optionally with native labels; preserve generation records and identify the schematic |
 | **Generated image grids** | ❌ No — manual | Grids of generated samples (e.g., GAN/diffusion outputs). These come from running your model, not from this skill |
 | **Photographs / screenshots** | ❌ No — manual | Real-world images, UI screenshots, qualitative examples |
 
-**In practice:** For a typical ML paper, this skill handles ~60% of figures (all data plots + tables). The remaining ~40% (hero figure, architecture diagram, qualitative results) need to be created manually and placed in `figures/` before running `/paper-write`. The skill will detect these as "existing figures" and preserve them.
+**In practice:** Generate data plots and tables here, route structured diagrams to the appropriate diagram skill, and preserve existing figures. Photographs, screenshots and qualitative model samples need actual source assets; do not fabricate them to fill a figure plan.
 
 ## Constants
 
@@ -49,13 +50,13 @@ Parse the Figure Plan table from PAPER_PLAN.md:
 ```markdown
 | ID | Type | Description | Data Source | Priority |
 |----|------|-------------|-------------|----------|
-| Fig 1 | Architecture | ... | manual | HIGH |
+| Fig 1 | Architecture | ... | method description → `/latex-diagrams` | HIGH |
 | Fig 2 | Line plot | ... | figures/exp.json | HIGH |
 ```
 
 Identify:
 - Which figures can be auto-generated from data
-- Which need manual creation (architecture diagrams, etc.)
+- Which need a diagram skill, existing source assets, or genuinely missing input
 - Which are comparison tables (generate as LaTeX)
 
 ### Step 2: Set Up Plotting Environment
@@ -164,11 +165,12 @@ Method & Rate & Depends on $D$? & Multi-modal? \\
 \end{table}
 ```
 
-**Architecture/pipeline diagrams** (MANUAL — outside this skill's scope):
-- These require manual creation using draw.io, Figma, Keynote, or TikZ
-- This skill can generate a rough TikZ skeleton as a starting point, but **do not expect publication-quality results**
-- If the figure already exists in `figures/`, preserve it and generate only the LaTeX `\includegraphics` snippet
-- Flag as `[MANUAL]` in the figure plan and `latex_includes.tex`
+**Architecture/pipeline diagrams**:
+- For native LaTeX flowcharts, decision trees, feedback loops and method explanations, use `/latex-diagrams`. Construct editable TikZ, compile it in the target document, and inspect the final render before claiming visual quality.
+- For a requested editable SVG architecture or workflow figure, use `/figure-spec`.
+- For a physical scene or conceptual illustration, follow the [image and hybrid guide](../latex-diagrams/references/image-generation.md) to use existing `SomniImage` generation or combine its image with native notation. Generated artwork cannot replace real data, screenshots or evaluated model samples.
+- If the figure already exists in `figures/`, preserve it unless revision was requested and generate the appropriate LaTeX inclusion snippet.
+- Mark a diagram as pending only for an actual unresolved input, rendering or review issue; diagrams do not automatically require manual creation.
 
 ### Step 5: Run All Scripts
 

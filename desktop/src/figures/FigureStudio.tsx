@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "../api/tauri";
 import ImageLightbox from "../ImageLightbox";
@@ -10,7 +10,9 @@ import FigureRasterEditor from "./FigureRasterEditor";
 import FigureSvgChat from "./FigureSvgChat";
 import FigureSourceEditor from "./FigureSourceEditor";
 import { ArtifactsCard, ExportMenu, FlowStepper, LedgerCard, LedgerPill, PipelineList, StatusChip } from "./FigurePanels";
-import { figureCancel, figureConnections, figureDelete, figureDocument, figureExport, figureList, figurePrepare, figureReview, figureSave, figureSelectRaster, figureStart, figuresAvailable, onFigureUpdated } from "./figureApi";
+import { figureCancel, figureConnections, figureDelete, figureDiscardDraft, figureDocument, figureExport, figureList, figurePrepare, figureReview, figureSave, figureSelectRaster, figureStart, figuresAvailable, onFigureUpdated } from "./figureApi";
+import useFigureDraft from "./useFigureDraft";
+import FigureResizeHandle, { useFigurePanelSize } from "./FigureResizeHandle";
 import { formatTime, formatTokens, statusLabel, statusTone, titleFromDescription, truncationInsight } from "./figureModel";
 import type { FigureConnections, FigureDocument, FigureRasterDocument, FigureView } from "./types";
 import "./figures.css";
@@ -32,7 +34,6 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
   const [source, setSource] = useState("");
   const [dirty, setDirty] = useState(false);
   const [editOrigin, setEditOrigin] = useState<"canvas" | "source" | null>(null);
-  useEffect(() => { useStore.getState().setFigureDirty(dirty); return () => useStore.getState().setFigureDirty(false); }, [dirty]);
   const [panel, setPanel] = useState<Panel>("canvas");
   const [draft, setDraft] = useState<FigureDraft>(EMPTY_DRAFT);
   const [busy, setBusy] = useState(false);
@@ -44,6 +45,10 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
   const [showSvgChat, setShowSvgChat] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; title: string } | null>(null);
   const editor = useRef<FigureEditorHandle>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarLayout = useFigurePanelSize("sidebar");
+  const comparisonRef = useRef<HTMLElement>(null);
+  const comparisonLayout = useFigurePanelSize("comparison");
   const submitting = useRef(false);
   const projectRef = useRef(projectId); projectRef.current = projectId;
   const selectedRef = useRef(selected); selectedRef.current = selected;
@@ -57,6 +62,28 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
   const upsert = (next: FigureView) => { if (!deleted.current.has(next.run.id)) setRuns((all) => [next, ...all.filter((entry) => entry.run.id !== next.run.id)]); };
   const listed = (all: FigureView[]) => all.filter((entry) => !deleted.current.has(entry.run.id));
   const { executorModel, reviewerModel } = draft;
+  const editRef = useRef({ source, editOrigin }); editRef.current = { source, editOrigin };
+  const autosave = useFigureDraft({
+    projectId, id: selected, blocked: busy || !!current?.active,
+    readSvg: async () => {
+      const svg = editRef.current.editOrigin === "source" ? editRef.current.source : await editor.current?.serialize();
+      if (svg === undefined) throw new Error(t("画布尚未准备好，请稍后再试。", "The canvas is not ready. Try again shortly."));
+      return svg;
+    },
+    onError: (message) => setError(t(`草稿自动保存失败：${message}`, `Draft autosave failed: ${message}`)),
+    onSaved: () => setError((message) => message?.startsWith(t("草稿自动保存失败：", "Draft autosave failed:")) ? null : message),
+  });
+  useEffect(() => {
+    useStore.getState().setFigureDirty(autosave.unsaved || (dirty && busy));
+    return () => useStore.getState().setFigureDirty(false);
+  }, [autosave.unsaved, dirty, busy]);
+  const resetEdits = () => {
+    autosave.restore(); dirtyRef.current = false; setDirty(false); setEditOrigin(null);
+  };
+  const edited = (origin: "canvas" | "source") => {
+    dirtyRef.current = true; setDirty(true); setEditOrigin(origin);
+    autosave.changed({ expectedHash: version?.hash ?? null, baseIndex: displayedVersion?.index ?? null });
+  };
 
   useEffect(() => {
     if (current?.run.pendingRasterEdit || (current?.run.status === "image_ready" && !current.run.versions.length)) setPanel("image");
@@ -89,7 +116,7 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
 
   useEffect(() => {
     let disposed = false; let unlisten: (() => void) | null = null;
-    setSelected(null); setRuns([]); setDocument(EMPTY); setSource(""); setDirty(false); setError(null); setConnections(null);
+    resetEdits(); setSelected(null); setVersionIndex(null); setRuns([]); setDocument(EMPTY); setSource(""); setError(null); setConnections(null);
     if (!projectId || !figuresAvailable()) return;
     void figureList(projectId).then((all) => { if (!disposed) setRuns(listed(all)); }).catch((e) => { if (!disposed) setError(String(e)); });
     void onFigureUpdated((next) => { if (!disposed && next.projectId === projectId) upsert(next); }).then((fn) => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
@@ -103,21 +130,30 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
     let disposed = false;
     void figureDocument(projectId, selected, versionIndex).then((doc) => {
       if (disposed || dirtyRef.current) return;
-      setDocument(doc); setSource(doc.svg ?? doc.rawOutput ?? "");
+      autosave.restore(doc.draft ?? null);
+      dirtyRef.current = !!doc.draft; setDirty(!!doc.draft); setEditOrigin(doc.draft ? "source" : null);
+      setDocument(doc); setSource(doc.draft?.svg ?? doc.svg ?? doc.rawOutput ?? "");
+      if (doc.draft && !doc.svg) setPanel("source");
     }).catch((e) => { if (!disposed) setError(String(e)); });
     return () => { disposed = true; };
   }, [projectId, selected, version?.hash, version?.index, current?.run.sourceHash, versionIndex]);
 
   useEffect(() => {
     if (isTauri()) return;
-    const guard = (event: BeforeUnloadEvent) => { if (dirtyRef.current) { event.preventDefault(); event.returnValue = ""; } };
+    const guard = (event: BeforeUnloadEvent) => { if (autosave.unsavedRef.current || useStore.getState().figureDirty) { event.preventDefault(); event.returnValue = ""; } };
     window.addEventListener("beforeunload", guard); return () => window.removeEventListener("beforeunload", guard);
   }, []);
 
-  const select = (id: string | null) => {
-    if (dirty) { setError(t("请先保存版本或放弃当前编辑。", "Save this version or discard edits first.")); return; }
+  const select = (id: string | null, prepared = false) => {
+    if (id === selected) return;
+    if (autosave.unsavedRef.current || (busy && !prepared)) { setError(t("请等待草稿自动保存完成，或放弃当前编辑。", "Wait for draft autosave or discard the current edits.")); return; }
+    resetEdits();
     setSelected(id); setVersionIndex(null); setDocument(EMPTY); setSource(""); setEditOrigin(null); setError(null); setPanel("canvas");
     if (window.innerWidth <= 760) setSidebarOpen(false);
+  };
+  const chooseVersion = (index: number | null) => {
+    if (index === versionIndex) return;
+    resetEdits(); setVersionIndex(index);
   };
   const upload = async (file?: File) => {
     if (!file) return;
@@ -147,20 +183,29 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
     if (!projectId || !current || busy || current.active) return;
     const owner = projectId; const id = current.run.id; setBusy(true); setError(null);
     try {
+      await autosave.settle();
       const svg = editOrigin === "source" ? source : await editor.current?.serialize();
       if (!svg) throw new Error(t("请打开画布或 SVG 源码后保存。", "Open the canvas or SVG source before saving."));
-      const next = await figureSave(owner, id, version?.hash ?? null, svg, displayedVersion?.index ?? null);
+      const parent = autosave.base.current ?? { expectedHash: version?.hash ?? null, baseIndex: displayedVersion?.index ?? null };
+      const next = await figureSave(owner, id, parent.expectedHash, svg, parent.baseIndex);
       if (projectRef.current === owner && selectedRef.current === id) {
-        setDirty(false); dirtyRef.current = false; setEditOrigin(null); setVersionIndex(null); upsert(next);
+        resetEdits(); setVersionIndex(null); upsert(next);
         const doc = await figureDocument(owner, id);
         if (projectRef.current === owner && selectedRef.current === id) { setDocument(doc); setSource(doc.svg ?? ""); }
       }
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
   const discard = async () => {
-    setDirty(false); dirtyRef.current = false; setEditOrigin(null);
-    if (projectId && selected) { const doc = await figureDocument(projectId, selected); setDocument(doc); setSource(doc.svg ?? ""); }
-    setError(null);
+    if (!projectId || !selected || busy) return;
+    const owner = projectId, id = selected; setBusy(true);
+    try {
+      await autosave.settle();
+      await figureDiscardDraft(owner, id);
+      const doc = await figureDocument(owner, id, versionIndex);
+      if (projectRef.current === owner && selectedRef.current === id) {
+        resetEdits(); setDocument(doc); setSource(doc.svg ?? doc.rawOutput ?? ""); setError(null);
+      }
+    } finally { setBusy(false); }
   };
   const exportFile = async (format: string) => {
     if (!projectId || !current) return;
@@ -182,35 +227,52 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
   };
   const switchPanel = async (next: Panel) => {
     if (next === panel) return;
-    if (dirty && panel === "canvas") {
-      try { const svg = await editor.current?.serialize(); if (svg) setSource(svg); } catch (e) { setError(String(e)); return; }
+    const owner = projectId, id = selected;
+    const stillSelected = () => projectRef.current === owner && selectedRef.current === id;
+    if (dirty && panel === "canvas" && editOrigin === "canvas") {
+      try {
+        const svg = await editor.current?.serialize();
+        if (!stillSelected()) return;
+        if (svg) setSource(svg);
+      } catch (e) { if (stillSelected()) setError(String(e)); return; }
     }
-    if (dirty && editOrigin === "source" && next === "canvas") { setError(t("保存 SVG 源码后即可在画布中继续编辑。", "Save SVG source to continue in the canvas.")); return; }
+    if (dirty && editOrigin === "source" && next === "canvas") {
+      if (autosave.unsavedRef.current) { setError(t("请等待草稿自动保存完成。", "Wait for draft autosave.")); return; }
+      try {
+        const doc = await figureDocument(owner!, id!);
+        if (!stillSelected() || autosave.unsavedRef.current) return;
+        if (!doc.svg) throw new Error(t("请先修复 SVG 源码，再打开画布。", "Repair the SVG source before opening the canvas."));
+        setDocument(doc); setEditOrigin("canvas"); setError(null);
+      } catch (e) { setError(String(e)); return; }
+    }
     setPanel(next);
   };
   const remove = async (entry: FigureView) => {
-    if (!projectId || entry.active) return;
+    if (!projectId || entry.active || busy || submitting.current) return;
     const id = entry.run.id; const unsaved = id === selected && dirty; const title = titleFromDescription(entry.run.title);
-    const message = t(`删除「${title}」？\n该绘图的全部 SVG / PNG 版本、圈选记录和运行记录将从项目中移除，无法恢复。${unsaved ? "\n未保存的编辑也会丢失。" : ""}`,
-      `Delete "${title}"?\nAll SVG/PNG versions, selections and the run log are removed from the project. This cannot be undone.${unsaved ? "\nUnsaved edits are lost too." : ""}`);
+    const message = t(`删除「${title}」？\n该绘图的原图、草稿、全部版本和本地运行记录将从磁盘删除，无法恢复。${unsaved ? "\n未保存的编辑也会丢失。" : ""}`,
+      `Delete "${title}"?\nThe source image, draft, all versions and local run records will be deleted from disk. This cannot be undone.${unsaved ? "\nUnsaved edits are lost too." : ""}`);
     if (!window.confirm(message)) return;
     const owner = projectId;
+    submitting.current = true; setBusy(true);
     try {
+      if (id === selectedRef.current) await autosave.settle();
       await figureDelete(owner, id);
       deleted.current.add(id);
       if (projectRef.current !== owner) return;
       setRuns((all) => all.filter((item) => item.run.id !== id));
       if (selectedRef.current === id) {
-        setDirty(false); dirtyRef.current = false; setEditOrigin(null);
+        resetEdits();
         setSelected(null); setVersionIndex(null); setDocument(EMPTY); setSource(""); setPanel("canvas");
       }
     } catch (e) { setError(String(e)); }
+    finally { submitting.current = false; setBusy(false); }
   };
   /** Prefills a new task from this one, reusing its reference image. */
   const duplicate = () => {
     if (!current) return;
     const { run } = current;
-    if (dirty) { setError(t("请先保存版本或放弃当前编辑。", "Save this version or discard edits first.")); return; }
+    if (autosave.unsavedRef.current || busy) { setError(t("请等待草稿自动保存完成，或放弃当前编辑。", "Wait for draft autosave or discard the current edits.")); return; }
     const source = document.sourceDataUrl;
     setDraft({
       description: run.method, style: run.style,
@@ -243,7 +305,7 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
           confirmedRaster: { id, index: image.index, hash: image.hash },
         });
         if (prepared.run.sourceHash !== image.hash || !prepared.run.sourceRaster) throw new Error(t("图片版本校验失败。", "Image version verification failed."));
-        if (projectRef.current === owner && selectedRef.current === id) { upsert(prepared); select(prepared.run.id); }
+        if (projectRef.current === owner && selectedRef.current === id) { upsert(prepared); select(prepared.run.id, true); }
         const next = await figureStart(owner, prepared.run.id, image.hash, prepared.run.sourceRaster);
         if (projectRef.current === owner) {
           upsert(next);
@@ -254,7 +316,7 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
   };
   const startPrepared = () => { if (projectId && current) void figureStart(projectId, current.run.id).then(upsert).catch((e) => setError(String(e))); };
   const cancel = () => { if (projectId && current) void figureCancel(projectId, current.run.id).catch((e) => setError(String(e))); };
-  const locked = dirty || busy || !!current?.active;
+  const locked = autosave.unsaved || busy || !!current?.active;
   const truncation = current ? truncationInsight(current.run, document.rawOutput) : null;
   const models = effectiveModels(draft, connections);
   const canSubmit = !busy && !!projectId && !!connections && !!draft.description.trim() && (!!draft.image || (connections.image.available && !!models.image)) && figuresAvailable();
@@ -266,7 +328,7 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
 
   return <section className={`figure-studio${sidebarOpen ? "" : " sidebar-collapsed"}`} aria-label={t("科研绘图应用", "Scientific figure application")}>
     {sidebarOpen && <button type="button" className="figure-sidebar-dismiss" aria-label={t("关闭绘图列表", "Close figure list")} onClick={() => setSidebarOpen(false)} />}
-    {sidebarOpen && <aside className="figure-sidebar">
+    {sidebarOpen && <aside ref={sidebarRef} style={sidebarLayout.style} className="figure-sidebar">
       <button type="button" className="figure-icon-button figure-sidebar-close" aria-label={t("收起绘图列表", "Collapse figure list")} onClick={() => setSidebarOpen(false)}><SvgIcon name="close" size={14} /></button>
       <button type="button" className="figure-button primary block" onClick={() => select(null)}><SvgIcon name="plus" size={14} />{t("新建绘图", "New figure")}</button>
       <div className="figure-group-label">{t("项目绘图", "Project figures")} <em>{runs.length}</em></div>
@@ -278,10 +340,12 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
             <span><strong>{titleFromDescription(entry.run.title)}</strong><small>{status(entry.run.status)}</small></span>
             <time>{formatTime(entry.run.updatedAt || entry.run.createdAt, true)}</time>
           </button>
-          <button type="button" className="figure-run-delete" disabled={entry.active} aria-label={t(`删除 ${titleFromDescription(entry.run.title)}`, `Delete ${titleFromDescription(entry.run.title)}`)}
+          <button type="button" className="figure-run-delete" disabled={entry.active || busy} aria-label={t(`删除 ${titleFromDescription(entry.run.title)}`, `Delete ${titleFromDescription(entry.run.title)}`)}
             title={entry.active ? t("任务运行中，取消后才能删除", "Cancel the running task before deleting it") : t("删除绘图", "Delete figure")} onClick={() => void remove(entry)}><SvgIcon name="trash" size={13} /></button>
         </div>)}
       </div>
+      <FigureResizeHandle className="edge-end" label={t("调整绘图列表宽度", "Resize figure list")} panelRef={sidebarRef}
+        minWidth={180} reserveWidth={560} onResize={sidebarLayout.resize} onReset={sidebarLayout.reset} />
     </aside>}
 
     <main className="figure-workspace">
@@ -298,10 +362,11 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
           {panel !== "image" && <span className="figure-divider" />}
           {panel !== "image" && <button type="button" className={`figure-button${showSvgChat ? " active" : ""}`} aria-pressed={showSvgChat} onClick={() => { setShowSvgChat((open) => !open); setShowArtifacts(false); }}><SvgIcon name="messageCircle" size={14} />{t("对话修改", "Edit with chat")}</button>}
           {current.active && (panel !== "image" || !current.run.sourceHash) && <button type="button" className="figure-button" onClick={cancel}><SvgIcon name="stop" size={13} />{t("取消任务", "Cancel task")}</button>}
-          {panel !== "image" && <><select aria-label={t("版本", "Version")} value={versionIndex ?? "latest"} disabled={locked} onChange={(e) => setVersionIndex(e.target.value === "latest" ? null : Number(e.target.value))}><option value="latest">{t("当前版本", "Current version")}</option>{current.run.versions.map((v) => <option key={v.index} value={v.index}>v{v.index} · {v.author}</option>)}</select>
+          {panel !== "image" && <><select aria-label={t("版本", "Version")} value={versionIndex ?? "latest"} disabled={locked} onChange={(e) => chooseVersion(e.target.value === "latest" ? null : Number(e.target.value))}><option value="latest">{dirty ? t("当前草稿", "Current draft") : t("当前版本", "Current version")}</option>{current.run.versions.map((v) => <option key={v.index} value={v.index}>v{v.index} · {v.author}</option>)}</select>
+          {dirty && <span className="figure-draft-status" role="status">{autosave.status === "saved" ? t("草稿已自动保存", "Draft autosaved") : autosave.status === "error" ? t("草稿保存失败", "Draft save failed") : t("正在保存草稿…", "Saving draft…")}</span>}
           {dirty && <button type="button" className="figure-button ghost" disabled={busy} onClick={() => void discard().catch((e) => setError(String(e)))}>{t("放弃编辑", "Discard edits")}</button>}
           <button type="button" className={`figure-button${dirty ? " primary" : ""}`} disabled={!dirty || busy || current.active} onClick={() => void save()}>{t("保存新版本", "Save version")}{dirty ? " •" : ""}</button>
-          <button type="button" className="figure-button" title={t("提交一次独立 Reviewer 调用", "Sends one independent Reviewer call")} disabled={!version || versionIndex !== null || dirty || busy || current.active || current.run.status === "unknown"} onClick={review}><SvgIcon name="shieldCheck" size={13} />{t("审查", "Review")}<em className="figure-cost">{t("1 次调用", "1 call")}</em></button>
+          <button type="button" className="figure-button" disabled={!version || versionIndex !== null || dirty || busy || current.active || current.run.status === "unknown"} onClick={review}><SvgIcon name="shieldCheck" size={13} />{t("审查", "Review")}</button>
           <ExportMenu disabled={!version || dirty || busy || current.active} t={t} onExport={(format) => void exportFile(format)} /></>}
           {panel !== "image" && <span className="figure-divider" />}
           {panel !== "image" && <button type="button" className={`figure-icon-button${showArtifacts ? " active" : ""}`} aria-pressed={showArtifacts} aria-label={t("产物与审查", "Artifacts and review")} title={t("产物与审查", "Artifacts and review")} onClick={() => { setShowArtifacts((v) => !v); setShowSvgChat(false); }}><SvgIcon name="panelRight" size={15} /></button>}
@@ -316,7 +381,7 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
         : <div className="figure-stage">
           <div className={`figure-shell view-${document.svg || panel !== "canvas" ? panel : "pending"}`}>
             <div className="figure-canvas-pane" hidden={panel !== "canvas"}>
-              {document.svg ? <FigureEditor key={`${projectId}:${selected}`} ref={editor} svg={document.svg} readOnly={busy || current.active} onDirty={() => { setDirty(true); setEditOrigin("canvas"); }} onError={setError} />
+              {document.svg ? <FigureEditor key={`${projectId}:${selected}`} ref={editor} svg={document.svg} readOnly={busy || current.active} onDirty={() => edited("canvas")} onError={setError} />
                 : <div className="figure-pending">
                   {document.sourceDataUrl && <img className="figure-pending-reference" src={document.sourceDataUrl} alt="" aria-hidden />}
                   <div className="figure-pending-card">
@@ -342,18 +407,19 @@ export default function FigureStudio({ visible = true }: { visible?: boolean }) 
             {panel === "image" && (current.run.sourceHash ? <FigureRasterEditor key={`${projectId}:${selected}`} view={current} t={t} available={!!connections?.image.available} locked={dirty || busy}
               onUpdate={(next) => { if (next.projectId === projectRef.current) upsert(next); }} onError={(message) => { if (current.projectId === projectRef.current) setError(message); }} onNext={nextFromImage} onCancel={cancel} /> : <div className="figure-compare-empty">{t("图片生成后可在此圈选修改。", "Select a region here once the image is ready.")}</div>)}
             {panel === "compare" && <div className="figure-compare">
-              {compare.map(([src, label]) => <figure key={label}>
+              {compare.map(([src, label], index) => <Fragment key={label}><figure ref={index === 0 ? comparisonRef : undefined} style={index === 0 ? comparisonLayout.style : undefined}>
                 <figcaption>{label}</figcaption>
                 {src ? <button type="button" onClick={() => setLightbox({ src, title: label })}><img src={src} alt={label} /></button> : <div className="figure-compare-empty"><SvgIcon name="image" size={20} />{t("尚无图片", "No image yet")}</div>}
-              </figure>)}
+              </figure>{index === 0 && <FigureResizeHandle label={t("调整对照图片宽度", "Resize comparison images")} panelRef={comparisonRef}
+                minWidth={200} reserveWidth={260} onResize={comparisonLayout.resize} onReset={comparisonLayout.reset} />}</Fragment>)}
             </div>}
-            {panel === "source" && <FigureSourceEditor key={`${projectId}:${selected}`} value={source} readOnly={busy || current.active} onChange={(svg) => { setSource(svg); setDirty(true); setEditOrigin("source"); }} />}
+            {panel === "source" && <FigureSourceEditor key={`${projectId}:${selected}`} value={source} readOnly={busy || current.active} onChange={(svg) => { setSource(svg); edited("source"); }} />}
             {versionIndex !== null && <div className="figure-history-banner"><SvgIcon name="clock" size={13} />{t(`正在查看历史版本 v${versionIndex}，修改后会保存为新版本`, `Viewing v${versionIndex}; saving creates a new version`)}<button type="button" disabled={dirty} onClick={() => setVersionIndex(null)}>{t("返回当前版本", "Back to current")}</button></div>}
             {showLedger ? <LedgerCard run={current.run} language={language} t={t} onClose={() => setShowLedger(false)} />
               : <LedgerPill run={current.run} active={current.active} t={t} onOpen={() => setShowLedger(true)} />}
           </div>
           {showArtifacts && <ArtifactsCard run={current.run} document={document} language={language} t={t} displayed={displayedVersion} versionIndex={versionIndex} locked={locked}
-            onVersion={setVersionIndex} onPreview={setLightbox} onClose={() => setShowArtifacts(false)} onDuplicate={duplicate} />}
+            onVersion={chooseVersion} onPreview={setLightbox} onClose={() => setShowArtifacts(false)} onDuplicate={duplicate} />}
           {showSvgChat && panel !== "image" && <FigureSvgChat key={`${projectId}:${selected}`} view={current} dirty={dirty} busy={busy} historical={versionIndex !== null} t={t}
             onUpdate={(next) => { if (next.projectId === projectRef.current) upsert(next); }} onError={setError} onBusy={setBusy} onCancel={cancel}
             onClose={() => setShowSvgChat(false)} onVersion={(index) => { setVersionIndex(index); setPanel("canvas"); }} />}

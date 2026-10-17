@@ -23,6 +23,7 @@ mod prompt;
 pub(crate) mod raster_result;
 mod continuation;
 pub(crate) mod svg_edit;
+pub(crate) mod draft;
 use tauri::{AppHandle, Emitter, Manager};
 
 // Includes any model reasoning. DEV-02 exhausted 2K before a complete verdict.
@@ -450,10 +451,16 @@ pub async fn figures_delete(app: AppHandle, project_id: String, id: String) -> R
         if jobs.contains_key(&(project_id, id.clone())) {
             return Err("Cancel the running task before deleting it".into());
         }
-        store::delete(&workspace, &id)
+        delete_local(&workspace, &id, &crate::usage_log::usage_log_path())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn delete_local(workspace: &Path, id: &str, usage_path: &Path) -> Result<(), String> {
+    store::validate_id(id)?;
+    crate::usage_log::remove_session_usage_at(usage_path, &format!("figure-{id}"))?;
+    store::delete(workspace, id)
 }
 
 fn stage(
@@ -666,7 +673,7 @@ fn process(
             let mut prepared = image_connection.ok_or("Missing SomniImage snapshot")?;
             let output = prompt::generate_once(workspace, &run, &cancelled,
                 |request| executor.run_with_limit(&store::routing_session_id(workspace, id, "executor"), request, svg_cap(&run), cancelled.clone()),
-                |instruction| { prepared.set_prompt(instruction)?; prepared.generate(workspace, cancelled.clone()) }, &notify)?;
+                |instruction| { prepared.set_prompt(instruction)?; prepared.generate(workspace, id, cancelled.clone()) }, &notify)?;
             let relative = output["images"][0]["path"]
                 .as_str()
                 .ok_or("SomniImage returned no image")?;
@@ -1024,6 +1031,7 @@ pub struct FigureDocument {
     raw_output: Option<String>,
     source_data_url: Option<String>,
     preview_data_url: Option<String>,
+    draft: Option<store::drafts::FigureDraft>,
 }
 #[tauri::command]
 pub async fn figures_document(
@@ -1048,7 +1056,7 @@ pub async fn figures_document(
             Some(index) => run.versions.iter().find(|v| v.index == index),
             None => run.versions.last(),
         };
-        let (svg, preview_data_url) = if let Some(v) = version {
+        let (mut svg, preview_data_url) = if let Some(v) = version {
             let bytes = store::read_artifact(&workspace, &id, &v.svg_path, store::MAX_SVG_BYTES)?;
             if store::hash(&bytes) != v.hash {
                 return Err("SVG version integrity check failed".into());
@@ -1069,7 +1077,7 @@ pub async fn figures_document(
         } else {
             (None, None)
         };
-        let raw_output = if version.is_none() {
+        let mut raw_output = if version.is_none() {
             run.requests
                 .iter()
                 .rev()
@@ -1087,11 +1095,19 @@ pub async fn figures_document(
         } else {
             None
         };
+        // Historical versions stay immutable. Even a stale draft is returned
+        // with its original parent hash so it can be recovered without overwrite.
+        let draft = if version_index.is_none() { store::drafts::load(&workspace, &id)? } else { None };
+        if let Some(draft) = &draft {
+            svg = self::draft::canvas_svg(draft);
+            raw_output = svg.is_none().then(|| draft.svg.clone());
+        }
         Ok(FigureDocument {
             svg,
             raw_output,
             source_data_url,
             preview_data_url,
+            draft,
         })
     })
     .await
@@ -1292,6 +1308,41 @@ pub async fn figures_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn deletion_fixture(workspace: &Path) -> String {
+        let id = "8".repeat(32);
+        let run = serde_json::from_value(json!({
+            "schemaVersion": 1, "id": id, "title": "Delete", "method": "A to B", "style": "paper", "sourceMode": "import", "sourceMime": "image/png", "sourceHash": null,
+            "status": "ready", "outputLimit": 0, "executor": ModelIdentity::default(), "reviewer": ModelIdentity::default(),
+            "executorVision": false, "reviewerVision": false, "revisionUsed": false, "versions": [], "requests": [], "review": null, "error": null, "createdAt": "now", "updatedAt": "now"
+        })).unwrap();
+        store::create(workspace, run, Some(b"source")).unwrap();
+        id
+    }
+
+    #[test]
+    fn deletion_removes_task_files_and_its_usage_records_from_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = deletion_fixture(temp.path());
+        let task = store::directory(temp.path(), &id).unwrap();
+        let log = temp.path().join("usage-log.jsonl");
+        fs::write(&log, format!("{{\"sessionId\":\"figure-{id}\"}}\n{{\"sessionId\":\"other-chat\"}}\n")).unwrap();
+        delete_local(temp.path(), &id, &log).unwrap();
+        assert!(!task.exists());
+        assert_eq!(fs::read_to_string(&log).unwrap(), "{\"sessionId\":\"other-chat\"}\n");
+        delete_local(temp.path(), &id, &log).unwrap();
+    }
+
+    #[test]
+    fn deletion_reports_usage_cleanup_failure_before_removing_task_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = deletion_fixture(temp.path());
+        let task = store::directory(temp.path(), &id).unwrap();
+        // A directory cannot be read as the usage file on any platform.
+        assert!(delete_local(temp.path(), &id, temp.path()).unwrap_err().contains("usage records"));
+        assert_eq!(fs::read(task.join("figure.source")).unwrap(), b"source");
+        assert!(store::load(temp.path(), &id).is_ok());
+    }
+
     // Only the explicitly invoked paid diagnostics call this helper. Ordinary
     // start remains paused at PNG preview and never grants confirmation.
     fn process_confirmed_sample(workspace: &Path, id: &str) -> Result<(), String> {

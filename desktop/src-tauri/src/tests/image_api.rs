@@ -77,6 +77,32 @@ fn saves_images_and_auditable_prompt_model_hash_without_credentials() {
     assert!(manifest.contains(&request.prompt));
 }
 
+#[test]
+fn figure_generation_is_saved_inside_the_task_without_a_second_image_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let id = "e".repeat(32);
+    let run = serde_json::from_value(json!({
+        "schemaVersion": 1, "id": id, "title": "Figure", "method": "A to B", "style": "paper", "sourceMode": "generate", "sourceMime": null, "sourceHash": null,
+        "status": "ready", "outputLimit": 0, "executor": runtime::figures::ModelIdentity::default(), "reviewer": runtime::figures::ModelIdentity::default(),
+        "executorVision": false, "reviewerVision": false, "revisionUsed": false, "versions": [], "requests": [], "review": null, "error": null, "createdAt": "now", "updatedAt": "now"
+    })).unwrap();
+    runtime::figures::create(&workspace, run, None).unwrap();
+    let directory = runtime::figures::directory(&workspace, &id).unwrap();
+    let request = ImageGenerationRequest { model: "fixture".into(), prompt: "A to B".into(), size: "1024x1024".into(), quality: None, n: 1 };
+    let result = api::ImageGenerationResult {
+        images: vec![api::GeneratedImage { bytes: vec![1, 2, 3], mime_type: "image/png", extension: "png", width: 2, height: 3, revised_prompt: None }],
+        usage: None,
+    };
+    let output = save_result_in_directory(&workspace, &directory, &"A".repeat(24), &request, &[], result).unwrap();
+    assert_eq!(output["images"][0]["path"], format!(".somniq/artifacts/figures/{id}/image-1.png"));
+    assert_eq!(fs::read(directory.join("image-1.png")).unwrap(), [1, 2, 3]);
+    assert!(directory.join("generation.json").exists());
+    assert!(!workspace.join(".somniq/artifacts/somni-images").exists());
+    runtime::figures::delete(&workspace, &id).unwrap();
+    assert!(!directory.exists());
+}
+
 #[tokio::test]
 async fn running_image_requests_can_be_cancelled_after_the_server_accepts_them() {
     use std::{io::Read, net::TcpListener, thread};

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -8,6 +8,7 @@ import type {
   ProjectBriefView,
   ProjectIntentObservation,
 } from "../../api/tauri";
+import type { AgentTaskCard } from "../../api/agentTasks";
 import type {
   ChatReasoningEffortView,
   ChatTodoItem,
@@ -124,7 +125,16 @@ const dialogMocks = vi.hoisted(() => ({
   open: vi.fn(() => Promise.resolve<string | null>("F:/project/docs/plan.md")),
 }));
 
+const agentMocks = vi.hoisted(() => ({
+  chatAgentList: vi.fn<(...args: unknown[]) => Promise<AgentTaskCard[]>>(() => Promise.resolve([])),
+  chatAgentDetail: vi.fn(() => Promise.resolve({ transcript: "Saved agent conversation" })),
+  chatAgentInterrupt: vi.fn(() => Promise.resolve()),
+  onChatAgents: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatAgentActivity: vi.fn(() => Promise.resolve(() => undefined)),
+}));
+
 vi.mock("../../api/tauri", () => apiMocks);
+vi.mock("../../api/agentTasks", () => agentMocks);
 vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
 vi.mock("../../git/GitWorkspace", () => ({
   default: ({ embedded }: { embedded?: boolean }) => (
@@ -371,6 +381,7 @@ describe("Chat export action", () => {
     document.body.appendChild(portal);
     vi.clearAllMocks();
     apiMocks.isTauri.mockReturnValue(true);
+    agentMocks.chatAgentList.mockResolvedValue([]);
     apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 });
     apiMocks.chatModelOptions.mockResolvedValue({
       provider: "anthropic-compat", current: CONFIGURED_EXECUTOR_MODEL,
@@ -448,6 +459,57 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("launches agent conversations from the summary, reuses tabs, and restores them without running a new chat", async () => {
+    const session = makeSession("default");
+    session.id = "session-delegation";
+    session.title = "Delegation test";
+    session.turns = [{ id: "delegation-user", role: "user", blocks: [{ kind: "text", text: "Check the research evidence" }] }];
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatUiSessionsList.mockResolvedValue([session]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(session);
+    const agent: AgentTaskCard = {
+      revision: 1, sessionId: "agent-survey", rootSessionId: session.id, path: "/root/survey_agent", projectId: "default",
+      status: { state: "running" }, pendingMail: 0,
+      task: { reason: "Independent evidence", task: "Review recent time-series research", inputs: "Research sources", deliverable: "Evidence summary", stopCondition: "Sources checked", model: "configured-executor", connection: "local config", permission: "read-only", workspace: "F:/project", maxIterations: 16, maxSeconds: 600 },
+      lastActivity: "read_file", interruptionReason: null, sessionPath: "F:/project/agents/survey.json", evidencePath: "F:/project/agents/survey.events.jsonl",
+    };
+    agentMocks.chatAgentList.mockImplementation(async (id) => id === session.id ? [agent] : []);
+    const first = render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    const summary = within(document.getElementById("project-brief-popover")!);
+    const launchList = await summary.findByRole("button", { name: "View agents" });
+    expect(document.querySelector(".project-brief-body")?.contains(launchList)).toBe(true);
+    expect(summary.queryByRole("button", { name: /Open agent/ })).toBeNull();
+    expect(document.querySelector("main.chat .agent-task-cards")).toBeNull();
+    expect(agentMocks.chatAgentDetail).not.toHaveBeenCalled();
+    await userEvent.click(launchList);
+    expect(await screen.findByRole("tab", { name: "Agents" })).toBeTruthy();
+    const launch = await screen.findByRole("button", { name: "Open agent Literature search" });
+    await userEvent.click(launch);
+    expect(await screen.findByRole("tab", { name: "Literature search" })).toBeTruthy();
+    expect(await screen.findByText("Saved agent conversation")).toBeTruthy();
+    expect(agentMocks.chatAgentDetail).toHaveBeenCalledWith(session.id, "default", agent.sessionId);
+    expect(document.getElementById("project-brief-popover")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show project summary" }));
+    await userEvent.click(within(document.getElementById("project-brief-popover")!).getByRole("button", { name: "View agents" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open agent Literature search" }));
+    expect(screen.getAllByRole("tab", { name: "Literature search" })).toHaveLength(1);
+    expect(document.querySelector(".side-task-panel")).toBeNull();
+    await waitFor(() => expect(localStorage.getItem(`somniq-side-panel-state-v1:default:${session.id}`)).toContain('"kind":"agent"'));
+    first.unmount();
+    localStorage.setItem(CURRENT_KEY, session.id);
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    expect(await screen.findByRole("tab", { name: "Literature search" })).toBeTruthy();
+    expect(await screen.findByText("Saved agent conversation")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Literature search" }));
+    expect(screen.queryByRole("tab", { name: "Literature search" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Open agent Literature search" })).toBeTruthy();
+    expect(agentMocks.chatAgentInterrupt).not.toHaveBeenCalled();
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
   });
 
   it("does not portal head actions into the header when embedded", () => {

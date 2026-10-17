@@ -1,5 +1,55 @@
 # ARIS-Code Changelog
 
+## v0.4.83 (2026-10-17)
+
+- **Scopus works off campus** — Scopus searches can go through the SomniQ
+  school route (`somni.ensuanx.com/research/scopus/search`), where the school
+  holds the Elsevier entitlement and searches from its campus network. The route
+  presents the signed-in SomniQ account and reads the school's own response
+  format. Without an Elsevier key it is used from the start; with a key Elsevier
+  is tried first, and a 401/403 moves the rest of that search to the school route.
+  Signed out, the previous COMPLETE-to-STANDARD retry is kept.
+- **Scopus availability follows the account** — Scopus counts as available with
+  an Elsevier key or a signed-in account, and Settings marks the key as optional.
+  School-route pages request up to 200 STANDARD records without abstract
+  enrichment, to spare the shared institutional allowance; abstracts come from
+  other sources for the same record. Each run records the route used, route
+  switches and the school's remaining allowance. Account tokens are sent only to
+  the host that issued them.
+- **Version consistency** — desktop manifests, shared Rust packages, lockfiles
+  and README badges use 0.4.83.
+
+## v0.4.82 (2026-10-16)
+
+- **Images open in an image viewer** — Chat's View image references open a
+  zoomable image preview with loading and read-error states. Image file links
+  use the image side panel; closing the preview restores focus to Chat.
+- **Explanatory diagrams and stronger slide delivery** — bundled TikZ/Beamer
+  examples cover pipelines, branches, parallel checks and feedback loops.
+  Existing SomniImage generation supports conceptual illustrations alongside
+  editable labels and precise vector diagrams. Slide delivery checks track a
+  single content source, editable PPTX/PDF exports, rendered pages, evidence
+  provenance and the independent review verdict.
+- **Persistent agent collaboration** — up to two read-only child agents keep
+  separate sessions, permissions, execution traces and recoverable mailboxes.
+  Project Summary provides compact task navigation into the corresponding
+  conversation and timeline, with explicit stop and continuation controls.
+  The independent Reviewer remains separate from delegated agents.
+- **Stable Chat reading and composition** — streaming reasoning and long replies
+  preserve reading position. Composer controls adapt to the actual panel width;
+  local file names, workflow labels and reasoning-continuation errors are clearer.
+  Required reasoning fields survive compression and tool continuation.
+- **Figure workspace improvements** — reusable scientific styles, responsive
+  resizable panels, recoverable drafts and clearer editing controls accompany
+  the Figure entry directly below Chat. Code opens with explicit workspace trust.
+- **Reliable local documents and Windows commands** — PDFs bundle the character maps
+  needed by the offline renderer. Saved DOCX reads preserve an open
+  editor and report exclusive locks safely. Windows tools identify their shell
+  and provide PowerShell recovery when a POSIX shell is unavailable.
+- **Version consistency** — desktop manifests, shared Rust packages, lockfiles
+  and README badges use 0.4.82. Windows x64 and macOS universal installers retain
+  signed updater artifacts and the combined update manifest.
+
 ## v0.4.81 (2026-10-08)
 
 - **Chat opens at the latest message** — returning to a kept-alive Chat waits

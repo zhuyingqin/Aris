@@ -1171,14 +1171,17 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     }
     if contains_any(
         lowered,
-        &["skill", "agent", "delegate", "智能体", "技能", "委派"],
+        &["agent", "delegate", "parallel", "subtask", "collaboration", "智能体", "委派", "并行", "子任务", "续派", "协作", "跨模块", "后端恢复", "前端状态同步"],
     ) {
         groups.push(ToolGroup {
             profile: "delegation",
-            reason: "skill or agent intent",
-            required: Vec::new(),
-            optional: resolve_named(catalog, &["Skill", "Agent"]),
+            reason: "independent investigation or child continuation intent",
+            required: resolve_named(catalog, &tools::collaboration::ACTIONS),
+            optional: resolve_named(catalog, &["Skill"]),
         });
+    }
+    if contains_any(lowered, &["skill", "技能"]) {
+        groups.push(ToolGroup {profile:"skills",reason:"skill intent",required:Vec::new(),optional:resolve_named(catalog,&["Skill"])});
     }
     if contains_any(
         lowered,

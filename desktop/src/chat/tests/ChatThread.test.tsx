@@ -93,15 +93,15 @@ describe("ChatThread scroll and timeline helpers", () => {
   it("compensates an above-viewport resize regardless of scroll direction", () => {
     const instance = { scrollElement: { scrollTop: 900 }, scrollOffset: 400 };
     // Above the viewport: the reader's content would shift without an adjustment.
-    expect(compensateAboveViewportResize({ start: 100 }, instance)).toBe(true);
-    // At or below the viewport top: growth lands below the reader, leave it.
-    expect(compensateAboveViewportResize({ start: 900 }, instance)).toBe(false);
-    expect(compensateAboveViewportResize({ start: 1_400 }, instance)).toBe(false);
+    expect(compensateAboveViewportResize({ end: 300 }, instance)).toBe(true);
+    expect(compensateAboveViewportResize({ end: 900 }, instance)).toBe(true);
+    // A visible long reply can start above the reader and grow below them.
+    expect(compensateAboveViewportResize({ end: 1_400 }, instance)).toBe(false);
     // The live scrollTop wins over the last observed offset, which lags behind
     // adjustments the virtualizer has already written.
-    expect(compensateAboveViewportResize({ start: 500 }, instance)).toBe(true);
+    expect(compensateAboveViewportResize({ end: 500 }, instance)).toBe(true);
     expect(
-      compensateAboveViewportResize({ start: 500 }, { scrollElement: null, scrollOffset: 400 }),
+      compensateAboveViewportResize({ end: 500 }, { scrollElement: null, scrollOffset: 400 }),
     ).toBe(false);
   });
 
