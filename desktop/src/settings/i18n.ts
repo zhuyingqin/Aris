@@ -229,6 +229,7 @@ export interface SettingsProvidersCopy {
   fieldScopusKey: string;
   fieldOpenalexKey: string;
   openalexGatewayHint: string;
+  scopusSchoolRouteHint: string;
   fieldBochaKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
@@ -875,6 +876,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus 密钥",
       fieldOpenalexKey: "OpenAlex 文献检索",
       openalexGatewayHint: "SomniQ 已内置，无需 API 密钥",
+      scopusSchoolRouteHint: "可选。未设置时，登录后通过 SomniQ 学校通道检索 Scopus",
       fieldBochaKey: "博查备用直连密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
@@ -1543,6 +1545,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus Key",
       fieldOpenalexKey: "OpenAlex literature search",
       openalexGatewayHint: "Built into SomniQ; no API key required",
+      scopusSchoolRouteHint: "Optional. Without a key, signed-in searches go through the SomniQ school route",
       fieldBochaKey: "Bocha direct fallback key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",

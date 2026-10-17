@@ -1,5 +1,24 @@
 # ARIS-Code Changelog
 
+## v0.4.83 (2026-10-17)
+
+- **Scopus works off campus** — Scopus searches can go through the SomniQ
+  school route (`somni.ensuanx.com/research/scopus/search`), where the school
+  holds the Elsevier entitlement and searches from its campus network. The route
+  presents the signed-in SomniQ account and reads the school's own response
+  format. Without an Elsevier key it is used from the start; with a key Elsevier
+  is tried first, and a 401/403 moves the rest of that search to the school route.
+  Signed out, the previous COMPLETE-to-STANDARD retry is kept.
+- **Scopus availability follows the account** — Scopus counts as available with
+  an Elsevier key or a signed-in account, and Settings marks the key as optional.
+  School-route pages request up to 200 STANDARD records without abstract
+  enrichment, to spare the shared institutional allowance; abstracts come from
+  other sources for the same record. Each run records the route used, route
+  switches and the school's remaining allowance. Account tokens are sent only to
+  the host that issued them.
+- **Version consistency** — desktop manifests, shared Rust packages, lockfiles
+  and README badges use 0.4.83.
+
 ## v0.4.82 (2026-10-16)
 
 - **Images open in an image viewer** — Chat's View image references open a

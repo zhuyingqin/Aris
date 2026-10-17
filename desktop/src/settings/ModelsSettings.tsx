@@ -260,7 +260,7 @@ export default function ModelsSettings({ language, configView, managedModels, co
 
         {/* Section 2: Literature APIs */}
         <SettingsSection title={copy.sectionLiteratureServices}>
-          <SettingRow title={copy.fieldScopusKey} description={configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}>
+          <SettingRow title={copy.fieldScopusKey} description={configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.scopusSchoolRouteHint}>
             <KeyInput
               label={copy.fieldScopusKey}
               value={scopusKey}

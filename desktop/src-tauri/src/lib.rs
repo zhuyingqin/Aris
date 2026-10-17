@@ -720,6 +720,11 @@ pub fn run() {
             // literature search runs; force=false keeps real env vars intact.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            // Without an Elsevier key, or off campus with one, Scopus goes
+            // through the school route, which needs the signed-in account.
+            tools::research_account::set_research_account_provider(std::sync::Arc::new(
+                newapi::ResearchAccount,
+            ));
             // Bound before the Code page can start a workbench: the bridge
             // address is handed to that process in its environment, so the
             // listener has to exist first.

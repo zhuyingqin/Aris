@@ -1403,6 +1403,8 @@ async fn refresh_browser_session(
 /// against new-api's `/v1/user/self` and never the rotating refresh cookie,
 /// which must not leave the OS credential store.
 pub(crate) struct AccountOwnershipCredential {
+    /// The account service that issued `access_token`.
+    pub(crate) base_url: String,
     pub(crate) user_id: i64,
     pub(crate) access_token: String,
 }
@@ -1422,15 +1424,61 @@ pub(crate) async fn account_ownership_credential(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (_, session) = authenticated_stored_session(&client).await?;
+    let (base_url, session) = authenticated_stored_session(&client).await?;
     let access_token = session
         .user_token
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
     Ok(Some(AccountOwnershipCredential {
+        base_url,
         user_id: session.user_id,
         access_token,
     }))
+}
+
+/// Base URL of the signed-in account, from config alone: no keychain read and
+/// no network. A session that can no longer be renewed surfaces when it is used.
+pub(crate) fn signed_in_base_url() -> Option<String> {
+    let obj = config::load_object();
+    obj.get("newapi_user_id").and_then(value_as_i64)?;
+    let base = obj
+        .get("newapi_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    approved_managed_base(base).ok()
+}
+
+/// The signed-in account as literature adapters see it: the research gateway's
+/// school Scopus route identifies the caller with it.
+pub(crate) struct ResearchAccount;
+
+impl tools::research_account::ResearchAccountProvider for ResearchAccount {
+    fn session_issuer(&self) -> Option<String> {
+        signed_in_base_url()
+    }
+
+    fn credential(
+        &self,
+    ) -> Result<Option<tools::research_account::ResearchAccountCredential>, String> {
+        // Adapters block, on a runtime's blocking pool or a plain thread, while
+        // renewal is async. A private current-thread runtime on its own thread
+        // serves both without ever nesting one `block_on` inside another.
+        let credential = std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("账号凭证查询失败: {error}"))?
+                .block_on(account_ownership_credential())
+        })
+        .join()
+        .map_err(|_| "账号凭证查询失败".to_string())??;
+        Ok(credential.map(|credential| tools::research_account::ResearchAccountCredential {
+            issuer: credential.base_url,
+            user_id: credential.user_id,
+            access_token: credential.access_token,
+        }))
+    }
 }
 
 async fn authenticated_stored_session(
