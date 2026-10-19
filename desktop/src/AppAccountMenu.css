@@ -130,6 +130,12 @@
 .account-menu-quota-title { display: flex; align-items: center; gap: 7px; color: var(--text); }
 .account-menu-quota-title svg { flex: 0 0 auto; color: var(--text-dim); }
 .account-menu-quota-title strong { font-size: 12px; font-weight: 600; }
+.account-menu-refresh { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: pointer; }
+.account-menu-refresh:hover:not(:disabled) { background: var(--bg-3); }
+.account-menu-refresh:focus-visible { outline: 2px solid var(--tier-accent); outline-offset: 1px; }
+.account-menu-refresh:disabled { cursor: default; opacity: .65; }
+.account-menu-refresh svg[data-icon="spinner"] { animation: spin .9s linear infinite; }
+.account-menu-refresh-error { display: block; margin-top: 6px; color: var(--text-dim); font-size: 10px; }
 .account-menu-quota-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 8px 0 7px; font-size: 11px; }
 .account-menu-quota-summary > span { color: var(--text-dim); }
 .account-menu-quota-summary > strong { color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -160,6 +166,7 @@
 .app .app-account[data-plan-tier] .account-menu-action:focus-visible { outline: 2px solid var(--tier-accent); outline-offset: -2px; background: color-mix(in srgb, var(--tier-accent) 10%, var(--bg-2)); }
 
 @media (prefers-reduced-motion: reduce) {
+  .account-menu-refresh svg[data-icon="spinner"] { animation: none; }
   .app-account[data-plan-tier] .account-menu-profile::before,
   .app-account[data-plan-tier] .account-menu-profile::after { animation: none; }
   .app-account[data-plan-tier="pro"] .account-menu-profile::after { opacity: 0; }

@@ -1,3 +1,4 @@
+mod agent_threads;
 mod app_ctx;
 mod blocking;
 mod change_review;
@@ -22,6 +23,7 @@ mod knowledge;
 mod literature;
 mod paper_reading;
 mod mail;
+mod managed_key;
 mod mcp;
 mod membership;
 mod memory;
@@ -34,6 +36,7 @@ mod process;
 mod profile;
 mod projects;
 mod remote;
+mod review_thread;
 mod scheduled;
 mod screenshot;
 mod sessions;
@@ -422,6 +425,7 @@ fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
 pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
     let chat_state = app_handle.state::<engine::ChatState>();
     engine::cancel_all_running_turns(chat_state.inner());
+    agent_threads::stop_all("project work stopped; continue explicitly from the saved checkpoint");
 
     let remote_state = app_handle.state::<remote::RemoteAgentState>();
     remote::cancel_all_active_chat_messages(remote_state.inner());
@@ -435,6 +439,7 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
         playwright_pdf::shutdown();
         stop_all_running_work(app_handle);
+        agent_threads::shutdown();
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
         // its existing paired devices without a fresh connection ceremony.
@@ -549,6 +554,14 @@ fn apply_windows_taskbar_icon(_window: &tauri::WebviewWindow) {}
 fn install_transport_verdict_hook() {
     aris_executor::set_transport_verdict_hook(Box::new(|base_url, model, verdict| {
         config::record_runtime_transport_verdict(base_url, model, verdict);
+    }));
+}
+
+/// Let the executor swap in a re-fetched account model key when the gateway
+/// answers 401, instead of failing the turn (see `newapi::replace_rejected_model_key`).
+fn install_credential_recovery_hook() {
+    aris_executor::set_credential_recovery_hook(Box::new(|base_url, rejected_key| {
+        Box::pin(newapi::replace_rejected_model_key(base_url, rejected_key))
     }));
 }
 
@@ -708,14 +721,28 @@ pub fn run() {
             if let Err(error) = newapi::retire_legacy_managed_session() {
                 eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
             }
+            // Before any reader exports config-held keys: an older build kept
+            // the account model key in config.json.
+            if let Err(error) = config::move_managed_key_to_credential_store() {
+                eprintln!("SomniQ account model key migration failed: {error}");
+            }
+            if let Err(error) = config::retire_third_party_api_settings() {
+                eprintln!("SomniQ third-party API settings cleanup failed: {error}");
+            }
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
             }
             state::apply_bundle_cache_environment();
-            // Export config-held keys (e.g. SCOPUS_API_KEY) before any
-            // literature search runs; force=false keeps real env vars intact.
+            // Configure account review and research preferences before tools run.
+            // Account credentials remain in process memory.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            install_credential_recovery_hook();
+            // Without an Elsevier key, or off campus with one, Scopus goes
+            // through the school route, which needs the signed-in account.
+            tools::research_account::set_research_account_provider(std::sync::Arc::new(
+                newapi::ResearchAccount,
+            ));
             // Bound before the Code page can start a workbench: the bridge
             // address is handed to that process in its environment, so the
             // listener has to exist first.
@@ -893,11 +920,8 @@ pub fn run() {
             remote::remote_control_p2p_frame,
             remote::remote_control_p2p_closed,
             config::config_get,
-            config::config_secret_get,
-            config::config_secret_clear,
             config::config_set,
             config::config_test,
-            config::web_search_provider_test,
             memory::memory_status,
             memory::memory_v2_status,
             memory::memory_v2_confirm_r3,
@@ -944,6 +968,8 @@ pub fn run() {
             figures::figures_cancel,
             figures::figures_document,
             figures::figures_save,
+            figures::draft::figures_save_draft,
+            figures::draft::figures_discard_draft,
             figures::figures_export,
             figures::figures_review,
             figures::svg_edit::figures_edit_svg,
@@ -1095,6 +1121,10 @@ pub fn run() {
             engine::chat_reasoning_effort_get,
             engine::chat_reasoning_effort_set,
             engine::chat_permission_get,
+            engine::collaboration::chat_agent_list,
+            engine::collaboration::chat_agent_detail,
+            engine::collaboration::chat_agent_interrupt,
+            engine::collaboration::chat_agent_trace,
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,

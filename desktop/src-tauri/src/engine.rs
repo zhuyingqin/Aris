@@ -19,6 +19,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "collaboration.rs"]
+pub(crate) mod collaboration;
+
 use crate::slash_commands::{slash_command_specs, SlashCommand};
 use crate::system_prompt::{
     build_system_prompt_inner, build_system_prompt_inner_with_memory, build_workflow_system_prompt,
@@ -719,6 +722,27 @@ fn release_cancelled_turn_for_replacement(
     }
 }
 
+/// Serialize final persistence with Stop and replacement. The cancelled owner
+/// may preserve its partial transcript until a new turn takes the slot; after
+/// that, neither its disk write nor its cache projection may run.
+fn with_current_chat_turn<T>(
+    state: &ChatState,
+    session_id: &str,
+    turn_id: u64,
+    allow_cancelled: bool,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    let running = state
+        .running_turns
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    let current = running.get(session_id).is_some_and(|turn| {
+        turn.turn_id == turn_id
+            && (allow_cancelled || !turn.cancelled.load(Ordering::SeqCst))
+    });
+    if current { action().map(Some) } else { Ok(None) }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InterruptedResearchFollowUp {
     None,
@@ -1227,7 +1251,10 @@ fn start_tool_heartbeat(
 ) -> ToolHeartbeat {
     let done = Arc::new(AtomicBool::new(false));
     let worker_done = done.clone();
+    // The heartbeat reports on behalf of the turn that started the tool.
+    let turn = crate::chat_events::current_turn_tag();
     let handle = std::thread::spawn(move || {
+        let _turn_scope = turn.as_ref().map(crate::chat_events::TurnTag::enter);
         let started = Instant::now();
         let mut wait = Duration::from_secs(1);
         loop {
@@ -1305,6 +1332,9 @@ impl ToolExecutor for KernelToolExecutor {
             return Err(ToolError::interrupted_by_user());
         }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+        if tools::collaboration::is_tool(tool_name) {
+            return collaboration::execute(&self.session_id, &self.turn_id, _tool_use_id, tool_name, input).map_err(ToolError::new);
+        }
         if crate::mail::is_mail_tool(tool_name) {
             return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
         }
@@ -1375,12 +1405,17 @@ impl ToolExecutor for KernelToolExecutor {
                 })
                 .collect();
         }
+        // A parallel tool runs on a thread of its own, which does not inherit
+        // the worker's turn; hand it over so the tool's events keep it.
+        let turn = crate::chat_events::current_turn_tag();
         std::thread::scope(|scope| {
             let handles = invocations
                 .iter()
                 .map(|invocation| {
                     let mut executor = self.clone();
+                    let turn = turn.clone();
                     scope.spawn(move || {
+                        let _turn_scope = turn.as_ref().map(crate::chat_events::TurnTag::enter);
                         executor.execute_with_id(
                             &invocation.tool_use_id,
                             &invocation.tool_name,
@@ -1709,8 +1744,11 @@ impl LatexRepairGuard {
         // having been made; counting those exhausts the allowance and then
         // blocks the compile that would have verified the real fix.
         if failed
-            && crate::tool_output::latex_failure_class(output)
-                == crate::tool_output::LatexFailureClass::Environment
+            && matches!(
+                crate::tool_output::latex_failure_class(output),
+                crate::tool_output::LatexFailureClass::Environment
+                    | crate::tool_output::LatexFailureClass::Process
+            )
         {
             return;
         }
@@ -2870,7 +2908,7 @@ pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
         BuiltinToolAvailability {
             name: "WebSearch".to_string(),
             available: true,
-            reason: "Built-in Bocha general search, Zhihu community search, and DuckDuckGo fallback are available."
+            reason: "DeepSeek web search uses the signed-in SomniQ API token; New API checks membership and bills successful searches."
                 .to_string(),
         },
         BuiltinToolAvailability {
@@ -2885,7 +2923,7 @@ pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
 #[tauri::command]
 pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvailability>, String> {
     let providers = [
-        ("Bocha", "bocha"),
+        ("DeepSeek", "deepseek"),
         ("Zhihu", "zhihu"),
         ("OpenAlex", "openalex"),
     ];
@@ -6712,6 +6750,12 @@ struct IndependentReviewResult {
     independent: bool,
     #[serde(default)]
     exhausted: bool,
+    /// What the Reviewer looked at with its own tools, as the controller
+    /// recorded the calls. `evidence_checked` is the Reviewer's account in its
+    /// own words; this is the record, so the two can be compared. Empty (and
+    /// omitted) for a one-shot review, which has no tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6925,6 +6969,9 @@ fn render_executor_review_memory(memory: &PersistedReviewMemory) -> Option<Strin
 #[tauri::command]
 pub fn chat_review_clear(app: AppHandle, session_id: String) -> Result<(), String> {
     validate_session_id(&session_id)?;
+    // The cleared review thread is gone for the Reviewer too: its next review
+    // starts from nothing, as the Executor's memory of it does.
+    crate::review_thread::reset_session(&session_id);
     emit_independent_review_event(&app, &session_id, "cleared", 0, 0, None);
     Ok(())
 }
@@ -7218,9 +7265,10 @@ fn collect_review_path_values(value: &Value, paths: &mut Vec<String>) {
     }
 }
 
-fn review_evidence_file_is_safe(path: &Path) -> bool {
+/// Whether a path's own name says it holds credentials.
+pub(crate) fn review_path_looks_secret(path: &Path) -> bool {
     let lower = path.to_string_lossy().to_ascii_lowercase();
-    if [
+    [
         ".env",
         "credential",
         "secret",
@@ -7230,7 +7278,10 @@ fn review_evidence_file_is_safe(path: &Path) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
-    {
+}
+
+pub(crate) fn review_evidence_file_is_safe(path: &Path) -> bool {
+    if review_path_looks_secret(path) {
         return false;
     }
     matches!(
@@ -7261,7 +7312,7 @@ fn review_evidence_file_is_safe(path: &Path) -> bool {
     )
 }
 
-fn redact_review_evidence(contents: &str) -> String {
+pub(crate) fn redact_review_evidence(contents: &str) -> String {
     contents
         .lines()
         .map(|line| {
@@ -7438,17 +7489,9 @@ fn review_workspace_snapshot(workspace: &Path) -> (String, bool) {
     )
 }
 
-fn independent_review_prompt(
-    user_text: &str,
-    answer: &str,
-    cumulative_tool_trace: &str,
-    cumulative_materialized_evidence: &str,
-    prior_reviews: &[IndependentReviewResult],
-    review_attempt: usize,
-    workspace: &Path,
-    executor_provider: &str,
-    executor_model: &str,
-) -> String {
+/// The active project milestone and its success criteria (zero-based, user
+/// behavior gates marked reference-only), as every review packet states them.
+fn review_goal_section(workspace: &Path) -> (String, String) {
     let goal = runtime::load_project_goal(workspace)
         .ok()
         .flatten()
@@ -7470,6 +7513,21 @@ fn independent_review_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    (goal_objective, criteria)
+}
+
+fn independent_review_prompt(
+    user_text: &str,
+    answer: &str,
+    cumulative_tool_trace: &str,
+    cumulative_materialized_evidence: &str,
+    prior_reviews: &[IndependentReviewResult],
+    review_attempt: usize,
+    workspace: &Path,
+    executor_provider: &str,
+    executor_model: &str,
+) -> String {
+    let (goal_objective, criteria) = review_goal_section(workspace);
     let (workspace_snapshot, workspace_has_git) = review_workspace_snapshot(workspace);
     let workspace_attribution_guidance = if workspace_has_git {
         "The workspace snapshot may contain pre-existing user changes. Attribute a change to this Executor turn only when the tool trace supports that attribution. You may still use the rest of the snapshot to find missed integrations, regressions, or untested interactions."
@@ -7553,6 +7611,161 @@ PASS is allowed when claims material to the current request are supported by the
         user_text = truncate_for_prompt(user_text, 8_000),
         answer = truncate_for_prompt(answer, 16_000),
     )
+}
+
+/// Largest incremental review packet, in characters. The first packet of a
+/// Reviewer thread carries the whole case and can run past a hundred thousand;
+/// every later one carries only what changed, and this bound holds however many
+/// rounds the chat has been through.
+const MAX_INCREMENTAL_REVIEW_PACKET_CHARS: usize = 80_000;
+const MAX_INCREMENTAL_REQUEST_CHARS: usize = 6_000;
+const MAX_INCREMENTAL_ANSWER_CHARS: usize = 14_000;
+const MAX_INCREMENTAL_TOOL_EVIDENCE_CHARS: usize = 18_000;
+const MAX_INCREMENTAL_FILE_EVIDENCE_CHARS: usize = 12_000;
+const MAX_INCREMENTAL_OPEN_ISSUES_CHARS: usize = 5_000;
+const MAX_INCREMENTAL_WORKSPACE_CHARS: usize = 10_000;
+const MAX_INCREMENTAL_GOAL_CHARS: usize = 2_000;
+
+/// What an incremental review packet is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncrementalReviewKind {
+    /// The Executor revised its answer to satisfy the Reviewer's last verdict.
+    Revision { number: usize },
+    /// A new request in a chat whose earlier reviews the Reviewer remembers.
+    NewRequest,
+}
+
+struct IncrementalReviewInput<'a> {
+    kind: IncrementalReviewKind,
+    attempt: usize,
+    user_text: &'a str,
+    answer: &'a str,
+    /// The Executor's tool evidence from this round only.
+    new_tool_evidence: &'a str,
+    /// Workspace files this round's tools referenced.
+    new_file_evidence: &'a str,
+    /// The Reviewer's previous verdict, whose issues are to be re-checked.
+    previous: Option<&'a IndependentReviewResult>,
+    workspace: &'a Path,
+    executor_provider: &'a str,
+    executor_model: &'a str,
+}
+
+/// The previous verdict's findings, short enough to restate each round. The
+/// Reviewer remembers the full text; this is the checklist it is asked to close.
+fn open_issues_digest(previous: Option<&IndependentReviewResult>) -> String {
+    let Some(previous) = previous else {
+        return "None: this chat has no earlier review.".to_string();
+    };
+    let mut lines = previous
+        .issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "- [{}] {}: {}",
+                issue.severity,
+                issue.title,
+                truncate_for_prompt(&issue.detail, 400)
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.extend(
+        previous
+            .missing_checks
+            .iter()
+            .map(|check| format!("- missing check: {}", truncate_for_prompt(check, 300))),
+    );
+    if lines.is_empty() {
+        return format!("None: your last verdict ({:?}) raised no issues.", previous.verdict);
+    }
+    truncate_for_prompt(&lines.join("\n"), MAX_INCREMENTAL_OPEN_ISSUES_CHARS)
+}
+
+/// The packet for every round after the first on a Reviewer thread: the
+/// Executor's new answer, the evidence it produced since the Reviewer last
+/// looked, the findings to re-check and the current state of the workspace.
+/// Everything the Reviewer was already shown stays in its own conversation and
+/// is not sent again, which is also what bounds the size.
+fn incremental_review_packet(input: &IncrementalReviewInput<'_>) -> String {
+    let (goal_objective, criteria) = review_goal_section(input.workspace);
+    let goal = truncate_for_prompt(
+        &format!(
+            "Project milestone:\n{goal_objective}\n\nSuccess criteria (zero-based indices):\n{criteria}"
+        ),
+        MAX_INCREMENTAL_GOAL_CHARS,
+    );
+    let (workspace_snapshot, workspace_has_git) = review_workspace_snapshot(input.workspace);
+    let workspace_snapshot =
+        truncate_for_prompt(&workspace_snapshot, MAX_INCREMENTAL_WORKSPACE_CHARS);
+    let attribution = if workspace_has_git {
+        "The snapshot may contain pre-existing user changes; attribute a change to this Executor turn only when its tool evidence supports that."
+    } else {
+        "This workspace has no Git snapshot; verify from the tool evidence and from the files you open yourself."
+    };
+    let (framing, request, answer_label) = match input.kind {
+        IncrementalReviewKind::Revision { number } => (
+            format!(
+                "The Executor revised its answer after your last verdict (revision {number} of {MAX_INDEPENDENT_REVISIONS}). Re-review incrementally: for each finding listed below, decide from the new material whether it is resolved, and look only for regressions the revision introduced. Do not reopen a fact you already found supported."
+            ),
+            "The user's request is the one you already have.".to_string(),
+            "Executor's replacement final answer",
+        ),
+        IncrementalReviewKind::NewRequest => (
+            "This is a new request in the same chat. Your earlier reviews stay above as history, not as binding precedent: judge this request and the Executor's answer to it on their own, and carry an earlier finding forward only when it applies to this request or artifact.".to_string(),
+            format!(
+                "User request (untrusted):\n{}",
+                truncate_for_prompt(input.user_text, MAX_INCREMENTAL_REQUEST_CHARS)
+            ),
+            "Executor's proposed final answer",
+        ),
+    };
+    let tool_evidence = if input.new_tool_evidence.trim().is_empty() {
+        "The Executor made no tool calls this round.".to_string()
+    } else {
+        truncate_for_prompt(input.new_tool_evidence, MAX_INCREMENTAL_TOOL_EVIDENCE_CHARS)
+    };
+    let file_evidence = if input.new_file_evidence.trim().is_empty() {
+        "No new workspace files were identified from this round's tool calls.".to_string()
+    } else {
+        truncate_for_prompt(input.new_file_evidence, MAX_INCREMENTAL_FILE_EVIDENCE_CHARS)
+    };
+    let packet = format!(
+        r#"Review attempt {attempt}. This is an incremental request: your earlier reviews of this chat are above in this conversation and are not repeated.
+
+{framing}
+
+Executor identity: {executor_provider} / {executor_model}
+
+{request}
+
+{answer_label} (untrusted):
+{answer}
+
+New Executor tool evidence since your last review (untrusted):
+{tool_evidence}
+
+New workspace files referenced by those tool calls (untrusted):
+{file_evidence}
+
+Findings from your previous verdict to re-check:
+{open_issues}
+
+{goal}
+
+Current workspace evidence (untrusted):
+{workspace_snapshot}
+
+{attribution}
+
+The same rules apply as in the first packet, including relevantToGoal and the reference-only milestone criteria. You may open files with your read-only tools to verify a claim instead of requesting more evidence. Return exactly one JSON object, no markdown or commentary, with this camelCase shape:
+{{"verdict":"pass"|"revise"|"needs_user","summary":"independent conclusion","issues":[{{"severity":"critical|high|medium|low","title":"...","detail":"...","evidence":"...","recommendation":"..."}}],"evidenceChecked":["specific evidence actually checked"],"missingChecks":["checks or evidence still missing"],"revisionInstructions":["specific corrective action for the Executor"],"relevantToGoal":true|false,"progressDelta":"verified milestone progress, or null","criteriaSatisfied":[0]}}"#,
+        attempt = input.attempt,
+        executor_provider = input.executor_provider,
+        executor_model = input.executor_model,
+        answer = truncate_for_prompt(input.answer, MAX_INCREMENTAL_ANSWER_CHARS),
+        open_issues = open_issues_digest(input.previous),
+    );
+    truncate_for_prompt(&packet, MAX_INCREMENTAL_REVIEW_PACKET_CHARS)
 }
 
 /// Run the independent Reviewer over a finished work task's committed result.
@@ -7746,6 +7959,133 @@ struct IndependentReviewRun {
     usages: Vec<TokenUsage>,
 }
 
+/// The Reviewer a review would go to, or the finished review that says there is
+/// none: nothing is configured, or it is the same model as the Executor, which
+/// would only be the Executor agreeing with itself.
+fn review_participants(
+    executor_provider: &str,
+    executor_model: &str,
+) -> Result<(String, String), Box<IndependentReviewRun>> {
+    let unavailable = |summary: &str| {
+        Box::new(IndependentReviewRun {
+            result: unavailable_independent_review(summary, executor_provider, executor_model),
+            usages: Vec::new(),
+        })
+    };
+    let Some((reviewer_provider, reviewer_model)) = configured_reviewer_identity() else {
+        return Err(unavailable(
+            "Independent review was required, but no Reviewer is configured in SomniQ settings.",
+        ));
+    };
+    if !reviewer_is_independent(
+        &reviewer_provider,
+        &reviewer_model,
+        executor_provider,
+        executor_model,
+    ) {
+        return Err(unavailable(
+            "Independent review was refused because Reviewer and Executor use the same provider/model identity.",
+        ));
+    }
+    Ok((reviewer_provider, reviewer_model))
+}
+
+/// Everything about a review that is the same however the Reviewer was asked.
+struct ReviewOutcomeContext<'a> {
+    session_id: &'a str,
+    attempt: usize,
+    reviewer_provider: &'a str,
+    reviewer_model: &'a str,
+    executor_provider: &'a str,
+    executor_model: &'a str,
+    started: Instant,
+    /// What the Reviewer opened with its own tools; empty for a one-shot review.
+    tool_checks: &'a [String],
+    /// Extra fields for the `reviewer.response` trace row.
+    trace: Value,
+}
+
+impl ReviewOutcomeContext<'_> {
+    fn response_event(&self, mut fields: Value) {
+        if let (Some(fields), Some(extra)) = (fields.as_object_mut(), self.trace.as_object()) {
+            for (key, value) in extra {
+                fields.insert(key.clone(), value.clone());
+            }
+        }
+        crate::chat_events::record_wire_event(self.session_id, "reviewer.response", fields);
+    }
+
+    fn base_event(&self) -> Value {
+        json!({
+            "sessionId": self.session_id,
+            "role": "reviewer",
+            "attempt": self.attempt,
+            "provider": self.reviewer_provider,
+            "model": self.reviewer_model,
+            "durationMs": self.started.elapsed().as_millis(),
+        })
+    }
+}
+
+/// Turn what the Reviewer answered (or the way it failed) into the review the
+/// controller acts on: parse the verdict, stamp both identities, drop findings
+/// that gate on the wrong thing, and put it all in the trace.
+fn finish_independent_review(
+    context: &ReviewOutcomeContext<'_>,
+    observed: Result<tools::LlmReviewRun, String>,
+) -> IndependentReviewRun {
+    let unavailable = |summary: String, usages: Vec<TokenUsage>| IndependentReviewRun {
+        result: unavailable_independent_review(
+            summary,
+            context.executor_provider,
+            context.executor_model,
+        ),
+        usages,
+    };
+    let observed = match observed {
+        Ok(run) => run,
+        Err(error) => {
+            let mut event = context.base_event();
+            event["error"] = json!(&error);
+            context.response_event(event);
+            return unavailable(format!("Independent Reviewer failed: {error}"), Vec::new());
+        }
+    };
+    let raw = observed.text;
+    let usages = observed.usages;
+    let mut result = match parse_independent_review(&raw) {
+        Ok(result) => result,
+        Err(error) => {
+            let mut event = context.base_event();
+            event["raw"] = json!(&raw);
+            event["parseError"] = json!(&error);
+            event["usages"] = crate::chat_events::token_usages_to_value(&usages);
+            context.response_event(event);
+            return unavailable(
+                format!(
+                    "{error}. Raw Reviewer output: {}",
+                    truncate_for_prompt(&raw, 4_000)
+                ),
+                usages,
+            );
+        }
+    };
+    result.reviewer_provider = context.reviewer_provider.to_string();
+    result.reviewer_model = context.reviewer_model.to_string();
+    result.executor_provider = context.executor_provider.to_string();
+    result.executor_model = context.executor_model.to_string();
+    result.independent = true;
+    result.tool_checks = context.tool_checks.to_vec();
+    normalize_review_goal_gating(&mut result);
+    let mut event = context.base_event();
+    event["raw"] = json!(&raw);
+    event["verdict"] = json!(result.verdict);
+    event["relevantToGoal"] = json!(result.relevant_to_goal);
+    event["usages"] = crate::chat_events::token_usages_to_value(&usages);
+    context.response_event(event);
+    IndependentReviewRun { result, usages }
+}
+
 fn run_independent_review(
     session_id: &str,
     attempt: usize,
@@ -7755,31 +8095,11 @@ fn run_independent_review(
     executor_model: &str,
 ) -> IndependentReviewRun {
     let started = Instant::now();
-    let Some((reviewer_provider, reviewer_model)) = configured_reviewer_identity() else {
-        return IndependentReviewRun {
-            result: unavailable_independent_review(
-                "Independent review was required, but no Reviewer is configured in SomniQ settings.",
-                executor_provider,
-                executor_model,
-            ),
-            usages: Vec::new(),
+    let (reviewer_provider, reviewer_model) =
+        match review_participants(executor_provider, executor_model) {
+            Ok(participants) => participants,
+            Err(unavailable) => return *unavailable,
         };
-    };
-    if !reviewer_is_independent(
-        &reviewer_provider,
-        &reviewer_model,
-        executor_provider,
-        executor_model,
-    ) {
-        return IndependentReviewRun {
-            result: unavailable_independent_review(
-                "Independent review was refused because Reviewer and Executor use the same provider/model identity.",
-                executor_provider,
-                executor_model,
-            ),
-            usages: Vec::new(),
-        };
-    }
 
     crate::config::apply_reviewer_environment(true);
     crate::chat_events::record_wire_event(
@@ -7794,97 +8114,197 @@ fn run_independent_review(
             "prompt": &prompt,
         }),
     );
-    let observed = match if reviewer_provider.eq_ignore_ascii_case("oracle-web") {
+    let observed = if reviewer_provider.eq_ignore_ascii_case("oracle-web") {
         crate::oracle_web::run_bound_reviewer(prompt, cancelled).map(|text| tools::LlmReviewRun {
             text,
             usages: Vec::new(),
         })
     } else {
         tools::execute_llm_review_observed_with_cancel(prompt, None, cancelled)
-    } {
-        Ok(run) => run,
-        Err(error) => {
-            let duration_ms = started.elapsed().as_millis();
-            crate::chat_events::record_wire_event(
-                session_id,
-                "reviewer.response",
-                json!({
-                    "sessionId": session_id,
-                    "role": "reviewer",
-                    "attempt": attempt,
-                    "provider": &reviewer_provider,
-                    "model": &reviewer_model,
-                    "durationMs": duration_ms,
-                    "error": &error,
+    };
+    finish_independent_review(
+        &ReviewOutcomeContext {
+            session_id,
+            attempt,
+            reviewer_provider: &reviewer_provider,
+            reviewer_model: &reviewer_model,
+            executor_provider,
+            executor_model,
+            started,
+            tool_checks: &[],
+            trace: json!({}),
+        },
+        observed,
+    )
+}
+
+/// Whether a review runs on the chat's resident Reviewer thread. It does when
+/// the settings say so, the turn is an ordinary Chat turn whose chat has an
+/// agent tree to hold the thread, and the Reviewer is one that can hold a
+/// conversation: the ChatGPT web Reviewer is a single browser tab with no
+/// tools. Everything else keeps the one-shot review.
+fn review_runs_in_thread(
+    mode: crate::config::ReviewMode,
+    chat_turn_with_agent: bool,
+    reviewer_provider: Option<&str>,
+) -> bool {
+    mode == crate::config::ReviewMode::Thread
+        && chat_turn_with_agent
+        && reviewer_provider.is_some_and(|provider| !provider.eq_ignore_ascii_case("oracle-web"))
+}
+
+fn threaded_review_applies(chat_turn_with_agent: bool) -> bool {
+    review_runs_in_thread(
+        crate::config::review_mode(),
+        chat_turn_with_agent,
+        configured_reviewer_identity()
+            .as_ref()
+            .map(|(provider, _)| provider.as_str()),
+    )
+}
+
+/// One review round on the chat's Reviewer thread. Same contract as
+/// [`run_independent_review`], so the revision loop does not care which ran.
+fn run_independent_review_threaded(
+    agent: &crate::agent_threads::TurnAgent,
+    attempt: usize,
+    packets: crate::review_thread::Packets<'_>,
+    workspace: &Path,
+    cancelled: &Arc<AtomicBool>,
+    executor_provider: &str,
+    executor_model: &str,
+) -> IndependentReviewRun {
+    let started = Instant::now();
+    let (reviewer_provider, reviewer_model) =
+        match review_participants(executor_provider, executor_model) {
+            Ok(participants) => participants,
+            Err(unavailable) => return *unavailable,
+        };
+    crate::config::apply_reviewer_environment(true);
+    match tools::prepare_llm_review(None) {
+        Ok(prepared) => review_in_thread(
+            &crate::review_thread::ConfiguredBackend(prepared),
+            agent,
+            cancelled,
+            crate::review_thread::RoundRequest {
+                attempt,
+                packets,
+                workspace,
+                provider: &reviewer_provider,
+                model: &reviewer_model,
+            },
+            (executor_provider, executor_model),
+        ),
+        Err(error) => finish_independent_review(
+            &ReviewOutcomeContext {
+                session_id: agent.session_id(),
+                attempt,
+                reviewer_provider: &reviewer_provider,
+                reviewer_model: &reviewer_model,
+                executor_provider,
+                executor_model,
+                started,
+                tool_checks: &[],
+                trace: json!({ "mode": "thread" }),
+            },
+            Err(error),
+        ),
+    }
+}
+
+fn review_in_thread<B: crate::review_thread::ReviewerBackend>(
+    backend: &B,
+    agent: &crate::agent_threads::TurnAgent,
+    cancelled: &Arc<AtomicBool>,
+    request: crate::review_thread::RoundRequest<'_>,
+    executor: (&str, &str),
+) -> IndependentReviewRun {
+    use crate::review_thread::{run_round, RoundError};
+
+    let started = Instant::now();
+    let attempt = request.attempt;
+    let reviewer = (request.provider, request.model);
+    let outcome = run_round(backend, agent, cancelled, &request);
+    let (finished, reviewer_session_id, incremental) = match outcome {
+        Ok(round) => {
+            let tool_checks = round
+                .tool_calls
+                .iter()
+                .map(|call| call.label.clone())
+                .collect::<Vec<_>>();
+            let trace = json!({
+                "mode": "thread",
+                "reviewerSessionId": &round.reviewer_session_id,
+                "round": round.round,
+                "incremental": round.incremental,
+                "packetChars": round.packet.chars().count(),
+                "mailId": &round.mail_id,
+                "toolCalls": round.tool_calls.iter().map(|call| json!({
+                    "call": &call.label,
+                    "ok": call.ok,
+                    "outputChars": call.output_chars,
+                })).collect::<Vec<_>>(),
+            });
+            let finished = finish_independent_review(
+                &ReviewOutcomeContext {
+                    session_id: agent.session_id(),
+                    attempt,
+                    reviewer_provider: reviewer.0,
+                    reviewer_model: reviewer.1,
+                    executor_provider: executor.0,
+                    executor_model: executor.1,
+                    started,
+                    tool_checks: &tool_checks,
+                    trace,
+                },
+                Ok(tools::LlmReviewRun {
+                    text: round.text,
+                    usages: round.usages,
                 }),
             );
-            return IndependentReviewRun {
-                result: unavailable_independent_review(
-                    format!("Independent Reviewer failed: {error}"),
-                    executor_provider,
-                    executor_model,
-                ),
-                usages: Vec::new(),
-            };
+            (finished, Some(round.reviewer_session_id), Some(round.incremental))
         }
-    };
-    let duration_ms = started.elapsed().as_millis();
-    let raw = observed.text;
-    let usages = observed.usages;
-    let mut result = match parse_independent_review(&raw) {
-        Ok(result) => result,
         Err(error) => {
-            crate::chat_events::record_wire_event(
-                session_id,
-                "reviewer.response",
-                json!({
-                    "sessionId": session_id,
-                    "role": "reviewer",
-                    "attempt": attempt,
-                    "provider": &reviewer_provider,
-                    "model": &reviewer_model,
-                    "durationMs": duration_ms,
-                    "raw": &raw,
-                    "parseError": &error,
-                    "usages": crate::chat_events::token_usages_to_value(&usages),
-                }),
-            );
-            return IndependentReviewRun {
-                result: unavailable_independent_review(
-                    format!(
-                        "{error}. Raw Reviewer output: {}",
-                        truncate_for_prompt(&raw, 4_000)
-                    ),
-                    executor_provider,
-                    executor_model,
+            let message = match error {
+                RoundError::Cancelled => "interrupted by user".to_string(),
+                // The one way a Reviewer thread fails that a one-shot review would
+                // not is a model or gateway that cannot be offered tools.
+                RoundError::Failed(message) => format!(
+                    "{message} (If this Reviewer model cannot call tools, set review_mode to oneshot in the settings file.)"
                 ),
-                usages,
             };
+            let finished = finish_independent_review(
+                &ReviewOutcomeContext {
+                    session_id: agent.session_id(),
+                    attempt,
+                    reviewer_provider: reviewer.0,
+                    reviewer_model: reviewer.1,
+                    executor_provider: executor.0,
+                    executor_model: executor.1,
+                    started,
+                    tool_checks: &[],
+                    trace: json!({ "mode": "thread" }),
+                },
+                Err(message),
+            );
+            (finished, None, None)
         }
     };
-    result.reviewer_provider = reviewer_provider.clone();
-    result.reviewer_model = reviewer_model.clone();
-    result.executor_provider = executor_provider.to_string();
-    result.executor_model = executor_model.to_string();
-    result.independent = true;
-    normalize_review_goal_gating(&mut result);
-    crate::chat_events::record_wire_event(
-        session_id,
-        "reviewer.response",
+    crate::chat_events::record_event(
+        agent.session_id(),
+        runtime::agent_control::EVENT_AGENT_REVIEW_VERDICT,
         json!({
-            "sessionId": session_id,
-            "role": "reviewer",
+            "turnId": agent.turn_id(),
+            "reviewerSessionId": reviewer_session_id,
             "attempt": attempt,
-            "provider": &reviewer_provider,
-            "model": &reviewer_model,
-            "durationMs": duration_ms,
-            "raw": &raw,
-            "verdict": result.verdict,
-            "relevantToGoal": result.relevant_to_goal,
-            "usages": crate::chat_events::token_usages_to_value(&usages),
+            "incremental": incremental,
+            "verdict": finished.result.verdict,
+            "issueCount": finished.result.issues.len(),
+            "toolChecks": &finished.result.tool_checks,
+            "durationMs": started.elapsed().as_millis(),
         }),
     );
-    IndependentReviewRun { result, usages }
+    finished
 }
 
 fn revision_prompt(result: &IndependentReviewResult, revision: usize) -> ConversationMessage {
@@ -7932,6 +8352,8 @@ fn collapse_independent_review_session(
         .or_else(|| {
             session.messages.iter().rposition(|message| {
                 message.role == MessageRole::User
+                    // Mail another agent delivered mid-turn is not the request.
+                    && !runtime::is_inter_agent_message(message)
                     && !message.blocks.iter().any(|block| {
                         matches!(
                             block,
@@ -7973,6 +8395,11 @@ fn collapse_independent_review_session(
                 }
             }
             MessageRole::Tool => clean.push(message.clone()),
+            // Mail from another agent is information the answer may rest on, so
+            // it stays where it arrived; only the review's own messages go.
+            MessageRole::User if runtime::is_inter_agent_message(message) => {
+                clean.push(message.clone());
+            }
             MessageRole::System | MessageRole::User => {
                 // Internal review/retry messages are audit events, not durable
                 // user conversation context.
@@ -8021,11 +8448,15 @@ fn final_assistant_memory_source(session: &Session) -> Option<(usize, usize, Str
             if text.is_empty() {
                 return None;
             }
+            // Mail another agent delivered into the turn is a `User` message too,
+            // but it is not the question the answer responds to.
             let user_index = session.messages[..assistant_index]
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, candidate)| candidate.role == MessageRole::User)
+                .find(|(_, candidate)| {
+                    candidate.role == MessageRole::User && !runtime::is_inter_agent_message(candidate)
+                })
                 .map(|(index, _)| index)?;
             let trace =
                 runtime::tool_trace_for_turn(&session.messages[user_index..=assistant_index]);
@@ -8185,10 +8616,15 @@ fn emit_chat_error(
 fn emit_turn_chat_error(
     app: &AppHandle,
     session_id: &str,
+    turn_id: &str,
     message: &str,
     emit_to_desktop: bool,
     cancelled: &AtomicBool,
 ) {
+    // Name the turn that failed. The renderer and the log can then tell this
+    // failure from whichever turn the session has moved on to by the time a
+    // cancelled worker finally reports it.
+    let _turn_scope = crate::chat_events::TurnTag::new(session_id, turn_id).enter();
     emit_chat_error(
         app,
         session_id,
@@ -8276,7 +8712,7 @@ async fn run_chat_turn_with_context(
         }
     };
     let _session_event_guard =
-        match crate::chat_events::bind_session_event_dir(&session_id, sessions_dir) {
+        match crate::chat_events::bind_session_event_dir(&session_id, sessions_dir.clone()) {
             Ok(guard) => guard,
             Err(error) => {
                 emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
@@ -8323,6 +8759,20 @@ async fn run_chat_turn_with_context(
         );
     }
     emit_desktop_chat_run_state(&app);
+    // The chat is the root of its agent tree for as long as the turn runs. An
+    // ephemeral side task has no session worth supervising.
+    let turn_agent = (!ephemeral)
+        .then(|| {
+            crate::agent_threads::TurnAgent::register(
+                &sessions_dir,
+                &session_id,
+                &audit_turn_id,
+                project_binding
+                    .as_ref()
+                    .map(|binding| binding.project_id.as_str()),
+            )
+        })
+        .flatten();
     let interrupted_checkpoint_available = previous_turn_cancelled
         && state
             .interrupted_turns
@@ -8348,7 +8798,13 @@ async fn run_chat_turn_with_context(
     if !ephemeral {
         record_user_prompt(&session_id, surface, &user_message);
     }
-    crate::chat_events::record_user_message(&session_id, surface, &user_message);
+    {
+        // The message that opens the turn names it, so a reader can group the
+        // log by turn from its first row.
+        let _turn_scope =
+            crate::chat_events::TurnTag::new(&session_id, &audit_turn_id).enter();
+        crate::chat_events::record_user_message(&session_id, surface, &user_message);
+    }
     // The durable event is authoritative; this content-free notification only
     // wakes paired long polls so they can read the scoped, filtered projection.
     let _ = app.emit(
@@ -8375,6 +8831,7 @@ async fn run_chat_turn_with_context(
             emit_turn_chat_error(
                 &app,
                 &session_id,
+                &audit_turn_id,
                 &error,
                 emit_desktop_chat_events,
                 &cancelled,
@@ -8448,6 +8905,7 @@ async fn run_chat_turn_with_context(
         emit_turn_chat_error(
             &app,
             &session_id,
+            &audit_turn_id,
             &error,
             emit_desktop_chat_events,
             &cancelled,
@@ -8467,6 +8925,7 @@ async fn run_chat_turn_with_context(
                 emit_turn_chat_error(
                     &app,
                     &session_id,
+                    &audit_turn_id,
                     &error,
                     emit_desktop_chat_events,
                     &cancelled,
@@ -8545,6 +9004,7 @@ async fn run_chat_turn_with_context(
             emit_turn_chat_error(
                 &app,
                 &session_id,
+                &audit_turn_id,
                 &error,
                 emit_desktop_chat_events,
                 &cancelled,
@@ -8556,6 +9016,7 @@ async fn run_chat_turn_with_context(
             emit_turn_chat_error(
                 &app,
                 &session_id,
+                &audit_turn_id,
                 &error,
                 emit_desktop_chat_events,
                 &cancelled,
@@ -8596,6 +9057,7 @@ async fn run_chat_turn_with_context(
                 emit_turn_chat_error(
                     &app,
                     &session_id,
+                    &audit_turn_id,
                     &error,
                     emit_desktop_chat_events,
                     &cancelled,
@@ -8639,6 +9101,7 @@ async fn run_chat_turn_with_context(
     let worker_retrieval_registry = state.retrieval_checkpoints.clone();
     let worker_turn_id = turn_id;
     let worker_audit_turn_id = audit_turn_id.clone();
+    let worker_turn_agent = turn_agent.clone();
     let worker_project_id = project_binding
         .as_ref()
         .map(|binding| binding.project_id.clone())
@@ -8649,6 +9112,7 @@ async fn run_chat_turn_with_context(
     let capture_user_text = worker_user_text.clone();
     let capture_workspace = worker_workspace.clone();
     let worker_work_task = work_task_runtime.clone();
+    let worker_sessions_dir = sessions_dir.clone();
     let worker_project_context =
         match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
             Ok(context) => context,
@@ -8657,6 +9121,7 @@ async fn run_chat_turn_with_context(
                 emit_turn_chat_error(
                     &app,
                     &session_id,
+                    &audit_turn_id,
                     &error,
                     emit_desktop_chat_events,
                     &cancelled,
@@ -8666,6 +9131,12 @@ async fn run_chat_turn_with_context(
         };
     let joined = tauri::async_runtime::spawn_blocking(move || {
         runtime::with_project_execution_context(&worker_project_context.clone(), || {
+        // Every event this thread records for the session from here on is
+        // stamped with this turn. The worker is the one place that knows which
+        // turn it is, so a cancelled worker that is still unwinding after the
+        // session's next turn has begun keeps writing under its own, older id.
+        let _turn_scope =
+            crate::chat_events::TurnTag::new(&worker_session_id, &worker_audit_turn_id).enter();
         let feature_config = if worker_paper_reading.is_some() {
             runtime::RuntimeFeatureConfig::default()
         } else { match crate::mcp::config_loader(&worker_workspace)
@@ -8847,6 +9318,10 @@ async fn run_chat_turn_with_context(
             scopus_probes_spent: 0,
             inner: mcp_bundle.executor,
         };
+        if let Some(agent) = worker_turn_agent.as_ref().filter(|_| !workflow_mode && worker_paper_reading.is_none()) {
+            collaboration::bind(&worker_app, agent, &worker_sessions_dir, &worker_project_context,
+                &executor_config, &model, permission_mode, &feature_config, worker_cancelled.clone(), &mcp_bundle.tool_specs);
+        }
         let persisted_review_memory = load_persisted_review_memory(&worker_session_id);
         let recalled_memory = if worker_workflow.is_none() && worker_paper_reading.is_none() && !ephemeral {
             worker_app
@@ -8866,6 +9341,7 @@ async fn run_chat_turn_with_context(
             |workflow| build_workflow_system_prompt(&workflow.binding, autonomous_workflow),
         ) };
         if !workflow_mode {
+            system_prompt.push(tools::collaboration::DELEGATION_POLICY.to_string());
             if let Some(review_memory_prompt) =
                 render_executor_review_memory(&persisted_review_memory)
             {
@@ -8976,10 +9452,13 @@ async fn run_chat_turn_with_context(
         } else {
             runtime
         };
-        let mut runtime = runtime
-            .with_event_sink(Box::new(DesktopRuntimeEventSink {
+        let mut runtime = crate::agent_threads::attach_to_runtime(
+            worker_turn_agent.as_ref(),
+            runtime,
+            Box::new(DesktopRuntimeEventSink {
                 session_id: worker_session_id.clone(),
-            }))
+            }),
+        )
             .with_compaction_session_id(worker_session_id.clone())
             .with_retrieval_continuation(
                 worker_retrieval_checkpoint.clone(),
@@ -9155,33 +9634,79 @@ async fn run_chat_turn_with_context(
                     review_revision_count,
                     None,
                 );
-                let prompt = independent_review_prompt(
-                    &worker_user_text,
-                    &text,
-                    &cumulative_review_sections(
-                        &trace_sections,
-                        MAX_REVIEW_CUMULATIVE_TRACE_CHARS,
-                        "Tool evidence",
+                let delegation_evidence = worker_turn_agent.as_ref().map(|agent|
+                    collaboration::review_evidence(agent, &worker_sessions_dir)).unwrap_or_default();
+                let round_tool_evidence = format!("{}\n\n{}", trace_sections.last().map_or("", String::as_str), delegation_evidence);
+                // The whole case, as the one-shot path has always sent it. A
+                // Reviewer thread asks for it only on first contact.
+                let full_prompt = || {
+                    independent_review_prompt(
+                        &worker_user_text,
+                        &text,
+                        &format!("{}\n\n{}", cumulative_review_sections(
+                            &trace_sections, MAX_REVIEW_CUMULATIVE_TRACE_CHARS, "Tool evidence"), delegation_evidence),
+                        &cumulative_review_sections(
+                            &evidence_sections,
+                            MAX_REVIEW_MATERIALIZED_EVIDENCE_CHARS,
+                            "File evidence",
+                        ),
+                        &prior_reviews,
+                        review_attempt,
+                        &worker_workspace,
+                        &worker_executor_provider,
+                        &worker_executor_model,
+                    )
+                };
+                // Chat only: a work task's own review of what it committed
+                // stays the one-shot review it has always been.
+                let review_run = match worker_turn_agent
+                    .as_ref()
+                    .filter(|_| threaded_review_applies(worker_work_task.is_none()))
+                {
+                    Some(agent) => run_independent_review_threaded(
+                        agent,
+                        review_attempt,
+                        crate::review_thread::Packets {
+                            full: &full_prompt,
+                            // Only this round's material: the sections the
+                            // Executor produced since the Reviewer last looked.
+                            incremental: &|| {
+                                incremental_review_packet(&IncrementalReviewInput {
+                                    kind: if review_revision_count == 0 {
+                                        IncrementalReviewKind::NewRequest
+                                    } else {
+                                        IncrementalReviewKind::Revision {
+                                            number: review_revision_count,
+                                        }
+                                    },
+                                    attempt: review_attempt,
+                                    user_text: &worker_user_text,
+                                    answer: &text,
+                                    new_tool_evidence: &round_tool_evidence,
+                                    new_file_evidence: evidence_sections
+                                        .last()
+                                        .map_or("", String::as_str),
+                                    previous: prior_reviews.last(),
+                                    workspace: &worker_workspace,
+                                    executor_provider: &worker_executor_provider,
+                                    executor_model: &worker_executor_model,
+                                })
+                            },
+                        },
+                        &worker_workspace,
+                        &worker_cancelled,
+                        &worker_executor_provider,
+                        &worker_executor_model,
                     ),
-                    &cumulative_review_sections(
-                        &evidence_sections,
-                        MAX_REVIEW_MATERIALIZED_EVIDENCE_CHARS,
-                        "File evidence",
+                    None => run_independent_review(
+                        &worker_session_id,
+                        review_attempt,
+                        full_prompt(),
+                        worker_cancelled.clone(),
+                        &worker_executor_provider,
+                        &worker_executor_model,
                     ),
-                    &prior_reviews,
-                    review_attempt,
-                    &worker_workspace,
-                    &worker_executor_provider,
-                    &worker_executor_model,
-                );
-                let review_run = run_independent_review(
-                    &worker_session_id,
-                    review_attempt,
-                    prompt,
-                    worker_cancelled.clone(),
-                    &worker_executor_provider,
-                    &worker_executor_model,
-                );
+                };
                 if worker_cancelled.load(Ordering::SeqCst) {
                     let mut cancelled_session = runtime.into_session();
                     if review_revision_count > 0 {
@@ -9363,39 +9888,38 @@ async fn run_chat_turn_with_context(
                 runtime::strip_trailing_internal_continuation_messages(&mut failed_session);
                 let failure_session_id = session_id.clone();
                 let failure_project_id = remote_project_id_owned.clone();
+                let failure_app = app.clone();
+                let failure_audit_turn_id = audit_turn_id.clone();
                 let persisted = tauri::async_runtime::spawn_blocking(move || {
-                    persist_chat_turn_session_to_disk(
-                        &failure_session_id,
-                        failure_project_id.as_deref(),
-                        &failed_session,
-                    )?;
-                    Ok::<Session, String>(failed_session)
+                    let state = failure_app.state::<ChatState>();
+                    with_current_chat_turn(&state, &failure_session_id, turn_id, true, || {
+                        persist_chat_turn_session_to_disk(
+                            &failure_session_id,
+                            failure_project_id.as_deref(),
+                            &failed_session,
+                        )?;
+                        let _turn_scope = crate::chat_events::TurnTag::new(
+                            &failure_session_id, &failure_audit_turn_id,
+                        ).enter();
+                        crate::chat_events::record_session_snapshot(
+                            &failure_session_id,
+                            if was_cancelled { "turn_cancelled" }
+                            else if awaiting_work_task { "turn_awaiting_input" }
+                            else { "turn_error" },
+                            &failed_session,
+                        );
+                        if failure_project_id.is_none() {
+                            cache_chat_session(&state, failure_session_id.clone(), failed_session)?;
+                        }
+                        Ok(())
+                    })
                 })
                 .await;
                 match persisted {
-                    Ok(Ok(failed_session)) => {
+                    Ok(Ok(Some(()))) => {
                         session_preserved = true;
-                        crate::chat_events::record_session_snapshot(
-                            &session_id,
-                            if was_cancelled {
-                                "turn_cancelled"
-                            } else if awaiting_work_task {
-                                "turn_awaiting_input"
-                            } else {
-                                "turn_error"
-                            },
-                            &failed_session,
-                        );
-                        if remote_project_id_owned.is_none() {
-                            if let Err(error) =
-                                cache_chat_session(state, session_id.clone(), failed_session)
-                            {
-                                eprintln!(
-                                    "SomniQ desktop: failed to cache preserved session: {error}"
-                                );
-                            }
-                        }
                     }
+                    Ok(Ok(None)) => {}
                     Ok(Err(store_error)) => {
                         eprintln!(
                             "SomniQ desktop: failed to preserve session after turn error: {store_error}"
@@ -9414,13 +9938,17 @@ async fn run_chat_turn_with_context(
                     crate::work_task::engine::AWAITING_INPUT_OUTCOME.to_string(),
                 );
             }
-            emit_chat_error(
-                &app,
-                &session_id,
-                &failure.message,
-                session_preserved,
-                emit_desktop_chat_events,
-            );
+            {
+                let _turn_scope =
+                    crate::chat_events::TurnTag::new(&session_id, &audit_turn_id).enter();
+                emit_chat_error(
+                    &app,
+                    &session_id,
+                    &failure.message,
+                    session_preserved,
+                    emit_desktop_chat_events,
+                );
+            }
             return Err(failure.message);
         }
     };
@@ -9439,19 +9967,23 @@ async fn run_chat_turn_with_context(
     let persist_session_id = session_id.clone();
     let persist_project_id = remote_project_id_owned.clone();
     let persist_cancelled = cancelled.clone();
+    let persist_app = app.clone();
     let updated = match tauri::async_runtime::spawn_blocking(move || {
-        if persist_cancelled.load(Ordering::SeqCst) {
-            return Err("interrupted by user".to_string());
-        }
-        persist_chat_turn_session_to_disk(
-            &persist_session_id,
-            persist_project_id.as_deref(),
-            &updated,
-        )?;
-        if persist_cancelled.load(Ordering::SeqCst) {
-            return Err("interrupted by user".to_string());
-        }
-        Ok::<Session, String>(updated)
+        let state = persist_app.state::<ChatState>();
+        with_current_chat_turn(&state, &persist_session_id, turn_id, false, || {
+            if persist_cancelled.load(Ordering::SeqCst) {
+                return Err("interrupted by user".to_string());
+            }
+            persist_chat_turn_session_to_disk(
+                &persist_session_id,
+                persist_project_id.as_deref(),
+                &updated,
+            )?;
+            if persist_project_id.is_none() {
+                cache_chat_session(&state, persist_session_id.clone(), updated.clone())?;
+            }
+            Ok(updated)
+        })?.ok_or_else(|| "interrupted by user".to_string())
     })
     .await
     {
@@ -9460,6 +9992,7 @@ async fn run_chat_turn_with_context(
             emit_turn_chat_error(
                 &app,
                 &session_id,
+                &audit_turn_id,
                 &error,
                 emit_desktop_chat_events,
                 &cancelled,
@@ -9471,6 +10004,7 @@ async fn run_chat_turn_with_context(
             emit_turn_chat_error(
                 &app,
                 &session_id,
+                &audit_turn_id,
                 &error,
                 emit_desktop_chat_events,
                 &cancelled,
@@ -9481,6 +10015,9 @@ async fn run_chat_turn_with_context(
     if cancelled.load(Ordering::SeqCst) {
         return Err("interrupted by user".to_string());
     }
+    // Nothing below awaits, so the turn can stay current for the rest of the
+    // function: usage, compaction and the other closing events carry it too.
+    let _turn_scope = crate::chat_events::TurnTag::new(&session_id, &audit_turn_id).enter();
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if capture_research_memory && !ephemeral && !workflow_mode && !autonomous_workflow {
         if let Some((user_index, message_index, assistant_text, tool_trace)) =
@@ -9507,18 +10044,6 @@ async fn run_chat_turn_with_context(
             }
         } else {
             eprintln!("SomniQ memory capture skipped: final assistant message was not found");
-        }
-    }
-    if remote_project_id_owned.is_none() {
-        if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {
-            emit_turn_chat_error(
-                &app,
-                &session_id,
-                &error,
-                emit_desktop_chat_events,
-                &cancelled,
-            );
-            return Err(error);
         }
     }
     if !ephemeral {
@@ -9966,6 +10491,9 @@ pub fn chat_delete(
     clear_retrieval_continuation(&state, &session_id);
     forget_session_tool_carry_forward(&session_id);
     forget_session_summarizer_circuit(&session_id);
+    // Before the chat's own log is removed below: closing writes to it, and
+    // writing after the removal would leave a log behind for a deleted chat.
+    crate::agent_threads::forget_session(&session_id);
     let path = match project_id {
         Some(project_id) => {
             if !crate::state::valid_project_id(&project_id) {
@@ -10027,6 +10555,9 @@ pub(crate) fn cancel_chat_turn(state: &ChatState, session_id: &str) -> Result<()
             .map_err(|_| "chat state poisoned".to_string())?
             .insert(session_id.to_string(), turn_id);
     }
+    // The turn may be waiting on an agent below the chat, its Reviewer above
+    // all, and no flag of the turn itself reaches that.
+    crate::agent_threads::cancel_session_tree(session_id);
     crate::chat_events::record_event(
         session_id,
         "cancel_requested",
@@ -10039,8 +10570,9 @@ pub(crate) fn cancel_chat_turn(state: &ChatState, session_id: &str) -> Result<()
 
 pub(crate) fn cancel_all_running_turns(state: &ChatState) {
     if let Ok(running) = state.running_turns.lock() {
-        for turn in running.values() {
+        for (session_id, turn) in running.iter() {
             turn.cancelled.store(true, Ordering::SeqCst);
+            crate::agent_threads::cancel_session_tree(session_id);
         }
     }
     runtime::set_interrupt();
@@ -10251,20 +10783,10 @@ fn resolve_summarizer_config(
     }))
 }
 
-fn save_config_object(obj: &serde_json::Map<String, Value>) -> Result<(), String> {
-    let path = crate::state::config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body =
-        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
-    fs::write(path, body).map_err(|e| e.to_string())
-}
-
 fn set_config_string(key: &str, value: String) -> Result<(), String> {
     let mut obj = crate::config::load_object();
     obj.insert(key.to_string(), Value::String(value));
-    save_config_object(&obj)
+    crate::config::save_object(&obj)
 }
 
 fn resolve_desktop_model_alias(model: &str, provider: Option<&str>) -> String {
@@ -10979,6 +11501,32 @@ fn export_debug_zip(
     for artifact in &tool_output_artifacts {
         zip_write_file_if_exists(&mut zip, &artifact.zip_name, &artifact.path)?;
     }
+    // Sub-agents and the Reviewer keep their sessions beside the chat's, in
+    // `agents/`; without them a bundle shows only half of a delegated turn.
+    let agent_tree = event_log_path
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(|dir| collaboration::agent_tree_export(dir, session_id));
+    let mut agent_manifest = Value::Null;
+    if let Some((trace, files)) = &agent_tree {
+        zip_write_text(
+            &mut zip,
+            "agents/trace.json",
+            &serde_json::to_string_pretty(trace).map_err(|error| error.to_string())?,
+        )?;
+        for (name, path) in files {
+            zip_write_file_if_exists(&mut zip, &format!("agents/{name}"), path)?;
+        }
+        agent_manifest = json!({
+            "trace": "agents/trace.json",
+            "agents": trace.nodes.len().saturating_sub(1),
+            "interactions": trace.edges.len(),
+            "files": files.iter().map(|(name, path)| json!({
+                "zipPath": format!("agents/{name}"),
+                "bytes": file_size(path),
+            })).collect::<Vec<_>>(),
+        });
+    }
 
     let rotated_wire_manifest = rotated_wire_log_paths
         .iter()
@@ -11031,6 +11579,7 @@ fn export_debug_zip(
             "sourcePath": artifact.path.display().to_string(),
             "bytes": artifact.bytes,
         })).collect::<Vec<_>>(),
+        "agentTree": agent_manifest,
         "performanceSummary": diagnostics,
         "traceGovernance": {
             "wireTraceEnv": std::env::var("ARIS_WIRE_TRACE").unwrap_or_else(|_| "on".to_string()),
@@ -11046,7 +11595,8 @@ fn export_debug_zip(
             "events.jsonl remains the UI/runtime event log used for replay and restore.",
             "usage-log.jsonl contains only entries whose sessionId matches this debug bundle.",
             "diagnostics.json summarizes model requests, token occupancy, tool use, routing, evidence, and context checkpoints without requiring manual JSONL analysis.",
-            "config.redacted.json redacts secret-bearing keys and conservatively redacts command/env/header/argument fields."
+            "config.redacted.json redacts secret-bearing keys and conservatively redacts command/env/header/argument fields.",
+            "agents/ holds the sessions and event logs of this chat's sub-agents and Reviewer; agents/trace.json links every spawn, task, message, result and review to the turn and tool call behind it."
         ]
     });
     zip_write_text(
@@ -12447,7 +12997,9 @@ fn recent_user_context(session: &Session, limit: usize) -> String {
     let requests = session
         .messages
         .iter()
-        .filter(|message| message.role == MessageRole::User)
+        .filter(|message| {
+            message.role == MessageRole::User && !runtime::is_inter_agent_message(message)
+        })
         .filter_map(|message| {
             message.blocks.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.trim().to_string()),
@@ -12471,7 +13023,7 @@ fn recent_user_context(session: &Session, limit: usize) -> String {
     }
 }
 
-fn truncate_for_prompt(value: &str, limit: usize) -> String {
+pub(crate) fn truncate_for_prompt(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         value.trim().to_string()
     } else {

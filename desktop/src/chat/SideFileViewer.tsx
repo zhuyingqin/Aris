@@ -368,7 +368,7 @@ export default function SideFileViewer({
             </div>
           )}
           <div className="side-file-actions">
-            {workspaceTarget !== "external" && (
+            {(workspaceTarget === "code" || workspaceTarget === "latex") && (
               <button
                 type="button"
                 className="side-file-open-workspace"

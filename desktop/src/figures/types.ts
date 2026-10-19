@@ -39,7 +39,8 @@ export interface FigureRasterVersion {
 }
 export interface FigureRasterDocument { dataUrl: string; hash: string; index: number; width: number; height: number; editPrompts?: string[]; resolvedPrompt?: string | null; promptModel?: string | null }
 export interface FigureView { projectId: string; run: FigureRun; active: boolean; activeCount?: number }
-export interface FigureDocument { svg: string | null; rawOutput?: string | null; sourceDataUrl: string | null; previewDataUrl: string | null }
+export interface FigureEditingDraft { svg: string; expectedHash: string | null; baseIndex: number | null; updatedAt: string }
+export interface FigureDocument { svg: string | null; rawOutput?: string | null; sourceDataUrl: string | null; previewDataUrl: string | null; draft?: FigureEditingDraft | null }
 export interface FigureConnections {
   executor: ModelIdentity; reviewer: ModelIdentity;
   executorModels?: string[]; reviewerModels?: string[];

@@ -20,7 +20,7 @@ import {
 } from "./api/tauri";
 import { isTypesetPreviewMode } from "./api/browserPreview";
 import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
-import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
+import { clearCachedUsageLogPages, writeCachedAccount } from "./accountCache";
 import { isMacOS } from "./platform";
 import { MANAGED_NEWAPI_BASE_URL, approvedManagedNewApiBaseUrl } from "./managedNewApi";
 import {
@@ -287,7 +287,6 @@ async function persistManagedAuthResult(result: NewApiLoginResult, language: Lan
     executorProvider: "openai",
     executorModel: result.model,
     executorBaseUrl: result.baseUrl,
-    executorApiKey: result.token,
     language,
   });
 }
@@ -315,11 +314,10 @@ function rememberAuthServer(server: string) {
 function clearStoredAuth() {
   // In-memory caches first: they outlive the signed-out session otherwise.
   clearCachedUsageLogPages();
+  writeCachedAccount(null);
   try {
     localStorage.removeItem(AUTH_FLAG_KEY);
     localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
-    localStorage.removeItem(ACCOUNT_CACHE_KEY);
-    localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
   } catch {
     // Ignore unavailable browser storage.
   }

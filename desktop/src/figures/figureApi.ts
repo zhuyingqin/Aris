@@ -1,5 +1,5 @@
 import { hasNativeBackend, invoke, listen } from "../api/transport";
-import type { FigureConnections, FigureDocument, FigureRasterDocument, FigureView, PrepareFigure } from "./types";
+import type { FigureConnections, FigureDocument, FigureEditingDraft, FigureRasterDocument, FigureView, PrepareFigure } from "./types";
 
 export const figuresAvailable = hasNativeBackend;
 export const figuresRunningCount = () => invoke<number>("figures_running_count");
@@ -20,5 +20,7 @@ export const figureReview = (projectId: string, id: string) => invoke<FigureView
 export const figureEditSvg = (input: { projectId: string; id: string; editId: string; baseIndex: number; expectedHash: string; prompt: string }) => invoke<FigureView>("figures_edit_svg", { input });
 export const figureDocument = (projectId: string, id: string, versionIndex: number | null = null) => invoke<FigureDocument>("figures_document", { projectId, id, versionIndex });
 export const figureSave = (projectId: string, id: string, expectedHash: string | null, svg: string, baseIndex: number | null = null) => invoke<FigureView>("figures_save", { projectId, id, expectedHash, svg, baseIndex });
+export const figureSaveDraft = (projectId: string, id: string, expectedHash: string | null, svg: string, baseIndex: number | null = null) => invoke<FigureEditingDraft>("figures_save_draft", { projectId, id, expectedHash, svg, baseIndex });
+export const figureDiscardDraft = (projectId: string, id: string) => invoke<void>("figures_discard_draft", { projectId, id });
 export const figureExport = (projectId: string, id: string, format: string, destination: string | null, versionIndex: number | null = null) => invoke<{ filename: string; mimeType: string; dataBase64: string }>("figures_export", { projectId, id, format, destination, versionIndex });
 export const onFigureUpdated = (handler: (view: FigureView) => void) => listen("figures-updated", (event) => handler(event.payload as FigureView));

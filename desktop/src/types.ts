@@ -66,6 +66,8 @@ export interface ConfigView {
   reviewerModel?: string | null;
   reviewerBaseUrl?: string | null;
   reviewEnabled: boolean;
+  /** `thread`: a resident Reviewer that is sent only what changed and checks the project itself; `oneshot`: the stateless fallback. */
+  reviewMode?: "thread" | "oneshot";
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
@@ -95,17 +97,6 @@ export interface ConfigView {
     transport?: string;
   }[];
 }
-
-export type ConfigSecretKind =
-  | "executorApiKey"
-  | "summarizerApiKey"
-  | "reviewerApiKey"
-  | "scopusApiKey"
-  | "openalexApiKey"
-  | "bochaApiKey"
-  | "braveSearchApiKey"
-  | "exaApiKey"
-  | "zhihuAccessSecret";
 
 export interface ScheduledTask {
   id: string;
@@ -150,19 +141,11 @@ export interface ConfigPatch {
   summarizerModel?: string;
   retrievalCardModel?: string;
   summarizerBaseUrl?: string;
-  summarizerApiKey?: string;
-  executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;
   reviewerBaseUrl?: string;
-  reviewerApiKey?: string;
   reviewEnabled?: boolean;
-  scopusApiKey?: string;
-  openalexApiKey?: string;
-  bochaApiKey?: string;
-  braveSearchApiKey?: string;
-  exaApiKey?: string;
-  zhihuAccessSecret?: string;
+  reviewMode?: "thread" | "oneshot";
   webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;

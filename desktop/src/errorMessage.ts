@@ -5,6 +5,7 @@ type ErrorCopy = {
   signInExpired: string;
   connection: string;
   contextLimit: string;
+  reasoningContinuation: string;
   rateLimited: string;
   modelUnavailable: string;
   serviceUnavailable: string;
@@ -18,6 +19,7 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     signInExpired: "登录已过期，请重新登录。",
     connection: "暂时无法连接到服务，请检查网络后重试。",
     contextLimit: "当前对话上下文过长，请新建对话或压缩上下文后重试。",
+    reasoningContinuation: "模型未能接续工具调用所需的思考记录，请重试或切换模型后继续。",
     rateLimited: "请求过于频繁或当前额度不足，请稍后重试。",
     modelUnavailable: "所选模型当前不可用，请在设置中更换模型后重试。",
     serviceUnavailable: "服务暂时不可用，请稍后重试。",
@@ -29,6 +31,7 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     signInExpired: "Your sign-in has expired. Please sign in again.",
     connection: "Unable to reach the service. Check your network connection and try again.",
     contextLimit: "This chat is too long for the selected model. Start a new chat or compact the context, then try again.",
+    reasoningContinuation: "The model could not continue with the reasoning history required for tool calls. Retry or switch models to continue.",
     rateLimited: "The request was rate-limited or the current quota is unavailable. Please try again later.",
     modelUnavailable: "The selected model is unavailable. Choose another model in Settings and try again.",
     serviceUnavailable: "The service is temporarily unavailable. Please try again later.",
@@ -80,6 +83,17 @@ export function formatUserFacingError(
   const copy = COPY[language];
 
   if (!message) return copy.unexpected;
+
+  if (
+    lower.includes("reasoning_content")
+    && (
+      lower.includes("must be passed back")
+      || lower.includes("missing")
+      || lower.includes("required")
+    )
+  ) {
+    return copy.reasoningContinuation;
+  }
 
   if (
     lower.includes("context window")

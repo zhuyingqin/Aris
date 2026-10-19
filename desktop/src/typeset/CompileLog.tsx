@@ -92,6 +92,15 @@ export default function CompileLog({
     onDiagnosticClick && (diagnostic.filePath || diagnostic.line),
   );
   const diagnosticGuidance = (diagnostic: LatexDiagnostic) => {
+    if (diagnostic.code.startsWith("compile_")) {
+      if (diagnostic.code === "compile_timeout" || result?.timedOut || result?.returnCodeInterpretation === "timeout") {
+        return copy.timeoutGuidance;
+      }
+      if (diagnostic.code === "compile_interrupted" || result?.interrupted || result?.returnCodeInterpretation === "interrupted") {
+        return copy.interruptedGuidance;
+      }
+      return copy.unlocatedErrorGuidance;
+    }
     if (diagnostic.code === "table_alignment") {
       return copy.tableAlignmentGuidance;
     }
@@ -99,7 +108,7 @@ export default function CompileLog({
       return copy.undefinedCitationGuidance;
     }
     return diagnostic.severity === "error"
-      ? copy.errorGuidance
+      ? diagnostic.filePath || diagnostic.line ? copy.errorGuidance : copy.unlocatedErrorGuidance
       : copy.warningGuidance;
   };
   const diagnosticExcerpt = (diagnostic: LatexDiagnostic) => {

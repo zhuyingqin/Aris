@@ -200,27 +200,16 @@ const OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX: &str = "openai-responses-reas
 const OPENAI_RESPONSES_REASONING_V2_TAG: &str = "v2:";
 
 /// Marker signature for a `reasoning_content`-family (Kimi/Moonshot, MiMo,
-/// DeepSeek-R1) reasoning block. Unlike the Responses encrypted signature, the
+/// DeepSeek V4/R1) reasoning block. Unlike the Responses encrypted signature, the
 /// text *is* the payload — this prefix only tags a persisted Thinking block as
 /// "replay me as `reasoning_content` on the chat transport". An empty signature
 /// marks a display-only thinking block that is never replayed on any transport.
 const OPENAI_REASONING_CONTENT_SIGNATURE: &str = "openai-reasoning-content:";
 
-/// Per-turn reasoning size cap (chars; rough proxy for tokens ~4:1). Captures
-/// up to ~8K tokens of thinking per assistant turn before truncating, so a
-/// single runaway reasoning trace cannot bloat the persisted session block. Long
-/// reasoning still streams to the UI in real time; only what is *persisted* for
-/// replay/display is capped.
+/// Per-turn cap for display-only reasoning (chars). Reasoning that a provider
+/// requires back as protocol input must be persisted verbatim; the runtime's
+/// context accounting and compaction bound the complete request instead.
 const MAX_REASONING_CHARS_PER_TURN: usize = 32_000;
-
-/// Total `reasoning_content` replay budget across all assistant turns in one
-/// request (chars). Enforced at request-build time in [`convert_messages_openai`]:
-/// oldest turns get `reasoning_content` first and the newest are dropped once the
-/// budget is spent. This keeps already-sent historical bytes stable (preserving
-/// the provider's automatic prefix cache) while bounding how much reasoning a
-/// long session replays every turn. ~32K tokens for ASCII; multi-byte trims
-/// faster (a conservative bound for non-ASCII reasoning).
-const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
 /// Which OpenAI-compatible transport to use for a request.
 ///
@@ -410,6 +399,34 @@ fn record_transport_verdict(base_url: &str, model: &str, verdict: &str) {
     }
 }
 
+/// Callback asked for a replacement key when an OpenAI-compatible endpoint
+/// answers HTTP 401. Arguments are the base URL and the rejected key; it
+/// resolves to a different key to retry with, or `None` to let the 401
+/// surface. The desktop app registers this for its account gateway, whose
+/// key it can re-fetch with the signed-in session. CLI leaves it unset.
+pub type CredentialRecoveryHook = Box<
+    dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+fn credential_recovery_hook() -> &'static std::sync::OnceLock<CredentialRecoveryHook> {
+    static HOOK: std::sync::OnceLock<CredentialRecoveryHook> = std::sync::OnceLock::new();
+    &HOOK
+}
+
+/// Register the 401 credential-recovery callback. First registration wins.
+pub fn set_credential_recovery_hook(hook: CredentialRecoveryHook) {
+    let _ = credential_recovery_hook().set(hook);
+}
+
+async fn recover_rejected_credential(base_url: &str, rejected_key: &str) -> Option<String> {
+    let hook = credential_recovery_hook().get()?;
+    hook(base_url.to_string(), rejected_key.to_string())
+        .await
+        .filter(|key| !key.trim().is_empty() && key != rejected_key)
+}
+
 /// Process-wide set of `(server, model)` pairs observed to reject
 /// `/v1/responses`. Populated by the runtime fallback so a gateway that
 /// cannot convert the request is asked exactly once per process instead of
@@ -459,6 +476,117 @@ fn mark_chat_requires_responses(base_url: &str, model: &str) {
         registry.insert(transport_registry_key(base_url, model));
     }
     record_transport_verdict(base_url, model, "responses");
+}
+
+/// `(server, model)` pairs whose endpoint refused image input outright. Once a
+/// text-only model has said so, every later request in the process sends its
+/// images as text notes up front instead of paying a 400 first — the images
+/// stay in the session history, so without this each request would fail once.
+fn image_input_unsupported_registry() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
+{
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn image_input_known_unsupported(base_url: &str, model: &str) -> bool {
+    image_input_unsupported_registry()
+        .lock()
+        .is_ok_and(|registry| registry.contains(&transport_registry_key(base_url, model)))
+}
+
+fn mark_image_input_unsupported(base_url: &str, model: &str) {
+    if let Ok(mut registry) = image_input_unsupported_registry().lock() {
+        registry.insert(transport_registry_key(base_url, model));
+    }
+}
+
+/// Words that place an error on the request's image payload.
+const IMAGE_PAYLOAD_TERMS: &[&str] = &["image", "vision", "multimodal", "multi-modal"];
+
+/// Phrases a provider uses when the model takes no image input at all.
+/// DeepSeek: "unknown variant `image_url`, expected `text`"; OpenAI: "image_url
+/// is only supported by certain models"; vLLM: "is not a multimodal model".
+const IMAGE_INPUT_REFUSALS: &[&str] = &[
+    "not support",
+    "unsupported",
+    "unknown variant",
+    "only supported",
+    "not a multimodal",
+    "does not accept",
+    "not accept",
+    "not allowed",
+    "invalid content type",
+    "cannot process",
+    "not enabled",
+];
+
+/// Phrases that blame one particular image (bad data, format, size) rather
+/// than the model's capability. A vision model that rejects one screenshot must
+/// not be recorded as text-only for the rest of the process.
+const IMAGE_PAYLOAD_PROBLEMS: &[&str] = &[
+    "invalid image",
+    "image format",
+    "image size",
+    "too large",
+    "dimension",
+    "failed to download",
+    "download image",
+    "decode",
+    "corrupt",
+    "mime",
+];
+
+/// A 4xx body that rejects the request because of its image content — either
+/// the model takes no images or this image is unusable. Requires both an image
+/// term and a refusal/problem phrase, and never claims a context-window
+/// overflow, which the conversation loop must see to compact.
+pub(crate) fn is_image_input_rejected(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    IMAGE_PAYLOAD_TERMS.iter().any(|term| lower.contains(term))
+        && (IMAGE_INPUT_REFUSALS.iter().any(|phrase| lower.contains(phrase))
+            || IMAGE_PAYLOAD_PROBLEMS.iter().any(|phrase| lower.contains(phrase)))
+        && !is_context_window_exceeded_error(body)
+}
+
+/// Narrower than [`is_image_input_rejected`]: the endpoint accepts no image
+/// input for this model, so the verdict can be remembered.
+pub(crate) fn is_image_input_unsupported(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    is_image_input_rejected(body)
+        && IMAGE_INPUT_REFUSALS.iter().any(|phrase| lower.contains(phrase))
+        && !IMAGE_PAYLOAD_PROBLEMS.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Shown to the model in place of an image the endpoint would not take, so it
+/// knows an image existed and was not seen instead of guessing its contents.
+const OMITTED_IMAGE_NOTE: &str =
+    "[Image omitted: this model endpoint rejected image input, so the image was not shown to the model.]";
+
+/// Replace every image part of a chat/completions `messages` or responses
+/// `input` array with [`OMITTED_IMAGE_NOTE`]. Returns whether anything changed.
+fn strip_image_parts_from_body(body: &mut Value) -> bool {
+    let mut replaced = false;
+    for key in ["messages", "input"] {
+        let Some(items) = body.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for part in parts {
+                let note_type = match part.get("type").and_then(Value::as_str) {
+                    Some("image_url") => "text",
+                    Some("input_image") => "input_text",
+                    _ => continue,
+                };
+                *part = json!({ "type": note_type, "text": OMITTED_IMAGE_NOTE });
+                replaced = true;
+            }
+        }
+    }
+    replaced
 }
 
 fn apply_openai_routing_session_header(
@@ -1530,7 +1658,7 @@ fn responses_prompt_cache_key(
     format!("aris-{hash:016x}")
 }
 
-/// Cap one turn's reasoning text to [`MAX_REASONING_CHARS_PER_TURN`] before it
+/// Cap display-only reasoning to [`MAX_REASONING_CHARS_PER_TURN`] before it
 /// is persisted as a Thinking block, UTF-8-safe at a char boundary. Truncation
 /// happens once, before the block is ever sent, so its stored bytes stay stable
 /// afterwards (preserving the provider's automatic prefix cache). Empty in →
@@ -2111,6 +2239,14 @@ impl ApiClient for OpenAIRuntimeClient {
                 else if chat_reasoning_effort_for(&self.model, &self.base_url, false).is_some() { body["reasoning_effort"] = json!(level); }
             }
         }
+        // A model already known to take no images gets its image parts as text
+        // notes up front (see `image_input_unsupported_registry`). Artifact jobs
+        // keep the real error: they ask for an image because they need it seen.
+        let mut strip_images =
+            !self.single_request && image_input_known_unsupported(&self.base_url, &self.model);
+        if strip_images {
+            strip_image_parts_from_body(&mut body);
+        }
         let mut transport = transport_label(use_responses_api);
         let mut url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
         trace_record(
@@ -2148,6 +2284,9 @@ impl ApiClient for OpenAIRuntimeClient {
         let mut routing_session_header_enabled = self.send_routing_session_header
             || api::is_opencode_base_url(&self.base_url);
 
+        // The key can be replaced once by `recover_rejected_credential` on a
+        // 401; the replacement is kept for this executor's later requests.
+        let mut api_key = self.api_key.clone();
         let result = self.runtime.block_on(async {
             const MAX_ATTEMPTS: u32 = 4;
             let mut attempt: u32 = 0;
@@ -2166,6 +2305,12 @@ impl ApiClient for OpenAIRuntimeClient {
             // reasoning replay instead of hard-failing every turn until the
             // session is compacted.
             let mut tried_without_reasoning_items = false;
+            // One image-free resend per request when the endpoint refuses the
+            // request's image content.
+            let mut tried_without_images = false;
+            // One replacement key per request when the endpoint answers 401
+            // (see `set_credential_recovery_hook`).
+            let mut tried_credential_recovery = false;
             // Post-send timeout resends spent on this request, shared by the
             // send loop and every stream restart below; capped by
             // `api::MAX_TIMEOUT_RESENDS`.
@@ -2191,7 +2336,7 @@ impl ApiClient for OpenAIRuntimeClient {
                 let http_request = self
                     .http
                     .post(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(&api_key)
                     .header("content-type", "application/json")
                     .json(&body);
                 let routing_session_header_sent = routing_session_header_enabled;
@@ -2239,8 +2384,34 @@ impl ApiClient for OpenAIRuntimeClient {
                         let body_text = resp.text().await.unwrap_or_default();
                         let missing_opencode_session =
                             is_missing_opencode_session_error(status.as_u16(), &body_text);
+                        if status.as_u16() == 401 && !tried_credential_recovery {
+                            tried_credential_recovery = true;
+                            let replacement = tokio::select! {
+                                key = recover_rejected_credential(&self.base_url, &api_key) => key,
+                                () = wait_for_stream_cancel(self.observer.as_ref()) => {
+                                    return Err(interrupted_error());
+                                }
+                            };
+                            if let Some(replacement) = replacement {
+                                api_key = replacement;
+                                trace_record(
+                                    &trace_sink,
+                                    "llm.request_adjusted",
+                                    json!({
+                                        "provider": "openai-compatible",
+                                        "model": &self.model,
+                                        "reason": "credential_replaced",
+                                        "status": status.as_u16(),
+                                        "requestId": request_id,
+                                    }),
+                                );
+                                // Not a real retry — the credential changed.
+                                attempt = attempt.saturating_sub(1);
+                                continue;
+                            }
+                        }
                         if self.single_request {
-                            let safe_body = body_text.replace(&self.api_key, "[REDACTED]");
+                            let safe_body = body_text.replace(&api_key, "[REDACTED]");
                             if routing_session_header_sent
                                 && missing_opencode_session
                             {
@@ -2323,6 +2494,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                     self.enable_tools,
                                 ),
                             );
+                            if strip_images {
+                                strip_image_parts_from_body(&mut body);
+                            }
                             trace_record(
                                 &trace_sink,
                                 "llm.transport_fallback",
@@ -2377,6 +2551,9 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &request.messages,
                                 ),
                             );
+                            if strip_images {
+                                strip_image_parts_from_body(&mut body);
+                            }
                             trace_record(
                                 &trace_sink,
                                 "llm.transport_fallback",
@@ -2469,6 +2646,44 @@ impl ApiClient for OpenAIRuntimeClient {
                             );
                             eprintln!(
                                 "\x1b[33m  {} rejected a replayed reasoning item for {} (HTTP {status}); retrying without reasoning replay this turn\x1b[0m",
+                                self.base_url, self.model
+                            );
+                            // Not a real retry — the request shape changed.
+                            attempt = attempt.saturating_sub(1);
+                            continue;
+                        }
+
+                        // Image input refused — a text-only model, or one image
+                        // it cannot use. The image stays in the session history,
+                        // so failing here would fail every later request too.
+                        // Resend once with each image replaced by a note; only a
+                        // capability refusal is remembered for the process.
+                        if !tried_without_images
+                            && matches!(status.as_u16(), 400 | 413 | 415 | 422)
+                            && is_image_input_rejected(&body_text)
+                            && strip_image_parts_from_body(&mut body)
+                        {
+                            tried_without_images = true;
+                            strip_images = true;
+                            let model_refuses_images = is_image_input_unsupported(&body_text);
+                            if model_refuses_images {
+                                mark_image_input_unsupported(&self.base_url, &self.model);
+                            }
+                            trace_record(
+                                &trace_sink,
+                                "llm.request_adjusted",
+                                json!({
+                                    "provider": "openai-compatible",
+                                    "model": &self.model,
+                                    "reason": "image_input_rejected",
+                                    "rememberedForProcess": model_refuses_images,
+                                    "status": status.as_u16(),
+                                    "requestId": request_id,
+                                    "bodyPreview": body_preview_trace(&body_text),
+                                }),
+                            );
+                            eprintln!(
+                                "\x1b[33m  {} rejected image input for {} (HTTP {status}); resending with images replaced by text notes\x1b[0m",
                                 self.base_url, self.model
                             );
                             // Not a real retry — the request shape changed.
@@ -2698,7 +2913,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.api_key,
+                                    &api_key,
                                     &self.session_id,
                                     routing_session_header_enabled,
                                     &body,
@@ -2791,7 +3006,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.api_key,
+                                    &api_key,
                                     &self.session_id,
                                     routing_session_header_enabled,
                                     &body,
@@ -2853,7 +3068,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             response = stream_restart_send(
                                 &self.http,
                                 &url,
-                                &self.api_key,
+                                &api_key,
                                 &self.session_id,
                                 routing_session_header_enabled,
                                 &body,
@@ -3001,7 +3216,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 response = stream_restart_send(
                                     &self.http,
                                     &url,
-                                    &self.api_key,
+                                    &api_key,
                                     &self.session_id,
                                     routing_session_header_enabled,
                                     &body,
@@ -3318,7 +3533,12 @@ impl ApiClient for OpenAIRuntimeClient {
                 } else {
                     String::new()
                 };
-                let thinking = truncate_reasoning_per_turn(std::mem::take(&mut current_reasoning));
+                let thinking = std::mem::take(&mut current_reasoning);
+                let thinking = if !use_responses_api && supports_reasoning {
+                    thinking
+                } else {
+                    truncate_reasoning_per_turn(thinking)
+                };
                 // Skip a block that carries neither display text nor a replay
                 // payload (nothing to persist).
                 if !thinking.is_empty() || !signature.is_empty() {
@@ -3339,6 +3559,7 @@ impl ApiClient for OpenAIRuntimeClient {
 
             Ok(events)
         });
+        self.api_key = api_key;
         match &result {
             Ok(events) => trace_record(
                 &self.trace_sink,
@@ -3388,6 +3609,88 @@ struct PendingToolCallId {
     outbound_id: String,
 }
 
+/// An image a tool returned next to its text result (a `read_file` of a PNG, a
+/// browser screenshot). A chat/completions `tool` message and a responses
+/// `function_call_output` carry text only, so dropping the image block there
+/// left the model reading "the image is attached" with nothing attached. The
+/// images are queued here and sent in a user message right after the tool
+/// results, once every tool call of the step has been answered.
+struct PendingToolImage<'a> {
+    tool_name: &'a str,
+    media_type: &'a str,
+    data: &'a str,
+}
+
+const TOOL_IMAGES_PREAMBLE: &str = "Images returned by the tool calls above. Tool results on this API can only carry text, so SomniQ attaches them here; they are tool output, not a new user request.";
+
+/// Which request shape an image or text part is written in.
+#[derive(Clone, Copy)]
+enum ContentPartShape {
+    ChatCompletions,
+    Responses,
+}
+
+fn text_content_part(shape: ContentPartShape, text: &str) -> Value {
+    match shape {
+        ContentPartShape::ChatCompletions => json!({ "type": "text", "text": text }),
+        ContentPartShape::Responses => json!({ "type": "input_text", "text": text }),
+    }
+}
+
+fn image_content_part(shape: ContentPartShape, media_type: &str, data: &str) -> Value {
+    let url = format!("data:{media_type};base64,{data}");
+    match shape {
+        ContentPartShape::ChatCompletions => json!({
+            "type": "image_url",
+            "image_url": { "url": url },
+        }),
+        ContentPartShape::Responses => json!({
+            "type": "input_image",
+            "detail": "auto",
+            "image_url": url,
+        }),
+    }
+}
+
+/// Queue the images of one tool message, each attributed to the tool result it
+/// follows. Images that precede any tool result have no owner to name and are
+/// attributed to "tool".
+fn queue_tool_images<'a>(blocks: &'a [ContentBlock], pending: &mut Vec<PendingToolImage<'a>>) {
+    let mut tool_name = "tool";
+    for block in blocks {
+        match block {
+            ContentBlock::ToolResult { tool_name: name, .. } => tool_name = name.as_str(),
+            ContentBlock::Image { media_type, data } => pending.push(PendingToolImage {
+                tool_name,
+                media_type: media_type.as_str(),
+                data: data.as_str(),
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// Drain queued tool images into one user message. Must run only where a user
+/// message is valid: after every pending tool call has its result.
+fn flush_tool_images(
+    result: &mut Vec<Value>,
+    pending: &mut Vec<PendingToolImage<'_>>,
+    shape: ContentPartShape,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut content = vec![text_content_part(shape, TOOL_IMAGES_PREAMBLE)];
+    for image in pending.drain(..) {
+        content.push(text_content_part(
+            shape,
+            &format!("Image from `{}`:", image.tool_name),
+        ));
+        content.push(image_content_part(shape, image.media_type, image.data));
+    }
+    result.push(json!({ "role": "user", "content": content }));
+}
+
 /// Assign request-wide unique tool-call ids without rewriting the local
 /// session. Compatible providers occasionally reuse an opaque id in a later
 /// turn, and both OpenAI transports reject the replayed history with a
@@ -3424,13 +3727,13 @@ fn convert_messages_openai(
     let mut outbound_tool_call_ids = OutboundToolCallIds::default();
     let mut pending_tool_calls: Vec<PendingToolCallId> = Vec::new();
     let mut orphan_tool_results: Vec<String> = Vec::new();
+    let mut pending_tool_images: Vec<PendingToolImage> = Vec::new();
     // `reasoning_content` replay is only for the families whose chat API accepts
     // it back as input; for everyone else the persisted Thinking block stays
-    // display-only. Oldest turns spend the shared budget first, so a long
-    // session drops the *newest* reasoning replay while keeping already-sent
-    // historical bytes stable (see [`MAX_REASONING_CONTENT_REPLAY_CHARS`]).
+    // display-only. Never drop required protocol fields to meet a separate
+    // replay budget: runtime compaction accounts for and removes complete
+    // exchanges, preserving the reasoning attached to each retained call.
     let replay_reasoning_content = supports_reasoning_content_replay(model);
-    let mut reasoning_replay_used: usize = 0;
 
     // System message first
     if let Some(prompt) = system_prompt {
@@ -3483,6 +3786,11 @@ fn convert_messages_openai(
                     &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
+                flush_tool_images(
+                    &mut result,
+                    &mut pending_tool_images,
+                    ContentPartShape::ChatCompletions,
+                );
                 let content = openai_user_content(&message.blocks);
 
                 if let Some(content) = content {
@@ -3512,12 +3820,18 @@ fn convert_messages_openai(
                         );
                     }
                 }
+                queue_tool_images(&message.blocks, &mut pending_tool_images);
             }
             MessageRole::Assistant => {
                 recover_openai_tool_call_sequence(
                     &mut result,
                     &mut pending_tool_calls,
                     &mut orphan_tool_results,
+                );
+                flush_tool_images(
+                    &mut result,
+                    &mut pending_tool_images,
+                    ContentPartShape::ChatCompletions,
                 );
                 let mut content_text = String::new();
                 let mut tool_calls: Vec<Value> = Vec::new();
@@ -3566,27 +3880,28 @@ fn convert_messages_openai(
                     msg["tool_calls"] = json!(tool_calls);
                 }
                 // Replay this turn's `reasoning_content` for the families whose
-                // chat API accepts it back (Kimi/Moonshot, MiMo, DeepSeek-R1),
+                // chat API accepts it back (Kimi/Moonshot, MiMo, DeepSeek),
                 // sourced from the persisted Thinking block tagged with
-                // `OPENAI_REASONING_CONTENT_SIGNATURE`. Bounded by the shared
-                // budget so a long session does not replay unbounded reasoning.
-                if replay_reasoning_content
-                    && reasoning_replay_used < MAX_REASONING_CONTENT_REPLAY_CHARS
-                {
-                    if let Some(reasoning) = message.blocks.iter().find_map(|block| match block {
-                        ContentBlock::Thinking {
-                            thinking,
-                            signature,
-                        } if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE)
-                            && !thinking.is_empty() =>
-                        {
-                            Some(thinking.as_str())
-                        }
-                        _ => None,
-                    }) {
+                // `OPENAI_REASONING_CONTENT_SIGNATURE`. A provider may emit a
+                // tool call without thinking; DeepSeek still requires the field
+                // on that assistant message, even when its actual value is empty.
+                // This also permits older saved tool-only turns to continue.
+                if replay_reasoning_content {
+                    let reasoning = message
+                        .blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Thinking {
+                                thinking,
+                                signature,
+                            } if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE) => {
+                                Some(thinking.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if !reasoning.is_empty() || !tool_calls.is_empty() {
                         msg["reasoning_content"] = json!(reasoning);
-                        reasoning_replay_used =
-                            reasoning_replay_used.saturating_add(reasoning.len());
                     }
                 }
                 result.push(msg);
@@ -3598,6 +3913,11 @@ fn convert_messages_openai(
         &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
+    flush_tool_images(
+        &mut result,
+        &mut pending_tool_images,
+        ContentPartShape::ChatCompletions,
+    );
 
     result
 }
@@ -3607,6 +3927,7 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
     let mut outbound_tool_call_ids = OutboundToolCallIds::default();
     let mut pending_tool_calls = Vec::new();
     let mut orphan_tool_results = Vec::new();
+    let mut pending_tool_images: Vec<PendingToolImage> = Vec::new();
 
     for message in messages {
         match message.role {
@@ -3640,6 +3961,11 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                     &mut pending_tool_calls,
                     &mut orphan_tool_results,
                 );
+                flush_tool_images(
+                    &mut result,
+                    &mut pending_tool_images,
+                    ContentPartShape::Responses,
+                );
                 if let Some(content) = responses_user_content(&message.blocks) {
                     result.push(json!({ "role": "user", "content": content }));
                 }
@@ -3663,12 +3989,18 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
                         );
                     }
                 }
+                queue_tool_images(&message.blocks, &mut pending_tool_images);
             }
             MessageRole::Assistant => {
                 recover_responses_tool_call_sequence(
                     &mut result,
                     &mut pending_tool_calls,
                     &mut orphan_tool_results,
+                );
+                flush_tool_images(
+                    &mut result,
+                    &mut pending_tool_images,
+                    ContentPartShape::Responses,
                 );
                 result.extend(responses_reasoning_items_from_blocks(
                     &message.blocks,
@@ -3701,6 +4033,11 @@ fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> 
         &mut pending_tool_calls,
         &mut orphan_tool_results,
     );
+    flush_tool_images(
+        &mut result,
+        &mut pending_tool_images,
+        ContentPartShape::Responses,
+    );
     result
 }
 
@@ -3726,15 +4063,14 @@ fn responses_user_content(blocks: &[ContentBlock]) -> Option<Value> {
     let content = blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } if !text.is_empty() => Some(json!({
-                "type": "input_text",
-                "text": text,
-            })),
-            ContentBlock::Image { media_type, data } => Some(json!({
-                "type": "input_image",
-                "detail": "auto",
-                "image_url": format!("data:{media_type};base64,{data}"),
-            })),
+            ContentBlock::Text { text } if !text.is_empty() => {
+                Some(text_content_part(ContentPartShape::Responses, text))
+            }
+            ContentBlock::Image { media_type, data } => Some(image_content_part(
+                ContentPartShape::Responses,
+                media_type,
+                data,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3850,16 +4186,14 @@ fn openai_user_content(blocks: &[ContentBlock]) -> Option<Value> {
     let content = blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } if !text.is_empty() => Some(json!({
-                "type": "text",
-                "text": text,
-            })),
-            ContentBlock::Image { media_type, data } => Some(json!({
-                "type": "image_url",
-                "image_url": {
-                    "url": format!("data:{media_type};base64,{data}"),
-                },
-            })),
+            ContentBlock::Text { text } if !text.is_empty() => {
+                Some(text_content_part(ContentPartShape::ChatCompletions, text))
+            }
+            ContentBlock::Image { media_type, data } => Some(image_content_part(
+                ContentPartShape::ChatCompletions,
+                media_type,
+                data,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();

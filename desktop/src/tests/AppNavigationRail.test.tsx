@@ -7,6 +7,7 @@ import AppNavigationRail, { type AppNavigationItem } from "../AppNavigationRail"
 
 const items: AppNavigationItem[] = [
   { id: "chat", label: "对话", icon: <span /> },
+  { id: "figures", label: "科研绘图", icon: <span /> },
   { id: "lab", label: "Code", icon: <span /> },
   { id: "typeset", label: "TeX", icon: <span /> },
   { id: "literature", label: "文献库", icon: <span /> },
@@ -26,7 +27,7 @@ function rail(overrides: Partial<React.ComponentProps<typeof AppNavigationRail>>
 afterEach(cleanup);
 
 describe("AppNavigationRail", () => {
-  it("switches all four workspaces directly and keeps the account in the same rail", async () => {
+  it("switches all five workspaces directly and keeps the account in the same rail", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(rail({ onSelect }));

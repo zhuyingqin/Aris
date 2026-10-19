@@ -549,6 +549,8 @@ fn every_tool_has_a_failure_classification_decision() {
     // report failure as `Err` (the call itself fails, which every consumer
     // already sees) or only read and write local state.
     const NO_PAYLOAD_FAILURE: &[&str] = &[
+        // Controller operations report errors as Err; list/wait describe state.
+        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",
@@ -709,6 +711,9 @@ fn every_tool_is_triaged_for_external_retrieval() {
     // task-building are included deliberately: they write or read a local plan
     // and open no connection, so they must not spend a retrieval budget.
     const NO_RETRIEVAL: &[&str] = &[
+        // These operate on local sessions/mailboxes. Child retrieval is metered
+        // in that child's own runtime, not at the delegation operation.
+        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",

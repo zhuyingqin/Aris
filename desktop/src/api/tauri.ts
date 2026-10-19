@@ -2,7 +2,9 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+
 import { notifyChatModelsUpdated } from "../modelEvents";
+import { getAccountSessionRevision } from "../accountCache";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
 import type { CodeShellAction, CodeShellState } from "../code/codeShell";
@@ -220,8 +222,6 @@ import type {
   AppUpdateProgress,
   BuiltinToolAvailability,
   ConfigPatch,
-  ConfigSecretKind,
-  ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
   ComputeJobEvent,
@@ -648,23 +648,10 @@ export const remoteControlP2pClosed = (input: RemoteP2pSessionInput) =>
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
-export const configSecretGet = (kind: ConfigSecretKind) =>
-  invoke<string | null>("config_secret_get", { kind });
-export const configSecretClear = (kind: ConfigSecretKind) =>
-  invoke<ConfigView>("config_secret_clear", { kind });
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
-export const webSearchProviderTest = (
-  provider: "brave" | "exa" | "zhihu" | "bocha",
-  apiKey?: string,
-) =>
-  invoke<ConfigTestDetail>("web_search_provider_test", {
-    provider,
-    apiKey: apiKey?.trim() || null,
-  });
-
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
 export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
 export const memoryV2ConfirmR3 = (atomId: string) =>
@@ -714,8 +701,8 @@ export interface NewApiLoginResult {
   /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
   baseUrl: string;
   model: string;
-  /** Usable downstream key (`sk-...`) for the executor. */
-  token: string;
+  // The downstream key never reaches the webview; the backend keeps it in the
+  // OS credential store.
 }
 
 export interface NewApiAuthStatus {
@@ -798,7 +785,7 @@ export const newapiModels = () => invoke<string[]>("newapi_models").then((models
   notifyChatModelsUpdated();
   return models;
 });
-let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
+let newapiBootstrapInFlight: { session: number; promise: Promise<NewApiAccount> } | null = null;
 
 /**
  * AuthenticatedRoot and App both bootstrap the account during startup. Keep
@@ -806,20 +793,22 @@ let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
  * two Keychain reads for the same refresh credential.
  */
 export const newapiBootstrap = (): Promise<NewApiAccount> => {
-  if (!newapiBootstrapInFlight) {
-    newapiBootstrapInFlight = invoke<NewApiAccount>("newapi_bootstrap")
+  const session = getAccountSessionRevision();
+  if (!newapiBootstrapInFlight || newapiBootstrapInFlight.session !== session) {
+    const promise = invoke<NewApiAccount>("newapi_bootstrap")
       .then((account) => {
         // The native command has persisted the reachable model catalog. Startup
         // and App's background account refresh must update Chat just as Settings
         // does, including a successful empty catalog after access is removed.
-        notifyChatModelsUpdated();
+        if (getAccountSessionRevision() === session) notifyChatModelsUpdated();
         return account;
       })
       .finally(() => {
-        newapiBootstrapInFlight = null;
+        if (newapiBootstrapInFlight?.promise === promise) newapiBootstrapInFlight = null;
       });
+    newapiBootstrapInFlight = { session, promise };
   }
-  return newapiBootstrapInFlight;
+  return newapiBootstrapInFlight.promise;
 };
 export const newapiUsageLogs = (page: number, pageSize: number) =>
   invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
@@ -2227,6 +2216,8 @@ export const latexCompile = (
   continueOnError = false,
   /** Overrides the engine detected from the source: pdflatex | xelatex | lualatex. */
   engine?: string | null,
+  /** Total build budget; null uses the compiler's configured default. */
+  timeoutMs?: number | null,
 ) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
@@ -2257,6 +2248,7 @@ export const latexCompile = (
         runId: runId ?? null,
         continueOnError,
         engine: engine ?? null,
+        timeoutMs: timeoutMs ?? null,
       });
 
 /** Copy a file from anywhere on disk into the workspace, at a project-relative path. */
@@ -2499,6 +2491,8 @@ export interface IndependentReviewResult {
   executorModel: string;
   independent: boolean;
   exhausted: boolean;
+  /** What a Reviewer thread opened with its own read-only tools, as the controller recorded the calls. Absent for a one-shot review. */
+  toolChecks?: string[];
 }
 
 export interface IndependentReviewEvent {

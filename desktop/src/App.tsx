@@ -2,12 +2,11 @@ import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef,
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, newapiBootstrap, onChatDone, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
-import { hasNativeBackend } from "./api/transport";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { figuresRunningCount, onFigureUpdated } from "./figures/figureApi";
-import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
+import { useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
-import { readCachedAccount, writeCachedAccount } from "./accountCache";
+import { useAccountRefresh } from "./useAccountRefresh";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "./settingsTabRequest";
 import type { SettingsNavId } from "./settings/settingsNav";
 import ErrorBoundary from "./ErrorBoundary";
@@ -23,6 +22,7 @@ import AppProductSwitcher from "./AppProductSwitcher";
 import AppProjectSwitcher, { type AppProjectSwitcherCopy } from "./AppProjectSwitcher";
 import AppAccountMenu from "./AppAccountMenu";
 import { useCodeShell } from "./code/useCodeShell";
+import "./code/CodeShell.css";
 import { formatQuota } from "./settings/settingsFormatters";
 import { accountMenuPlan } from "./accountMenuPlan";
 import { desktopCloseConfirmationMessage, installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
@@ -228,8 +228,6 @@ interface NavItem {
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
-const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
 
 // Settings also resolves legacy category links to their current sidebar page.
 type RequestedSettingsTab = SettingsNavId;
@@ -290,6 +288,10 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     </ModuleIcon>,
   },
   {
+    id: "figures", label: "Figures",
+    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
+  },
+  {
     id: "lab", label: "Code",
     icon: <ModuleIcon>
       <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
@@ -306,10 +308,6 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
         <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
       </g>
     </ModuleIcon>,
-  },
-  {
-    id: "figures", label: "Figures",
-    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
   },
   {
     id: "literature", label: "Literature",
@@ -355,7 +353,7 @@ const PRODUCT_NAMES: Record<Tab, string> = Object.fromEntries(
 /** Roving focus for a `role="menu"` popup. Items come from the event's own
  * container, so every module menu can share one handler. */
 const menuKeyDownHandler = (close: () => void) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
-  const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+  const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
   if (items.length === 0) return;
   const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
   let nextIndex: number | null = null;
@@ -454,7 +452,7 @@ export default function App() {
   const reorderProjects = useStore((s) => s.reorderProjects);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
+  const { account, refreshing: accountRefreshing, error: accountRefreshError, refresh: refreshAccount } = useAccountRefresh(userMenuOpen);
   const profileAvatar = useProfileAvatar();
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
@@ -474,8 +472,6 @@ export default function App() {
   const suppressProjectClickRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
   const updateStateRef = useRef<UpdateIndicatorState>("idle");
-  const accountRefreshInFlightRef = useRef(false);
-  const lastAccountRefreshAtRef = useRef(0);
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -504,7 +500,7 @@ export default function App() {
   }, []);
 
   const chooseProject = async () => {
-    if (figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
+    if (figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
@@ -524,7 +520,7 @@ export default function App() {
   };
 
   const selectProject = (id: string) => {
-    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请先保存科研绘图版本或放弃编辑，再切换项目。" : "Save or discard your figure edits before switching projects."); return; }
+    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
     setProjectMenuOpen(false);
     if (
       id !== currentProject?.id
@@ -629,62 +625,10 @@ export default function App() {
 
   const handleLogout = useCallback(() => {
     setUserMenuOpen(false);
-    setAccount(null);
-    writeCachedAccount(null);
     logout();
   }, [logout]);
 
-  const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!hasNativeBackend()) return;
-    const now = Date.now();
-    if (accountRefreshInFlightRef.current) return;
-    if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
-    accountRefreshInFlightRef.current = true;
-    lastAccountRefreshAtRef.current = now;
-    try {
-      const next = await newapiBootstrap();
-      setAccount(next);
-      writeCachedAccount(next);
-    } catch (err) {
-      if (isManagedAuthInvalidError(err)) {
-        setAccount(null);
-        writeCachedAccount(null);
-        logout();
-      }
-    } finally {
-      accountRefreshInFlightRef.current = false;
-    }
-  }, [logout]);
-
   useEffect(() => init(), [init]);
-  useEffect(() => {
-    if (!hasNativeBackend()) return;
-    void refreshAccount({ force: true });
-    const timer = window.setInterval(() => {
-      void refreshAccount();
-    }, ACCOUNT_REFRESH_INTERVAL_MS);
-    const refreshOnFocus = () => {
-      void refreshAccount();
-    };
-    window.addEventListener("focus", refreshOnFocus);
-    let disposed = false;
-    let unlistenChatDone: (() => void) | null = null;
-    void onChatDone(() => {
-      void refreshAccount({ force: true });
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else unlistenChatDone = unlisten;
-    }).catch(() => {});
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refreshOnFocus);
-      unlistenChatDone?.();
-    };
-  }, [refreshAccount]);
-  useEffect(() => {
-    if (userMenuOpen) void refreshAccount();
-  }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
     if (tab === "lab") setCodeMounted(true);
     if (tab === "typeset") setTypesetMounted(true);
@@ -859,7 +803,7 @@ export default function App() {
   useEffect(() => {
     if (!userMenuOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      userMenuRef.current?.querySelector<HTMLButtonElement>('.sidebar-user-menu button')?.focus();
+      userMenuRef.current?.querySelector<HTMLButtonElement>('.sidebar-user-menu button:not(:disabled)')?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [userMenuOpen]);
@@ -978,7 +922,9 @@ export default function App() {
     onSignOut: handleLogout,
   });
   const codePage = renderedTab === "lab";
-  const codeShell = codePage && codeShellReady && codeWorkbenchReady;
+  // The page layout must be stable before the iframe/extension is ready.
+  // Desktop navigation remains available in the titlebar during preparation.
+  const codeShell = codePage;
   // Keep a desktop-owned exit from Code when the duplicate header is removed.
   // It must work without an extension command or an editor socket round trip.
   const productSwitcher = (
@@ -1006,6 +952,9 @@ export default function App() {
       avatar={profileAvatar}
       plan={userPlan}
       open={userMenuOpen}
+      refreshing={accountRefreshing}
+      refreshError={accountRefreshError ? formatUserFacingError(accountRefreshError, language) : null}
+      onRefresh={() => void refreshAccount({ force: true })}
       rootRef={userMenuRef}
       triggerRef={userMenuTriggerRef}
       onMenuKeyDown={handleUserMenuKeyDown}
@@ -1015,6 +964,21 @@ export default function App() {
       }}
       onSettings={() => openSettingsTab("general")}
       onLogout={handleLogout}
+    />
+  );
+
+  const projectControl = (
+    <AppProjectSwitcher
+      copy={copy} projects={orderedProjects} currentProject={currentProject}
+      busy={projectBusy} open={projectMenuOpen} onOpenChange={setProjectSwitcherOpen}
+      onSelect={selectProject} onAdd={() => void chooseProject()}
+      onReveal={() => {
+        if (!currentProject?.path) return;
+        void fileReveal(currentProject.path).catch((error) => setError(String(error)));
+      }}
+      drag={{ id: draggedProjectId, suppressClick: suppressProjectClickRef,
+        onStart: startProjectDrag, onMove: moveProjectDrag,
+        onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
     />
   );
 
@@ -1053,11 +1017,17 @@ export default function App() {
             <NavArrow dir="right" />
           </button>
         </div>}
-        <div
-          className="window-titlebar-drag"
-          data-tauri-drag-region
-          onDoubleClick={() => requestWindowAction("maximize")}
-        />
+        <div className="window-titlebar-center">
+          <div
+            className="window-titlebar-drag"
+            data-tauri-drag-region
+            onDoubleClick={() => requestWindowAction("maximize")}
+          />
+          {codePage && <div
+            className="window-titlebar-code-actions"
+            hidden={codeShellReady && codeWorkbenchReady && !projectMenuOpen && !userMenuOpen}
+          >{projectControl}{accountControl}</div>}
+        </div>
         <div className="window-titlebar-controls">
           {isTauri() && (
             <button
@@ -1108,20 +1078,9 @@ export default function App() {
         </div>
         {tab === "literature" && literaturePageView === "library" && <div id="literature-toolbar-slot" />}
         <div className="app-head-actions">
-          <AppProjectSwitcher
-            copy={copy} projects={orderedProjects} currentProject={currentProject}
-            busy={projectBusy} open={projectMenuOpen} onOpenChange={setProjectSwitcherOpen}
-            onSelect={selectProject} onAdd={() => void chooseProject()}
-            onReveal={() => {
-              if (!currentProject?.path) return;
-              void fileReveal(currentProject.path).catch((error) => setError(String(error)));
-            }}
-            drag={{ id: draggedProjectId, suppressClick: suppressProjectClickRef,
-              onStart: startProjectDrag, onMove: moveProjectDrag,
-              onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
-          />
+          {!codePage && projectControl}
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
-          {!navigationShell && accountControl}
+          {!navigationShell && !codePage && accountControl}
         </div>
       </header>
 

@@ -2284,14 +2284,20 @@ fn source_failures_are_classified_for_auditable_coverage_gaps() {
 
 #[test]
 fn source_adapter_preview_is_sanitized_and_exposes_scopus_downgrade_policy() {
-    let request = adapter_request_preview("scopus", "semantic communication", 50);
+    let request = scopus_request_preview(true, "semantic communication", 50);
     assert_eq!(request["authentication"], "SCOPUS_API_KEY (redacted)");
     assert_eq!(request["query"]["view"], "COMPLETE");
     assert_eq!(
         request["fallback"],
-        "STANDARD on 401/403 entitlement response"
+        "SomniQ school route on 401/403 when signed in, otherwise STANDARD"
     );
     assert!(!request.to_string().contains("SCOPUS_API_KEY="));
+    // The live preview follows whichever route this process would take.
+    let has_key = scopus_api_key().is_ok();
+    assert_eq!(
+        adapter_request_preview("scopus", "semantic communication", 50),
+        scopus_request_preview(has_key, "semantic communication", 50)
+    );
 
     // Semantic Scholar's anonymous pool answers 429 rather than results, so
     // without a key the run records the coverage gap instead of spending three
@@ -4273,4 +4279,511 @@ fn keyword_sources_keep_only_records_that_satisfy_the_boolean_design() {
         .coverage_note
         .as_deref()
         .is_some_and(|note| note.contains("2 of 3 records")));
+}
+
+// ── Scopus routes ───────────────────────────────────────────────────────────
+
+/// One school-route record exactly as the gateway returned it on 2026-10-17.
+const SCHOOL_SCOPUS_FIXTURE: &str = r#"{"query":"TITLE-ABS-KEY(neural network)","total_hits":1496572,"returned_entries":1,"entries":[{"title":"Spectrally Partitioned All-Optical Memristors for Highly Linear Neuromorphic Vision Systems","scopus_id":"105048872751","eid":"2-s2.0-105048872751","doi":"10.1007/s40820-026-02331-4","publication_name":"Nano Micro Letters","cover_date":"2027-12-01","year":"2027","subtype":"Article","citedby_count":1,"openaccess":"1","authors":["Zhang J."],"affiliations":["State Key Laboratory for Manufacturing Systems Engineering, Xi'an Jiaotong University"],"keywords":[],"abstract":null}],"pagination":{"start":0,"count":1,"cursor":"*","next_cursor":"rO0ABXNyABFqYXZh","next_start":null,"has_more":true,"offset_limit_reached":false},"quota":{"limit":20000,"remaining":19972,"reset":1792649169},"abstracts_returned":0,"abstracts_requested":false,"cached":false,"retrieved_at":"2026-10-17T08:46:25.984142+00:00","view":"STANDARD"}"#;
+
+const ELSEVIER_SCOPUS_FIXTURE: &str = r#"{"search-results":{"opensearch:totalResults":"1","cursor":{"@next":"elsevier-next"},"entry":[{"dc:identifier":"SCOPUS_ID:85190000001","dc:title":"Direct campus record","prism:doi":"10.1000/direct","prism:coverDate":"2025-01-01"}]}}"#;
+
+const TEST_ACCESS_TOKEN: &str = "account-access-token-sentinel";
+const TEST_ELSEVIER_KEY: &str = "elsevier-key-sentinel";
+
+#[derive(Debug)]
+struct RecordedRequest {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl RecordedRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn path(&self) -> &str {
+        self.target.split('?').next().unwrap_or_default()
+    }
+
+    fn json(&self) -> Value {
+        serde_json::from_str(&self.body).expect("request body is JSON")
+    }
+}
+
+/// Serves canned responses in order and records every request in full.
+struct ScopusFixtureServer {
+    addr: std::net::SocketAddr,
+    requests: std::sync::Arc<Mutex<Vec<RecordedRequest>>>,
+    stop: std::sync::Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ScopusFixtureServer {
+    fn spawn(responses: Vec<(u16, &'static str)>) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let addr = listener.local_addr().expect("fixture address");
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (recorded, stopping) = (requests.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let mut responses = responses.into_iter();
+            while !stopping.load(Ordering::SeqCst) {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                let request = read_fixture_request(&mut stream);
+                recorded.lock().expect("requests").push(request);
+                let (status, body) = responses
+                    .next()
+                    .unwrap_or((500, r#"{"error":"no fixture"}"#));
+                let reply = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        Self {
+            addr,
+            requests,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
+    fn requests(&self) -> std::sync::MutexGuard<'_, Vec<RecordedRequest>> {
+        self.requests.lock().expect("requests")
+    }
+}
+
+impl Drop for ScopusFixtureServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join fixture server");
+        }
+    }
+}
+
+fn read_fixture_request(stream: &mut std::net::TcpStream) -> RecordedRequest {
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut buffer).expect("read request");
+        assert!(read > 0, "client closed before sending headers");
+        raw.extend_from_slice(&buffer[..read]);
+        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+    let mut lines = head.split("\r\n");
+    let mut request_line = lines.next().unwrap_or_default().split(' ');
+    let method = request_line.next().unwrap_or_default().to_string();
+    let target = request_line.next().unwrap_or_default().to_string();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect::<Vec<_>>();
+    let length = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    while raw.len() < header_end + length {
+        let read = stream.read(&mut buffer).expect("read body");
+        assert!(read > 0, "client closed before sending the body");
+        raw.extend_from_slice(&buffer[..read]);
+    }
+    RecordedRequest {
+        method,
+        target,
+        headers,
+        body: String::from_utf8_lossy(&raw[header_end..header_end + length]).into_owned(),
+    }
+}
+
+fn fixture_client() -> reqwest::blocking::Client {
+    // A system proxy must not intercept the loopback fixture.
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("fixture client")
+}
+
+fn signed_in_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
+    Ok(Some(research_account::ResearchAccountCredential {
+        issuer: "https://somni.ensuanx.com".to_string(),
+        user_id: 7,
+        access_token: TEST_ACCESS_TOKEN.to_string(),
+    }))
+}
+
+fn signed_out_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
+    Ok(None)
+}
+
+fn fixture_access<'a>(
+    server: &ScopusFixtureServer,
+    api_key: Option<&str>,
+    account: ScopusAccountLookup<'a>,
+) -> ScopusAccess<'a> {
+    ScopusAccess {
+        elsevier_url: server.url("/content/search/scopus"),
+        school_url: server.url("/research/scopus/search"),
+        api_key: api_key.map(str::to_string),
+        account,
+    }
+}
+
+fn run_fixture_search(
+    access: &ScopusAccess<'_>,
+    limit: usize,
+) -> Result<AdapterSearchOutcome, String> {
+    search_scopus_with(
+        &fixture_client(),
+        access,
+        "neural network",
+        limit,
+        None,
+        "relevance",
+        None,
+        &|| false,
+    )
+}
+
+#[test]
+fn school_route_entries_map_to_remote_papers() {
+    let body: Value = serde_json::from_str(SCHOOL_SCOPUS_FIXTURE).expect("fixture");
+    let paper = scopus_school_entry_to_paper(&body["entries"][0]).expect("entry should map");
+    assert_eq!(paper.id, "scopus:105048872751");
+    assert_eq!(
+        paper.title,
+        "Spectrally Partitioned All-Optical Memristors for Highly Linear Neuromorphic Vision Systems"
+    );
+    assert_eq!(paper.doi.as_deref(), Some("10.1007/s40820-026-02331-4"));
+    assert_eq!(paper.venue, "Nano Micro Letters");
+    assert_eq!(paper.year, Some(2027));
+    assert_eq!(paper.published.as_deref(), Some("2027-12-01"));
+    assert_eq!(paper.authors, vec!["Zhang J.".to_string()]);
+    assert_eq!(paper.cited_by, Some(1));
+    assert_eq!(
+        paper.url.as_deref(),
+        Some("https://www.scopus.com/record/display.uri?eid=2-s2.0-105048872751&origin=inward")
+    );
+    // `abstract: null` is an absent abstract, not the text "null".
+    assert_eq!(paper.summary, "");
+    assert_eq!(paper.source, "Scopus");
+    assert_eq!(scopus_json_count(&body["total_hits"]), 1_496_572);
+    assert_eq!(scopus_json_count(&json!("42")), 42);
+    // The school also answers its "no results" case with an untitled entry.
+    assert!(scopus_school_entry_to_paper(&json!({ "title": "  " })).is_none());
+}
+
+#[test]
+fn school_route_entry_identity_falls_back_to_eid_doi_then_title() {
+    let from_eid = scopus_school_entry_to_paper(&json!({
+        "title": "Only an EID", "eid": "2-s2.0-123", "year": 2024
+    }))
+    .expect("maps");
+    assert_eq!(from_eid.id, "scopus:123");
+    assert_eq!(from_eid.year, Some(2024));
+    let from_doi = scopus_school_entry_to_paper(&json!({
+        "title": "Only a DOI", "doi": "10.1000/ABC"
+    }))
+    .expect("maps");
+    assert_eq!(from_doi.id, "doi:10.1000/abc");
+    assert_eq!(from_doi.url.as_deref(), Some("https://doi.org/10.1000/abc"));
+}
+
+#[test]
+fn scopus_availability_follows_the_key_or_the_signed_in_account() {
+    assert_eq!(scopus_availability(true, true).status, "available");
+    assert_eq!(scopus_availability(true, false).status, "available");
+    let school = scopus_availability(false, true);
+    assert_eq!(school.status, "available");
+    assert!(school.coverage_note.contains("school route"));
+    let missing = scopus_availability(false, false);
+    assert_eq!(missing.status, "missing_credentials");
+    assert!(missing.coverage_note.contains("SCOPUS_API_KEY"));
+    assert!(missing.coverage_note.contains("signed-in"));
+}
+
+#[test]
+fn scopus_request_preview_names_the_route_it_will_take() {
+    let direct = scopus_request_preview(true, "semantic communication", 50);
+    assert_eq!(direct["method"], "GET");
+    assert_eq!(direct["url"], SCOPUS_ELSEVIER_URL);
+    assert_eq!(direct["query"]["count"], 25);
+
+    let school = scopus_request_preview(false, "semantic communication", 500);
+    assert_eq!(school["method"], "POST");
+    assert_eq!(
+        school["url"],
+        "https://somni.ensuanx.com/research/scopus/search"
+    );
+    assert_eq!(school["body"]["view"], "STANDARD");
+    assert_eq!(school["body"]["count"], 200);
+    assert_eq!(school["body"]["include_abstracts"], false);
+    assert_eq!(
+        school["authentication"],
+        "SomniQ account session (redacted)"
+    );
+}
+
+#[test]
+fn research_account_tokens_only_go_to_their_own_origin() {
+    let gateway = "https://somni.ensuanx.com/research";
+    assert!(research_account::same_origin(
+        "https://somni.ensuanx.com",
+        gateway
+    ));
+    assert!(research_account::same_origin(
+        "https://SOMNI.ensuanx.com:443/",
+        gateway
+    ));
+    assert!(!research_account::same_origin(
+        "http://somni.ensuanx.com",
+        gateway
+    ));
+    assert!(!research_account::same_origin(
+        "https://somni.ensuanx.com:8443",
+        gateway
+    ));
+    assert!(!research_account::same_origin(
+        "https://ensuanx.com",
+        gateway
+    ));
+    assert!(!research_account::same_origin("not a url", gateway));
+}
+
+#[test]
+fn scopus_without_a_key_posts_the_school_request_with_the_account_session() {
+    let server = ScopusFixtureServer::spawn(vec![(200, SCHOOL_SCOPUS_FIXTURE)]);
+    let outcome =
+        run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30).expect("search");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path(), "/research/scopus/search");
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {TEST_ACCESS_TOKEN}").as_str())
+    );
+    assert_eq!(request.header("new-api-user"), Some("7"));
+    assert_eq!(request.header("x-els-apikey"), None);
+    let body = request.json();
+    assert_eq!(body["query"], "TITLE-ABS-KEY(neural network)");
+    assert_eq!(body["view"], "STANDARD");
+    assert_eq!(body["count"], 30);
+    assert_eq!(body["cursor"], "*");
+    assert_eq!(body["include_abstracts"], false);
+    // The gateway rejects unknown fields before calling the school.
+    let mut fields = body
+        .as_object()
+        .expect("object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["count", "cursor", "include_abstracts", "query", "view"]
+    );
+
+    assert_eq!(outcome.papers.len(), 1);
+    assert_eq!(outcome.papers[0].id, "scopus:105048872751");
+    assert_eq!(outcome.hit_count, Some(1_496_572));
+    assert_eq!(outcome.request["route"], "school");
+    assert_eq!(outcome.request["view"], "STANDARD");
+    assert_eq!(outcome.quota[0]["school"]["remaining"], 19972);
+    // A short page ends the search; the cursor is still recorded for audit.
+    assert!(outcome.coverage.exhausted);
+    let recorded = outcome.request.to_string();
+    assert!(!recorded.contains(TEST_ACCESS_TOKEN), "{recorded}");
+    assert!(outcome
+        .coverage_note
+        .as_deref()
+        .is_some_and(|note| note.contains("school route")));
+}
+
+#[test]
+fn school_route_continues_from_the_school_cursor_and_sends_the_sort() {
+    let server = ScopusFixtureServer::spawn(vec![(200, SCHOOL_SCOPUS_FIXTURE)]);
+    search_scopus_with(
+        &fixture_client(),
+        &fixture_access(&server, None, &signed_in_account),
+        "neural network",
+        1,
+        None,
+        "publication_date_desc",
+        Some("cursor-from-last-run"),
+        &|| false,
+    )
+    .map(|outcome| {
+        // A full page with `has_more` leaves the next cursor for continuation.
+        assert!(!outcome.coverage.exhausted);
+        assert_eq!(
+            outcome.coverage.next_cursor.as_deref(),
+            Some("rO0ABXNyABFqYXZh")
+        );
+    })
+    .expect("search");
+    let body = server.requests()[0].json();
+    assert_eq!(body["cursor"], "cursor-from-last-run");
+    assert_eq!(body["sort"], "-coverDate");
+    assert_eq!(body["count"], 1);
+}
+
+#[test]
+fn elsevier_refusal_moves_the_rest_of_the_search_to_the_school_route() {
+    let server = ScopusFixtureServer::spawn(vec![
+        (
+            401,
+            r#"{"service-error":{"status":{"statusCode":"AUTHENTICATION_ERROR"}}}"#,
+        ),
+        (200, SCHOOL_SCOPUS_FIXTURE),
+    ]);
+    let outcome = run_fixture_search(
+        &fixture_access(&server, Some(TEST_ELSEVIER_KEY), &signed_in_account),
+        30,
+    )
+    .expect("search");
+
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "no STANDARD retry once the school route is available"
+    );
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path(), "/content/search/scopus");
+    assert_eq!(requests[0].header("x-els-apikey"), Some(TEST_ELSEVIER_KEY));
+    assert!(requests[0].target.contains("view=COMPLETE"));
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path(), "/research/scopus/search");
+    assert_eq!(requests[1].header("x-els-apikey"), None);
+    // The page is re-asked with the school route's own page size.
+    assert_eq!(requests[1].json()["count"], 30);
+
+    assert_eq!(outcome.request["route"], "elsevier_then_school");
+    assert_eq!(outcome.papers[0].id, "scopus:105048872751");
+    assert!(outcome
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("HTTP 401") && warning.contains("school route")));
+    // Both provider answers are kept as evidence.
+    assert_eq!(outcome.raw_artifacts.len(), 2);
+    let recorded = outcome.request.to_string();
+    assert!(!recorded.contains(TEST_ELSEVIER_KEY) && !recorded.contains(TEST_ACCESS_TOKEN));
+}
+
+#[test]
+fn elsevier_success_never_touches_the_school_route() {
+    let server = ScopusFixtureServer::spawn(vec![(200, ELSEVIER_SCOPUS_FIXTURE)]);
+    let outcome = run_fixture_search(
+        &fixture_access(&server, Some(TEST_ELSEVIER_KEY), &signed_in_account),
+        30,
+    )
+    .expect("search");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path(), "/content/search/scopus");
+    assert_eq!(requests[0].header("authorization"), None);
+    assert_eq!(outcome.request["route"], "elsevier");
+    assert_eq!(outcome.papers[0].id, "scopus:85190000001");
+}
+
+#[test]
+fn elsevier_refusal_while_signed_out_keeps_the_standard_fallback() {
+    let server = ScopusFixtureServer::spawn(vec![
+        (
+            403,
+            r#"{"service-error":{"status":{"statusCode":"AUTHORIZATION_ERROR"}}}"#,
+        ),
+        (200, ELSEVIER_SCOPUS_FIXTURE),
+    ]);
+    let outcome = run_fixture_search(
+        &fixture_access(&server, Some(TEST_ELSEVIER_KEY), &signed_out_account),
+        30,
+    )
+    .expect("search");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path() == "/content/search/scopus"));
+    assert!(requests[1].target.contains("view=STANDARD"));
+    assert_eq!(outcome.request["route"], "elsevier");
+    assert_eq!(outcome.request["view"], "STANDARD");
+}
+
+#[test]
+fn scopus_with_neither_key_nor_account_is_an_unauthorised_attempt_without_a_request() {
+    let server = ScopusFixtureServer::spawn(Vec::new());
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_out_account), 30)
+        .expect_err("no route to Scopus");
+    assert_eq!(error, SCOPUS_NO_ROUTE_MESSAGE);
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Unauthorised
+    );
+    assert!(server.requests().is_empty());
+
+    let failing = || -> Result<Option<research_account::ResearchAccountCredential>, String> {
+        Err("登录已过期，请重新登录".to_string())
+    };
+    let error = run_fixture_search(&fixture_access(&server, None, &failing), 30)
+        .expect_err("an expired session cannot reach the school route");
+    assert!(error.contains("登录已过期"), "{error}");
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Unauthorised
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn school_route_rejection_of_the_account_asks_for_sign_in() {
+    let server = ScopusFixtureServer::spawn(vec![(401, r#"{"error":"请先登录 SomniQ 账号。"}"#)]);
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+        .expect_err("rejected session");
+    assert!(
+        error.contains("HTTP 401") && error.contains("sign in"),
+        "{error}"
+    );
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Unauthorised
+    );
+}
+
+#[test]
+fn school_route_body_without_entries_is_an_error_not_an_empty_result() {
+    let server = ScopusFixtureServer::spawn(vec![(200, r#"{"detail":"upstream changed"}"#)]);
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+        .expect_err("no entries list");
+    assert!(error.contains("`entries`"), "{error}");
 }

@@ -858,56 +858,12 @@ fn authoritative_final_turns(
             .ok()
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
             .map_or_else(|| epoch_secs().max(0) as u64, |duration| duration.as_secs());
-        let mut session_turns = Vec::new();
-        for (user_index, message) in session.messages.iter().enumerate() {
-            if message.role != MessageRole::User {
-                continue;
-            }
-            let Some(user_text) = clean_session_text(message) else {
-                continue;
-            };
-            let next_user = session.messages[user_index + 1..]
-                .iter()
-                .position(|candidate| candidate.role == MessageRole::User)
-                .map_or(session.messages.len(), |offset| user_index + 1 + offset);
-            let assistant = session.messages[user_index + 1..next_user]
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| candidate.role == MessageRole::Assistant)
-                .filter_map(|(offset, candidate)| {
-                    clean_session_text(candidate).map(|text| (user_index + 1 + offset, text))
-                })
-                .last();
-            let Some((assistant_index, assistant_text)) = assistant else {
-                continue;
-            };
-            let tool_trace =
-                runtime::tool_trace_for_turn(&session.messages[user_index..=assistant_index]);
-            session_turns.push((
-                user_index,
-                assistant_index,
-                user_text,
-                assistant_text,
-                tool_trace,
-            ));
-        }
-        let total = session_turns.len() as u64;
-        for (ordinal, (user_index, assistant_index, user_text, assistant_text, tool_trace)) in
-            session_turns.into_iter().enumerate()
-        {
-            let offset = total.saturating_sub(1).saturating_sub(ordinal as u64);
-            turns.push(AuthoritativeFinalTurn {
-                session_id: session_id.clone(),
-                user_message_index: i64::try_from(user_index).unwrap_or(i64::MAX),
-                message_index: i64::try_from(assistant_index).unwrap_or(i64::MAX),
-                user_text: canonicalize_research_memory_text(workspace, &user_text),
-                assistant_text: canonicalize_research_memory_text(workspace, &assistant_text),
-                tool_trace: canonicalize_research_memory_text(workspace, &tool_trace),
-                occurred_at: runtime::iso8601_from_epoch_secs(
-                    occurred_at_secs.saturating_sub(offset),
-                ),
-            });
-        }
+        turns.extend(final_turns_of_session(
+            &session_id,
+            &session,
+            occurred_at_secs,
+            workspace,
+        ));
     }
     turns.sort_by(|left, right| {
         left.occurred_at
@@ -916,6 +872,70 @@ fn authoritative_final_turns(
             .then_with(|| left.message_index.cmp(&right.message_index))
     });
     Ok(turns)
+}
+
+/// The finished turns of one Session: each user request paired with the last
+/// thing the assistant said before the next request.
+fn final_turns_of_session(
+    session_id: &str,
+    session: &Session,
+    occurred_at_secs: u64,
+    workspace: &Path,
+) -> Vec<AuthoritativeFinalTurn> {
+    let mut session_turns = Vec::new();
+    for (user_index, message) in session.messages.iter().enumerate() {
+        if !is_user_request(message) {
+            continue;
+        }
+        let Some(user_text) = clean_session_text(message) else {
+            continue;
+        };
+        let next_user = session.messages[user_index + 1..]
+            .iter()
+            .position(is_user_request)
+            .map_or(session.messages.len(), |offset| user_index + 1 + offset);
+        let assistant = session.messages[user_index + 1..next_user]
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.role == MessageRole::Assistant)
+            .filter_map(|(offset, candidate)| {
+                clean_session_text(candidate).map(|text| (user_index + 1 + offset, text))
+            })
+            .next_back();
+        let Some((assistant_index, assistant_text)) = assistant else {
+            continue;
+        };
+        let tool_trace =
+            runtime::tool_trace_for_turn(&session.messages[user_index..=assistant_index]);
+        session_turns.push((
+            user_index,
+            assistant_index,
+            user_text,
+            assistant_text,
+            tool_trace,
+        ));
+    }
+    let total = session_turns.len() as u64;
+    session_turns
+        .into_iter()
+        .enumerate()
+        .map(
+            |(ordinal, (user_index, assistant_index, user_text, assistant_text, tool_trace))| {
+                let offset = total.saturating_sub(1).saturating_sub(ordinal as u64);
+                AuthoritativeFinalTurn {
+                    session_id: session_id.to_string(),
+                    user_message_index: i64::try_from(user_index).unwrap_or(i64::MAX),
+                    message_index: i64::try_from(assistant_index).unwrap_or(i64::MAX),
+                    user_text: canonicalize_research_memory_text(workspace, &user_text),
+                    assistant_text: canonicalize_research_memory_text(workspace, &assistant_text),
+                    tool_trace: canonicalize_research_memory_text(workspace, &tool_trace),
+                    occurred_at: runtime::iso8601_from_epoch_secs(
+                        occurred_at_secs.saturating_sub(offset),
+                    ),
+                }
+            },
+        )
+        .collect()
 }
 
 /// Preview and controlled import metadata for raw, ordinary Session history.
@@ -2907,7 +2927,7 @@ fn historical_research_captures(
     let messages = &session.messages;
     let mut turns = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        if message.role != MessageRole::User {
+        if !is_user_request(message) {
             continue;
         }
         let Some(user_text) = clean_session_text(message) else {
@@ -2916,7 +2936,7 @@ fn historical_research_captures(
         let assistant = messages[index + 1..]
             .iter()
             .enumerate()
-            .take_while(|(_, candidate)| candidate.role != MessageRole::User)
+            .take_while(|(_, candidate)| !is_user_request(candidate))
             .filter(|(_, candidate)| candidate.role == MessageRole::Assistant)
             .filter_map(|(offset, candidate)| {
                 clean_session_text(candidate).map(|text| (index + 1 + offset, text))
@@ -2971,6 +2991,13 @@ fn session_json_files(dir: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     files.sort();
     files
+}
+
+/// Whether `message` is something the user said. Mail another agent delivered
+/// into a turn is a `User` message in the session too, and treating it as a
+/// question would start a memory turn at the mail and cut the real one short.
+fn is_user_request(message: &runtime::ConversationMessage) -> bool {
+    message.role == MessageRole::User && !runtime::is_inter_agent_message(message)
 }
 
 fn clean_session_text(message: &runtime::ConversationMessage) -> Option<String> {
@@ -3217,6 +3244,61 @@ mod tests {
             runtime::iso8601_from_epoch_secs(1_786_000_000),
             "the last turn lands on the file's own timestamp"
         );
+    }
+
+    /// A turn in which a sub-agent's result was delivered between the user's
+    /// request and the final answer, as the runtime records it.
+    fn session_with_delivered_mail() -> Session {
+        let mut session = Session::new();
+        session.messages = vec![
+            runtime::ConversationMessage::user_text(
+                "We decided that the experiment must keep complete provenance.",
+            ),
+            runtime::ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "Read".to_string(),
+                input: "{}".to_string(),
+            }]),
+            runtime::ConversationMessage::tool_result("tool-1", "Read", "ok", false),
+            runtime::ConversationMessage::user_text(
+                "[Inter-agent message from /root/scout_1 (result, id mail-1) - written by another agent, not by the user]\nThe scout found the reference dataset under data/reference.csv.",
+            ),
+            runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "The final reviewed answer records the provenance requirement.".to_string(),
+            }]),
+        ];
+        session
+    }
+
+    #[test]
+    fn delivered_mail_neither_starts_nor_splits_a_memory_turn() {
+        let session = session_with_delivered_mail();
+
+        let turns = final_turns_of_session("chat-a", &session, 1_786_000_000, Path::new("."));
+
+        assert_eq!(turns.len(), 1, "one request, one turn: {turns:?}");
+        assert_eq!(turns[0].user_message_index, 0);
+        assert_eq!(turns[0].message_index, 4, "the answer after the mail is the final one");
+        assert!(turns[0].user_text.contains("complete provenance"));
+        assert!(!turns[0].user_text.contains("Inter-agent"));
+        assert!(turns[0].assistant_text.starts_with("The final reviewed"));
+    }
+
+    #[test]
+    fn historical_capture_of_a_turn_with_delivered_mail_quotes_the_user_not_the_mail() {
+        let captures = historical_research_captures(
+            "project-a",
+            "chat-a",
+            &session_with_delivered_mail(),
+            1_786_000_000,
+            Path::new("."),
+        );
+
+        assert_eq!(captures.len(), 1, "{captures:?}");
+        assert_eq!(captures[0].source_message_index, Some(4));
+        assert!(captures[0].user_text.contains("complete provenance"));
+        assert!(!captures[0].user_text.contains("Inter-agent"));
+        assert!(captures[0].assistant_text.starts_with("The final reviewed"));
     }
 
     fn research_atom(id: &str, statement: &str) -> runtime::ResearchMemoryAtom {

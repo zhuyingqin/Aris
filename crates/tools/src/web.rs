@@ -26,6 +26,8 @@ use sha2::{Digest, Sha256};
 
 use crate::collapse_whitespace;
 
+mod deepseek;
+
 const WEB_SEARCH_SCHEMA_VERSION: u32 = 3;
 const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 12;
 const MAX_WEB_SEARCH_RESULTS: usize = 50;
@@ -437,6 +439,7 @@ static WEB_SEARCH_CACHE: OnceLock<Mutex<VecDeque<WebSearchCacheEntry>>> = OnceLo
 
 #[derive(Debug, Clone)]
 pub(crate) enum WebProvider {
+    DeepSeek(deepseek::DeepSeekProvider),
     Custom { base: Url, allow_private: bool },
     SomniqGatewayBocha,
     Bocha { api_key: String },
@@ -450,6 +453,7 @@ pub(crate) enum WebProvider {
 impl WebProvider {
     fn name(&self) -> &'static str {
         match self {
+            Self::DeepSeek(_) => "deepseek",
             Self::Custom { .. } => "custom",
             Self::SomniqGatewayBocha | Self::Bocha { .. } => "bocha",
             Self::Brave { .. } => "brave",
@@ -470,6 +474,9 @@ pub(crate) fn somniq_research_gateway_url(path: &str) -> Result<Url, String> {
 /// This is intentionally separate from a normal search so Settings can report
 /// upstream reachability without constructing a chat turn.
 pub fn probe_somniq_research_provider(provider: &str) -> Result<String, String> {
+    if provider.trim().eq_ignore_ascii_case("deepseek") {
+        return deepseek::DeepSeekProvider::from_account()?.probe_access(&|| false);
+    }
     let (method, url, headers, body) = match provider.trim().to_ascii_lowercase().as_str() {
         "openalex" => {
             let mut url = somniq_research_gateway_url("openalex/works")?;
@@ -1883,6 +1890,14 @@ pub(crate) fn execute_web_search(
     input: &WebSearchInput,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<WebSearchOutput, String> {
+    execute_web_search_with_candidates(input, should_cancel, None)
+}
+
+fn execute_web_search_with_candidates(
+    input: &WebSearchInput,
+    should_cancel: &dyn Fn() -> bool,
+    supplied_candidates: Option<Vec<WebProvider>>,
+) -> Result<WebSearchOutput, String> {
     let started = Instant::now();
     let query = collapse_whitespace(&input.query);
     if query.chars().count() < 2 {
@@ -1905,7 +1920,10 @@ pub(crate) fn execute_web_search(
     let mut variants = plan_web_query_variants(&query, input.language.as_deref());
     let requested = normalize_provider_request(input.providers.as_deref())?;
     let explicit_all = requested.iter().any(|name| name == "all");
-    let candidates = resolve_provider_candidates(&requested)?;
+    let candidates = match supplied_candidates {
+        Some(candidates) => candidates,
+        None => resolve_provider_candidates(&requested)?,
+    };
     let supplied_cursor = parse_search_cursor(input.cursor.as_deref())?;
     let cursor_provider_names = supplied_cursor
         .as_ref()
@@ -1938,7 +1956,21 @@ pub(crate) fn execute_web_search(
     }
     let max_variants_per_provider = (max_results / concurrent_provider_count).max(1);
     variants.truncate(max_variants_per_provider);
-    let query_key = web_search_query_key(input, max_results, &provider_names, &variants);
+    // DeepSeek bills every successful request. A batch must never silently
+    // fan out into several paid query variants.
+    if selected_candidates
+        .iter()
+        .any(|provider| matches!(provider, WebProvider::DeepSeek(_)))
+    {
+        variants.truncate(1);
+    }
+    let query_key = web_search_query_key(
+        input,
+        max_results,
+        &provider_names,
+        &variants,
+        &selected_candidates,
+    );
     if let Some(cursor) = supplied_cursor.as_ref() {
         if cursor.schema_version != WEB_SEARCH_SCHEMA_VERSION {
             return Err(format!(
@@ -2031,8 +2063,11 @@ pub(crate) fn execute_web_search(
             );
             let usable = !run.hits.is_empty();
             let valid_empty = run.attempt.status == "completed" && run.attempt.coverage.exhausted;
+            let valid_deepseek_window = matches!(provider, WebProvider::DeepSeek(_))
+                && run.attempt.status == "partial"
+                && run.attempt.error.is_none();
             attempts.push(run.attempt);
-            if usable {
+            if usable || valid_deepseek_window {
                 successful_provider_names.push(provider.name().to_string());
                 let should_add_zhihu = should_supplement_chinese_with_zhihu(
                     input,
@@ -2160,7 +2195,13 @@ pub(crate) fn execute_web_search(
         Some(
             serde_json::to_string(&WebSearchCursor {
                 schema_version: WEB_SEARCH_SCHEMA_VERSION,
-                query_key: web_search_query_key(input, max_results, &cursor_providers, &variants),
+                query_key: web_search_query_key(
+                    input,
+                    max_results,
+                    &cursor_providers,
+                    &variants,
+                    &selected_candidates,
+                ),
                 providers: cursor_providers.clone(),
                 remaining_providers: available_unsearched_providers.clone(),
                 streams: next_streams,
@@ -2409,6 +2450,9 @@ fn fetch_provider_page(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<SearchPage, String> {
     match provider {
+        WebProvider::DeepSeek(provider) => {
+            provider.search_page(variant, input, cursor, limit, stream, should_cancel)
+        }
         WebProvider::Custom {
             base,
             allow_private,
@@ -3742,7 +3786,7 @@ fn normalize_provider_request(providers: Option<&[String]>) -> Result<Vec<String
     for value in &values {
         if !matches!(
             value.as_str(),
-            "auto" | "all" | "custom" | "bocha" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
+            "auto" | "all" | "deepseek" | "custom" | "bocha" | "brave" | "exa" | "zhihu" | "duckduckgo" | "ddg"
         ) {
             return Err(format!(
                 "web_search_error:invalid_provider unsupported provider {value:?}"
@@ -3763,6 +3807,16 @@ fn normalize_provider_request(providers: Option<&[String]>) -> Result<Vec<String
 }
 
 fn resolve_provider_candidates(requested: &[String]) -> Result<Vec<WebProvider>, String> {
+    // Desktop owns an account provider. Use its billed search route for the
+    // default and broad modes, and surface access/quota failures directly.
+    // The shared headless runtime retains its existing provider integrations.
+    if crate::research_account::current_provider().is_some()
+        && requested.iter().any(|name| matches!(name.as_str(), "auto" | "all"))
+    {
+        return Ok(vec![WebProvider::DeepSeek(
+            deepseek::DeepSeekProvider::from_account()?,
+        )]);
+    }
     if requested.iter().any(|name| name == "auto") {
         let mut providers = Vec::new();
         if let Some(provider) = configured_custom_provider()? {
@@ -3817,6 +3871,9 @@ pub(crate) fn resolve_named_providers(names: &[String]) -> Result<Vec<WebProvide
     let mut providers = Vec::new();
     for name in names {
         match name.as_str() {
+            "deepseek" => providers.push(WebProvider::DeepSeek(
+                deepseek::DeepSeekProvider::from_account()?,
+            )),
             "custom" => {
                 if let Some(provider) = configured_custom_provider()? {
                     providers.push(provider);
@@ -4230,6 +4287,7 @@ fn web_search_query_key(
     max_results: usize,
     providers: &[String],
     variants: &[runtime::SearchQueryVariant],
+    candidates: &[WebProvider],
 ) -> String {
     let custom_base = std::env::var("ARIS_WEB_SEARCH_BASE_URL")
         .or_else(|_| std::env::var("CLAWD_WEB_SEARCH_BASE_URL"))
@@ -4242,6 +4300,10 @@ fn web_search_query_key(
         "maxResults": max_results,
         "providers": providers,
         "customBase": custom_base,
+        "accountScopes": candidates.iter().filter_map(|provider| match provider {
+            WebProvider::DeepSeek(provider) => Some(provider.cache_scope()),
+            _ => None,
+        }).collect::<Vec<_>>(),
         "language": input.language.as_deref().unwrap_or_default().trim().to_lowercase(),
         "variants": variants
             .iter()
@@ -4446,6 +4508,8 @@ fn web_search_retrieval_control(
         "The efficient auto stage stopped after a usable provider. Stop if the evidence is sufficient; otherwise start a new search with providers=[\"all\"] to cover the listed unsearched providers."
     } else if hits_are_empty {
         "No resumable results remain. Reformulate or broaden the query if the information need is not satisfied."
+    } else if !coverage.exhausted {
+        "The provider returned a bounded result window without a continuation cursor. Stop if the evidence is sufficient; otherwise explicitly reformulate or broaden the query."
     } else {
         "The attempted provider streams are exhausted. Stop if the evidence is sufficient; otherwise reformulate the query or explicitly broaden providers."
     };

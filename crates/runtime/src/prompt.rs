@@ -206,6 +206,13 @@ impl SystemPromptBuilder {
         if let Some(model) = &self.model_id {
             bullets.insert(0, format!("Model: {model}"));
         }
+        if self
+            .os_name
+            .as_deref()
+            .is_some_and(|os| os.eq_ignore_ascii_case("windows"))
+        {
+            bullets.push("Shell contract: prefer the PowerShell tool on Windows. It runs pwsh or Windows PowerShell, never cmd.exe. The bash tool requires a POSIX shell and never falls back to CMD. Use syntax matching the selected tool; the parent terminal does not select the tool's shell. For Windows PowerShell compatibility, avoid &&/|| and use explicit exit-code checks for dependent commands. Honor an explicit user shell preference.".to_string());
+        }
         lines.extend(prepend_bullets(bullets));
         lines.join("\n")
     }
@@ -223,7 +230,12 @@ fn render_system_prompt_template(has_output_style: bool) -> String {
         "with software engineering and research automation tasks."
     };
 
-    let rendered = SYSTEM_PROMPT_TEMPLATE.replace("{{TASK_FOCUS}}", task_focus);
+    let rendered = SYSTEM_PROMPT_TEMPLATE
+        .replace("{{TASK_FOCUS}}", task_focus)
+        .replace(
+            "{{LOCAL_DOCUMENT_READ_GUIDANCE}}",
+            crate::document_safety::LOCAL_DOCUMENT_READ_GUIDANCE,
+        );
     if rendered.trim().is_empty() {
         [
             get_simple_intro_section(has_output_style),
@@ -1387,6 +1399,7 @@ fn get_simple_system_section() -> String {
 fn get_simple_doing_tasks_section() -> String {
     let items = prepend_bullets(vec![
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
+        crate::document_safety::LOCAL_DOCUMENT_READ_GUIDANCE.to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
