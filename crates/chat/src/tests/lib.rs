@@ -600,6 +600,51 @@ fn dynamic_tool_router_pins_a_tool_the_user_named() {
     assert!(plan.pinned_names.contains("multi_edit"), "{plan:?}");
 }
 
+/// The system prompt says a matching skill MUST be invoked and, on Windows, that
+/// PowerShell is the shell to prefer. Both rules need their tool visible from the
+/// first request, whatever the prompt's wording.
+#[test]
+fn dynamic_tool_router_pins_the_tools_the_system_prompt_requires() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("PowerShell"), routing_spec("LlmReview")]);
+    for prompt in ["随便聊聊", "帮我写论文的引言", ""] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("Skill"), "{prompt:?}: {plan:?}");
+        assert_eq!(
+            plan.pinned_names.contains("PowerShell"),
+            cfg!(windows),
+            "{prompt:?}: {plan:?}"
+        );
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS, "{plan:?}");
+    }
+}
+
+/// `LlmReview` is the only route to an independent review, so asking for one
+/// routes it; ordinary "review this code" reading work does not.
+#[test]
+fn dynamic_tool_router_routes_llm_review_only_for_an_independent_review() {
+    let mut specs = desktop_like_catalog();
+    specs.push(routing_spec("LlmReview"));
+    for prompt in [
+        "请做一次独立审查",
+        "让审稿人评审这篇论文",
+        "Get a second opinion from an external reviewer",
+        "run a cross-model review of the proof",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("LlmReview"), "{prompt}: {plan:?}");
+        assert!(plan.profile.contains("review"), "{prompt}: {plan:?}");
+    }
+    for prompt in [
+        "Review the document routing code",
+        "审查一下这个函数",
+        "preview the page",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(!plan.active_names.contains("LlmReview"), "{prompt}: {plan:?}");
+    }
+}
+
 #[test]
 fn browser_mutations_resolve_their_matching_snapshot_tool() {
     let tools = BTreeSet::from([

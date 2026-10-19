@@ -8,6 +8,8 @@ import { imagePreviewKey, normalizeImagePreviewSource, type ImagePreviewScope, t
 import MarkdownContent, { markdownImageSources, ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
 import ModelWaitIndicator from "./ModelWaitIndicator";
+import UserMessageText from "./UserMessageText";
+import { userMessageDisclosureKey } from "./userMessageCollapse";
 import { AgentSpawnNotice, isAgentSpawn } from "./AgentSpawnNotice";
 import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
@@ -1035,9 +1037,11 @@ function renderSingleBlock(
         streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)}
       />
     ) : (
-      <div key={index} className="chat-text">
-        {block.text}
-      </div>
+      <UserMessageText
+        key={userMessageDisclosureKey(turn.id, index)}
+        text={block.text}
+        disclosureKey={userMessageDisclosureKey(turn.id, index)}
+      />
     );
   }
   if (block.kind === "thinking") {

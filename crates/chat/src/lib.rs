@@ -429,6 +429,11 @@ pub const MAX_ACTIVE_TOOLS: usize = 24;
 /// failure mode (a broken heredoc corrupts the file instead of failing the
 /// call). Creating files stays intent-routed — `write_file` is needed far less
 /// often than the editors, and the slots are better spent rotating.
+///
+/// `Skill` is pinned because the system prompt's skill list says a matching
+/// skill MUST be invoked before doing the work. Deferring the one tool that
+/// obeys that rule cost every skill-driven turn a ToolSearch round trip, or
+/// tempted the model to imitate the skill's checklist instead.
 const PINNED_CORE_TOOLS: &[&str] = &[
     "ToolSearch",
     "read_file",
@@ -438,7 +443,21 @@ const PINNED_CORE_TOOLS: &[&str] = &[
     "bash",
     "edit_file",
     "multi_edit",
+    "Skill",
 ];
+
+/// The shell the system prompt tells the model to prefer on this platform. On
+/// Windows the environment section says to use `PowerShell` and that `bash`
+/// needs a POSIX shell that may be missing, so shipping `bash` alone stated a
+/// rule the model could only follow after a ToolSearch. `bash` stays pinned
+/// too: Git Bash is common there and many skills are written for it.
+fn platform_shell_tools() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["PowerShell"]
+    } else {
+        &[]
+    }
+}
 
 /// Visible from the first request but evictable once the turn's real shape is
 /// known.
@@ -600,7 +619,10 @@ pub fn route_chat_tools_with_carry_forward(
     let mut active_names = BTreeSet::new();
     let mut pinned_names = BTreeSet::new();
 
-    for name in resolve_named(&catalog_names, PINNED_CORE_TOOLS) {
+    for name in resolve_named(&catalog_names, PINNED_CORE_TOOLS)
+        .into_iter()
+        .chain(resolve_named(&catalog_names, platform_shell_tools()))
+    {
         pinned_names.insert(name.clone());
         active_names.insert(name);
     }
@@ -1106,6 +1128,36 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             .into_iter()
             .filter(|name| !COMPATIBILITY_ALIAS_TOOLS.contains(&name.as_str()))
             .collect(),
+        });
+    }
+    // The system prompt makes `LlmReview` the only route to an independent,
+    // external or cross-model review, so a turn that asks for one gets it up
+    // front. Deliberately narrow: "review the code" or "审查" alone is ordinary
+    // reading work, not a request for a second model.
+    if contains_any(
+        lowered,
+        &[
+            "independent review",
+            "external review",
+            "cross-model",
+            "second opinion",
+            "peer review",
+            "reviewer",
+            "独立审查",
+            "独立评审",
+            "外部审查",
+            "外部评审",
+            "交叉审查",
+            "交叉评审",
+            "评审",
+            "审稿",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "review",
+            reason: "independent review intent",
+            required: resolve_named(catalog, &["LlmReview"]),
+            optional: Vec::new(),
         });
     }
     if contains_any(

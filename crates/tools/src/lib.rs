@@ -101,6 +101,7 @@ pub mod literature;
 mod literature_boolean;
 pub mod notebook;
 pub mod pdf_rag;
+pub mod process_secrets;
 pub mod research_account;
 pub mod runs;
 pub mod sweep;
@@ -710,14 +711,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WebSearch",
-            description: "Run one bounded batch of an LLM-directed, auditable general-web search with query variants, provider fallback, pagination, retry/backoff, canonical URL deduplication, reciprocal-rank fusion, and explicit coverage. For academic paper discovery or paper identification, call LiteratureSearch before WebSearch because it searches structured scholarly metadata and returns canonical paper identities. WebSearch is available first only when the user explicitly requests web/search-engine/site search; otherwise use it after a LiteratureSearch attempt as a fallback for unavailable or insufficient scholarly coverage, or to locate official/full-text entry points missing from scholarly metadata. Choose maxResults for the current information need. After every batch, assess retrievalControl for relevance, source diversity, corroboration, authority and recency: stop when sufficient, continue nextCursor for more depth, or call providers=[\"all\"] for more source diversity. The 50-result ceiling protects one tool response; it is not a total search cap. Never describe a result as exhaustive when coverage.exhausted is false. `auto` stops at a usable configured custom/Brave/Exa provider with DuckDuckGo fallback; Zhihu is a configured Chinese community-information supplement after general providers return no usable evidence, and for Chinese queries when the first usable general provider returns fewer than four results. For Chinese-local context, practical experience, or community viewpoints that remain insufficient, explicitly call providers=[\"zhihu\"] (or `all`) and clearly distinguish its community results from primary or academic sources. Paid providers are called only when their credentials are configured.",
+            description: "Run one bounded, auditable general-web search. Desktop auto/all uses DeepSeek through New API with the signed-in SomniQ model API token. Each successful request with results costs 1 credit, using monthly allowance first; Go, Plus, Pro and 千研 are supported. One DeepSeek batch sends one query and one POST, without automatic paid query expansion or retries. Repeating an unchanged request can reuse a short-lived account-scoped cache. DeepSeek returns a ranked result window without pagination or an exhaustive total: never claim complete web coverage, and reformulate explicitly when more evidence is needed. Choose maxResults from 1 to 50 for this batch; this is not a total search cap. Review retrievalControl for relevance, authority, recency, diversity and corroboration. For academic paper discovery or identification, call LiteratureSearch before WebSearch unless the user explicitly requests web/search-engine/site search; use WebSearch for missing scholarly coverage or official/full-text entry points. Explicit legacy providers and headless auto retain their query variants, pagination and fallback; zhihu is a Chinese community supplement whose results require separate corroboration for primary or academic claims. Account access, rate-limit and quota errors are reported directly.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "minLength": 2,
-                        "description": "One general-web discovery anchor or legal source query. For academic paper discovery, call LiteratureSearch first unless the user explicitly requested web/search-engine/site search."
+                        "maxLength": 128,
+                        "description": "One concise general-web discovery anchor or legal source query. DeepSeek allows at most 128 Unicode characters including domain operators. For academic paper discovery, call LiteratureSearch first unless the user explicitly requested web/search-engine/site search."
                     },
                     "allowed_domains": {
                         "type": "array",
@@ -741,9 +743,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["auto", "all", "custom", "brave", "exa", "zhihu", "duckduckgo"]
+                            "enum": ["auto", "all", "deepseek", "custom", "bocha", "brave", "exa", "zhihu", "duckduckgo"]
                         },
-                        "description": "Provider selection. Defaults to auto fallback; use zhihu to supplement Chinese community information, or all for cross-provider fusion."
+                        "description": "Defaults to the account-billed DeepSeek search in Desktop (auto/all). Use deepseek explicitly for the same route. Each successful request with results costs 1 credit; monthly allowance is used first. Legacy providers remain available for explicit selection and headless callers."
                     },
                     "language": {
                         "type": "string",
@@ -1116,7 +1118,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LaTeXCompile",
-            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. It resolves the root file safely, selects a Unicode-capable engine for CJK/fontspec sources, handles Windows TeX paths, retries stale latexmk caches, and returns structured diagnostics plus the output PDF path. Prefer this over shelling out to pdflatex/latexmk from bash/PowerShell/REPL. On failure, make one minimal edit for diagnostics[0], then re-run this same tool; do not batch speculative source rewrites.",
+            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. It resolves the root file safely, selects a Unicode-capable engine for CJK/fontspec sources, handles Windows TeX paths, retries stale latexmk caches, and returns structured diagnostics plus the output PDF path. Prefer this over shelling out to pdflatex/latexmk from bash/PowerShell/REPL. For a concrete source diagnostic, make one minimal edit and rerun this tool. For a timeout or unlocated failure, inspect the compiler log before changing source; do not batch speculative source rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1136,7 +1138,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "timeoutMs": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Foreground compile timeout in milliseconds. Defaults to the shell foreground timeout."
+                        "description": "Total compile timeout in milliseconds, shared by all passes and retries. Defaults to 600000 (10 minutes), independently of shell commands; SOMNIQ_LATEX_COMPILE_TIMEOUT_MS overrides the default."
                     }
                 },
                 "required": ["inputPath"],
@@ -3020,6 +3022,32 @@ pub struct LatexCompileRequest {
     pub timeout_ms: Option<u64>,
     pub clean_cache: bool,
     pub continue_on_error: bool,
+}
+
+const DEFAULT_LATEX_COMPILE_TIMEOUT_MS: u64 = 600_000;
+const LATEX_COMPILE_TIMEOUT_ENV: &str = "SOMNIQ_LATEX_COMPILE_TIMEOUT_MS";
+
+fn latex_compile_timeout_ms(timeout: Option<u64>) -> u64 {
+    timeout
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            runtime::execution_env_var_os(LATEX_COMPILE_TIMEOUT_ENV)
+                .and_then(|value| value.to_str()?.trim().parse::<u64>().ok())
+                .filter(|value| *value > 0)
+        })
+        .unwrap_or(DEFAULT_LATEX_COMPILE_TIMEOUT_MS)
+}
+
+/// One budget for the whole build, including engine fallback and cache recovery.
+struct LatexCompileBudget {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl LatexCompileBudget {
+    fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -5202,8 +5230,12 @@ pub fn compile_latex_document(
         )
         .with_extension("pdf");
     let expected_pdf_before = latex_output_fingerprint(&expected_pdf);
-    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(request.timeout_ms);
+    let timeout_ms = latex_compile_timeout_ms(request.timeout_ms);
     let started = Instant::now();
+    let budget = LatexCompileBudget {
+        started,
+        timeout: Duration::from_millis(timeout_ms),
+    };
     let cache_note = if request.clean_cache {
         let removed = remove_known_latex_cache_files(&input_path, output_dir)?;
         Some(format!(
@@ -5218,7 +5250,7 @@ pub fn compile_latex_document(
         &input_path,
         source_dir,
         output_dir,
-        timeout_ms,
+        &budget,
         workspace,
         request.continue_on_error,
         should_cancel,
@@ -5247,8 +5279,11 @@ pub fn compile_latex_document(
         return_code_interpretation = Some(format!("exit_code:{code}"));
     }
 
-    let mut success = output.status.success() && output_path.is_file();
-    if output.status.success() && !output_path.is_file() {
+    let mut success = !output.interrupted
+        && !output.timed_out
+        && output.status.success()
+        && output_path.is_file();
+    if !output.interrupted && !output.timed_out && output.status.success() && !output_path.is_file() {
         success = false;
         stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
         return_code_interpretation = Some("missing_output".to_string());
@@ -5277,13 +5312,7 @@ pub fn compile_latex_document(
         success,
         return_code_interpretation.as_deref(),
     );
-    let repair_guidance = (!success).then(|| {
-        if diagnostics.is_empty() {
-            "Inspect the TeX toolchain diagnostic, make no speculative source rewrite, and rerun LaTeXCompile once the concrete failure is understood.".to_string()
-        } else {
-            "Fix only diagnostics[0] with the smallest source change, preserve the current diff, then rerun LaTeXCompile. Do not invoke a TeX compiler from REPL.".to_string()
-        }
-    });
+    let repair_guidance = (!success).then(|| latex_repair_guidance(&diagnostics));
 
     Ok(LatexCompileOutput {
         success,
@@ -5613,7 +5642,7 @@ fn run_latex_compile_process(
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     workspace: &Path,
     continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
@@ -5638,7 +5667,7 @@ fn run_latex_compile_process(
                 input_path,
                 source_dir,
                 output_dir,
-                timeout_ms,
+                budget,
                 workspace,
                 continue_on_error,
                 should_cancel,
@@ -5652,7 +5681,7 @@ fn run_latex_compile_process(
             input_path,
             source_dir,
             output_dir,
-            timeout_ms,
+            budget,
             workspace,
             continue_on_error,
             should_cancel,
@@ -5667,7 +5696,7 @@ fn run_latex_compile_process(
         input_path,
         source_dir,
         output_dir,
-        timeout_ms,
+        budget,
         workspace,
         continue_on_error,
         should_cancel,
@@ -5685,7 +5714,7 @@ fn run_latex_compile_process(
             input_path,
             source_dir,
             output_dir,
-            timeout_ms,
+            budget,
             workspace,
             continue_on_error,
             should_cancel,
@@ -5715,7 +5744,7 @@ fn run_latexmk_with_retries(
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     workspace: &Path,
     continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
@@ -5727,12 +5756,15 @@ fn run_latexmk_with_retries(
         input_path,
         source_dir,
         output_dir,
-        timeout_ms,
+        budget,
         workspace,
         continue_on_error,
         should_cancel,
         on_progress,
     )?;
+    if output.interrupted || output.timed_out {
+        return Ok((engine.latexmk_label().to_string(), output));
+    }
     if engine == LatexEnginePreference::PdfLatex && latex_output_needs_unicode_engine(&output) {
         engine = LatexEnginePreference::XeLatex;
         output = run_latexmk(
@@ -5740,14 +5772,14 @@ fn run_latexmk_with_retries(
             input_path,
             source_dir,
             output_dir,
-            timeout_ms,
+            budget,
             workspace,
             continue_on_error,
             should_cancel,
             on_progress,
         )?;
     }
-    if latexmk_output_reports_stale_failure(&output) {
+    if !output.interrupted && !output.timed_out && latexmk_output_reports_stale_failure(&output) {
         let removed = remove_known_latex_cache_files(input_path, output_dir)
             .map_err(std::io::Error::other)?;
         let mut retry = run_latexmk(
@@ -5755,7 +5787,7 @@ fn run_latexmk_with_retries(
             input_path,
             source_dir,
             output_dir,
-            timeout_ms,
+            budget,
             workspace,
             continue_on_error,
             should_cancel,
@@ -5775,7 +5807,7 @@ fn run_latexmk(
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     workspace: &Path,
     continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
@@ -5803,7 +5835,7 @@ fn run_latexmk(
         "latexmk",
         input_path,
         workspace,
-        timeout_ms,
+        budget,
         should_cancel,
         on_progress,
     )
@@ -5815,7 +5847,7 @@ fn run_latex_engine(
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     workspace: &Path,
     continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
@@ -5826,7 +5858,7 @@ fn run_latex_engine(
         input_path,
         source_dir,
         output_dir,
-        timeout_ms,
+        budget,
         workspace,
         continue_on_error,
         should_cancel,
@@ -5840,7 +5872,7 @@ fn run_latex_engine(
         input_path,
         source_dir,
         output_dir,
-        timeout_ms,
+        budget,
         workspace,
         continue_on_error,
         should_cancel,
@@ -5864,7 +5896,7 @@ fn run_single_latex_engine(
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     workspace: &Path,
     continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
@@ -5891,7 +5923,7 @@ fn run_single_latex_engine(
         engine,
         input_path,
         workspace,
-        timeout_ms,
+        budget,
         should_cancel,
         on_progress,
     )
@@ -5902,7 +5934,7 @@ fn run_latex_process(
     compiler: &str,
     input_path: &Path,
     workspace: &Path,
-    timeout_ms: u64,
+    budget: &LatexCompileBudget,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
@@ -5912,7 +5944,7 @@ fn run_latex_process(
             "LaTeX compile ({compiler}): {}",
             truncate_process_label(&workspace_relative_display(input_path, workspace))
         ),
-        Some(Duration::from_millis(timeout_ms)),
+        Some(budget.remaining()),
         true,
         should_cancel,
         |progress| on_progress(managed_progress_to_tool_progress(progress)),
@@ -6246,18 +6278,26 @@ fn extract_latex_diagnostics(
             .iter()
             .any(|diagnostic| diagnostic.severity == "error")
     {
-        let message = return_code_interpretation
-            .map(|status| {
-                format!(
-                    "LaTeX compilation failed ({status}) without a parseable source diagnostic."
-                )
-            })
-            .unwrap_or_else(|| {
-                "LaTeX compilation failed without a parseable source diagnostic.".to_string()
-            });
+        let (code, message) = match return_code_interpretation {
+            Some("timeout") => (
+                "compile_timeout",
+                "LaTeX compilation timed out before a source error was reported.".to_string(),
+            ),
+            Some("interrupted") => (
+                "compile_interrupted",
+                "LaTeX compilation was cancelled before a source error was reported.".to_string(),
+            ),
+            status => (
+                "compile_failed",
+                status.map_or_else(
+                    || "LaTeX compilation failed without a parseable source diagnostic.".to_string(),
+                    |status| format!("LaTeX compilation failed ({status}) without a parseable source diagnostic."),
+                ),
+            ),
+        };
         diagnostics.push(LatexDiagnostic {
             severity: "error".to_string(),
-            code: "compile_failed".to_string(),
+            code: code.to_string(),
             message,
             file_path: None,
             line: None,
@@ -6280,6 +6320,21 @@ fn extract_latex_diagnostics(
         );
     }
     diagnostics
+}
+
+fn latex_repair_guidance(diagnostics: &[LatexDiagnostic]) -> String {
+    if diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == "error" && !diagnostic.code.starts_with("compile_")
+    }) {
+        return "Fix only the primary source diagnostic with the smallest source change, preserve the current diff, then rerun LaTeXCompile. Do not invoke a TeX compiler from REPL.".to_string();
+    }
+    if diagnostics.iter().any(|diagnostic| diagnostic.code == "compile_timeout") {
+        return "The compile exceeded its time budget without reporting a source error. Inspect the raw compiler log for a slow or stalled TeX/bibliography process. If more time is needed, increase timeoutMs (or SOMNIQ_LATEX_COMPILE_TIMEOUT_MS for Desktop) and recompile unchanged. Missing .toc/.lof/.lot/.bbl files alone are generated-file notices, not source errors. Do not make speculative source edits.".to_string();
+    }
+    if diagnostics.iter().any(|diagnostic| diagnostic.code == "compile_interrupted") {
+        return "Compilation was cancelled. Recompile unchanged when ready; cancellation does not identify a source error.".to_string();
+    }
+    "Inspect the raw compiler log and TeX toolchain before editing source; no concrete source error was reported. Recompile once the failure is understood.".to_string()
 }
 
 fn latex_warning_message(line: &str) -> Option<String> {
@@ -7196,9 +7251,7 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
     // the API key and ARIS_REVIEWER_BASE_URL for the endpoint. Routes through
     // the same OpenAI-compat call path — no third routing path added.
     if matches!(reviewer_provider.as_deref(), Some("custom" | "opencode")) {
-        let key = std::env::var("ARIS_REVIEWER_AUTH_TOKEN")
-            .ok()
-            .filter(|k| !k.is_empty())
+        let key = process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN")
             .ok_or_else(|| {
                 "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for custom reviewer)"
                     .to_string()
@@ -7241,10 +7294,12 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
     if reviewer_provider.as_deref() == Some("anthropic-compat")
         || reviewer_provider.as_deref() == Some("deepseek")
     {
-        let key = std::env::var("ARIS_REVIEWER_AUTH_TOKEN")
-            .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
-            .ok()
-            .filter(|k| !k.is_empty())
+        let key = process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN")
+            .or_else(|| {
+                std::env::var("ANTHROPIC_AUTH_TOKEN")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+            })
             .ok_or_else(|| {
                 "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for anthropic-compat reviewer)"
                     .to_string()
@@ -7290,9 +7345,7 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         default_base_url.to_string()
     };
 
-    let key = std::env::var(key_env)
-        .ok()
-        .filter(|k| !k.is_empty())
+    let key = process_secrets::secret_var(key_env)
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
     let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();

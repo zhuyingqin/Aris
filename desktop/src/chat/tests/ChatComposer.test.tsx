@@ -28,6 +28,7 @@ class ResizeObserverMock {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({ language: "en" });
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
   attachmentApiMocks.isTauri.mockReturnValue(false);
   attachmentApiMocks.chatImportAttachment.mockReset();
   attachmentApiMocks.chatImportAttachmentData.mockReset();

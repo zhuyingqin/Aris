@@ -285,6 +285,129 @@ fn turn_summary_assistant_text_falls_back_to_thinking_only_output() {
 }
 
 #[test]
+fn summary_prompts_name_the_reasoning_label_and_keep_research_state() {
+    // The prompts are raw strings and cannot interpolate the label, so pin that
+    // the text they tell the summarizer about is the text it will see.
+    for prompt in [super::SUMMARY_SYSTEM_PROMPT, super::MAP_SUMMARY_SYSTEM_PROMPT] {
+        assert!(prompt.contains(super::SUMMARY_REASONING_LABEL), "{prompt}");
+        assert!(prompt.contains("arXiv IDs"), "{prompt}");
+        // Summary-aware clients recognize compaction requests by this phrase.
+        assert!(prompt.contains("compacting a long coding-assistant conversation"));
+    }
+    assert!(super::SUMMARY_SYSTEM_PROMPT.contains("## Research State"));
+}
+
+#[test]
+fn summarizer_transcript_labels_and_bounds_reasoning() {
+    let reasoning = format!("{}Settled on the loader fix.", "maybe the cache is stale. ".repeat(400));
+    let segments = super::build_transcript_segments(&[
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: reasoning,
+                signature: String::new(),
+            },
+            ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "read_file".to_string(),
+                input: "{}".to_string(),
+            },
+        ]),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "   ".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "The loader is fixed.".to_string(),
+            },
+        ]),
+    ]);
+
+    let reasoning_line = segments[0]
+        .lines()
+        .next()
+        .expect("reasoning line");
+    assert!(
+        reasoning_line.starts_with("assistant: [reasoning, not shown to the user] …"),
+        "{reasoning_line}"
+    );
+    // The tail survives: it is what led to the next action.
+    assert!(reasoning_line.ends_with("Settled on the loader fix."));
+    assert!(reasoning_line.chars().count() < super::MAX_SUMMARY_REASONING_CHARS + 80);
+    // Blank reasoning adds nothing; the visible answer is unlabelled.
+    assert_eq!(segments[1], "assistant: The loader is fixed.");
+}
+
+fn reasoning_step(thinking: &str, tool_id: &str) -> ConversationMessage {
+    ConversationMessage::assistant(vec![
+        ContentBlock::Thinking {
+            thinking: thinking.to_string(),
+            signature: String::new(),
+        },
+        ContentBlock::ToolUse {
+            id: tool_id.to_string(),
+            name: "read_file".to_string(),
+            input: "{}".to_string(),
+        },
+    ])
+}
+
+fn summary_of(assistant_messages: Vec<ConversationMessage>) -> TurnSummary {
+    TurnSummary {
+        iterations: assistant_messages.len(),
+        assistant_messages,
+        tool_results: Vec::new(),
+        usage: TokenUsage::default(),
+        auto_compaction: None,
+    }
+}
+
+#[test]
+fn turn_summary_assistant_text_omits_reasoning_from_tool_steps() {
+    // A reasoning model's tool loop: thinking + tool call, twice, then the
+    // answer. The thinking is chain of thought, not part of the answer the
+    // Reviewer judges or a review revision writes back into the session.
+    let summary = summary_of(vec![
+        reasoning_step("I should read the config first.", "tool-1"),
+        reasoning_step("The config is wrong; check the loader next.", "tool-2"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Fix complete.".to_string(),
+        }]),
+    ]);
+
+    assert_eq!(assistant_text_from_turn_summary(&summary), "Fix complete.");
+}
+
+#[test]
+fn turn_summary_assistant_text_uses_reasoning_only_for_the_closing_message() {
+    // The closing message streamed its answer as reasoning_content.
+    let summary = summary_of(vec![
+        ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: "Checking files.".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "read_file".to_string(),
+                input: "{}".to_string(),
+            },
+        ]),
+        ConversationMessage::assistant(vec![ContentBlock::Thinking {
+            thinking: "The chart shows a rising trend.".to_string(),
+            signature: String::new(),
+        }]),
+    ]);
+    assert_eq!(
+        assistant_text_from_turn_summary(&summary),
+        "Checking files.\n\nThe chart shows a rising trend."
+    );
+
+    // A turn that stopped on a tool step has no answer; its reasoning is not one.
+    let stopped = summary_of(vec![reasoning_step("Read the file next.", "tool-1")]);
+    assert_eq!(assistant_text_from_turn_summary(&stopped), "");
+}
+
+#[test]
 fn repeated_single_word_output_is_rejected() {
     let error = build_assistant_message(vec![
         AssistantEvent::TextDelta("loop ".repeat(120)),
@@ -5290,4 +5413,155 @@ fn evidence_ledger_observes_pristine_text_instead_of_the_context_projection() {
         observations.lock().expect("observations").as_slice(),
         ["new", "new"]
     );
+}
+
+/// Asks for `tool_calls` distinct `echo` calls, one per request, then answers.
+struct ToolLoopClient {
+    calls: usize,
+    tool_calls: usize,
+}
+
+impl ApiClient for ToolLoopClient {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.calls += 1;
+        if self.calls <= self.tool_calls {
+            return Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: format!("step-{}", self.calls),
+                    name: "echo".to_string(),
+                    input: format!("step {}", self.calls),
+                },
+                AssistantEvent::MessageStop,
+            ]);
+        }
+        Ok(vec![
+            AssistantEvent::TextDelta("done".to_string()),
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
+fn echo_tools() -> StaticToolExecutor {
+    StaticToolExecutor::new().register("echo", |input| Ok(format!("echoed {input}")))
+}
+
+#[test]
+fn many_tool_calls_in_a_roomy_window_do_not_compact_the_session() {
+    let session = session_with_four_large_turns();
+    let earlier_messages = session.messages.len();
+    let mut runtime = ConversationRuntime::new(
+        session,
+        ToolLoopClient {
+            calls: 0,
+            tool_calls: 45,
+        },
+        echo_tools(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".to_string()],
+    )
+    .with_max_iterations(100)
+    .with_context_compaction_estimated_tokens_threshold(1_000_000);
+
+    let summary = runtime
+        .run_turn("walk through every step", None)
+        .expect("turn completes");
+
+    // Past the tool-call interval, but at a few percent of the budget: there
+    // is nothing to gain from summarizing, so nothing is.
+    assert!(
+        summary.auto_compaction.is_none(),
+        "{:?}",
+        summary.auto_compaction
+    );
+    assert!(runtime.session().compactions.is_empty());
+    // Earlier turns, the request, 45 tool exchanges and the answer, verbatim.
+    assert_eq!(
+        runtime.session().messages.len(),
+        earlier_messages + 1 + 45 * 2 + 1
+    );
+}
+
+#[test]
+fn soft_checkpoint_under_pressure_keeps_the_previous_turn_verbatim() {
+    // One large finished turn, then a tool-heavy one whose fourteen messages
+    // are more than the overflow path's eight-message tail could keep.
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("old request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "old answer ".repeat(4_000),
+        }]));
+    session
+        .messages
+        .push(ConversationMessage::user_text("previous request"));
+    for step in 0..6 {
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: format!("previous-{step}"),
+                name: "echo".to_string(),
+                input: format!("previous {step}"),
+            }]));
+        session.messages.push(ConversationMessage::tool_result(
+            format!("previous-{step}"),
+            "echo",
+            format!("echoed previous {step}"),
+            false,
+        ));
+    }
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "previous answer".to_string(),
+        }]));
+    // ~75% of the budget: past the soft-checkpoint ratio, short of the point
+    // where the budget-time overflow path takes over.
+    let budget = crate::estimate_session_tokens(&session) * 4 / 3;
+    let mut runtime = ConversationRuntime::new(
+        session,
+        ToolLoopClient {
+            calls: 0,
+            tool_calls: 1,
+        },
+        echo_tools(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        Vec::new(),
+    )
+    .with_context_compaction_estimated_tokens_threshold(budget);
+
+    let summary = runtime
+        .run_turn("current request", None)
+        .expect("turn completes");
+
+    assert!(
+        summary
+            .auto_compaction
+            .is_some_and(|event| event.removed_message_count > 0),
+        "the large old turn should be summarized: {:?}",
+        summary.auto_compaction
+    );
+    let messages = &runtime.session().messages;
+    let user_texts = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .filter_map(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(!user_texts.contains(&"old request"), "{user_texts:?}");
+    assert!(user_texts.contains(&"previous request"), "{user_texts:?}");
+    assert!(user_texts.contains(&"current request"), "{user_texts:?}");
+    // Every earlier tool result survives verbatim, plus this turn's.
+    let tool_results = messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(tool_results, 7);
 }

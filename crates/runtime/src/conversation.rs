@@ -88,6 +88,8 @@ const MAX_PARALLEL_TOOL_BATCH: usize = 8;
 /// Long autonomous turns need continuity checkpoints well before the provider
 /// rejects an oversized request. This is deliberately a soft budget: it
 /// summarizes older completed exchanges but never stops a healthy tool call.
+/// Nothing fires below `DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO` of the budget;
+/// past it, this interval re-arms a checkpoint that token growth alone would not.
 const DEFAULT_SOFT_CHECKPOINT_TOOL_CALL_INTERVAL: usize = 40;
 const SOFT_CHECKPOINT_TOOL_CALLS_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_TOOL_CALLS";
 const DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO: f64 = 0.60;
@@ -664,12 +666,22 @@ pub struct TurnSummary {
     pub auto_compaction: Option<AutoCompactionEvent>,
 }
 
+/// The visible text of a finished turn: each iteration's answer text, in order.
+///
+/// Reasoning is used only for the turn's closing message, and only when that
+/// message has no text and requests no tool — the provider that streamed its
+/// answer as `reasoning_content`. An earlier thinking-only step, typically
+/// `[Thinking, ToolUse]` from a reasoning model, is chain of thought; letting it
+/// fall back here put every step's reasoning into the "answer" the independent
+/// Reviewer judged and that a review revision wrote back into the session.
 #[must_use]
 pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
+    let last_index = summary.assistant_messages.len().saturating_sub(1);
     summary
         .assistant_messages
         .iter()
-        .filter_map(|message| {
+        .enumerate()
+        .filter_map(|(index, message)| {
             let text = message
                 .blocks
                 .iter()
@@ -682,6 +694,14 @@ pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
             let text = text.trim();
             if !text.is_empty() {
                 return Some(text.to_string());
+            }
+            let closes_turn = index == last_index
+                && !message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+            if !closes_turn {
+                return None;
             }
             let thinking = message
                 .blocks
@@ -1326,10 +1346,16 @@ where
             let token_growth = ((self.context_compaction_estimated_tokens_threshold as f64)
                 * soft_checkpoint_token_growth_ratio)
                 .round() as usize;
-            let calls_due = turn_tool_calls.saturating_sub(last_soft_checkpoint_tool_calls)
-                >= soft_checkpoint_tool_call_interval;
+            // Both triggers need real context pressure. A tool-call count alone
+            // says nothing about how full the window is: forty small calls on a
+            // 1M-token model used to compact the whole session at a few percent
+            // of its budget, discarding verbatim history for no gain.
+            let under_pressure = estimated_tokens >= token_threshold.max(1);
+            let calls_due = under_pressure
+                && turn_tool_calls.saturating_sub(last_soft_checkpoint_tool_calls)
+                    >= soft_checkpoint_tool_call_interval;
             let tokens_due = turn_tool_calls > 0
-                && estimated_tokens >= token_threshold.max(1)
+                && under_pressure
                 && (last_soft_checkpoint_tokens == 0
                     || estimated_tokens.saturating_sub(last_soft_checkpoint_tokens)
                         >= token_growth.max(1));
@@ -2502,13 +2528,19 @@ where
         reason: &str,
     ) -> Option<AutoCompactionEvent> {
         let tokens_before = self.estimated_request_tokens();
-        let pristine = self.session.messages.clone();
-        let preserve = overflow_preserve_message_count(&self.session);
-        let event = self.compact_now(CompactionConfig::overflow(preserve))?;
-        self.restore_pristine_archive(&pristine, event.removed_message_count);
-        // The archive above retains complete tool I/O. The active projection
-        // can therefore be leaner without sacrificing session search or audit.
-        compact_context_history(&mut self.session, true);
+        // An ordinary compaction, not the overflow one. The window still has
+        // room, so the recent turns stay verbatim (token/turn-aware tail, never
+        // fewer than the last two user turns) and the full pinned context is
+        // carried. The overflow strategy — an eight-message tail, a minimal pin
+        // and lossy tool-history shrinking — is reserved for a request that is
+        // actually at or over the budget. When the recent turns are all there
+        // is, nothing is removed and the budget-time path takes over later.
+        let event = self.compact_now(CompactionConfig {
+            max_estimated_tokens: 0,
+            source: crate::compact::CompactionSource::Auto,
+            instruction: None,
+            ..CompactionConfig::default()
+        })?;
         let tokens_after = self.estimated_request_tokens();
         self.event_sink.emit(&RuntimeEvent {
             timestamp: now_iso8601(),
@@ -2923,10 +2955,12 @@ fn compaction_slice_hash(segments: &[String], instruction: Option<&str>) -> [u8;
 const SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
 Output one <summary>...</summary> block and nothing else.
 
-The summary must preserve the information needed to continue development after earlier messages are removed.
+The summary must preserve the information needed to continue development or research after earlier messages are removed.
 Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
 Do not invent details. If something is unknown, omit it.
-If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
+Keep research identifiers exact: paper titles, authors and years, DOIs, arXiv IDs, citation keys, dataset and model names, and numeric results with their units, settings, and the file or tool output they came from. Never invent, merge, or round a citation or a number; mark one you are unsure of as unverified.
+Lines marked [reasoning, not shown to the user] are the assistant's private deliberation. Use them only to understand intent and where work stopped; never record a hypothesis from them as an established fact, result, or decision.
+If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, Research State, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
 Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your latest assistant message is empty" when identifying the user's active goal.
 If a custom compaction instruction is supplied, prioritize it above the default compression priorities while still preserving the active task state and safety constraints.
 If the transcript contains a TodoWrite result, preserve its latest structured task statuses and unfinished items.
@@ -2970,6 +3004,13 @@ Inside <summary>, use this exact structure:
 ## Commands & Test Results
 - [Command]: [Result.]
 
+## Research State
+Leave this section out when the conversation involves no literature, data, experiments, or writing.
+- Sources: [title — authors, year — DOI / arXiv ID / citation key — what it was used to support; mark unverified ones.]
+- Results: [metric = value (units, setting, source file or tool output).]
+- Claims & evidence: [claim — supporting source or result — verified / unverified / contradicted.]
+- Drafts & artifacts: [paper sections, figures, tables, and their file paths, with status.]
+
 ## User Intent & Constraints
 - [Stable user requirements, preferences, and constraints.]
 
@@ -2987,6 +3028,8 @@ Inside <summary>, use this exact structure:
 const MAP_SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
 This is ONE SLICE of the transcript. Output one <summary>...</summary> block and nothing else.
 Preserve the concrete facts from THIS slice: file paths, commands, errors, decisions, constraints, user requests, and current task state. Do not invent details; if something is unknown, omit it.
+Keep research identifiers exact — paper titles, authors and years, DOIs, arXiv IDs, citation keys, and numeric results with their units and source — and never invent, merge, or round one.
+Lines marked [reasoning, not shown to the user] are private deliberation: use them for intent only, never as established facts.
 This partial summary will be merged with the summaries of the other slices, so keep it self-contained and factual rather than narrative.
 "#;
 
@@ -3018,6 +3061,23 @@ const MAX_MAP_REDUCE_DEPTH: usize = 3;
 /// number of cheap-model calls. Exhausting it falls back to the deterministic
 /// summary.
 const MAX_SUMMARY_CALLS: usize = 24;
+
+/// How reasoning appears in a summarizer transcript. The summary prompts refer
+/// to this exact text.
+const SUMMARY_REASONING_LABEL: &str = "[reasoning, not shown to the user]";
+
+/// Per-block cap on the reasoning a summarizer sees.
+const MAX_SUMMARY_REASONING_CHARS: usize = 2_000;
+
+/// The last `max_chars` characters of `text`, marked when anything was cut.
+fn char_tail(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let tail = text.chars().skip(total - max_chars).collect::<String>();
+    format!("…{tail}")
+}
 
 /// Floor for the overflow pinned block's char budget, so the latest user request
 /// survives even when the shrink budget is tiny. Bounded overall by
@@ -3089,7 +3149,18 @@ fn build_transcript_segments(removed: &[ConversationMessage]) -> Vec<String> {
         for block in &message.blocks {
             let line = match block {
                 ContentBlock::Text { text } => text.clone(),
-                ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+                // Labelled, because the summarizer cannot otherwise tell a
+                // rejected hypothesis from something the assistant told the
+                // user; bounded, because one turn's reasoning can outweigh the
+                // whole visible exchange. The tail is kept: it is the part
+                // that led to the next action.
+                ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                    format!(
+                        "{SUMMARY_REASONING_LABEL} {}",
+                        char_tail(thinking.trim(), MAX_SUMMARY_REASONING_CHARS)
+                    )
+                }
+                ContentBlock::Thinking { .. } => String::new(),
                 ContentBlock::ToolUse { name, input, .. } => format!("[tool_use {name}] {input}"),
                 ContentBlock::ToolResult {
                     tool_name,

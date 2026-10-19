@@ -1744,8 +1744,11 @@ impl LatexRepairGuard {
         // having been made; counting those exhausts the allowance and then
         // blocks the compile that would have verified the real fix.
         if failed
-            && crate::tool_output::latex_failure_class(output)
-                == crate::tool_output::LatexFailureClass::Environment
+            && matches!(
+                crate::tool_output::latex_failure_class(output),
+                crate::tool_output::LatexFailureClass::Environment
+                    | crate::tool_output::LatexFailureClass::Process
+            )
         {
             return;
         }
@@ -2905,7 +2908,7 @@ pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
         BuiltinToolAvailability {
             name: "WebSearch".to_string(),
             available: true,
-            reason: "Built-in Bocha general search, Zhihu community search, and DuckDuckGo fallback are available."
+            reason: "DeepSeek web search uses the signed-in SomniQ API token; New API checks membership and bills successful searches."
                 .to_string(),
         },
         BuiltinToolAvailability {
@@ -2920,7 +2923,7 @@ pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
 #[tauri::command]
 pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvailability>, String> {
     let providers = [
-        ("Bocha", "bocha"),
+        ("DeepSeek", "deepseek"),
         ("Zhihu", "zhihu"),
         ("OpenAlex", "openalex"),
     ];
@@ -10780,20 +10783,10 @@ fn resolve_summarizer_config(
     }))
 }
 
-fn save_config_object(obj: &serde_json::Map<String, Value>) -> Result<(), String> {
-    let path = crate::state::config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body =
-        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
-    fs::write(path, body).map_err(|e| e.to_string())
-}
-
 fn set_config_string(key: &str, value: String) -> Result<(), String> {
     let mut obj = crate::config::load_object();
     obj.insert(key.to_string(), Value::String(value));
-    save_config_object(&obj)
+    crate::config::save_object(&obj)
 }
 
 fn resolve_desktop_model_alias(model: &str, provider: Option<&str>) -> String {

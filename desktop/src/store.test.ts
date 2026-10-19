@@ -86,7 +86,7 @@ describe("model preference on login", () => {
     authMocks.configGet.mockReset().mockResolvedValue({ executorModel: null });
     authMocks.configSet.mockReset().mockResolvedValue(undefined);
     authMocks.newapiLogin.mockReset().mockImplementation(async (_server: string, model: string) => ({
-      model, baseUrl: "https://model-gateway.example/v1", token: "test-token",
+      model, baseUrl: "https://model-gateway.example/v1",
     }));
   });
 
@@ -98,6 +98,14 @@ describe("model preference on login", () => {
 
     expect(authMocks.newapiLogin).toHaveBeenCalledWith(DEFAULT_AUTH_SERVER, "gpt-6.1-sol", "reader", "test-password", undefined);
     expect(authMocks.configSet).toHaveBeenCalledWith(expect.objectContaining({ executorModel: "gpt-6.1-sol" }));
+  });
+
+  it("never passes the account model key through the webview", async () => {
+    const { DEFAULT_AUTH_SERVER, useStore } = await import("./store");
+
+    await useStore.getState().login(DEFAULT_AUTH_SERVER, "reader", "test-password");
+
+    expect(authMocks.configSet).toHaveBeenCalledWith(expect.not.objectContaining({ executorApiKey: expect.anything() }));
   });
 
   it("uses the initial model only when no previous model has been saved", async () => {

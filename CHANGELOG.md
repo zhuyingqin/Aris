@@ -1,5 +1,43 @@
 # ARIS-Code Changelog
 
+## v0.4.84 (2026-10-19)
+
+- **DeepSeek search through the SomniQ account** — WebSearch now uses New API's
+  managed DeepSeek search route, with account authentication and the published
+  one-credit price for successful nonempty searches. Each batch sends one
+  request without automatic query expansion or retries. Account-scoped caching,
+  explicit permission/quota errors and bounded result-window reporting preserve
+  the search evidence. WebFetch continues to retrieve and parse original pages
+  locally, without calling DeepSeek Fetch.
+- **Account-managed connections and protected credentials** — Desktop uses the
+  signed-in account for model and research services. Third-party key entry and
+  connection testing are removed; legacy settings are cleaned during migration.
+  The managed model key stays in the operating-system credential store and
+  process memory, rather than config files or agent subprocess environments.
+  Executor and independent Reviewer model selection remain separate.
+- **Allowance refresh follows real activity** — opening the account menu,
+  completing a chat or drawing, and retrying a failed refresh read the server's
+  confirmed allowance. Overlapping requests coalesce without losing completion
+  events, and late responses cannot restore a signed-out account.
+- **Reliable thinking and tool continuation** — Claude thinking requests follow
+  the model's manual/adaptive protocol and supported effort levels. Required
+  OpenAI-compatible reasoning content survives tool calls, compaction and
+  session reloads. Summaries label internal reasoning rather than presenting it
+  as a user-visible conclusion.
+- **Safer Chat input and reading** — confirming macOS input-method candidates
+  no longer submits the draft or activates a suggestion. Long sent messages
+  have a persistent expand/collapse preview while copy and edit retain the full
+  text. Account menus remain usable when the embedded Code controls reconnect.
+- **LaTeX builds and library navigation** — compilation uses a shared ten-minute
+  default budget with a saved per-project override. All passes consume the same
+  budget; timeouts and cancellation keep diagnostics without triggering source
+  repair or another build. The library preserves nested source folders, saved
+  expansion, search navigation and document actions.
+- **Release consistency** — updated SomniQ icons accompany version 0.4.84 across
+  desktop and shared Rust manifests, lockfiles and README badges. Windows x64
+  and macOS universal packages retain signed updater artifacts and a combined
+  update manifest.
+
 ## v0.4.83 (2026-10-17)
 
 - **Scopus works off campus** — Scopus searches can go through the SomniQ

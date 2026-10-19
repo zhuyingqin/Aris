@@ -5,8 +5,27 @@
 //! session lives in the desktop's credential store and renews asynchronously,
 //! so `tools` cannot read it directly: the desktop registers a provider at
 //! startup. Without one (tests, headless callers) nobody is signed in.
+//! Account-billed tools such as DeepSeek search use the provider's separate
+//! downstream API credential; the dashboard session is never substituted.
 
 use std::sync::{Arc, OnceLock, RwLock};
+
+/// The account's downstream API token, used for account-billed tools. This is
+/// distinct from the dashboard access token used by institutional routes.
+#[derive(Clone)]
+pub struct ResearchApiCredential {
+    pub issuer: String,
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for ResearchApiCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResearchApiCredential")
+            .field("issuer", &self.issuer)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
 
 /// A currently valid account credential.
 #[derive(Clone)]
@@ -36,6 +55,12 @@ pub trait ResearchAccountProvider: Send + Sync {
     /// A currently valid credential, renewing it when needed. Blocks; call it
     /// from a blocking context. `Ok(None)` means signed out.
     fn credential(&self) -> Result<Option<ResearchAccountCredential>, String>;
+
+    /// The signed-in account's model API token. Never substitute a dashboard
+    /// JWT or refresh cookie. Headless callers without an account return None.
+    fn api_credential(&self) -> Result<Option<ResearchApiCredential>, String> {
+        Ok(None)
+    }
 }
 
 fn provider_slot() -> &'static RwLock<Option<Arc<dyn ResearchAccountProvider>>> {

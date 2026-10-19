@@ -16,6 +16,7 @@ import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 import { groupChatModels } from "./modelGroups";
 import { reasoningLevelName } from "./reasoningLevels";
+import { useMacImeGuard } from "./useMacImeGuard";
 import "./ChatComposerGit.css";
 import "./ChatComposerModel.css";
 import "./ChatComposerLayout.css";
@@ -411,6 +412,7 @@ function ChatComposer({
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const macIme = useMacImeGuard();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activePickerItemRef = useRef<HTMLButtonElement | null>(null);
   const [pickerMode, setPickerMode] = useState<"skill" | "file" | null>(null);
@@ -910,6 +912,10 @@ function ChatComposer({
           value={input}
           aria-busy={busy}
           placeholder={ready ? copy.messagePlaceholder : copy.configurePlaceholder}
+          onCompositionStart={macIme.onCompositionStart}
+          onCompositionEnd={macIme.onCompositionEnd}
+          onKeyUp={macIme.onKeyUp}
+          onBlur={macIme.onBlur}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -923,6 +929,9 @@ function ChatComposer({
             }
           }}
           onKeyDown={(event) => {
+            // Do not preventDefault: the input method still needs this key to
+            // confirm text or navigate its own candidates.
+            if (macIme.isImeKeyDown(event)) return;
             if (pickerMode) {
               if (event.key === "ArrowDown") {
                 event.preventDefault();

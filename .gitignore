@@ -88,3 +88,9 @@ site/temp_release_*/
 /docs/business/
 desktop/public/figure-editor/
 desktop/public/pdfjs/
+
+# Generated local evaluation data and Python bytecode
+/output/
+/.chart-data-*/
+__pycache__/
+*.py[cod]

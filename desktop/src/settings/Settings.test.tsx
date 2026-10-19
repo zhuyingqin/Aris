@@ -45,7 +45,7 @@ describe("Settings account and usage", () => {
     expect(profilePage).toHaveProperty("hidden", false);
   });
 
-  it("exposes the optional research proxy and search-provider keys", () => {
+  it("keeps research services available without third-party API-key inputs", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "models");
     render(<Settings />);
 
@@ -56,18 +56,29 @@ describe("Settings account and usage", () => {
     expect(screen.queryByText("账户模型变更立即生效，连接参数保存后生效。")).toBeNull();
     expect(screen.getByRole("heading", { name: "辅助模型" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "网络与社区搜索" })).toBeTruthy();
+    expect(screen.getByText(/DeepSeek 搜索使用当前 SomniQ 账号/)).toBeTruthy();
     expect(screen.queryByPlaceholderText("粘贴 Bocha API Key")).toBeNull();
-    expect(screen.getByText("Brave Search 密钥")).toBeTruthy();
-    expect(screen.getByText("Exa 密钥")).toBeTruthy();
+    expect(screen.queryByText("Brave Search 密钥")).toBeNull();
+    expect(screen.queryByText("Exa 密钥")).toBeNull();
     const proxyInput = screen.getByPlaceholderText("例如 http://127.0.0.1:10808");
-    const braveInput = screen.getByPlaceholderText("粘贴 Brave Search API 密钥");
-    const exaInput = screen.getByPlaceholderText("粘贴 Exa API 密钥");
+    expect(screen.queryByPlaceholderText("粘贴 Elsevier 密钥")).toBeNull();
+    expect(screen.queryByRole("option", { name: "手动配置" })).toBeNull();
+    expect(screen.queryAllByPlaceholderText(/粘贴.*密钥|粘贴.*API Key/)).toHaveLength(0);
     fireEvent.change(proxyInput, { target: { value: "http://127.0.0.1:10808" } });
-    fireEvent.change(braveInput, { target: { value: "brave-test-key" } });
-    fireEvent.change(exaInput, { target: { value: "exa-test-key" } });
     expect((proxyInput as HTMLInputElement).value).toBe("http://127.0.0.1:10808");
-    expect((braveInput as HTMLInputElement).value).toBe("brave-test-key");
-    expect((exaInput as HTMLInputElement).value).toBe("exa-test-key");
+  });
+
+  it("starts the review mode on the resident Reviewer and switches it locally in the browser preview", () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "models");
+    const configSet = vi.spyOn(tauri, "configSet");
+    render(<Settings />);
+
+    const mode = screen.getByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
+    expect(mode.value).toBe("thread");
+    expect([...mode.options].map((option) => option.value)).toEqual(["thread", "oneshot"]);
+    fireEvent.change(mode, { target: { value: "oneshot" } });
+    expect(mode.value).toBe("oneshot");
+    expect(configSet).not.toHaveBeenCalled();
   });
 
   it("starts the review mode on the resident Reviewer and switches it locally in the browser preview", () => {
@@ -268,7 +279,7 @@ describe("Settings account and usage", () => {
     useStore.getState().setHideMail(false);
     sessionStorage.setItem("somniq-settings-tab-request", "models");
     const { container } = render(<Settings />);
-    fireEvent.change(screen.getByPlaceholderText("粘贴 Elsevier 密钥"), { target: { value: "pending-key" } });
+    fireEvent.change(screen.getByPlaceholderText("例如 http://127.0.0.1:10808"), { target: { value: "http://127.0.0.1:20808" } });
 
     fireEvent.click(screen.getByRole("tab", { name: "邮箱" }));
     fireEvent.change(screen.getByPlaceholderText("name@example.com"), { target: { value: "draft@example.com" } });
@@ -284,7 +295,7 @@ describe("Settings account and usage", () => {
     expect(screen.queryByRole("heading", { level: 1, name: "邮箱连接" })).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "模型服务" }));
-    expect(screen.getByPlaceholderText("粘贴 Elsevier 密钥")).toHaveProperty("value", "pending-key");
+    expect(screen.getByPlaceholderText("例如 http://127.0.0.1:10808")).toHaveProperty("value", "http://127.0.0.1:20808");
     fireEvent.click(screen.getByRole("tab", { name: "邮箱" }));
     expect(screen.getByPlaceholderText("name@example.com")).toHaveProperty("value", "draft@example.com");
     expect(screen.getByPlaceholderText("imap.example.com")).toHaveProperty("value", "imap.draft.test");

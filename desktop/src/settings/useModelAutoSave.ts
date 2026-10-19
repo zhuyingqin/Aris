@@ -5,21 +5,12 @@ import { useStore, type Language } from "../store";
 import { formatUserFacingError } from "../errorMessage";
 import { notifyChatModelsUpdated } from "../modelEvents";
 
-const MODEL_FIELDS = ["summarizerProvider", "summarizerModel", "summarizerBaseUrl", "retrievalCardModel", "webProxyUrl"] as const;
-type SecretField = "summarizerApiKey" | "scopusApiKey" | "braveSearchApiKey" | "exaApiKey";
-interface SecretDraft {
-  field: SecretField;
-  present: "hasSummarizerKey" | "hasScopusKey" | "hasBraveSearchKey" | "hasExaKey";
-  masked: "summarizerKeyMasked" | "scopusKeyMasked" | "braveSearchKeyMasked" | "exaKeyMasked";
-  value: string;
-  setValue: Dispatch<SetStateAction<string>>;
-}
+const MODEL_FIELDS = ["summarizerModel", "retrievalCardModel", "webProxyUrl"] as const;
 interface Params {
   configView: ConfigView | null;
   setConfigView: Dispatch<SetStateAction<ConfigView | null>>;
   draft: ConfigPatch;
   setDraft: Dispatch<SetStateAction<ConfigPatch>>;
-  secrets: SecretDraft[];
   language: Language;
 }
 
@@ -38,11 +29,8 @@ export function useModelAutoSave(params: Params) {
       const value = params.draft[field];
       if (value !== undefined && value !== (params.configView[field] ?? "")) patch[field] = value;
     }
-    for (const secret of params.secrets) {
-      if (secret.value.trim()) patch[secret.field] = secret.value.trim();
-    }
   }
-  // This snapshot stays in memory, including pending secret edits; never log it.
+  // Save only the supported model preferences.
   const snapshot = JSON.stringify(patch);
   const latestSnapshot = useRef(snapshot);
   latestSnapshot.current = snapshot;
@@ -73,24 +61,12 @@ export function useModelAutoSave(params: Params) {
             for (const field of MODEL_FIELDS) {
               if (submitted[field] !== undefined) confirmed[field] = submitted[field];
             }
-            for (const secret of current.secrets) {
-              if (submitted[secret.field] !== undefined) {
-                confirmed[secret.present] = true;
-                confirmed[secret.masked] = "••••";
-              }
-            }
           }
           notifyChatModelsUpdated();
           if (!mounted.current) return;
           let updates: Partial<ConfigView> = {};
           for (const field of MODEL_FIELDS) {
             if (submitted[field] !== undefined) updates = { ...updates, [field]: confirmed[field] };
-          }
-          for (const secret of latest.current.secrets) {
-            const value = submitted[secret.field];
-            if (value === undefined) continue;
-            updates = { ...updates, [secret.present]: confirmed[secret.present], [secret.masked]: confirmed[secret.masked] };
-            secret.setValue((draft) => draft.trim() === value ? "" : draft);
           }
           latest.current.setConfigView((view) => view ? { ...view, ...updates } : view);
           latest.current.setDraft((draft) => {

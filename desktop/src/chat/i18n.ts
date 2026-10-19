@@ -59,6 +59,8 @@ export const CHAT_COPY: Record<Language, {
   copy: string;
   copied: string;
   editAndResend: string;
+  expandMessage: string;
+  collapseMessage: string;
   continue: string;
   image: string;
   file: string;
@@ -127,6 +129,8 @@ export const CHAT_COPY: Record<Language, {
     copy: "复制",
     copied: "已复制",
     editAndResend: "编辑并重新发送",
+    expandMessage: "展开全文",
+    collapseMessage: "收起",
     continue: "继续",
     image: "图片",
     file: "文件",
@@ -195,6 +199,8 @@ export const CHAT_COPY: Record<Language, {
     copy: "Copy",
     copied: "Copied",
     editAndResend: "Edit and resend",
+    expandMessage: "Show more",
+    collapseMessage: "Show less",
     continue: "Continue",
     image: "Image",
     file: "File",

@@ -7,7 +7,7 @@ import {
 import { hasNativeBackend } from "../api/transport";
 import { isManagedAuthInvalidError, useStore } from "../store";
 import { formatUserFacingError } from "../errorMessage";
-import { readCachedAccount, writeCachedAccount } from "../accountCache";
+import { getAccountSessionRevision, readCachedAccount, subscribeCachedAccount, writeCachedAccount } from "../accountCache";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "../settingsTabRequest";
 import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
@@ -78,6 +78,7 @@ export default function Settings() {
   const [account, setAccount] = useState<NewApiAccount | null>(() => hasNativeBackend() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
+  const accountRequestRef = useRef(0);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
   // Keep forms mounted after their first visit so category switches retain drafts.
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set([activeSettingsTab]));
@@ -85,6 +86,19 @@ export default function Settings() {
   const navRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const scrollPositions = useRef(new Map<SettingsTab, number>());
+
+  useEffect(() => {
+    const unsubscribe = subscribeCachedAccount((next) => {
+      setAccount(next);
+      setAccountError("");
+      setManagedModels(next?.models ?? []);
+      setConfigView((current) => current ? { ...current, managedModels: next?.models ?? [] } : current);
+    });
+    return () => {
+      accountRequestRef.current += 1;
+      unsubscribe();
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = scrollPositions.current.get(activeSettingsTab) ?? 0;
@@ -133,9 +147,14 @@ export default function Settings() {
     }
     setAccountLoading(true);
     setAccountError("");
+    const request = ++accountRequestRef.current;
+    const session = getAccountSessionRevision();
+    const isCurrent = () => accountRequestRef.current === request && getAccountSessionRevision() === session;
     try {
-      applyRefreshedAccount(await newapiBootstrap());
+      const next = await newapiBootstrap();
+      if (isCurrent()) applyRefreshedAccount(next);
     } catch (error) {
+      if (!isCurrent()) return;
       const message = formatUserFacingError(error, language);
       setAccountError(message);
       if (isManagedAuthInvalidError(error)) {
@@ -144,7 +163,7 @@ export default function Settings() {
         logout();
       }
     } finally {
-      setAccountLoading(false);
+      if (accountRequestRef.current === request) setAccountLoading(false);
     }
   };
 

@@ -64,6 +64,89 @@ fn uncapped_artifact_request_follows_chat_and_keeps_light_reasoning() {
     assert_eq!(payload["reasoning_effort"], "low");
 }
 
+#[test]
+fn a_401_is_retried_once_with_the_recovered_key() {
+    // The hook is process-wide; it only ever replaces this test's stale key.
+    set_credential_recovery_hook(Box::new(|_base_url, rejected| {
+        Box::pin(async move { (rejected == "stale-key").then(|| "fresh-key".to_string()) })
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let rejected = read_mock_http_request(&mut stream);
+        write_mock_http_response(&mut stream, "401 Unauthorized", r#"{"error":{"message":"invalid token"}}"#);
+        drop(stream);
+        let (mut stream, _) = listener.accept().unwrap();
+        let retried = read_mock_http_request(&mut stream);
+        write_mock_sse_success(&mut stream);
+        (rejected, retried)
+    });
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig { api_key: "stale-key".into(), base_url: format!("http://{address}/v1") },
+        "MiniMax-M3".into(),
+        false,
+        vec![],
+        Box::new(crate::NoopStreamObserver),
+    )
+    .unwrap()
+    .with_transport(OpenAiTransport::ChatCompletions);
+    let request = ApiRequest {
+        system_prompt: vec![],
+        messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "hi".into() }])],
+    };
+
+    client.stream(request).expect("the retried request succeeds");
+    let (rejected, retried) = server.join().unwrap();
+    assert!(rejected.to_ascii_lowercase().contains("authorization: bearer stale-key"));
+    assert!(retried.to_ascii_lowercase().contains("authorization: bearer fresh-key"));
+    assert_eq!(client.api_key, "fresh-key", "later requests keep the recovered key");
+}
+
+#[test]
+fn a_401_without_a_replacement_key_is_not_resent() {
+    set_credential_recovery_hook(Box::new(|_base_url, rejected| {
+        Box::pin(async move { (rejected == "stale-key").then(|| "fresh-key".to_string()) })
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_mock_http_request(&mut stream);
+        write_mock_http_response(&mut stream, "401 Unauthorized", r#"{"error":{"message":"invalid token"}}"#);
+        drop(stream);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let mut resends = 0;
+        while std::time::Instant::now() < deadline {
+            if let Ok((mut stream, _)) = listener.accept() {
+                resends += 1;
+                write_mock_http_response(&mut stream, "401 Unauthorized", "{}");
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        resends
+    });
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig { api_key: "own-key".into(), base_url: format!("http://{address}/v1") },
+        "MiniMax-M3".into(),
+        false,
+        vec![],
+        Box::new(crate::NoopStreamObserver),
+    )
+    .unwrap()
+    .with_transport(OpenAiTransport::ChatCompletions)
+    .with_single_request(1024);
+    let request = ApiRequest {
+        system_prompt: vec![],
+        messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "hi".into() }])],
+    };
+
+    let error = client.stream(request).unwrap_err();
+    assert!(error.to_string().contains("401"));
+    assert_eq!(server.join().unwrap(), 0);
+}
+
 fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -1990,6 +2073,10 @@ fn deepseek_tool_reasoning_survives_stream_compaction_and_session_reload() {
                     Err(error) => panic!("accept: {error}"),
                 }
             };
+            // Winsock hands an accepted socket the listener's non-blocking
+            // mode; without this a read that runs ahead of the client fails
+            // with WouldBlock whenever the machine is busy.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -2742,4 +2829,253 @@ fn artifact_long_header_wait_can_still_be_cancelled_without_resending() {
     assert_eq!(server.join().unwrap(), 1);
     assert!(error.to_string().contains("interrupted by user"), "{error}");
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// One tool step that returned a screenshot next to a plain text result.
+fn tool_image_turn() -> Vec<ConversationMessage> {
+    vec![
+        ConversationMessage::user_text("what does the chart show?"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "call-shot".into(),
+                name: "read_file".into(),
+                input: r#"{"path":"chart.png"}"#.into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call-list".into(),
+                name: "bash".into(),
+                input: r#"{"command":"ls"}"#.into(),
+            },
+        ]),
+        ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call-shot".into(),
+                    tool_name: "read_file".into(),
+                    output: "Read `chart.png` as an image (image/png, 5 bytes). The image content is attached to this turn as an image block.".into(),
+                    is_error: false,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call-list".into(),
+                    tool_name: "bash".into(),
+                    output: "chart.png".into(),
+                    is_error: false,
+                },
+            ],
+            usage: None,
+        },
+    ]
+}
+
+fn item_kind(item: &Value) -> &str {
+    item.get("type")
+        .or_else(|| item.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+#[test]
+fn chat_completions_replays_tool_images_after_every_tool_result() {
+    let result = convert_messages_openai(&tool_image_turn(), None, "gpt-5.6-sol");
+
+    // The image may not split the tool results: every `tool` message has to
+    // follow the assistant's tool_calls directly.
+    let kinds = result.iter().map(item_kind).collect::<Vec<_>>();
+    assert_eq!(kinds, ["user", "assistant", "tool", "tool", "user"]);
+    let content = result[4]["content"].as_array().expect("image message parts");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["text"], "Image from `read_file`:");
+    assert_eq!(content[2]["type"], "image_url");
+    assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,aW1hZ2U=");
+}
+
+#[test]
+fn responses_replays_tool_images_after_every_function_call_output() {
+    let result = convert_messages_responses(&tool_image_turn(), "gpt-5.6-sol");
+
+    let kinds = result.iter().map(item_kind).collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "user",
+            "function_call",
+            "function_call",
+            "function_call_output",
+            "function_call_output",
+            "user",
+        ]
+    );
+    let content = result[5]["content"].as_array().expect("image message parts");
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[1]["text"], "Image from `read_file`:");
+    assert_eq!(content[2]["type"], "input_image");
+    assert_eq!(content[2]["image_url"], "data:image/png;base64,aW1hZ2U=");
+}
+
+#[test]
+fn tool_images_wait_until_every_pending_call_is_answered() {
+    let mut messages = tool_image_turn();
+    // Interrupted after the screenshot: the second call never got a result.
+    messages
+        .last_mut()
+        .expect("tool message")
+        .blocks
+        .truncate(2);
+    messages.push(ConversationMessage::user_text("continue"));
+
+    let result = convert_messages_openai(&messages, None, "gpt-5.6-sol");
+
+    let kinds = result.iter().map(item_kind).collect::<Vec<_>>();
+    assert_eq!(kinds, ["user", "assistant", "tool", "tool", "user", "user"]);
+    assert!(result[3]["content"]
+        .as_str()
+        .is_some_and(|text| text.contains("Tool execution stopped")));
+    assert_eq!(result[4]["content"][2]["type"], "image_url");
+    assert_eq!(result[5]["content"], "continue");
+}
+
+#[test]
+fn image_input_rejection_separates_text_only_models_from_bad_images() {
+    // A model that takes no images: resend without them, and remember it.
+    for body in [
+        r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[3]: unknown variant `image_url`, expected `text` at line 1 column 912","type":"invalid_request_error"}}"#,
+        r#"{"error":{"message":"Invalid content type. image_url is only supported by certain models.","type":"invalid_request_error"}}"#,
+        r#"{"object":"error","message":"qwen3-coder is not a multimodal model","type":"BadRequestError"}"#,
+        r#"{"error":{"message":"This model does not support image input."}}"#,
+    ] {
+        assert!(is_image_input_rejected(body), "{body}");
+        assert!(is_image_input_unsupported(body), "{body}");
+    }
+    // One unusable image on a vision model: resend this request only.
+    for body in [
+        r#"{"error":{"message":"Invalid image: failed to decode base64 data"}}"#,
+        r#"{"error":{"message":"Unsupported image format image/tiff"}}"#,
+    ] {
+        assert!(is_image_input_rejected(body), "{body}");
+        assert!(!is_image_input_unsupported(body), "{body}");
+    }
+    // Not about images, or an overflow the conversation loop must compact for.
+    for body in [
+        r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort'"}}"#,
+        r#"{"error":{"message":"This model's maximum context length is 128000 tokens; the request is too large (including images).","code":"context_length_exceeded"}}"#,
+        "",
+    ] {
+        assert!(!is_image_input_rejected(body), "{body}");
+    }
+}
+
+#[test]
+fn stripping_images_leaves_a_note_in_both_request_shapes() {
+    let mut body = json!({
+        "messages": [
+            { "role": "user", "content": "plain text stays a string" },
+            { "role": "user", "content": [
+                { "type": "text", "text": "look" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } },
+            ] },
+        ],
+        "input": [
+            { "role": "user", "content": [
+                { "type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,AA==" },
+            ] },
+        ],
+    });
+
+    assert!(strip_image_parts_from_body(&mut body));
+    assert_eq!(
+        body["messages"][1]["content"][1],
+        json!({ "type": "text", "text": OMITTED_IMAGE_NOTE })
+    );
+    assert_eq!(body["messages"][1]["content"][0]["text"], "look");
+    assert_eq!(
+        body["input"][0]["content"][0],
+        json!({ "type": "input_text", "text": OMITTED_IMAGE_NOTE })
+    );
+    assert!(!body.to_string().contains("base64"));
+    assert!(!strip_image_parts_from_body(&mut body), "nothing left to strip");
+}
+
+/// Serve one image rejection, then two successes. Returns the raw requests:
+/// the rejected one, then the resend and a later request from a fresh client
+/// for the same endpoint and model.
+fn run_image_rejection_gateway(model: &str, rejection: &'static str) -> (String, Vec<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut first, _) = listener.accept().expect("first request");
+        let first_request = read_mock_http_request(&mut first);
+        write_mock_http_response(&mut first, "400 Bad Request", rejection);
+        let mut later = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("later request");
+            later.push(read_mock_http_request(&mut stream));
+            write_mock_sse_success(&mut stream);
+        }
+        (first_request, later)
+    });
+
+    let base_url = format!("http://{address}/v1");
+    let new_client = || {
+        OpenAIRuntimeClient::new(
+            OpenAIExecutorConfig {
+                api_key: "test-key".to_string(),
+                base_url: base_url.clone(),
+            },
+            model.to_string(),
+            false,
+            Vec::new(),
+            Box::new(crate::NoopStreamObserver),
+        )
+        .expect("OpenAI client")
+        .with_transport(OpenAiTransport::ChatCompletions)
+    };
+    let request = || ApiRequest {
+        system_prompt: Vec::new(),
+        messages: tool_image_turn(),
+    };
+    let events = new_client()
+        .stream(request())
+        .expect("the image-free resend should succeed");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "ok")));
+    new_client()
+        .stream(request())
+        .expect("a later request should succeed");
+    server.join().expect("mock gateway thread")
+}
+
+#[test]
+fn text_only_endpoint_gets_tool_images_as_notes_for_the_rest_of_the_process() {
+    let (rejected, later) = run_image_rejection_gateway(
+        "text-only-image-fallback-model",
+        r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[4]: unknown variant `image_url`, expected `text`","type":"invalid_request_error"}}"#,
+    );
+
+    assert!(rejected.contains("image_url"));
+    // The resend, and a fresh client's first request: neither pays the 400
+    // again, and both tell the model an image existed.
+    for request in &later {
+        assert!(!request.contains("image_url"), "{request}");
+        assert!(request.contains("Image omitted"), "{request}");
+    }
+}
+
+#[test]
+fn one_bad_image_does_not_mark_a_vision_endpoint_text_only() {
+    let (rejected, later) = run_image_rejection_gateway(
+        "vision-bad-image-fallback-model",
+        r#"{"error":{"message":"Invalid image: failed to decode base64 data"}}"#,
+    );
+
+    assert!(rejected.contains("image_url"));
+    assert!(!later[0].contains("image_url"), "{}", later[0]);
+    assert!(later[0].contains("Image omitted"));
+    // The next request still sends images: the endpoint itself takes them.
+    assert!(later[1].contains("image_url"), "{}", later[1]);
 }

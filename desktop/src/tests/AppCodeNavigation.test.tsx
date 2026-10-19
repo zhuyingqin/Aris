@@ -8,9 +8,13 @@ import { useStore } from "../store";
 import App from "../App";
 
 const bridge = vi.hoisted(() => ({
+  accountRefreshing: false,
   action: null as ((action: CodeShellAction) => void) | null,
   connection: null as ((connected: boolean) => void) | null,
   ready: null as ((revision: number) => void) | null,
+}));
+vi.mock("../useAccountRefresh", () => ({
+  useAccountRefresh: () => ({ account: null, refreshing: bridge.accountRefreshing, error: null, refresh: async () => {} }),
 }));
 vi.mock("../api/tauri", async (original) => ({
   ...await original<typeof import("../api/tauri")>(),
@@ -38,6 +42,7 @@ vi.mock("../workflows/Workflows", () => ({ default: () => null }));
 
 const originalState = useStore.getState();
 beforeEach(() => {
+  bridge.accountRefreshing = false;
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   useStore.setState({ ...originalState, tab: "lab", language: "cn", init: () => () => {}, error: null });
 });
@@ -106,6 +111,25 @@ describe("Code module navigation in the app shell", () => {
     await waitFor(() => expect(screen.getByRole("menu", { name: "用户菜单" })).toBe(menu));
     expect(menu.closest("[hidden]")).toBeNull();
     expect(view.container.querySelector<HTMLElement>(".app-head")?.hidden).toBe(true);
+  });
+
+  it("keeps settings and sign out reachable by keyboard while allowance is refreshing", async () => {
+    bridge.accountRefreshing = true;
+    const user = userEvent.setup();
+    await readyApp();
+    act(() => bridge.connection?.(false));
+    const trigger = screen.getByRole("button", { name: "用户菜单" });
+    await user.click(trigger);
+    expect(screen.getByRole("button", { name: "正在刷新额度" })).toHaveProperty("disabled", true);
+    const settings = screen.getByRole("menuitem", { name: /设置/ });
+    await waitFor(() => expect(document.activeElement).toBe(settings));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "退出登录" }));
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(settings);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "用户菜单" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("switches the visible workspace when a native editor action arrives and can return to Code", async () => {

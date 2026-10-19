@@ -23,6 +23,7 @@ mod knowledge;
 mod literature;
 mod paper_reading;
 mod mail;
+mod managed_key;
 mod mcp;
 mod membership;
 mod memory;
@@ -556,6 +557,14 @@ fn install_transport_verdict_hook() {
     }));
 }
 
+/// Let the executor swap in a re-fetched account model key when the gateway
+/// answers 401, instead of failing the turn (see `newapi::replace_rejected_model_key`).
+fn install_credential_recovery_hook() {
+    aris_executor::set_credential_recovery_hook(Box::new(|base_url, rejected_key| {
+        Box::pin(newapi::replace_rejected_model_key(base_url, rejected_key))
+    }));
+}
+
 /// Run one prompt through the real Desktop Chat engine when explicitly
 /// requested by an environment variable. This is intentionally opt-in and
 /// headless-friendly so diagnostics can exercise SomniQ itself without a
@@ -712,14 +721,23 @@ pub fn run() {
             if let Err(error) = newapi::retire_legacy_managed_session() {
                 eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
             }
+            // Before any reader exports config-held keys: an older build kept
+            // the account model key in config.json.
+            if let Err(error) = config::move_managed_key_to_credential_store() {
+                eprintln!("SomniQ account model key migration failed: {error}");
+            }
+            if let Err(error) = config::retire_third_party_api_settings() {
+                eprintln!("SomniQ third-party API settings cleanup failed: {error}");
+            }
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
             }
             state::apply_bundle_cache_environment();
-            // Export config-held keys (e.g. SCOPUS_API_KEY) before any
-            // literature search runs; force=false keeps real env vars intact.
+            // Configure account review and research preferences before tools run.
+            // Account credentials remain in process memory.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            install_credential_recovery_hook();
             // Without an Elsevier key, or off campus with one, Scopus goes
             // through the school route, which needs the signed-in account.
             tools::research_account::set_research_account_provider(std::sync::Arc::new(
@@ -902,11 +920,8 @@ pub fn run() {
             remote::remote_control_p2p_frame,
             remote::remote_control_p2p_closed,
             config::config_get,
-            config::config_secret_get,
-            config::config_secret_clear,
             config::config_set,
             config::config_test,
-            config::web_search_provider_test,
             memory::memory_status,
             memory::memory_v2_status,
             memory::memory_v2_confirm_r3,

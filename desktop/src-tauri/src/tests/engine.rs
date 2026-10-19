@@ -2454,6 +2454,17 @@ fn latex_repair_guard_no_longer_blocks_repeated_failures() {
 }
 
 #[test]
+fn latex_process_failure_does_not_count_as_a_source_repair() {
+    let mut guard = LatexRepairGuard::default();
+    let output = json!({
+        "success": false, "timedOut": true, "returnCodeInterpretation": "timeout",
+        "diagnostics": [{ "severity": "error", "code": "compile_timeout", "message": "Timed out" }]
+    }).to_string();
+    guard.record("LaTeXCompile", r#"{"inputPath":"main.tex"}"#, true, &output);
+    assert_eq!(guard.consecutive_failures, 0);
+}
+
+#[test]
 fn batch_write_paths_are_all_visible_to_latex_repair_guard() {
     let paths = edited_file_paths(
         r#"{"files":[{"path":"paper/main.tex"},{"path":"paper/sections/results.tex"},{"path":"notes.md"}]}"#,

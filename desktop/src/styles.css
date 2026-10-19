@@ -12999,6 +12999,35 @@ button.chat-project-toggle:hover {
   border-radius: 0;
 }
 
+.chat-user-text-viewport.is-collapsed {
+  max-height: calc(var(--chat-user-preview-lines) * 1lh);
+  overflow: hidden;
+}
+
+.chat-user-text-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.chat-user-text-toggle:hover {
+  color: var(--text);
+}
+
+.chat-user-text-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 .chat-assistant .md-content {
   width: 100%;
   max-width: none;

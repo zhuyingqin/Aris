@@ -98,17 +98,6 @@ export interface ConfigView {
   }[];
 }
 
-export type ConfigSecretKind =
-  | "executorApiKey"
-  | "summarizerApiKey"
-  | "reviewerApiKey"
-  | "scopusApiKey"
-  | "openalexApiKey"
-  | "bochaApiKey"
-  | "braveSearchApiKey"
-  | "exaApiKey"
-  | "zhihuAccessSecret";
-
 export interface ScheduledTask {
   id: string;
   title: string;
@@ -152,20 +141,11 @@ export interface ConfigPatch {
   summarizerModel?: string;
   retrievalCardModel?: string;
   summarizerBaseUrl?: string;
-  summarizerApiKey?: string;
-  executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;
   reviewerBaseUrl?: string;
-  reviewerApiKey?: string;
   reviewEnabled?: boolean;
   reviewMode?: "thread" | "oneshot";
-  scopusApiKey?: string;
-  openalexApiKey?: string;
-  bochaApiKey?: string;
-  braveSearchApiKey?: string;
-  exaApiKey?: string;
-  zhihuAccessSecret?: string;
   webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;

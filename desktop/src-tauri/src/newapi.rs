@@ -32,7 +32,7 @@ const MANAGED_NEWAPI_CONFIG: &str = include_str!("../../managed-newapi.json");
 /// Default executor model when the caller doesn't pin one. Must match a model
 /// the new-api MiniMax channel exposes.
 const DEFAULT_MODEL: &str = "MiniMax-M3";
-const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
+pub(crate) const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
 /// Routing group written onto the managed token. Empty means "the account's
 /// group", which new-api resolves on every request: membership tiers are user
 /// groups that subscriptions switch, so an upgrade or an expiry applies to the
@@ -73,14 +73,14 @@ static REFRESH_SESSION_CACHE: OnceLock<Mutex<HashMap<String, NewApiRefreshSessio
 /// than letting sibling calls invalidate each other's cookie.
 static ACCESS_TOKEN_REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+/// The key itself is deliberately absent: it stays in the backend (see
+/// `managed_key`) and never passes through the webview.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewApiLogin {
     /// OpenAI-compatible base URL for the executor (`<base>/v1`).
     pub base_url: String,
     pub model: String,
-    /// Usable downstream key (`sk-…`) for the executor.
-    pub token: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -804,44 +804,6 @@ pub(crate) fn managed_account_group() -> Option<String> {
     has_stored_session().then(|| get_config_string(ACCOUNT_GROUP_KEY).unwrap_or_default())
 }
 
-pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("HTTP client creation failed: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-    let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-    let string_field = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let group = string_field("group");
-    let groups = user_groups(&client, &base, &session).await;
-    let group_desc = groups
-        .get(group.as_str())
-        .and_then(|entry| entry.get("desc"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let role = data
-        .get("role")
-        .or_else(|| data.get("user_role"))
-        .or_else(|| data.get("userRole"))
-        .and_then(value_as_i64)
-        .unwrap_or(0);
-    let role_text = ["role", "role_name", "roleName", "status"]
-        .into_iter()
-        .filter_map(|key| data.get(key).and_then(value_as_string))
-        .find(|value| has_admin_marker(value));
-    Ok(user_is_admin_marker(role, role_text, &group, &group_desc))
-}
-
 /// Sign in and return the authenticated user/session values needed by new-api.
 async fn login(
     client: &reqwest::Client,
@@ -1134,7 +1096,7 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(model) => {
             let model = model.trim();
-            if !model.is_empty() {
+            if !model.is_empty() && !is_tool_service_model(model) {
                 out.push(model.to_string());
             }
         }
@@ -1147,7 +1109,7 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
             for key in ["id", "model", "name"] {
                 if let Some(model) = obj.get(key).and_then(Value::as_str) {
                     let model = model.trim();
-                    if !model.is_empty() {
+                    if !model.is_empty() && !is_tool_service_model(model) {
                         out.push(model.to_string());
                     }
                 }
@@ -1160,6 +1122,10 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+fn is_tool_service_model(model: &str) -> bool {
+    matches!(model, "deepseek-search" | "deepseek-fetch" | "scopus-search")
 }
 
 async fn user_models(
@@ -1266,10 +1232,13 @@ fn resolve_model_from_list(models: &[String], requested_model: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// `reuse_stored_key` is false only when the gateway has just rejected the
+/// stored key, so the reveal below must ask the gateway again.
 async fn get_or_create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
+    reuse_stored_key: bool,
 ) -> Result<(String, Option<i64>), String> {
     let token = match find_token(client, base, session).await? {
         Some(token) => {
@@ -1296,7 +1265,10 @@ async fn get_or_create_token(
     // is otherwise required on *every* refresh. Reuse a previously-revealed
     // key for the same token id to avoid tripping the gateway's rate limit on
     // that endpoint (see `config::cached_newapi_token_key`).
-    if let Some(cached) = config::cached_newapi_token_key(base, token_id) {
+    if let Some(cached) = reuse_stored_key
+        .then(|| config::cached_newapi_token_key(base, token_id))
+        .flatten()
+    {
         return Ok((cached, Some(token_id)));
     }
     let key = fetch_token_key(client, base, session, token_id).await?;
@@ -1453,9 +1425,35 @@ pub(crate) fn signed_in_base_url() -> Option<String> {
 /// school Scopus route identifies the caller with it.
 pub(crate) struct ResearchAccount;
 
+fn research_api_credential(
+    base: &str,
+    obj: &serde_json::Map<String, Value>,
+) -> Option<tools::research_account::ResearchApiCredential> {
+    let executor_base = config::managed_executor_base_url(obj)?;
+    let expected = format!("{}/v1", base.trim_end_matches('/'));
+    if executor_base.trim_end_matches('/') != expected {
+        return None;
+    }
+    Some(tools::research_account::ResearchApiCredential {
+        issuer: base.to_string(),
+        api_key: config::managed_executor_api_key(obj)?,
+    })
+}
+
 impl tools::research_account::ResearchAccountProvider for ResearchAccount {
     fn session_issuer(&self) -> Option<String> {
         signed_in_base_url()
+    }
+
+    fn api_credential(
+        &self,
+    ) -> Result<Option<tools::research_account::ResearchApiCredential>, String> {
+        let Some(base) = signed_in_base_url() else {
+            return Ok(None);
+        };
+        // load_object overlays the OS-held downstream API key. The dashboard
+        // access token and refresh cookie are never used by paid tool routes.
+        Ok(research_api_credential(&base, &config::load_object()))
     }
 
     fn credential(
@@ -1516,15 +1514,86 @@ async fn refresh_downstream_token(
     model: &str,
 ) -> Result<String, String> {
     forget_legacy_group_pick();
-    let (token, token_id) = get_or_create_token(client, base, session).await?;
+    let (token, token_id) = get_or_create_token(client, base, session, true).await?;
     let executor_base_url = format!("{base}/v1");
-    config::persist_newapi_executor_credentials(&executor_base_url, &token, token_id)?;
+    config::persist_newapi_executor_credentials(base, &token, token_id)?;
     let model = model.trim();
     if !model.is_empty() {
         let _ = config::record_verified_executor("openai", model, Some(&executor_base_url), &token);
     }
     let _ = config::managed_config_object()?;
     Ok(token)
+}
+
+/// A failed re-fetch is not retried sooner than this, so a broken session cannot
+/// turn every rejected request into another call to the rate-limited reveal.
+const MODEL_KEY_RECOVERY_BACKOFF: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct ModelKeyRecovery {
+    last_failure: Option<std::time::Instant>,
+    /// Keys this process has already replaced; a request still carrying one
+    /// takes the current key without asking the gateway again.
+    replaced: Vec<String>,
+}
+
+fn model_key_recovery() -> &'static tokio::sync::Mutex<ModelKeyRecovery> {
+    static RECOVERY: OnceLock<tokio::sync::Mutex<ModelKeyRecovery>> = OnceLock::new();
+    RECOVERY.get_or_init(|| tokio::sync::Mutex::new(ModelKeyRecovery::default()))
+}
+
+/// Replace the account model key after the gateway answered 401 for it
+/// (registered as the executor's credential-recovery hook). Like Codex's
+/// unauthorized recovery: take a key another request already replaced it with,
+/// else re-fetch it once with the signed-in session; otherwise give up and let
+/// the 401 surface. Keys that are not the account key are never touched.
+pub(crate) async fn replace_rejected_model_key(base_url: String, rejected_key: String) -> Option<String> {
+    let obj = config::load_object();
+    let managed_base = config::managed_executor_base_url(&obj)?;
+    let same_endpoint = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    if same_endpoint(&managed_base) != same_endpoint(&base_url) {
+        return None;
+    }
+    let mut recovery = model_key_recovery().lock().await;
+    let current = config::managed_executor_api_key(&config::load_object())?;
+    if current != rejected_key {
+        return recovery.replaced.contains(&rejected_key).then_some(current);
+    }
+    if recovery
+        .last_failure
+        .is_some_and(|at| at.elapsed() < MODEL_KEY_RECOVERY_BACKOFF)
+    {
+        return None;
+    }
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        let (base, session) = authenticated_stored_session(&client).await?;
+        let (key, token_id) = get_or_create_token(&client, &base, &session, false).await?;
+        config::persist_newapi_executor_credentials(&base, &key, token_id)?;
+        Ok::<String, String>(key)
+    }
+    .await;
+    match fetched {
+        Ok(key) if key != rejected_key => {
+            recovery.last_failure = None;
+            recovery.replaced.push(rejected_key);
+            Some(key)
+        }
+        Ok(_) => {
+            recovery.last_failure = Some(std::time::Instant::now());
+            None
+        }
+        Err(error) => {
+            eprintln!("SomniQ could not replace the rejected account model key: {error}");
+            recovery.last_failure = Some(std::time::Instant::now());
+            None
+        }
+    }
 }
 
 #[tauri::command]
@@ -1579,9 +1648,9 @@ pub async fn newapi_logout() -> Result<(), String> {
     Ok(())
 }
 
-/// Authenticate against new-api and return an executor config (base URL, model,
-/// downstream token) for the signed-in user. The frontend persists these into
-/// the executor settings so Chat routes through new-api.
+/// Authenticate against new-api and return the executor endpoint and model for
+/// the signed-in user. The frontend persists these into the executor settings
+/// so Chat routes through new-api; the downstream key is stored here.
 #[tauri::command]
 pub async fn newapi_login(
     base_url: String,
@@ -1626,7 +1695,6 @@ pub async fn newapi_login(
     Ok(NewApiLogin {
         base_url: executor_base_url,
         model,
-        token,
     })
 }
 
@@ -2345,6 +2413,36 @@ mod tests {
     };
 
     #[test]
+    fn paid_search_uses_the_account_api_key_and_rejects_a_different_model_origin() {
+        let base = "https://somni.ensuanx.com";
+        let mut obj = json!({
+            "newapi_base_url": base,
+            "newapi_executor_base_url": format!("{base}/v1"),
+            "newapi_executor_api_key": "sk-account-api-sentinel",
+            "newapi_user_token": "dashboard-jwt-sentinel",
+        }).as_object().unwrap().clone();
+        let credential = super::research_api_credential(base, &obj).unwrap();
+        assert_eq!(credential.api_key, "sk-account-api-sentinel");
+        assert_eq!(credential.issuer, base);
+        assert!(!format!("{credential:?}").contains("sk-account-api-sentinel"));
+        obj.insert("newapi_executor_base_url".into(), json!("https://other.example/v1"));
+        assert!(super::research_api_credential(base, &obj).is_none());
+        obj.insert("newapi_executor_base_url".into(), json!(format!("{base}/v1")));
+        obj.remove("newapi_executor_api_key");
+        assert!(super::research_api_credential(base, &obj).is_none());
+    }
+
+    #[test]
+    fn tool_billing_models_are_not_offered_as_chat_models() {
+        let mut models = Vec::new();
+        super::collect_model_ids(&json!([
+            { "id": "deepseek-search" }, { "id": "scopus-search" },
+            "deepseek-fetch", "deepseek-v4.1-flash", { "id": "MiniMax-M3" }
+        ]), &mut models);
+        assert_eq!(models, vec!["deepseek-v4.1-flash", "MiniMax-M3"]);
+    }
+
+    #[test]
     fn managed_account_endpoint_requires_https_or_loopback() {
         assert_eq!(
             secure_base("https://somni.ensuanx.com/").unwrap(),
@@ -2878,5 +2976,105 @@ mod tests {
         assert_eq!(payload["group"], "");
         assert_eq!(payload["remain_quota"], 50);
         assert_eq!(payload["unlimited_quota"], false);
+    }
+
+    #[test]
+    fn a_rejected_account_key_is_fetched_again_once_and_shared() {
+        let _guard = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_home = std::env::var("HOME").ok();
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let home = std::env::temp_dir().join(format!(
+            "somniq-newapi-key-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let base = format!("http://{}", listener.local_addr().expect("mock address"));
+        let server = thread::spawn(move || {
+            let (mut list_stream, _) = listener.accept().expect("accept token list");
+            let list_request = read_request(&mut list_stream);
+            write_json_response(
+                &mut list_stream,
+                r#"{"success":true,"data":{"items":[{"id":5,"name":"somniq-desktop","status":1,"key":"abcd**********wxyz","group":""}]}}"#,
+                false,
+            );
+            let (mut key_stream, _) = listener.accept().expect("accept key reveal");
+            let key_request = read_request(&mut key_stream);
+            write_json_response(&mut key_stream, r#"{"success":true,"data":{"key":"fresh"}}"#, false);
+            (list_request, key_request)
+        });
+
+        // A legacy-gateway session: the management token sits in config.json,
+        // so no OS credential store is involved in this test.
+        let config_path = crate::state::config_path();
+        std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+        std::fs::write(
+            &config_path,
+            json!({
+                "newapi_base_url": base,
+                "newapi_user_id": 17,
+                "newapi_access_token": "management-token",
+                "newapi_executor_base_url": format!("{base}/v1"),
+            })
+            .to_string(),
+        )
+        .expect("write config");
+        crate::config::persist_newapi_executor_credentials(&base, "sk-rejected", Some(5))
+            .expect("store rejected key");
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let replaced = runtime.block_on(super::replace_rejected_model_key(
+            format!("{base}/v1"),
+            "sk-rejected".to_string(),
+        ));
+        let (list_request, key_request) = server.join().expect("mock server finishes");
+
+        assert_eq!(replaced.as_deref(), Some("sk-fresh"));
+        assert!(list_request.starts_with("GET /api/token/ HTTP/1.1"));
+        assert!(key_request.starts_with("POST /api/token/5/key HTTP/1.1"));
+        assert!(!std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("sk-fresh"));
+        // A second request that still carries the rejected key takes the
+        // replacement without asking the gateway again (the mock is gone).
+        assert_eq!(
+            runtime
+                .block_on(super::replace_rejected_model_key(
+                    format!("{base}/v1"),
+                    "sk-rejected".to_string(),
+                ))
+                .as_deref(),
+            Some("sk-fresh")
+        );
+        // A key this account never issued is left alone.
+        assert!(runtime
+            .block_on(super::replace_rejected_model_key(
+                format!("{base}/v1"),
+                "sk-somebody-elses".to_string(),
+            ))
+            .is_none());
+        // So is any other endpoint.
+        assert!(runtime
+            .block_on(super::replace_rejected_model_key(
+                "https://api.openai.com/v1".to_string(),
+                "sk-fresh".to_string(),
+            ))
+            .is_none());
+
+        crate::config::clear_newapi_session().expect("logout");
+        let _ = std::fs::remove_dir_all(&home);
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
     }
 }

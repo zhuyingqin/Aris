@@ -1452,7 +1452,11 @@ fn summarize_block(block: &ContentBlock) -> String {
             "tool_result {tool_name}: {}{output}",
             if *is_error { "error " } else { "" }
         ),
-        ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+        // Marked, so the resumed conversation does not read a discarded
+        // hypothesis as something the assistant concluded or said.
+        ContentBlock::Thinking { thinking, .. } => {
+            format!("reasoning (not shown to the user): {thinking}")
+        }
     };
     truncate_summary(&redact_secrets(&raw), 450)
 }

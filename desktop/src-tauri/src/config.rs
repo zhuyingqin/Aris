@@ -2,17 +2,34 @@
 //!
 //! Operates on the raw JSON object (snake_case keys) so unmodelled fields
 //! (e.g. `meta_logging`) survive a round trip,
-//! and so the schema can't drift. API keys are masked in the normal view; raw
-//! values are exposed only through the explicit, allow-listed reveal command.
+//! and so the schema can't drift. Account keys live in the OS credential store;
+//! Desktop does not accept third-party API keys.
 
 use api::AuthSource;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
 
+use crate::managed_key::{self, ManagedKey};
 use crate::{newapi, state};
 
 pub(crate) const LEGACY_MANAGED_NEWAPI_BASE_URL: &str = "http://106.53.28.124:18080";
+
+/// Environment names a provider credential can be exported under (see
+/// `apply_reviewer_environment_from`). The account gateway key is kept out of
+/// all of them; it is handed to in-process readers via `tools::process_secrets`.
+const PROVIDER_CREDENTIAL_ENV: [&str; 7] = [
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "GLM_API_KEY",
+    "MINIMAX_API_KEY",
+    "KIMI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ARIS_REVIEWER_AUTH_TOKEN",
+];
+
+/// Slots that can carry a copy of the account gateway key.
+const MANAGED_KEY_SLOTS: [&str; 3] = ["executor", "reviewer", "summarizer"];
 
 fn load_raw_object() -> Map<String, Value> {
     std::fs::read_to_string(state::config_path())
@@ -27,7 +44,209 @@ pub(crate) fn load_object() -> Map<String, Value> {
     // Every runtime read enforces the managed credential/origin binding, even
     // if writing the one-time migration back to disk fails.
     sanitize_legacy_managed_http(&mut obj);
+    overlay_managed_key(&mut obj);
+    remove_third_party_api_settings(&mut obj);
     obj
+}
+
+/// The signed-in account gateway, when it is one this build may talk to.
+fn managed_account_base(obj: &Map<String, Value>) -> Option<String> {
+    get_non_empty(obj, "newapi_base_url").filter(|base| newapi::is_approved_managed_base(base))
+}
+
+/// The credential-store key for this config's account, if it was issued for
+/// that account's own model endpoint.
+fn stored_managed_key(obj: &Map<String, Value>) -> Option<ManagedKey> {
+    let account = managed_account_base(obj)?;
+    let stored = managed_key::load(&account)?;
+    (url_match_key(&stored.base_url) == url_match_key(&normalize_openai_base_url(&account)))
+        .then_some(stored)
+}
+
+/// Lay the account gateway key over a config read from disk: into
+/// `newapi_executor_api_key` and into every slot or verified entry that points
+/// at the gateway without a key of its own. `strip_managed_key` undoes this on
+/// save.
+fn overlay_managed_key(obj: &mut Map<String, Value>) {
+    let Some(stored) = stored_managed_key(obj) else {
+        return;
+    };
+    let managed_base = url_match_key(&stored.base_url);
+    // A model endpoint recorded for another host must not receive this key.
+    if get_non_empty(obj, "newapi_executor_base_url")
+        .is_some_and(|base| url_match_key(&base) != managed_base)
+    {
+        return;
+    }
+    // A plaintext copy written by an older build stays authoritative until
+    // `move_managed_key_to_credential_store` has moved it.
+    if get_non_empty(obj, "newapi_executor_api_key").is_none() {
+        obj.insert(
+            "newapi_executor_api_key".to_string(),
+            Value::String(stored.key.clone()),
+        );
+    }
+    for prefix in MANAGED_KEY_SLOTS {
+        let base_key = format!("{prefix}_base_url");
+        let api_key = format!("{prefix}_api_key");
+        let at_gateway = get_non_empty(obj, &base_key)
+            .is_some_and(|base| url_match_key(&base) == managed_base);
+        if at_gateway && get_non_empty(obj, &api_key).is_none() {
+            obj.insert(api_key, Value::String(stored.key.clone()));
+        }
+    }
+    if obj.get("verified_executors").is_some() {
+        let mut verified = read_verified(obj);
+        let mut changed = false;
+        for entry in &mut verified {
+            if entry.api_key.trim().is_empty()
+                && !entry.base_url.trim().is_empty()
+                && url_match_key(&entry.base_url) == managed_base
+            {
+                entry.api_key = stored.key.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            write_verified(obj, &verified);
+        }
+    }
+}
+
+/// Remove every copy of the account gateway key before a config is written.
+/// A copy the credential store does not know yet (a config written by an older
+/// build) is moved there first.
+fn strip_managed_key(obj: &mut Map<String, Value>) {
+    let plaintext = managed_executor_api_key(obj);
+    if let (Some(key), Some(account)) = (plaintext.as_deref(), managed_account_base(obj)) {
+        if managed_key::load(&account).is_none() {
+            let _ = managed_key::store(
+                &account,
+                ManagedKey {
+                    base_url: normalize_openai_base_url(&account),
+                    token_id: obj.get("newapi_token_id").and_then(Value::as_i64),
+                    key: key.to_string(),
+                },
+            );
+        }
+    }
+    let secrets: Vec<String> = plaintext
+        .into_iter()
+        .chain(stored_managed_key(obj).map(|stored| stored.key))
+        .collect();
+    obj.remove("newapi_executor_api_key");
+    if secrets.is_empty() {
+        return;
+    }
+    for prefix in MANAGED_KEY_SLOTS {
+        let api_key = format!("{prefix}_api_key");
+        if get_non_empty(obj, &api_key).is_some_and(|key| secrets.contains(&key)) {
+            obj.remove(&api_key);
+        }
+    }
+    if obj.get("verified_executors").is_some() {
+        let mut verified = read_verified(obj);
+        let mut changed = false;
+        for entry in &mut verified {
+            if secrets.contains(&entry.api_key) {
+                entry.api_key.clear();
+                changed = true;
+            }
+        }
+        if changed {
+            write_verified(obj, &verified);
+        }
+    }
+}
+
+/// Startup migration: move a plaintext account gateway key left in
+/// `config.json` by an older build into the credential store, then rewrite the
+/// file without it. The file's copy wins over an older stored one, since the
+/// build that wrote it was the last to talk to the gateway.
+pub(crate) fn move_managed_key_to_credential_store() -> Result<bool, String> {
+    let mut obj = load_raw_object();
+    sanitize_legacy_managed_http(&mut obj);
+    let Some(key) = managed_executor_api_key(&obj) else {
+        return Ok(false);
+    };
+    if let Some(account) = managed_account_base(&obj) {
+        let stored = ManagedKey {
+            base_url: normalize_openai_base_url(&account),
+            token_id: obj.get("newapi_token_id").and_then(Value::as_i64),
+            key,
+        };
+        if let Err(error) = managed_key::store(&account, stored) {
+            // Still remove the plaintext: this process keeps the key in
+            // memory, and the next launch fetches it again with the session.
+            eprintln!("SomniQ kept the account model key in memory only: {error}");
+        }
+    }
+    save_object(&obj)?;
+    Ok(true)
+}
+
+/// Third-party API keys are no longer part of Desktop settings. Keep only
+/// account connections and their in-process key overlay; the shared CLI runtime
+/// retains its own provider configuration.
+fn remove_third_party_api_settings(obj: &mut Map<String, Value>) -> bool {
+    let before = obj.clone();
+    let managed_base =
+        managed_account_base(obj).map(|base| url_match_key(&normalize_openai_base_url(&base)));
+    let managed_key = managed_executor_api_key(obj);
+    for prefix in MANAGED_KEY_SLOTS {
+        let at_gateway = get_non_empty(obj, &format!("{prefix}_base_url"))
+            .zip(managed_base.as_deref())
+            .is_some_and(|(base, managed)| url_match_key(&base) == managed);
+        if !at_gateway {
+            clear_provider_credentials_keep_model(obj, prefix);
+            if prefix == "executor" {
+                obj.remove("executor_transport");
+            }
+        } else if get_non_empty(obj, &format!("{prefix}_api_key"))
+            .is_some_and(|key| managed_key.as_deref() != Some(key.as_str()))
+        {
+            obj.remove(&format!("{prefix}_api_key"));
+        }
+    }
+    // Auxiliary models now use the account executor connection.
+    for key in [
+        "summarizer_provider", "summarizer_base_url", "summarizer_api_key",
+        "scopus_api_key", "openalex_api_key", "bocha_api_key",
+        "brave_search_api_key", "exa_api_key", "zhihu_access_secret",
+    ] {
+        obj.remove(key);
+    }
+    if obj.contains_key("verified_executors") {
+        let mut entries = read_verified(obj);
+        entries.retain(|entry| {
+            managed_base.as_deref().is_some_and(|base| {
+                url_match_key(&entry.base_url) == base
+                    && (entry.api_key.is_empty()
+                        || managed_key.as_deref() == Some(entry.api_key.as_str()))
+            })
+        });
+        write_verified(obj, &entries);
+    }
+    *obj != before
+}
+
+/// Remove legacy Desktop keys on startup, after the account-key migration.
+pub(crate) fn retire_third_party_api_settings() -> Result<bool, String> {
+    let mut obj = load_raw_object();
+    let changed = remove_third_party_api_settings(&mut obj);
+    if changed {
+        save_object(&obj)?;
+    }
+    Ok(changed)
+}
+
+/// Hand every in-process reader that held `old` the replacement `new`.
+fn replace_process_credential(old: &str, new: &str) {
+    for name in PROVIDER_CREDENTIAL_ENV {
+        if tools::process_secrets::secret_var(name).as_deref() == Some(old) {
+            tools::process_secrets::set_process_secret(name, Some(new.to_string()));
+        }
+    }
 }
 
 fn get_str(obj: &Map<String, Value>, key: &str) -> Option<String> {
@@ -308,21 +527,29 @@ pub(crate) fn current_executor_object() -> Result<Map<String, Value>, String> {
     managed_config_object()
 }
 
+/// Record the account gateway key for `account_base`: the key itself goes to
+/// the credential store (see `managed_key`), only its endpoint and token id to
+/// `config.json`.
 pub(crate) fn persist_newapi_executor_credentials(
-    base_url: &str,
+    account_base: &str,
     api_key: &str,
     token_id: Option<i64>,
 ) -> Result<(), String> {
-    let mut values: Vec<(&str, Value)> = vec![
-        (
-            "newapi_executor_base_url",
-            Value::String(normalize_openai_base_url(base_url)),
-        ),
-        (
-            "newapi_executor_api_key",
-            Value::String(api_key.to_string()),
-        ),
-    ];
+    let base_url = normalize_openai_base_url(account_base);
+    let previous = managed_key::load(account_base).map(|stored| stored.key);
+    let stored = ManagedKey {
+        base_url: base_url.clone(),
+        token_id,
+        key: api_key.to_string(),
+    };
+    if let Err(error) = managed_key::store(account_base, stored) {
+        eprintln!("SomniQ kept the account model key in memory only: {error}");
+    }
+    if let Some(previous) = previous.filter(|previous| previous != api_key) {
+        replace_process_credential(&previous, api_key);
+    }
+    let mut values: Vec<(&str, Value)> =
+        vec![("newapi_executor_base_url", Value::String(base_url))];
     if let Some(token_id) = token_id {
         values.push(("newapi_token_id", Value::Number(token_id.into())));
     }
@@ -330,22 +557,16 @@ pub(crate) fn persist_newapi_executor_credentials(
 }
 
 /// Return a previously-revealed downstream key if it was fetched for the same
-/// gateway base URL and token id. new-api masks keys in its token-list
-/// response, so callers must `POST /api/token/{id}/key` to reveal the raw
-/// value — an endpoint the gateway rate-limits. Reusing the cached key lets
-/// periodic account refreshes (see `App.tsx` polling) skip that call entirely
-/// once a token has been revealed once, instead of hitting it every cycle.
-pub(crate) fn cached_newapi_token_key(base_url: &str, token_id: i64) -> Option<String> {
-    let obj = load_object();
-    let cached_base = get_non_empty(&obj, "newapi_executor_base_url")?;
-    let cached_id = obj.get("newapi_token_id").and_then(Value::as_i64)?;
-    if cached_id != token_id {
-        return None;
-    }
-    if url_match_key(&cached_base) != url_match_key(&normalize_openai_base_url(base_url)) {
-        return None;
-    }
-    get_non_empty(&obj, "newapi_executor_api_key")
+/// gateway and token id. new-api masks keys in its token-list response, so
+/// callers must `POST /api/token/{id}/key` to reveal the raw value — an
+/// endpoint the gateway rate-limits. Reusing the stored key lets every later
+/// account refresh skip that call once a token has been revealed.
+pub(crate) fn cached_newapi_token_key(account_base: &str, token_id: i64) -> Option<String> {
+    let stored = managed_key::load(account_base)?;
+    (stored.token_id == Some(token_id)
+        && url_match_key(&stored.base_url)
+            == url_match_key(&normalize_openai_base_url(account_base)))
+    .then_some(stored.key)
 }
 
 fn mask(key: &str) -> String {
@@ -570,75 +791,18 @@ pub fn config_get() -> ConfigView {
     build_view(&managed_config_object().unwrap_or_else(|_| load_object()))
 }
 
-const ADMIN_API_SETTINGS_MESSAGE: &str =
-    "Only administrators can manage executor or reviewer API settings.";
-
-async fn ensure_admin_api_settings_access() -> Result<(), String> {
-    match newapi::stored_user_is_admin().await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(ADMIN_API_SETTINGS_MESSAGE.to_string()),
-        Err(_) => Err(format!(
-            "{ADMIN_API_SETTINGS_MESSAGE} Please sign in as an administrator."
-        )),
-    }
-}
-
-#[tauri::command]
-pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
-    let (key, admin_only) = match kind.as_str() {
-        "executorApiKey" | "executor_api_key" => ("executor_api_key", true),
-        "summarizerApiKey" | "summarizer_api_key" => ("summarizer_api_key", false),
-        "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
-        "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
-        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", false),
-        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", false),
-        "braveSearchApiKey" | "brave_search_api_key" => ("brave_search_api_key", false),
-        "exaApiKey" | "exa_api_key" => ("exa_api_key", false),
-        "zhihuAccessSecret" | "zhihu_access_secret" => ("zhihu_access_secret", false),
-        _ => return Err(format!("Unsupported secret field: {kind}")),
-    };
-    if admin_only {
-        ensure_admin_api_settings_access().await?;
-    }
-    Ok(get_non_empty(&load_object(), key))
-}
-
-#[tauri::command]
-pub async fn config_secret_clear(kind: String) -> Result<ConfigView, String> {
-    let (key, environment_key, admin_only) = match kind.as_str() {
-        "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", "SCOPUS_API_KEY", false),
-        "openalexApiKey" | "openalex_api_key" => ("openalex_api_key", "OPENALEX_API_KEY", false),
-        "bochaApiKey" | "bocha_api_key" => ("bocha_api_key", "BOCHA_API_KEY", false),
-        "braveSearchApiKey" | "brave_search_api_key" => {
-            ("brave_search_api_key", "BRAVE_SEARCH_API_KEY", false)
-        }
-        "exaApiKey" | "exa_api_key" => ("exa_api_key", "EXA_API_KEY", false),
-        "zhihuAccessSecret" | "zhihu_access_secret" => {
-            ("zhihu_access_secret", "ZHIHU_ACCESS_SECRET", false)
-        }
-        _ => {
-            return Err(format!(
-                "Secret clearing is not supported for field: {kind}"
-            ))
-        }
-    };
-    if admin_only {
-        ensure_admin_api_settings_access().await?;
-    }
-    let mut obj = load_object();
-    obj.remove(key);
-    save_object(&obj)?;
-    std::env::remove_var(environment_key);
-    Ok(build_view(&obj))
-}
-
-fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
+/// The only writer of `config.json`: every copy of the account gateway key is
+/// stripped here, so a config object read with `load_object` can be saved back
+/// without putting the key on disk.
+pub(crate) fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
     let path = state::config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let json =
-        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
+    let mut obj = obj.clone();
+    strip_managed_key(&mut obj);
+    remove_third_party_api_settings(&mut obj);
+    let json = serde_json::to_string_pretty(&Value::Object(obj)).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -730,6 +894,9 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
     let mut obj = load_object();
     let managed_base = managed_executor_base_url(&obj).map(|base| url_match_key(&base));
     let managed_key = managed_executor_api_key(&obj);
+    if let Some(account) = get_non_empty(&obj, "newapi_base_url") {
+        crate::managed_key::clear(&account);
+    }
 
     for key in [
         "newapi_base_url",
@@ -1080,63 +1247,6 @@ pub(crate) fn verified_executor_summaries() -> Vec<(String, String, String)> {
         .collect()
 }
 
-const DEEPSEEK_EXECUTOR_MODEL: &str = "deepseek-v4-pro";
-const DEEPSEEK_OPENAI_BASE_URL: &str = "https://api.deepseek.com/v1";
-
-fn value_contains(obj: &Map<String, Value>, key: &str, needle: &str) -> bool {
-    obj.get(key)
-        .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase().contains(needle))
-        .unwrap_or(false)
-}
-
-fn config_has_deepseek_executor(obj: &Map<String, Value>) -> bool {
-    value_contains(obj, "executor_provider", "deepseek")
-        || value_contains(obj, "executor_model", "deepseek")
-        || value_contains(obj, "executor_base_url", "deepseek")
-}
-
-fn config_has_deepseek_reviewer(obj: &Map<String, Value>) -> bool {
-    value_contains(obj, "reviewer_provider", "deepseek")
-        || value_contains(obj, "reviewer_model", "deepseek")
-        || value_contains(obj, "reviewer_base_url", "deepseek")
-}
-
-fn deepseek_executor_key(obj: &Map<String, Value>) -> Option<String> {
-    if config_has_deepseek_executor(obj) {
-        if let Some(key) = get_non_empty(obj, "executor_api_key") {
-            return Some(key);
-        }
-    }
-    if config_has_deepseek_reviewer(obj) {
-        if let Some(key) = get_non_empty(obj, "reviewer_api_key") {
-            return Some(key);
-        }
-    }
-    std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-}
-
-fn apply_deepseek_executor(obj: &mut Map<String, Value>, key: String) {
-    obj.insert(
-        "executor_provider".to_string(),
-        Value::String("openai".to_string()),
-    );
-    obj.insert(
-        "executor_model".to_string(),
-        Value::String(DEEPSEEK_EXECUTOR_MODEL.to_string()),
-    );
-    obj.insert(
-        "executor_base_url".to_string(),
-        Value::String(DEEPSEEK_OPENAI_BASE_URL.to_string()),
-    );
-    obj.insert("executor_api_key".to_string(), Value::String(key));
-    // DeepSeek V4 Pro supports `/v1/responses`. The executor still retains its
-    // runtime fallback to Chat Completions if a compatible gateway rejects it.
-    set_or_clear_executor_transport(obj, "responses");
-}
-
 fn apply_verified_executor(obj: &mut Map<String, Value>, entry: VerifiedExecutor) {
     obj.insert(
         "executor_provider".to_string(),
@@ -1241,8 +1351,7 @@ fn normalize_managed_model_slots(obj: &mut Map<String, Value>) -> Result<bool, S
 }
 
 /// Return a config object with `model` selected as executor, without saving it.
-/// The model must be the current executor, a verified executor, or a built-in
-/// preset backed by an already configured key.
+/// The model must be the current account executor or one of its verified models.
 pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String, Value>>, String> {
     let model = model.trim();
     if model.is_empty() {
@@ -1269,15 +1378,6 @@ pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String
         .find(|item| item.model == model)
     {
         apply_verified_executor(&mut obj, entry);
-        return Ok(Some(obj));
-    }
-    if model == DEEPSEEK_EXECUTOR_MODEL {
-        let Some(key) = deepseek_executor_key(&obj) else {
-            return Err(
-                "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
-            );
-        };
-        apply_deepseek_executor(&mut obj, key);
         return Ok(Some(obj));
     }
     Ok(None)
@@ -1318,19 +1418,9 @@ pub(crate) fn switch_to_managed_executor(model: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Built-in executor choices backed by keys already present in config/env.
-/// Keys are never returned to the frontend.
+/// Desktop model choices come only from the signed-in account.
 pub(crate) fn builtin_executor_summaries() -> Vec<(String, String, String)> {
-    let obj = load_object();
-    let mut out = Vec::new();
-    if deepseek_executor_key(&obj).is_some() {
-        out.push((
-            "openai".to_string(),
-            DEEPSEEK_EXECUTOR_MODEL.to_string(),
-            DEEPSEEK_OPENAI_BASE_URL.to_string(),
-        ));
-    }
-    out
+    Vec::new()
 }
 
 /// Restore the full executor config of a verified model. Returns `Ok(false)`
@@ -1349,28 +1439,9 @@ pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Switch to a built-in executor preset when a usable key already exists.
-pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
-    let model = model.trim();
-    if model != DEEPSEEK_EXECUTOR_MODEL {
-        return Ok(false);
-    }
-    let mut obj = load_object();
-    let Some(key) = deepseek_executor_key(&obj) else {
-        return Err(
-            "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
-        );
-    };
-    apply_deepseek_executor(&mut obj, key.clone());
-    save_object(&obj)?;
-    let _ = record_verified_executor_with_transport(
-        "openai",
-        DEEPSEEK_EXECUTOR_MODEL,
-        Some(DEEPSEEK_OPENAI_BASE_URL),
-        &key,
-        "responses",
-    );
-    Ok(true)
+/// Retired Desktop presets cannot reactivate an environment-supplied API key.
+pub(crate) fn switch_to_builtin_executor(_model: &str) -> Result<bool, String> {
+    Ok(false)
 }
 
 #[derive(Clone, Deserialize, Default)]
@@ -1408,6 +1479,29 @@ pub struct ConfigPatch {
 }
 
 impl ConfigPatch {
+    /// Decode retired fields only to reject old clients before any write or request.
+    fn validate_account_settings(&self, obj: &Map<String, Value>) -> Result<(), String> {
+        let supplied_key = [
+            &self.executor_api_key, &self.reviewer_api_key, &self.summarizer_api_key,
+            &self.scopus_api_key, &self.openalex_api_key, &self.bocha_api_key,
+            &self.brave_search_api_key, &self.exa_api_key, &self.zhihu_access_secret,
+        ]
+        .into_iter()
+        .any(|value| value.is_some());
+        let auxiliary_connection = self
+            .summarizer_provider
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .summarizer_base_url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+        if supplied_key || auxiliary_connection || self.changes_external_api_settings(obj) {
+            return Err("Third-party API key settings have been removed. Use your SomniQ account models.".into());
+        }
+        Ok(())
+    }
+
     fn is_managed_executor_update(&self, obj: &Map<String, Value>) -> bool {
         let Some(model) = self.executor_model.as_deref().map(str::trim) else {
             return false;
@@ -1576,7 +1670,7 @@ impl ConfigPatch {
         touches_reviewer && !self.is_managed_reviewer_update(obj)
     }
 
-    fn changes_admin_api_settings(&self, obj: &Map<String, Value>) -> bool {
+    fn changes_external_api_settings(&self, obj: &Map<String, Value>) -> bool {
         self.changes_executor_api_settings(obj) || self.changes_reviewer_api_settings(obj)
     }
 }
@@ -1636,15 +1730,6 @@ fn set_or_clear(obj: &mut Map<String, Value>, key: &str, value: Option<String>) 
     }
 }
 
-/// Secrets are never wiped by a blank field — only a non-empty value replaces.
-fn set_secret(obj: &mut Map<String, Value>, key: &str, value: Option<String>) {
-    if let Some(v) = value {
-        if !v.is_empty() {
-            obj.insert(key.to_string(), Value::String(v));
-        }
-    }
-}
-
 fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     let reviewer_disabled = patch.reviewer_provider.as_deref() == Some("");
 
@@ -1688,16 +1773,6 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
         obj.insert("memory_v2_mode".to_string(), Value::String(mode));
     }
 
-    set_secret(obj, "executor_api_key", patch.executor_api_key);
-    set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
-    set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
-    set_secret(obj, "scopus_api_key", patch.scopus_api_key);
-    set_secret(obj, "openalex_api_key", patch.openalex_api_key);
-    set_secret(obj, "bocha_api_key", patch.bocha_api_key);
-    set_secret(obj, "brave_search_api_key", patch.brave_search_api_key);
-    set_secret(obj, "exa_api_key", patch.exa_api_key);
-    set_secret(obj, "zhihu_access_secret", patch.zhihu_access_secret);
-
     if reviewer_disabled {
         for key in [
             "reviewer_provider",
@@ -1740,9 +1815,7 @@ pub async fn config_set(mut patch: ConfigPatch) -> Result<ConfigView, String> {
             return Err("memory_v2_mode must be legacy_r0_only, observe, canary, or active".to_string());
         }
     }
-    if patch.changes_admin_api_settings(&obj) {
-        ensure_admin_api_settings_access().await?;
-    }
+    patch.validate_account_settings(&obj)?;
     apply_patch(&mut obj, patch);
     normalize_managed_model_slots(&mut obj)?;
     save_object(&obj)?;
@@ -1769,6 +1842,26 @@ fn set_env_if_allowed(key: &str, value: Option<String>, force: bool) {
     }
 }
 
+/// Like `set_env_if_allowed`, but the account gateway key is handed only to
+/// in-process readers (`tools::process_secrets`): an environment variable is
+/// inherited by every command the Agent runs.
+fn set_credential_if_allowed(
+    key: &str,
+    value: Option<String>,
+    managed_key: Option<&str>,
+    force: bool,
+) {
+    let Some(value) = value.filter(|item| !item.trim().is_empty()) else {
+        return;
+    };
+    if managed_key != Some(value.as_str()) {
+        return;
+    }
+    if force || std::env::var(key).is_err() {
+        tools::process_secrets::set_process_secret(key, Some(value));
+    }
+}
+
 fn normalize_web_proxy_patch(patch: &mut ConfigPatch) -> Result<(), String> {
     let Some(value) = patch.web_proxy_url.take() else {
         return Ok(());
@@ -1790,6 +1883,7 @@ fn clear_forced_reviewer_environment(force: bool) {
     ] {
         std::env::remove_var(key);
     }
+    tools::process_secrets::clear_process_secrets();
 }
 
 fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
@@ -1835,32 +1929,6 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
             if enabled { "true" } else { "false" },
         );
     }
-    // Literature kernel tools read these provider credentials from the environment.
-    set_env_if_allowed(
-        "SCOPUS_API_KEY",
-        get_non_empty(obj, "scopus_api_key"),
-        force,
-    );
-    set_env_if_allowed(
-        "OPENALEX_API_KEY",
-        get_non_empty(obj, "openalex_api_key"),
-        force,
-    );
-    // Built-in WebSearch reads optional paid-provider credentials from the
-    // process environment on every invocation. Applying them here makes a
-    // Settings save effective immediately without exposing keys in tool input.
-    set_env_if_allowed("BOCHA_API_KEY", get_non_empty(obj, "bocha_api_key"), force);
-    set_env_if_allowed(
-        "BRAVE_SEARCH_API_KEY",
-        get_non_empty(obj, "brave_search_api_key"),
-        force,
-    );
-    set_env_if_allowed("EXA_API_KEY", get_non_empty(obj, "exa_api_key"), force);
-    set_env_if_allowed(
-        "ZHIHU_ACCESS_SECRET",
-        get_non_empty(obj, "zhihu_access_secret"),
-        force,
-    );
     // The dedicated research-web proxy is configuration-owned. Missing or
     // blank means direct access, so do not fall back to an inherited proxy.
     if let Some(proxy_url) = get_non_empty(obj, "web_proxy_url") {
@@ -1869,18 +1937,20 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         std::env::remove_var("ARIS_WEB_PROXY_URL");
     }
 
+    let managed_key = managed_executor_api_key(obj);
+    let managed_key = managed_key.as_deref();
     match provider.as_deref() {
-        Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
-        Some("openai") => set_env_if_allowed("OPENAI_API_KEY", key, force),
-        Some("glm") => set_env_if_allowed("GLM_API_KEY", key, force),
-        Some("minimax") => set_env_if_allowed("MINIMAX_API_KEY", key, force),
-        Some("kimi") => set_env_if_allowed("KIMI_API_KEY", key, force),
+        Some("gemini") => set_credential_if_allowed("GEMINI_API_KEY", key, managed_key, force),
+        Some("openai") => set_credential_if_allowed("OPENAI_API_KEY", key, managed_key, force),
+        Some("glm") => set_credential_if_allowed("GLM_API_KEY", key, managed_key, force),
+        Some("minimax") => set_credential_if_allowed("MINIMAX_API_KEY", key, managed_key, force),
+        Some("kimi") => set_credential_if_allowed("KIMI_API_KEY", key, managed_key, force),
         Some("deepseek") => {
-            set_env_if_allowed("DEEPSEEK_API_KEY", key.clone(), force);
-            set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
+            set_credential_if_allowed("DEEPSEEK_API_KEY", key.clone(), managed_key, force);
+            set_credential_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, managed_key, force);
         }
         Some("anthropic-compat" | "custom" | "opencode") => {
-            set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
+            set_credential_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, managed_key, force);
         }
         _ => {}
     }
@@ -1889,15 +1959,7 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
 pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
     let mut obj = load_object();
     obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
-    let path = state::config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&Value::Object(obj)).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    save_object(&obj)?;
     std::env::set_var(
         "ARIS_MEMORY_WRITE_APPROVAL",
         if enabled { "true" } else { "false" },
@@ -2181,82 +2243,10 @@ async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
 }
 
 #[tauri::command]
-pub async fn web_search_provider_test(
-    provider: String,
-    api_key: Option<String>,
-) -> Result<ConfigTestDetail, String> {
-    let provider = provider.trim().to_ascii_lowercase();
-    let (config_key, base_url) = match provider.as_str() {
-        "bocha" => ("bocha_api_key", "https://api.bochaai.com/v1/web-search"),
-        "brave" => ("brave_search_api_key", "https://api.search.brave.com"),
-        "exa" => ("exa_api_key", "https://api.exa.ai"),
-        "zhihu" => (
-            "zhihu_access_secret",
-            "https://developer.zhihu.com/api/v1/content/zhihu_search",
-        ),
-        _ => return Err(format!("Unsupported web search provider: {provider}")),
-    };
-    let key = api_key
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| get_non_empty(&load_object(), config_key))
-        .ok_or_else(|| format!("No {provider} API key is available to test."))?;
-    let test_query = if provider == "zhihu" || provider == "bocha" {
-        "清华大学人工智能研究".to_string()
-    } else {
-        format!(
-            "SomniQ research workspace connectivity {}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        )
-    };
-    let probe_provider = provider.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        tools::web::probe_web_search_provider(&probe_provider, &key, &test_query)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-
-    let (ok, message) = match result {
-        Ok(attempt) => {
-            let attempt_status = attempt["status"].as_str().unwrap_or("unknown");
-            let ok = matches!(attempt_status, "completed" | "partial");
-            (
-                ok,
-                if ok {
-                    format!(
-                        "{} connection succeeded; provider status={attempt_status}.",
-                        provider.to_ascii_uppercase()
-                    )
-                } else {
-                    attempt["error"]
-                        .as_str()
-                        .unwrap_or("Provider connection test failed.")
-                        .to_string()
-                },
-            )
-        }
-        Err(error) => (false, error),
-    };
-    Ok(ConfigTestDetail {
-        ok,
-        label: format!("{} Web Search", provider.to_ascii_uppercase()),
-        provider: Some(provider),
-        model: None,
-        base_url: Some(base_url.to_string()),
-        message,
-    })
-}
-
-#[tauri::command]
 pub async fn config_test(mut patch: ConfigPatch) -> Result<ConfigTestResult, String> {
     let mut obj = load_object();
     normalize_web_proxy_patch(&mut patch)?;
-    if patch.changes_admin_api_settings(&obj) {
-        ensure_admin_api_settings_access().await?;
-    }
+    patch.validate_account_settings(&obj)?;
     apply_patch(&mut obj, patch);
     normalize_managed_model_slots(&mut obj)?;
 
