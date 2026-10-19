@@ -115,8 +115,12 @@ jobs:
               # This wrapper repeats the same process-group timeout scenario
               # through the tool dispatcher and triggers the same runner-level
               # shutdown on Ubuntu hosted runners.
+              # The remaining-budget LaTeX test also terminates a Unix process
+              # group; hosted runners shut down while it kills its sh/sleep
+              # fixture. Keep this case in local workspace regression instead.
               cargo test -p tools -- --test-threads=1 \
-                --skip bash_tool_reports_success_exit_failure_timeout_and_background
+                --skip bash_tool_reports_success_exit_failure_timeout_and_background \
+                --skip latex_process_uses_the_remaining_build_budget
               ;;
             *)
               cargo test -p "${{ matrix.package }}" -- --test-threads=1
