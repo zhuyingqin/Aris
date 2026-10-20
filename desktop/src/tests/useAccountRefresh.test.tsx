@@ -157,6 +157,30 @@ describe("account allowance refresh", () => {
     expect(newapiBootstrap).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps the account signed in when a temporary token or model key is rejected", async () => {
+    render(<Harness />);
+    await settle();
+    for (const error of ["401 Unauthorized: invalid access token", "Invalid token", "AUTH_TOKEN_EXPIRED"]) {
+      vi.mocked(newapiBootstrap).mockRejectedValueOnce(new Error(error));
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      expect(useStore.getState().authed).toBe(true);
+      expect(readCachedAccount()).toEqual(initialAccount);
+    }
+    vi.mocked(newapiBootstrap).mockResolvedValue(consumedAccount);
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(readCachedAccount()).toEqual(consumedAccount);
+    expect(useStore.getState().authed).toBe(true);
+  });
+
+  it("signs out when the backend confirms the long-lived login has expired", async () => {
+    render(<Harness />);
+    await settle();
+    vi.mocked(newapiBootstrap).mockRejectedValueOnce(new Error("Login expired. Please sign in again."));
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(useStore.getState().authed).toBe(false);
+    expect(readCachedAccount()).toBeNull();
+  });
+
   it("does not restore a signed-out account from a late response", async () => {
     const older = deferred<NewApiAccount>();
     vi.mocked(newapiBootstrap).mockReturnValueOnce(older.promise);

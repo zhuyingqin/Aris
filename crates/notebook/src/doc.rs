@@ -39,15 +39,6 @@ impl NotebookDoc {
         Self::from_json_str(&text)
     }
 
-    /// Load from disk, or return a fresh empty notebook if the file is absent.
-    pub fn load_or_empty(path: &Path) -> Result<Self, NotebookError> {
-        if path.exists() {
-            Self::load(path)
-        } else {
-            Ok(Self::new_empty())
-        }
-    }
-
     /// Parse + validate a notebook from a JSON string.
     pub fn from_json_str(text: &str) -> Result<Self, NotebookError> {
         // Validate structure (this is the guard that catches corruption early).
@@ -186,21 +177,6 @@ impl NotebookDoc {
     pub fn delete(&mut self, index: usize) -> Result<(), NotebookError> {
         self.check(index)?;
         self.cells_mut().remove(index);
-        Ok(())
-    }
-
-    /// Move the cell at `from` to `to` (clamped to the last index), carrying its
-    /// source, outputs, and execution count with it. Unlike a delete+insert this
-    /// preserves the cell verbatim, so reordering in the UI never drops results.
-    pub fn move_cell(&mut self, from: usize, to: usize) -> Result<(), NotebookError> {
-        self.check(from)?;
-        let cells = self.cells_mut();
-        let to = to.min(cells.len().saturating_sub(1));
-        if from == to {
-            return Ok(());
-        }
-        let cell = cells.remove(from);
-        cells.insert(to, cell);
         Ok(())
     }
 

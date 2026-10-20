@@ -2,7 +2,7 @@ import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef,
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatError, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { figuresRunningCount, onFigureUpdated } from "./figures/figureApi";
 import { useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
@@ -10,6 +10,8 @@ import { useAccountRefresh } from "./useAccountRefresh";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "./settingsTabRequest";
 import type { SettingsNavId } from "./settings/settingsNav";
 import ErrorBoundary from "./ErrorBoundary";
+import { ClientOutdatedNotice } from "./ClientOutdatedNotice";
+import { onClientOutdated, reportClientOutdated } from "./clientOutdated";
 import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
 import { clientRunningConversationCount } from "./chat/chatActivity";
@@ -459,6 +461,7 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [clientOutdated, setClientOutdated] = useState(false);
   const [literaturePageView, setLiteraturePageView] = useState<LiteraturePageView>("library");
   // Mount Code once on first visit, then keep it alive (hidden) like Chat
   // instead of conditionally mounting per tab: remounting would tear down the
@@ -759,6 +762,26 @@ export default function App() {
       void checkForAppUpdate();
     }, UPDATE_CHECK_INTERVAL_MS);
     return () => window.clearInterval(timer);
+  }, [checkForAppUpdate]);
+  // The gateway refused this release: say so and look for the update now
+  // rather than at the next periodic check. Chat turns fail through
+  // `chat-error`; commands are reported by `invoke` itself.
+  useEffect(() => {
+    let disposed = false;
+    let unlistenChatError: (() => void) | null = null;
+    const unsubscribe = onClientOutdated(() => {
+      setClientOutdated(true);
+      void checkForAppUpdate();
+    });
+    void onChatError((event) => reportClientOutdated(event.message)).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenChatError = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unsubscribe();
+      unlistenChatError?.();
+    };
   }, [checkForAppUpdate]);
   // Collapsing the docked sidebar has to reach the app-head's matching left
   // cell as well, so the state rides on the body rather than on `.chat-root`.
@@ -1142,6 +1165,14 @@ export default function App() {
           {renderedTab === "settings" && <Settings />}
         </ErrorBoundary>
 
+        {clientOutdated && (
+          <ClientOutdatedNotice
+            language={language}
+            updateState={updateState}
+            onInstall={() => void handleUpdateIndicatorClick()}
+            onDismiss={() => setClientOutdated(false)}
+          />
+        )}
         {error && (
           <div className="toast" role="alert" aria-live="assertive">
             {error}

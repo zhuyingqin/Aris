@@ -12594,6 +12594,31 @@ button.chat-project-toggle:hover {
   letter-spacing: normal;
 }
 
+.chat-local-project-group .chat-project-label-text {
+  flex: 0 1 auto;
+}
+
+.chat-project-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.chat-project-collapse:hover,
+.chat-project-collapse:focus-visible {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+}
+
 .chat-project-add {
   display: inline-flex;
   align-items: center;
@@ -15862,6 +15887,19 @@ button.chat-project-toggle:hover {
 .file-path-menu-divider {
   margin: 3px 4px;
   border-top: 1px solid var(--border);
+}
+
+.file-path-menu button:disabled {
+  color: var(--text-dim);
+  cursor: wait;
+}
+
+.file-path-menu-error {
+  max-width: 240px;
+  padding: 4px 10px;
+  color: var(--danger, #dc5b5b);
+  font-size: 12px;
+  white-space: normal;
 }
 
 .file-path-menu-has-sub {
@@ -19898,6 +19936,13 @@ button.chat-workflow-file-path:hover {
   padding-left: 5px;
 }
 
+.chat-attachment .chat-image-preview {
+  width: 42px;
+  flex: 0 0 42px;
+  margin: 0;
+  border-radius: 6px;
+}
+
 .chat-attachment img {
   width: 42px;
   height: 42px;
@@ -19924,7 +19969,7 @@ button.chat-workflow-file-path:hover {
   color: var(--text);
 }
 
-.chat-attachment button {
+.chat-attachment button:not(.chat-image-preview-button) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -19940,7 +19985,7 @@ button.chat-workflow-file-path:hover {
   line-height: 1;
 }
 
-.chat-attachment button:hover {
+.chat-attachment button:not(.chat-image-preview-button):hover {
   background: var(--bg-3);
   color: var(--text);
 }

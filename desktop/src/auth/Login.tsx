@@ -9,6 +9,8 @@ import appLogo from "../assets/app-logo.png";
 import DesktopWindowControls from "../DesktopWindowControls";
 import { DEFAULT_AUTH_SERVER, useStore, type Language } from "../store";
 import { formatUserFacingError } from "../errorMessage";
+import { LoginClientUpdateButton } from "../ClientOutdatedNotice";
+import { onClientOutdated } from "../clientOutdated";
 import { DreamScene, LoginBackdrop } from "./LoginScene";
 import { LOGIN_COPY } from "./i18n";
 import "./login.css";
@@ -69,7 +71,12 @@ export default function Login() {
   const [codeCooldown, setCodeCooldown] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [clientOutdated, setClientOutdated] = useState(false);
   const [affCode] = useState(readAffCode);
+
+  // Any account call can be the first to learn the gateway no longer serves
+  // this release; the update action then sits under the alerts.
+  useEffect(() => onClientOutdated(() => setClientOutdated(true)), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -414,6 +421,10 @@ export default function Login() {
             <div role="alert" className="sq-alert sq-alert-err">
               {error}
             </div>
+          )}
+
+          {clientOutdated && (
+            <LoginClientUpdateButton language={language} className="sq-btn sq-btn-secondary" />
           )}
 
           <button

@@ -20,7 +20,6 @@ pub const POSTER_DIR: &str = "poster";
 pub const WEB_DIR: &str = "web";
 pub const NOTEBOOKS_DIR: &str = "notebooks";
 pub const REPORTS_DIR: &str = "reports";
-pub const LEGACY_NOTEBOOKS_DIR: &str = "experiments";
 pub const EXPERIMENTS_DIR: &str = "experiments";
 pub const RUNS_SUBDIR: &str = "runs";
 /// Staging area for deliverables a work task produces that do not belong to
@@ -65,10 +64,6 @@ pub fn poster_dir_at(base: &Path) -> PathBuf {
 
 pub fn web_dir_at(base: &Path) -> PathBuf {
     project_data_dir_at(base).join(WEB_DIR)
-}
-
-pub fn notebooks_dir_at(base: &Path) -> PathBuf {
-    project_data_dir_at(base).join(NOTEBOOKS_DIR)
 }
 
 pub fn reports_dir_at(base: &Path) -> PathBuf {
@@ -151,10 +146,6 @@ pub fn is_noisy_workspace_entry(name: &str) -> bool {
             | "target"
             | "__pycache__"
     ) || name.starts_with(".tmp-")
-}
-
-pub fn is_noisy_walk_dir(name: &str) -> bool {
-    is_noisy_workspace_entry(name) || name.starts_with('.')
 }
 
 pub fn layout_json() -> Value {

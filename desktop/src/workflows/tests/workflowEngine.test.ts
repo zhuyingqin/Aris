@@ -6,7 +6,6 @@ import {
   applyStageFailure,
   assertMatrixStrategyIterationChange,
   batchInputFingerprint,
-  chunkItems,
   currentWorkflowStageId,
   deterministicPlan,
   enforceScopusJournalArticleType,
@@ -15,7 +14,6 @@ import {
   invalidateDownstream,
   mergeActivityLog,
   matrixStrategyIterationPrompt,
-  normalizedPlan,
   normalizeLandscapeAnalysis,
   normalizeMatrixStrategy,
   nextScoutAutomationAction,
@@ -494,10 +492,6 @@ describe("workflowEngine", () => {
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
-  it("chunks bounded model inputs without dropping records", () => {
-    expect(chunkItems([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
-  });
-
   it("rejects incomplete Scopus matrix syntax", () => {
     expect(validateScopusQuery("TITLE-ABS-KEY((anion AND battery)")).toContain("括号配对失败");
   });
@@ -946,37 +940,6 @@ describe("review search plan", () => {
     yearTo: 2026,
   } as ReviewWorkflowRun;
 
-  it("keeps one query per source when the model returns a variant ladder", () => {
-    const plan = normalizedPlan({
-      queries: [
-        { id: "s1", source: "scopus", kind: "broader", language: "English", query: "TITLE-ABS-KEY(\"reservoir computing\")", rationale: "recall" },
-        { id: "s2", source: "scopus", kind: "stricter", language: "English", query: "TITLE(\"reservoir computing\")", rationale: "precision" },
-        { id: "s3", source: "scopus", kind: "synonym", language: "English", query: "TITLE-ABS-KEY(\"echo state network\")", rationale: "synonyms" },
-        { id: "a1", source: "arxiv", kind: "base", language: "English", query: "reservoir computing", rationale: "base" },
-      ],
-      inclusionCriteria: ["2022-2026"],
-      exclusionCriteria: ["editorials"],
-    }, planRun);
-
-    expect(plan.queries).toHaveLength(2);
-    expect(plan.queries.map((query) => query.source)).toEqual(["scopus", "arxiv"]);
-    // The first query for a source wins; the ladder below it is dropped.
-    expect(plan.queries[0].query).toContain("TITLE-ABS-KEY");
-    expect(plan.queries[0].query).toContain("DOCTYPE(re)");
-    expect(plan.queries.every((query) => query.kind === "primary")).toBe(true);
-  });
-
-  it("drops queries for sources the run did not select", () => {
-    const plan = normalizedPlan({
-      queries: [
-        { id: "w1", source: "web-of-science", kind: "base", language: "English", query: "TS=(reservoir computing)", rationale: "off-protocol" },
-        { id: "s1", source: "scopus", kind: "base", language: "English", query: "TITLE-ABS-KEY(\"reservoir computing\")", rationale: "in protocol" },
-      ],
-    }, planRun);
-
-    expect(plan.queries.map((query) => query.source)).toEqual(["scopus"]);
-  });
-
   it("falls back to one field-level query per source with no invented exclusions", () => {
     const plan = deterministicPlan(planRun);
 
@@ -1002,16 +965,8 @@ describe("review search plan", () => {
   });
 
   it("rejects Chinese natural-language and combinatorial Scopus queries before review", () => {
-    const chinesePlan = normalizedPlan({
-      queries: [{
-        id: "s1",
-        source: "scopus",
-        kind: "primary",
-        language: "English",
-        query: 'TITLE-ABS-KEY("研究大语言模型与时间序列结合") AND DOCTYPE(re)',
-        rationale: "bad translation",
-      }],
-    }, { ...planRun, databases: ["scopus"] });
+    const chinesePlan = deterministicPlan({ ...planRun, databases: ["scopus"] } as ReviewWorkflowRun);
+    chinesePlan.queries[0].query = 'TITLE-ABS-KEY("研究大语言模型与时间序列结合") AND DOCTYPE(re)';
     expect(reviewSearchPlanPreflightIssues(chinesePlan).join(" ")).toContain("不得出现中文");
 
     const variants = Array.from(

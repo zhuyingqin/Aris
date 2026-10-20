@@ -138,6 +138,8 @@ describe("SideFileViewer", () => {
       onOpenInWorkspace={() => undefined} onMetadataChange={() => undefined} />);
     expect((await screen.findByRole("img", { name })).getAttribute("src")).toBe("asset://mock-image");
     expect(apiMocks.fileAssetUrl).toHaveBeenCalledWith(`F:/project/figures/${name}`, mimeType);
+    await userEvent.click(screen.getByRole("button", { name }));
+    expect(screen.getByRole("dialog", { name })).toBeTruthy();
     expect(apiMocks.fileReadText).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "在 LaTeX 页面打开" })).toBeNull();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();

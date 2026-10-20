@@ -196,12 +196,6 @@ pub fn detect_container_environment_from(
 }
 
 #[must_use]
-pub fn resolve_sandbox_status(config: &SandboxConfig, cwd: &Path) -> SandboxStatus {
-    let request = config.resolve_request(None, None, None, None, None);
-    resolve_sandbox_status_for_request(&request, cwd)
-}
-
-#[must_use]
 pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) -> SandboxStatus {
     let container = detect_container_environment();
     let namespace_supported = cfg!(target_os = "linux") && crate::command_exists("unshare");

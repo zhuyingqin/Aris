@@ -13,7 +13,6 @@ export const figureEditImage = (input: { projectId: string; id: string; baseInde
 export type ImageResultChoice = "returned" | "selection" | "keep";
 export const figureEditResultDocument = (projectId: string, id: string, requestId: string, expectedHash: string, choice: Exclude<ImageResultChoice, "keep">) => invoke<FigureRasterDocument>("figures_edit_result_document", { projectId, id, requestId, expectedHash, choice });
 export const figureResolveEditResult = (projectId: string, id: string, requestId: string, expectedHash: string, choice: ImageResultChoice) => invoke<FigureView>("figures_resolve_edit_result", { projectId, id, requestId, expectedHash, choice });
-export const figureExportRaster = (projectId: string, id: string, index: number, destination: string | null) => invoke<{ filename: string; mimeType: string; dataBase64: string }>("figures_export_raster", { projectId, id, index, destination });
 export const figureDelete = (projectId: string, id: string) => invoke<void>("figures_delete", { projectId, id });
 export const figureCancel = (projectId: string, id: string) => invoke<void>("figures_cancel", { projectId, id });
 export const figureReview = (projectId: string, id: string) => invoke<FigureView>("figures_review", { projectId, id });

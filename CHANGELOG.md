@@ -1,5 +1,31 @@
 # ARIS-Code Changelog
 
+## v0.4.85 (2026-10-20)
+
+- **Model prices beside model selection** — Chat and model settings show compact
+  price badges using DeepSeek's peak rate as the fixed 1× comparison. DeepSeek
+  shows 0.5× off peak while other models keep the same peak denominator.
+  Each Chat category sorts models by numeric multiplier from low to high,
+  preserves equal-price order, and keeps unknown prices last. Single-model
+  categories, highlight-only selection and per-request labels of 0.1 keep the
+  picker consistent; detailed pricing remains available on hover.
+- **Account sessions recover from access-token expiry** — account, model,
+  pricing and usage requests renew short-lived access tokens and retry once.
+  Refresh-cookie rotation is serialized, and temporary credential-store write
+  failures retain the latest credential in backend memory for a later retry.
+  Model-key failures preserve account sign-in; confirmed revoked sessions still
+  sign out. Credentials remain in backend memory and the OS credential store.
+- **Copy original images from Chat and previews** — image context menus resolve
+  the original file, preserve PNG bytes and transparency, and convert other
+  supported formats at their natural size. Enlarged previews share the same
+  copy flow, including duplicate-write protection and visible retry errors.
+- **Clear client upgrade requests** — SomniQ service requests identify the app
+  version consistently. A server's upgrade-required response opens the update
+  notice instead of appearing as a generic network or authentication error.
+- **Release consistency** — desktop and shared Rust manifests, lockfiles and
+  README badges target 0.4.85. Windows x64 and macOS universal installers retain
+  signed updater payloads and a combined update manifest.
+
 ## v0.4.84 (2026-10-19)
 
 - **DeepSeek search through the SomniQ account** — WebSearch now uses New API's

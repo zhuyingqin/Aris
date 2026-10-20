@@ -31,10 +31,6 @@ export function readDisclosure(key: string | null | undefined): boolean | undefi
   return key ? store.get(key) : undefined;
 }
 
-export function clearDisclosureState(): void {
-  store.clear();
-}
-
 /**
  * Drop-in replacement for `useState(false)` on a disclosure toggle. Blocks
  * without an id (older transcripts) fall back to plain local state rather than

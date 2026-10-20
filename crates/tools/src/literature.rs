@@ -403,10 +403,6 @@ impl ParsedTimeWindow {
 
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
 
-pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, String> {
-    run_literature_search_with_cancel(input, &|| false)
-}
-
 pub fn run_literature_search_with_cancel(
     input: LiteratureSearchInput,
     should_cancel: &dyn Fn() -> bool,
@@ -1935,10 +1931,6 @@ pub fn run_literature_library_upsert(
     let base = runtime::workspace_root_from_env();
     let stats = library_upsert_at(&base, &input.papers, input.search.as_ref())?;
     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
-}
-
-pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<String, String> {
-    run_literature_pdf_download_with_cancel(input, &|| false)
 }
 
 pub fn run_literature_pdf_download_with_cancel(
@@ -11513,15 +11505,6 @@ fn scopus_operand_end(tokens: &[ScopusToken], op: usize) -> Option<usize> {
         ScopusTokenKind::Other => Some(right),
         _ => None,
     }
-}
-
-/// The query as it will actually be sent to Scopus, after field-code wrapping
-/// and proximity normalisation.
-///
-/// Exposed because a caller that reports "0 results" needs to be able to show
-/// the query the provider actually answered, not the one it was handed.
-pub fn scopus_query_for_provider(query: &str) -> String {
-    scopus_query(query)
 }
 
 /// Bare keyword queries become `TITLE-ABS-KEY(...)`; queries that already use

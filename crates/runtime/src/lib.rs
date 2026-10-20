@@ -8,6 +8,7 @@ pub mod background_log;
 mod bash;
 mod cache;
 mod change_ledger;
+pub mod client_identity;
 mod compact;
 mod config;
 mod conversation;
@@ -66,6 +67,10 @@ pub use bash::{
     adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
+};
+pub use client_identity::{
+    client_outdated_error, client_outdated_message, client_user_agent, CLIENT_OUTDATED_CODE,
+    CLIENT_VERSION,
 };
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
@@ -239,7 +244,7 @@ pub use reports::{
 };
 pub use research_memory::{
     canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
-    ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
+    ResearchMemoryAtom, ResearchMemoryCapture,
     ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
     ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild,
     ResearchMemoryRebuildSummary, ResearchMemoryRecall, ResearchMemorySnapshot,

@@ -12,16 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tauri::State;
 
 use runtime::{
     canonicalize_research_memory_text,
     is_research_memory_session_id as is_general_memory_session_id, prefilter_v2, ContentBlock,
-    MessageRole, ResearchMemoryCapture, ResearchMemoryStore,
+    MessageRole, ResearchMemoryStore,
     ResearchMemoryV2Capture, ResearchMemoryV2Extraction, ResearchMemoryV2Layer,
     ResearchMemoryV2Mode, ResearchMemoryV2OutboxItem, ResearchMemoryV2Prefilter,
     ResearchMemoryV2Promotion, ResearchMemoryV2Store, Session, SessionSearchResult,
@@ -74,24 +72,10 @@ pub enum MemoryHealthStatus {
 
 #[derive(Default)]
 struct MemoryInner {
-    #[allow(dead_code)]
-    research_draining: AtomicBool,
-    /// Raised by every enqueue and lowered by the drain thread before it drains.
-    /// Without it a capture that lands between "the queue is empty" and the
-    /// thread releasing `research_draining` is never woken: the enqueue sees the
-    /// guard still held and skips spawning, and the thread has already decided
-    /// to exit, so the capture sits pending until the next turn or a restart.
-    #[allow(dead_code)]
-    research_wakeup: AtomicBool,
     /// V2 is deliberately separate from the frozen v1 store.  A completed v1
     /// outbox row must never be interpreted as a v2 screening decision.
     v2_draining: AtomicBool,
     v2_wakeup: AtomicBool,
-    /// Per-project guards keep startup/status reconciliation from racing itself.
-    #[allow(dead_code)]
-    capture_reconciling: Mutex<BTreeSet<String>>,
-    migration_cancelled: AtomicBool,
-    migration_progress: Mutex<MemoryMigrationProgress>,
     /// Live view of the v2 drain worker. Screening a backlog is minutes of
     /// silent model calls, so without this the user cannot tell a working
     /// pipeline from a stuck one -- the queue number alone moves too slowly.
@@ -126,57 +110,6 @@ impl MemoryState {
         let _ = projects;
         if research_memory_v2_mode().runs_pipeline() {
             self.spawn_v2_outbox_drain();
-        }
-    }
-
-    #[allow(dead_code)]
-    fn begin_migration(&self, total_items: usize) {
-        if let Ok(mut progress) = self.inner.migration_progress.lock() {
-            *progress = MemoryMigrationProgress {
-                running: true,
-                phase: "scanning".to_string(),
-                completed_items: 0,
-                total_items,
-                last_error: None,
-            };
-        }
-    }
-
-    #[allow(dead_code)]
-    fn update_migration_progress(&self, phase: &str, completed_items: usize) {
-        if let Ok(mut progress) = self.inner.migration_progress.lock() {
-            progress.phase = phase.to_string();
-            progress.completed_items = completed_items.min(progress.total_items);
-        }
-    }
-
-    /// Surfaces a non-fatal backfill problem without ending the run. One
-    /// unparseable capture is not a reason to abandon the remaining Sessions.
-    #[allow(dead_code)]
-    fn note_migration_error(&self, error: &str) {
-        if let Ok(mut progress) = self.inner.migration_progress.lock() {
-            progress.last_error = Some(truncate_chars(error, 500));
-        }
-    }
-
-    #[allow(dead_code)]
-    fn finish_migration(&self, error: Option<&str>, cancelled: bool) {
-        if let Ok(mut progress) = self.inner.migration_progress.lock() {
-            progress.running = false;
-            if cancelled {
-                progress.phase = "cancelled".to_string();
-            } else if error.is_none() {
-                progress.completed_items = progress.total_items;
-                progress.phase = "completed".to_string();
-            } else {
-                progress.phase = "failed".to_string();
-            }
-            // Only overwrite on failure: `begin_migration` clears the field for
-            // every run, so a non-fatal note from `note_migration_error` has to
-            // survive an otherwise successful finish.
-            if let Some(error) = error {
-                progress.last_error = Some(truncate_chars(error, 500));
-            }
         }
     }
 
@@ -313,94 +246,6 @@ impl MemoryState {
             self.spawn_v2_outbox_drain();
         }
         Ok(enqueued)
-    }
-
-    /// Records what a turn established, at the moment it ends and without a
-    /// single model call.
-    ///
-    /// A tool that failed and the call that worked instead is the most reusable
-    /// thing a turn produces, and it is already fully determined by the turn's
-    /// own blocks. Reconstructing it later is both expensive and lossy.
-    /// Compare completed normal turns in the canonical Session event logs with
-    /// the durable memory outbox. The work is restart-safe: the outbox has a
-    /// unique `(project, session, final message index)` key, and a pending or
-    /// dead-letter record remains visible rather than being silently replaced.
-    #[allow(dead_code)]
-    fn reconcile_project_async(&self, project_id: String, workspace: PathBuf) {
-        let should_start = self
-            .inner
-            .capture_reconciling
-            .lock()
-            .map(|mut active| active.insert(project_id.clone()))
-            .unwrap_or(false);
-        if !should_start {
-            return;
-        }
-        let state = self.clone();
-        let _ = std::thread::Builder::new()
-            .name("somniq-research-memory-reconcile".to_string())
-            .spawn(move || {
-                let outcome = reconcile_project_captures(&project_id, &workspace);
-                if let Err(error) = outcome {
-                    eprintln!("SomniQ memory capture reconciliation skipped: {error}");
-                }
-                if let Ok(mut active) = state.inner.capture_reconciling.lock() {
-                    active.remove(&project_id);
-                }
-                state.spawn_research_outbox_drain();
-            });
-    }
-
-    #[allow(dead_code)]
-    fn spawn_research_outbox_drain(&self) {
-        // Raise the wakeup before claiming the guard: a thread that is already
-        // draining has to be able to observe this request even if it is on its
-        // way out.
-        self.inner.research_wakeup.store(true, Ordering::SeqCst);
-        if self.inner.research_draining.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let state = self.clone();
-        let _ = std::thread::Builder::new()
-            .name("somniq-research-memory-outbox".to_string())
-            .spawn(move || {
-                let store = ResearchMemoryStore::default();
-                loop {
-                    state.inner.research_wakeup.store(false, Ordering::SeqCst);
-                    match store.drain_due_outbox(50) {
-                        Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("SomniQ research memory outbox item deferred: {error}");
-                        }
-                    }
-                    match store.next_outbox_delay() {
-                        Ok(None) => {
-                            if state.inner.research_wakeup.load(Ordering::SeqCst) {
-                                continue;
-                            }
-                            state.inner.research_draining.store(false, Ordering::SeqCst);
-                            // Re-check after releasing. An enqueue that raised
-                            // the wakeup while the guard was still held skipped
-                            // spawning its own thread and is relying on this.
-                            if state.inner.research_wakeup.load(Ordering::SeqCst)
-                                && !state.inner.research_draining.swap(true, Ordering::SeqCst)
-                            {
-                                continue;
-                            }
-                            return;
-                        }
-                        Ok(Some(delay)) if delay.is_zero() => continue,
-                        Ok(Some(delay)) => {
-                            std::thread::sleep(delay.min(std::time::Duration::from_secs(30)));
-                        }
-                        Err(error) => {
-                            eprintln!("SomniQ research memory outbox paused: {error}");
-                            state.inner.research_draining.store(false, Ordering::SeqCst);
-                            return;
-                        }
-                    }
-                }
-            });
     }
 
     /// V2 calls the configured independent Reviewer only from a background
@@ -807,14 +652,11 @@ struct AuthoritativeFinalTurn {
     session_id: String,
     user_message_index: i64,
     message_index: i64,
-    #[allow(dead_code)]
     user_text: String,
-    #[allow(dead_code)]
     assistant_text: String,
     /// Historic Sessions retain their tool blocks on disk, so a replayed turn
     /// gets the same evidence a live one does. Without this the whole backlog
     /// could only ever yield restatements of the task.
-    #[allow(dead_code)]
     tool_trace: String,
     occurred_at: String,
 }
@@ -1054,48 +896,6 @@ fn capture_coverage(project_id: &str, workspace: &Path) -> Result<CaptureCoverag
     Ok(coverage)
 }
 
-#[allow(dead_code)]
-fn reconcile_project_captures(project_id: &str, workspace: &Path) -> Result<usize, String> {
-    let turns = authoritative_final_turns(project_id, workspace)?;
-    let store = ResearchMemoryStore::default();
-    let deliveries = store.final_turn_deliveries(project_id)?;
-    let delivered = deliveries
-        .into_iter()
-        .map(|delivery| (delivery.session_id, delivery.source_message_index))
-        .collect::<BTreeSet<_>>();
-    let mut captures = Vec::new();
-    let mut repaired = 0_usize;
-    for turn in turns {
-        if delivered.contains(&(turn.session_id.clone(), turn.message_index)) {
-            continue;
-        }
-        if store.bind_legacy_final_turn(
-            project_id,
-            &turn.session_id,
-            turn.message_index,
-            &turn.user_text,
-            &turn.assistant_text,
-        )? {
-            repaired = repaired.saturating_add(1);
-            continue;
-        }
-        captures.push(ResearchMemoryCapture {
-            project_id: project_id.to_string(),
-            session_id: turn.session_id.clone(),
-            source_message_index: Some(turn.message_index),
-            source_event_ids: vec![format!("{}:{}", turn.session_id, turn.message_index)],
-            user_text: turn.user_text,
-            assistant_text: turn.assistant_text,
-            occurred_at: turn.occurred_at,
-        });
-    }
-    let inserted = store.enqueue_captures(&captures)?;
-    if repaired > 0 || inserted > 0 {
-        let _ = store.drain_project_outbox(project_id, 100);
-    }
-    Ok(repaired.saturating_add(inserted))
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryStatusView {
@@ -1121,44 +921,6 @@ pub struct MemoryStatusView {
     capture_missing: usize,
     last_captured_at: Option<String>,
     last_captured_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryMigrationPreview {
-    session_files: usize,
-    already_migrated: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryMigrationResult {
-    imported_sessions: usize,
-    imported_messages: usize,
-    skipped: usize,
-    cancelled: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryMigrationProgress {
-    running: bool,
-    phase: String,
-    completed_items: usize,
-    total_items: usize,
-    last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryDeadLetterView {
-    id: String,
-    session_id: String,
-    source_event_ids: Vec<String>,
-    occurred_at: String,
-    attempts: i64,
-    last_error: String,
-    updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1561,14 +1323,6 @@ pub fn memory_v2_build_progress(memory: State<'_, MemoryState>) -> MemoryV2Build
         .unwrap_or_default()
 }
 
-/// Removes the retired v1 R1--R3 projection and its v1 outbox from the local
-/// database. Durable Session JSONL (R0) and the independent v2 database are
-/// intentionally outside this operation.
-#[tauri::command]
-pub async fn memory_purge_legacy_derived() -> Result<runtime::ResearchMemoryLegacyPurge, String> {
-    spawn_memory_task(|| ResearchMemoryStore::default().purge_legacy_derived()).await
-}
-
 #[tauri::command]
 pub async fn memory_explorer_snapshot(
     limit: Option<usize>,
@@ -1798,127 +1552,6 @@ fn export_memory(project_id: String) -> Result<String, String> {
         .map_err(|error| error.to_string())?;
         Ok(path.display().to_string())
     }
-}
-
-#[tauri::command]
-pub async fn memory_migration_preview(
-    projects: State<'_, projects::ProjectState>,
-) -> Result<MemoryMigrationPreview, String> {
-    let project_id = projects::active_project_id(projects.inner())?;
-    spawn_memory_task(move || migration_preview(&project_id)).await
-}
-
-#[tauri::command]
-pub fn memory_migration_progress(
-    memory: State<'_, MemoryState>,
-) -> Result<MemoryMigrationProgress, String> {
-    memory
-        .inner
-        .migration_progress
-        .lock()
-        .map(|progress| progress.clone())
-        .map_err(|_| "Memory migration progress is poisoned".to_string())
-}
-
-#[tauri::command]
-pub async fn memory_dead_letters(
-    projects: State<'_, projects::ProjectState>,
-) -> Result<Vec<MemoryDeadLetterView>, String> {
-    let project_id = projects::active_project_id(projects.inner())?;
-    spawn_memory_task(move || {
-        ResearchMemoryStore::default()
-            .dead_letters(&project_id, 20)
-            .map(|items| {
-                items
-                    .into_iter()
-                    .map(|item| MemoryDeadLetterView {
-                        id: item.id,
-                        session_id: item.session_id,
-                        source_event_ids: item.source_event_ids,
-                        occurred_at: item.occurred_at,
-                        attempts: item.attempts,
-                        last_error: item.last_error,
-                        updated_at: item.updated_at,
-                    })
-                    .collect()
-            })
-    })
-    .await
-}
-
-/// Replays every stored capture in every project through the current extractor.
-///
-/// R1 is written once and never revisited, so an extraction fix reaches only new
-/// conversations until this runs. The outbox keeps every completed capture, so
-/// the replay is local and repeatable; user corrections and deletions survive it.
-///
-/// The pass is store-wide rather than scoped to the active project: an extractor
-/// version bump invalidates every project at once, and a per-project button
-/// leaves the projects the user has not opened lately on the old rules, mixing
-/// rule generations inside one store.
-#[tauri::command]
-pub async fn memory_rebuild_derived() -> Result<runtime::ResearchMemoryRebuildSummary, String> {
-    Err(
-        "Legacy R1-R3 memory is read-only during the v2 migration; rebuild is disabled."
-            .to_string(),
-    )
-}
-
-/// Returns every dead-lettered capture for this project to the queue and kicks
-/// the drain. Without it `dead_letter` is terminal and the Settings page can
-/// only watch the backlog it reports.
-#[tauri::command]
-pub async fn memory_dead_letter_retry(
-    _memory: State<'_, MemoryState>,
-    _projects: State<'_, projects::ProjectState>,
-) -> Result<usize, String> {
-    Err("Legacy R1-R3 memory is read-only during the v2 migration; retry is disabled.".to_string())
-}
-
-#[tauri::command]
-pub fn memory_migration_cancel(memory: State<'_, MemoryState>) {
-    memory
-        .inner
-        .migration_cancelled
-        .store(true, Ordering::SeqCst);
-}
-
-#[tauri::command]
-pub async fn memory_migration_execute(
-    _memory: State<'_, MemoryState>,
-    _projects: State<'_, projects::ProjectState>,
-) -> Result<MemoryMigrationResult, String> {
-    Err(
-        "Legacy R1-R3 migration is disabled. V2 starts from an empty provenance-only queue."
-            .to_string(),
-    )
-}
-
-fn open_backfill_ledger() -> Result<rusqlite::Connection, String> {
-    fs::create_dir_all(memory_root()).map_err(|error| error.to_string())?;
-    let connection =
-        rusqlite::Connection::open(ledger_path()).map_err(|error| error.to_string())?;
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=2000;
-             CREATE TABLE IF NOT EXISTS migration_ledger_v2(
-               source_path TEXT NOT NULL,
-               source_hash TEXT NOT NULL,
-               target_scope TEXT NOT NULL,
-               item_count INTEGER NOT NULL,
-               status TEXT NOT NULL,
-               updated_at INTEGER NOT NULL,
-               last_error TEXT,
-               PRIMARY KEY(source_path, target_scope)
-             );",
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(connection)
-}
-
-fn ledger_path() -> PathBuf {
-    memory_root().join("memory-bridge.sqlite3")
 }
 
 fn memory_root() -> PathBuf {
@@ -2785,194 +2418,6 @@ const fn explorer_layer_for_v2(layer: ResearchMemoryV2Layer) -> &'static str {
     }
 }
 
-fn migration_preview(project_id: &str) -> Result<MemoryMigrationPreview, String> {
-    let sessions_dir = state::sessions_dir_for_project(project_id);
-    let session_files = session_json_files(&sessions_dir)
-        .into_iter()
-        .filter(|path| {
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(is_general_memory_session_id)
-        })
-        .count();
-    let target_scope = format!("builtin-research:{project_id}");
-    let already_migrated = open_backfill_ledger()?
-        .query_row(
-            "SELECT COUNT(*) FROM migration_ledger_v2 WHERE status='done' AND target_scope=?1",
-            [target_scope],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
-        .map_err(|error| error.to_string())?;
-    Ok(MemoryMigrationPreview {
-        session_files,
-        already_migrated,
-    })
-}
-
-#[allow(dead_code)]
-fn run_builtin_research_migration(
-    memory: &MemoryState,
-    project_id: &str,
-    workspace: &Path,
-) -> Result<MemoryMigrationResult, String> {
-    let store = ResearchMemoryStore::default();
-    let target_scope = format!("builtin-research:{project_id}");
-    let mut result = MemoryMigrationResult {
-        imported_sessions: 0,
-        imported_messages: 0,
-        skipped: 0,
-        cancelled: false,
-    };
-    let paths = session_json_files(&state::sessions_dir_for_project(project_id))
-        .into_iter()
-        .filter(|path| {
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(is_general_memory_session_id)
-        })
-        .collect::<Vec<_>>();
-    for (index, path) in paths.into_iter().enumerate() {
-        if memory.inner.migration_cancelled.load(Ordering::SeqCst) {
-            result.cancelled = true;
-            break;
-        }
-        let session_id = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let source_hash = file_sha256(&path)?;
-        if migration_is_done(&path, &source_hash, &target_scope)? {
-            result.skipped += 1;
-            memory.update_migration_progress("sessions", index.saturating_add(1));
-            continue;
-        }
-        let session = match Session::load_from_path(&path) {
-            Ok(session) => session,
-            Err(error) => {
-                record_migration(
-                    &path,
-                    &source_hash,
-                    &target_scope,
-                    0,
-                    "failed",
-                    Some(&error.to_string()),
-                )?;
-                memory.update_migration_progress("sessions", index.saturating_add(1));
-                continue;
-            }
-        };
-        let occurred_at_secs = fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map_or_else(|| epoch_secs().max(0) as u64, |duration| duration.as_secs());
-        let captures = historical_research_captures(
-            project_id,
-            &session_id,
-            &session,
-            occurred_at_secs,
-            workspace,
-        );
-        let mut imported_turns = 0_usize;
-        for capture in captures {
-            if store.enqueue_capture(&capture)? {
-                imported_turns += 1;
-            }
-        }
-        // Scoped to this project, and tolerant of a single bad capture:
-        // `drain_project_outbox` reports the first failure but has already
-        // scheduled that item's retry, and the Sessions still queued behind it
-        // are worth importing. Aborting here used to lose the whole backfill —
-        // including to a failure in an unrelated project's queue.
-        loop {
-            match store.drain_project_outbox(project_id, 100) {
-                Ok(completed) if completed >= 100 => continue,
-                Ok(_) => break,
-                Err(error) => {
-                    memory.note_migration_error(&error);
-                    break;
-                }
-            }
-        }
-        let imported_messages = imported_turns.saturating_mul(2);
-        record_migration(
-            &path,
-            &source_hash,
-            &target_scope,
-            imported_messages,
-            "done",
-            None,
-        )?;
-        if imported_turns == 0 {
-            result.skipped += 1;
-        } else {
-            result.imported_sessions += 1;
-            result.imported_messages += imported_messages;
-        }
-        memory.update_migration_progress("sessions", index.saturating_add(1));
-    }
-    Ok(result)
-}
-
-#[allow(dead_code)]
-fn historical_research_captures(
-    project_id: &str,
-    session_id: &str,
-    session: &Session,
-    occurred_at_secs: u64,
-    workspace: &Path,
-) -> Vec<ResearchMemoryCapture> {
-    let messages = &session.messages;
-    let mut turns = Vec::new();
-    for (index, message) in messages.iter().enumerate() {
-        if !is_user_request(message) {
-            continue;
-        }
-        let Some(user_text) = clean_session_text(message) else {
-            continue;
-        };
-        let assistant = messages[index + 1..]
-            .iter()
-            .enumerate()
-            .take_while(|(_, candidate)| !is_user_request(candidate))
-            .filter(|(_, candidate)| candidate.role == MessageRole::Assistant)
-            .filter_map(|(offset, candidate)| {
-                clean_session_text(candidate).map(|text| (index + 1 + offset, text))
-            })
-            .last();
-        let Some((assistant_index, assistant_text)) = assistant else {
-            continue;
-        };
-        turns.push((assistant_index, user_text, assistant_text));
-    }
-    // A Session file carries no per-message timestamp, so turn order is the only
-    // ordering signal there is. Spread the turns back from the file's mtime, one
-    // second apart, so that a later decision still supersedes an earlier one.
-    // Stamping every turn with the same instant would collapse a whole session
-    // into a single moment, and supersession only fires on a strictly newer one.
-    let total = turns.len() as u64;
-    turns
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, (assistant_index, user_text, assistant_text))| {
-            let offset = total.saturating_sub(1).saturating_sub(ordinal as u64);
-            ResearchMemoryCapture {
-                project_id: project_id.to_string(),
-                session_id: session_id.to_string(),
-                source_message_index: Some(i64::try_from(assistant_index).unwrap_or(i64::MAX)),
-                source_event_ids: vec![format!("{session_id}:{assistant_index}")],
-                user_text: canonicalize_research_memory_text(workspace, &user_text),
-                assistant_text: canonicalize_research_memory_text(workspace, &assistant_text),
-                occurred_at: runtime::iso8601_from_epoch_secs(
-                    occurred_at_secs.saturating_sub(offset),
-                ),
-            }
-        })
-        .collect()
-}
-
 fn session_json_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = fs::read_dir(dir)
         .ok()
@@ -3013,63 +2458,6 @@ fn clean_session_text(message: &runtime::ConversationMessage) -> Option<String> 
     clean_capture_text(&text)
 }
 
-#[allow(dead_code)]
-fn migration_is_done(path: &Path, hash: &str, scope: &str) -> Result<bool, String> {
-    open_backfill_ledger()?
-        .query_row(
-            "SELECT 1 FROM migration_ledger_v2
-             WHERE source_path=?1 AND source_hash=?2 AND target_scope=?3 AND status='done'",
-            rusqlite::params![path.display().to_string(), hash, scope],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(|error| error.to_string())
-}
-
-#[allow(dead_code)]
-fn record_migration(
-    path: &Path,
-    hash: &str,
-    scope: &str,
-    count: usize,
-    status: &str,
-    error: Option<&str>,
-) -> Result<(), String> {
-    open_backfill_ledger()?
-        .execute(
-            "INSERT INTO migration_ledger_v2(source_path, source_hash, target_scope, item_count, status, updated_at, last_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(source_path, target_scope) DO UPDATE SET source_hash=excluded.source_hash,
-               item_count=excluded.item_count,
-               status=excluded.status, updated_at=excluded.updated_at, last_error=excluded.last_error",
-            rusqlite::params![
-                path.display().to_string(),
-                hash,
-                scope,
-                count,
-                status,
-                epoch_secs(),
-                error
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn file_sha256(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(hex_bytes(&hasher.finalize()))
-}
-
-#[allow(dead_code)]
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3081,6 +2469,7 @@ fn epoch_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::ResearchMemoryCapture;
 
     struct EnvGuard {
         key: &'static str,
@@ -3216,34 +2605,6 @@ mod tests {
         assert!(!is_general_memory_session_id(
             "somni-deepseek-v4-flash-free-bounded"
         ));
-
-        let mut historical = Session::new();
-        historical.messages = vec![
-            runtime::ConversationMessage::user_text(
-                "We decided that the experiment must keep complete provenance.",
-            ),
-            runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "This intermediate assistant draft is long enough but is not final."
-                    .to_string(),
-            }]),
-            runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "The final reviewed answer records the provenance requirement.".to_string(),
-            }]),
-        ];
-        let captures = historical_research_captures(
-            "project-a",
-            "chat-a",
-            &historical,
-            1_786_000_000,
-            Path::new("."),
-        );
-        assert_eq!(captures.len(), 1);
-        assert!(captures[0].assistant_text.starts_with("The final reviewed"));
-        assert_eq!(
-            captures[0].occurred_at,
-            runtime::iso8601_from_epoch_secs(1_786_000_000),
-            "the last turn lands on the file's own timestamp"
-        );
     }
 
     /// A turn in which a sub-agent's result was delivered between the user's
@@ -3282,23 +2643,6 @@ mod tests {
         assert!(turns[0].user_text.contains("complete provenance"));
         assert!(!turns[0].user_text.contains("Inter-agent"));
         assert!(turns[0].assistant_text.starts_with("The final reviewed"));
-    }
-
-    #[test]
-    fn historical_capture_of_a_turn_with_delivered_mail_quotes_the_user_not_the_mail() {
-        let captures = historical_research_captures(
-            "project-a",
-            "chat-a",
-            &session_with_delivered_mail(),
-            1_786_000_000,
-            Path::new("."),
-        );
-
-        assert_eq!(captures.len(), 1, "{captures:?}");
-        assert_eq!(captures[0].source_message_index, Some(4));
-        assert!(captures[0].user_text.contains("complete provenance"));
-        assert!(!captures[0].user_text.contains("Inter-agent"));
-        assert!(captures[0].assistant_text.starts_with("The final reviewed"));
     }
 
     fn research_atom(id: &str, statement: &str) -> runtime::ResearchMemoryAtom {
@@ -3587,67 +2931,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_migration_backfills_sessions_but_excludes_workflow_history() {
-        let (root, _guards, _serial) = migration_fixture("builtin-backfill");
-        let project_id = "project-migration";
-        let sessions = state::sessions_dir_for_project(project_id);
-        fs::create_dir_all(&sessions).expect("sessions dir");
-        let ordinary = Session {
-            version: 1,
-            messages: vec![
-                runtime::ConversationMessage::user_text(
-                    "我们决定实验必须保留完整来源并记录延迟指标。",
-                ),
-                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "实验结果 p95 延迟降低到 42 ms，来源已经记录。".to_string(),
-                }]),
-            ],
-            compactions: Vec::new(),
-        };
-        ordinary
-            .save_to_path(sessions.join("chat-a.json"))
-            .expect("save ordinary session");
-        let workflow = Session {
-            version: 1,
-            messages: vec![
-                runtime::ConversationMessage::user_text(
-                    "工作流控制器决定使用不能进入普通记忆的 secret-model。",
-                ),
-                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "工作流私有配置 secret-model 已记录。".to_string(),
-                }]),
-            ],
-            compactions: Vec::new(),
-        };
-        workflow
-            .save_to_path(sessions.join("wf-run-a.json"))
-            .expect("save workflow session");
-
-        let memory = MemoryState::default();
-        let first =
-            run_builtin_research_migration(&memory, project_id, &root).expect("first backfill");
-        assert_eq!(first.imported_sessions, 1);
-        assert_eq!(first.imported_messages, 2);
-        let snapshot = ResearchMemoryStore::default()
-            .snapshot(project_id, 100)
-            .expect("builtin snapshot");
-        assert!(snapshot
-            .atoms
-            .iter()
-            .any(|atom| atom.statement.contains("p95")));
-        assert!(!snapshot
-            .atoms
-            .iter()
-            .any(|atom| atom.statement.contains("secret-model")));
-
-        let second =
-            run_builtin_research_migration(&memory, project_id, &root).expect("second backfill");
-        assert_eq!(second.imported_sessions, 0);
-        assert_eq!(second.skipped, 1);
-        fs::remove_dir_all(root).expect("remove migration fixture");
-    }
-
-    #[test]
     fn v2_history_import_queues_raw_final_turns_without_legacy_or_workflow_data() {
         let (root, _guards, _serial) = migration_fixture("v2-guided-import");
         let project_id = "project-migration";
@@ -3728,8 +3011,8 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_repairs_a_missing_final_turn_once_and_records_coverage() {
-        let (root, _guards, _serial) = migration_fixture("capture-repair");
+    fn coverage_reports_a_final_turn_without_a_capture_as_missing() {
+        let (root, _guards, _serial) = migration_fixture("capture-coverage");
         let project_id = "project-migration";
         let sessions = state::sessions_dir_for_project(project_id);
         fs::create_dir_all(&sessions).expect("sessions dir");
@@ -3749,201 +3032,8 @@ mod tests {
             .save_to_path(sessions.join("chat-missing-final.json"))
             .expect("save source session");
 
-        let before = capture_coverage(project_id, &root).expect("coverage before repair");
+        let before = capture_coverage(project_id, &root).expect("coverage");
         assert_eq!((before.expected, before.covered, before.missing), (1, 0, 1));
-
-        assert_eq!(
-            reconcile_project_captures(project_id, &root).expect("repair capture"),
-            1
-        );
-        let deliveries = ResearchMemoryStore::default()
-            .final_turn_deliveries(project_id)
-            .expect("delivery");
-        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
-        assert_eq!(deliveries[0].session_id, "chat-missing-final");
-        assert_eq!(deliveries[0].source_message_index, 1);
-        assert_eq!(deliveries[0].status, "completed");
-
-        // Reconciliation repairs into the v1 store, while `capture_coverage`
-        // reports from v2, so a repair cannot close the gap that coverage
-        // reports. That is not what this test wants, but it is what the code
-        // does: the reconciler is v1-era and no longer reachable from
-        // production (`reconcile_project_async` has no callers), while the
-        // status view it was built to satisfy moved to v2. Asserting the real
-        // behaviour keeps the split visible instead of leaving a red test that
-        // says nothing.
-        let after = capture_coverage(project_id, &root).expect("coverage after repair");
-        assert_eq!(
-            (after.expected, after.covered, after.missing),
-            (1, 0, 1),
-            "a v1 repair does not register in v2 coverage"
-        );
-        assert_eq!(
-            reconcile_project_captures(project_id, &root).expect("idempotent repair"),
-            0
-        );
-        let snapshot = ResearchMemoryStore::default()
-            .snapshot(project_id, 50)
-            .expect("memory snapshot");
-        assert!(
-            snapshot
-                .atoms
-                .iter()
-                .any(|atom| atom.statement.contains("153 pages")),
-            "{snapshot:?}"
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn reconciliation_binds_an_old_manual_backfill_without_a_duplicate_capture() {
-        let (root, _guards, _serial) = migration_fixture("capture-bind-legacy");
-        let project_id = "project-migration";
-        let sessions = state::sessions_dir_for_project(project_id);
-        fs::create_dir_all(&sessions).expect("sessions dir");
-        let user_text = "Please record the final thesis output.";
-        let assistant_text = "Final/main.pdf compiled successfully to 153 pages.";
-        Session {
-            version: 1,
-            messages: vec![
-                runtime::ConversationMessage::user_text(user_text),
-                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: assistant_text.to_string(),
-                }]),
-            ],
-            compactions: Vec::new(),
-        }
-        .save_to_path(sessions.join("chat-legacy-final.json"))
-        .expect("save source session");
-        let store = ResearchMemoryStore::default();
-        store
-            .enqueue_capture(&ResearchMemoryCapture {
-                project_id: project_id.to_string(),
-                session_id: "chat-legacy-final".to_string(),
-                source_message_index: None,
-                source_event_ids: vec!["history:chat-legacy-final:0:legacy".to_string()],
-                user_text: user_text.to_string(),
-                assistant_text: assistant_text.to_string(),
-                occurred_at: runtime::now_iso8601(),
-            })
-            .expect("enqueue old manual backfill");
-
-        assert_eq!(
-            reconcile_project_captures(project_id, &root).expect("bind legacy capture"),
-            1
-        );
-        let deliveries = store
-            .final_turn_deliveries(project_id)
-            .expect("bound delivery");
-        assert_eq!(deliveries.len(), 1, "legacy row must be reused");
-        assert_eq!(deliveries[0].source_message_index, 1);
-        assert_eq!(deliveries[0].status, "completed");
-        assert_eq!(
-            reconcile_project_captures(project_id, &root).expect("idempotent bind"),
-            0
-        );
-        let row_count = rusqlite::Connection::open(runtime::research_memory_db_path())
-            .expect("open store")
-            .query_row(
-                "SELECT COUNT(*) FROM research_memory_outbox
-                 WHERE project_id=?1 AND session_id='chat-legacy-final'",
-                [project_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("outbox row count");
-        assert_eq!(row_count, 1);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn backfill_cancellation_stops_before_importing_sessions() {
-        let (root, _guards, _serial) = migration_fixture("cancel");
-        let project_id = "project-migration";
-        let sessions = state::sessions_dir_for_project(project_id);
-        fs::create_dir_all(&sessions).expect("sessions dir");
-        let mut session = Session::new();
-        session
-            .messages
-            .push(runtime::ConversationMessage::user_text(
-                "Remember that the cancelled backfill must import nothing.",
-            ));
-        session
-            .messages
-            .push(runtime::ConversationMessage::assistant(vec![
-                ContentBlock::Text {
-                    text: "Recorded: the cancelled backfill must import nothing at all."
-                        .to_string(),
-                },
-            ]));
-        session
-            .save_to_path(sessions.join("chat-cancelled.json"))
-            .expect("save session");
-
-        let memory = MemoryState::default();
-        memory
-            .inner
-            .migration_cancelled
-            .store(true, Ordering::SeqCst);
-        let result =
-            run_builtin_research_migration(&memory, project_id, &root).expect("cancelled backfill");
-        assert!(result.cancelled);
-        assert_eq!(result.imported_sessions, 0);
-        assert_eq!(result.imported_messages, 0);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn backfill_orders_turns_so_a_later_decision_still_supersedes() {
-        let (root, _guards, _serial) = migration_fixture("backfill-order");
-        let project_id = "project-migration";
-        let sessions = state::sessions_dir_for_project(project_id);
-        fs::create_dir_all(&sessions).expect("sessions dir");
-        let session = Session {
-            version: 1,
-            messages: vec![
-                runtime::ConversationMessage::user_text(
-                    "我们决定 executor model 使用 model-a 来跑这一轮。",
-                ),
-                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "已经把这个配置写入项目记录，后续可以直接查询。".to_string(),
-                }]),
-                runtime::ConversationMessage::user_text(
-                    "最新决定：executor model 改为 model-b 继续实验。",
-                ),
-                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "已经把最新的配置写入项目记录，旧条目留在历史里。".to_string(),
-                }]),
-            ],
-            compactions: Vec::new(),
-        };
-        session
-            .save_to_path(sessions.join("chat-ordered.json"))
-            .expect("save session");
-
-        let memory = MemoryState::default();
-        run_builtin_research_migration(&memory, project_id, &root).expect("backfill");
-
-        let snapshot = ResearchMemoryStore::default()
-            .snapshot(project_id, 100)
-            .expect("snapshot");
-        let newer = snapshot
-            .atoms
-            .iter()
-            .find(|atom| atom.statement.contains("model-b"))
-            .expect("later decision");
-        let older = snapshot
-            .atoms
-            .iter()
-            .find(|atom| atom.statement.contains("model-a"))
-            .expect("earlier decision");
-        // A Session file has no per-message timestamps. Stamping every turn with
-        // the file mtime collapsed the session into one instant, and
-        // supersession only fires on a strictly newer moment.
-        assert_eq!(newer.status, "derived", "{snapshot:?}");
-        assert_eq!(older.status, "superseded", "{snapshot:?}");
 
         let _ = fs::remove_dir_all(root);
     }

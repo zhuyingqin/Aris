@@ -2,10 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runtime::{
-    load_oauth_credentials, save_oauth_credentials, OAuthConfig, OAuthRefreshRequest,
-    OAuthTokenExchangeRequest,
-};
+use runtime::{load_oauth_credentials, save_oauth_credentials, OAuthConfig, OAuthRefreshRequest};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -131,6 +128,7 @@ fn routing_session_header_value(session_id: &str) -> reqwest::header::HeaderValu
 
 fn build_http_client(wait_policy: StreamWaitPolicy) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .user_agent(runtime::client_user_agent())
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
         .tcp_keepalive(HTTP_TCP_KEEPALIVE);
@@ -214,15 +212,6 @@ impl AuthSource {
                 ..
             } => Some(token),
             Self::None | Self::ApiKey(_) => None,
-        }
-    }
-
-    #[must_use]
-    pub fn masked_authorization_header(&self) -> &'static str {
-        if self.bearer_token().is_some() {
-            "Bearer [REDACTED]"
-        } else {
-            "<absent>"
         }
     }
 
@@ -319,12 +308,6 @@ impl AnthropicClient {
         Ok(Self::from_auth(AuthSource::from_env_or_saved()?)
             .with_base_url(read_base_url())
             .with_send_betas(read_send_betas()))
-    }
-
-    #[must_use]
-    pub fn with_auth_source(mut self, auth: AuthSource) -> Self {
-        self.auth = auth;
-        self
     }
 
     #[must_use]
@@ -458,26 +441,6 @@ impl AnthropicClient {
             timeout_resends,
             done: false,
         })
-    }
-
-    pub async fn exchange_oauth_code(
-        &self,
-        config: &OAuthConfig,
-        request: &OAuthTokenExchangeRequest,
-    ) -> Result<OAuthTokenSet, ApiError> {
-        let response = send_with_response_header_timeout(
-            self.http
-                .post(&config.token_url)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .form(&request.form_params()),
-            self.wait_policy.response_header_timeout,
-        )
-        .await?;
-        let response = expect_success(response).await?;
-        response
-            .json::<OAuthTokenSet>()
-            .await
-            .map_err(ApiError::from)
     }
 
     pub async fn refresh_oauth_token(
@@ -1541,6 +1504,15 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     }
 
     let body = response.text().await.unwrap_or_else(|_| String::new());
+    if let Some(message) = runtime::client_outdated_message(status.as_u16(), &body) {
+        return Err(ApiError::Api {
+            status,
+            error_type: Some(runtime::CLIENT_OUTDATED_CODE.to_string()),
+            message: Some(message),
+            body,
+            retryable: false,
+        });
+    }
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
 

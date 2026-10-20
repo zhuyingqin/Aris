@@ -89,8 +89,6 @@ site/temp_release_*/
 desktop/public/figure-editor/
 desktop/public/pdfjs/
 
-# Generated local evaluation data and Python bytecode
-/output/
-/.chart-data-*/
+# Python test caches
 __pycache__/
 *.py[cod]

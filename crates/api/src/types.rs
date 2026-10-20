@@ -64,23 +64,6 @@ impl InputMessage {
         }
     }
 
-    #[must_use]
-    pub fn user_tool_result(
-        tool_use_id: impl Into<String>,
-        content: impl Into<String>,
-        is_error: bool,
-    ) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: vec![InputContentBlock::ToolResult {
-                tool_use_id: tool_use_id.into(),
-                content: vec![ToolResultContentBlock::Text {
-                    text: content.into(),
-                }],
-                is_error,
-            }],
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

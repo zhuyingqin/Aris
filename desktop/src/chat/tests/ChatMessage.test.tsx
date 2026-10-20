@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
 import { useStore } from "../../store";
 import ChatMessage, { EditedFilesSummary } from "../ChatMessage";
-import { diffFromTool, fileChangesFromTurn } from "../toolSummaries";
+import { diffFromTool, fileChangeSummaryFromTurns } from "../toolSummaries";
 import { useChatComposer } from "../useChatComposer";
 
 const apiMocks = vi.hoisted(() => ({
@@ -469,17 +469,17 @@ describe("ChatMessage rendering", () => {
       availability: "exact", addedLines: 1, removedLines: 1,
       unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-old\n+new\n",
     };
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "failed-shell", role: "assistant", blocks: [{
         kind: "tool", id: "tool", name: "PowerShell", input: "{}",
         isError: true, output: JSON.stringify({ returnCodeInterpretation: "exit_code:1", audit }),
       }],
-    });
+    }]);
     expect(summary?.fileCount).toBe(1);
   });
 
   it("explains an unavailable patch in the turn Review panel", () => {
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "unavailable-review", role: "assistant", blocks: [{
         kind: "tool", id: "tool", name: "edit_file", input: "{}",
         output: JSON.stringify({ audit: {
@@ -487,14 +487,14 @@ describe("ChatMessage rendering", () => {
           availability: "too_large", addedLines: 22000, removedLines: 1, unifiedDiff: "",
         } }),
       }],
-    })!;
+    }])!;
     const { container } = render(<EditedFilesSummary summary={summary} />);
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     expect(container.querySelector(".chat-change-review")?.textContent).toMatch(/too large|unavailable|过大|不可用/i);
   });
 
   it("summarizes audited file edits across a turn", () => {
-    const summary = fileChangesFromTurn(auditedFileTurn());
+    const summary = fileChangeSummaryFromTurns([auditedFileTurn()]);
 
     expect(summary?.fileCount).toBe(2);
     expect(summary?.addedLines).toBe(4);
@@ -512,11 +512,11 @@ describe("ChatMessage rendering", () => {
     const zero = { ...first, changeIds: ["c1", "c2"], afterHash: "original", addedLines: 0, removedLines: 0, unifiedDiff: "" };
     const outputs = [{ audit: first }, { audit: { ...zero, changeIds: ["c2"] }, turnDiff: zero }];
     for (const ordered of [outputs, [...outputs].reverse()]) {
-      expect(fileChangesFromTurn({
+      expect(fileChangeSummaryFromTurns([{
         id: "net-zero", role: "assistant", blocks: ordered.map((output, index) => ({
           kind: "tool", id: `tool-${index}`, name: "edit_file", input: "{}", output: JSON.stringify(output),
         })),
-      })).toBeNull();
+      }])).toBeNull();
     }
   });
 
@@ -529,7 +529,7 @@ describe("ChatMessage rendering", () => {
       availability: "exact",
       unifiedDiff: `diff --git a/paper.tex b/paper.tex\nindex 111..222 100644\n--- a/paper.tex\n+++ b/paper.tex\n@@ -1 +1 @@\n-${removed}\n+${added}\n`,
     });
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "assistant-net-change", role: "assistant", blocks: [
         { kind: "tool", id: "tool-2", name: "edit_file", input: "{}", output: JSON.stringify({
           changeId: "change-2", audit: audit(["change-2"], "middle", "final"),
@@ -542,7 +542,7 @@ describe("ChatMessage rendering", () => {
           turnDiff: audit(["change-1"], "original", "middle"),
         }) },
       ],
-    });
+    }]);
 
     expect(summary?.fileCount).toBe(1);
     expect(summary?.changes).toHaveLength(1);
@@ -553,7 +553,7 @@ describe("ChatMessage rendering", () => {
   });
 
   it("counts only hunk lines in a Git patch with a preamble", () => {
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "assistant-git-preamble", role: "assistant", blocks: [{
         kind: "tool", id: "tool-1", name: "edit_file", input: "{}", output: JSON.stringify({
           changeId: "change-1",
@@ -564,7 +564,7 @@ describe("ChatMessage rendering", () => {
           },
         }),
       }],
-    });
+    }]);
 
     expect(summary?.addedLines).toBe(1);
     expect(summary?.removedLines).toBe(1);
@@ -577,12 +577,12 @@ describe("ChatMessage rendering", () => {
     });
     const first = projection(["change-2"], "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-middle\n+final\n");
     const net = projection(["change-1", "change-2"], "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n-original\n+final\n");
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "late-predecessor", role: "assistant", blocks: [first, net].map((audit, index) => ({
         kind: "tool", id: `tool-${index}`, name: "edit_file", input: "{}",
         output: JSON.stringify({ audit, turnDiff: audit }),
       })),
-    });
+    }]);
     expect(summary?.changes).toHaveLength(1);
     expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
     expect(summary?.addedLines).toBe(1);
@@ -590,7 +590,7 @@ describe("ChatMessage rendering", () => {
   });
 
   it("keeps interrupted same-file chains separate and counts header-like content", () => {
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "interrupted-chain", role: "assistant", blocks: ["change-1", "change-2"].map((changeId) => ({
         kind: "tool", id: changeId, name: "edit_file", input: "{}",
         output: JSON.stringify({ audit: {
@@ -599,7 +599,7 @@ describe("ChatMessage rendering", () => {
           unifiedDiff: "--- paper.tex\n+++ paper.tex\n@@ -1 +1 @@\n--- removed content\n+++ added content\n",
         } }),
       })),
-    });
+    }]);
     expect(summary?.changes).toHaveLength(2);
     expect(summary?.fileCount).toBe(1);
     expect(summary?.addedLines).toBe(2);
@@ -608,7 +608,7 @@ describe("ChatMessage rendering", () => {
 
   it("reports the completed portion when reverting a multi-change turn stops midway", async () => {
     const user = userEvent.setup();
-    const summary = fileChangesFromTurn(auditedFileTurn());
+    const summary = fileChangeSummaryFromTurns([auditedFileTurn()]);
     expect(summary).toBeTruthy();
     apiMocks.chatChangeRevert
       .mockResolvedValueOnce({ changeId: "change-2", reverted: true })
@@ -623,7 +623,7 @@ describe("ChatMessage rendering", () => {
   });
 
   it("summarizes multiple audited files from one REPL output", () => {
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "assistant-repl-files",
       role: "assistant",
       blocks: [{
@@ -647,7 +647,7 @@ describe("ChatMessage rendering", () => {
           },
         }),
       }],
-    });
+    }]);
 
     expect(summary?.fileCount).toBe(2);
     expect(summary?.addedLines).toBe(3);
@@ -661,7 +661,7 @@ describe("ChatMessage rendering", () => {
       availability: "exact", addedLines: 1, removedLines: 1,
       unifiedDiff: `--- ${path}\n+++ ${path}\n@@ -1 +1 @@\n-old\n+new\n`,
     });
-    const summary = fileChangesFromTurn({
+    const summary = fileChangeSummaryFromTurns([{
       id: "multi-file-net", role: "assistant", blocks: [{
         kind: "tool", id: "shell-1", name: "REPL", input: "{}",
         output: JSON.stringify({ changes: {
@@ -669,7 +669,7 @@ describe("ChatMessage rendering", () => {
           "chapter.tex": { audit: projection("chapter.tex", ["change-3"]), turnDiff: projection("chapter.tex", ["change-3"]) },
         } }),
       }],
-    });
+    }]);
     expect(summary?.fileCount).toBe(2);
     expect(summary?.changeIds).toEqual(["change-1", "change-2", "change-3"]);
     expect(summary?.addedLines).toBe(2);

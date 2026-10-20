@@ -30,17 +30,6 @@ struct McpToolTimeoutPolicy {
     hard_timeout: Duration,
 }
 
-/// Return the renewable idle lease for an interactive MCP browser call.
-///
-/// Long-running shell, compute, image-generation, and agent-style MCP tools
-/// deliberately return `None`: they keep their own progress-aware or
-/// transport-level limits. An explicit browser wait is given enough time to
-/// finish the requested wait plus a small protocol/serialization allowance.
-#[must_use]
-pub fn mcp_tool_timeout(tool_name: &str, input: &str) -> Option<Duration> {
-    mcp_tool_timeout_policy(tool_name, input).map(|policy| policy.idle_timeout)
-}
-
 /// Return the non-renewable maximum runtime shown by desktop heartbeats.
 #[must_use]
 pub fn mcp_tool_max_runtime(tool_name: &str, input: &str) -> Option<Duration> {

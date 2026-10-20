@@ -2,6 +2,27 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+describe("managed authentication error classification", () => {
+  it("preserves sign-in for a provider's nonrenewable upstream key", async () => {
+    const { isManagedAuthInvalidError } = await import("./store");
+    const error = 'OpenAI API error 401 Unauthorized: {"error":{"code":"api_key_expired","message":"Create a new API key in OpenCode Console. Signing in again will not renew this key."}}';
+    expect(isManagedAuthInvalidError(error)).toBe(false);
+    expect(isManagedAuthInvalidError(new Error(error))).toBe(false);
+    expect(isManagedAuthInvalidError("Login expired. Please sign in again.")).toBe(true);
+    expect(isManagedAuthInvalidError("401 Unauthorized: invalid access token")).toBe(false);
+  });
+
+  it("only signs out for a backend-confirmed expired account session", async () => {
+    const { isManagedAuthInvalidError } = await import("./store");
+    expect(isManagedAuthInvalidError(new Error("Login expired. Please sign in again."))).toBe(true);
+    for (const error of ["Invalid token", "invalid access token", "HTTP 401 Unauthorized",
+      "AUTH_TOKEN_EXPIRED", "access token expired", "Model connection failed: Invalid token",
+      "登录续期失败: network unavailable", "Please sign in again to renew a model key"]) {
+      expect(isManagedAuthInvalidError(error)).toBe(false);
+    }
+  });
+});
+
 const authMocks = vi.hoisted(() => ({
   configGet: vi.fn(),
   configSet: vi.fn(),

@@ -6,6 +6,7 @@ import { useStore, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { PdfAnnotation } from "../literature/literatureTypes";
 import MarkdownContent from "./MarkdownContent";
+import ChatImagePreview from "./ChatImagePreview";
 import {
   fileHandoff,
   imageMimeType,
@@ -307,7 +308,7 @@ export default function SideFileViewer({
     if (kind === "image") {
       return (
         <div className="side-file-image-scroll">
-          {imageUrl && <img src={imageUrl} alt={basename(path)} />}
+          {imageUrl && <ChatImagePreview src={imageUrl} alt={basename(path)} openPath={path} mimeType={imageMimeType(path)} />}
         </div>
       );
     }

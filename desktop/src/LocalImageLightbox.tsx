@@ -15,8 +15,11 @@ export default function LocalImageLightbox({
 }) {
   const [image, setImage] = useState<{ path: string; url: string } | null>(null);
   const [failedPath, setFailedPath] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
+    setFailedPath(null);
+    setImage(null);
     let disposed = false;
     let objectUrl: string | null = null;
     const mimeType = imageMimeType(path);
@@ -37,8 +40,9 @@ export default function LocalImageLightbox({
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [path]);
+  }, [path, reloadKey]);
 
   return <ImageLightbox src={image?.path === path ? image.url : null}
-    path={path} title={title} alt={title} loadError={failedPath === path} onClose={onClose} />;
+    path={path} title={title} alt={title} loadError={failedPath === path}
+    onRetry={() => setReloadKey((value) => value + 1)} onClose={onClose} />;
 }

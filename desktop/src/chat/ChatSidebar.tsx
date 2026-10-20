@@ -199,6 +199,7 @@ export default function ChatSidebar({
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<Set<string>>(new Set());
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(new Set());
   const [selectedRemoteProjectId, setSelectedRemoteProjectId] = useState<string | null>(null);
   const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
@@ -282,7 +283,14 @@ export default function ChatSidebar({
       ?? (language === "cn" ? "项目、模型与工具" : "Projects, models, and tools"));
 
   const requestLocalNewChat = useCallback((projectId?: string) => {
-    void onNew(projectId ?? defaultNewTaskProjectId);
+    const targetProjectId = projectId ?? defaultNewTaskProjectId;
+    setCollapsedProjectIds((current) => {
+      if (!current.has(targetProjectId)) return current;
+      const next = new Set(current);
+      next.delete(targetProjectId);
+      return next;
+    });
+    void onNew(targetProjectId);
   }, [defaultNewTaskProjectId, onNew]);
 
   useEffect(() => {
@@ -745,6 +753,15 @@ export default function ChatSidebar({
     });
   };
 
+  const toggleProject = (projectId: string) => {
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
   const renderSessionGroupToggle = (
     groupId: string,
     totalCount: number,
@@ -995,6 +1012,7 @@ export default function ChatSidebar({
               </div>
               {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
               {orderedGroups.map((group) => {
+                const collapsed = collapsedProjectIds.has(group.id);
                 const expanded = expandedSessionGroups.has(group.id);
                 const visibleSessions = expanded
                   ? group.sessions
@@ -1023,9 +1041,24 @@ export default function ChatSidebar({
                         aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}`}
                       >
                         <span className="chat-project-caret" aria-hidden="true">
-                          <FolderIcon open />
+                          <FolderIcon open={!collapsed} />
                         </span>
                         <span className="chat-project-label-text" title={group.label}>{group.label}</span>
+                        <button
+                          className="chat-project-collapse"
+                          type="button"
+                          aria-label={collapsed ? copy.expandProject(group.label) : copy.collapseProject(group.label)}
+                          title={collapsed ? copy.expandProject(group.label) : copy.collapseProject(group.label)}
+                          aria-expanded={!collapsed}
+                          aria-controls={`chat-project-sessions-${group.id}`}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleProject(group.id);
+                          }}
+                        >
+                          <SvgIcon name={collapsed ? "chevronRight" : "chevronDown"} size={12} />
+                        </button>
                       </div>
                       <button
                         className="chat-project-add"
@@ -1043,7 +1076,11 @@ export default function ChatSidebar({
                         <SvgIcon name="plus" size={11} />
                       </button>
                     </div>
-                    <div className="chat-project-sessions">
+                    <div
+                      className="chat-project-sessions"
+                      id={`chat-project-sessions-${group.id}`}
+                      hidden={collapsed}
+                    >
                       {visibleSessions.map((session) => renderSessionItem(session))}
                       {renderSessionGroupToggle(
                         group.id,

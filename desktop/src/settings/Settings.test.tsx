@@ -81,19 +81,6 @@ describe("Settings account and usage", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 
-  it("starts the review mode on the resident Reviewer and switches it locally in the browser preview", () => {
-    sessionStorage.setItem("somniq-settings-tab-request", "models");
-    const configSet = vi.spyOn(tauri, "configSet");
-    render(<Settings />);
-
-    const mode = screen.getByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
-    expect(mode.value).toBe("thread");
-    expect([...mode.options].map((option) => option.value)).toEqual(["thread", "oneshot"]);
-    fireEvent.change(mode, { target: { value: "oneshot" } });
-    expect(mode.value).toBe("oneshot");
-    expect(configSet).not.toHaveBeenCalled();
-  });
-
   it("routes the legacy Update category to About with application updates and diagnostics without loading Oracle", () => {
     sessionStorage.setItem("somniq-settings-tab-request", "update");
     const oracleStatus = vi.spyOn(tauri, "oracleWebStatus");

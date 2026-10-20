@@ -612,6 +612,22 @@ fn is_missing_opencode_session_error(status: u16, body: &str) -> bool {
         && (lower.contains("missingsessionid") || lower.contains("request is missing"))
 }
 
+/// This upstream explicitly requires replacing its static key. Refreshing the
+/// gateway account credential cannot repair it and needlessly re-fetches that key.
+fn is_nonrenewable_upstream_key_error(body: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(error) = body.get("error") else {
+        return false;
+    };
+    error.get("code").and_then(Value::as_str) == Some("api_key_expired")
+        && error.get("message").and_then(Value::as_str).is_some_and(|message| {
+            let lower = message.to_ascii_lowercase();
+            lower.contains("opencode") || lower.contains("signing in again will not renew this key")
+        })
+}
+
 /// Whether a failed `/v1/chat/completions` POST means "this model must use
 /// `/v1/responses` instead" — the official OpenAI gate on gpt-5.5+/o-series tool
 /// flows, which a gateway may forward verbatim. Symmetric to
@@ -1953,6 +1969,9 @@ async fn stream_restart_send(
                     continue;
                 }
                 let body_preview = resp.text().await.unwrap_or_default();
+                if let Some(error) = runtime::client_outdated_error(status.as_u16(), &body_preview) {
+                    return Err(RuntimeError::new(error));
+                }
                 return Err(RuntimeError::new(format!(
                     "OpenAI stream restart failed: {status}: {body_preview}"
                 )));
@@ -2056,7 +2075,7 @@ pub struct OpenAIRuntimeClient {
 
 fn build_runtime_http_client(wait_policy: api::StreamWaitPolicy) -> Result<reqwest::Client, String> {
     let mut http = reqwest::Client::builder()
-        .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
+        .user_agent(runtime::client_user_agent())
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
         .tcp_keepalive(HTTP_TCP_KEEPALIVE);
@@ -2136,12 +2155,6 @@ impl OpenAIRuntimeClient {
         self.single_request = true;
         self.max_output_tokens = max_output_tokens;
         self.with_wait_policy(api::StreamWaitPolicy::single_request_from_env())
-    }
-
-    pub fn selected_transport(&self) -> OpenAiTransport {
-        if resolve_transport(self.transport, &self.base_url, &self.model, self.enable_tools).0 {
-            OpenAiTransport::Responses
-        } else { OpenAiTransport::ChatCompletions }
     }
 
     /// Propagate the session to OpenCode or a configured managed gateway.
@@ -2382,9 +2395,19 @@ impl ApiClient for OpenAIRuntimeClient {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|s| s.parse::<u64>().ok());
                         let body_text = resp.text().await.unwrap_or_default();
+                        // The SomniQ edge refused this release. No transport,
+                        // credential, or retry adjustment can change that.
+                        if let Some(error) =
+                            runtime::client_outdated_error(status.as_u16(), &body_text)
+                        {
+                            return Err(RuntimeError::new(error));
+                        }
                         let missing_opencode_session =
                             is_missing_opencode_session_error(status.as_u16(), &body_text);
-                        if status.as_u16() == 401 && !tried_credential_recovery {
+                        if status.as_u16() == 401
+                            && !tried_credential_recovery
+                            && !is_nonrenewable_upstream_key_error(&body_text)
+                        {
                             tried_credential_recovery = true;
                             let replacement = tokio::select! {
                                 key = recover_rejected_credential(&self.base_url, &api_key) => key,

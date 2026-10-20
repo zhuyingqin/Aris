@@ -108,43 +108,49 @@ fn a_401_without_a_replacement_key_is_not_resent() {
     set_credential_recovery_hook(Box::new(|_base_url, rejected| {
         Box::pin(async move { (rejected == "stale-key").then(|| "fresh-key".to_string()) })
     }));
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        read_mock_http_request(&mut stream);
-        write_mock_http_response(&mut stream, "401 Unauthorized", r#"{"error":{"message":"invalid token"}}"#);
-        drop(stream);
-        listener.set_nonblocking(true).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-        let mut resends = 0;
-        while std::time::Instant::now() < deadline {
-            if let Ok((mut stream, _)) = listener.accept() {
-                resends += 1;
-                write_mock_http_response(&mut stream, "401 Unauthorized", "{}");
+    for (key, body) in [
+        ("own-key", r#"{"error":{"message":"invalid token"}}"#),
+        ("stale-key", r#"{"error":{"code":"api_key_expired","message":"Create a new API key in OpenCode Console. Signing in again will not renew this key."}}"#),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_mock_http_request(&mut stream);
+            write_mock_http_response(&mut stream, "401 Unauthorized", body);
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut resends = 0;
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    resends += 1;
+                    write_mock_http_response(&mut stream, "401 Unauthorized", "{}");
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
             }
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        resends
-    });
-    let mut client = OpenAIRuntimeClient::new(
-        OpenAIExecutorConfig { api_key: "own-key".into(), base_url: format!("http://{address}/v1") },
-        "MiniMax-M3".into(),
-        false,
-        vec![],
-        Box::new(crate::NoopStreamObserver),
-    )
-    .unwrap()
-    .with_transport(OpenAiTransport::ChatCompletions)
-    .with_single_request(1024);
-    let request = ApiRequest {
-        system_prompt: vec![],
-        messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "hi".into() }])],
-    };
+            resends
+        });
+        let mut client = OpenAIRuntimeClient::new(
+            OpenAIExecutorConfig { api_key: key.into(), base_url: format!("http://{address}/v1") },
+            "MiniMax-M3".into(),
+            false,
+            vec![],
+            Box::new(crate::NoopStreamObserver),
+        )
+        .unwrap()
+        .with_transport(OpenAiTransport::ChatCompletions)
+        .with_single_request(1024);
+        let request = ApiRequest {
+            system_prompt: vec![],
+            messages: vec![ConversationMessage::user_blocks(vec![ContentBlock::Text { text: "hi".into() }])],
+        };
 
-    let error = client.stream(request).unwrap_err();
-    assert!(error.to_string().contains("401"));
-    assert_eq!(server.join().unwrap(), 0);
+        let error = client.stream(request).unwrap_err();
+        assert!(error.to_string().contains("401"));
+        assert_eq!(client.api_key, key);
+        assert_eq!(server.join().unwrap(), 0);
+    }
 }
 
 fn read_mock_http_request(stream: &mut std::net::TcpStream) -> String {
@@ -3078,4 +3084,58 @@ fn one_bad_image_does_not_mark_a_vision_endpoint_text_only() {
     assert!(later[0].contains("Image omitted"));
     // The next request still sends images: the endpoint itself takes them.
     assert!(later[1].contains("image_url"), "{}", later[1]);
+}
+
+#[test]
+fn outdated_client_refusal_is_final_and_identifies_the_release() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock gateway");
+    let address = listener.local_addr().expect("mock gateway address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("first request");
+        let request = read_mock_http_request(&mut stream);
+        write_mock_http_response(
+            &mut stream,
+            "426 Upgrade Required",
+            r#"{"success":false,"error":{"message":"请升级到 9.9.9 或更高版本","type":"client_outdated","code":"client_outdated"}}"#,
+        );
+        drop(stream);
+        // No transport fallback, credential recovery, or retry may follow.
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+        let mut extra = 0;
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok(_) => extra += 1,
+                Err(_) => thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        (request, extra)
+    });
+
+    let mut client = OpenAIRuntimeClient::new(
+        OpenAIExecutorConfig {
+            api_key: "test-key".to_string(),
+            base_url: format!("http://{address}/v1"),
+        },
+        "gpt-5.6-luna".to_string(),
+        false,
+        Vec::new(),
+        Box::new(crate::NoopStreamObserver),
+    )
+    .expect("OpenAI client");
+    let error = client
+        .stream(ApiRequest {
+            system_prompt: Vec::new(),
+            messages: vec![ConversationMessage::user_text("hello")],
+        })
+        .expect_err("a refused release must fail");
+    assert_eq!(
+        error.to_string(),
+        "请升级到 9.9.9 或更高版本 (client_outdated)"
+    );
+
+    let (request, extra) = server.join().expect("mock gateway thread");
+    assert_eq!(extra, 0, "the refusal was retried");
+    let expected = format!("user-agent: {}", runtime::client_user_agent()).to_ascii_lowercase();
+    assert!(request.to_ascii_lowercase().contains(&expected), "{request}");
 }

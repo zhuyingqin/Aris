@@ -136,9 +136,6 @@ export function formatTime(value: string | null | undefined, withDate = false): 
   return withDate ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}` : `${time}:${pad(date.getSeconds())}`;
 }
 
-/** Expected paid calls shown before submission; mirrors the native budget. */
-export const callEstimate = (sourceMode: "import" | "generate") => sourceMode === "import" ? { usual: 2, max: 4 } : { usual: 4, max: 6 };
-
 /** Short provisional title for descriptions/imports and legacy task display.
  * Generation replaces it with the Executor's title from the same prompt call. */
 export function titleFromDescription(text: string): string {

@@ -57,10 +57,6 @@ impl RuntimeFeatureConfig {
         }
     }
 
-    /// Set meta-logging level.
-    pub fn set_meta_logging(&mut self, level: impl Into<String>) {
-        self.meta_logging = level.into();
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -11,6 +11,7 @@ import { fileOpen, fileReveal, isTauri } from "./api/tauri";
 import { basename } from "./editor/workspaceFiles";
 import { useStore } from "./store";
 import { SvgIcon } from "./SvgIcon";
+import { copyImageToClipboard } from "./imageClipboard";
 import "./ImageLightbox.css";
 
 const ZOOM_MIN = 0.1;
@@ -24,6 +25,12 @@ const LIGHTBOX_COPY = {
     zoomIn: "放大",
     actualSize: "实际大小",
     fit: "适应窗口",
+    copyImage: "复制图片",
+    copyingImage: "正在复制图片…",
+    imageCopied: "图片已复制",
+    imageCopyFailed: "图片复制失败，请重试。",
+    pathCopyFailed: "路径复制失败，请重试。",
+    retry: "重新加载",
     copyPath: "复制路径",
     copied: "已复制",
     reveal: "在文件管理器中显示",
@@ -38,6 +45,12 @@ const LIGHTBOX_COPY = {
     zoomIn: "Zoom in",
     actualSize: "Actual size",
     fit: "Fit to window",
+    copyImage: "Copy image",
+    copyingImage: "Copying image…",
+    imageCopied: "Image copied",
+    imageCopyFailed: "Could not copy image. Try again.",
+    pathCopyFailed: "Could not copy path. Try again.",
+    retry: "Reload image",
     copyPath: "Copy path",
     copied: "Copied",
     reveal: "Show in file manager",
@@ -67,6 +80,7 @@ interface Props {
    */
   onOpenExternal?: () => void;
   onReveal?: () => void;
+  onRetry?: () => void;
   onClose: () => void;
 }
 
@@ -78,6 +92,7 @@ export default function ImageLightbox({
   path,
   onOpenExternal,
   onReveal,
+  onRetry,
   onClose,
 }: Props) {
   const language = useStore((state) => state.language);
@@ -88,17 +103,67 @@ export default function ImageLightbox({
   const [percent, setPercent] = useState(100);
   const [pannable, setPannable] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"image" | "path" | null>(null);
+  const [copying, setCopying] = useState<"image" | "path" | null>(null);
+  const [copyError, setCopyError] = useState<"image" | "path" | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [failed, setFailed] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const copiedTimer = useRef<number | null>(null);
+  const mountedRef = useRef(true);
   const zoomRef = useRef<number | null>(zoom);
   zoomRef.current = zoom;
 
   const label = basename(path ?? title ?? alt ?? "") || copy.imageLabel;
+
+  const showCopied = useCallback((action: "image" | "path") => {
+    if (!mountedRef.current) return;
+    setCopied(action);
+    if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopied(null), 1500);
+  }, []);
+
+  const copyImage = useCallback(async () => {
+    if (!src || loadError || failed || copying) return;
+    setCopying("image");
+    setCopied(null);
+    setCopyError(null);
+    try {
+      await copyImageToClipboard(path ?? src, src);
+      showCopied("image");
+    } catch {
+      if (mountedRef.current) setCopyError("image");
+    } finally {
+      if (mountedRef.current) setCopying(null);
+    }
+  }, [copying, failed, loadError, path, showCopied, src]);
+
+  const copyPath = async () => {
+    if (!path || copying) return;
+    setCopying("path");
+    setCopied(null);
+    setCopyError(null);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard is unavailable");
+      await navigator.clipboard.writeText(path);
+      showCopied("path");
+    } catch {
+      if (mountedRef.current) setCopyError("path");
+    } finally {
+      if (mountedRef.current) setCopying(null);
+    }
+  };
+
+  useEffect(() => {
+    setFailed(false);
+    setSize(null);
+    setZoom(null);
+    setCopied(null);
+    setCopyError(null);
+  }, [src, path]);
 
   /** Scale the image is drawn at right now, including while fitted. */
   const currentScale = useCallback(() => {
@@ -115,9 +180,11 @@ export default function ImageLightbox({
   }, [currentScale]);
 
   useEffect(() => {
+    mountedRef.current = true;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     cardRef.current?.focus();
     return () => {
+      mountedRef.current = false;
       if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
       opener?.focus?.();
     };
@@ -133,6 +200,14 @@ export default function ImageLightbox({
         onClose();
         return;
       }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !window.getSelection()?.toString()) {
+        if (src && !failed && !loadError) {
+          event.preventDefault();
+          event.stopPropagation();
+          void copyImage();
+        }
+        return;
+      }
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (event.key === "+" || event.key === "=") stepZoom(ZOOM_STEP);
       else if (event.key === "-" || event.key === "_") stepZoom(-ZOOM_STEP);
@@ -143,7 +218,7 @@ export default function ImageLightbox({
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [onClose, stepZoom]);
+  }, [copyImage, failed, loadError, onClose, src, stepZoom]);
 
   // React attaches `wheel` passively, so ctrl+wheel zoom needs a native
   // listener to stop the webview from zooming the whole page instead.
@@ -195,14 +270,6 @@ export default function ImageLightbox({
     dragRef.current = null;
     setDragging(false);
     stageRef.current?.releasePointerCapture?.(event.pointerId);
-  };
-
-  const copyPath = () => {
-    if (!path) return;
-    void navigator.clipboard?.writeText(path);
-    setCopied(true);
-    if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
-    copiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
   };
 
   const scaled = size && zoom ? { width: size.width * zoom, height: size.height * zoom } : null;
@@ -259,14 +326,24 @@ export default function ImageLightbox({
             {size && (
               <span className="image-lightbox-dimensions">{`${size.width} × ${size.height}`}</span>
             )}
+            <button
+              type="button"
+              title={copying === "image" ? copy.copyingImage : copied === "image" ? copy.imageCopied : copy.copyImage}
+              aria-label={copy.copyImage}
+              disabled={!src || loadError || failed || copying !== null}
+              onClick={() => void copyImage()}
+            >
+              <SvgIcon name={copied === "image" ? "check" : copying === "image" ? "spinner" : "image"} size={14} />
+            </button>
             {path && (
               <button
                 type="button"
-                title={copied ? copy.copied : copy.copyPath}
+                title={copied === "path" ? copy.copied : copy.copyPath}
                 aria-label={copy.copyPath}
-                onClick={copyPath}
+                disabled={copying !== null}
+                onClick={() => void copyPath()}
               >
-                <SvgIcon name={copied ? "check" : "copy"} size={14} />
+                <SvgIcon name={copied === "path" ? "check" : "copy"} size={14} />
               </button>
             )}
             {revealAction && (
@@ -298,15 +375,28 @@ export default function ImageLightbox({
           onPointerCancel={endDrag}
         >
           {loadError || failed ? (
-            <span className="image-lightbox-status">{copy.failed}</span>
+            <div className="image-lightbox-status" role="alert">
+              <span>{copy.failed}</span>
+              {(onRetry || (src && !loadError)) && (
+                <button type="button" onClick={() => {
+                  setFailed(false);
+                  setSize(null);
+                  setReloadKey((value) => value + 1);
+                  onRetry?.();
+                }}>{copy.retry}</button>
+              )}
+            </div>
           ) : !src ? (
             <span className="image-lightbox-status" role="status">{copy.loading}</span>
           ) : (
             <img
+              key={reloadKey}
               ref={imageRef}
               src={src}
+              data-image-path={path}
               alt={alt ?? label}
               draggable={false}
+              onDoubleClick={() => setZoom((value) => value === 1 ? null : 1)}
               style={scaled
                 ? { width: `${scaled.width}px`, height: `${scaled.height}px`, maxWidth: "none", maxHeight: "none" }
                 : undefined}
@@ -318,6 +408,12 @@ export default function ImageLightbox({
             />
           )}
         </div>
+        {(copyError || copied) && (
+          <div className="image-lightbox-feedback" role={copyError ? "alert" : "status"}>
+            {copyError === "image" ? copy.imageCopyFailed : copyError === "path" ? copy.pathCopyFailed
+              : copied === "image" ? copy.imageCopied : copy.copied}
+          </div>
+        )}
         {path && (
           <footer className="image-lightbox-path">
             <code title={path}>{path}</code>

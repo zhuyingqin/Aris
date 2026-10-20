@@ -16,11 +16,6 @@ export type CompleteFn = (code: string, cursorPos: number) => Promise<KernelComp
 /** Queries the kernel for object docs; resolves to plain text or null. */
 export type InspectFn = (code: string, cursorPos: number) => Promise<string | null>;
 
-/** Strip ANSI SGR escapes so an IPython docstring reads cleanly in a tooltip. */
-export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
-}
-
 /**
  * A CodeMirror completion source backed by the Jupyter kernel (`complete_request`
  * → jedi/IPython), replacing the language pack's keyword-only completion for the

@@ -1,5 +1,5 @@
 .chat-model-pill {
-  max-width: min(300px, 100%);
+  max-width: min(380px, 100%);
 }
 
 .chat-model-pill-name {
@@ -19,7 +19,7 @@
   z-index: 200;
   display: flex;
   flex-direction: column;
-  width: 260px;
+  width: 340px;
   max-width: calc(100vw - 5rem);
   max-height: min(500px, calc(100vh - 9rem));
   padding: 4px;
@@ -68,7 +68,18 @@
   gap: 8px;
 }
 
-.chat-model-option svg { flex-shrink: 0; }
+.chat-model-option-name { min-width: 0; }
+.chat-model-option-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  gap: 6px;
+}
+.chat-model-option.active .model-price-badge {
+  border-color: color-mix(in srgb, var(--model-price-color) 36%, transparent);
+  background: color-mix(in srgb, var(--model-price-color) 14%, var(--bg-2));
+}
 
 .chat-model-group + .chat-model-group {
   margin-top: 3px;

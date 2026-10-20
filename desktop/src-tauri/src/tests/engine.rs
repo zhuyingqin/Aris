@@ -464,18 +464,6 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
 }
 
 #[test]
-fn builtin_tool_availability_reports_the_chat_registry() {
-    let tools = chat_builtin_tool_availability();
-    assert!(tools
-        .iter()
-        .any(|tool| tool.name == "WebSearch" && tool.available));
-    assert!(tools
-        .iter()
-        .any(|tool| tool.name == "LiteratureSearch" && tool.available));
-    assert_eq!(tools.len(), 2);
-}
-
-#[test]
 fn ordinary_chat_routes_the_real_registry_to_a_small_recoverable_schema_set() {
     let specs = aris_chat::chat_tool_specs(all_tool_specs_for(&[]));
     let plan = aris_chat::route_chat_tools(

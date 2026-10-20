@@ -12,6 +12,9 @@ import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 import { GENERAL_PAGE_COPY } from "./generalPageCopy";
 import "./ModelsSettings.css";
 import { uniqueModelList } from "./settingsProviderCatalog";
+import { useModelPricing } from "../useModelPricing";
+import { modelPriceView, modelPricingSummary } from "../modelPricing";
+import "../modelPricing.css";
 
 interface Props {
   language: Language;
@@ -22,6 +25,8 @@ interface Props {
 }
 
 export default function ModelsSettings({ language, configView, managedModels, connection }: Props) {
+  const pricing = useModelPricing();
+  const priceFor = (model: string) => modelPriceView(model, pricing, language);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
   const {
@@ -50,6 +55,13 @@ export default function ModelsSettings({ language, configView, managedModels, co
     [configView.executorModel, configView.reviewerModel],
   ).filter((model) => !isImageGenerationModel(model));
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
+  const executorPrice = priceFor(currentManagedModel);
+  const reviewerPrice = currentReviewerModel ? priceFor(currentReviewerModel) : null;
+  const priceBadge = (price: ReturnType<typeof priceFor>) => price && <span className={`model-price-badge settings-model-price is-${price.kind}`} title={price.title}>{price.label}</span>;
+  const priceOptions = availableManagedModels.map((model) => {
+    const price = priceFor(model);
+    return <option key={model} value={model} title={price?.title}>{model}{price ? ` · ${price.label}` : ""}</option>;
+  });
   // An absent or unrecognised mode is the backend's default, the resident Reviewer.
   const reviewMode = configView.reviewMode === "oneshot" ? "oneshot" : "thread";
   // Endpoint actually used for the selected executor model. Prefer the entry
@@ -73,35 +85,32 @@ export default function ModelsSettings({ language, configView, managedModels, co
           {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
         </button>
       }>
-        <SettingRow title={copy.executorModel} description={executorTransport ? executorTransport === "responses" ? copy.transportResponses : copy.transportChat : undefined}>
+        <SettingRow title={<>{copy.executorModel}{priceBadge(executorPrice)}</>} description={executorTransport ? executorTransport === "responses" ? copy.transportResponses : copy.transportChat : undefined}>
           {availableManagedModels.length > 0 ? (
             <select
               aria-label={copy.executorModel}
-              title={executorTransport ? copy.transportHint : undefined}
+              title={[executorTransport ? copy.transportHint : "", executorPrice?.title].filter(Boolean).join("\n") || undefined}
               value={configView.executorModel ?? ""}
               onChange={(event) => void applyManagedModel(event.target.value)}
-              className="sp-settings-select"
+              className="sp-settings-select sp-model-price-select"
             >
-              {availableManagedModels.map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
+              {priceOptions}
             </select>
           ) : (
             <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
           )}
         </SettingRow>
-        <SettingRow title={copy.reviewerModel}>
+        <SettingRow title={<>{copy.reviewerModel}{priceBadge(reviewerPrice)}</>}>
           {availableManagedModels.length > 0 ? (
             <select
               aria-label={copy.reviewerModel}
+              title={reviewerPrice?.title}
               value={currentReviewerModel}
               onChange={(event) => void applyManagedReviewerModel(event.target.value)}
-              className="sp-settings-select"
+              className="sp-settings-select sp-model-price-select"
             >
               <option value="">{copy.reviewerModelOff}</option>
-              {availableManagedModels.map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
+              {priceOptions}
             </select>
           ) : (
             <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
@@ -119,6 +128,7 @@ export default function ModelsSettings({ language, configView, managedModels, co
           </select>
         </SettingRow>
         <div className="settings-model-status">
+          {pricing && <p className="settings-model-price-basis">{modelPricingSummary(pricing, language)}</p>}
           <p>
             {copy.currentExecutor(currentManagedModel)}
             {currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff}

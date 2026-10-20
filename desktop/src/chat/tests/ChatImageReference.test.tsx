@@ -87,3 +87,27 @@ describe("ChatImageReference", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 });
+
+
+describe("image reference consistency", () => {
+  it.each(["https://example.com/plot.png?token=a%2Fb", "data:image/png;base64,iVBORw0KGgo="])("opens direct image references in-app: %s", async (src) => {
+    render(<ChatImageReference src={src} label="Result" />);
+    await userEvent.click(screen.getByRole("button", { name: "View image · Result" }));
+    const viewer = screen.getByRole("dialog", { name: "Result" });
+    expect(within(viewer).getByRole("img").getAttribute("src")).toBe(src);
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalled();
+    expect(apiMocks.fileAssetUrl).not.toHaveBeenCalled();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("retries a failed reference read without closing the viewer", async () => {
+    apiMocks.fileAssetUrl.mockRejectedValueOnce(new Error("File not ready"));
+    render(<ChatImageReference src="figures/late.png" />);
+    await userEvent.click(screen.getByRole("button", { name: "View image · late.png" }));
+    const viewer = screen.getByRole("dialog");
+    const retry = await within(viewer).findByRole("button", { name: "Reload image" });
+    await userEvent.click(retry);
+    expect(await within(viewer).findByRole("img")).toBeTruthy();
+    expect(apiMocks.fileAssetUrl).toHaveBeenCalledTimes(2);
+  });
+});

@@ -76,6 +76,7 @@ import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
+import { useModelPricing } from "../useModelPricing";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./ProjectBriefCard";
@@ -464,6 +465,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   // Shared "latest value" refs so the controllers can read current state from
   // async callbacks without re-subscribing.
   const currentSessionRef = useRef(currentSession);
+  const modelPricing = useModelPricing(!currentSession?.remoteAgent);
   currentSessionRef.current = currentSession;
   const allSessionsRef = useRef(allSessions);
   allSessionsRef.current = allSessions;
@@ -1835,6 +1837,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           onPermissionChange={run.changePermission}
           modelName={activeModel}
           modelOptions={workflowSession ? [] : run.modelSelectOptions}
+          modelPricing={modelPricing}
           modelBusy={run.modelBusy}
           canSwitchModel={!workflowSession && run.canSwitchModel}
           onModelChange={run.changeModel}
@@ -2021,6 +2024,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           x={composer.fileMenu.x}
           y={composer.fileMenu.y}
           path={composer.fileMenu.path}
+          image={composer.fileMenu.image}
           projectRoot={currentProject?.path}
           onOpenInWorkspace={openWorkflowFile}
           onOpenInSidePanel={openSideFile}

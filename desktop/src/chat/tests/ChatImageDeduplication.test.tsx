@@ -129,6 +129,13 @@ describe("Chat image deduplication", () => {
     expect(screen.getAllByRole("img", { name: "One" })).toHaveLength(2);
     expect(screen.getAllByRole("img", { name: "Two" })).toHaveLength(2);
     expect(screen.getAllByRole("img", { name: "Uploaded" })).toHaveLength(1);
-    expect(screen.getAllByRole("link", { name: "View image · Same" })).toHaveLength(2);
+    const references = screen.getAllByRole("button", { name: "View image · Same" });
+    expect(references).toHaveLength(2);
+    await userEvent.click(references[0]);
+    const viewer = screen.getByRole("dialog", { name: "Same" });
+    expect(within(viewer).getByRole("img").getAttribute("src")).toBe(source);
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+    await userEvent.click(within(viewer).getByRole("button", { name: "Close" }));
+    expect(screen.getAllByRole("img")).toHaveLength(9);
   });
 });

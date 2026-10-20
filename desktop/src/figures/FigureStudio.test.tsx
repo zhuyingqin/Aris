@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FigureEditingDraft, FigureView } from "./types";
 
 const state = vi.hoisted(() => ({ currentProject: { id: "project-a", name: "Research" }, language: "cn", setTab: vi.fn(), setFigureDirty: vi.fn() }));
-const api = vi.hoisted(() => ({ figureSaveDraft: vi.fn(), figureDiscardDraft: vi.fn(), figureEditSvg: vi.fn(), figureList: vi.fn(), figureConnections: vi.fn(), figurePrepare: vi.fn(), figureStart: vi.fn(), figureDocument: vi.fn(), figureSave: vi.fn(), figureReview: vi.fn(), figureCancel: vi.fn(), figureExport: vi.fn(), figureDelete: vi.fn(), figureSelectRaster: vi.fn(), figureEditImage: vi.fn(), figureEditResultDocument: vi.fn(), figureResolveEditResult: vi.fn(), figureRasterDocument: vi.fn(), figureExportRaster: vi.fn(), onFigureUpdated: vi.fn() }));
+const api = vi.hoisted(() => ({ figureSaveDraft: vi.fn(), figureDiscardDraft: vi.fn(), figureEditSvg: vi.fn(), figureList: vi.fn(), figureConnections: vi.fn(), figurePrepare: vi.fn(), figureStart: vi.fn(), figureDocument: vi.fn(), figureSave: vi.fn(), figureReview: vi.fn(), figureCancel: vi.fn(), figureExport: vi.fn(), figureDelete: vi.fn(), figureSelectRaster: vi.fn(), figureEditImage: vi.fn(), figureEditResultDocument: vi.fn(), figureResolveEditResult: vi.fn(), figureRasterDocument: vi.fn(), onFigureUpdated: vi.fn() }));
 const canvas = vi.hoisted(() => ({ serialize: vi.fn() }));
 vi.mock("../store", () => ({ useStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state }) }));
 vi.mock("../api/tauri", () => ({ isTauri: () => false }));

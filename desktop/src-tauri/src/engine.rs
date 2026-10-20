@@ -2899,27 +2899,6 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     specs
 }
 
-/// The Settings surface reports precisely the same availability policy used to
-/// construct a normal Chat turn. This keeps a disabled integration out of the
-/// model's tool schema instead of relying on an avoidable failed tool call.
-#[tauri::command]
-pub fn chat_builtin_tool_availability() -> Vec<BuiltinToolAvailability> {
-    vec![
-        BuiltinToolAvailability {
-            name: "WebSearch".to_string(),
-            available: true,
-            reason: "DeepSeek web search uses the signed-in SomniQ API token; New API checks membership and bills successful searches."
-                .to_string(),
-        },
-        BuiltinToolAvailability {
-            name: "LiteratureSearch".to_string(),
-            available: true,
-            reason: "Built-in OpenAlex gateway plus Crossref and arXiv adapters are available."
-                .to_string(),
-        },
-    ]
-}
-
 #[tauri::command]
 pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvailability>, String> {
     let providers = [

@@ -1,0 +1,24 @@
+.model-price-badge {
+  --model-price-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 2.75rem;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--model-price-color) 20%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--model-price-color) 8%, var(--bg-2));
+  color: color-mix(in srgb, var(--model-price-color) 85%, var(--text));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.model-price-badge.is-free { --model-price-color: var(--green); }
+.model-price-badge.is-unknown {
+  --model-price-color: var(--text-dim);
+  font-weight: 500;
+}

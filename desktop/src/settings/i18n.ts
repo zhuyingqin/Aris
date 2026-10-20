@@ -648,17 +648,6 @@ export interface SettingsCopy {
   nav: SettingsNavCopy;
 }
 
-export const ADMIN_ACCOUNT_EXACT_MARKERS = [
-  "admin",
-  "administrator",
-  "root",
-  "superuser",
-  "super-admin",
-  "owner",
-] as const;
-
-export const ADMIN_ACCOUNT_CONTAINS_MARKERS = ["管理员", "管理員"] as const;
-
 export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
   cn: {
     general: {

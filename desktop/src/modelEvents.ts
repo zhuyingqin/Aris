@@ -1,12 +1,15 @@
 const CHAT_MODELS_UPDATED_EVENT = "somniq-chat-models-updated";
 
-export function notifyChatModelsUpdated() {
+interface ChatModelsUpdatedOptions { refreshPricing?: boolean }
+
+export function notifyChatModelsUpdated(options: ChatModelsUpdatedOptions = {}) {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(CHAT_MODELS_UPDATED_EVENT));
+  window.dispatchEvent(new CustomEvent(CHAT_MODELS_UPDATED_EVENT, { detail: options }));
 }
 
-export function onChatModelsUpdated(handler: () => void): () => void {
+export function onChatModelsUpdated(handler: (options: ChatModelsUpdatedOptions) => void): () => void {
   if (typeof window === "undefined") return () => undefined;
-  window.addEventListener(CHAT_MODELS_UPDATED_EVENT, handler);
-  return () => window.removeEventListener(CHAT_MODELS_UPDATED_EVENT, handler);
+  const listener = (event: Event) => handler((event as CustomEvent<ChatModelsUpdatedOptions>).detail ?? {});
+  window.addEventListener(CHAT_MODELS_UPDATED_EVENT, listener);
+  return () => window.removeEventListener(CHAT_MODELS_UPDATED_EVENT, listener);
 }

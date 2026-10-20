@@ -1,7 +1,11 @@
+import { isClientOutdatedError } from "./clientOutdated";
+
 export type ErrorMessageLanguage = "cn" | "en";
 
 type ErrorCopy = {
+  clientOutdated: string;
   authentication: string;
+  upstreamCredentialExpired: string;
   signInExpired: string;
   connection: string;
   contextLimit: string;
@@ -15,7 +19,9 @@ type ErrorCopy = {
 
 const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
   cn: {
+    clientOutdated: "当前版本已停止服务，请更新 SomniQ Studio 后继续使用。",
     authentication: "身份验证失败，请重新登录或检查 API Key。",
+    upstreamCredentialExpired: "所选模型的服务端密钥已过期，请切换模型或联系服务管理员。",
     signInExpired: "登录已过期，请重新登录。",
     connection: "暂时无法连接到服务，请检查网络后重试。",
     contextLimit: "当前对话上下文过长，请新建对话或压缩上下文后重试。",
@@ -27,7 +33,9 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     unexpected: "操作未完成，请稍后重试。",
   },
   en: {
+    clientOutdated: "This version of SomniQ Studio is no longer supported. Update it to continue.",
     authentication: "Authentication failed. Sign in again or check the API key.",
+    upstreamCredentialExpired: "The selected model's service credential has expired. Switch models or contact the service administrator.",
     signInExpired: "Your sign-in has expired. Please sign in again.",
     connection: "Unable to reach the service. Check your network connection and try again.",
     contextLimit: "This chat is too long for the selected model. Start a new chat or compact the context, then try again.",
@@ -40,7 +48,7 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
   },
 };
 
-/** Shared with `isManagedAuthInvalidError` in `store.ts` — keep both needle sets in sync. */
+/** Presentation rules only; raw authentication text must not trigger logout. */
 export const AUTH_SESSION_EXPIRED_NEEDLES = ["login expired", "sign in again"];
 export const AUTH_TOKEN_INVALID_NEEDLES = ["invalid access token", "invalid token"];
 
@@ -56,6 +64,13 @@ function rawErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error == null) return "";
   return String(error);
+}
+
+/** This provider explicitly says account sign-in cannot renew its static key. */
+export function isUpstreamCredentialExpiredError(error: unknown): boolean {
+  const lower = rawErrorMessage(error).toLowerCase();
+  return lower.includes("api_key_expired")
+    && (lower.includes("opencode") || lower.includes("signing in again will not renew this key"));
 }
 
 function hasLocalPath(message: string): boolean {
@@ -83,6 +98,11 @@ export function formatUserFacingError(
   const copy = COPY[language];
 
   if (!message) return copy.unexpected;
+
+  // The gateway refused this release (HTTP 426); only an update helps.
+  if (isClientOutdatedError(message)) return copy.clientOutdated;
+
+  if (isUpstreamCredentialExpiredError(error)) return copy.upstreamCredentialExpired;
 
   if (
     lower.includes("reasoning_content")

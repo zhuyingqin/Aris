@@ -332,7 +332,7 @@ fn python_environment_path_round_trips_and_can_be_cleared() {
 }
 
 #[test]
-fn retired_api_keys_are_rejected_before_saving_or_testing() {
+fn retired_api_keys_are_rejected_before_saving() {
     with_temp_home("retired-api-patches", |config_path| {
         let initial = serde_json::json!({"language":"cn", "memory_write_approval":true}).to_string();
         std::fs::write(config_path, &initial).unwrap();
@@ -345,8 +345,6 @@ fn retired_api_keys_are_rejected_before_saving_or_testing() {
             let error = runtime.block_on(super::config_set(patch)).err().expect("retired key rejected");
             assert!(error.contains("removed"));
             assert!(!error.contains("retired-secret"));
-            let patch = serde_json::from_value(value).unwrap();
-            assert!(runtime.block_on(super::config_test(patch)).is_err());
             assert_eq!(std::fs::read_to_string(config_path).unwrap(), initial);
         }
     });

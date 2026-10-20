@@ -3421,7 +3421,7 @@ pub(crate) fn build_http_client_with_proxy(
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("SomniQ-Studio/0.4 web-research")
+        .user_agent(format!("{} web-research", runtime::client_user_agent()))
         // Web access is direct unless the user explicitly configured the
         // dedicated research proxy. Do not inherit process or OS proxies.
         .no_proxy();
