@@ -127,9 +127,71 @@ fn docx_tools_have_distinct_permissions_and_reviewers_can_read() {
     );
     assert_eq!(tool_execution("read_docx"), ToolExecution::Parallel);
     assert_eq!(tool_execution("edit_docx"), ToolExecution::Serial);
-    for role in ["Explore", "Plan", "Verification"] {
-        assert!(allowed_tools_for_subagent(role).contains("read_docx"));
-        assert!(!allowed_tools_for_subagent(role).contains("edit_docx"));
-    }
-    assert!(allowed_tools_for_subagent("general-purpose").contains("edit_docx"));
+    // Child permissions are bound by the session host, which intersects these
+    // schema permissions with its read-only allowlist. No legacy role bypass.
+}
+
+#[cfg(windows)]
+#[test]
+fn docx_chat_reads_work_while_an_editor_keeps_the_file_open() {
+    use std::os::windows::fs::OpenOptionsExt;
+    in_workspace(|root| {
+        let path = root.join("open.docx");
+        fs::write(&path, REAL_DOCX).unwrap();
+        let editor = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let single = run("read_file", json!({"path":"open.docx"}));
+        let direct = run("read_docx", json!({"path":"open.docx"}));
+        let batch = run("read_files", json!({"requests":[{"path":"open.docx"}]}));
+        assert_eq!(single["revision"], direct["revision"]);
+        assert_eq!(
+            single["revision"],
+            batch["results"][0]["result"]["revision"]
+        );
+        assert_eq!(batch["succeeded"], 1);
+        assert_eq!(editor.metadata().unwrap().len(), REAL_DOCX.len() as u64);
+        assert!(
+            fs::rename(&path, root.join("renamed.docx")).is_err(),
+            "editor's sharing lock must remain held"
+        );
+        assert_eq!(fs::read(&path).unwrap(), REAL_DOCX);
+        drop(editor);
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn exclusive_editor_locks_return_safe_read_errors_and_leave_the_lock_intact() {
+    use std::os::windows::fs::OpenOptionsExt;
+    in_workspace(|root| {
+        let path = root.join("locked.docx");
+        fs::write(&path, REAL_DOCX).unwrap();
+        let editor = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        for name in ["read_file", "read_docx"] {
+            let error = execute_tool(name, &json!({"path":"locked.docx"})).unwrap_err();
+            assert!(error.contains("document_read_unavailable"), "{error}");
+            assert!(error.contains("keeping the editor open"));
+        }
+        let batch = run("read_files", json!({"requests":[{"path":"locked.docx"}]}));
+        assert_eq!(batch["failed"], 1);
+        assert!(batch["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("saved copy"));
+        assert!(
+            fs::File::open(&path).is_err(),
+            "editor's exclusive lock must remain held"
+        );
+        drop(editor);
+        assert_eq!(fs::read(&path).unwrap(), REAL_DOCX);
+    });
 }

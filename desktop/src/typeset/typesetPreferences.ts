@@ -20,6 +20,9 @@ export function compileErrorHandlingStorageKey(projectId?: string): string {
 }
 export const LATEX_ENGINE_STORAGE_PREFIX = "somniq-typeset-engine:";
 export const COMPILE_ON_SAVE_STORAGE_PREFIX = "somniq-typeset-compile-on-save:";
+export const COMPILE_TIMEOUT_STORAGE_PREFIX = "somniq-typeset-compile-timeout-minutes:";
+export const DEFAULT_COMPILE_TIMEOUT_MINUTES = 10;
+export const MAX_COMPILE_TIMEOUT_MINUTES = Math.floor(Number.MAX_SAFE_INTEGER / 60_000);
 export const MAIN_DOCUMENT_STORAGE_PREFIX = "somniq-typeset-main-document:";
 export const PDF_INVERT_STORAGE_KEY = "somniq-typeset-pdf-invert";
 export function projectScopedKey(prefix: string, projectId?: string): string {
@@ -49,6 +52,17 @@ export function loadLatexEngineChoice(projectId?: string): LatexEngineChoice {
 export function loadCompileOnSave(projectId?: string): boolean {
   // Default on: a save that leaves the PDF stale is the state people complain about.
   return readStoredValue(projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, projectId)) !== "off";
+}
+export function parseCompileTimeoutMinutes(value: string): number | null {
+  const minutes = Number(value);
+  return Number.isSafeInteger(minutes) && minutes > 0 && minutes <= MAX_COMPILE_TIMEOUT_MINUTES
+    ? minutes
+    : null;
+}
+/** Null lets the shared compiler use its configured default. */
+export function loadCompileTimeoutMinutes(projectId?: string): number | null {
+  const stored = readStoredValue(projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, projectId));
+  return stored === null ? null : parseCompileTimeoutMinutes(stored);
 }
 export function loadMainDocument(projectId?: string): string | null {
   const stored = readStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, projectId));

@@ -12,7 +12,8 @@
 //! middleware), so we keep a cookie store and echo the logged-in user id.
 
 use crate::config;
-use keyring::{Entry as KeyringEntry, Error as KeyringError};
+pub(crate) mod pricing;
+mod refresh_store;
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN, SET_COOKIE};
 use serde::{Deserialize, Serialize};
@@ -20,8 +21,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{Mutex, OnceLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Token name we create/look for under the user's account.
@@ -32,7 +34,8 @@ const MANAGED_NEWAPI_CONFIG: &str = include_str!("../../managed-newapi.json");
 /// Default executor model when the caller doesn't pin one. Must match a model
 /// the new-api MiniMax channel exposes.
 const DEFAULT_MODEL: &str = "MiniMax-M3";
-const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
+#[cfg(not(test))]
+pub(crate) const NEWAPI_REFRESH_KEYRING_SERVICE: &str = "SomniQ Studio New API Sessions";
 /// Routing group written onto the managed token. Empty means "the account's
 /// group", which new-api resolves on every request: membership tiers are user
 /// groups that subscriptions switch, so an upgrade or an expiry applies to the
@@ -60,12 +63,17 @@ struct CachedAccessToken {
     expires_at: SystemTime,
 }
 
+struct CachedRefreshSession {
+    session: NewApiRefreshSession,
+    persist_retry_at: Option<Instant>,
+}
+
 static ACCESS_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, CachedAccessToken>>> = OnceLock::new();
 /// The refresh cookie is loaded from the OS credential store once per app
 /// process and then reused.  The frontend performs an auth check and an
 /// account projection during startup; without this cache both paths would
 /// independently ask macOS to authorize the same Keychain item.
-static REFRESH_SESSION_CACHE: OnceLock<Mutex<HashMap<String, NewApiRefreshSession>>> =
+static REFRESH_SESSION_CACHE: OnceLock<Mutex<HashMap<String, CachedRefreshSession>>> =
     OnceLock::new();
 /// A rotated refresh cookie is single-use on current new-api gateways. The
 /// Settings screen can ask for the account, groups, and models concurrently on
@@ -73,14 +81,14 @@ static REFRESH_SESSION_CACHE: OnceLock<Mutex<HashMap<String, NewApiRefreshSessio
 /// than letting sibling calls invalidate each other's cookie.
 static ACCESS_TOKEN_REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+/// The key itself is deliberately absent: it stays in the backend (see
+/// `managed_key`) and never passes through the webview.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewApiLogin {
     /// OpenAI-compatible base URL for the executor (`<base>/v1`).
     pub base_url: String,
     pub model: String,
-    /// Usable downstream key (`sk-…`) for the executor.
-    pub token: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -280,6 +288,16 @@ fn with_session(
     }
 }
 
+/// Account calls identify the release: New API records the User-Agent on the
+/// login session and its audit log, and the edge can refuse an outdated client.
+fn account_http_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(runtime::client_user_agent())
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(timeout)
+}
+
 async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, String> {
     let status = response.status();
     let content_type = response
@@ -292,6 +310,11 @@ async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, S
         .bytes()
         .await
         .map_err(|error| format!("{label}响应读取失败: {error}"))?;
+    if let Some(error) =
+        runtime::client_outdated_error(status.as_u16(), &String::from_utf8_lossy(&bytes))
+    {
+        return Err(error);
+    }
 
     parse_json_bytes(&bytes).map_err(|error| {
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -410,6 +433,7 @@ fn generate_token_key() -> String {
         .collect()
 }
 
+#[derive(Clone)]
 struct NewApiSession {
     user_id: i64,
     /// Short-lived browser access JWT. It deliberately never goes into
@@ -435,7 +459,6 @@ fn access_token_expiry(expires_at: Option<i64>) -> SystemTime {
     expires_at
         .and_then(|seconds| u64::try_from(seconds).ok())
         .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
-        .filter(|expiry| *expiry > SystemTime::now())
         .unwrap_or_else(|| SystemTime::now() + FALLBACK_ACCESS_TOKEN_LIFETIME)
 }
 
@@ -468,7 +491,7 @@ fn forget_access_token(base: &str) {
     }
 }
 
-fn refresh_session_cache() -> &'static Mutex<HashMap<String, NewApiRefreshSession>> {
+fn refresh_session_cache() -> &'static Mutex<HashMap<String, CachedRefreshSession>> {
     REFRESH_SESSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -476,12 +499,45 @@ fn cached_refresh_session(base: &str) -> Option<NewApiRefreshSession> {
     refresh_session_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(base).cloned())
+        .and_then(|cache| cache.get(base).map(|entry| entry.session.clone()))
 }
 
 fn remember_refresh_session(base: &str, session: &NewApiRefreshSession) {
     if let Ok(mut cache) = refresh_session_cache().lock() {
-        cache.insert(base.to_string(), session.clone());
+        cache.insert(
+            base.to_string(),
+            CachedRefreshSession {
+                session: session.clone(),
+                persist_retry_at: None,
+            },
+        );
+    }
+}
+
+/// Rotation has already happened on the gateway. Retain its newest cookie even
+/// if the OS store is temporarily unavailable, and retry persistence later.
+fn persist_rotated_refresh_session(base: &str, session: &NewApiRefreshSession) {
+    remember_refresh_session(base, session);
+    if let Err(error) = save_refresh_session(base, session) {
+        if let Ok(mut cache) = refresh_session_cache().lock() {
+            if let Some(entry) = cache.get_mut(base) {
+                entry.persist_retry_at = Some(Instant::now() + Duration::from_secs(60));
+            }
+        }
+        eprintln!("SomniQ kept the renewed login in memory and will retry saving it: {error}");
+    }
+}
+
+/// Called only under the refresh lock so an older write cannot overwrite a
+/// concurrently rotated cookie. Failed writes are throttled to once a minute.
+fn retry_refresh_session_persistence(base: &str) {
+    let pending = refresh_session_cache().lock().ok().and_then(|cache| {
+        let entry = cache.get(base)?;
+        entry.persist_retry_at.filter(|at| *at <= Instant::now())?;
+        Some(entry.session.clone())
+    });
+    if let Some(session) = pending {
+        persist_rotated_refresh_session(base, &session);
     }
 }
 
@@ -612,20 +668,10 @@ fn newapi_refresh_secret_account(base: &str) -> String {
     format!("refresh-{fingerprint}")
 }
 
-fn newapi_refresh_keyring_entry(base: &str) -> Result<KeyringEntry, String> {
-    KeyringEntry::new(
-        NEWAPI_REFRESH_KEYRING_SERVICE,
-        &newapi_refresh_secret_account(base),
-    )
-    .map_err(|error| format!("无法访问系统登录凭据存储: {error}"))
-}
-
 fn save_refresh_session(base: &str, refresh_session: &NewApiRefreshSession) -> Result<(), String> {
     let bytes = serde_json::to_vec(refresh_session)
         .map_err(|error| format!("无法编码登录续期凭据: {error}"))?;
-    newapi_refresh_keyring_entry(base)?
-        .set_secret(&bytes)
-        .map_err(|error| format!("无法保存系统登录凭据: {error}"))?;
+    refresh_store::write(&newapi_refresh_secret_account(base), &bytes)?;
     remember_refresh_session(base, refresh_session);
     Ok(())
 }
@@ -634,10 +680,8 @@ fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, Stri
     if let Some(refresh_session) = cached_refresh_session(base) {
         return Ok(Some(refresh_session));
     }
-    let secret = match newapi_refresh_keyring_entry(base)?.get_secret() {
-        Ok(secret) => secret,
-        Err(KeyringError::NoEntry) => return Ok(None),
-        Err(error) => return Err(format!("无法读取系统登录凭据: {error}")),
+    let Some(secret) = refresh_store::read(&newapi_refresh_secret_account(base))? else {
+        return Ok(None);
     };
     let refresh_session = serde_json::from_slice::<NewApiRefreshSession>(&secret)
         .map_err(|_| "保存的登录续期凭据无效，请重新登录".to_string())?;
@@ -655,13 +699,8 @@ fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, Stri
 }
 
 fn delete_refresh_session(base: &str) -> Result<(), String> {
-    match newapi_refresh_keyring_entry(base)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => {
-            forget_refresh_session(base);
-            Ok(())
-        }
-        Err(error) => Err(format!("无法删除系统登录凭据: {error}")),
-    }
+    forget_refresh_session(base);
+    refresh_store::delete(&newapi_refresh_secret_account(base))
 }
 
 /// One-time retirement of the previous public HTTP managed gateway. The
@@ -751,8 +790,12 @@ fn get_config_string(key: &str) -> Option<String> {
 }
 
 const SESSION_EXPIRED_MESSAGE: &str = "Login expired. Please sign in again.";
+const MODEL_REQUEST_ERROR_PREFIX: &str = "Model connection failed: ";
 
 fn is_invalid_session_error(message: &str) -> bool {
+    if message.starts_with(MODEL_REQUEST_ERROR_PREFIX) {
+        return false;
+    }
     let lower = message.to_ascii_lowercase();
     lower == SESSION_EXPIRED_MESSAGE.to_ascii_lowercase()
         || lower.contains("auth_token_expired")
@@ -802,44 +845,6 @@ fn has_stored_session() -> bool {
 /// this desktop has no managed account, `Some("")` until a bootstrap reports one.
 pub(crate) fn managed_account_group() -> Option<String> {
     has_stored_session().then(|| get_config_string(ACCOUNT_GROUP_KEY).unwrap_or_default())
-}
-
-pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| format!("HTTP client creation failed: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
-    let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
-    let string_field = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let group = string_field("group");
-    let groups = user_groups(&client, &base, &session).await;
-    let group_desc = groups
-        .get(group.as_str())
-        .and_then(|entry| entry.get("desc"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let role = data
-        .get("role")
-        .or_else(|| data.get("user_role"))
-        .or_else(|| data.get("userRole"))
-        .and_then(value_as_i64)
-        .unwrap_or(0);
-    let role_text = ["role", "role_name", "roleName", "status"]
-        .into_iter()
-        .filter_map(|key| data.get(key).and_then(value_as_string))
-        .find(|value| has_admin_marker(value));
-    Ok(user_is_admin_marker(role, role_text, &group, &group_desc))
 }
 
 /// Sign in and return the authenticated user/session values needed by new-api.
@@ -914,11 +919,6 @@ async fn login(
             .ok()
             .flatten();
         session.user_token = persisted_user_token(login_response_token, management_token);
-    }
-    if let Some(token) = session.user_token.as_deref() {
-        if session.refresh_session.is_some() {
-            remember_access_token(base, token, session.access_expires_at);
-        }
     }
     Ok(session)
 }
@@ -1073,12 +1073,7 @@ async fn update_token_group(
         .map_err(|error| format!("Failed to read managed token: {error}"))?;
     let body = parse_json(response, "managed token").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "Failed to read managed token.".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "Failed to read managed token."));
     }
     let token = body
         .get("data")
@@ -1091,12 +1086,7 @@ async fn update_token_group(
         .map_err(|error| format!("Failed to update managed token group: {error}"))?;
     let body = parse_json(response, "managed token group update").await?;
     if !api_ok(&body) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "Failed to update managed token group.".to_string()
-        } else {
-            message
-        });
+        return Err(session_api_error(&body, "Failed to update managed token group."));
     }
     Ok(())
 }
@@ -1134,7 +1124,7 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(model) => {
             let model = model.trim();
-            if !model.is_empty() {
+            if !model.is_empty() && !is_tool_service_model(model) {
                 out.push(model.to_string());
             }
         }
@@ -1147,7 +1137,7 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
             for key in ["id", "model", "name"] {
                 if let Some(model) = obj.get(key).and_then(Value::as_str) {
                     let model = model.trim();
-                    if !model.is_empty() {
+                    if !model.is_empty() && !is_tool_service_model(model) {
                         out.push(model.to_string());
                     }
                 }
@@ -1160,6 +1150,10 @@ fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+fn is_tool_service_model(model: &str) -> bool {
+    matches!(model, "deepseek-search" | "deepseek-fetch" | "scopus-search")
 }
 
 async fn user_models(
@@ -1196,28 +1190,50 @@ async fn downstream_models(
     base: &str,
     token: &str,
 ) -> Result<Vec<String>, String> {
-    let response = client
-        .get(format!("{}/v1/models", base.trim_end_matches('/')))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|error| format!("Failed to fetch reachable models: {error}"))?;
-    let body = parse_json(response, "reachable model list").await?;
-    if body.get("error").is_some() || body.get("success").and_then(Value::as_bool) == Some(false) {
-        let message = api_message(&body);
-        return Err(if message.is_empty() {
-            "Failed to fetch reachable models.".to_string()
-        } else {
-            message
-        });
+    let executor_base = format!("{}/v1", base.trim_end_matches('/'));
+    let mut token = token.to_string();
+    let mut recovered = false;
+    loop {
+        let response = client
+            .get(format!("{executor_base}/models"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| format!("{MODEL_REQUEST_ERROR_PREFIX}{error}"))?;
+        let status = response.status();
+        let body = parse_json(response, "reachable model list").await;
+        if status == reqwest::StatusCode::UNAUTHORIZED && !recovered {
+            recovered = true;
+            if let Some(replacement) =
+                replace_rejected_model_key(executor_base.clone(), token.clone()).await
+            {
+                token = replacement;
+                continue;
+            }
+        }
+        let body = body.map_err(|error| format!("{MODEL_REQUEST_ERROR_PREFIX}{error}"))?;
+        if !status.is_success()
+            || body.get("error").is_some()
+            || body.get("success").and_then(Value::as_bool) == Some(false)
+        {
+            let message = api_message(&body);
+            return Err(format!(
+                "{MODEL_REQUEST_ERROR_PREFIX}{}",
+                if message.is_empty() {
+                    "Failed to fetch reachable models."
+                } else {
+                    &message
+                }
+            ));
+        }
+        let mut models = Vec::new();
+        if let Some(data) = body.get("data") {
+            collect_model_ids(data, &mut models);
+        }
+        models.sort();
+        models.dedup();
+        return Ok(models);
     }
-    let mut models = Vec::new();
-    if let Some(data) = body.get("data") {
-        collect_model_ids(data, &mut models);
-    }
-    models.sort();
-    models.dedup();
-    Ok(models)
 }
 
 async fn fetch_user_token(
@@ -1266,10 +1282,13 @@ fn resolve_model_from_list(models: &[String], requested_model: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// `reuse_stored_key` is false only when the gateway has just rejected the
+/// stored key, so the reveal below must ask the gateway again.
 async fn get_or_create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
+    reuse_stored_key: bool,
 ) -> Result<(String, Option<i64>), String> {
     let token = match find_token(client, base, session).await? {
         Some(token) => {
@@ -1296,7 +1315,10 @@ async fn get_or_create_token(
     // is otherwise required on *every* refresh. Reuse a previously-revealed
     // key for the same token id to avoid tripping the gateway's rate limit on
     // that endpoint (see `config::cached_newapi_token_key`).
-    if let Some(cached) = config::cached_newapi_token_key(base, token_id) {
+    if let Some(cached) = reuse_stored_key
+        .then(|| config::cached_newapi_token_key(base, token_id))
+        .flatten()
+    {
         return Ok((cached, Some(token_id)));
     }
     let key = fetch_token_key(client, base, session, token_id).await?;
@@ -1368,7 +1390,9 @@ async fn refresh_browser_session(
     let rotated_cookies = refresh_cookies_from_headers(response.headers());
     let body = parse_json(response, "登录续期").await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "登录续期失败"));
+        // Only a rejection of the long-lived refresh credential confirms that
+        // sign-in has ended. An ordinary access-token rejection can be renewed.
+        return clear_session_if_invalid(Err(session_api_error(&body, "登录续期失败")));
     }
     let data = body.get("data").unwrap_or(&body);
     let access_token =
@@ -1384,13 +1408,7 @@ async fn refresh_browser_session(
     if let Some(session_id) = data_session_id(data) {
         refresh_session.session_id = Some(session_id);
     }
-    if save_refresh_session(base, refresh_session).is_err() {
-        // The gateway has already rotated the cookie. Keeping the old
-        // keychain value would make every subsequent check fail, so leave no
-        // half-authenticated local session behind.
-        clear_local_session();
-        return Err(SESSION_EXPIRED_MESSAGE.to_string());
-    }
+    persist_rotated_refresh_session(base, refresh_session);
     remember_access_token(base, &access_token, access_expires_at);
     session.user_token = Some(access_token);
     session.access_expires_at = access_expires_at;
@@ -1403,6 +1421,8 @@ async fn refresh_browser_session(
 /// against new-api's `/v1/user/self` and never the rotating refresh cookie,
 /// which must not leave the OS credential store.
 pub(crate) struct AccountOwnershipCredential {
+    /// The account service that issued `access_token`.
+    pub(crate) base_url: String,
     pub(crate) user_id: i64,
     pub(crate) access_token: String,
 }
@@ -1416,39 +1436,105 @@ pub(crate) async fn account_ownership_credential(
     if stored_session().is_err() {
         return Ok(None);
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+    let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (_, session) = authenticated_stored_session(&client).await?;
+    let (base_url, session) = authenticated_stored_session(&client).await?;
     let access_token = session
         .user_token
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
     Ok(Some(AccountOwnershipCredential {
+        base_url,
         user_id: session.user_id,
         access_token,
     }))
 }
 
+/// Base URL of the signed-in account, from config alone: no keychain read and
+/// no network. A session that can no longer be renewed surfaces when it is used.
+pub(crate) fn signed_in_base_url() -> Option<String> {
+    let obj = config::load_object();
+    obj.get("newapi_user_id").and_then(value_as_i64)?;
+    let base = obj
+        .get("newapi_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    approved_managed_base(base).ok()
+}
+
+/// The signed-in account as literature adapters see it: the research gateway's
+/// school Scopus route identifies the caller with it.
+pub(crate) struct ResearchAccount;
+
+fn research_api_credential(
+    base: &str,
+    obj: &serde_json::Map<String, Value>,
+) -> Option<tools::research_account::ResearchApiCredential> {
+    let executor_base = config::managed_executor_base_url(obj)?;
+    let expected = format!("{}/v1", base.trim_end_matches('/'));
+    if executor_base.trim_end_matches('/') != expected {
+        return None;
+    }
+    Some(tools::research_account::ResearchApiCredential {
+        issuer: base.to_string(),
+        api_key: config::managed_executor_api_key(obj)?,
+    })
+}
+
+impl tools::research_account::ResearchAccountProvider for ResearchAccount {
+    fn session_issuer(&self) -> Option<String> {
+        signed_in_base_url()
+    }
+
+    fn api_credential(
+        &self,
+    ) -> Result<Option<tools::research_account::ResearchApiCredential>, String> {
+        let Some(base) = signed_in_base_url() else {
+            return Ok(None);
+        };
+        // load_object overlays the OS-held downstream API key. The dashboard
+        // access token and refresh cookie are never used by paid tool routes.
+        Ok(research_api_credential(&base, &config::load_object()))
+    }
+
+    fn credential(
+        &self,
+    ) -> Result<Option<tools::research_account::ResearchAccountCredential>, String> {
+        // Adapters block, on a runtime's blocking pool or a plain thread, while
+        // renewal is async. A private current-thread runtime on its own thread
+        // serves both without ever nesting one `block_on` inside another.
+        let credential = std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("账号凭证查询失败: {error}"))?
+                .block_on(account_ownership_credential())
+        })
+        .join()
+        .map_err(|_| "账号凭证查询失败".to_string())??;
+        Ok(credential.map(|credential| tools::research_account::ResearchAccountCredential {
+            issuer: credential.base_url,
+            user_id: credential.user_id,
+            access_token: credential.access_token,
+        }))
+    }
+}
+
 async fn authenticated_stored_session(
     client: &reqwest::Client,
 ) -> Result<(String, NewApiSession), String> {
+    let _refresh_guard = access_token_refresh_lock().lock().await;
+    // Load after taking the lock: a sibling may have rotated the single-use
+    // cookie, or the user may have signed out while this request was waiting.
     let (base, mut session) = stored_session()?;
+    retry_refresh_session_persistence(&base);
     if session.refresh_session.is_some() {
         if let Some(token) = cached_access_token(&base) {
             session.user_token = Some(token);
         } else {
-            let _refresh_guard = access_token_refresh_lock().lock().await;
-            // Another Settings request may have refreshed and persisted the
-            // rotating cookie while this request waited for the lock.
-            if let Some(token) = cached_access_token(&base) {
-                session.user_token = Some(token);
-            } else {
-                refresh_browser_session(client, &base, &mut session).await?;
-            }
+            refresh_browser_session(client, &base, &mut session).await?;
         }
     }
     if session
@@ -1461,6 +1547,54 @@ async fn authenticated_stored_session(
     Ok((base, session))
 }
 
+async fn renew_rejected_session(
+    client: &reqwest::Client,
+    base: &str,
+    rejected: &NewApiSession,
+) -> Result<NewApiSession, String> {
+    let _refresh_guard = access_token_refresh_lock().lock().await;
+    let (current_base, mut current) = stored_session()?;
+    if current_base != base
+        || current.user_id != rejected.user_id
+        || current.refresh_session.is_none()
+    {
+        return Err("Account sign-in changed; retry the request.".to_string());
+    }
+    retry_refresh_session_persistence(base);
+    if let Some(token) = cached_access_token(base) {
+        if Some(token.as_str()) != rejected.user_token.as_deref() {
+            current.user_token = Some(token);
+            return Ok(current);
+        }
+    }
+    forget_access_token(base);
+    refresh_browser_session(client, base, &mut current).await?;
+    Ok(current)
+}
+
+/// Retry an account operation once after renewing its short-lived access
+/// token. A failure of that operation alone never revokes a modern login.
+/// Legacy gateways have no refresh credential and retain their prior behavior.
+async fn with_authenticated_session<T, F, Fut>(
+    client: &reqwest::Client,
+    mut request: F,
+) -> Result<T, String>
+where
+    F: FnMut(reqwest::Client, String, NewApiSession) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let (base, session) = authenticated_stored_session(client).await?;
+    let result = request(client.clone(), base.clone(), session.clone()).await;
+    match result {
+        Err(error) if session.refresh_session.is_some() && is_invalid_session_error(&error) => {
+            let renewed = renew_rejected_session(client, &base, &session).await?;
+            request(client.clone(), base, renewed).await
+        }
+        other if session.refresh_session.is_none() => clear_session_if_invalid(other),
+        other => other,
+    }
+}
+
 async fn refresh_downstream_token(
     client: &reqwest::Client,
     base: &str,
@@ -1468,9 +1602,9 @@ async fn refresh_downstream_token(
     model: &str,
 ) -> Result<String, String> {
     forget_legacy_group_pick();
-    let (token, token_id) = get_or_create_token(client, base, session).await?;
+    let (token, token_id) = get_or_create_token(client, base, session, true).await?;
     let executor_base_url = format!("{base}/v1");
-    config::persist_newapi_executor_credentials(&executor_base_url, &token, token_id)?;
+    config::persist_newapi_executor_credentials(base, &token, token_id)?;
     let model = model.trim();
     if !model.is_empty() {
         let _ = config::record_verified_executor("openai", model, Some(&executor_base_url), &token);
@@ -1479,13 +1613,80 @@ async fn refresh_downstream_token(
     Ok(token)
 }
 
+/// A failed re-fetch is not retried sooner than this, so a broken session cannot
+/// turn every rejected request into another call to the rate-limited reveal.
+const MODEL_KEY_RECOVERY_BACKOFF: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct ModelKeyRecovery {
+    last_failure: Option<std::time::Instant>,
+    /// Keys this process has already replaced; a request still carrying one
+    /// takes the current key without asking the gateway again.
+    replaced: Vec<String>,
+}
+
+fn model_key_recovery() -> &'static tokio::sync::Mutex<ModelKeyRecovery> {
+    static RECOVERY: OnceLock<tokio::sync::Mutex<ModelKeyRecovery>> = OnceLock::new();
+    RECOVERY.get_or_init(|| tokio::sync::Mutex::new(ModelKeyRecovery::default()))
+}
+
+/// Replace the account model key after the gateway answered 401 for it
+/// (registered as the executor's credential-recovery hook). Like Codex's
+/// unauthorized recovery: take a key another request already replaced it with,
+/// else re-fetch it once with the signed-in session; otherwise give up and let
+/// the 401 surface. Keys that are not the account key are never touched.
+pub(crate) async fn replace_rejected_model_key(base_url: String, rejected_key: String) -> Option<String> {
+    let obj = config::load_object();
+    let managed_base = config::managed_executor_base_url(&obj)?;
+    let same_endpoint = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    if same_endpoint(&managed_base) != same_endpoint(&base_url) {
+        return None;
+    }
+    let mut recovery = model_key_recovery().lock().await;
+    let current = config::managed_executor_api_key(&config::load_object())?;
+    if current != rejected_key {
+        return recovery.replaced.contains(&rejected_key).then_some(current);
+    }
+    if recovery
+        .last_failure
+        .is_some_and(|at| at.elapsed() < MODEL_KEY_RECOVERY_BACKOFF)
+    {
+        return None;
+    }
+    let fetched = async {
+        let client = account_http_client_builder(Duration::from_secs(20))
+            .build()
+            .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        with_authenticated_session(&client, |client, base, session| async move {
+            let (key, token_id) = get_or_create_token(&client, &base, &session, false).await?;
+            config::persist_newapi_executor_credentials(&base, &key, token_id)?;
+            Ok(key)
+        })
+        .await
+    }
+    .await;
+    match fetched {
+        Ok(key) if key != rejected_key => {
+            recovery.last_failure = None;
+            recovery.replaced.push(rejected_key);
+            Some(key)
+        }
+        Ok(_) => {
+            recovery.last_failure = Some(std::time::Instant::now());
+            None
+        }
+        Err(error) => {
+            eprintln!("SomniQ could not replace the rejected account model key: {error}");
+            recovery.last_failure = Some(std::time::Instant::now());
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn newapi_auth_status(base_url: String) -> Result<NewApiAuthStatus, String> {
     let base = approved_managed_base(&base_url)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+    let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
     fetch_auth_status(&client, &base).await
@@ -1509,10 +1710,7 @@ pub async fn newapi_logout() -> Result<(), String> {
     };
     if let Some((base, refresh_session)) = revoke {
         if let Ok(cookie) = refresh_cookie_header(&refresh_session.cookies) {
-            if let Ok(client) = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(20))
+            if let Ok(client) = account_http_client_builder(Duration::from_secs(20))
                 .build()
             {
                 let mut request = client
@@ -1531,9 +1729,9 @@ pub async fn newapi_logout() -> Result<(), String> {
     Ok(())
 }
 
-/// Authenticate against new-api and return an executor config (base URL, model,
-/// downstream token) for the signed-in user. The frontend persists these into
-/// the executor settings so Chat routes through new-api.
+/// Authenticate against new-api and return the executor endpoint and model for
+/// the signed-in user. The frontend persists these into the executor settings
+/// so Chat routes through new-api; the downstream key is stored here.
 #[tauri::command]
 pub async fn newapi_login(
     base_url: String,
@@ -1547,11 +1745,8 @@ pub async fn newapi_login(
     if username.is_empty() || password.is_empty() {
         return Err("请输入账号和密码".to_string());
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let client = account_http_client_builder(Duration::from_secs(30))
         .cookie_store(true)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
 
@@ -1559,26 +1754,32 @@ pub async fn newapi_login(
     // Save the long-lived session before minting or persisting downstream
     // executor credentials. If the OS credential store is unavailable, this
     // avoids leaving an executor key without a recoverable sign-in session.
-    if let Err(error) = persist_session(&base, &username, &session) {
-        forget_access_token(&base);
-        return Err(error);
+    {
+        let _refresh_guard = access_token_refresh_lock().lock().await;
+        if let Err(error) = persist_session(&base, &username, &session) {
+            forget_access_token(&base);
+            return Err(error);
+        }
     }
     let entitled_models = user_models(&client, &base, &session)
         .await
         .unwrap_or_default();
     let requested_model = resolve_model_from_list(&entitled_models, &model);
     let executor_base_url = format!("{base}/v1");
-    let token = clear_session_if_invalid(
-        refresh_downstream_token(&client, &base, &session, &requested_model).await,
-    )?;
-    let models = downstream_models(&client, &base, &token).await?;
+    let models = with_authenticated_session(&client, |client, base, session| {
+        let model = requested_model.clone();
+        async move {
+            let token = refresh_downstream_token(&client, &base, &session, &model).await?;
+            downstream_models(&client, &base, &token).await
+        }
+    })
+    .await?;
     config::persist_managed_models(&models)?;
     let model = resolve_model_from_list(&models, &requested_model);
 
     Ok(NewApiLogin {
         base_url: executor_base_url,
         model,
-        token,
     })
 }
 
@@ -1631,10 +1832,7 @@ pub async fn newapi_send_verification(input: NewApiVerificationInput) -> Result<
         return Err("请先输入邮箱".to_string());
     }
     let turnstile = optional_payload_value(input.turnstile).unwrap_or_default();
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+    let client = account_http_client_builder(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
     let response = client
@@ -1671,10 +1869,7 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
         return Err("密码长度需要为 8-20 位".to_string());
     }
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+    let client = account_http_client_builder(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
     let status = fetch_auth_status(&client, &base).await?;
@@ -1740,6 +1935,9 @@ fn persist_session(base: &str, username: &str, session: &NewApiSession) -> Resul
             // non-secret account metadata could not be committed.
             let _ = delete_refresh_session(base);
             return Err(error);
+        }
+        if let Some(token) = session.user_token.as_deref() {
+            remember_access_token(base, token, session.access_expires_at);
         }
         return Ok(());
     }
@@ -2111,15 +2309,18 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
     if !has_stored_session() {
         return Err(SESSION_EXPIRED_MESSAGE.to_string());
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+    let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
+    with_authenticated_session(&client, bootstrap_account).await
+}
 
-    let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+async fn bootstrap_account(
+    client: reqwest::Client,
+    base: String,
+    session: NewApiSession,
+) -> Result<AccountState, String> {
+    let data = user_self(&client, &base, &session).await?;
     let string_field = |key: &str| {
         data.get(key)
             .and_then(Value::as_str)
@@ -2141,9 +2342,7 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         &entitled_models,
         &get_config_string("executor_model").unwrap_or_default(),
     );
-    let token = clear_session_if_invalid(
-        refresh_downstream_token(&client, &base, &session, &requested_model).await,
-    )?;
+    let token = refresh_downstream_token(&client, &base, &session, &requested_model).await?;
     let models = downstream_models(&client, &base, &token).await?;
     config::persist_managed_models(&models)?;
     let model = resolve_model_from_list(&models, &requested_model);
@@ -2213,26 +2412,35 @@ fn normalize_usage_log_error(error: String) -> String {
 pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageLogPage, String> {
     let page = page.max(1);
     let page_size = page_size.clamp(1, 100);
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+    let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
+    with_authenticated_session(&client, |client, base, session| async move {
+        fetch_usage_logs(&client, &base, &session, page, page_size).await
+    })
+    .await
+    .map_err(normalize_usage_log_error)
+}
+
+async fn fetch_usage_logs(
+    client: &reqwest::Client,
+    base: &str,
+    session: &NewApiSession,
+    page: u32,
+    page_size: u32,
+) -> Result<NewApiUsageLogPage, String> {
     let request = client.get(format!("{base}/api/log/self")).query(&[
         ("p", page.to_string()),
         ("page_size", page_size.to_string()),
         ("type", "2".to_string()),
     ]);
-    let response = with_session(request, &session)
+    let response = with_session(request, session)
         .send()
         .await
-        .map_err(|error| format!("获取调用明细失败: {error}"));
-    let response = clear_session_if_invalid(response).map_err(normalize_usage_log_error)?;
+        .map_err(|error| format!("获取调用明细失败: {error}"))?;
     let body = parse_usage_log_json(response).await?;
     if !api_ok(&body) {
-        return clear_session_if_invalid(Err(session_api_error(&body, "获取调用明细失败")));
+        return Err(session_api_error(&body, "获取调用明细失败"));
     }
 
     let data = body.get("data").unwrap_or(&body);
@@ -2262,26 +2470,32 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
     if !has_stored_session() {
         return Err("尚未登录 New API，无法获取模型列表".to_string());
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+    let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (base, session) = clear_session_if_invalid(authenticated_stored_session(&client).await)?;
+    with_authenticated_session(&client, account_models).await
+}
+
+async fn account_models(
+    client: reqwest::Client,
+    base: String,
+    session: NewApiSession,
+) -> Result<Vec<String>, String> {
     let model = get_config_string("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let api_key = clear_session_if_invalid(
-        refresh_downstream_token(&client, &base, &session, &model).await,
-    )?;
+    let api_key = refresh_downstream_token(&client, &base, &session, &model).await?;
     let models = downstream_models(&client, &base, &api_key).await?;
     config::persist_managed_models(&models)?;
     Ok(models)
 }
 
 #[cfg(test)]
+#[path = "tests/newapi_session.rs"]
+mod session_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
-        account_group, approved_managed_base, is_invalid_session_error, login, managed_token_create_payload,
+        account_group, account_http_client_builder, approved_managed_base, fetch_auth_status, is_invalid_session_error, login, managed_token_create_payload,
         newapi_login,
         parse_json_bytes, parse_refresh_cookie, persisted_user_token, refresh_cookie_header,
         response_preview, secure_base, session_api_error, token_candidate, token_group_update_payload,
@@ -2295,6 +2509,36 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn paid_search_uses_the_account_api_key_and_rejects_a_different_model_origin() {
+        let base = "https://somni.ensuanx.com";
+        let mut obj = json!({
+            "newapi_base_url": base,
+            "newapi_executor_base_url": format!("{base}/v1"),
+            "newapi_executor_api_key": "sk-account-api-sentinel",
+            "newapi_user_token": "dashboard-jwt-sentinel",
+        }).as_object().unwrap().clone();
+        let credential = super::research_api_credential(base, &obj).unwrap();
+        assert_eq!(credential.api_key, "sk-account-api-sentinel");
+        assert_eq!(credential.issuer, base);
+        assert!(!format!("{credential:?}").contains("sk-account-api-sentinel"));
+        obj.insert("newapi_executor_base_url".into(), json!("https://other.example/v1"));
+        assert!(super::research_api_credential(base, &obj).is_none());
+        obj.insert("newapi_executor_base_url".into(), json!(format!("{base}/v1")));
+        obj.remove("newapi_executor_api_key");
+        assert!(super::research_api_credential(base, &obj).is_none());
+    }
+
+    #[test]
+    fn tool_billing_models_are_not_offered_as_chat_models() {
+        let mut models = Vec::new();
+        super::collect_model_ids(&json!([
+            { "id": "deepseek-search" }, { "id": "scopus-search" },
+            "deepseek-fetch", "deepseek-v4.1-flash", { "id": "MiniMax-M3" }
+        ]), &mut models);
+        assert_eq!(models, vec!["deepseek-v4.1-flash", "MiniMax-M3"]);
+    }
 
     #[test]
     fn managed_account_endpoint_requires_https_or_loopback() {
@@ -2594,6 +2838,40 @@ mod tests {
     }
 
     #[test]
+    fn account_calls_identify_the_release_and_surface_an_outdated_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let address = listener.local_addr().expect("mock address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept status");
+            let request = read_request(&mut stream);
+            let body = r#"{"success":false,"error":{"message":"请升级到 9.9.9 或更高版本","type":"client_outdated","code":"client_outdated"}}"#;
+            let response = format!(
+                "HTTP/1.1 426 Upgrade Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            request
+        });
+
+        let client = account_http_client_builder(Duration::from_secs(5))
+            .build()
+            .expect("build client");
+        let executor = tokio::runtime::Runtime::new().expect("create runtime");
+        let Err(error) =
+            executor.block_on(fetch_auth_status(&client, &format!("http://{address}")))
+        else {
+            panic!("an outdated release is refused");
+        };
+
+        assert_eq!(error, "请升级到 9.9.9 或更高版本 (client_outdated)");
+        let request = server.join().expect("mock server finishes").to_ascii_lowercase();
+        let expected = format!("user-agent: {}", runtime::client_user_agent()).to_ascii_lowercase();
+        assert!(request.contains(&expected), "{request}");
+    }
+
+    #[test]
     fn login_keeps_a_modern_refresh_session_out_of_the_legacy_token_flow() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
         let address = listener.local_addr().expect("mock address");
@@ -2830,5 +3108,105 @@ mod tests {
         assert_eq!(payload["group"], "");
         assert_eq!(payload["remain_quota"], 50);
         assert_eq!(payload["unlimited_quota"], false);
+    }
+
+    #[test]
+    fn a_rejected_account_key_is_fetched_again_once_and_shared() {
+        let _guard = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_home = std::env::var("HOME").ok();
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let home = std::env::temp_dir().join(format!(
+            "somniq-newapi-key-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock new-api");
+        let base = format!("http://{}", listener.local_addr().expect("mock address"));
+        let server = thread::spawn(move || {
+            let (mut list_stream, _) = listener.accept().expect("accept token list");
+            let list_request = read_request(&mut list_stream);
+            write_json_response(
+                &mut list_stream,
+                r#"{"success":true,"data":{"items":[{"id":5,"name":"somniq-desktop","status":1,"key":"abcd**********wxyz","group":""}]}}"#,
+                false,
+            );
+            let (mut key_stream, _) = listener.accept().expect("accept key reveal");
+            let key_request = read_request(&mut key_stream);
+            write_json_response(&mut key_stream, r#"{"success":true,"data":{"key":"fresh"}}"#, false);
+            (list_request, key_request)
+        });
+
+        // A legacy-gateway session: the management token sits in config.json,
+        // so no OS credential store is involved in this test.
+        let config_path = crate::state::config_path();
+        std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+        std::fs::write(
+            &config_path,
+            json!({
+                "newapi_base_url": base,
+                "newapi_user_id": 17,
+                "newapi_access_token": "management-token",
+                "newapi_executor_base_url": format!("{base}/v1"),
+            })
+            .to_string(),
+        )
+        .expect("write config");
+        crate::config::persist_newapi_executor_credentials(&base, "sk-rejected", Some(5))
+            .expect("store rejected key");
+
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+        let replaced = runtime.block_on(super::replace_rejected_model_key(
+            format!("{base}/v1"),
+            "sk-rejected".to_string(),
+        ));
+        let (list_request, key_request) = server.join().expect("mock server finishes");
+
+        assert_eq!(replaced.as_deref(), Some("sk-fresh"));
+        assert!(list_request.starts_with("GET /api/token/ HTTP/1.1"));
+        assert!(key_request.starts_with("POST /api/token/5/key HTTP/1.1"));
+        assert!(!std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("sk-fresh"));
+        // A second request that still carries the rejected key takes the
+        // replacement without asking the gateway again (the mock is gone).
+        assert_eq!(
+            runtime
+                .block_on(super::replace_rejected_model_key(
+                    format!("{base}/v1"),
+                    "sk-rejected".to_string(),
+                ))
+                .as_deref(),
+            Some("sk-fresh")
+        );
+        // A key this account never issued is left alone.
+        assert!(runtime
+            .block_on(super::replace_rejected_model_key(
+                format!("{base}/v1"),
+                "sk-somebody-elses".to_string(),
+            ))
+            .is_none());
+        // So is any other endpoint.
+        assert!(runtime
+            .block_on(super::replace_rejected_model_key(
+                "https://api.openai.com/v1".to_string(),
+                "sk-fresh".to_string(),
+            ))
+            .is_none());
+
+        crate::config::clear_newapi_session().expect("logout");
+        let _ = std::fs::remove_dir_all(&home);
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
     }
 }

@@ -8,13 +8,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configGet, configSet, newapiBootstrap, newapiModels, newapiUsageLogs, profileStats } from "../api/tauri";
-import { readCachedUsageLogPages, writeCachedUsageLogPages } from "../accountCache";
+import { ACCOUNT_CACHE_KEY, readCachedAccount, readCachedUsageLogPages, subscribeCachedAccount, writeCachedAccount, writeCachedUsageLogPages } from "../accountCache";
 import { useStore } from "../store";
 import { SETTINGS_TAB_REQUEST_EVENT } from "../settingsTabRequest";
 import Settings from "./Settings";
 import { PREVIEW_SETTINGS_DATA } from "./settingsPreviewData";
 import { writeCachedProfileStats } from "./profileStatsCache";
-import type { ProfileStats } from "../types";
+import type { ConfigView, ProfileStats } from "../types";
 
 vi.mock("../api/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/tauri")>()),
@@ -73,6 +73,45 @@ describe("Settings against a native backend", () => {
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M2.7" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Reviewer 模型" }), { target: { value: "gpt-5.5" } });
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewerProvider: "custom", reviewerModel: "gpt-5.5" }));
+  });
+
+  it("saves the review mode by itself, reads it back on the next visit, and keeps the confirmed mode when a save fails", async () => {
+    let confirmed: ConfigView = { ...preview.configView, reviewMode: "thread" };
+    vi.mocked(configGet).mockImplementation(async () => confirmed);
+    vi.mocked(configSet).mockImplementation(async (patch) => { confirmed = { ...confirmed, ...patch }; return confirmed; });
+    const first = render(<Settings />);
+    const mode = await screen.findByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
+    await waitFor(() => expect(mode.value).toBe("thread"));
+    expect(screen.getByText(/只读工具自行核对项目文件/)).toBeTruthy();
+
+    fireEvent.change(mode, { target: { value: "oneshot" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewMode: "oneshot" }));
+    await waitFor(() => expect(mode.value).toBe("oneshot"));
+    expect(screen.getByText(/Reviewer 模型不能调用工具时选此项/)).toBeTruthy();
+    expect(screen.queryByText(/只读工具自行核对项目文件/)).toBeNull();
+
+    first.unmount();
+    sessionStorage.setItem("somniq-settings-tab-request", "models");
+    render(<Settings />);
+    const reopened = await screen.findByRole("combobox", { name: "审查方式" }) as HTMLSelectElement;
+    await waitFor(() => expect(reopened.value).toBe("oneshot"));
+
+    useStore.setState({ error: null });
+    vi.mocked(configSet).mockRejectedValueOnce(new Error("Disk is read-only"));
+    fireEvent.change(reopened, { target: { value: "thread" } });
+    await waitFor(() => expect(useStore.getState().error).toBeTruthy());
+    expect(reopened.value).toBe("oneshot");
+    expect(confirmed.reviewMode).toBe("oneshot");
+  });
+
+  it("neither sends nor discards unsaved model drafts when the review mode changes", async () => {
+    render(<Settings />);
+    fireEvent.change(await screen.findByPlaceholderText("例如 http://127.0.0.1:10808"), { target: { value: "http://proxy.keep.test" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "审查方式" }), { target: { value: "oneshot" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewMode: "oneshot" }));
+    // The draft goes out through its own auto-save, on its own.
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith(expect.objectContaining({ webProxyUrl: "http://proxy.keep.test" })));
+    expect(vi.mocked(configSet).mock.calls.find(([patch]) => patch.webProxyUrl)?.[0]).not.toHaveProperty("reviewMode");
   });
 
   it("shows cached Profile statistics before settings configuration finishes loading", async () => {
@@ -164,6 +203,57 @@ describe("Settings against a native backend", () => {
     expect(container.querySelectorAll(".sp-usage-row-call:not(.sp-usage-row-head)")).toHaveLength(preview.usageLogs.items.length);
   });
 
+  it("publishes refreshed allowance to the menu and receives background balance updates", async () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "profile");
+    const observer = vi.fn();
+    const unsubscribe = subscribeCachedAccount(observer);
+    try {
+      const { container } = render(<Settings />);
+      await waitFor(() => expect(newapiBootstrap).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toHaveProperty("disabled", false));
+      const updated = { ...preview.account, subscriptionQuota: 12_345_000, subscriptionUsedQuota: 17_655_000 };
+      vi.mocked(newapiBootstrap).mockResolvedValueOnce(updated);
+      fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+      await waitFor(() => expect(observer).toHaveBeenLastCalledWith(updated));
+      const card = container.querySelector<HTMLElement>(".sp-usage-quota-card.subscription")!;
+      expect(within(card).getByText("$24.69")).toBeTruthy();
+      act(() => writeCachedAccount({ ...updated, subscriptionQuota: 10_000_000, subscriptionUsedQuota: 20_000_000 }));
+      expect(within(card).getByText("$20.00")).toBeTruthy();
+      expect(newapiBootstrap).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("does not repopulate the account cache from a response arriving after logout", async () => {
+    let finish!: (account: typeof preview.account) => void;
+    vi.mocked(newapiBootstrap).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { unmount } = render(<Settings />);
+    await waitFor(() => expect(newapiBootstrap).toHaveBeenCalledTimes(1));
+    act(() => useStore.getState().logout());
+    unmount();
+    await act(async () => { finish(preview.account); });
+    expect(readCachedAccount()).toBeNull();
+  });
+
+  it("finishes loading when another window supersedes a pending account read", async () => {
+    sessionStorage.setItem("somniq-settings-tab-request", "profile");
+    let finish!: (account: typeof preview.account) => void;
+    vi.mocked(newapiBootstrap).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    writeCachedAccount(preview.account);
+    render(<Settings />);
+    await waitFor(() => expect(newapiBootstrap).toHaveBeenCalledTimes(1));
+    const updated = { ...preview.account, subscriptionQuota: 12_345_000 };
+    const newValue = JSON.stringify(updated);
+    act(() => {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, newValue);
+      fireEvent(window, new StorageEvent("storage", { key: ACCOUNT_CACHE_KEY, newValue }));
+    });
+    await act(async () => { finish(preview.account); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "刷新" })).toHaveProperty("disabled", false));
+    expect(readCachedAccount()).toEqual(updated);
+  });
+
   it("discards a pending call response after logout and unmount instead of refilling the account cache", async () => {
     sessionStorage.setItem("somniq-settings-tab-request", "profile");
     let finish!: (page: typeof preview.usageLogs) => void;
@@ -176,21 +266,21 @@ describe("Settings against a native backend", () => {
     expect(readCachedUsageLogPages()).toEqual({});
   });
 
-  it("clears API-key drafts after saving the connection configuration", async () => {
+  it("saves the research proxy without third-party API keys", async () => {
     render(<Settings />);
 
-    const scopusInput = await screen.findByPlaceholderText("粘贴 Elsevier 密钥");
-    fireEvent.change(scopusInput, { target: { value: "scopus-draft" } });
+    const proxyInput = await screen.findByPlaceholderText("例如 http://127.0.0.1:10808");
+    fireEvent.change(proxyInput, { target: { value: "http://proxy.draft.test" } });
 
 
 
     await waitFor(() => {
       expect(vi.mocked(configSet)).toHaveBeenCalledWith(
-        expect.objectContaining({ scopusApiKey: "scopus-draft" }),
+        expect.objectContaining({ webProxyUrl: "http://proxy.draft.test" }),
       );
     });
     await waitFor(() => {
-      expect((scopusInput as HTMLInputElement).value).toBe("");
+      expect((proxyInput as HTMLInputElement).value).toBe("http://proxy.draft.test");
     });
   });
 
@@ -203,9 +293,9 @@ describe("Settings against a native backend", () => {
     expect(readCachedUsageLogPages()).toEqual({});
   });
 
-  it("applies a Python environment without clearing unsaved model connection keys", async () => {
+  it("applies a Python environment without clearing unsaved model preferences", async () => {
     render(<Settings />);
-    fireEvent.change(await screen.findByPlaceholderText("粘贴 Elsevier 密钥"), { target: { value: "keep-scopus-draft" } });
+    fireEvent.change(await screen.findByPlaceholderText("例如 http://127.0.0.1:10808"), { target: { value: "http://proxy.keep.test" } });
     fireEvent.click(screen.getByRole("tab", { name: "关于与环境" }));
     const input = screen.getByRole("textbox", { name: "首选 Python / Conda 环境" });
     fireEvent.change(input, { target: { value: "C:/Conda/research" } });
@@ -218,12 +308,12 @@ describe("Settings against a native backend", () => {
     fireEvent.click(screen.getByRole("tab", { name: "模型服务" }));
 
 
-    await waitFor(() => expect(configSet).toHaveBeenLastCalledWith(expect.objectContaining({ scopusApiKey: "keep-scopus-draft" })));
+    await waitFor(() => expect(configSet).toHaveBeenLastCalledWith(expect.objectContaining({ webProxyUrl: "http://proxy.keep.test" })));
   });
 
   it("keeps the confirmed memory policy on failure and retries without losing model drafts", async () => {
     render(<Settings />);
-    fireEvent.change(await screen.findByPlaceholderText("粘贴 Elsevier 密钥"), { target: { value: "unsaved-key" } });
+    fireEvent.change(await screen.findByPlaceholderText("例如 http://127.0.0.1:10808"), { target: { value: "http://proxy.unsaved.test" } });
     fireEvent.click(screen.getByRole("tab", { name: "常规" }));
     const group = within(screen.getByRole("radiogroup", { name: "记忆策略" }));
     const previous = group.getAllByRole("radio").find((radio) => radio.getAttribute("aria-checked") === "true")!;
@@ -239,8 +329,8 @@ describe("Settings against a native backend", () => {
     fireEvent.click(screen.getByRole("tab", { name: "模型服务" }));
 
 
-    await waitFor(() => expect(vi.mocked(configSet)).toHaveBeenLastCalledWith(expect.objectContaining({ scopusApiKey: "unsaved-key" })));
-    expect(vi.mocked(configSet).mock.calls.find(([patch]) => patch.scopusApiKey === "unsaved-key")?.[0]).not.toHaveProperty("memoryWriteApproval");
+    await waitFor(() => expect(vi.mocked(configSet)).toHaveBeenLastCalledWith(expect.objectContaining({ webProxyUrl: "http://proxy.unsaved.test" })));
+    expect(vi.mocked(configSet).mock.calls.find(([patch]) => patch.webProxyUrl === "http://proxy.unsaved.test")?.[0]).not.toHaveProperty("memoryWriteApproval");
   });
 
   it("prevents duplicate writes and retains an in-flight policy change across tab switches", async () => {
@@ -266,7 +356,7 @@ describe("Settings against a native backend", () => {
 
   it("reports language failures locally and only applies a confirmed language without clearing connection drafts", async () => {
     render(<Settings />);
-    fireEvent.change(await screen.findByPlaceholderText("粘贴 Elsevier 密钥"), { target: { value: "keep-this-draft" } });
+    fireEvent.change(await screen.findByPlaceholderText("例如 http://127.0.0.1:10808"), { target: { value: "http://proxy.language.test" } });
     fireEvent.click(screen.getByRole("tab", { name: "常规" }));
     vi.mocked(configSet).mockClear();
     vi.mocked(configSet).mockRejectedValueOnce(new Error("Disk is read-only"));
@@ -282,6 +372,6 @@ describe("Settings against a native backend", () => {
     // Use the stable category request contract so translations do not couple this test to nav copy.
     fireEvent(window, new CustomEvent(SETTINGS_TAB_REQUEST_EVENT, { detail: "models" }));
     await waitFor(() => expect(screen.queryByText("Saved")).toBeNull());
-    expect(screen.getByDisplayValue("keep-this-draft")).toBeTruthy();
+    expect(screen.getByDisplayValue("http://proxy.language.test")).toBeTruthy();
   });
 });

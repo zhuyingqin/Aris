@@ -44,7 +44,7 @@ export const figurePrepare=async input=>{
  run={...run,id:input.id,title:input.title,method:input.method,sourceMode:'import',status:'image_ready',sourceRaster:1,sourceHash:source.hash,imageConfirmed:false,pendingRasterEdit:null,versions:[],requests:[],review:null,error:null,rasterVersions:[{...source,index:1}]};
  return view();
 };
-export const figureSave=reject,figureReview=reject,figureCancel=reject,figureExport=reject,figureDelete=reject,figureEditSvg=reject;
+export const figureSave=reject,figureSaveDraft=reject,figureDiscardDraft=reject,figureReview=reject,figureCancel=reject,figureExport=reject,figureDelete=reject,figureEditSvg=reject;
 `;
 const mockStore = `const state={currentProject:{id:'fixture',name:'SomniQ PNG preview'},language:new URLSearchParams(location.search).get('language')==='en'?'en':'cn',setTab:()=>{},setFigureDirty:()=>{}};export const useStore=Object.assign(selector=>selector(state),{getState:()=>state});`;
 

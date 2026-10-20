@@ -322,6 +322,9 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
         if let Some(hint) = latex_primary_diagnostic_hint(output) {
             return Some(hint);
         }
+        if let Some(hint) = latex_process_failure_hint(output) {
+            return Some(hint);
+        }
         if lower.contains("not found") || lower.contains("failed to start") {
             // An explicit user override can still be used through bash.
             return Some(match crate::system_prompt::configured_tectonic_command() {
@@ -395,6 +398,8 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
 pub(crate) enum LatexFailureClass {
     /// Nothing in the document caused this and no edit can fix it.
     Environment,
+    /// A timeout/cancellation or unlocated build failure needs log inspection.
+    Process,
     /// A real TeX error at a source location; editing is the right response.
     Source,
     /// Not confidently either. Treated as `Source`, which is the status quo.
@@ -413,6 +418,9 @@ pub(crate) fn latex_failure_class(output: &str) -> LatexFailureClass {
     }
     if latex_primary_diagnostic_hint(output).is_some() {
         return LatexFailureClass::Source;
+    }
+    if latex_process_failure_hint(output).is_some() {
+        return LatexFailureClass::Process;
     }
     LatexFailureClass::Unknown
 }
@@ -500,7 +508,21 @@ fn blocked_output_file_name(output: &str) -> Option<String> {
 
 fn latex_primary_diagnostic_hint(output: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
-    let diagnostic = value.get("diagnostics")?.as_array()?.first()?.as_object()?;
+    let diagnostic = value
+        .get("diagnostics")?
+        .as_array()?
+        .iter()
+        .find(|diagnostic| {
+            diagnostic
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+                && !diagnostic
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|code| code.starts_with("compile_"))
+        })?
+        .as_object()?;
     let message = diagnostic.get("message")?.as_str()?.trim();
     if message.is_empty() {
         return None;
@@ -520,6 +542,33 @@ fn latex_primary_diagnostic_hint(output: &str) -> Option<String> {
     Some(format!(
         "Fix only the primary LaTeX diagnostic{location}: {message}. Make the smallest source edit, then rerun LaTeXCompile; do not compile through REPL or batch speculative rewrites."
     ))
+}
+
+fn latex_process_failure_hint(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let status = value
+        .get("returnCodeInterpretation")
+        .and_then(serde_json::Value::as_str);
+    if value.get("timedOut").and_then(serde_json::Value::as_bool) == Some(true)
+        || status == Some("timeout")
+    {
+        return Some("LaTeX compilation exceeded its time budget without reporting a concrete source error. Inspect the raw compiler log for a slow or stalled TeX/bibliography process; if it needs more time, increase timeoutMs (or SOMNIQ_LATEX_COMPILE_TIMEOUT_MS for Desktop) and recompile unchanged. Missing .toc/.lof/.lot/.bbl files alone are generated-file notices. Do not make speculative source edits.".to_string());
+    }
+    if value
+        .get("interrupted")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || status == Some("interrupted")
+    {
+        return Some("LaTeX compilation was cancelled. Recompile unchanged when ready; cancellation does not identify a source error.".to_string());
+    }
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("not found") || lower.contains("failed to start") {
+        return None;
+    }
+    (value.get("success").and_then(serde_json::Value::as_bool) == Some(false)).then(|| {
+        "LaTeX compilation failed without a concrete source diagnostic. Inspect the raw compiler log and TeX toolchain before editing source, then rerun LaTeXCompile once the failure is understood.".to_string()
+    })
 }
 
 pub(crate) fn persist_tool_output_if_large(

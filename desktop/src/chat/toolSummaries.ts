@@ -878,10 +878,6 @@ function summarizeFileChanges(turns: ChatTurn[]): TurnFileChangeSummary | null {
   };
 }
 
-export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
-  return summarizeFileChanges([turn]);
-}
-
 export function fileChangeSummaryFromTurns(turns: ChatTurn[]): TurnFileChangeSummary | null {
   let start = 0;
   for (let index = turns.length - 1; index >= 0; index -= 1) {

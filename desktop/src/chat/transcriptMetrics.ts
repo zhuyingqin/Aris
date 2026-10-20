@@ -1,5 +1,7 @@
 import type { VirtualItem } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
+import { readDisclosure } from "./disclosureState";
+import { USER_MESSAGE_PREVIEW_LINES, userMessageDisclosureKey } from "./userMessageCollapse";
 
 /**
  * Height bookkeeping for the virtualized transcript.
@@ -113,11 +115,19 @@ export function estimateTurnSize(turn: ChatTurn | undefined, columns = messageCo
   if (!turn) return FALLBACK_TURN_SIZE;
   let height = TURN_CHROME + (turn.role === "user" ? USER_BUBBLE_CHROME : 0);
   height += (turn.attachments?.length ?? 0) * ATTACHMENT_ROW;
-  for (const block of turn.blocks) {
+  for (const [index, block] of turn.blocks.entries()) {
     switch (block.kind) {
-      case "text":
-        height += wrappedTextHeight(block.text, columns);
+      case "text": {
+        const textHeight = wrappedTextHeight(block.text, columns);
+        const previewHeight = USER_MESSAGE_PREVIEW_LINES * LINE_HEIGHT;
+        if (turn.role === "user" && textHeight > previewHeight) {
+          height += readDisclosure(userMessageDisclosureKey(turn.id, index)) ? textHeight : previewHeight;
+          height += 28; // The expand/collapse button and its top gap.
+        } else {
+          height += textHeight;
+        }
         break;
+      }
       case "thinking":
         // Collapsed once the turn settles; while streaming it is revealed but
         // its body is a bounded scroller, so the row height stays bounded.

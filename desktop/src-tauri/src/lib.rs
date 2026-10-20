@@ -1,7 +1,9 @@
+mod agent_threads;
 mod app_ctx;
 mod blocking;
 mod change_review;
 mod chat_events;
+mod clipboard;
 mod codebridge;
 mod codeserver;
 mod commands;
@@ -22,6 +24,7 @@ mod knowledge;
 mod literature;
 mod paper_reading;
 mod mail;
+mod managed_key;
 mod mcp;
 mod membership;
 mod memory;
@@ -34,6 +37,7 @@ mod process;
 mod profile;
 mod projects;
 mod remote;
+mod review_thread;
 mod scheduled;
 mod screenshot;
 mod sessions;
@@ -422,6 +426,7 @@ fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
 pub(crate) fn stop_all_running_work(app_handle: &tauri::AppHandle) {
     let chat_state = app_handle.state::<engine::ChatState>();
     engine::cancel_all_running_turns(chat_state.inner());
+    agent_threads::stop_all("project work stopped; continue explicitly from the saved checkpoint");
 
     let remote_state = app_handle.state::<remote::RemoteAgentState>();
     remote::cancel_all_active_chat_messages(remote_state.inner());
@@ -435,6 +440,7 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     SHUTDOWN_CLEANUP.call_once(|| {
         playwright_pdf::shutdown();
         stop_all_running_work(app_handle);
+        agent_threads::shutdown();
         // Application exit additionally tears down the transport; a project
         // pause intentionally keeps it available so a resumed project can use
         // its existing paired devices without a fresh connection ceremony.
@@ -549,6 +555,14 @@ fn apply_windows_taskbar_icon(_window: &tauri::WebviewWindow) {}
 fn install_transport_verdict_hook() {
     aris_executor::set_transport_verdict_hook(Box::new(|base_url, model, verdict| {
         config::record_runtime_transport_verdict(base_url, model, verdict);
+    }));
+}
+
+/// Let the executor swap in a re-fetched account model key when the gateway
+/// answers 401, instead of failing the turn (see `newapi::replace_rejected_model_key`).
+fn install_credential_recovery_hook() {
+    aris_executor::set_credential_recovery_hook(Box::new(|base_url, rejected_key| {
+        Box::pin(newapi::replace_rejected_model_key(base_url, rejected_key))
     }));
 }
 
@@ -708,14 +722,28 @@ pub fn run() {
             if let Err(error) = newapi::retire_legacy_managed_session() {
                 eprintln!("SomniQ retired managed HTTP session cleanup failed: {error}");
             }
+            // Before any reader exports config-held keys: an older build kept
+            // the account model key in config.json.
+            if let Err(error) = config::move_managed_key_to_credential_store() {
+                eprintln!("SomniQ account model key migration failed: {error}");
+            }
+            if let Err(error) = config::retire_third_party_api_settings() {
+                eprintln!("SomniQ third-party API settings cleanup failed: {error}");
+            }
             if let Err(error) = apply_configured_python_environment() {
                 eprintln!("SomniQ Python environment configuration skipped: {error}");
             }
             state::apply_bundle_cache_environment();
-            // Export config-held keys (e.g. SCOPUS_API_KEY) before any
-            // literature search runs; force=false keeps real env vars intact.
+            // Configure account review and research preferences before tools run.
+            // Account credentials remain in process memory.
             config::apply_reviewer_environment(false);
             install_transport_verdict_hook();
+            install_credential_recovery_hook();
+            // Without an Elsevier key, or off campus with one, Scopus goes
+            // through the school route, which needs the signed-in account.
+            tools::research_account::set_research_account_provider(std::sync::Arc::new(
+                newapi::ResearchAccount,
+            ));
             // Bound before the Code page can start a workbench: the bridge
             // address is handed to that process in its environment, so the
             // listener has to exist first.
@@ -785,7 +813,6 @@ pub fn run() {
             updater::app_update_download_and_install,
             open_chat_companion,
             take_chat_companion_handoff,
-            screenshot::screenshot_capture_begin,
             screenshot::screenshot_overlay_context,
             screenshot::screenshot_overlay_image,
             screenshot::screenshot_overlay_ready,
@@ -803,14 +830,12 @@ pub fn run() {
             commands::skills_list,
             commands::skill_view,
             ppt_master::ppt_master_status,
-            ppt_master::ppt_master_preflight,
             ppt_master::ppt_master_install,
             ppt_master::ppt_master_uninstall,
             ppt_master::ppt_master_decks_list,
             commands::state_dir,
             commands::local_environment_checks,
             commands::local_environment_check,
-            engine::chat_builtin_tool_availability,
             engine::chat_research_provider_availability,
             engine::chat_running_turn_count,
             commands::open_external_url,
@@ -893,11 +918,7 @@ pub fn run() {
             remote::remote_control_p2p_frame,
             remote::remote_control_p2p_closed,
             config::config_get,
-            config::config_secret_get,
-            config::config_secret_clear,
             config::config_set,
-            config::config_test,
-            config::web_search_provider_test,
             memory::memory_status,
             memory::memory_v2_status,
             memory::memory_v2_confirm_r3,
@@ -908,7 +929,6 @@ pub fn run() {
             memory::memory_v2_rescreen_rejected,
             memory::memory_v2_start_build,
             memory::memory_v2_build_progress,
-            memory::memory_purge_legacy_derived,
             memory::memory_explorer_snapshot,
             memory::memory_recall_preview,
             memory::memory_governance_search,
@@ -916,19 +936,13 @@ pub fn run() {
             memory::memory_governance_update,
             memory::memory_governance_delete,
             memory::memory_export,
-            memory::memory_migration_preview,
-            memory::memory_migration_progress,
-            memory::memory_migration_execute,
-            memory::memory_migration_cancel,
-            memory::memory_dead_letters,
-            memory::memory_dead_letter_retry,
-            memory::memory_rebuild_derived,
             newapi::newapi_auth_status,
             newapi::newapi_logout,
             newapi::newapi_login,
             newapi::newapi_register,
             newapi::newapi_send_verification,
             newapi::newapi_models,
+            newapi::pricing::newapi_model_pricing,
             image_api::somni_image_settings,
             figures::figures_connections,
             figures::figures_running_count,
@@ -944,6 +958,8 @@ pub fn run() {
             figures::figures_cancel,
             figures::figures_document,
             figures::figures_save,
+            figures::draft::figures_save_draft,
+            figures::draft::figures_discard_draft,
             figures::figures_export,
             figures::figures_review,
             figures::svg_edit::figures_edit_svg,
@@ -959,7 +975,6 @@ pub fn run() {
             work_task::commands::work_task_update,
             work_task::commands::work_task_delete,
             work_task::commands::work_task_start,
-            work_task::commands::work_task_retry,
             work_task::commands::work_task_pause,
             work_task::commands::work_task_resume,
             work_task::commands::work_task_reply,
@@ -969,7 +984,6 @@ pub fn run() {
             work_task::commands::work_task_review_snapshot,
             work_task::commands::work_task_review_patch,
             work_task::commands::work_task_artifact_export,
-            work_task::commands::work_task_reorder,
             scheduled::scheduled_tasks_list,
             scheduled::scheduled_task_create,
             scheduled::scheduled_task_update,
@@ -1006,7 +1020,6 @@ pub fn run() {
             chat_events::chat_events_read,
             chat_events::chat_events_replay,
             literature::literature_load,
-            literature::literature_library_relations,
             literature::literature_library_model,
             literature::literature_update_collections,
             literature::literature_preferences,
@@ -1015,10 +1028,8 @@ pub fn run() {
             literature::literature_update_relations,
             literature::literature_update_item,
             literature::literature_create_item,
-            literature::literature_trash_items,
             literature::literature_restore_items,
             literature::literature_permanently_delete_items,
-            literature::literature_update_saved_searches,
             literature::literature_storage_status,
             literature::literature_storage_backup,
             literature::literature_full_text_search,
@@ -1036,7 +1047,6 @@ pub fn run() {
             literature::literature_add_identifier,
             literature::literature_download_pdf,
             literature::literature_llm,
-            literature::literature_llm_stream,
             literature::literature_llm_cancel,
             literature::literature_search_cancel,
             literature::literature_review_llm,
@@ -1083,8 +1093,6 @@ pub fn run() {
             codebridge::code_bridge_connected,
             codebridge::code_bridge_set_shell,
             codebridge::code_bridge_set_theme,
-            codebridge::code_bridge_save_all,
-            codebridge::code_bridge_reload,
             codebridge::code_bridge_open_file,
             codebridge::code_bridge_open_diff,
             engine::chat_status,
@@ -1095,6 +1103,10 @@ pub fn run() {
             engine::chat_reasoning_effort_get,
             engine::chat_reasoning_effort_set,
             engine::chat_permission_get,
+            engine::collaboration::chat_agent_list,
+            engine::collaboration::chat_agent_detail,
+            engine::collaboration::chat_agent_interrupt,
+            engine::collaboration::chat_agent_trace,
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,
@@ -1124,6 +1136,7 @@ pub fn run() {
             files::file_duplicate,
             files::file_delete,
             files::file_read_bytes,
+            clipboard::clipboard_write_image,
             files::file_read_bytes_info,
             files::file_read_bytes_range,
             files::file_asset_path,
@@ -1157,7 +1170,6 @@ pub fn run() {
             typeset_state::typeset_history_read,
             typeset_state::typeset_revision_capture,
             typeset_state::typeset_revision_list,
-            typeset_state::typeset_revision_read,
             typeset_state::typeset_revision_compare,
             typeset_state::typeset_revision_restore_file,
             typeset_state::typeset_revision_restore_project,

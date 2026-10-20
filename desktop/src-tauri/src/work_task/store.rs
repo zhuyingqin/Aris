@@ -224,12 +224,6 @@ where
 }
 
 /// [`update`] with the modification time supplied by the caller.
-///
-/// Exists for [`reorder`]: the board renders each column freshest-first, so a
-/// drag that stamped each card as it was written would hand the frontend
-/// descending timestamps and re-sort the cards into the reverse of what the
-/// user just arranged. One timestamp for the whole gesture makes them tie, and
-/// the tiebreak is the `sort_order` the drag itself wrote.
 fn update_stamped<F>(
     project_id: &str,
     task_id: &str,
@@ -252,20 +246,6 @@ where
     sort_tasks(&mut tasks);
     remember_revision(project_id, write_at(&path, file.revision, &tasks)?);
     Ok(updated)
-}
-
-/// Renumber board order from the ids the user dragged into place, under one
-/// timestamp. Ids not named keep their existing `sort_order`, so a drag on a
-/// filtered board cannot reshuffle cards that were not on screen.
-pub(crate) fn reorder(project_id: &str, task_ids: &[String]) -> Result<(), String> {
-    let stamped = now_ms();
-    for (index, task_id) in task_ids.iter().enumerate() {
-        update_stamped(project_id, task_id, stamped, |task| {
-            task.sort_order = index as i64;
-            Ok(())
-        })?;
-    }
-    Ok(())
 }
 
 pub(crate) fn remove(project_id: &str, task_id: &str) -> Result<(), String> {

@@ -1,6 +1,9 @@
-import { useState, type DragEvent, type ReactNode } from "react";
+import { useRef, useState, type DragEvent } from "react";
 import { SvgIcon } from "../SvgIcon";
-import { STYLE_PRESETS, callEstimate } from "./figureModel";
+import { STYLE_PRESETS } from "./figureModel";
+import FigureResizeHandle, { useFigurePanelSize } from "./FigureResizeHandle";
+import FigureStylePicker from "./FigureStylePicker";
+import { DEFAULT_STYLE_SPEC, compileFigureStyle, parseFigureStyle } from "./figureStyles";
 import type { FigureConnections } from "./types";
 
 /** One description, a style preset, an optional reference image and three
@@ -39,17 +42,6 @@ export function effectiveModels(draft: FigureDraft, connections: FigureConnectio
   };
 }
 
-/** Miniature of each preset so the choice is visual, not a style prompt. */
-function StyleThumb({ preset }: { preset: string }) {
-  const art: Record<string, ReactNode> = {
-    academic: <><rect x="6" y="8" width="22" height="12" rx="2" fill="#dbeafe" stroke="#3b82f6" /><rect x="52" y="8" width="22" height="12" rx="2" fill="#dcfce7" stroke="#22c55e" /><rect x="29" y="30" width="22" height="12" rx="2" fill="#ffedd5" stroke="#f97316" /><path d="M28 14h24M17 20l14 10M63 20 49 30" stroke="#475569" fill="none" /></>,
-    minimal: <><rect x="6" y="8" width="22" height="12" rx="1" fill="none" stroke="#334155" /><rect x="52" y="8" width="22" height="12" rx="1" fill="none" stroke="#334155" /><rect x="29" y="30" width="22" height="12" rx="1" fill="none" stroke="#334155" /><path d="M28 14h24M17 20l14 10M63 20 49 30" stroke="#94a3b8" fill="none" /></>,
-    soft: <><rect x="3" y="4" width="74" height="20" rx="7" fill="#f3e8ff" /><rect x="8" y="9" width="20" height="10" rx="5" fill="#e9d5ff" /><rect x="52" y="9" width="20" height="10" rx="5" fill="#fbcfe8" /><rect x="27" y="30" width="26" height="13" rx="6" fill="#ccfbf1" /><path d="M40 24v6" stroke="#a78bfa" fill="none" /></>,
-    print: <><rect x="6" y="8" width="22" height="12" fill="#fff" stroke="#000" strokeWidth="2" /><rect x="52" y="8" width="22" height="12" fill="#000" /><rect x="29" y="30" width="22" height="12" fill="#fff" stroke="#0072b2" strokeWidth="2" /><path d="M28 14h24M17 20l14 10M63 20 49 30" stroke="#000" strokeWidth="1.6" fill="none" /></>,
-  };
-  return <svg viewBox="0 0 80 48" aria-hidden>{art[preset]}</svg>;
-}
-
 interface Props {
   t: (cn: string, en: string) => string; language: "cn" | "en";
   draft: FigureDraft; onDraft: (patch: Partial<FigureDraft>) => void;
@@ -62,8 +54,9 @@ interface Props {
  * the reference image or shows where the editable SVG will open. */
 export default function FigureComposer({ t, language, draft, onDraft, connections, options, busy, canSubmit, onUpload, onSubmit, onOpenSettings }: Props) {
   const [dragging, setDragging] = useState(false);
+  const specRef = useRef<HTMLElement>(null);
+  const layout = useFigurePanelSize("specification");
   const generate = !draft.image;
-  const estimate = callEstimate(generate ? "generate" : "import");
   const models = effectiveModels(draft, connections);
   const pick = (copy: [string, string]) => copy[language === "cn" ? 0 : 1];
   // Executor and Reviewer must differ; moving the Executor onto the current
@@ -82,12 +75,12 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
   };
 
   return <div className="figure-new">
-    <aside className="figure-spec" aria-label={t("图形规格", "Figure specification")}>
+    <aside ref={specRef} style={layout.style} className="figure-spec" aria-label={t("图形规格", "Figure specification")}>
       <div className="figure-spec-scroll">
         <section className="figure-panel">
           <h2><b>1</b>{t("描述图形", "Describe the figure")}</h2>
           <div className={`figure-describe${dragging ? " dragging" : ""}`} {...dropHandlers}>
-            <textarea aria-label={t("图形描述", "Figure description")} value={draft.description} onChange={(e) => onDraft({ description: e.target.value })} maxLength={MAX_DESCRIPTION} rows={8}
+            <textarea aria-label={t("图形描述", "Figure description")} value={draft.description} onChange={(e) => onDraft({ description: e.target.value })} maxLength={MAX_DESCRIPTION} rows={14}
               placeholder={t("你想画什么？写清模块、标签、关系和箭头方向，标题会自动简化。数据图请提供真实数据。", "What do you want to create? Name modules, labels, relations and arrow directions. A concise title is created automatically. Use real data for plots.")} />
             <div className="figure-describe-bar">
               <label className="figure-attach" title={t("PNG / JPEG / WebP，≤ 10 MB", "PNG / JPEG / WebP, ≤ 10 MB")}>
@@ -99,11 +92,9 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
           </div>
           {draft.image ? <div className="figure-attached">
             <img src={draft.image.url} alt="" />
-            <span><strong>{draft.image.name}</strong><small>{t("将按此图重建，不再生图", "Rebuilt from this image; nothing is generated")}</small></span>
+            <span><strong>{draft.image.name}</strong></span>
             <button type="button" className="figure-icon-button" aria-label={t("移除参考图", "Remove reference image")} title={t("移除，改为生成", "Remove and generate instead")} onClick={() => onDraft({ image: null })}><SvgIcon name="close" size={12} /></button>
-          </div> : <p className={`figure-hint${imageUnavailable ? " tone-danger" : ""}`}>{imageUnavailable
-            ? t("SomniImage 不可用：请添加参考图，或在模型设置中登录并开启 SomniImage。", "SomniImage is unavailable: add a reference image, or sign in and enable SomniImage in Model settings.")
-            : t("Executor 整理需求后生成 PNG，确认图片后再重建为可编辑 SVG。", "The Executor plans the PNG from your requirements; confirm the image before rebuilding it as editable SVG.")}</p>}
+          </div> : imageUnavailable && <p className="figure-hint tone-danger">{t("SomniImage 不可用：请添加参考图，或在模型设置中登录并开启 SomniImage。", "SomniImage is unavailable: add a reference image, or sign in and enable SomniImage in Model settings.")}</p>}
           {!draft.description && <div className="figure-examples">
             <span>{t("快速示例", "Quick examples")}</span>
             <div>{EXAMPLES.map((example) => <button key={example.label[1]} type="button" onClick={() => onDraft({ description: pick(example.text) })}>{pick(example.label)}</button>)}</div>
@@ -112,14 +103,11 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
 
         <section className="figure-panel">
           <h2><b>2</b>{t("设置", "Settings")}</h2>
-          <div className="figure-field">
-            <span className="figure-field-head">{t("风格预设", "Style preset")}</span>
-            <div className="figure-styles" role="radiogroup" aria-label={t("风格", "Style")}>
-              {STYLE_PRESETS.map((preset) => <button key={preset.key} type="button" role="radio" aria-checked={draft.style === preset.value} className={draft.style === preset.value ? "selected" : ""} onClick={() => onDraft({ style: preset.value })}>
-                <StyleThumb preset={preset.key} /><span>{pick(preset.label)}</span>
-              </button>)}
-            </div>
-          </div>
+          <FigureStylePicker language={language} value={draft.style} preserveSource={!!draft.image} hasDescription={!!draft.description.trim()}
+            onChange={(style) => onDraft({ style })} onUseScenario={(scenario) => onDraft({
+              description: pick(scenario.description),
+              style: compileFigureStyle({ ...(parseFigureStyle(draft.style) ?? DEFAULT_STYLE_SPEC), family: scenario.family }),
+            })} />
           <div className="figure-field">
             <span className="figure-field-head">{t("模型", "Models")}<button type="button" className="figure-link" onClick={onOpenSettings}><SvgIcon name="settings" size={12} />{t("模型设置", "Model settings")}</button></span>
             <div className="figure-models">
@@ -150,22 +138,19 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
         <button type="button" className="figure-button primary block" disabled={!canSubmit} onClick={onSubmit}>
           <SvgIcon name={generate ? "sparkle" : "play"} size={14} />{busy ? t("正在启动…", "Starting…") : generate ? t("生成图形", "Generate figure") : t("预览参考图", "Preview reference")}
         </button>
-        <small>{t("先预览和圈选修改 PNG，确认后再重建 SVG。", "Preview and edit the PNG, then confirm to build SVG.")}</small>
-        {generate && <small>{t("先由 Executor 理解需求并整理提示词，再调用生图模型。", "Executor plans the prompt before the image model generates the PNG.")}</small>}
-        <small>{t(`预计 ${estimate.usual} 次调用 · 最多 ${estimate.max} 次；首次使用另计最多 2 次视觉探针`, `About ${estimate.usual} calls · up to ${estimate.max}; first use adds up to 2 vision probes`)}</small>
       </footer>
     </aside>
+    <FigureResizeHandle label={t("调整描述与预览区域宽度", "Resize description and preview")} panelRef={specRef}
+      minWidth={300} reserveWidth={240} onResize={layout.resize} onReset={layout.reset} />
 
     <div className={`figure-preview${dragging ? " dragging" : ""}`} {...dropHandlers}>
       {draft.image ? <figure className="figure-preview-image">
         <img src={draft.image.url} alt={t("参考图预览", "Reference preview")} />
-        <figcaption><SvgIcon name="image" size={12} />{t("参考图 · 将重建为可编辑 SVG", "Reference · will be rebuilt as editable SVG")}</figcaption>
+        <figcaption><SvgIcon name="image" size={12} />{t("参考图", "Reference image")}</figcaption>
       </figure> : <div className="figure-preview-empty">
         <svg viewBox="0 0 120 80" aria-hidden><rect x="8" y="10" width="34" height="20" rx="4" /><rect x="78" y="10" width="34" height="20" rx="4" /><rect x="43" y="50" width="34" height="20" rx="4" /><path d="M42 20h36M25 30l22 20M95 30 73 50" /></svg>
-        <strong>{t("先生成 PNG，满意后再重建 SVG", "Generate a PNG, then confirm to build SVG")}</strong>
-        <p>{t("可以直接改字、移动、分组，保存为新版本后再交给独立 Reviewer 审查。", "Edit text, move and group elements, then save a version for the independent Reviewer.")}</p>
-        <ol>{[t("生成参考图", "Generate reference"), t("预览与圈选修改", "Preview and edit"), t("重建 SVG", "Rebuild SVG"), t("独立审查", "Independent review")].map((step, index) => <li key={step}><b>{index + 1}</b>{step}</li>)}</ol>
-        <small>{t("也可以把已有图片拖到这里，直接重建。", "Or drop an existing image here to rebuild it directly.")}</small>
+        <strong>{t("图形预览", "Figure preview")}</strong>
+        <small>{t("拖入参考图", "Drop a reference image")}</small>
       </div>}
     </div>
   </div>;

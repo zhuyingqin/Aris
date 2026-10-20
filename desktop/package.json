@@ -1,12 +1,13 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.81",
+  "version": "0.4.85",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
-    "predev": "node scripts/prepare-figure-editor.cjs",
-    "prebuild": "node scripts/prepare-figure-editor.cjs",
+    "predev": "node scripts/prepare-frontend-assets.cjs",
+    "predev:typeset": "node scripts/prepare-pdf-assets.cjs",
+    "prebuild": "node scripts/prepare-frontend-assets.cjs",
     "dev": "vite",
     "dev:typeset": "vite --host 127.0.0.1 --port 1420 --strictPort --open /?typesetPreview=1",
     "build": "vite build",
@@ -21,6 +22,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run src",
+    "generate:icons": "node gen-icon.cjs && tauri icon src-tauri/icon-src.png",
     "tauri": "tauri",
     "test:scripts": "node --test scripts/tests/*.test.cjs"
   },
@@ -65,7 +67,9 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
     "svgedit": "7.4.2",
+    "unified": "^11.0.5",
     "zustand": "^4.5.5"
   },
   "devDependencies": {
