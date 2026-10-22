@@ -2,9 +2,9 @@
 
 2026-10-15 更新：普通 Chat 六动作、双只读子任务、聊天卡片与持久恢复已实施；现行行为和分开的模拟/真实验收记录见 [Chat 协作第一版](chat-collaboration-v1.md)。下文保留原设计与历史阶段说明。
 
-> 状态：设计提案（Design Proposal）；P0–P2 已实现，见第 11、12 节；P3 及之后未实施  
-> 日期：2026-10-14  
-> 范围：`crates/runtime`、`crates/tools`、`crates/chat`、`desktop/src-tauri`（engine / work_task / workflow / app_ctx）、Chat 侧栏  
+> 状态：设计提案（Design Proposal）；P0–P2 已实现，见第 11、12 节；P3 及之后未实施
+> 日期：2026-10-14
+> 范围：`crates/runtime`、`crates/tools`、`crates/chat`、`desktop/src-tauri`（engine / work_task / workflow / app_ctx）、Chat 侧栏
 > 行为参考：openai/codex `d292f721`（2026-10-14 主干）的 multi-agent v2、Guardian 审阅会话与 `rollout-trace`。只借设计，不复制代码。
 
 ---

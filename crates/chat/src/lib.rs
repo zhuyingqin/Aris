@@ -1221,6 +1221,9 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             optional: resolve_named(catalog, &["Skill"]),
         });
     }
+    if contains_any(lowered, &["skill", "技能"]) {
+        groups.push(ToolGroup {profile:"skills",reason:"skill intent",required:Vec::new(),optional:resolve_named(catalog,&["Skill"])});
+    }
     if contains_any(
         lowered,
         &["email", "mail", "inbox", "邮件", "邮箱", "收件箱"],

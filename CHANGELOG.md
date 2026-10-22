@@ -1,5 +1,168 @@
 # ARIS-Code Changelog
 
+## v0.4.86 (2026-10-22)
+
+- **Membership payments in the desktop app** — purchase Go, Plus or Pro with
+  the website's live account prices and Alipay desktop cashier. The client
+  verifies the order and opens the official cashier in the system browser.
+  Returning to the app refreshes membership and credits from the account service;
+  retrying a failed browser launch reopens the same order.
+- **Buy and upgrade from the account menu** — Free accounts get Buy membership;
+  paid accounts get Upgrade membership, with a direct link to the payment panel.
+  The panel identifies the current plan, defaults to the next tier where
+  available, and explains full-month billing and the new period. Pro uses a
+  lighter lavender palette with readable text in both themes.
+- **Recoverable figure model choices** — the figure workspace keeps model
+  names and choices available when saved Executor and Reviewer selections
+  conflict. Tasks remain blocked until different models are selected, so the
+  independent review requirement is preserved while users fix the selection.
+- **Release consistency** — version 0.4.86 across desktop and shared Rust
+  manifests, lockfiles and README badges, retaining Windows x64 and macOS
+  universal installers, signed updater payloads and a combined update manifest.
+
+## v0.4.85 (2026-10-20)
+
+- **Model prices beside model selection** — Chat and model settings show compact
+  price badges using DeepSeek's peak rate as the fixed 1× comparison. DeepSeek
+  shows 0.5× off peak while other models keep the same peak denominator.
+  Each Chat category sorts models by numeric multiplier from low to high,
+  preserves equal-price order, and keeps unknown prices last. Single-model
+  categories, highlight-only selection and per-request labels of 0.1 keep the
+  picker consistent; detailed pricing remains available on hover.
+- **Account sessions recover from access-token expiry** — account, model,
+  pricing and usage requests renew short-lived access tokens and retry once.
+  Refresh-cookie rotation is serialized, and temporary credential-store write
+  failures retain the latest credential in backend memory for a later retry.
+  Model-key failures preserve account sign-in; confirmed revoked sessions still
+  sign out. Credentials remain in backend memory and the OS credential store.
+- **Copy original images from Chat and previews** — image context menus resolve
+  the original file, preserve PNG bytes and transparency, and convert other
+  supported formats at their natural size. Enlarged previews share the same
+  copy flow, including duplicate-write protection and visible retry errors.
+- **Clear client upgrade requests** — SomniQ service requests identify the app
+  version consistently. A server's upgrade-required response opens the update
+  notice instead of appearing as a generic network or authentication error.
+- **Release consistency** — desktop and shared Rust manifests, lockfiles and
+  README badges target 0.4.85. Windows x64 and macOS universal installers retain
+  signed updater payloads and a combined update manifest.
+
+## v0.4.84 (2026-10-19)
+
+- **DeepSeek search through the SomniQ account** — WebSearch now uses New API's
+  managed DeepSeek search route, with account authentication and the published
+  one-credit price for successful nonempty searches. Each batch sends one
+  request without automatic query expansion or retries. Account-scoped caching,
+  explicit permission/quota errors and bounded result-window reporting preserve
+  the search evidence. WebFetch continues to retrieve and parse original pages
+  locally, without calling DeepSeek Fetch.
+- **Account-managed connections and protected credentials** — Desktop uses the
+  signed-in account for model and research services. Third-party key entry and
+  connection testing are removed; legacy settings are cleaned during migration.
+  The managed model key stays in the operating-system credential store and
+  process memory, rather than config files or agent subprocess environments.
+  Executor and independent Reviewer model selection remain separate.
+- **Allowance refresh follows real activity** — opening the account menu,
+  completing a chat or drawing, and retrying a failed refresh read the server's
+  confirmed allowance. Overlapping requests coalesce without losing completion
+  events, and late responses cannot restore a signed-out account.
+- **Reliable thinking and tool continuation** — Claude thinking requests follow
+  the model's manual/adaptive protocol and supported effort levels. Required
+  OpenAI-compatible reasoning content survives tool calls, compaction and
+  session reloads. Summaries label internal reasoning rather than presenting it
+  as a user-visible conclusion.
+- **Safer Chat input and reading** — confirming macOS input-method candidates
+  no longer submits the draft or activates a suggestion. Long sent messages
+  have a persistent expand/collapse preview while copy and edit retain the full
+  text. Account menus remain usable when the embedded Code controls reconnect.
+- **LaTeX builds and library navigation** — compilation uses a shared ten-minute
+  default budget with a saved per-project override. All passes consume the same
+  budget; timeouts and cancellation keep diagnostics without triggering source
+  repair or another build. The library preserves nested source folders, saved
+  expansion, search navigation and document actions.
+- **Release consistency** — updated SomniQ icons accompany version 0.4.84 across
+  desktop and shared Rust manifests, lockfiles and README badges. Windows x64
+  and macOS universal packages retain signed updater artifacts and a combined
+  update manifest.
+
+## v0.4.83 (2026-10-17)
+
+- **Scopus works off campus** — Scopus searches can go through the SomniQ
+  school route (`somni.ensuanx.com/research/scopus/search`), where the school
+  holds the Elsevier entitlement and searches from its campus network. The route
+  presents the signed-in SomniQ account and reads the school's own response
+  format. Without an Elsevier key it is used from the start; with a key Elsevier
+  is tried first, and a 401/403 moves the rest of that search to the school route.
+  Signed out, the previous COMPLETE-to-STANDARD retry is kept.
+- **Scopus availability follows the account** — Scopus counts as available with
+  an Elsevier key or a signed-in account, and Settings marks the key as optional.
+  School-route pages request up to 200 STANDARD records without abstract
+  enrichment, to spare the shared institutional allowance; abstracts come from
+  other sources for the same record. Each run records the route used, route
+  switches and the school's remaining allowance. Account tokens are sent only to
+  the host that issued them.
+- **Version consistency** — desktop manifests, shared Rust packages, lockfiles
+  and README badges use 0.4.83.
+
+## v0.4.82 (2026-10-16)
+
+- **Images open in an image viewer** — Chat's View image references open a
+  zoomable image preview with loading and read-error states. Image file links
+  use the image side panel; closing the preview restores focus to Chat.
+- **Explanatory diagrams and stronger slide delivery** — bundled TikZ/Beamer
+  examples cover pipelines, branches, parallel checks and feedback loops.
+  Existing SomniImage generation supports conceptual illustrations alongside
+  editable labels and precise vector diagrams. Slide delivery checks track a
+  single content source, editable PPTX/PDF exports, rendered pages, evidence
+  provenance and the independent review verdict.
+- **Persistent agent collaboration** — up to two read-only child agents keep
+  separate sessions, permissions, execution traces and recoverable mailboxes.
+  Project Summary provides compact task navigation into the corresponding
+  conversation and timeline, with explicit stop and continuation controls.
+  The independent Reviewer remains separate from delegated agents.
+- **Stable Chat reading and composition** — streaming reasoning and long replies
+  preserve reading position. Composer controls adapt to the actual panel width;
+  local file names, workflow labels and reasoning-continuation errors are clearer.
+  Required reasoning fields survive compression and tool continuation.
+- **Figure workspace improvements** — reusable scientific styles, responsive
+  resizable panels, recoverable drafts and clearer editing controls accompany
+  the Figure entry directly below Chat. Code opens with explicit workspace trust.
+- **Reliable local documents and Windows commands** — PDFs bundle the character maps
+  needed by the offline renderer. Saved DOCX reads preserve an open
+  editor and report exclusive locks safely. Windows tools identify their shell
+  and provide PowerShell recovery when a POSIX shell is unavailable.
+- **Version consistency** — desktop manifests, shared Rust packages, lockfiles
+  and README badges use 0.4.82. Windows x64 and macOS universal installers retain
+  signed updater artifacts and the combined update manifest.
+
+## v0.4.81 (2026-10-08)
+
+- **Chat opens at the latest message** — returning to a kept-alive Chat waits
+  for loaded history and a visible viewport before aligning the final turn.
+  Delayed row measurements retain bottom alignment; scrolling into history
+  preserves the reader's position when new messages arrive.
+- **PDF evidence carries an explicit quality ceiling** — shared local reads and
+  WebFetch use a mature extractor and label incomplete or questionable text.
+  Unconfirmed text cannot become verification evidence. Formula, quotation and
+  numeric checks still require original-page verification.
+- **Current requests retain their authority** — saved project summaries provide
+  context without blocking an explicitly requested task. Known path, quoting,
+  regular-expression and edit-anchor failures provide concrete recovery hints;
+  unchanged deterministic failures have a bounded retry limit.
+- **Precise, reversible DOCX text editing** — Chat routes Word requests to
+  indexed paragraph reads and revision-checked exact edits. Native equations,
+  untouched formatting and package parts survive local text changes. Atomic
+  batches, review snapshots and byte-exact undo integrate with the shared
+  change ledger; protected document structures report an explicit limitation.
+- **Editable native Word equations** — the bundled converters preserve command
+  names, accents, limits, delimiters and matrix structure. Native OMML is the
+  default requirement; unsupported conversion fails without replacing the old
+  document. Image/text fallback requires an explicit option. Structural checks
+  cover a nine-equation document; Word/LibreOffice page rendering remains a
+  separate acceptance check.
+- **Version consistency** — manifests, product lockfiles and README badges use
+  0.4.81. The release workflow builds Windows/macOS installers, updater signatures
+  and the combined update manifest.
+
 ## v0.4.80 (2026-10-07)
 
 - **SomniFig research figure workspace** — generate or import a reference,
