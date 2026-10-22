@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  findMatchesInPage,
-  pageHighlights,
-  pageTextFromContent,
-  searchPdf,
-  type PdfSearchProgress,
-} from "../pdfSearch";
+import { findMatchesInPage, pageTextFromContent } from "../pdfSearch";
 
 function content(items: Array<string | [string, boolean]>) {
   return {
@@ -63,84 +57,5 @@ describe("findMatchesInPage", () => {
   it("honours the match limit", () => {
     const many = pageTextFromContent(1, content(Array.from({ length: 40 }, () => "hit")));
     expect(findMatchesInPage(many, "hit", 5)).toHaveLength(5);
-  });
-});
-
-describe("searchPdf", () => {
-  function fakePdf(pages: string[][]) {
-    return {
-      numPages: pages.length,
-      getPage: (page: number) => Promise.resolve({
-        getTextContent: () => Promise.resolve(content(pages[page - 1])),
-      }),
-    };
-  }
-
-  it("reports progress per page so early hits appear before the scan ends", async () => {
-    const progress: PdfSearchProgress[] = [];
-    await searchPdf(fakePdf([["alpha", "beta"], ["gamma"], ["beta", "again"]]), "beta", (value) => progress.push(value));
-
-    expect(progress.map((value) => value.pagesScanned)).toEqual([1, 2, 3]);
-    expect(progress.map((value) => value.matches.length)).toEqual([1, 1, 2]);
-    expect(progress.at(-1)).toMatchObject({ done: true, truncated: false, totalPages: 3 });
-    expect(progress.at(-1)!.matches.map((match) => match.page)).toEqual([1, 3]);
-  });
-
-  it("stops when the caller aborts, so a superseded search does not compete", async () => {
-    const signal = { aborted: false };
-    const progress: PdfSearchProgress[] = [];
-    await searchPdf(fakePdf([["x"], ["x"], ["x"]]), "x", (value) => {
-      progress.push(value);
-      signal.aborted = true;
-    }, { signal });
-
-    expect(progress).toHaveLength(1);
-  });
-
-  it("stops at the match limit and says so", async () => {
-    const progress: PdfSearchProgress[] = [];
-    await searchPdf(fakePdf([["x", "x"], ["x"]]), "x", (value) => progress.push(value), { limit: 2 });
-    expect(progress.at(-1)).toMatchObject({ truncated: true, done: true });
-    expect(progress.at(-1)!.matches).toHaveLength(2);
-  });
-
-  it("skips a page whose text cannot be read instead of failing the search", async () => {
-    const pdf = {
-      numPages: 2,
-      getPage: (page: number) => (page === 1
-        ? Promise.reject(new Error("broken page"))
-        : Promise.resolve({ getTextContent: () => Promise.resolve(content(["found"])) })),
-    };
-    const progress: PdfSearchProgress[] = [];
-    await searchPdf(pdf, "found", (value) => progress.push(value));
-    expect(progress.at(-1)!.matches.map((match) => match.page)).toEqual([2]);
-  });
-
-  it("reuses a cached page instead of re-reading it for the next query", async () => {
-    const cache = new Map();
-    let reads = 0;
-    const pdf = {
-      numPages: 1,
-      getPage: () => {
-        reads += 1;
-        return Promise.resolve({ getTextContent: () => Promise.resolve(content(["alpha", "beta"])) });
-      },
-    };
-    await searchPdf(pdf, "alpha", () => {}, { cache });
-    await searchPdf(pdf, "beta", () => {}, { cache });
-    expect(reads).toBe(1);
-  });
-});
-
-describe("pageHighlights", () => {
-  it("separates the active match from the rest on the same page", () => {
-    const matches = [
-      { page: 1, from: 0, to: 3, itemIndices: [0], snippet: "" },
-      { page: 1, from: 8, to: 11, itemIndices: [2, 3], snippet: "" },
-      { page: 2, from: 0, to: 3, itemIndices: [0], snippet: "" },
-    ];
-    expect(pageHighlights(matches, 1, 1)).toEqual({ items: [0, 2, 3], activeItems: [2, 3] });
-    // A page with no active match still highlights its other hits.
-    expect(pageHighlights(matches, 2, 1)).toEqual({ items: [0], activeItems: [] });
   });
 });

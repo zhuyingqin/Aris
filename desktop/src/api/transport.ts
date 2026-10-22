@@ -1,6 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { reportClientOutdated } from "../clientOutdated";
+
 /**
  * Chooses where `invoke` and `listen` go.
  *
@@ -51,8 +53,19 @@ export const devBackendUrl = (): string | null => devBackend;
  */
 export const hasNativeBackend = (): boolean => isTauriRuntime() || devBackend !== null;
 
-/** Mirrors Tauri's argument casing: command args are camelCase over the wire. */
+/** Mirrors Tauri's argument casing: command args are camelCase over the wire.
+ * A rejection meaning "this release is no longer served" is also broadcast, so
+ * the shell can offer the update whichever command hit it. */
 export async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invokeBackend<T>(command, args);
+  } catch (error) {
+    reportClientOutdated(error);
+    throw error;
+  }
+}
+
+async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!devBackend) return tauriInvoke<T>(command, args);
   const response = await fetch(`${devBackend}/invoke/${command}`, {
     method: "POST",

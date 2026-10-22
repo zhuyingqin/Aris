@@ -2,6 +2,27 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+describe("managed authentication error classification", () => {
+  it("preserves sign-in for a provider's nonrenewable upstream key", async () => {
+    const { isManagedAuthInvalidError } = await import("./store");
+    const error = 'OpenAI API error 401 Unauthorized: {"error":{"code":"api_key_expired","message":"Create a new API key in OpenCode Console. Signing in again will not renew this key."}}';
+    expect(isManagedAuthInvalidError(error)).toBe(false);
+    expect(isManagedAuthInvalidError(new Error(error))).toBe(false);
+    expect(isManagedAuthInvalidError("Login expired. Please sign in again.")).toBe(true);
+    expect(isManagedAuthInvalidError("401 Unauthorized: invalid access token")).toBe(false);
+  });
+
+  it("only signs out for a backend-confirmed expired account session", async () => {
+    const { isManagedAuthInvalidError } = await import("./store");
+    expect(isManagedAuthInvalidError(new Error("Login expired. Please sign in again."))).toBe(true);
+    for (const error of ["Invalid token", "invalid access token", "HTTP 401 Unauthorized",
+      "AUTH_TOKEN_EXPIRED", "access token expired", "Model connection failed: Invalid token",
+      "登录续期失败: network unavailable", "Please sign in again to renew a model key"]) {
+      expect(isManagedAuthInvalidError(error)).toBe(false);
+    }
+  });
+});
+
 const authMocks = vi.hoisted(() => ({
   configGet: vi.fn(),
   configSet: vi.fn(),
@@ -86,7 +107,7 @@ describe("model preference on login", () => {
     authMocks.configGet.mockReset().mockResolvedValue({ executorModel: null });
     authMocks.configSet.mockReset().mockResolvedValue(undefined);
     authMocks.newapiLogin.mockReset().mockImplementation(async (_server: string, model: string) => ({
-      model, baseUrl: "https://model-gateway.example/v1", token: "test-token",
+      model, baseUrl: "https://model-gateway.example/v1",
     }));
   });
 
@@ -98,6 +119,14 @@ describe("model preference on login", () => {
 
     expect(authMocks.newapiLogin).toHaveBeenCalledWith(DEFAULT_AUTH_SERVER, "gpt-6.1-sol", "reader", "test-password", undefined);
     expect(authMocks.configSet).toHaveBeenCalledWith(expect.objectContaining({ executorModel: "gpt-6.1-sol" }));
+  });
+
+  it("never passes the account model key through the webview", async () => {
+    const { DEFAULT_AUTH_SERVER, useStore } = await import("./store");
+
+    await useStore.getState().login(DEFAULT_AUTH_SERVER, "reader", "test-password");
+
+    expect(authMocks.configSet).toHaveBeenCalledWith(expect.not.objectContaining({ executorApiKey: expect.anything() }));
   });
 
   it("uses the initial model only when no previous model has been saved", async () => {

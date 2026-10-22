@@ -35,8 +35,9 @@ describe("workspaceFiles", () => {
     expect(workspaceFileOpenTarget("Dockerfile")).toBe("code");
     expect(workspaceFileOpenTarget("paper/main.tex")).toBe("latex");
     expect(workspaceFileOpenTarget("paper/main.pdf")).toBe("pdf");
-    expect(workspaceFileOpenTarget("paper/figures/result.png")).toBe("latex");
-    expect(workspaceFileOpenTarget("paper/figures/diagram.svg")).toBe("latex");
+    expect(workspaceFileOpenTarget("paper/figures/result.png")).toBe("image");
+    expect(workspaceFileOpenTarget("paper/figures/diagram.svg")).toBe("image");
+    expect(workspaceFileOpenTarget("paper/figures/scan.TIFF")).toBe("image");
     expect(workspaceFileOpenTarget("paper/data.csv")).toBe("external");
   });
 });

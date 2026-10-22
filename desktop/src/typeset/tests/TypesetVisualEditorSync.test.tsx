@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Transaction, TransactionSpec } from "@codemirror/state";
+import { language as languageFacet } from "@codemirror/language";
 import type { EditorView } from "@codemirror/view";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -55,6 +56,9 @@ describe("TypesetVisualEditor document synchronization", () => {
       />,
     );
     await waitFor(() => expect(view).not.toBeNull());
+    // Language support loads asynchronously and reconfigures its own compartment.
+    // Observe the file switch only after that independent setup has completed.
+    await waitFor(() => expect(view!.state.facet(languageFacet)).not.toBeNull());
 
     const transactions: Transaction[] = [];
     const liveView = view!;

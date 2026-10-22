@@ -406,6 +406,18 @@ fn truncates_long_blocks_in_summary() {
 }
 
 #[test]
+fn fallback_summary_marks_reasoning_as_unspoken() {
+    let summary = super::summarize_block(&ContentBlock::Thinking {
+        thinking: "maybe the cache is stale".to_string(),
+        signature: String::new(),
+    });
+    assert_eq!(
+        summary,
+        "reasoning (not shown to the user): maybe the cache is stale"
+    );
+}
+
+#[test]
 fn estimates_cjk_text_by_characters_not_utf8_bytes() {
     let cjk = "上下文压缩质量很重要";
     let ascii = "context compression quality matters";

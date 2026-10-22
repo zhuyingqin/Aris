@@ -36,8 +36,9 @@ pub mod reasoning_effort;
 
 pub use openai::{
     chat_requires_responses_transport, openai_max_tokens_override, resolve_openai_executor_config,
-    responses_transport_unsupported, set_transport_verdict_hook, selected_openai_transport, OpenAIExecutorConfig,
-    OpenAIRuntimeClient, OpenAiTransport,
+    responses_transport_unsupported, set_credential_recovery_hook, set_transport_verdict_hook,
+    selected_openai_transport, CredentialRecoveryHook, OpenAIExecutorConfig, OpenAIRuntimeClient,
+    OpenAiTransport,
 };
 
 #[derive(Debug, Clone)]
@@ -507,29 +508,148 @@ impl AnthropicRuntimeClient {
     }
 }
 
-fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingConfig> {
-    if !model.to_ascii_lowercase().contains("claude") {
-        return None;
+/// What one Anthropic request asks for in thinking. Earlier thinking blocks go
+/// back to the API exactly when `thinking` is set.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AnthropicThinkingPlan {
+    thinking: Option<ThinkingConfig>,
+    output_config: Option<Value>,
+}
+
+impl AnthropicThinkingPlan {
+    fn replays_thinking(&self) -> bool {
+        self.thinking.is_some()
     }
-    // The level never reaches Anthropic as a word — it picks a thinking budget.
-    let level = reasoning_effort::closest_level(model, &reasoning_effort::configured_level())?;
-    let requested = match level {
-        "none" | "minimal" => return None,
-        "low" => 1_024,
-        "medium" => 4_096,
-        "high" => 8_192,
-        "xhigh" => 16_384,
-        "max" => 32_768,
-        _ => 8_192,
+}
+
+/// The thinking request for `model` at the configured level.
+///
+/// Claude 4.6 and later take adaptive thinking steered by effort; 4.7 and
+/// later answer the old `{"type": "enabled"}` shape with a 400, and the 5.x
+/// models think by default. Only 3.7 – 4.5 still need a manual budget.
+fn anthropic_thinking_plan(
+    model: &str,
+    max_tokens: u32,
+    messages: &[ConversationMessage],
+) -> AnthropicThinkingPlan {
+    use reasoning_effort::ClaudeThinking;
+    let Some(mode) = reasoning_effort::claude_thinking(model) else {
+        return AnthropicThinkingPlan::default();
     };
-    // Anthropic requires the thinking budget to fit below max_tokens. Keep a
-    // small visible-output allowance and omit thinking when the model's turn
-    // budget is too small to satisfy the protocol minimum.
-    let budget_tokens = requested.min(max_tokens.saturating_sub(1_024));
-    (budget_tokens >= 1_024).then_some(ThinkingConfig {
-        kind: "enabled".to_string(),
-        budget_tokens,
-    })
+    let Some(level) = reasoning_effort::closest_level(model, &reasoning_effort::configured_level())
+    else {
+        return AnthropicThinkingPlan::default();
+    };
+    match mode {
+        ClaudeThinking::Unsupported => AnthropicThinkingPlan::default(),
+        // `none` only exists on the ladders of models whose thinking is
+        // opt-in (4.6 – 4.8), where leaving the field out turns it off.
+        ClaudeThinking::Adaptive { .. } if level == "none" => AnthropicThinkingPlan::default(),
+        ClaudeThinking::Adaptive { .. } => AnthropicThinkingPlan {
+            thinking: Some(ThinkingConfig {
+                kind: "adaptive".to_string(),
+                budget_tokens: None,
+                // Models that think by default return empty thinking text
+                // unless asked; the chat shows it.
+                display: Some("summarized".to_string()),
+            }),
+            output_config: Some(json!({ "effort": level })),
+        },
+        ClaudeThinking::Manual => {
+            // The level picks a thinking budget here.
+            let requested = match level {
+                "none" | "minimal" => return AnthropicThinkingPlan::default(),
+                "low" => 1_024,
+                "medium" => 4_096,
+                "high" => 8_192,
+                "xhigh" => 16_384,
+                "max" => 32_768,
+                _ => 8_192,
+            };
+            // The budget has to fit below max_tokens. Keep a small visible-output
+            // allowance and omit thinking when the turn budget is too small for
+            // the protocol minimum.
+            let budget_tokens = requested.min(max_tokens.saturating_sub(1_024));
+            if budget_tokens < 1_024 || !final_assistant_turn_opens_with_thinking(messages) {
+                return AnthropicThinkingPlan::default();
+            }
+            AnthropicThinkingPlan {
+                thinking: Some(ThinkingConfig {
+                    kind: "enabled".to_string(),
+                    budget_tokens: Some(budget_tokens),
+                    display: None,
+                }),
+                output_config: None,
+            }
+        }
+    }
+}
+
+/// A thinking block Anthropic can take back: one it signed. OpenAI-compatible
+/// turns persist their reasoning with an `openai-` tag or no signature at all,
+/// and neither may be replayed here.
+fn is_replayable_anthropic_thinking(block: &ContentBlock) -> bool {
+    matches!(
+        block,
+        ContentBlock::Thinking { signature, .. }
+            if !signature.is_empty() && !signature.starts_with("openai-")
+    )
+}
+
+/// Manual thinking requires the final assistant turn — the assistant messages
+/// after the last user input, i.e. the tool loop in progress — to begin with a
+/// thinking block. A turn that started without one (a model or level switch, a
+/// proxy that dropped the block) cannot gain one now, so that request runs
+/// without thinking rather than failing with a 400.
+fn final_assistant_turn_opens_with_thinking(messages: &[ConversationMessage]) -> bool {
+    let is_new_input = |message: &ConversationMessage| {
+        message.role == MessageRole::User
+            && message
+                .blocks
+                .iter()
+                .any(|block| !matches!(block, ContentBlock::ToolResult { .. }))
+    };
+    let turn_start = messages
+        .iter()
+        .rposition(is_new_input)
+        .map_or(0, |index| index + 1);
+    messages[turn_start..]
+        .iter()
+        .find(|message| message.role == MessageRole::Assistant)
+        .is_none_or(|first| {
+            first
+                .blocks
+                .first()
+                .is_some_and(is_replayable_anthropic_thinking)
+        })
+}
+
+/// A 400 that blames the thinking configuration, the effort level, or a
+/// replayed thinking block (say, a signature another provider wrote). The API
+/// allows any request to run without thinking, so one resend without them
+/// keeps the turn alive.
+fn is_thinking_request_rejected(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("returned 400")
+        && ["thinking", "signature", "output_config", "effort"]
+            .iter()
+            .any(|term| lower.contains(term))
+}
+
+fn anthropic_open_error(error: &api::ApiError) -> RuntimeError {
+    // Tag a "model unavailable on this account" failure (404 not_found_error
+    // from the initial POST) so the CLI can fall back from the default Opus
+    // 4.8 to 4.7.
+    if error.is_model_unavailable() {
+        RuntimeError::model_unavailable(error.to_string())
+    } else if openai::is_context_window_exceeded_error(&error.to_string()) {
+        // Anthropic 400 "prompt is too long: N tokens > M maximum" — tag so the
+        // conversation loop force-compacts and retries instead of failing the
+        // turn.
+        RuntimeError::context_overflow(error.to_string())
+    } else {
+        RuntimeError::new(error.to_string())
+    }
 }
 
 impl ApiClient for AnthropicRuntimeClient {
@@ -552,11 +672,16 @@ impl ApiClient for AnthropicRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let active_tool_specs =
             projected_tool_specs(&self.tool_specs, self.active_tool_names.as_ref());
-        let message_request = MessageRequest {
+        let thinking_plan = if self.bounded_request {
+            AnthropicThinkingPlan::default()
+        } else {
+            anthropic_thinking_plan(&self.model, self.max_tokens, &request.messages)
+        };
+        let build_request = |plan: &AnthropicThinkingPlan| MessageRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             messages: {
-                let mut messages = convert_messages(&request.messages);
+                let mut messages = convert_messages(&request.messages, plan.replays_thinking());
                 if self.cache_message_prefix {
                     mark_stable_prefix_cache_breakpoints(&mut messages);
                 }
@@ -590,9 +715,15 @@ impl ApiClient for AnthropicRuntimeClient {
                     .collect()
             }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-            thinking: if self.bounded_request { None } else { anthropic_thinking_config(&self.model, self.max_tokens) },
+            thinking: plan.thinking.clone(),
+            output_config: plan.output_config.clone(),
             stream: true,
         };
+        let message_request = build_request(&thinking_plan);
+        // The same request with no thinking configuration and no replayed
+        // thinking, for a 400 that rejects either.
+        let without_thinking = (thinking_plan != AnthropicThinkingPlan::default())
+            .then(|| build_request(&AnthropicThinkingPlan::default()));
 
         trace_record(
             &self.trace_sink,
@@ -626,27 +757,39 @@ impl ApiClient for AnthropicRuntimeClient {
         let trace_sink = self.trace_sink.clone();
         let trace_model = self.model.clone();
         let result = self.runtime.block_on(async {
-            // Tag a "model unavailable on this account" failure (404
-            // not_found_error from the initial POST) so the CLI can fall back
-            // from the default Opus 4.8 to 4.7.
-            let mut stream = tokio::select! {
-                result = client.stream_message(&message_request) => {
-                    result.map_err(|error| {
-                    if error.is_model_unavailable() {
-                        RuntimeError::model_unavailable(error.to_string())
-                    } else if openai::is_context_window_exceeded_error(&error.to_string()) {
-                        // Anthropic 400 "prompt is too long: N tokens > M
-                        // maximum" — tag so the conversation loop force-compacts
-                        // and retries instead of failing the turn.
-                        RuntimeError::context_overflow(error.to_string())
-                    } else {
-                        RuntimeError::new(error.to_string())
-                    }
-                    })?
-                }
+            // The request actually sent, for the non-streaming fallback below.
+            let mut sent_request = &message_request;
+            let opened = tokio::select! {
+                result = client.stream_message(sent_request) => result,
                 () = wait_for_stream_cancel(observer.as_ref()) => {
                     return Err(interrupted_error());
                 }
+            };
+            let mut stream = match (opened, without_thinking.as_ref()) {
+                (Ok(stream), _) => stream,
+                (Err(error), Some(fallback))
+                    if is_thinking_request_rejected(&error.to_string()) =>
+                {
+                    trace_record(
+                        &trace_sink,
+                        "llm.request_adjusted",
+                        json!({
+                            "provider": "anthropic",
+                            "model": &trace_model,
+                            "reason": "thinking_rejected",
+                            "error": error.to_string(),
+                        }),
+                    );
+                    sent_request = fallback;
+                    let reopened = tokio::select! {
+                        result = client.stream_message(sent_request) => result,
+                        () = wait_for_stream_cancel(observer.as_ref()) => {
+                            return Err(interrupted_error());
+                        }
+                    };
+                    reopened.map_err(|error| anthropic_open_error(&error))?
+                }
+                (Err(error), _) => return Err(anthropic_open_error(&error)),
             };
             trace_record(
                 &trace_sink,
@@ -834,7 +977,7 @@ impl ApiClient for AnthropicRuntimeClient {
 
             let fallback_request = MessageRequest {
                 stream: false,
-                ..message_request.clone()
+                ..sent_request.clone()
             };
             let response = tokio::select! {
                 result = client.send_message(&fallback_request) => {
@@ -993,7 +1136,10 @@ fn mark_stable_prefix_cache_breakpoints(messages: &mut [InputMessage]) {
     }
 }
 
-fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+/// `replay_thinking`: pass back the thinking blocks Anthropic signed, complete
+/// and unmodified, as a thinking-enabled request must within a tool loop. Off,
+/// every thinking block is dropped — the API accepts a request without them.
+fn convert_messages(messages: &[ConversationMessage], replay_thinking: bool) -> Vec<InputMessage> {
     messages
         .iter()
         .filter_map(|message| {
@@ -1005,6 +1151,15 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .blocks
                 .iter()
                 .filter_map(|block| match block {
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } if replay_thinking && is_replayable_anthropic_thinking(block) => {
+                        Some(InputContentBlock::Thinking {
+                            thinking: thinking.clone(),
+                            signature: signature.clone(),
+                        })
+                    }
                     ContentBlock::Thinking { .. } => None,
                     block => Some(match block {
                         ContentBlock::Text { text } => InputContentBlock::Text {
@@ -1032,12 +1187,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                             }],
                             is_error: *is_error,
                         },
-                        // This request does not enable Anthropic extended
-                        // thinking. Replaying a thinking block (especially one
-                        // injected by an OpenAI-compatible upstream) with its
-                        // signature can make the next request fail validation.
-                        // Visible text and tool exchanges remain authoritative.
-                        ContentBlock::Thinking { .. } => unreachable!("thinking filtered above"),
+                        ContentBlock::Thinking { .. } => unreachable!("thinking handled above"),
                     }),
                 })
                 .collect::<Vec<_>>();

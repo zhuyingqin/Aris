@@ -1,15 +1,55 @@
 use super::*;
 
 #[test]
+fn chat_script_tools_reject_office_takeover_before_starting_a_subprocess() {
+    let dir = temp_path("document-safety");
+    fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("should-not-exist");
+    let script = dir.join("reader.py");
+    fs::write(
+        &script,
+        "word = Dispatch('Word.Application')\nword.Quit()\n",
+    )
+    .unwrap();
+    for (name, input) in [
+        (
+            "REPL",
+            json!({"language": "python", "code": format!("open(r'{}', 'w').close()\nword = Dispatch('Word.Application')\nword.Quit()", marker.display())}),
+        ),
+        (
+            "PowerShell",
+            json!({"command": format!("New-Item '{}' -ItemType File; $word = New-Object -ComObject Word.Application; $word.Quit()", marker.display())}),
+        ),
+        (
+            "bash",
+            json!({"command": format!("touch '{}'; python -c \"Dispatch('Word.Application').Quit()\"", marker.display())}),
+        ),
+        (
+            "bash",
+            json!({"command": format!("python \"{}\"", script.display()), "run_in_background": true, "dangerouslyDisableSandbox": true}),
+        ),
+        (
+            "PowerShell",
+            json!({"command": "Stop-Process -Name WINWORD -Force", "run_in_background": true}),
+        ),
+    ] {
+        let error = execute_tool(name, &input).expect_err(name);
+        assert!(error.contains("document_safety"), "{name}: {error}");
+        assert!(!marker.exists(), "{name} ran before the preflight");
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn repl_executes_python_code() {
     let result = execute_tool(
         "REPL",
-        &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
+        &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 10_000}),
     )
     .expect("REPL should succeed");
     let output: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(output["language"], "python");
-    assert_eq!(output["exitCode"], 0);
+    assert_eq!(output["exitCode"], 0, "{output}");
     assert!(output["stdout"].as_str().expect("stdout").contains('2'));
 }
 

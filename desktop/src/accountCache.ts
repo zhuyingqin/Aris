@@ -3,6 +3,32 @@ import type { NewApiAccount, NewApiUsageLogPage } from "./api/tauri";
 export const ACCOUNT_CACHE_KEY = "somniq-account-v1";
 export const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 
+let accountSessionRevision = 0;
+const accountListeners = new Set<(account: NewApiAccount | null) => void>();
+
+export const getAccountSessionRevision = () => accountSessionRevision;
+
+function notifyAccountChanged(account: NewApiAccount | null) {
+  for (const listener of accountListeners) listener(account);
+}
+
+function onAccountStorageChanged(event: StorageEvent) {
+  if (event.key !== null && event.key !== ACCOUNT_CACHE_KEY && event.key !== ACCOUNT_LEGACY_CACHE_KEY) return;
+  // Another window can replace or clear the signed-in account while a request
+  // is pending. Its confirmed snapshot takes precedence over that request.
+  accountSessionRevision += 1;
+  notifyAccountChanged(readCachedAccount());
+}
+
+export function subscribeCachedAccount(listener: (account: NewApiAccount | null) => void) {
+  if (accountListeners.size === 0) window.addEventListener("storage", onAccountStorageChanged);
+  accountListeners.add(listener);
+  return () => {
+    accountListeners.delete(listener);
+    if (accountListeners.size === 0) window.removeEventListener("storage", onAccountStorageChanged);
+  };
+}
+
 export function readCachedAccount(): NewApiAccount | null {
   try {
     const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
@@ -13,6 +39,7 @@ export function readCachedAccount(): NewApiAccount | null {
 }
 
 export function writeCachedAccount(account: NewApiAccount | null) {
+  if (!account) accountSessionRevision += 1;
   try {
     if (account) {
       localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
@@ -24,6 +51,9 @@ export function writeCachedAccount(account: NewApiAccount | null) {
   } catch {
     // Local storage can be disabled; the in-memory state is still useful.
   }
+  // localStorage's storage event only reaches other windows. Notify the menu
+  // and Settings in this window as well, including when storage is disabled.
+  notifyAccountChanged(account);
 }
 
 // Usage-log pages live here rather than in Account tab state so they survive

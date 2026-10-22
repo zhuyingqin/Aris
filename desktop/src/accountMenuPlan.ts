@@ -3,6 +3,10 @@ import type { Language } from "./store";
 
 export type AccountPlanTier = "free" | "go" | "plus" | "pro" | "unknown";
 
+export function isPaidAccountPlan(tier: AccountPlanTier): boolean {
+  return tier === "go" || tier === "plus" || tier === "pro";
+}
+
 export interface AccountMenuPlan {
   tier: AccountPlanTier;
   label: string;

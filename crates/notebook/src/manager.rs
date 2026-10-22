@@ -178,35 +178,6 @@ impl KernelManager {
         }
     }
 
-    /// All kernels the user can choose: installed Jupyter kernelspecs plus the
-    /// native MATLAB backend when a MATLAB install is detected. Blocking (reads
-    /// kernelspec dirs); call from a blocking context.
-    pub fn available_kernels() -> Vec<KernelspecInfo> {
-        let mut out: Vec<KernelspecInfo> = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|rt| {
-                rt.block_on(jupyter_zmq_client::list_kernelspecs_with_jupyter_paths())
-                    .into_iter()
-                    .map(|spec| KernelspecInfo {
-                        name: spec.kernel_name.clone(),
-                        display_name: spec.kernelspec.display_name.clone(),
-                        language: spec.kernelspec.language.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if matlab::find_matlab().is_some() && !out.iter().any(|k| matlab::is_matlab_kernel(&k.name))
-        {
-            out.push(KernelspecInfo {
-                name: matlab::KERNEL_NAME.to_string(),
-                display_name: "MATLAB".to_string(),
-                language: "matlab".to_string(),
-            });
-        }
-        out
-    }
-
     /// All currently running kernels.
     pub fn list() -> Vec<KernelInfo> {
         sessions()

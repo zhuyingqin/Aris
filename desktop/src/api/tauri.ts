@@ -2,9 +2,12 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+
 import { notifyChatModelsUpdated } from "../modelEvents";
+import { getAccountSessionRevision } from "../accountCache";
 import type { PendingChatHandoff } from "../store";
 import type { ChatTodoItem } from "../types";
+import type { ModelPricingCatalog } from "../types";
 import type { CodeShellAction, CodeShellState } from "../code/codeShell";
 import {
   isFilePreviewMode,
@@ -77,9 +80,6 @@ export interface ScreenshotAttachmentEvent {
   name: string;
   preview: string | null;
 }
-
-/** Freeze every monitor and raise the region-selection overlay. */
-export const screenshotCaptureBegin = () => invoke<void>("screenshot_capture_begin");
 
 /** Geometry and snap targets for the overlay window making the call. */
 export const screenshotOverlayContext = () =>
@@ -220,9 +220,6 @@ import type {
   AppUpdateProgress,
   BuiltinToolAvailability,
   ConfigPatch,
-  ConfigSecretKind,
-  ConfigTestDetail,
-  ConfigTestResult,
   ConfigView,
   ComputeJobEvent,
   ComputeJobRecord,
@@ -251,11 +248,7 @@ import type {
   MailNewMessageEvent,
   MailModifyPatch,
   MemoryGovernanceHit,
-  MemoryDeadLetterView,
   MemoryExplorerSnapshot,
-  MemoryMigrationPreview,
-  MemoryMigrationProgress,
-  MemoryMigrationResult,
   MemoryStatusView,
   MemoryV2AtomView,
   MemoryV2BuildProgress,
@@ -273,7 +266,6 @@ import type {
   OracleWebRoleSetInput,
   OracleWebStatusView,
   PermissionModeView,
-  PptMasterCheck,
   PptMasterDeck,
   WorkTask,
   WorkTaskReviewSnapshot,
@@ -310,10 +302,6 @@ export const localEnvironmentCheck = (id: string) =>
   !isTauri()
     ? Promise.resolve({ ...(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.find((item) => item.id === id) ?? PREVIEW_LOCAL_ENVIRONMENT_CHECKS[0]) })
     : invoke<LocalEnvironmentCheck>("local_environment_check", { id });
-export const chatBuiltinToolAvailability = () =>
-  !isTauri()
-    ? Promise.resolve([] as BuiltinToolAvailability[])
-    : invoke<BuiltinToolAvailability[]>("chat_builtin_tool_availability");
 export const chatResearchProviderAvailability = () =>
   !isTauri()
     ? Promise.resolve([] as BuiltinToolAvailability[])
@@ -648,23 +636,8 @@ export const remoteControlP2pClosed = (input: RemoteP2pSessionInput) =>
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
-export const configSecretGet = (kind: ConfigSecretKind) =>
-  invoke<string | null>("config_secret_get", { kind });
-export const configSecretClear = (kind: ConfigSecretKind) =>
-  invoke<ConfigView>("config_secret_clear", { kind });
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
-export const configTest = (patch: ConfigPatch) =>
-  invoke<ConfigTestResult>("config_test", { patch });
-export const webSearchProviderTest = (
-  provider: "brave" | "exa" | "zhihu" | "bocha",
-  apiKey?: string,
-) =>
-  invoke<ConfigTestDetail>("web_search_provider_test", {
-    provider,
-    apiKey: apiKey?.trim() || null,
-  });
-
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
 export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
 export const memoryV2ConfirmR3 = (atomId: string) =>
@@ -695,18 +668,6 @@ export const memoryGovernanceUpdate = (source: "l0" | "l1", id: string, content:
 export const memoryGovernanceDelete = (source: "l0" | "l1", id: string) =>
   invoke<void>("memory_governance_delete", { source, id });
 export const memoryExport = () => invoke<string>("memory_export");
-export const memoryMigrationPreview = () =>
-  invoke<MemoryMigrationPreview>("memory_migration_preview");
-export const memoryMigrationProgress = () =>
-  invoke<MemoryMigrationProgress>("memory_migration_progress");
-export const memoryMigrationExecute = () =>
-  invoke<MemoryMigrationResult>("memory_migration_execute");
-export const memoryMigrationCancel = () => invoke<void>("memory_migration_cancel");
-export const memoryDeadLetters = () =>
-  invoke<MemoryDeadLetterView[]>("memory_dead_letters");
-export const memoryDeadLetterRetry = () => invoke<number>("memory_dead_letter_retry");
-export const memoryRebuildDerived = () =>
-  invoke<import("../types").MemoryRebuildResult>("memory_rebuild_derived");
 
 // Managed desktop login (NewAPI) is distinct from the passwordless remote
 // pairing gateway. These calls are used only by the desktop login shell.
@@ -714,8 +675,8 @@ export interface NewApiLoginResult {
   /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
   baseUrl: string;
   model: string;
-  /** Usable downstream key (`sk-...`) for the executor. */
-  token: string;
+  // The downstream key never reaches the webview; the backend keeps it in the
+  // OS credential store.
 }
 
 export interface NewApiAuthStatus {
@@ -795,10 +756,49 @@ export const newapiSendVerification = (input: {
   turnstile?: string;
 }) => invoke<void>("newapi_send_verification", { input });
 export const newapiModels = () => invoke<string[]>("newapi_models").then((models) => {
-  notifyChatModelsUpdated();
+  notifyChatModelsUpdated({ refreshPricing: true });
   return models;
 });
-let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
+export const newapiModelPricing = () => invoke<ModelPricingCatalog>("newapi_model_pricing");
+
+export interface PaymentOffer {
+  group: "go" | "plus" | "pro";
+  planId: number;
+  priceFen: number;
+  totalAmount: number;
+  originalFen: number;
+  promotionFen: number | null;
+  studentFen: number | null;
+  priceKind: "original" | "promotion" | "student";
+  revision: number;
+}
+
+export interface PaymentCatalog {
+  userId: number;
+  purchaseEnabled: boolean;
+  pagePayEnabled: boolean;
+  studentCheckUnavailable: boolean;
+  offers: PaymentOffer[];
+}
+
+export interface PaymentSelection {
+  userId: number;
+  group: PaymentOffer["group"];
+  expectedRevision: number;
+  expectedFen: number;
+  priceKind: PaymentOffer["priceKind"];
+}
+
+export interface PaymentCheckout {
+  cashierUrl: string;
+  tradeNo: string;
+}
+
+export const newapiPaymentCatalog = () => invoke<PaymentCatalog>("newapi_payment_catalog");
+export const newapiPaymentCheckout = (selection: PaymentSelection) =>
+  invoke<PaymentCheckout>("newapi_payment_checkout", { selection });
+
+let newapiBootstrapInFlight: { session: number; promise: Promise<NewApiAccount> } | null = null;
 
 /**
  * AuthenticatedRoot and App both bootstrap the account during startup. Keep
@@ -806,20 +806,22 @@ let newapiBootstrapInFlight: Promise<NewApiAccount> | null = null;
  * two Keychain reads for the same refresh credential.
  */
 export const newapiBootstrap = (): Promise<NewApiAccount> => {
-  if (!newapiBootstrapInFlight) {
-    newapiBootstrapInFlight = invoke<NewApiAccount>("newapi_bootstrap")
+  const session = getAccountSessionRevision();
+  if (!newapiBootstrapInFlight || newapiBootstrapInFlight.session !== session) {
+    const promise = invoke<NewApiAccount>("newapi_bootstrap")
       .then((account) => {
         // The native command has persisted the reachable model catalog. Startup
         // and App's background account refresh must update Chat just as Settings
         // does, including a successful empty catalog after access is removed.
-        notifyChatModelsUpdated();
+        if (getAccountSessionRevision() === session) notifyChatModelsUpdated();
         return account;
       })
       .finally(() => {
-        newapiBootstrapInFlight = null;
+        if (newapiBootstrapInFlight?.promise === promise) newapiBootstrapInFlight = null;
       });
+    newapiBootstrapInFlight = { session, promise };
   }
-  return newapiBootstrapInFlight;
+  return newapiBootstrapInFlight.promise;
 };
 export const newapiUsageLogs = (page: number, pageSize: number) =>
   invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
@@ -1057,11 +1059,7 @@ export const workTaskArtifactExport = (
   destination: string,
 ) =>
   invoke<WorkTask>("work_task_artifact_export", { taskId, artifactId, destination });
-export const workTaskReorder = (taskIds: string[]) =>
-  invoke<WorkTask[]>("work_task_reorder", { taskIds });
 
-export const pptMasterPreflight = () =>
-  invoke<PptMasterCheck[]>("ppt_master_preflight");
 // Both reject with a structured `PptMasterError`, not a string. Callers must
 // not stringify the rejection — see `pptMasterErrorText` in extensions/i18n.ts.
 export const pptMasterInstall = () =>
@@ -1155,8 +1153,6 @@ export const reviewWorkflowDelete = (id: string) =>
 // ── Literature library ────────────────────────────────────────────────────────
 
 export const literatureLoad = <T>() => invoke<T>("literature_load");
-export const literatureLibraryRelations = <T>() =>
-  invoke<T>("literature_library_relations");
 export const literatureLibraryModel = <T>() =>
   invoke<T>("literature_library_model");
 export const literatureUpdateCollections = <T>(collections: unknown) =>
@@ -1174,14 +1170,10 @@ export const literatureUpdateItem = <T>(itemId: string, patch: unknown) =>
   invoke<T>("literature_update_item", { itemId, patch });
 export const literatureCreateItem = <T>(item: unknown) =>
   invoke<T>("literature_create_item", { item });
-export const literatureTrashItems = <T>(itemIds: string[]) =>
-  invoke<T>("literature_trash_items", { itemIds });
 export const literatureRestoreItems = <T>(itemIds: string[]) =>
   invoke<T>("literature_restore_items", { itemIds });
 export const literaturePermanentlyDeleteItems = <T>(itemIds: string[]) =>
   invoke<T>("literature_permanently_delete_items", { itemIds });
-export const literatureUpdateSavedSearches = <T>(searches: unknown) =>
-  invoke<T>("literature_update_saved_searches", { searches });
 /** `includeHealth` runs a SQLite integrity check that reads the whole database
  *  — seconds on a large library — so it stays opt-in. */
 export const literatureStorageStatus = <T>(includeHealth = false) =>
@@ -1273,10 +1265,6 @@ export const literatureLlm = (
   model: model ?? null,
   requestId: requestId ?? null,
 });
-export interface LiteratureLlmResponse {
-  text: string;
-  model: string;
-}
 export const literatureReviewLlm = (
   system: string,
   prompt: string,
@@ -1671,6 +1659,10 @@ export const fileReadBytes = (path: string): Promise<ArrayBuffer> =>
     ? previewReadBytes(path).then((bytes) => Uint8Array.from(bytes).buffer)
     : invoke<ArrayBuffer>("file_read_bytes", { path });
 
+/** Write PNG pixels to the native clipboard, independently of browser permissions. */
+export const clipboardWriteImage = (png: ArrayBuffer): Promise<void> =>
+  tauriInvoke<void>("clipboard_write_image", png);
+
 export interface FileBinaryInfo {
   bytes: number;
 }
@@ -1935,11 +1927,6 @@ export const typesetRevisionCapture = (input: TypesetRevisionCaptureInput = {}) 
 
 export const typesetRevisionList = () =>
   isFilePreviewMode() ? preview<TypesetProjectRevisionSummary[]>([]) : invoke<TypesetProjectRevisionSummary[]>("typeset_revision_list");
-
-export const typesetRevisionRead = (id: string) =>
-  isFilePreviewMode()
-    ? preview<TypesetProjectRevision>(previewRevision())
-    : invoke<TypesetProjectRevision>("typeset_revision_read", { id });
 
 export const typesetRevisionCompare = (baseRevisionId: string, targetRevisionId: string) =>
   isFilePreviewMode()
@@ -2227,6 +2214,8 @@ export const latexCompile = (
   continueOnError = false,
   /** Overrides the engine detected from the source: pdflatex | xelatex | lualatex. */
   engine?: string | null,
+  /** Total build budget; null uses the compiler's configured default. */
+  timeoutMs?: number | null,
 ) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
@@ -2257,6 +2246,7 @@ export const latexCompile = (
         runId: runId ?? null,
         continueOnError,
         engine: engine ?? null,
+        timeoutMs: timeoutMs ?? null,
       });
 
 /** Copy a file from anywhere on disk into the workspace, at a project-relative path. */
@@ -2499,6 +2489,8 @@ export interface IndependentReviewResult {
   executorModel: string;
   independent: boolean;
   exhausted: boolean;
+  /** What a Reviewer thread opened with its own read-only tools, as the controller recorded the calls. Absent for a one-shot review. */
+  toolChecks?: string[];
 }
 
 export interface IndependentReviewEvent {
@@ -2775,10 +2767,6 @@ export const onCodeBridgeShellReady = (handler: (revision: number) => void) =>
     : Promise.resolve(noopUnlisten);
 export const codeBridgeSetTheme = (dark: boolean, colors: Record<string, string>) =>
   isTauri() ? invoke<void>("code_bridge_set_theme", { dark, colors }) : Promise.resolve();
-export const codeBridgeSaveAll = () =>
-  isTauri() ? invoke<void>("code_bridge_save_all") : Promise.resolve();
-export const codeBridgeReload = (paths: string[]) =>
-  isTauri() ? invoke<void>("code_bridge_reload", { paths }) : Promise.resolve();
 export const onCodeBridgeAsk = (handler: (ask: CodeBridgeAsk) => void) =>
   isTauri()
     ? listen<CodeBridgeAsk>("code-bridge-ask", (e) => handler(e.payload))

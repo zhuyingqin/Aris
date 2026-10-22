@@ -3,8 +3,6 @@ import {
   beginAnnotation,
   extendAnnotation,
   fontSizeFor,
-  isDragTool,
-  isStrokeTool,
   isUsableAnnotation,
   type Annotation,
   type AnnotationStyle,
@@ -56,16 +54,6 @@ describe("isUsableAnnotation", () => {
     expect(isUsableAnnotation(beginAnnotation("pen", { x: 0, y: 0 }, style))).toBe(false);
     const blank: Annotation = { id: "t", kind: "text", at: { x: 0, y: 0 }, text: "   ", style };
     expect(isUsableAnnotation(blank)).toBe(false);
-  });
-});
-
-describe("tool gestures", () => {
-  it("classifies each tool by the gesture that draws it", () => {
-    expect(isDragTool("rect")).toBe(true);
-    expect(isDragTool("mosaic")).toBe(true);
-    expect(isDragTool("pen")).toBe(false);
-    expect(isStrokeTool("highlight")).toBe(true);
-    expect(isStrokeTool("text")).toBe(false);
   });
 });
 

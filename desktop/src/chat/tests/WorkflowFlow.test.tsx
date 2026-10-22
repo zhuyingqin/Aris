@@ -46,7 +46,7 @@ describe("WorkflowFlow", () => {
 
     // Collapsed chip shows current step (the in-progress one is step 2 of 4).
     const chip = screen.getByRole("button", { expanded: false });
-    expect(chip.textContent).toContain("第 2 / 4 步");
+    expect(chip.textContent).toContain("Step 2 / 4");
 
     // Panel is hidden until clicked.
     expect(screen.queryByRole("list")).toBeNull();
@@ -59,7 +59,7 @@ describe("WorkflowFlow", () => {
   it("renders a completed state when all steps are done", () => {
     const done = SAMPLE.map((t) => ({ ...t, status: "completed" as const }));
     render(<WorkflowFlow todos={done} fileChanges={[]} bottomOffset={120} active={false} />);
-    expect(screen.getByRole("button").textContent).toContain("已完成 4 步");
+    expect(screen.getByRole("button").textContent).toContain("4 steps complete");
   });
 
   it("renders file changes without todos", async () => {
@@ -77,12 +77,12 @@ describe("WorkflowFlow", () => {
     );
 
     const chip = screen.getByRole("button", { expanded: false });
-    expect(chip.textContent).toContain("已变更 2 文件");
+    expect(chip.textContent).toContain("2 files changed");
     await user.click(chip);
-    expect(screen.getByText("desktop/src/new.ts")).toBeTruthy();
-    expect(screen.getByText("desktop/src/App.tsx")).toBeTruthy();
-    expect(screen.getByText("新增")).toBeTruthy();
-    expect(screen.getByText("修改")).toBeTruthy();
+    expect(screen.getByText("new.ts")).toBeTruthy();
+    expect(screen.getByText("App.tsx")).toBeTruthy();
+    expect(screen.getByText("Added")).toBeTruthy();
+    expect(screen.getByText("Modified")).toBeTruthy();
   });
 
   it("renders audited file changes inside the workflow panel", async () => {
@@ -201,7 +201,29 @@ describe("WorkflowFlow", () => {
     await user.click(chip);
 
     expect(screen.getByText("Edited 1 file")).toBeTruthy();
-    expect(screen.getByText("scripts/fix_overflow.py")).toBeTruthy();
+    expect(screen.getByText("fix_overflow.py")).toBeTruthy();
+  });
+
+  it("keeps the full Windows path for opening and restores focus on Escape", async () => {
+    useStore.setState({ language: "cn" });
+    const user = userEvent.setup();
+    const onOpenFile = vi.fn();
+    const path = "F:\\论文\\机械臂_Omni\\nfq_lqr\\slides_irl\\irl_logic\\build_deck.py";
+    render(
+      <WorkflowFlow todos={SAMPLE} fileChanges={[{ path, status: "added" }]} bottomOffset={120} active onOpenFile={onOpenFile} />,
+    );
+
+    const chip = screen.getByRole("button", { name: "第 2 / 4 步 · 1 个文件" });
+    await user.click(chip);
+    expect(screen.getByRole("region", { name: "流程与文件" })).toBeTruthy();
+    expect(screen.getByText("已完成 1 / 4 步")).toBeTruthy();
+    expect(screen.getByText("build_deck.py")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: path.replace(/\\/g, "/") }));
+    expect(onOpenFile).toHaveBeenCalledWith(path);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("region")).toBeNull();
+    expect(document.activeElement).toBe(chip);
   });
 
   it("renders nothing without todos or file changes", () => {

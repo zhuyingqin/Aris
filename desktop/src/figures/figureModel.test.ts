@@ -68,7 +68,7 @@ describe("figure view model", () => {
     expect(truncationInsight(run({ status: "draft" }), "")).toBeNull();
   });
   it("names stored styles by preset and keeps custom text", () => {
-    expect(styleLabel(STYLE_PRESETS[1].value, "cn")).toBe("极简线框");
+    expect(styleLabel(STYLE_PRESETS[1].value, "cn")).toBe("抽象关系图 · 克制配色");
     expect(styleLabel("hand-drawn sketch", "en")).toBe("hand-drawn sketch");
   });
   it("keeps short subjects, removes request boilerplate and caps legacy titles", () => {
