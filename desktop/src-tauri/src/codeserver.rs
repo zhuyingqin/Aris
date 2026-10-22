@@ -53,6 +53,9 @@ use tauri::{AppHandle, Emitter, State};
 
 /// Pinned VSCodium release. Bump together with [`expected_sha256`].
 const RUNTIME_VERSION: &str = "1.126.04524";
+const WORKSPACE_TRUST_BRIDGE: &str = include_str!("../resources/code-workspace-trust.js");
+const WORKSPACE_TRUST_PRELUDE: &str =
+    "import './somniq-workspace-trust.js';await globalThis.somniqWorkspaceTrustReady;\n";
 
 /// Event carrying [`CodeServerStatus`] as the runtime downloads and starts.
 const STATUS_EVENT: &str = "code-server-status";
@@ -720,6 +723,12 @@ pub(crate) const PATCHES: &[Patch] = &[
     },
     Patch {
         file: WORKBENCH_BUNDLE,
+        anchor: None,
+        find: "async saveTrustInfo(){this.storageService.store(this.storageKey,JSON.stringify(this._trustStateInfo),-2,1),",
+        replace: "async saveTrustInfo(){this.storageService.store(this.storageKey,JSON.stringify(this._trustStateInfo),-2,1),await globalThis.somniqSaveWorkspaceTrust?.(JSON.stringify(this._trustStateInfo)),",
+    },
+    Patch {
+        file: WORKBENCH_BUNDLE,
         find: r#"reportIssueUrl:"https://github.com/VSCodium/vscodium/issues/new""#,
         replace: r#"reportIssueUrl:"https://github.com/zhuyingqin/Aris/issues/new""#,
         anchor: None,
@@ -900,7 +909,22 @@ fn patch_runtime(dir: &Path) -> Result<usize, String> {
         }
         applied += hits;
     }
+    install_workspace_trust_bridge(dir)?;
     Ok(applied)
+}
+
+fn install_workspace_trust_bridge(dir: &Path) -> Result<(), String> {
+    let workbench = runtime_file(dir, WORKBENCH_BUNDLE);
+    let mut source = std::fs::read_to_string(&workbench).map_err(|err| err.to_string())?;
+    let helper = workbench.with_file_name("somniq-workspace-trust.js");
+    if std::fs::read_to_string(&helper).ok().as_deref() != Some(WORKSPACE_TRUST_BRIDGE) {
+        std::fs::write(&helper, WORKSPACE_TRUST_BRIDGE).map_err(|err| err.to_string())?;
+    }
+    if !source.starts_with(WORKSPACE_TRUST_PRELUDE) {
+        source.insert_str(0, WORKSPACE_TRUST_PRELUDE);
+        std::fs::write(&workbench, source).map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 /// Directory of first-party brand assets inside the app's bundled resources.
@@ -1040,6 +1064,8 @@ const ASSET_REVISION_SALT: &str = "1";
 fn asset_revision(resource_dir: Option<&Path>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(ASSET_REVISION_SALT.as_bytes());
+    hasher.update(WORKSPACE_TRUST_BRIDGE.as_bytes());
+    hasher.update(WORKSPACE_TRUST_PRELUDE.as_bytes());
     hasher.update(NLS_REVISION.to_le_bytes());
     for patch in PATCHES {
         for segment in patch.file {

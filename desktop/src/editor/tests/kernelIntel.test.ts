@@ -5,7 +5,7 @@ import { EditorState } from "@codemirror/state";
 import type { MutableRefObject } from "react";
 import { describe, expect, it } from "vitest";
 
-import { kernelCompletionSource, stripAnsi, type CompleteFn } from "../kernelIntel";
+import { kernelCompletionSource, type CompleteFn } from "../kernelIntel";
 
 function contextFor(doc: string, pos = doc.length, explicit = false): CompletionContext {
   return new CompletionContext(EditorState.create({ doc }), pos, explicit);
@@ -55,11 +55,5 @@ describe("kernelCompletionSource", () => {
     );
     const result = await source(contextFor("value"));
     expect(result!.from).toBe(5);
-  });
-});
-
-describe("stripAnsi", () => {
-  it("removes SGR color escapes from a docstring", () => {
-    expect(stripAnsi("[31mSignature:[0m foo(x)")).toBe("Signature: foo(x)");
   });
 });

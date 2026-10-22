@@ -13,7 +13,9 @@ use crate::compact::{
     CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
+use crate::event_sink::{
+    now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent, TurnOutcome,
+};
 use crate::evidence_ledger::{evidence_guard_mode, EvidenceGuardMode, EvidenceLedger};
 use crate::file_ops::ReadImageOutput;
 use crate::hooks::{HookRunResult, HookRunner};
@@ -50,6 +52,11 @@ const DELIVERY_CHECKPOINT_TOOL_RESULT: &str =
     "Runtime delivery checkpoint reached. Do not call more tools. Deliver the current result, clearly separating completed verification from remaining or unverified work.";
 const DELIVERY_CHECKPOINT_PLACEHOLDER: &str =
     "This turn reached its delivery checkpoint. Work completed so far is preserved, but some requested work or verification may remain unfinished.";
+/// Opens the attribution header of a message another agent delivered into a
+/// running turn. Compaction and active-turn detection recognise it by this
+/// prefix so a delivery is never mistaken for something the user typed.
+pub(crate) const INTER_AGENT_MESSAGE_PREFIX: &str = "[Inter-agent message";
+const INTERRUPTED_MESSAGE: &str = "interrupted by user";
 const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
@@ -81,6 +88,8 @@ const MAX_PARALLEL_TOOL_BATCH: usize = 8;
 /// Long autonomous turns need continuity checkpoints well before the provider
 /// rejects an oversized request. This is deliberately a soft budget: it
 /// summarizes older completed exchanges but never stops a healthy tool call.
+/// Nothing fires below `DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO` of the budget;
+/// past it, this interval re-arms a checkpoint that token growth alone would not.
 const DEFAULT_SOFT_CHECKPOINT_TOOL_CALL_INTERVAL: usize = 40;
 const SOFT_CHECKPOINT_TOOL_CALLS_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_TOOL_CALLS";
 const DEFAULT_SOFT_CHECKPOINT_CONTEXT_RATIO: f64 = 0.60;
@@ -419,6 +428,87 @@ pub trait ToolExecutor {
     }
 }
 
+/// A message another party delivered to this conversation while it was
+/// running: a sub-agent's result, a follow-up from a supervising agent, a
+/// controller notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnInput {
+    /// Identity of the delivery. It appears in the attribution header, so a
+    /// transcript can be lined up with the delivery log, and it is what makes
+    /// "delivered exactly once" checkable.
+    pub id: String,
+    /// Who wrote it, for example an agent path such as `/root/scout_1`.
+    pub from: String,
+    /// What it is (`result`, `message`, `task`). Rendered, never interpreted.
+    pub kind: String,
+    pub text: String,
+}
+
+/// Where a running turn picks up mail from other parties.
+///
+/// The runtime asks once per iteration, before it builds the next provider
+/// request, so a delivery joins the very next request instead of waiting for
+/// the turn to end. It does **not** ask once the turn has produced its final
+/// answer: late mail stays with the source and is offered again at the start of
+/// the next turn, so an answer the user has already read is never extended
+/// underneath them.
+pub trait TurnInputSource: Send {
+    /// Remove and return everything that is ready, oldest first.
+    ///
+    /// Must not block. Each input must be handed out at most once: the runtime
+    /// appends what it receives to the session and never gives it back.
+    fn take_ready(&mut self) -> Vec<TurnInput>;
+
+    /// Commit delivered inputs together with the canonical conversation before
+    /// a provider request. Durable mailbox sources acknowledge only after this.
+    fn checkpoint(&mut self, _session: &Session) -> Result<(), RuntimeError> { Ok(()) }
+}
+
+/// The model-visible form of one delivered input. It is a `User`-role message,
+/// because that is the only role a mid-turn message can have, so the header
+/// states plainly that the text is another agent's and not the user's.
+fn render_turn_input(input: &TurnInput) -> String {
+    format!(
+        "{INTER_AGENT_MESSAGE_PREFIX} from {} ({}, id {}) - written by another agent, not by the user]\n{}",
+        header_field(&input.from),
+        header_field(&input.kind),
+        header_field(&input.id),
+        input.text,
+    )
+}
+
+/// One header field with everything that could end or fake the header removed.
+fn header_field(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '[' | ']' | '(' | ')' | ',') {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(80)
+        .collect::<String>();
+    if cleaned.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Whether `message` is mail another agent delivered into a turn rather than
+/// something the user said. Both are `User`-role messages in a session, so any
+/// code that treats the last `User` message as "the user's request" must ask
+/// this first.
+#[must_use]
+pub fn is_inter_agent_message(message: &ConversationMessage) -> bool {
+    message.role == MessageRole::User
+        && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.starts_with(INTER_AGENT_MESSAGE_PREFIX))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
     message: String,
@@ -550,6 +640,13 @@ impl RuntimeError {
     pub fn is_context_overflow(&self) -> bool {
         self.context_overflow
     }
+
+    /// Whether the turn ended because the caller cancelled it, which is a stop
+    /// the caller asked for rather than a failure.
+    #[must_use]
+    pub fn is_interrupted(&self) -> bool {
+        self.message == INTERRUPTED_MESSAGE
+    }
 }
 
 impl Display for RuntimeError {
@@ -569,12 +666,22 @@ pub struct TurnSummary {
     pub auto_compaction: Option<AutoCompactionEvent>,
 }
 
+/// The visible text of a finished turn: each iteration's answer text, in order.
+///
+/// Reasoning is used only for the turn's closing message, and only when that
+/// message has no text and requests no tool — the provider that streamed its
+/// answer as `reasoning_content`. An earlier thinking-only step, typically
+/// `[Thinking, ToolUse]` from a reasoning model, is chain of thought; letting it
+/// fall back here put every step's reasoning into the "answer" the independent
+/// Reviewer judged and that a review revision wrote back into the session.
 #[must_use]
 pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
+    let last_index = summary.assistant_messages.len().saturating_sub(1);
     summary
         .assistant_messages
         .iter()
-        .filter_map(|message| {
+        .enumerate()
+        .filter_map(|(index, message)| {
             let text = message
                 .blocks
                 .iter()
@@ -587,6 +694,14 @@ pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
             let text = text.trim();
             if !text.is_empty() {
                 return Some(text.to_string());
+            }
+            let closes_turn = index == last_index
+                && !message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+            if !closes_turn {
+                return None;
             }
             let thinking = message
                 .blocks
@@ -632,6 +747,9 @@ pub struct ConversationRuntime<C, T> {
     /// closely.
     context_overhead_estimated_tokens: usize,
     event_sink: Box<dyn EventSink>,
+    /// Mail from other agents, folded into the turn between provider requests.
+    /// See [`TurnInputSource`]. `None` leaves the loop exactly as it was.
+    turn_input_source: Option<Box<dyn TurnInputSource>>,
     /// Optional cheap-model client used to produce a real LLM summary when the
     /// session is compacted. Same concrete type as `api_client` (in practice a
     /// second `ExecutorClient` pointed at a small model). `None` falls back to
@@ -652,6 +770,7 @@ pub struct ConversationRuntime<C, T> {
     /// so one long stretch is reminded periodically rather than every
     /// iteration. Cleared when a new user turn starts a fresh window.
     last_focus_nudge_tool_calls: Option<usize>,
+    tool_recovery: crate::tool_recovery::ToolRecoveryState,
     /// Deterministic per-turn retrieval convergence and source-scope state.
     retrieval_guard: RetrievalGuard,
     /// Whether that state is consulted at all. See [`Self::without_retrieval_guard`].
@@ -815,12 +934,14 @@ where
             context_compaction_estimated_tokens_threshold: context_compaction_threshold_from_env(),
             context_overhead_estimated_tokens,
             event_sink: Box::new(NoopEventSink),
+            turn_input_source: None,
             summarizer: None,
             summarizer_circuit_open: false,
             summarizer_failure_event_pending: false,
             compaction_session_id,
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
+            tool_recovery: crate::tool_recovery::ToolRecoveryState::default(),
             retrieval_guard: RetrievalGuard::default(),
             retrieval_guard_enabled: true,
             resume_retrieval_on_next_user_message: false,
@@ -942,6 +1063,14 @@ where
         self
     }
 
+    /// Let other agents deliver mail into this conversation's turns. Without a
+    /// source the runtime never looks for any.
+    #[must_use]
+    pub fn with_turn_input_source(mut self, source: Box<dyn TurnInputSource>) -> Self {
+        self.turn_input_source = Some(source);
+        self
+    }
+
     /// Restore a research ledger for the next user message only. Callers must
     /// set this only for an explicit continuation of a cancelled task.
     #[must_use]
@@ -1051,9 +1180,45 @@ where
 
     pub fn run_turn_message(
         &mut self,
+        user_message: ConversationMessage,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> Result<TurnSummary, RuntimeError> {
+        self.emit_event(EventType::TurnStarted);
+        let result = self.run_turn_message_inner(user_message, prompter).and_then(|summary| {
+            if let Some(source) = self.turn_input_source.as_mut() { source.checkpoint(&self.session)?; }
+            Ok(summary)
+        });
+        let (outcome, last_message) = match &result {
+            Ok(summary) => (TurnOutcome::Completed, last_assistant_text(summary)),
+            Err(error) if error.is_interrupted() => (TurnOutcome::Interrupted, None),
+            Err(error) => (
+                TurnOutcome::Failed {
+                    message: error.to_string(),
+                },
+                None,
+            ),
+        };
+        self.emit_event(EventType::TurnFinished {
+            outcome,
+            last_message,
+        });
+        result
+    }
+
+    fn emit_event(&mut self, event_type: EventType) {
+        self.event_sink.emit(&RuntimeEvent {
+            timestamp: now_iso8601(),
+            session_id: String::new(),
+            event_type,
+        });
+    }
+
+    fn run_turn_message_inner(
+        &mut self,
         mut user_message: ConversationMessage,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
+        self.session.seal_uncertain_tool_calls();
         bound_incoming_user_message(&mut user_message);
         let user_text = user_message
             .blocks
@@ -1086,6 +1251,7 @@ where
         // A new user turn opens a fresh focus window, so the previous turn's
         // reminder must not suppress this turn's first one.
         self.last_focus_nudge_tool_calls = None;
+        self.tool_recovery.reset();
         self.browser_timeout_requests.clear();
         self.evidence_ledger = EvidenceLedger::default();
         self.evidence_observed_tool_uses.clear();
@@ -1110,6 +1276,10 @@ where
         let turn_started = std::time::Instant::now();
         let mut delivery_checkpoint_active = false;
         let mut delivery_checkpoint_attempts = 0_usize;
+        // Whether this turn is still working and may take delivered mail. It
+        // closes once the model has produced visible answer text and reopens
+        // only if the same turn then does more work (a tool call).
+        let mut accepts_turn_input = true;
 
         loop {
             // Check for Ctrl+C or caller-provided cancellation between iterations.
@@ -1162,6 +1332,13 @@ where
                 delivery_checkpoint_attempts += 1;
             }
 
+            // A delivery checkpoint is the turn wrapping up, so it takes no new
+            // work either. Mail then stays queued for the next turn, as it does
+            // after a final answer.
+            if accepts_turn_input && !delivery_checkpoint_active {
+                self.take_turn_inputs()?;
+            }
+
             let estimated_tokens = self.estimated_request_tokens();
             let token_threshold = ((self.context_compaction_estimated_tokens_threshold as f64)
                 * soft_checkpoint_context_ratio)
@@ -1169,10 +1346,16 @@ where
             let token_growth = ((self.context_compaction_estimated_tokens_threshold as f64)
                 * soft_checkpoint_token_growth_ratio)
                 .round() as usize;
-            let calls_due = turn_tool_calls.saturating_sub(last_soft_checkpoint_tool_calls)
-                >= soft_checkpoint_tool_call_interval;
+            // Both triggers need real context pressure. A tool-call count alone
+            // says nothing about how full the window is: forty small calls on a
+            // 1M-token model used to compact the whole session at a few percent
+            // of its budget, discarding verbatim history for no gain.
+            let under_pressure = estimated_tokens >= token_threshold.max(1);
+            let calls_due = under_pressure
+                && turn_tool_calls.saturating_sub(last_soft_checkpoint_tool_calls)
+                    >= soft_checkpoint_tool_call_interval;
             let tokens_due = turn_tool_calls > 0
-                && estimated_tokens >= token_threshold.max(1)
+                && under_pressure
                 && (last_soft_checkpoint_tokens == 0
                     || estimated_tokens.saturating_sub(last_soft_checkpoint_tokens)
                         >= token_growth.max(1));
@@ -1272,6 +1455,18 @@ where
                 })
                 .collect::<Vec<_>>();
             turn_tool_calls = turn_tool_calls.saturating_add(pending_tool_uses.len());
+            if pending_tool_uses.is_empty() {
+                // Visible answer text without a tool call: the user is already
+                // reading it. Whatever arrives from here on belongs to the next
+                // turn rather than to an answer that has been shown.
+                if assistant_message_has_answer_text(&assistant_message) {
+                    accepts_turn_input = false;
+                }
+            } else {
+                // More work in the same turn: the next request is a fresh
+                // chance to take what arrived while the tools ran.
+                accepts_turn_input = true;
+            }
 
             self.session.messages.push(assistant_message.clone());
             assistant_messages.push(assistant_message);
@@ -1386,6 +1581,11 @@ where
             // for the tool we were on plus any not-yet-reached tools (so every
             // `tool_use` is answered), flush the complete tool message into the
             // session, and only then surface the interrupt.
+            // Persist tool intents before execution. A crash can then be
+            // distinguished from an unstarted task without replaying effects.
+            if let Some(source) = self.turn_input_source.as_mut() {
+                source.checkpoint(&self.session)?;
+            }
             let mut turn_tool_results = Vec::new();
             let mut pending_iter = pending_tool_uses.into_iter().peekable();
             let mut interrupted = false;
@@ -1512,6 +1712,18 @@ where
                             }]);
                             continue;
                         }
+                    }
+                    if let Some(output) = self
+                        .tool_recovery
+                        .before_tool(&invocation.tool_name, &invocation.input)
+                    {
+                        ordered_blocks[index] = Some(vec![ContentBlock::ToolResult {
+                            tool_use_id: invocation.tool_use_id,
+                            tool_name: invocation.tool_name,
+                            output,
+                            is_error: true,
+                        }]);
+                        continue;
                     }
                     let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                         self.permission_policy.authorize(
@@ -1842,11 +2054,38 @@ where
         crate::is_interrupted() || self.tool_executor.is_cancelled()
     }
 
+    /// Fold everything the source has ready into the session as one message,
+    /// one block per delivery, so the next provider request carries it.
+    fn take_turn_inputs(&mut self) -> Result<(), RuntimeError> {
+        let Some(source) = self.turn_input_source.as_mut() else {
+            return Ok(());
+        };
+        let inputs = source.take_ready();
+        if inputs.is_empty() {
+            return source.checkpoint(&self.session);
+        }
+        let mut message = ConversationMessage {
+            role: MessageRole::User,
+            blocks: inputs
+                .iter()
+                .map(|input| ContentBlock::Text {
+                    text: render_turn_input(input),
+                })
+                .collect(),
+            usage: None,
+        };
+        // The sender is another model, so its text is bounded the way a
+        // user-typed message is.
+        bound_incoming_user_message(&mut message);
+        self.session.messages.push(message);
+        source.checkpoint(&self.session)
+    }
+
     fn interrupted_error() -> RuntimeError {
         if crate::is_interrupted() {
             crate::clear_interrupt();
         }
-        RuntimeError::new("interrupted by user")
+        RuntimeError::new(INTERRUPTED_MESSAGE)
     }
 
     fn finish_tool_invocation(
@@ -1892,7 +2131,9 @@ where
             .as_deref()
             .unwrap_or(&tool_output.text)
             .to_string();
-        let mut output = tool_output.text;
+        let mut output = self
+            .tool_recovery
+            .observe(&tool_name, &input, tool_output.text, is_error);
         // The same identity `before_tool` keyed on, so a transient failure
         // releases the exact entry it reserved and the retry is not refused as
         // a duplicate.
@@ -2287,13 +2528,19 @@ where
         reason: &str,
     ) -> Option<AutoCompactionEvent> {
         let tokens_before = self.estimated_request_tokens();
-        let pristine = self.session.messages.clone();
-        let preserve = overflow_preserve_message_count(&self.session);
-        let event = self.compact_now(CompactionConfig::overflow(preserve))?;
-        self.restore_pristine_archive(&pristine, event.removed_message_count);
-        // The archive above retains complete tool I/O. The active projection
-        // can therefore be leaner without sacrificing session search or audit.
-        compact_context_history(&mut self.session, true);
+        // An ordinary compaction, not the overflow one. The window still has
+        // room, so the recent turns stay verbatim (token/turn-aware tail, never
+        // fewer than the last two user turns) and the full pinned context is
+        // carried. The overflow strategy — an eight-message tail, a minimal pin
+        // and lossy tool-history shrinking — is reserved for a request that is
+        // actually at or over the budget. When the recent turns are all there
+        // is, nothing is removed and the budget-time path takes over later.
+        let event = self.compact_now(CompactionConfig {
+            max_estimated_tokens: 0,
+            source: crate::compact::CompactionSource::Auto,
+            instruction: None,
+            ..CompactionConfig::default()
+        })?;
         let tokens_after = self.estimated_request_tokens();
         self.event_sink.emit(&RuntimeEvent {
             timestamp: now_iso8601(),
@@ -2708,10 +2955,12 @@ fn compaction_slice_hash(segments: &[String], instruction: Option<&str>) -> [u8;
 const SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
 Output one <summary>...</summary> block and nothing else.
 
-The summary must preserve the information needed to continue development after earlier messages are removed.
+The summary must preserve the information needed to continue development or research after earlier messages are removed.
 Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
 Do not invent details. If something is unknown, omit it.
-If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
+Keep research identifiers exact: paper titles, authors and years, DOIs, arXiv IDs, citation keys, dataset and model names, and numeric results with their units, settings, and the file or tool output they came from. Never invent, merge, or round a citation or a number; mark one you are unsure of as unverified.
+Lines marked [reasoning, not shown to the user] are the assistant's private deliberation. Use them only to understand intent and where work stopped; never record a hypothesis from them as an established fact, result, or decision.
+If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, Research State, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
 Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your latest assistant message is empty" when identifying the user's active goal.
 If a custom compaction instruction is supplied, prioritize it above the default compression priorities while still preserving the active task state and safety constraints.
 If the transcript contains a TodoWrite result, preserve its latest structured task statuses and unfinished items.
@@ -2755,6 +3004,13 @@ Inside <summary>, use this exact structure:
 ## Commands & Test Results
 - [Command]: [Result.]
 
+## Research State
+Leave this section out when the conversation involves no literature, data, experiments, or writing.
+- Sources: [title — authors, year — DOI / arXiv ID / citation key — what it was used to support; mark unverified ones.]
+- Results: [metric = value (units, setting, source file or tool output).]
+- Claims & evidence: [claim — supporting source or result — verified / unverified / contradicted.]
+- Drafts & artifacts: [paper sections, figures, tables, and their file paths, with status.]
+
 ## User Intent & Constraints
 - [Stable user requirements, preferences, and constraints.]
 
@@ -2772,6 +3028,8 @@ Inside <summary>, use this exact structure:
 const MAP_SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
 This is ONE SLICE of the transcript. Output one <summary>...</summary> block and nothing else.
 Preserve the concrete facts from THIS slice: file paths, commands, errors, decisions, constraints, user requests, and current task state. Do not invent details; if something is unknown, omit it.
+Keep research identifiers exact — paper titles, authors and years, DOIs, arXiv IDs, citation keys, and numeric results with their units and source — and never invent, merge, or round one.
+Lines marked [reasoning, not shown to the user] are private deliberation: use them for intent only, never as established facts.
 This partial summary will be merged with the summaries of the other slices, so keep it self-contained and factual rather than narrative.
 "#;
 
@@ -2803,6 +3061,23 @@ const MAX_MAP_REDUCE_DEPTH: usize = 3;
 /// number of cheap-model calls. Exhausting it falls back to the deterministic
 /// summary.
 const MAX_SUMMARY_CALLS: usize = 24;
+
+/// How reasoning appears in a summarizer transcript. The summary prompts refer
+/// to this exact text.
+const SUMMARY_REASONING_LABEL: &str = "[reasoning, not shown to the user]";
+
+/// Per-block cap on the reasoning a summarizer sees.
+const MAX_SUMMARY_REASONING_CHARS: usize = 2_000;
+
+/// The last `max_chars` characters of `text`, marked when anything was cut.
+fn char_tail(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let tail = text.chars().skip(total - max_chars).collect::<String>();
+    format!("…{tail}")
+}
 
 /// Floor for the overflow pinned block's char budget, so the latest user request
 /// survives even when the shrink budget is tiny. Bounded overall by
@@ -2874,7 +3149,18 @@ fn build_transcript_segments(removed: &[ConversationMessage]) -> Vec<String> {
         for block in &message.blocks {
             let line = match block {
                 ContentBlock::Text { text } => text.clone(),
-                ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+                // Labelled, because the summarizer cannot otherwise tell a
+                // rejected hypothesis from something the assistant told the
+                // user; bounded, because one turn's reasoning can outweigh the
+                // whole visible exchange. The tail is kept: it is the part
+                // that led to the next action.
+                ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                    format!(
+                        "{SUMMARY_REASONING_LABEL} {}",
+                        char_tail(thinking.trim(), MAX_SUMMARY_REASONING_CHARS)
+                    )
+                }
+                ContentBlock::Thinking { .. } => String::new(),
                 ContentBlock::ToolUse { name, input, .. } => format!("[tool_use {name}] {input}"),
                 ContentBlock::ToolResult {
                     tool_name,
@@ -3325,6 +3611,27 @@ fn message_has_visible_output(message: &ConversationMessage) -> bool {
     })
 }
 
+/// Whether the message carries text the user can read as an answer. Reasoning
+/// alone is not an answer.
+fn assistant_message_has_answer_text(message: &ConversationMessage) -> bool {
+    message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { text } if !text.trim().is_empty()))
+}
+
+/// The last assistant text of a finished turn: the answer a supervising agent
+/// receives as the turn's result.
+fn last_assistant_text(summary: &TurnSummary) -> Option<String> {
+    summary
+        .assistant_messages
+        .iter()
+        .rev()
+        .map(assistant_message_text)
+        .map(|text| text.trim().to_string())
+        .find(|text| !text.is_empty())
+}
+
 fn assistant_message_text(message: &ConversationMessage) -> String {
     message
         .blocks
@@ -3400,7 +3707,11 @@ fn active_turn_message_count(session: &Session) -> usize {
         .messages
         .iter()
         .rposition(|message| {
-            message.role == MessageRole::User && !is_internal_continuation_message(message)
+            message.role == MessageRole::User
+                && !is_internal_continuation_message(message)
+                // Mail delivered mid-turn is part of the turn it joined, not the
+                // start of a new one.
+                && !is_inter_agent_message(message)
         })
         .map_or(session.messages.len(), |index| {
             session.messages.len() - index
@@ -3756,3 +4067,7 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 #[path = "tests/conversation.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/turn_input.rs"]
+mod turn_input_tests;

@@ -181,6 +181,11 @@ export interface SettingsProvidersCopy {
   reviewerModel: string;
   reviewerModelHint: string;
   reviewerModelOff: string;
+  reviewMode: string;
+  reviewModeThread: string;
+  reviewModeOneshot: string;
+  reviewModeThreadHint: string;
+  reviewModeOneshotHint: string;
   modelSyncAfterLogin: string;
   currentExecutor: (model: string) => string;
   currentReviewer: (model: string) => string;
@@ -224,6 +229,7 @@ export interface SettingsProvidersCopy {
   fieldScopusKey: string;
   fieldOpenalexKey: string;
   openalexGatewayHint: string;
+  scopusSchoolRouteHint: string;
   fieldBochaKey: string;
   fieldBraveSearchKey: string;
   fieldExaKey: string;
@@ -642,17 +648,6 @@ export interface SettingsCopy {
   nav: SettingsNavCopy;
 }
 
-export const ADMIN_ACCOUNT_EXACT_MARKERS = [
-  "admin",
-  "administrator",
-  "root",
-  "superuser",
-  "super-admin",
-  "owner",
-] as const;
-
-export const ADMIN_ACCOUNT_CONTAINS_MARKERS = ["管理员", "管理員"] as const;
-
 export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
   cn: {
     general: {
@@ -822,6 +817,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       reviewerModel: "Reviewer 模型",
       reviewerModelHint: "默认值尚未保存",
       reviewerModelOff: "关闭 Reviewer 模型",
+      reviewMode: "审查方式",
+      reviewModeThread: "常驻 Reviewer（默认）",
+      reviewModeOneshot: "一次性审查",
+      reviewModeThreadHint: "Reviewer 保留对话，每轮只收到新变化，并用只读工具自行核对项目文件",
+      reviewModeOneshotHint: "每轮无状态，证据一次给全、不使用工具；Reviewer 模型不能调用工具时选此项",
       modelSyncAfterLogin: "登录后同步模型",
       currentExecutor: (model) => `当前执行：${model}`,
       currentReviewer: (model) => ` · Reviewer：${model}`,
@@ -839,7 +839,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       sectionLiteratureServices: "学术文献检索",
       sectionLiteratureServicesSub: "Scopus 与 OpenAlex 数据库接口",
       sectionWebSearchServices: "网络与社区搜索",
-      sectionWebSearchServicesSub: "内置博查、知乎检索；Brave、Exa 与代理为可选扩展",
+      sectionWebSearchServicesSub: "DeepSeek 搜索使用当前 SomniQ 账号；Go、Plus、Pro、千研可用，成功返回结果每次 1 积分，优先使用月度额度",
       advancedCollapse: "收起",
       advancedExpand: "展开",
       summaryProvider: "摘要服务商",
@@ -865,6 +865,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus 密钥",
       fieldOpenalexKey: "OpenAlex 文献检索",
       openalexGatewayHint: "SomniQ 已内置，无需 API 密钥",
+      scopusSchoolRouteHint: "登录后通过 SomniQ 学校通道检索 Scopus",
       fieldBochaKey: "博查备用直连密钥",
       fieldBraveSearchKey: "Brave Search 密钥",
       fieldExaKey: "Exa 密钥",
@@ -1485,6 +1486,11 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       reviewerModel: "Review model",
       reviewerModelHint: "Default value is not saved yet",
       reviewerModelOff: "Disable review model",
+      reviewMode: "Review mode",
+      reviewModeThread: "Resident Reviewer (default)",
+      reviewModeOneshot: "One-shot review",
+      reviewModeThreadHint: "The Reviewer keeps its conversation, receives only what changed each round, and checks project files itself with read-only tools",
+      reviewModeOneshotHint: "Stateless every round: all evidence is sent at once and no tools are used; choose this if the review model cannot call tools",
       modelSyncAfterLogin: "Sync models after sign-in",
       currentExecutor: (model) => `Current executor: ${model}`,
       currentReviewer: (model) => ` · reviewer: ${model}`,
@@ -1502,7 +1508,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       sectionLiteratureServices: "Literature Services",
       sectionLiteratureServicesSub: "Scopus and OpenAlex database APIs",
       sectionWebSearchServices: "Web Search & Community",
-      sectionWebSearchServicesSub: "Built-in Bocha and Zhihu search; Brave, Exa, and proxy are optional",
+      sectionWebSearchServicesSub: "DeepSeek search uses your SomniQ account. Available to Go, Plus, Pro and 千研; 1 credit per search with results, using the monthly allowance first.",
       advancedCollapse: "Collapse",
       advancedExpand: "Expand",
       summaryProvider: "Summary provider",
@@ -1528,6 +1534,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
       fieldScopusKey: "Scopus Key",
       fieldOpenalexKey: "OpenAlex literature search",
       openalexGatewayHint: "Built into SomniQ; no API key required",
+      scopusSchoolRouteHint: "Signed-in searches use the SomniQ school route",
       fieldBochaKey: "Bocha direct fallback key",
       fieldBraveSearchKey: "Brave Search Key",
       fieldExaKey: "Exa Key",

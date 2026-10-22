@@ -3,3 +3,8 @@ desktop/src-tauri/resources/bin/latexmk text eol=lf
 desktop/src-tauri/resources/bin/pdflatex text eol=lf
 desktop/src-tauri/resources/bin/*.cmd text eol=crlf
 desktop/scripts/macos-signing.sh text eol=lf
+
+# PDF fixtures contain byte offsets; newline conversion would invalidate them.
+crates/runtime/src/tests/fixtures/*.pdf binary
+# Native Word fixtures are ZIP packages and must not undergo newline conversion.
+crates/runtime/src/tests/fixtures/*.docx binary

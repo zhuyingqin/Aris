@@ -84,6 +84,11 @@ fn path_lock_index(path: &Path) -> usize {
     (hasher.finish() as usize) % PATH_LOCK_STRIPES
 }
 
+#[cfg(test)]
+pub(crate) fn path_locks_collide(left: &Path, right: &Path) -> bool {
+    path_lock_index(left) == path_lock_index(right)
+}
+
 fn absolute_path_for_lock(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()

@@ -91,6 +91,8 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
         "AskUserQuestion",
         "bash",
         "read_file",
+        "read_docx",
+        "edit_docx",
         "read_files",
         "glob_search",
         "grep_search",
@@ -131,6 +133,23 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
     .into_iter()
     .map(routing_spec)
     .collect()
+}
+
+#[test]
+fn word_requests_route_native_docx_tools_without_using_partial_keywords() {
+    let specs = desktop_like_catalog();
+    for request in ["修改论文.docx 中这段正文", "编辑 Word 文档并保留公式", "开始修改doc准确的问题", "Review a WORD file"] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        for name in ["read_docx", "edit_docx"] {
+            assert!(plan.active_names.contains(name), "{request}: {plan:?}");
+            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+        }
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
+    }
+    for request in ["Explain word embeddings", "Review the document routing code", "Check keyword matching"] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(!plan.active_names.contains("edit_docx"), "{request}: {plan:?}");
+    }
 }
 
 #[test]
@@ -200,6 +219,21 @@ fn dynamic_tool_router_serves_a_multi_file_investigation() {
         assert!(plan.active_names.contains(name), "{name} missing: {plan:?}");
     }
     assert!(plan.profile.contains("investigate"), "{plan:?}");
+}
+
+#[test]
+fn collaboration_and_recovered_child_continuation_keep_all_six_actions_visible() {
+    let mut catalog=desktop_like_catalog();
+    catalog.extend(crate::chat_tool_specs(tools::collaboration::tool_specs()));
+    for prompt in ["检查后端恢复与前端状态同步", "继续子任务 /root/backend，在原有子会话中续派", "Investigate two independent modules in parallel"] {
+        let plan=route_chat_tools(prompt,&catalog,ToolRoutingMode::Active);
+        for name in tools::collaboration::ACTIONS {
+            assert!(plan.active_names.contains(name),"{prompt}: missing {name}: {plan:?}");
+        }
+        assert!(plan.active_names.len()<=MAX_ROUTED_TOOLS);
+    }
+    let simple=route_chat_tools("解释这个函数",&catalog,ToolRoutingMode::Active);
+    assert!(!simple.active_names.contains("spawn_agent"));
 }
 
 #[test]
@@ -564,6 +598,51 @@ fn dynamic_tool_router_pins_a_tool_the_user_named() {
     );
 
     assert!(plan.pinned_names.contains("multi_edit"), "{plan:?}");
+}
+
+/// The system prompt says a matching skill MUST be invoked and, on Windows, that
+/// PowerShell is the shell to prefer. Both rules need their tool visible from the
+/// first request, whatever the prompt's wording.
+#[test]
+fn dynamic_tool_router_pins_the_tools_the_system_prompt_requires() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("PowerShell"), routing_spec("LlmReview")]);
+    for prompt in ["随便聊聊", "帮我写论文的引言", ""] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("Skill"), "{prompt:?}: {plan:?}");
+        assert_eq!(
+            plan.pinned_names.contains("PowerShell"),
+            cfg!(windows),
+            "{prompt:?}: {plan:?}"
+        );
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS, "{plan:?}");
+    }
+}
+
+/// `LlmReview` is the only route to an independent review, so asking for one
+/// routes it; ordinary "review this code" reading work does not.
+#[test]
+fn dynamic_tool_router_routes_llm_review_only_for_an_independent_review() {
+    let mut specs = desktop_like_catalog();
+    specs.push(routing_spec("LlmReview"));
+    for prompt in [
+        "请做一次独立审查",
+        "让审稿人评审这篇论文",
+        "Get a second opinion from an external reviewer",
+        "run a cross-model review of the proof",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("LlmReview"), "{prompt}: {plan:?}");
+        assert!(plan.profile.contains("review"), "{prompt}: {plan:?}");
+    }
+    for prompt in [
+        "Review the document routing code",
+        "审查一下这个函数",
+        "preview the page",
+    ] {
+        let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
+        assert!(!plan.active_names.contains("LlmReview"), "{prompt}: {plan:?}");
+    }
 }
 
 #[test]

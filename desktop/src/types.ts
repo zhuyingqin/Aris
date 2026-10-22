@@ -66,6 +66,8 @@ export interface ConfigView {
   reviewerModel?: string | null;
   reviewerBaseUrl?: string | null;
   reviewEnabled: boolean;
+  /** `thread`: a resident Reviewer that is sent only what changed and checks the project itself; `oneshot`: the stateless fallback. */
+  reviewMode?: "thread" | "oneshot";
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
@@ -95,17 +97,6 @@ export interface ConfigView {
     transport?: string;
   }[];
 }
-
-export type ConfigSecretKind =
-  | "executorApiKey"
-  | "summarizerApiKey"
-  | "reviewerApiKey"
-  | "scopusApiKey"
-  | "openalexApiKey"
-  | "bochaApiKey"
-  | "braveSearchApiKey"
-  | "exaApiKey"
-  | "zhihuAccessSecret";
 
 export interface ScheduledTask {
   id: string;
@@ -150,19 +141,11 @@ export interface ConfigPatch {
   summarizerModel?: string;
   retrievalCardModel?: string;
   summarizerBaseUrl?: string;
-  summarizerApiKey?: string;
-  executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;
   reviewerBaseUrl?: string;
-  reviewerApiKey?: string;
   reviewEnabled?: boolean;
-  scopusApiKey?: string;
-  openalexApiKey?: string;
-  bochaApiKey?: string;
-  braveSearchApiKey?: string;
-  exaApiKey?: string;
-  zhihuAccessSecret?: string;
+  reviewMode?: "thread" | "oneshot";
   webProxyUrl?: string;
   language?: string;
   memoryWriteApproval?: boolean;
@@ -191,47 +174,6 @@ export interface MemoryStatusView {
   captureMissing: number;
   lastCapturedAt?: string | null;
   lastCapturedSessionId?: string | null;
-}
-
-export interface MemoryRebuildResult {
-  /** Project ids replayed. A re-derive is store-wide, not scoped to the active project. */
-  projects: string[];
-  /** Project ids whose replay failed; the rest still committed and a rerun is safe. */
-  failures: string[];
-  capturesReplayed: number;
-  atomsRemoved: number;
-  atomsWritten: number;
-  atomsPreserved: number;
-}
-
-export interface MemoryMigrationPreview {
-  sessionFiles: number;
-  alreadyMigrated: number;
-}
-
-export interface MemoryMigrationResult {
-  importedSessions: number;
-  importedMessages: number;
-  skipped: number;
-  cancelled: boolean;
-}
-
-export interface MemoryMigrationProgress {
-  running: boolean;
-  phase: string;
-  completedItems: number;
-  totalItems: number;
-  lastError?: string | null;
-}
-
-export interface MemoryDeadLetterView {
-  id: string;
-  sessionId: string;
-  sourceEventIds: string[];
-  occurredAt: string;
-  attempts: number;
-  lastError: string;
-  updatedAt: string;
 }
 
 export interface MemoryGovernanceHit {
@@ -406,22 +348,6 @@ export interface MemoryExplorerSnapshot {
   partialErrors: string[];
 }
 
-export interface ConfigTestDetail {
-  ok: boolean;
-  label: string;
-  provider?: string | null;
-  model?: string | null;
-  baseUrl?: string | null;
-  message: string;
-}
-
-export interface ConfigTestResult {
-  ok: boolean;
-  message: string;
-  executor: ConfigTestDetail;
-  reviewer?: ConfigTestDetail | null;
-}
-
 // ── Remote control (P0/P1) ────────────────────────────────────────────────
 
 export type RemoteScope =
@@ -482,17 +408,6 @@ export interface RemotePendingPairing {
 
 export interface RemotePairingApprovalInput {
   pairingId: string;
-}
-
-export interface RemoteAuditEntry {
-  timestamp: number;
-  deviceId: string;
-  requestId: string;
-  action: string;
-  transport: string;
-  projectId?: string | null;
-  outcome: string;
-  errorCode?: string | null;
 }
 
 // ── Durable local / remote compute jobs ─────────────────────────────────────
@@ -948,20 +863,6 @@ export interface MailDraftAttachment {
   mimeType?: string;
 }
 
-export interface MailOauthConfigView {
-  gmailClientId: string;
-  gmailHasSecret: boolean;
-  outlookConfigured: boolean;
-  outlookUsesBundledClient: boolean;
-  outlookClientId: string;
-}
-
-export interface MailOauthConfigPatch {
-  gmailClientId?: string;
-  gmailClientSecret?: string;
-  outlookClientId?: string;
-}
-
 export type MailSocketSecurity = "tls" | "starttls" | "none";
 
 export interface GenericMailAccountInput {
@@ -1023,12 +924,6 @@ export interface ConnectorPluginView {
   connectedAccounts: string[];
   transport: string;
   statusMessage: string;
-}
-
-export interface ConnectorActionResult {
-  ok: boolean;
-  message: string;
-  plugin: ConnectorPluginView;
 }
 
 export interface PermissionModeView {
@@ -1162,14 +1057,6 @@ export interface OracleWebLoginLaunchView {
   message: string;
 }
 
-export interface OracleWebImageArtifactView {
-  path: string;
-  mimeType: string;
-  sizeBytes: number;
-  width?: number | null;
-  height?: number | null;
-}
-
 export interface DesktopProject {
   id: string;
   name: string;
@@ -1233,15 +1120,6 @@ export type PptMasterFix =
 export interface PptMasterError {
   code: PptMasterErrorCode;
   params: Record<string, string>;
-  detail: string;
-  fix?: PptMasterFix | null;
-}
-
-export type PptMasterCheckStatus = "pass" | "fail";
-
-export interface PptMasterCheck {
-  id: string;
-  status: PptMasterCheckStatus;
   detail: string;
   fix?: PptMasterFix | null;
 }
@@ -1470,11 +1348,6 @@ export interface SessionMessage {
   blocks: SessionBlock[];
 }
 
-export interface SessionTranscript {
-  id: string;
-  messages: SessionMessage[];
-}
-
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export interface ChatStatus {
@@ -1503,6 +1376,26 @@ export interface UserPromptView {
   images: number;
   characters: number;
   prompt: string;
+}
+
+export interface ModelPrice {
+  model: string;
+  billing: "tokens" | "per_request" | "tiered" | "unknown";
+  inputRate: number | null;
+  outputRate: number | null;
+  cacheReadRate: number | null;
+  cacheCreationRate: number | null;
+  tier: string | null;
+}
+
+export interface ModelPricingCatalog {
+  username: string;
+  group: string;
+  fetchedAt: number;
+  validUntil: number;
+  referenceInputTokens: number;
+  peakBaseline: ModelPrice | null;
+  models: ModelPrice[];
 }
 
 export interface ChatModelOption {

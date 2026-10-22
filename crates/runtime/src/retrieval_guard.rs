@@ -1142,6 +1142,12 @@ impl RetrievalGuard {
         output: &str,
         call_number: usize,
     ) -> bool {
+        if serde_json::from_str::<Value>(output)
+            .ok()
+            .is_some_and(|value| unconfirmed_pdf_text(&value))
+        {
+            return false;
+        }
         let Some((candidate_id, path)) = self.candidate_for_local_snapshot(input, output) else {
             return false;
         };
@@ -1989,6 +1995,7 @@ impl RetrievalGuard {
             .pointer("/snapshot/markdownPath")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let pdf_unconfirmed = unconfirmed_pdf_text(&value);
         let candidate_id = self.register_candidate(
             CandidateSeed {
                 url: value.get("url").and_then(Value::as_str).map(str::to_string),
@@ -2003,7 +2010,15 @@ impl RetrievalGuard {
             call_number,
             None,
         );
-        if let Some(candidate_id) = candidate_id.as_deref() {
+        if pdf_unconfirmed {
+            self.latest_evidence_id = None;
+            if let Some(path) = markdown_path.as_deref() {
+                self.snapshot_candidates
+                    .remove(&normalize_snapshot_path(path));
+            }
+            notes.push("This PDF text is unconfirmed or incomplete and was not registered as verification evidence. Read rendered pages or obtain a reliable local extraction before assessing an exact quote, formula, or numeric clue.".to_string());
+        }
+        if let Some(candidate_id) = candidate_id.as_deref().filter(|_| !pdf_unconfirmed) {
             if let Some(path) = markdown_path.as_deref() {
                 self.snapshot_candidates
                     .insert(normalize_snapshot_path(path), candidate_id.to_string());
@@ -2121,6 +2136,20 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .ok_or_else(|| format!("{key} is required and must be a non-empty string"))
+}
+
+fn unconfirmed_pdf_text(value: &Value) -> bool {
+    value
+        .pointer("/pdfExtraction/quality")
+        .and_then(Value::as_str)
+        .is_some_and(|quality| matches!(quality, "unconfirmed" | "no_text"))
+        || value.get("extraction").and_then(Value::as_str) == Some("pdf_text")
+        || value
+            .pointer("/coverage/truncatedReason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                matches!(reason, "pdf_text_quality_unconfirmed" | "pdf_no_text_layer")
+            })
 }
 
 fn collect_candidate_seeds(value: &Value, seeds: &mut Vec<CandidateSeed>) {

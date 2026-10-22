@@ -3,6 +3,7 @@
   --tier-accent: #a6afbf;
   --tier-edge: #b8c0cc;
   --tier-avatar: linear-gradient(145deg, #697584, #475363);
+  --tier-avatar-ink: #fff;
   --tier-surface: color-mix(in srgb, var(--bg-3) 72%, var(--bg-2));
   --tier-ink: var(--text);
   --tier-muted: var(--text-dim);
@@ -26,19 +27,20 @@
 }
 
 .app-account[data-plan-tier="pro"] {
-  --tier-accent: #d5aeff;
-  --tier-edge: #e4c7ff;
-  --tier-avatar: linear-gradient(140deg, #dec1ff, #a465f2 48%, #6e2bb6);
-  --tier-surface: linear-gradient(120deg, #2a153f, #502275 58%, #713d9e);
-  --tier-ink: #fbf7ff;
-  --tier-muted: #d7c2eb;
-  --tier-halo: #ac5dfd70;
+  --tier-accent: #cbb5eb;
+  --tier-edge: #cdb6e9;
+  --tier-avatar: linear-gradient(140deg, #eee3fc, #d2b9ef 55%, #bea0df);
+  --tier-avatar-ink: #432b5c;
+  --tier-surface: linear-gradient(120deg, #f0e7fc, #e2d1f5 58%, #d1b8ef);
+  --tier-ink: #372348;
+  --tier-muted: #604374;
+  --tier-halo: #baa0e533;
 }
 
 :root[data-theme="light"] .app-account[data-plan-tier] { --tier-accent: #64748b; }
 :root[data-theme="light"] .app-account[data-plan-tier="go"] { --tier-accent: #7560aa; }
 :root[data-theme="light"] .app-account[data-plan-tier="plus"] { --tier-accent: #8a3cb3; }
-:root[data-theme="light"] .app-account[data-plan-tier="pro"] { --tier-accent: #7c32bc; }
+:root[data-theme="light"] .app-account[data-plan-tier="pro"] { --tier-accent: #745397; }
 
 .app .app-account[data-plan-tier] .account-menu-trigger { position: relative; }
 
@@ -50,7 +52,7 @@
   border: 1px solid color-mix(in srgb, var(--tier-edge) 50%, transparent);
   border-radius: 50%;
   background: var(--tier-avatar);
-  color: #fff;
+  color: var(--tier-avatar-ink);
   font-size: 11px;
   font-weight: 650;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--tier-edge) 8%, transparent), 0 0 12px var(--tier-halo);
@@ -70,8 +72,8 @@
   height: 12px;
   border: 1px solid #d8b3ff;
   border-radius: 50%;
-  background: #613098;
-  color: #f3dfff;
+  background: #e7d6fa;
+  color: #62417d;
   pointer-events: none;
 }
 
@@ -102,13 +104,13 @@
 .account-menu-identity > strong { overflow: hidden; color: var(--tier-ink); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu-plan { display: flex; align-items: center; gap: 4px; color: var(--tier-muted); font-size: 11px; line-height: 1.45; }
 .app-account[data-plan-tier="plus"] .account-menu-plan { color: var(--tier-accent); font-weight: 650; }
-.app-account[data-plan-tier="pro"] .account-menu-plan { color: #edceff; font-weight: 700; letter-spacing: .4px; }
+.app-account[data-plan-tier="pro"] .account-menu-plan { color: var(--tier-muted); font-weight: 700; letter-spacing: .4px; }
 
 .app-account[data-plan-tier="pro"] .account-menu-profile::before {
   content: "";
   position: absolute;
   inset: -40%;
-  background: radial-gradient(ellipse at 75% 65%, #d993ff33, transparent 55%);
+  background: radial-gradient(ellipse at 75% 65%, #ffffff50, transparent 55%);
   animation: account-pro-aura 6s ease-in-out infinite alternate;
   pointer-events: none;
 }
@@ -130,6 +132,12 @@
 .account-menu-quota-title { display: flex; align-items: center; gap: 7px; color: var(--text); }
 .account-menu-quota-title svg { flex: 0 0 auto; color: var(--text-dim); }
 .account-menu-quota-title strong { font-size: 12px; font-weight: 600; }
+.account-menu-refresh { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: pointer; }
+.account-menu-refresh:hover:not(:disabled) { background: var(--bg-3); }
+.account-menu-refresh:focus-visible { outline: 2px solid var(--tier-accent); outline-offset: 1px; }
+.account-menu-refresh:disabled { cursor: default; opacity: .65; }
+.account-menu-refresh svg[data-icon="spinner"] { animation: spin .9s linear infinite; }
+.account-menu-refresh-error { display: block; margin-top: 6px; color: var(--text-dim); font-size: 10px; }
 .account-menu-quota-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 8px 0 7px; font-size: 11px; }
 .account-menu-quota-summary > span { color: var(--text-dim); }
 .account-menu-quota-summary > strong { color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -155,11 +163,13 @@
 
 .account-menu-action > svg { color: var(--text-dim); flex: 0 0 auto; }
 .account-menu-action > span:nth-child(2) { flex: 1; }
+.account-menu-membership > svg { color: var(--tier-accent); }
 .account-menu-shortcut { color: var(--text-dim); font-size: 10px; opacity: .8; }
 .app .app-account[data-plan-tier] .account-menu-action:hover { background: color-mix(in srgb, var(--tier-accent) 10%, var(--bg-2)); }
 .app .app-account[data-plan-tier] .account-menu-action:focus-visible { outline: 2px solid var(--tier-accent); outline-offset: -2px; background: color-mix(in srgb, var(--tier-accent) 10%, var(--bg-2)); }
 
 @media (prefers-reduced-motion: reduce) {
+  .account-menu-refresh svg[data-icon="spinner"] { animation: none; }
   .app-account[data-plan-tier] .account-menu-profile::before,
   .app-account[data-plan-tier] .account-menu-profile::after { animation: none; }
   .app-account[data-plan-tier="pro"] .account-menu-profile::after { opacity: 0; }

@@ -1,7 +1,7 @@
 import type { Language } from "../store";
 import type { NewApiAccount } from "../api/tauri";
 import { epochToDate } from "../timestamp";
-import { ADMIN_ACCOUNT_CONTAINS_MARKERS, ADMIN_ACCOUNT_EXACT_MARKERS, SETTINGS_COPY } from "./i18n";
+import { SETTINGS_COPY } from "./i18n";
 
 export function normalizeLanguage(value: string | null | undefined): Language {
   return value === "en" ? "en" : "cn";
@@ -23,20 +23,6 @@ export function subscriptionQuotaPercent(account: NewApiAccount): number {
   const total = used + remaining;
   if (!Number.isFinite(total) || total <= 0) return 0;
   return Math.min(100, Math.round((used / total) * 100));
-}
-
-export function isAdminAccount(account: NewApiAccount | null): boolean {
-  if (!account) return false;
-  if (account.isAdmin === true) return true;
-  if (typeof account.role === "number" && account.role >= 10) return true;
-  const markers = [account.group, account.groupDesc, account.subscriptionName, account.subscriptionDesc];
-  return markers.some((value) => {
-    const text = value?.trim();
-    if (!text) return false;
-    const lower = text.toLowerCase();
-    return ADMIN_ACCOUNT_EXACT_MARKERS.some((marker) => lower === marker)
-      || ADMIN_ACCOUNT_CONTAINS_MARKERS.some((marker) => text.includes(marker));
-  });
 }
 
 export function formatUpdateBytes(value: number): string {

@@ -549,6 +549,8 @@ fn every_tool_has_a_failure_classification_decision() {
     // report failure as `Err` (the call itself fails, which every consumer
     // already sees) or only read and write local state.
     const NO_PAYLOAD_FAILURE: &[&str] = &[
+        // Controller operations report errors as Err; list/wait describe state.
+        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",
@@ -588,10 +590,14 @@ fn every_tool_has_a_failure_classification_decision() {
         "change_revert",
         "commit_large_write",
         "edit_file",
+        // DOCX I/O, version, match and audit failures return Err; an Ok
+        // payload contains a completed read or fully applied edit batch.
+        "edit_docx",
         "glob_search",
         "grep_search",
         "multi_edit",
         "read_file",
+        "read_docx",
         "ReadMediaFile",
         "session_search",
         "write_file",
@@ -705,6 +711,9 @@ fn every_tool_is_triaged_for_external_retrieval() {
     // task-building are included deliberately: they write or read a local plan
     // and open no connection, so they must not spend a retrieval budget.
     const NO_RETRIEVAL: &[&str] = &[
+        // These operate on local sessions/mailboxes. Child retrieval is metered
+        // in that child's own runtime, not at the delegation operation.
+        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",
@@ -742,11 +751,14 @@ fn every_tool_is_triaged_for_external_retrieval() {
         "change_revert",
         "commit_large_write",
         "edit_file",
+        // DOCX tools only read or mutate a local OOXML package.
+        "edit_docx",
         "glob_search",
         "grep_search",
         "memory",
         "multi_edit",
         "read_file",
+        "read_docx",
         "read_files",
         "session_search",
         "write_file",

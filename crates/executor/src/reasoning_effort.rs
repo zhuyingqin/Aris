@@ -36,12 +36,135 @@ const NONE_TO_HIGH: [&str; 4] = ["none", "low", "medium", "high"];
 /// GPT-5.4 and GPT-5.5.
 const NONE_TO_XHIGH: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
 
-/// GPT-5.6 and GPT-6 — the first GPT families to add `max`. Also what Claude gets:
-/// a level never reaches Anthropic as a word (`anthropic_thinking_config`
-/// turns it into a thinking-token budget), so every rung means something
-/// there. `minimal` is left out because for Claude it would be a second name
-/// for `none`.
+/// GPT-5.6 and GPT-6 — the first GPT families to add `max`. Also what Claude
+/// gets where every rung is meaningful: a manual-thinking model turns the level
+/// into a token budget, and Opus 4.7/4.8 take `none` (thinking off) through
+/// `max` as effort. `minimal` is left out because for Claude it would be a
+/// second name for `none`.
 const NONE_TO_MAX: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+/// Claude Opus 4.6 and Sonnet 4.6: adaptive thinking is opt-in, and the effort
+/// ladder has `max` but no `xhigh`.
+const NONE_TO_MAX_WITHOUT_XHIGH: [&str; 5] = ["none", "low", "medium", "high", "max"];
+
+/// Claude 5.x, Fable and Mythos think by default and several reject turning it
+/// off, so there is no `none`; the levels are effort values.
+const LOW_TO_MAX: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Claude Mythos Preview: thinks by default, effort without `xhigh`.
+const LOW_TO_MAX_WITHOUT_XHIGH: [&str; 4] = ["low", "medium", "high", "max"];
+
+/// How a Claude model takes thinking. The Messages API answers the wrong shape
+/// with a 400 — Claude 4.7 and later reject `{"type": "enabled"}` outright — so
+/// the request has to be chosen from the model ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeThinking {
+    /// No thinking support (Claude 3.5 and earlier).
+    Unsupported,
+    /// `{"type": "enabled", "budget_tokens": N}` only (Claude 3.7 – 4.5). The
+    /// final assistant turn of such a request must begin with a thinking block.
+    Manual,
+    /// `{"type": "adaptive"}`, depth set by `output_config.effort` (Claude 4.6
+    /// and later). `on_by_default`: the model thinks without being asked and
+    /// cannot reliably be switched off. `xhigh`: its effort ladder has `xhigh`.
+    Adaptive { on_by_default: bool, xhigh: bool },
+}
+
+/// The thinking shape for a Claude model, or `None` for any other model.
+///
+/// Reads both ID styles — `claude-opus-4-7`, `claude-haiku-4-5-20251001` and
+/// the legacy `claude-3-7-sonnet-20250219` — with or without a platform
+/// prefix (`anthropic.`, `us.anthropic.`, `anthropic/`). A Claude ID whose
+/// version cannot be read is assumed current but given the conservative
+/// adaptive profile, which every model from 4.6 on accepts.
+#[must_use]
+pub fn claude_thinking(model: &str) -> Option<ClaudeThinking> {
+    let name = model.to_ascii_lowercase();
+    let start = name.find("claude")?;
+    let tokens = name[start..]
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let family_index = tokens
+        .iter()
+        .position(|token| matches!(*token, "opus" | "sonnet" | "haiku" | "fable" | "mythos"));
+    let Some(family_index) = family_index else {
+        return Some(ClaudeThinking::Adaptive {
+            on_by_default: false,
+            xhigh: false,
+        });
+    };
+    let family = tokens[family_index];
+    // A version component is one or two digits; an eight-digit date or a
+    // `v1` suffix is not.
+    let number = |index: usize| {
+        tokens
+            .get(index)
+            .filter(|token| token.len() <= 2 && token.chars().all(|ch| ch.is_ascii_digit()))
+            .and_then(|token| token.parse::<u32>().ok())
+    };
+    let version = match number(family_index + 1) {
+        // claude-opus-4-7, claude-sonnet-4-20250514
+        Some(major) => Some((major, number(family_index + 2).unwrap_or(0))),
+        // claude-3-7-sonnet, claude-3-sonnet
+        None => match (
+            family_index.checked_sub(2).and_then(number),
+            family_index.checked_sub(1).and_then(number),
+        ) {
+            (Some(major), Some(minor)) => Some((major, minor)),
+            (None, Some(major)) => Some((major, 0)),
+            _ => None,
+        },
+    };
+
+    if matches!(family, "fable" | "mythos") {
+        // Mythos Preview's effort ladder stops at `max` without `xhigh`.
+        let preview = tokens.contains(&"preview");
+        return Some(ClaudeThinking::Adaptive {
+            on_by_default: true,
+            xhigh: !preview,
+        });
+    }
+    let Some(version) = version else {
+        return Some(ClaudeThinking::Adaptive {
+            on_by_default: false,
+            xhigh: false,
+        });
+    };
+    Some(if version >= (4, 6) {
+        ClaudeThinking::Adaptive {
+            on_by_default: version.0 >= 5,
+            xhigh: version.0 >= 5 || (family == "opus" && version >= (4, 7)),
+        }
+    } else if version >= (3, 7) {
+        ClaudeThinking::Manual
+    } else {
+        ClaudeThinking::Unsupported
+    })
+}
+
+fn claude_levels(thinking: ClaudeThinking) -> &'static [&'static str] {
+    match thinking {
+        ClaudeThinking::Unsupported => &[],
+        ClaudeThinking::Manual => &NONE_TO_MAX,
+        ClaudeThinking::Adaptive {
+            on_by_default: false,
+            xhigh: true,
+        } => &NONE_TO_MAX,
+        ClaudeThinking::Adaptive {
+            on_by_default: false,
+            xhigh: false,
+        } => &NONE_TO_MAX_WITHOUT_XHIGH,
+        ClaudeThinking::Adaptive {
+            on_by_default: true,
+            xhigh: true,
+        } => &LOW_TO_MAX,
+        ClaudeThinking::Adaptive {
+            on_by_default: true,
+            xhigh: false,
+        } => &LOW_TO_MAX_WITHOUT_XHIGH,
+    }
+}
 
 /// The levels `model` accepts, weakest → strongest. An empty slice means the
 /// model takes no reasoning level at all and the field must be omitted.
@@ -52,8 +175,8 @@ const NONE_TO_MAX: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"]
 pub fn levels_for_model(model: &str) -> &'static [&'static str] {
     let name = model.to_ascii_lowercase();
 
-    if name.contains("claude") {
-        return &NONE_TO_MAX;
+    if let Some(thinking) = claude_thinking(&name) {
+        return claude_levels(thinking);
     }
     if name.contains("gpt-6") {
         return &NONE_TO_MAX;

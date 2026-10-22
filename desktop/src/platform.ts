@@ -6,7 +6,3 @@ export function isMacOS(): boolean {
 export function primaryModifier(event: { metaKey: boolean; ctrlKey: boolean }): boolean {
   return isMacOS() ? event.metaKey : event.ctrlKey;
 }
-
-export function primaryShortcut(keys: string): string {
-  return `${isMacOS() ? "⌘" : "Ctrl+"}${keys}`;
-}

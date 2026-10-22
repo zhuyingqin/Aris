@@ -1,7 +1,9 @@
-import { isValidElement, memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { isValidElement, memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -17,6 +19,8 @@ import {
   type ChatEvidenceReference,
 } from "./openChatFile";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
+import ChatImageReference from "./ChatImageReference";
+import { imagePreviewKey, normalizeImagePreviewSource, type ImagePreviewScope } from "./imagePreviewIdentity";
 import MermaidDiagram from "./MermaidDiagram";
 
 const MAX_MARKDOWN_RENDER_CHARS = 80_000;
@@ -38,7 +42,63 @@ interface MarkdownAstNode {
   type: string;
   value?: string;
   url?: string;
+  identifier?: string;
+  data?: { hProperties?: Record<string, unknown> };
   children?: MarkdownAstNode[];
+}
+
+const imageSourceParser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
+
+/** Walk the same Markdown nodes that become previews, including reference
+ * links. Code, definitions, raw HTML and hidden thinking never claim an image. */
+function visitMarkdownImages(tree: MarkdownAstNode, visit: (node: MarkdownAstNode, source: string) => void) {
+  const definitions = new Map<string, string>();
+  const collectDefinitions = (node: MarkdownAstNode) => {
+    if (node.type === "definition" && node.identifier && node.url && !definitions.has(node.identifier.toLowerCase())) {
+      definitions.set(node.identifier.toLowerCase(), node.url);
+    }
+    node.children?.forEach(collectDefinitions);
+  };
+  collectDefinitions(tree);
+  const walk = (node: MarkdownAstNode) => {
+    const reference = node.type === "imageReference" || node.type === "linkReference";
+    const source = reference ? definitions.get(node.identifier?.toLowerCase() ?? "") : node.url;
+    if (source && (reference || node.type === "image" || node.type === "link")
+      && isPreviewableImagePath(normalizeImagePreviewSource(source))) {
+      visit(node, source);
+      // Markdown image links render their own preview instead of their children.
+      return;
+    }
+    node.children?.forEach(walk);
+  };
+  walk(tree);
+}
+
+export function markdownImageSources(text: string): string[] {
+  if (text.length > MAX_MARKDOWN_RENDER_CHARS || !/[\[<]/.test(text)
+    || (!/(?:\.(?:png|jpe?g|gif|webp|svg|bmp)\b|data:image\/|blob:)/i.test(text) && !text.includes("%"))) return [];
+  const sources: string[] = [];
+  for (const segment of parseThinkBlocks(text)) {
+    if (segment.kind !== "text") continue;
+    const tree = imageSourceParser.parse(normalizeMathDelimiters(formatDenseMarkdown(segment.content)));
+    visitMarkdownImages(tree, (_node, source) => sources.push(source));
+  }
+  return sources;
+}
+
+function remarkImagePreviewReferences(scope: ImagePreviewScope) {
+  return () => (tree: MarkdownAstNode) => {
+    // Clone for each pipeline invocation. React replays renders in StrictMode
+    // and virtual rows remount; neither may consume another render's claims.
+    const seen = new Set(scope.precedingKeys);
+    visitMarkdownImages(tree, (node, source) => {
+      const key = imagePreviewKey(source, scope.projectPath);
+      if (seen.has(key)) {
+        node.data = { ...node.data, hProperties: { ...node.data?.hProperties, "data-chat-image-reference": true } };
+      }
+      seen.add(key);
+    });
+  };
 }
 
 function evidenceHref(source: MarkdownEvidenceSource): string {
@@ -464,7 +524,7 @@ function markdownUrlTransform(url: string, key: string): string {
   if (key === "src" && /^(data:image\/|blob:)/i.test(url)) return url;
   if (key === "href" && /^(data:image\/|blob:)/i.test(url) && isPreviewableImagePath(url)) return url;
   if (key === "href" && url.startsWith(EVIDENCE_LINK_PREFIX)) return url;
-  if (key === "href" && isExplicitLocalFileHref(url)) return url;
+  if ((key === "href" || key === "src") && isExplicitLocalFileHref(url)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -472,10 +532,12 @@ function MarkdownLink({
   href,
   children,
   evidenceSources,
+  imageReference = false,
 }: {
   href?: string;
   children?: React.ReactNode;
   evidenceSources?: MarkdownEvidenceSource[];
+  imageReference?: boolean;
 }) {
   const openChatFile = useOpenChatFile();
   const openChatEvidence = useOpenChatEvidence();
@@ -497,11 +559,12 @@ function MarkdownLink({
       </button>
     );
   }
-  if (href && isPreviewableImagePath(href)) {
+  if (href && isPreviewableImagePath(normalizeImagePreviewSource(href))) {
     const title = textFromReactNode(children) || decodeLocalHref(href);
+    if (imageReference) return <ChatImageReference src={href} label={title} />;
     return (
       <ChatImagePreview
-        src={href}
+        src={normalizeImagePreviewSource(href)}
         alt={title}
         title={title}
         openPath={isDirectImageSource(href) ? undefined : decodeLocalHref(href)}
@@ -542,6 +605,7 @@ export const ThinkBlock = memo(function ThinkBlock({
   const startRef = useRef<number | null>(null);
   const wasAutoOpen = useRef(autoOpen);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const followingBodyRef = useRef(true);
 
   useEffect(() => {
     if (!streaming) {
@@ -563,14 +627,18 @@ export const ThinkBlock = memo(function ThinkBlock({
   // React update. Keep the newest thinking phase revealed for the rest of the
   // active turn, then collapse it when the whole turn finishes.
   useEffect(() => {
-    if (!wasAutoOpen.current && autoOpen) setOpen(true);
+    if (!wasAutoOpen.current && autoOpen) {
+      followingBodyRef.current = true;
+      setOpen(true);
+    }
     else if (wasAutoOpen.current && !autoOpen) setOpen(false);
     wasAutoOpen.current = autoOpen;
   }, [autoOpen]);
 
-  // Keep the bounded body pinned to the newest thinking text while it streams.
-  useEffect(() => {
-    if (streaming && open && bodyRef.current) {
+  // Follow before paint so each token does not briefly show the previous offset.
+  // Reading earlier reasoning releases following until the reader returns down.
+  useLayoutEffect(() => {
+    if (streaming && open && followingBodyRef.current && bodyRef.current) {
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
     }
   }, [content, streaming, open]);
@@ -584,7 +652,10 @@ export const ThinkBlock = memo(function ThinkBlock({
 
   return (
     <div className={`md-think${streaming ? " md-think-active" : ""}`}>
-      <button className="md-think-toggle" onClick={() => setOpen((value) => !value)}>
+      <button className="md-think-toggle" onClick={() => {
+        followingBodyRef.current = true;
+        setOpen((value) => !value);
+      }}>
         <span className="md-think-icon"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={12} /></span>
         {streaming && <span className="md-think-spinner" aria-hidden="true" />}
         <span className="md-think-label">{label}</span>
@@ -593,7 +664,17 @@ export const ThinkBlock = memo(function ThinkBlock({
         )}
       </button>
       {open && (
-        <div className="md-think-body" ref={bodyRef}>
+        <div className="md-think-body" ref={bodyRef}
+          onScroll={(event) => {
+            const body = event.currentTarget;
+            followingBodyRef.current = body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
+          }}
+          onWheel={(event) => {
+            // The bounded reasoning pane owns this input. Letting it reach the
+            // transcript would release the page's following even without a page scroll.
+            if (event.currentTarget.scrollHeight > event.currentTarget.clientHeight) event.stopPropagation();
+          }}
+        >
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
@@ -611,10 +692,12 @@ function MarkdownContent({
   text,
   streaming = false,
   evidenceSources = [],
+  imagePreviewScope,
 }: {
   text: string;
   streaming?: boolean;
   evidenceSources?: MarkdownEvidenceSource[];
+  imagePreviewScope?: ImagePreviewScope;
 }) {
   const rendered = useThrottledText(text, streaming);
   if (rendered.length > MAX_MARKDOWN_RENDER_CHARS) {
@@ -651,7 +734,8 @@ function MarkdownContent({
         return (
           <ReactMarkdown
             key={index}
-            remarkPlugins={[remarkGfm, remarkMath, remarkEvidenceCitations(evidenceSources)]}
+            remarkPlugins={[remarkGfm, remarkMath, remarkEvidenceCitations(evidenceSources),
+              ...(imagePreviewScope ? [remarkImagePreviewReferences(imagePreviewScope)] : [])]}
             rehypePlugins={rehypePlugins}
             urlTransform={markdownUrlTransform}
             components={{
@@ -668,18 +752,19 @@ function MarkdownContent({
                   ? <CodeBlock className={className}>{children}</CodeBlock>
                   : <code className="md-inline-code" {...props}>{children}</code>;
               },
-              a({ href, children }) {
+              a({ href, children, node }) {
                 return (
-                  <MarkdownLink href={href} evidenceSources={evidenceSources}>
+                  <MarkdownLink href={href} evidenceSources={evidenceSources} imageReference={Boolean(node?.properties?.["data-chat-image-reference"])}>
                     {children}
                   </MarkdownLink>
                 );
               },
-              img({ src, alt, title }) {
+              img({ src, alt, title, node }) {
                 if (!src) return null;
+                if (node?.properties?.["data-chat-image-reference"]) return <ChatImageReference src={src} label={alt ?? title} />;
                 return (
                   <ChatImagePreview
-                    src={src}
+                    src={normalizeImagePreviewSource(src)}
                     alt={alt ?? title ?? ""}
                     title={title ?? alt ?? src}
                     openPath={isDirectImageSource(src) ? undefined : decodeLocalHref(src)}

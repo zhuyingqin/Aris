@@ -30,17 +30,6 @@ struct McpToolTimeoutPolicy {
     hard_timeout: Duration,
 }
 
-/// Return the renewable idle lease for an interactive MCP browser call.
-///
-/// Long-running shell, compute, image-generation, and agent-style MCP tools
-/// deliberately return `None`: they keep their own progress-aware or
-/// transport-level limits. An explicit browser wait is given enough time to
-/// finish the requested wait plus a small protocol/serialization allowance.
-#[must_use]
-pub fn mcp_tool_timeout(tool_name: &str, input: &str) -> Option<Duration> {
-    mcp_tool_timeout_policy(tool_name, input).map(|policy| policy.idle_timeout)
-}
-
 /// Return the non-renewable maximum runtime shown by desktop heartbeats.
 #[must_use]
 pub fn mcp_tool_max_runtime(tool_name: &str, input: &str) -> Option<Duration> {
@@ -429,6 +418,11 @@ pub const MAX_ACTIVE_TOOLS: usize = 24;
 /// failure mode (a broken heredoc corrupts the file instead of failing the
 /// call). Creating files stays intent-routed — `write_file` is needed far less
 /// often than the editors, and the slots are better spent rotating.
+///
+/// `Skill` is pinned because the system prompt's skill list says a matching
+/// skill MUST be invoked before doing the work. Deferring the one tool that
+/// obeys that rule cost every skill-driven turn a ToolSearch round trip, or
+/// tempted the model to imitate the skill's checklist instead.
 const PINNED_CORE_TOOLS: &[&str] = &[
     "ToolSearch",
     "read_file",
@@ -438,7 +432,21 @@ const PINNED_CORE_TOOLS: &[&str] = &[
     "bash",
     "edit_file",
     "multi_edit",
+    "Skill",
 ];
+
+/// The shell the system prompt tells the model to prefer on this platform. On
+/// Windows the environment section says to use `PowerShell` and that `bash`
+/// needs a POSIX shell that may be missing, so shipping `bash` alone stated a
+/// rule the model could only follow after a ToolSearch. `bash` stays pinned
+/// too: Git Bash is common there and many skills are written for it.
+fn platform_shell_tools() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["PowerShell"]
+    } else {
+        &[]
+    }
+}
 
 /// Visible from the first request but evictable once the turn's real shape is
 /// known.
@@ -600,7 +608,10 @@ pub fn route_chat_tools_with_carry_forward(
     let mut active_names = BTreeSet::new();
     let mut pinned_names = BTreeSet::new();
 
-    for name in resolve_named(&catalog_names, PINNED_CORE_TOOLS) {
+    for name in resolve_named(&catalog_names, PINNED_CORE_TOOLS)
+        .into_iter()
+        .chain(resolve_named(&catalog_names, platform_shell_tools()))
+    {
         pinned_names.insert(name.clone());
         active_names.insert(name);
     }
@@ -798,6 +809,27 @@ fn strip_attachment_boilerplate(text: &str) -> String {
 /// order.
 fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGroup> {
     let mut groups = Vec::new();
+    let terms = lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .collect::<Vec<_>>();
+    let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))
+        || (terms.contains(&"word")
+            && contains_any(
+                lowered,
+                &[
+                    "document", "file", "edit", "formula", "equation", "export", "convert",
+                    "office", "文档", "文件", "编辑", "修改", "改稿", "公式", "导出", "转换",
+                    "排版", "准确",
+                ],
+            ));
+    if word_document {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "Word document intent",
+            required: resolve_named(catalog, &["read_docx", "edit_docx"]),
+            optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
     let drawing_intent = contains_any(
         lowered,
         &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],
@@ -1087,6 +1119,36 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             .collect(),
         });
     }
+    // The system prompt makes `LlmReview` the only route to an independent,
+    // external or cross-model review, so a turn that asks for one gets it up
+    // front. Deliberately narrow: "review the code" or "审查" alone is ordinary
+    // reading work, not a request for a second model.
+    if contains_any(
+        lowered,
+        &[
+            "independent review",
+            "external review",
+            "cross-model",
+            "second opinion",
+            "peer review",
+            "reviewer",
+            "独立审查",
+            "独立评审",
+            "外部审查",
+            "外部评审",
+            "交叉审查",
+            "交叉评审",
+            "评审",
+            "审稿",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "review",
+            reason: "independent review intent",
+            required: resolve_named(catalog, &["LlmReview"]),
+            optional: Vec::new(),
+        });
+    }
     if contains_any(
         lowered,
         &[
@@ -1150,13 +1212,13 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     }
     if contains_any(
         lowered,
-        &["skill", "agent", "delegate", "智能体", "技能", "委派"],
+        &["agent", "delegate", "parallel", "subtask", "collaboration", "智能体", "委派", "并行", "子任务", "续派", "协作", "跨模块", "后端恢复", "前端状态同步"],
     ) {
         groups.push(ToolGroup {
             profile: "delegation",
-            reason: "skill or agent intent",
-            required: Vec::new(),
-            optional: resolve_named(catalog, &["Skill", "Agent"]),
+            reason: "independent investigation or child continuation intent",
+            required: resolve_named(catalog, &tools::collaboration::ACTIONS),
+            optional: resolve_named(catalog, &["Skill"]),
         });
     }
     if contains_any(

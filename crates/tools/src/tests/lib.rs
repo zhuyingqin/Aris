@@ -17,21 +17,21 @@ use std::thread;
 use std::time::Duration;
 
 use super::{
-    agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
+    discover_skills,
     execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
     final_assistant_text, latex_input_manifest_hash, latex_input_snapshot,
     latex_input_snapshot_changed, latex_pdf_state, latex_pdf_state_after_compile, mvp_tool_specs,
-    persist_agent_terminal_state, preferred_latex_engine, render_latex_template,
+    preferred_latex_engine, render_latex_template,
     repl_invokes_latex_compiler, resolve_anthropic_compat_reviewer_model,
     resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
     reviewer_stream_observer, route_openai_compat_model, run_llm_review, skill_markdown,
-    tex_tool_path, tool_execution, workspace_path_candidate, AgentInput, AgentJob,
+    tex_tool_path, tool_execution, workspace_path_candidate,
     LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
     SubagentToolExecutor, ToolRunContext,
 };
 use runtime::{
     ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
-    RuntimeError, Session, TokenUsage, ToolExecution, TurnSummary, ARIS_AGENT_STORE_DIR_ENV,
+    PermissionMode, PermissionPolicy, RuntimeError, Session, TokenUsage, ToolExecution, TurnSummary, ARIS_AGENT_STORE_DIR_ENV,
     ARIS_WORKSPACE_ROOT_ENV, MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde_json::json;
@@ -80,6 +80,8 @@ impl Drop for EnvGuard {
 
 #[path = "lib/agent.rs"]
 mod agent;
+#[path = "lib/docx.rs"]
+mod docx;
 #[path = "lib/file_ops.rs"]
 mod file_ops;
 #[path = "lib/latex.rs"]

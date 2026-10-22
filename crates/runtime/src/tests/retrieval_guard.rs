@@ -826,6 +826,86 @@ fn checkpoint_restores_locked_clues_candidates_and_evidence_after_interrupt() {
 }
 
 #[test]
+fn unconfirmed_pdf_windows_and_their_snapshots_are_not_verification_evidence() {
+    for (extraction, reason) in [
+        ("pdf_text", None),
+        ("pdf_text_v2", Some("pdf_text_quality_unconfirmed")),
+        ("pdf_text_v2", Some("pdf_no_text_layer")),
+    ] {
+        let mut guard = RetrievalGuard::default();
+        guard.start_turn("identify the paper");
+        lock_test_clues(&mut guard);
+        discover_and_seal_candidate(&mut guard, "https://arxiv.org/abs/2405.02984");
+        let input =
+            r#"{"url":"https://arxiv.org/pdf/2405.02984","prompt":"verify the numeric clue"}"#;
+        let mut value: Value = serde_json::from_str(&web_fetch_output(
+            "https://arxiv.org/pdf/2405.02984",
+            "unconfirmed-pdf",
+            "bad-window",
+            1,
+        ))
+        .unwrap();
+        value["extraction"] = json!(extraction);
+        value["coverage"] = json!({"truncatedReason": reason});
+        let output = guard.observe_tool("WebFetch", input, value.to_string(), false);
+        assert!(
+            output.contains("not registered as verification evidence"),
+            "{output}"
+        );
+        assert!(guard.evidence.is_empty());
+        assert!(guard.snapshot_candidates.is_empty());
+        assert_eq!(guard.candidates["arxiv:2405.02984"].verification_windows, 0);
+        guard.observe_tool(
+            "read_file",
+            r#"{"path":".somniq/web-fetch/objects/unconfirmed-pdf/content.md"}"#,
+            json!({"file":{"content":"unreliable decoded formula"}}).to_string(),
+            false,
+        );
+        assert!(
+            guard.evidence.is_empty(),
+            "reading the same bad snapshot must not upgrade it"
+        );
+    }
+}
+
+#[test]
+fn a_local_pdf_read_respects_its_quality_even_when_a_candidate_path_is_known() {
+    let mut guard = RetrievalGuard::default();
+    guard.start_turn("identify the paper");
+    lock_test_clues(&mut guard);
+    discover_and_seal_candidate(&mut guard, "https://arxiv.org/abs/2405.02984");
+    guard.observe_tool(
+        "WebFetch",
+        r#"{"url":"https://arxiv.org/html/2405.02984","prompt":"read details"}"#,
+        web_fetch_output(
+            "https://arxiv.org/html/2405.02984",
+            "known-path",
+            "good-window",
+            1,
+        ),
+        false,
+    );
+    let input = r#"{"path":".somniq/web-fetch/objects/known-path/content.md"}"#;
+    let before = guard.evidence.len();
+    for quality in ["unconfirmed", "no_text"] {
+        guard.observe_tool(
+            "read_file",
+            input,
+            json!({"file":{"content":"bad glyph mapping"}, "pdfExtraction":{"quality":quality}})
+                .to_string(),
+            false,
+        );
+        assert_eq!(guard.evidence.len(), before);
+    }
+    guard.observe_tool("read_file", input, json!({"file":{"content":"readable source window"}, "pdfExtraction":{"quality":"readable", "exactContentVerified":false}}).to_string(), false);
+    assert_eq!(
+        guard.evidence.len(),
+        before + 1,
+        "a readable window remains usable for evidence assessment"
+    );
+}
+
+#[test]
 fn snapshot_grep_becomes_evidence_for_the_existing_candidate() {
     let mut guard = RetrievalGuard::default();
     guard.start_turn("identify the paper");

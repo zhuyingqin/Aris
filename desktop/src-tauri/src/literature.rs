@@ -191,204 +191,6 @@ pub async fn literature_llm(
     .map_err(|e| e.to_string())?
 }
 
-/// A one-shot Executor call that exposes its streamed reasoning/text deltas to
-/// the workflow UI. The request id is supplied by the UI so concurrent runs do
-/// not leak activity into each other's progress panel.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiteratureLlmResponse {
-    pub text: String,
-    pub model: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LiteratureLlmProgressEvent {
-    request_id: String,
-    phase: String,
-    text: Option<String>,
-    model: Option<String>,
-}
-
-/// Where literature progress events go.
-///
-/// The streaming command used to hold an `AppHandle` and call `app.emit`
-/// directly, which made the whole run reachable only from a live desktop app —
-/// including its terminal-phase contract, the one thing whose failure leaves
-/// the UI spinning forever on a request that already finished.
-///
-/// A second host (a server build serving browsers over WebSocket) would add one
-/// variant here and change nothing else in this file.
-#[derive(Clone)]
-pub(crate) enum ProgressSink {
-    Tauri(AppHandle),
-    /// Collects events instead of delivering them, so a test can assert on the
-    /// sequence a run produced. Compiled only under `cfg(test)` — it is a test
-    /// double, not a shipped transport; a real second host would be its own
-    /// variant next to `Tauri`.
-    #[cfg(test)]
-    Recording(Arc<Mutex<Vec<LiteratureLlmProgressEvent>>>),
-}
-
-impl ProgressSink {
-    fn emit(&self, request_id: &str, phase: &str, text: Option<String>, model: Option<String>) {
-        let event = LiteratureLlmProgressEvent {
-            request_id: request_id.to_string(),
-            phase: phase.to_string(),
-            text,
-            model,
-        };
-        match self {
-            // Delivery is best-effort by design: a dropped progress frame must
-            // never fail a run that is otherwise succeeding.
-            ProgressSink::Tauri(app) => {
-                let _ = app.emit("literature-llm-progress", event);
-            }
-            #[cfg(test)]
-            ProgressSink::Recording(events) => {
-                if let Ok(mut events) = events.lock() {
-                    events.push(event);
-                }
-            }
-        }
-    }
-}
-
-fn emit_llm_progress(
-    sink: &ProgressSink,
-    request_id: &str,
-    phase: &str,
-    text: Option<String>,
-    model: Option<String>,
-) {
-    sink.emit(request_id, phase, text, model);
-}
-
-struct ProgressObserver {
-    sink: ProgressSink,
-    request_id: String,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl ProgressObserver {
-    fn check(&self) -> Result<(), RuntimeError> {
-        if self.cancelled.load(Ordering::SeqCst) {
-            Err(RuntimeError::new("interrupted by user"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl aris_executor::StreamObserver for ProgressObserver {
-    fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
-        self.check()?;
-        emit_llm_progress(
-            &self.sink,
-            &self.request_id,
-            "text",
-            Some(text.to_string()),
-            None,
-        );
-        Ok(())
-    }
-
-    fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
-        self.check()?;
-        emit_llm_progress(
-            &self.sink,
-            &self.request_id,
-            "thinking",
-            Some(thinking.to_string()),
-            None,
-        );
-        Ok(())
-    }
-
-    fn on_tool_call(&mut self, _id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
-        emit_llm_progress(
-            &self.sink,
-            &self.request_id,
-            "tool",
-            Some(format!("{name}: {input}")),
-            None,
-        );
-        Ok(())
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-}
-
-#[tauri::command]
-pub async fn literature_llm_stream(
-    app: AppHandle,
-    system: String,
-    prompt: String,
-    model: Option<String>,
-    request_id: String,
-) -> Result<LiteratureLlmResponse, String> {
-    literature_llm_stream_core(ProgressSink::Tauri(app), system, prompt, model, request_id).await
-}
-
-pub(crate) async fn literature_llm_stream_core(
-    sink: ProgressSink,
-    system: String,
-    prompt: String,
-    model: Option<String>,
-    request_id: String,
-) -> Result<LiteratureLlmResponse, String> {
-    let requested_model = model.filter(|value| !value.trim().is_empty());
-    emit_llm_progress(
-        &sink,
-        &request_id,
-        "started",
-        Some("Executor is preparing the constrained research task.".to_string()),
-        requested_model.clone(),
-    );
-    let task_sink = sink.clone();
-    let task_request_id = request_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let registration = CancelRegistration::new(Some(&task_request_id));
-        run_oneshot_with_model_and_observer(
-            &system,
-            ConversationMessage::user_text(prompt),
-            requested_model.as_deref(),
-            Box::new(ProgressObserver {
-                sink: task_sink,
-                request_id: task_request_id,
-                cancelled: registration.flag(),
-            }),
-        )
-    })
-    .await
-    // A join failure is still an outcome the UI is waiting on, so it must go
-    // through the same terminal-phase emission as any other error rather than
-    // returning early past it.
-    .unwrap_or_else(|error| Err(error.to_string()));
-
-    let (phase, text, model) = terminal_progress(&result);
-    emit_llm_progress(&sink, &request_id, phase, text, model);
-    result.map(|(text, model)| LiteratureLlmResponse { text, model })
-}
-
-/// The terminal phase for a finished run.
-///
-/// Every exit path emits exactly one of these. A run that returns without one
-/// leaves the UI's progress panel waiting on a request that already finished —
-/// the same silent-hang shape as a stream that never reports its own failure,
-/// which is why this is a named function with a test rather than two arms of a
-/// `match` at the end of a command body.
-fn terminal_progress(
-    result: &Result<(String, String), String>,
-) -> (&'static str, Option<String>, Option<String>) {
-    match result {
-        Ok((_, resolved_model)) => ("completed", None, Some(resolved_model.clone())),
-        Err(error) => ("failed", Some(error.clone()), None),
-    }
-}
-
 /// Independent literature judgment through ARIS' built-in `LlmReview` tool.
 /// This deliberately uses the configured reviewer instead of the normal chat
 /// executor so screening is an independent review step.
@@ -1966,18 +1768,6 @@ pub async fn literature_load(projects_state: State<'_, ProjectState>) -> Result<
     off_main_thread(move || tools::literature::library_load_at(&base)).await
 }
 
-/// Read the normalized Zotero-style relationship graph for new Desktop
-/// surfaces. The existing load command remains the compatibility projection
-/// used by the current UI.
-#[tauri::command]
-pub async fn literature_library_relations(
-    projects_state: State<'_, ProjectState>,
-) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let relations = off_main_thread(move || tools::literature::library_relations_at(&base)).await?;
-    serde_json::to_value(relations).map_err(|error| error.to_string())
-}
-
 /// Read the complete local Zotero-shaped data plane, including child items
 /// and normalized fields/creators/relations.
 #[tauri::command]
@@ -2010,15 +1800,6 @@ pub async fn literature_create_item(
 }
 
 #[tauri::command]
-pub async fn literature_trash_items(
-    projects_state: State<'_, ProjectState>,
-    item_ids: Vec<String>,
-) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    off_main_thread(move || tools::literature::library_trash_items_at(&base, &item_ids)).await
-}
-
-#[tauri::command]
 pub async fn literature_restore_items(
     projects_state: State<'_, ProjectState>,
     item_ids: Vec<String>,
@@ -2044,16 +1825,6 @@ pub async fn literature_permanently_delete_items(
         Ok(result)
     })
     .await
-}
-
-#[tauri::command]
-pub async fn literature_update_saved_searches(
-    projects_state: State<'_, ProjectState>,
-    searches: Value,
-) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    off_main_thread(move || tools::literature::library_update_saved_searches_at(&base, &searches))
-        .await
 }
 
 /// Read the project's library preferences (attachment naming, and whether

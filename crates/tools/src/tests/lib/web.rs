@@ -1696,8 +1696,95 @@ fn web_fetch_reads_pdf_text_layer_including_mislabeled_content_types() {
                 .starts_with("pdf_text"),
             "{raw}"
         );
-        assert_eq!(output["status"], "completed", "{raw}");
+        // This synthetic PDF has no catalog/xref: the fallback can preserve
+        // useful text but must not label it a complete, reliable extraction.
+        assert_eq!(output["status"], "incomplete", "{raw}");
+        assert_eq!(
+            output["coverage"]["truncatedReason"], "pdf_text_quality_unconfirmed",
+            "{raw}"
+        );
+        assert!(result.contains("PDF text quality: unconfirmed"), "{raw}");
     }
+}
+
+#[test]
+fn web_fetch_decodes_font_encoded_numbers_with_the_shared_pdf_extractor() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _workspace = WebFetchTestWorkspace::new("web-fetch-pdf-font-encoding");
+    let pdf =
+        include_bytes!("../../../../runtime/src/tests/fixtures/type1-font-encoding.pdf").to_vec();
+    let server = TestServer::spawn(Arc::new(move |_| {
+        HttpResponse::bytes(200, "OK", "application/pdf", pdf.clone())
+    }));
+    let raw = execute_tool(
+        "WebFetch",
+        &json!({
+            "url": format!("http://{}/encoded.pdf", server.addr()),
+            "prompt": "Read the journal number",
+            "allowPrivateNetwork": true
+        }),
+    )
+    .expect("read encoded PDF");
+    let output: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        output["result"].as_str().unwrap().contains("Journal 789"),
+        "{raw}"
+    );
+    assert!(
+        !output["result"].as_str().unwrap().contains("Journal 123"),
+        "{raw}"
+    );
+    assert_eq!(output["status"], "completed", "{raw}");
+    assert_eq!(output["extraction"], "pdf_text_v2");
+    assert!(
+        output["warnings"]
+            .to_string()
+            .contains("Text-layer extraction only"),
+        "{raw}"
+    );
+}
+
+#[test]
+fn web_fetch_rejects_continuation_of_an_old_pdf_decoder_snapshot() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let workspace = WebFetchTestWorkspace::new("web-fetch-pdf-old-snapshot");
+    let stream = format!(
+        "BT /F1 12 Tf 72 720 Td {} ET",
+        "(A long paragraph that requires more than one reading window.) Tj T* ".repeat(80)
+    );
+    let pdf = pdf_with_content_stream(stream.as_bytes());
+    let server = TestServer::spawn(Arc::new(move |_| {
+        HttpResponse::bytes(200, "OK", "application/pdf", pdf.clone())
+    }));
+    let raw = execute_tool(
+        "WebFetch",
+        &json!({
+            "url": format!("http://{}/old.pdf", server.addr()),
+            "prompt": "Read the paragraphs",
+            "maxChars": 220,
+            "allowPrivateNetwork": true
+        }),
+    )
+    .expect("first PDF window");
+    let output: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let cursor = output["coverage"]["nextCursor"]
+        .as_str()
+        .expect("multiple windows");
+    let metadata_path = workspace
+        .root
+        .join(output["snapshot"]["metadataPath"].as_str().unwrap());
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    metadata["extraction"] = json!("pdf_text");
+    std::fs::write(&metadata_path, metadata.to_string()).unwrap();
+    let error = execute_tool("WebFetch", &json!({"cursor": cursor}))
+        .expect_err("old text cannot verify evidence");
+    assert!(error.contains("outdated_pdf_extraction"), "{error}");
+    assert!(error.contains("without the cursor"), "{error}");
 }
 
 #[test]

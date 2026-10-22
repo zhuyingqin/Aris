@@ -1,14 +1,19 @@
 // Bundled ARIS skills compiled in from assets/skills/ via build.rs
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
+pub mod agent_control;
+pub mod agent_trace;
 mod atomic_file;
 pub mod background_log;
 mod bash;
 mod cache;
 mod change_ledger;
+pub mod client_identity;
 mod compact;
 mod config;
 mod conversation;
+pub mod docx;
+pub mod document_safety;
 pub mod event_sink;
 mod evidence_ledger;
 mod execution_context;
@@ -29,6 +34,7 @@ mod mcp_client;
 mod mcp_stdio;
 mod oauth;
 mod paths;
+mod pdf_text;
 mod permissions;
 mod process;
 mod process_registry;
@@ -48,14 +54,23 @@ mod session;
 mod session_index;
 pub mod skill_registry;
 mod tool_outcome;
+mod tool_recovery;
 mod tool_output_artifact;
 mod usage;
 
 pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
+pub use pdf_text::{
+    extract_pdf_text_from_bytes, extract_pdf_text_with_quality, PdfExtractionMetadata,
+    PdfTextExtraction, PdfTextQuality,
+};
 pub use bash::{
     adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
+};
+pub use client_identity::{
+    client_outdated_error, client_outdated_message, client_user_agent, CLIENT_OUTDATED_CODE,
+    CLIENT_VERSION,
 };
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
@@ -82,22 +97,23 @@ pub use config::{
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
     autonomous_max_turn_duration_from_env, autonomous_max_turn_iterations_from_env,
-    max_turn_duration_from_env, max_turn_iterations_from_env,
+    is_inter_agent_message, max_turn_duration_from_env, max_turn_iterations_from_env,
     soft_checkpoint_context_ratio_from_env, soft_checkpoint_token_growth_ratio_from_env,
     soft_checkpoint_tool_call_interval_from_env, strip_trailing_internal_continuation_messages,
     ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
     DynamicToolRouting, RuntimeError, StaticToolExecutor, ToolError, ToolExecution, ToolExecutor,
-    ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
+    ToolInvocation, ToolMedia, ToolOutput, TurnInput, TurnInputSource, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
+    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink, TurnOutcome,
 };
 pub use evidence_ledger::{
     evidence_guard_mode, EvidenceGuardMode, NO_NEW_EVIDENCE_BLOCK_CALLS,
     NO_NEW_EVIDENCE_NUDGE_CALLS,
 };
 pub use execution_context::{
+    active_project_execution_context,
     execution_current_dir, execution_env_var_os, with_project_execution_context,
     ProjectExecutionContext,
 };
@@ -105,7 +121,7 @@ pub use file_ops::{
     abort_large_write, append_file, append_file_with_context, append_file_with_context_expected,
     append_write_chunk, begin_large_write, cleanup_stale_large_writes_at, commit_large_write,
     content_revision, decode_process_text, edit_file, edit_file_with_context,
-    edit_file_with_context_expected, extract_pdf_text_from_bytes, file_revision, glob_search,
+    edit_file_with_context_expected, file_revision, glob_search,
     grep_search, multi_edit_file, multi_edit_file_with_context,
     multi_edit_file_with_context_expected, parse_image_tool_output, read_file,
     read_file_with_images, recover_pending_batch_writes_at, write_file, write_file_with_context,
@@ -228,7 +244,7 @@ pub use reports::{
 };
 pub use research_memory::{
     canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
-    ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
+    ResearchMemoryAtom, ResearchMemoryCapture,
     ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
     ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild,
     ResearchMemoryRebuildSummary, ResearchMemoryRecall, ResearchMemorySnapshot,

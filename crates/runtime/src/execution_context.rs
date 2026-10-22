@@ -104,6 +104,12 @@ pub fn with_project_execution_context<T>(
 }
 
 #[must_use]
+/// Capture the current binding before passing work to another thread.
+pub fn active_project_execution_context() -> Option<ProjectExecutionContext> {
+    PROJECT_EXECUTION_CONTEXTS.with(|contexts| contexts.borrow().last().cloned())
+}
+
+#[must_use]
 pub fn execution_env_var_os(name: impl AsRef<OsStr>) -> Option<OsString> {
     let name = name.as_ref();
     let scoped = PROJECT_EXECUTION_CONTEXTS.with(|contexts| {

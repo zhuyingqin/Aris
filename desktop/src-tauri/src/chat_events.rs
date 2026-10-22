@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -51,6 +53,110 @@ pub struct ChatEventLogEntry {
     pub session_id: String,
     pub kind: String,
     pub payload: Value,
+}
+
+impl ChatEventLogEntry {
+    /// The chat turn that produced this event, when the writer knew it.
+    ///
+    /// It lives in the payload as `turnId`, the name `tool_result` and `done`
+    /// already used, so a log written before every event carried one simply
+    /// has no such field and reads as `None`. The child-task timeline uses it
+    /// to retain turn attribution without exposing the raw event payload.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[must_use]
+    pub fn turn_id(&self) -> Option<&str> {
+        self.payload
+            .get(TURN_ID_FIELD)
+            .and_then(Value::as_str)
+            .filter(|turn_id| !turn_id.is_empty())
+    }
+}
+
+/// Payload field naming the turn an event belongs to.
+const TURN_ID_FIELD: &str = "turnId";
+
+thread_local! {
+    static CURRENT_TURN: RefCell<Option<TurnTag>> = const { RefCell::new(None) };
+}
+
+/// Names the chat turn that is producing events on a thread.
+///
+/// A turn's worker runs events through many helpers that only know the session,
+/// so the turn is attached to the *thread* doing the work and stamped on every
+/// event the thread writes for that session. The producer's own turn is what
+/// matters: a cancelled worker still unwinding while the session's next turn
+/// has begun keeps stamping its own, older turn, so its late failure can never
+/// be read as the new turn's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnTag {
+    session_id: String,
+    turn_id: String,
+}
+
+impl TurnTag {
+    #[must_use]
+    pub fn new(session_id: &str, turn_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+        }
+    }
+
+    /// Make this the current thread's turn until the returned guard drops.
+    ///
+    /// Hand a [`current_turn_tag`] to any thread a turn starts and enter it
+    /// there; a thread that never enters one stamps nothing, which is honest.
+    #[must_use = "the turn is current only while the guard lives"]
+    pub fn enter(&self) -> TurnScope {
+        let previous = CURRENT_TURN.with(|current| current.replace(Some(self.clone())));
+        TurnScope {
+            previous,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+/// Restores the thread's previous turn when dropped. It cannot cross threads,
+/// so it also cannot be held across an `.await` in a future that may resume
+/// elsewhere.
+pub struct TurnScope {
+    previous: Option<TurnTag>,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for TurnScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_TURN.with(|current| current.replace(previous));
+    }
+}
+
+/// The turn the calling thread is working for, to hand to threads it starts.
+#[must_use]
+pub fn current_turn_tag() -> Option<TurnTag> {
+    CURRENT_TURN.with(|current| current.borrow().clone())
+}
+
+/// Add this thread's turn to a payload that does not name one. Only a turn of
+/// the *same session* counts, and a payload that already says which turn it is
+/// about keeps its own answer.
+fn stamp_turn_id(session_id: &str, payload: &mut Value) {
+    let Value::Object(fields) = payload else {
+        return;
+    };
+    if fields.contains_key(TURN_ID_FIELD) {
+        return;
+    }
+    let turn_id = CURRENT_TURN.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .filter(|tag| tag.session_id == session_id)
+            .map(|tag| tag.turn_id.clone())
+    });
+    if let Some(turn_id) = turn_id {
+        fields.insert(TURN_ID_FIELD.to_string(), Value::String(turn_id));
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,12 +329,40 @@ pub fn append_event(
 ) -> Result<ChatEventLogEntry, String> {
     validate_session_id(session_id)?;
     let path = chat_event_log_path(session_id)?;
-    let kind = kind.into();
-    runtime::with_path_lock(&path, || {
+    append_event_at(&path, session_id, kind.into(), payload)
+}
+
+/// [`append_event`] into a log whose directory the caller names instead of
+/// leaving it to the directory registered for the session. An agent's session
+/// is created by the agent control, so nothing has bound a directory for it yet
+/// when its first event (the lineage) is written.
+pub fn append_event_in_dir(
+    sessions_dir: &Path,
+    session_id: &str,
+    kind: impl Into<String>,
+    payload: Value,
+) -> Result<ChatEventLogEntry, String> {
+    validate_session_id(session_id)?;
+    append_event_at(
+        &session_log_path(session_id, sessions_dir),
+        session_id,
+        kind.into(),
+        payload,
+    )
+}
+
+fn append_event_at(
+    path: &Path,
+    session_id: &str,
+    kind: String,
+    mut payload: Value,
+) -> Result<ChatEventLogEntry, String> {
+    stamp_turn_id(session_id, &mut payload);
+    runtime::with_path_lock(path, || {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let current_bytes = fs::metadata(&path)
+        let current_bytes = fs::metadata(path)
             .map(|meta| meta.len())
             .unwrap_or_default();
 
@@ -238,7 +372,7 @@ pub fn append_event(
         let last = match seqs.get(session_id).copied() {
             Some(state) if state.bytes == current_bytes => state.seq,
             None => {
-                let seq = read_last_seq(&path)?;
+                let seq = read_last_seq(path)?;
                 seqs.insert(
                     session_id.to_string(),
                     EventSeqState {
@@ -249,7 +383,7 @@ pub fn append_event(
                 seq
             }
             Some(_) => {
-                let seq = read_last_seq(&path)?;
+                let seq = read_last_seq(path)?;
                 seqs.insert(
                     session_id.to_string(),
                     EventSeqState {
@@ -271,7 +405,7 @@ pub fn append_event(
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .map_err(|error| error.to_string())?;
         append_jsonl_entry(&mut file, &entry)?;
         let bytes = file
@@ -292,7 +426,7 @@ pub fn append_event(
 pub fn append_wire_event(
     session_id: &str,
     kind: impl Into<String>,
-    payload: Value,
+    mut payload: Value,
 ) -> Result<ChatEventLogEntry, String> {
     if !wire_trace_enabled() {
         return Err("chat wire trace disabled".to_string());
@@ -300,6 +434,7 @@ pub fn append_wire_event(
     validate_session_id(session_id)?;
     let path = chat_wire_log_path(session_id)?;
     let kind = kind.into();
+    stamp_turn_id(session_id, &mut payload);
     runtime::with_path_lock(&path, || {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -368,6 +503,14 @@ pub fn append_wire_event(
 
 pub fn record_event(session_id: &str, kind: &str, payload: Value) {
     if let Err(error) = append_event(session_id, kind, payload) {
+        eprintln!("SomniQ desktop: failed to write chat event log: {error}");
+    }
+}
+
+/// [`record_event`] for a log in a directory the caller names; see
+/// [`append_event_in_dir`].
+pub fn record_event_in_dir(sessions_dir: &Path, session_id: &str, kind: &str, payload: Value) {
+    if let Err(error) = append_event_in_dir(sessions_dir, session_id, kind, payload) {
         eprintln!("SomniQ desktop: failed to write chat event log: {error}");
     }
 }
@@ -578,8 +721,11 @@ pub fn emit_chat_event(
     event_name: &str,
     session_id: &str,
     kind: &str,
-    payload: Value,
+    mut payload: Value,
 ) {
+    // Stamp before the copy goes out so the renderer receives the same turn the
+    // log records, and can tell a late event from the turn it is showing.
+    stamp_turn_id(session_id, &mut payload);
     record_event(session_id, kind, payload.clone());
     let _ = app.emit(event_name, payload);
 }
@@ -1317,10 +1463,16 @@ fn is_canonical_session_event(event: &ChatEventLogEntry) -> bool {
     )
 }
 
-fn turns_from_session(session: &Session) -> Vec<Value> {
+pub(crate) fn turns_from_session(session: &Session) -> Vec<Value> {
     let mut turns = Vec::new();
     for (message_index, message) in session.messages.iter().enumerate() {
         match message.role {
+            // Mail from another agent is a `User` message in the session, but
+            // the person did not write it: it belongs to the assistant turn it
+            // joined, not in a bubble of its own.
+            MessageRole::User if runtime::is_inter_agent_message(message) => {
+                merge_inter_agent_message_into_turns(&mut turns, message, message_index);
+            }
             MessageRole::User => turns.push(json!({
                 "id": format!("session-{message_index}-user"),
                 "role": "user",
@@ -1376,18 +1528,19 @@ fn ui_blocks_from_message(message: &ConversationMessage) -> Vec<Value> {
         .collect()
 }
 
-fn merge_tool_message_into_turns(
+/// The blocks of the assistant turn a session message belongs to, starting one
+/// when the transcript has no assistant turn open yet.
+fn session_assistant_turn_blocks(
     turns: &mut Vec<Value>,
-    message: &ConversationMessage,
     message_index: usize,
-) {
-    if !turns
+) -> &mut Vec<Value> {
+    let ends_in_assistant = turns
         .last()
         .and_then(Value::as_object)
         .and_then(|object| object.get("role"))
         .and_then(Value::as_str)
-        .is_some_and(|role| role == "assistant")
-    {
+        == Some("assistant");
+    if !ends_in_assistant {
         turns.push(json!({
             "id": format!("session-{message_index}-assistant"),
             "role": "assistant",
@@ -1395,7 +1548,38 @@ fn merge_tool_message_into_turns(
             "streaming": false,
         }));
     }
-    let blocks = ensure_assistant_turn(turns, message_index as u64);
+    ensure_assistant_turn(turns, message_index as u64)
+}
+
+/// Longest stretch of one delivered message the transcript shows. A sub-agent's
+/// result can run to tens of thousands of characters; the session keeps all of
+/// it for the model, and the transcript only needs to say it arrived.
+const MAX_INTER_AGENT_NOTICE_CHARS: usize = 2_000;
+
+fn merge_inter_agent_message_into_turns(
+    turns: &mut Vec<Value>,
+    message: &ConversationMessage,
+    message_index: usize,
+) {
+    let blocks = session_assistant_turn_blocks(turns, message_index);
+    for block in &message.blocks {
+        let ContentBlock::Text { text } = block else {
+            continue;
+        };
+        let mut shown = text.chars().take(MAX_INTER_AGENT_NOTICE_CHARS).collect::<String>();
+        if shown.len() < text.len() {
+            shown.push('…');
+        }
+        blocks.push(json!({ "kind": "notice", "message": shown }));
+    }
+}
+
+fn merge_tool_message_into_turns(
+    turns: &mut Vec<Value>,
+    message: &ConversationMessage,
+    message_index: usize,
+) {
+    let blocks = session_assistant_turn_blocks(turns, message_index);
     for block in &message.blocks {
         let ContentBlock::ToolResult {
             tool_use_id,

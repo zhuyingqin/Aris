@@ -155,11 +155,6 @@ export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroup
   en: SETTINGS_COPY.en.nav.groupLabels,
 };
 
-export const SETTINGS_NAV_MISC: Record<Language, { back: string }> = {
-  cn: SETTINGS_COPY.cn.nav.misc,
-  en: SETTINGS_COPY.en.nav.misc,
-};
-
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([
   ...SETTINGS_NAV_GROUPS.flatMap((group) => group.items.map((item) => item.id)),
   "environment",

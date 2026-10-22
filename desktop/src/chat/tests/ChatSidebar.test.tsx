@@ -53,7 +53,7 @@ describe("ChatSidebar session menu", () => {
     expect(container.querySelector(".chat-sidebar-title")).toBeNull();
   });
 
-  it("creates a blank Chat immediately instead of opening the task dialog", async () => {
+  it.each(["New task", "New task in Alpha"])("creates a blank chat and expands its project using %s", async (triggerName) => {
     const user = userEvent.setup();
     const onNew = vi.fn();
     const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
@@ -74,8 +74,12 @@ describe("ChatSidebar session menu", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "New task" }));
+    await user.click(screen.getByRole("button", { name: "Collapse project Alpha" }));
+    expect(screen.queryByRole("button", { name: /Alpha chat/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: triggerName }));
     expect(onNew).toHaveBeenCalledWith("project-a");
+    expect(screen.getByRole("button", { name: "Collapse project Alpha" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: /Alpha chat/ })).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "New task" })).toBeNull();
   });
 
@@ -159,6 +163,11 @@ describe("ChatSidebar session menu", () => {
     await user.click(showMore);
 
     expect(screen.getByText("Topic 6")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Collapse project Alpha" }));
+    expect(screen.queryByRole("button", { name: "Show less" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Topic 1/ })).toBeNull();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: /Topic 6/ })).toBeTruthy();
     const showLess = screen.getByRole("button", { name: "Show less" });
     expect(showLess.getAttribute("aria-expanded")).toBe("true");
     await user.click(showLess);
@@ -239,6 +248,28 @@ describe("ChatSidebar run indicators", () => {
   }
 
   const itemFor = (title: string) => screen.getByText(title).closest(".chat-session-item")!;
+
+  it("keeps the active project manually collapsed when a background run finishes", async () => {
+    const user = userEvent.setup();
+    const { setRunning } = renderRuns({ running: ["chat-2"] });
+
+    await user.click(screen.getByRole("button", { name: "Collapse project Alpha" }));
+    const toggle = screen.getByRole("button", { name: "Expand project Alpha" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect((document.getElementById(toggle.getAttribute("aria-controls")!) as HTMLElement).hidden).toBe(true);
+    expect(screen.queryByRole("button", { name: /Topic 1/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Topic 2/ })).toBeNull();
+
+    act(() => setRunning([]));
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: /Topic 2/ })).toBeNull();
+
+    await user.keyboard(" ");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: /Topic 1/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Topic 2/ })).toBeTruthy();
+    expect(itemFor("Topic 2").querySelector(".chat-unread-dot")).not.toBeNull();
+  });
 
   it("marks a conversation with a turn in flight as running", () => {
     renderRuns({ running: ["chat-2"] });

@@ -3,6 +3,7 @@ use super::{
     instruction_files_fingerprint, normalize_instruction_content, redact_url_to_origin,
     render_available_skills, render_config_section, render_hooks_summary,
     render_instruction_content, render_instruction_files, render_mcp_servers_summary,
+    render_system_prompt_template,
     truncate_instruction_content, ContextFile, ProjectContext, SystemPromptBuilder,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
@@ -22,6 +23,20 @@ fn temp_dir() -> std::path::PathBuf {
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     crate::test_env_lock()
+}
+
+#[test]
+fn windows_environment_explains_shell_contract() {
+    let windows = SystemPromptBuilder::new()
+        .with_os("windows", "11")
+        .environment_section();
+    assert!(windows.contains("prefer the PowerShell tool"));
+    assert!(windows.contains("never falls back to CMD"));
+    assert!(windows.contains("parent terminal does not select"));
+    let linux = SystemPromptBuilder::new()
+        .with_os("linux", "6")
+        .environment_section();
+    assert!(!linux.contains("prefer the PowerShell tool"));
 }
 
 #[test]
@@ -369,6 +384,16 @@ fn system_reminder_tags_from_non_system_content_are_untrusted_data() {
     assert!(section.contains("<system-reminder>"));
     assert!(section.contains("untrusted data"));
     assert!(!section.contains("tags carrying system information"));
+}
+
+#[test]
+fn actual_system_template_preserves_the_users_open_document_session() {
+    for styled in [false, true] {
+        let prompt = render_system_prompt_template(styled);
+        assert!(prompt.contains(crate::document_safety::LOCAL_DOCUMENT_READ_GUIDANCE));
+        assert!(prompt.contains("unsaved edits in Word/WPS"));
+        assert!(!prompt.contains("{{LOCAL_DOCUMENT_READ_GUIDANCE}}"));
+    }
 }
 
 #[test]

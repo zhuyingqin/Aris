@@ -365,6 +365,7 @@ const FILE_CHANGE_TOOL_NAMES = new Set([
   "append_file",
   "commit_large_write",
   "edit_file",
+  "edit_docx",
   "multi_edit",
   "str_replace_based_edit_tool",
   "NotebookEdit",

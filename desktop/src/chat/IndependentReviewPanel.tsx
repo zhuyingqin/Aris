@@ -38,6 +38,7 @@ export default function IndependentReviewPanel({
       reviewer: "Reviewer",
       issues: "发现的问题",
       checked: "已核查证据",
+      toolChecks: "Reviewer 工具调用",
       missing: "缺失检查",
       instructions: "修订要求",
       clear: "清除审查记录",
@@ -52,6 +53,7 @@ export default function IndependentReviewPanel({
       reviewer: "Reviewer",
       issues: "Issues found",
       checked: "Evidence checked",
+      toolChecks: "Reviewer tool calls",
       missing: "Missing checks",
       instructions: "Revision instructions",
       clear: "Clear review history",
@@ -123,6 +125,10 @@ export default function IndependentReviewPanel({
                 )}
                 {round.result.evidenceChecked.length > 0 && (
                   <section><h3>{copy.checked}</h3><ul>{round.result.evidenceChecked.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                )}
+                {/* The controller's record of the Reviewer's own tool calls, which can repeat, so the index is part of the key. */}
+                {round.result.toolChecks && round.result.toolChecks.length > 0 && (
+                  <section><h3>{copy.toolChecks}</h3><ul className="independent-review-tool-checks">{round.result.toolChecks.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</ul></section>
                 )}
                 {round.result.missingChecks.length > 0 && (
                   <section><h3>{copy.missing}</h3><ul>{round.result.missingChecks.map((item) => <li key={item}>{item}</li>)}</ul></section>

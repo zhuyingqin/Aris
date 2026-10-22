@@ -2,6 +2,53 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn latex_timeouts_do_not_become_source_repair_instructions() {
+    // Include old persisted compile_failed diagnostics as well as the new code.
+    for code in ["compile_failed", "compile_timeout"] {
+        let output = json!({
+            "success": false,
+            "timedOut": true,
+            "interrupted": true,
+            "returnCodeInterpretation": "timeout",
+            "stderr": "Latexmk: Missing input file 'main.toc'\nNo file main.bbl.",
+            "diagnostics": [{ "severity": "error", "code": code,
+                "message": "LaTeX compilation failed (timeout) without a parseable source diagnostic." }]
+        }).to_string();
+        let hint = tool_recovery_hint("LaTeXCompile", &output).expect("timeout hint");
+        assert!(hint.contains("increase timeoutMs"), "{hint}");
+        assert!(!hint.contains("smallest source edit"), "{hint}");
+        assert_eq!(latex_failure_class(&output), LatexFailureClass::Process);
+    }
+}
+
+#[test]
+fn latex_unlocated_failure_and_cancellation_need_log_inspection_or_recompile() {
+    for status in ["interrupted", "exit_code:1"] {
+        let output = json!({
+            "success": false, "returnCodeInterpretation": status,
+            "diagnostics": [{ "severity": "error", "code": "compile_failed",
+                "message": "LaTeX compilation failed without a parseable source diagnostic." }]
+        }).to_string();
+        let hint = tool_recovery_hint("LaTeXCompile", &output).expect("process hint");
+        assert!(!hint.contains("smallest source edit"), "{hint}");
+        assert_eq!(latex_failure_class(&output), LatexFailureClass::Process);
+    }
+}
+
+#[test]
+fn latex_timeout_keeps_a_concrete_source_error_actionable() {
+    let output = json!({
+        "success": false, "timedOut": true,
+        "diagnostics": [{ "severity": "error", "code": "file_line_error",
+            "message": "Undefined control sequence.", "filePath": "main.tex", "line": 7 }]
+    }).to_string();
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("source hint");
+    assert!(hint.contains("main.tex:7"), "{hint}");
+    assert!(hint.contains("smallest source edit"), "{hint}");
+    assert_eq!(latex_failure_class(&output), LatexFailureClass::Source);
+}
+
+#[test]
 fn oracle_busy_profile_errors_get_specific_recovery_instructions() {
     for tool in ["ChatGptWebConsult", "ChatGptWebImage"] {
         for error in [

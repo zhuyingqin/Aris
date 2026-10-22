@@ -781,7 +781,7 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
                   <SvgIcon name="chevronLeft" size={18} />
                 </button>
               )}
-              <ChatImagePreview src={lightboxGeneration.path} alt={copy.enlarge} className="image-workflow-lightbox-image" />
+              <ChatImagePreview src={lightboxGeneration.path} alt={copy.enlarge} className="image-workflow-lightbox-image" interactive={false} />
               {previewableGenerations.length > 1 && (
                 <button type="button" className="image-workflow-lightbox-step is-next" aria-label={copy.next} onClick={() => stepLightbox(1)}>
                   <SvgIcon name="chevronRight" size={18} />

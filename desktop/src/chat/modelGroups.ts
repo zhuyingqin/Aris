@@ -11,8 +11,12 @@ export interface ChatModelGroup {
   options: ChatModelOption[];
 }
 
-/** Group model IDs by their named series, retaining catalog and variant order. */
-export function groupChatModels(options: readonly ChatModelOption[], otherLabel: string): ChatModelGroup[] {
+/** Retain category order, optionally sorting each category by numeric price. */
+export function groupChatModels(
+  options: readonly ChatModelOption[],
+  otherLabel: string,
+  priceSortValues?: ReadonlyMap<string, number>,
+): ChatModelGroup[] {
   const groups = new Map<string, ChatModelGroup>();
   for (const option of options) {
     // Also recognize IDs routed through a provider prefix, such as openai/gpt-6.1-sol.
@@ -28,5 +32,12 @@ export function groupChatModels(options: readonly ChatModelOption[], otherLabel:
     }
     group.options.push(option);
   }
-  return Array.from(groups.values());
+  return Array.from(groups.values(), (group) => {
+    if (priceSortValues) group.options.sort((a, b) => {
+      const left = priceSortValues.get(a.value) ?? Infinity;
+      const right = priceSortValues.get(b.value) ?? Infinity;
+      return left === right ? 0 : left - right;
+    });
+    return group;
+  });
 }

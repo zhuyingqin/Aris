@@ -162,4 +162,19 @@ mod tests {
         assert_eq!(endpoint_for_region(false), GLOBAL_UPDATE_ENDPOINT);
         assert!(endpoint_for_region(false).contains("github.com"));
     }
+
+    /// The edge logs and gates releases on the version in
+    /// `runtime::client_user_agent`, which comes from the workspace manifest.
+    /// A release that bumps only the desktop package reports a stale version:
+    /// 0.4.75 and earlier all sent `aris/0.4.15`.
+    #[test]
+    fn workspace_version_matches_the_shipped_desktop_version() {
+        let tauri: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../package.json")).unwrap();
+        assert_eq!(runtime::CLIENT_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(tauri["version"].as_str(), Some(runtime::CLIENT_VERSION));
+        assert_eq!(package["version"].as_str(), Some(runtime::CLIENT_VERSION));
+    }
 }

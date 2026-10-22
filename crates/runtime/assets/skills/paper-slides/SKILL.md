@@ -2,7 +2,7 @@
 name: paper-slides
 description: "Generate conference presentation slides (beamer LaTeX → PDF + editable PPTX) from a compiled paper, with speaker notes and full talk script. Use when user says \"做PPT\", \"做幻灯片\", \"make slides\", \"conference talk\", \"presentation slides\", \"生成slides\", \"写演讲稿\", or wants beamer slides for a conference talk."
 argument-hint: "[paper-directory-or-talk-length] [— style-ref: <source>]"
-allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, LlmReview, Agent
+allowed-tools: read_file, write_file, edit_file, glob_search, grep_search, bash, ToolSearch, SomniImage, LaTeXCompile, ReadMediaFile, LlmReview, Agent
 ---
 
 # Paper Slides: From Paper to Conference Talk
@@ -14,6 +14,32 @@ Generate conference presentation slides from: **$ARGUMENTS**
 This skill runs **after** Workflow 3 (`/paper-writing`). It takes a compiled paper and generates a presentation slide deck for conference oral talks, spotlight presentations, or poster lightning talks.
 
 Unlike posters (single page, visual-first), slides tell a **temporal story**: each slide builds on the previous one, with progressive revelation of the research narrative. A good talk makes the audience understand *why this matters* before showing *what was done*.
+
+## Delivery contract (required)
+
+Read [the quality contract](references/quality-contract.md) before authoring. A
+successful compile or export is a draft, not acceptance. Use one `slides.json`
+content source for PDF, editable PPTX, notes and script. After export, render and
+inspect **every page of both delivered formats**, including backup slides. PDF
+layout checks cannot validate PPTX layout.
+
+Keep each result's system, parameters, seed set, reference solver and source log
+with its figure. An old figure from another system/run cannot illustrate the
+current result. Redraw from the current log or omit it. Intentional comparisons
+need visible scenario labels. Distinguish measured results, script self-reports,
+analytic expectations and experiments not run. Do not upgrade evidence strength.
+
+Record main-talk time separately from backup slides and reserve Q&A inside the
+agreed slot unless the user says it is outside. Move detail to notes or backup
+before reducing font size. Review the actual plots' axes, units and legends at
+projection size, not just the size of surrounding text.
+
+The final independent Reviewer must examine the current artifacts and their
+rendered pages. `Needs revision`, unresolved blockers, skipped review, stale
+review hashes, or missing render checks keep state at `needs_revision` or
+`draft_pending_review`. Never label these `completed` or "ready to present".
+User authorization for an outline or revision persists; do not repeat already
+answered checkpoints during an authorized optimization.
 
 ## Constants
 
@@ -137,6 +163,11 @@ Persist state to `slides/SLIDES_STATE.json` after each phase:
 
 6. **Determine slide count**: from TALK_TYPE and TALK_MINUTES using the table above
 
+   Explicit user slide count takes precedence and includes cover and backup.
+   For a group meeting, reserve discussion time before distributing the main
+   slide timings. A 25-minute slot can use 18 main slides in about 21 minutes
+   and 4 backup slides; do not silently add backup pages to a requested total.
+
 7. **Check for resume**: read `slides/SLIDES_STATE.json` if it exists
 
 **State**: Write `SLIDES_STATE.json` with `phase: 0`.
@@ -186,10 +217,12 @@ Read `paper/sections/*.tex` and build a slide-by-slide outline.
 
 **For each slide, specify**:
 - Title (max 8 words)
-- 3-5 bullet points (max 8 words each)
+- One purpose and its most useful form: equation, plot, table, comparison or text
+- Short visible text; keep explanation and provenance in the notes
 - Figure reference (if any) from paper/figures/
+- Figure/log run identity and any limitation affecting the conclusion
 - Speaker note (2-3 sentences of what to say)
-- Time allocation (in seconds)
+- Main/backup role and time allocation (in seconds, backup = 0)
 
 **Output**: `slides/SLIDE_OUTLINE.md`
 
@@ -211,7 +244,9 @@ Slide-by-slide outline:
 Proceed to drafting? Or adjust the outline?
 ```
 
-**⛔ STOP HERE and wait for user response.** This is the most critical checkpoint — the outline determines the entire talk flow.
+Wait here if the outline requires a new user decision. If the user already
+authorized this outline, a redesign, or iterative optimization, proceed within
+that scope. Do not ask the same approval again.
 
 Options:
 - **"go"** → proceed to Phase 2
@@ -229,22 +264,49 @@ For each slide in the outline, draft the actual content.
 | Rule | Rationale |
 |------|-----------|
 | **One message per slide** | If a slide has two ideas, split it |
-| **Max 6 lines per slide** | More than 6 lines = wall of text |
-| **Max 8 words per line** | Audience reads, not listens, if text is long |
-| **Sentence fragments, not sentences** | "Improves F1 by 3.2%" not "Our method improves the F1 score by 3.2 percentage points" |
-| **Figure slides: figure ≥60% area** | The figure IS the content; bullets are annotations |
+| **Use the content's natural form** | Equations, tables and plots often communicate better than bullet lists |
+| **Budget rendered lines and reading time** | English word counts do not measure CJK text density; inspect wrapping at final size |
+| **Concise, specific wording** | Put derivations, qualifications and full prose in notes; keep essential scientific caveats visible |
+| **Readable evidence plots** | Enlarge the relevant panel or redraw from source data; do not shrink a 4–6 panel paper figure into a corner |
 | **Bold key numbers** | "Achieves **94.3%** accuracy" |
 | **Progressive disclosure** | Use `\pause` or `\onslide` for complex slides |
 | **No Related Work slide** | Unless invited talk (30+ min) |
+
+When a slide explains a process, decision, feedback loop or method's data flow,
+use `/latex-diagrams` for a native TikZ explanation. Choose the graph from the
+question being explained, with meaningful input/output and branch labels;
+avoid decorating a text list with boxes. Keep its semantic node/edge content
+and assumptions in `slides.json` so the PPTX and notes express the same logic.
+Retain the TikZ source; an included vector diagram in PPTX is not automatically
+a set of editable PowerPoint shapes. Inspect its final PDF/PPTX appearance.
+The `\fittikz` wrapper below limits the bounding box, not the minimum readable
+font size: simplify or split a diagram if fitting makes its labels too small.
+
+For conceptual illustrations, application scenes or spatial intuition, use the
+existing `SomniImage` tool when available and appropriate to the request; follow
+the [image and hybrid guide](../latex-diagrams/references/image-generation.md).
+Combine a generated scene with native labels, equations and arrows when exact
+notation matters. Keep the chosen asset and generation provenance in the common
+content source, visibly identify schematics, and inspect the final PDF and PPTX.
+Use actual data and source images for results, screenshots and evaluated samples.
 
 **For each slide, produce**:
 1. `\frametitle{}`
 2. Content (itemize or figure + caption)
 3. `\note{}` with speaker text (if SPEAKER_NOTES=true)
 
+Persist these in `slides/slides.json`, including stable slide IDs, main/backup,
+seconds, visible strings, equations, table/chart values, source IDs and notes.
+Generate the TeX frames and PPTX from that file. Do not maintain a second
+handwritten content array in `generate_pptx.py`. Keep full precision in chart
+data and use display formatting for rounding. When calculating a range or
+aggregate, specify which runs and which column it summarizes.
+
 ### Phase 3: Generate Slides LaTeX
 
 Create `slides/main.tex` using beamer.
+Generate the frame content from `slides.json`; the following is a layout
+template, not a second independent copy of the talk's content.
 
 **Template structure**:
 
@@ -272,6 +334,8 @@ Create `slides/main.tex` using beamer.
 % Packages
 \usepackage{graphicx,amsmath,booktabs}
 \usepackage{adjustbox}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds}
 \graphicspath{{figures/}}
 
 % Safe TikZ wrapper: scales to fit column/page without absolute-coord overflow.
@@ -390,7 +454,7 @@ if [ "$TOTAL" -gt 0 ]; then
   echo "--- Overfull lines ---"
   grep -n "Overfull" main.log | head -30
   echo "Fix these before proceeding to Phase 5."
-  # Loop back to error handling: parse which frame/line, apply TikZ safety rules
+  exit 1
 fi
 echo "✅ Layout clean: 0 overfull boxes."
 ```
@@ -407,13 +471,20 @@ echo "✅ Layout clean: 0 overfull boxes."
 pdfinfo slides/main.pdf | grep Pages
 ```
 
-If page count differs significantly from outline (>2 slides off), investigate.
+Require an exact match to the requested total and outline. Explicitly planned
+overlays must be accounted for in the PDF/PPTX delivery mapping. Do not accept
+two unexplained extra or missing pages.
+
+Render every PDF page to an image and inspect each at readable size. A contact
+sheet checks consistency and flow only. Save the artifact hash and per-page
+review records. Any later change invalidates the affected output's review.
 
 **State**: Write `SLIDES_STATE.json` with `phase: 4`.
 
-### Phase 5: `LlmReview` Review
+### Phase 5: Draft Content Review
 
-Send the slide outline + selected LaTeX frames to the reviewer:
+This is an early content review, not final visual acceptance. Send the outline,
+source/evidence map and rendered PDF pages to the independent Reviewer:
 
 ```
 LlmReview:
@@ -423,8 +494,8 @@ LlmReview:
     Evaluate using these criteria (score 1-5 each):
 
     1. **Story arc** — Does the talk build a compelling narrative? (Problem → insight → method → evidence → takeaway)
-    2. **Slide density** — Any slides with too much text? (Max 6 lines, 8 words/line)
-    3. **Time budget** — Is [N] slides realistic for [TALK_MINUTES] minutes?
+    2. **Slide density** — Are visible text, equations, table cells and axes readable at projection size?
+    3. **Time budget** — Do main slides plus Q&A fit the slot, excluding backups?
     4. **Figure visibility** — Will figures be readable on a projector?
     5. **Opening hook** — Do slides 2-3 grab attention? (Not "In this paper, we...")
     6. **Takeaway** — Is the final message clear and memorable?
@@ -442,9 +513,13 @@ LlmReview:
     - Overall: Ready to present? (Yes / Needs revision / Major issues)
 ```
 
-Apply fixes. Recompile if LaTeX was changed.
+Apply fixes to the common content source or layout. Rebuild and render changed
+outputs. Preserve unresolved review findings in state instead of treating
+"feedback saved" as "review passed".
 
-> ⚠️ If `LlmReview` is not available (no OpenAI API key), skip external review and proceed to Phase 6. Note the skip in `SLIDES_STATE.json`.
+If `LlmReview` is unavailable, continue producing a useful draft and record
+`draft_pending_review`. Do not invent an independent review or call a self-check
+independent. The completed gate still requires a separate Reviewer.
 
 Save review to `slides/SLIDES_REVIEW.md`.
 
@@ -491,7 +566,7 @@ python3 -c "import pptx" 2>/dev/null || pip install python-pptx
 Write `slides/generate_pptx.py` that:
 
 1. Creates a PPTX with correct aspect ratio (16:9 → 13.33" x 7.5"; 4:3 → 10" x 7.5")
-2. For each beamer frame:
+2. Reads each slide from the same `slides.json` used for TeX:
    - Creates a slide with matching layout
    - Title in venue primary color, bold
    - Bullet points with venue accent color markers
@@ -500,6 +575,11 @@ Write `slides/generate_pptx.py` that:
 3. Title slide with special formatting (centered, larger title)
 4. Thank You slide with centered text
 5. Applies venue color scheme throughout
+6. Uses native editable tables and charts for supplied data, with explicit fonts,
+   row heights, labels and units. Table and text placement use measured content
+   regions; do not hardcode a table at the same Y position as existing bullets.
+7. Treats missing assets as errors instead of silently omitting them. Preserve
+   aspect ratios and both width and height limits for figures.
 
 ```bash
 cd slides && python3 generate_pptx.py
@@ -507,6 +587,16 @@ cd slides && python3 generate_pptx.py
 ```
 
 > ⚠️ If `python-pptx` is not installed, skip with a note: "Install `pip install python-pptx` to enable PowerPoint export."
+
+If editable PPTX is requested and cannot be produced, keep draft/incomplete
+status and report the missing deliverable. Do not claim export succeeded.
+
+Render the **exported PPTX**, not a separately authored HTML/PDF approximation.
+Use an available presentation renderer (PowerPoint, LibreOffice, or a compatible
+artifact renderer). Inspect all pages, especially native tables, charts, image
+labels and the bottom edge. Record the renderer. If unavailable, label PPTX
+visual validation as pending and keep draft status. Never claim PowerPoint was
+tested unless it was actually opened there.
 
 **State**: Write `SLIDES_STATE.json` with `phase: 7`.
 
@@ -608,10 +698,35 @@ The paper and code are available at the QR code on screen. I'm happy to take que
 **A**: "[Answer]."
 ```
 
+### Phase 9: Final Visual and Independent Review Gate
+
+1. Build `QUALITY_MANIFEST.json` following `references/quality-contract.md`.
+   Bind the PDF, PPTX, content file, logs and figures by SHA256. Record one
+   rendered image and visual verdict for each page in each format.
+2. Have the independent Reviewer inspect the current rendered PDF **and PPTX**,
+   slide order, timing, evidence identity, plot readability and all unresolved
+   findings. Preserve its report and exact artifact hashes. A source-only review
+   cannot pass this gate. Revise and repeat for blockers, within the agreed scope.
+3. Run the bundled checker (resolve `SLIDE_QUALITY_TOOL` through the runtime
+   cache in the same way as other bundled tools):
+
+   ```bash
+   SLIDE_QUALITY_TOOL="${ARIS_CACHE_DIR:-$HOME/.aris/cache}/skills/paper-slides/tools/slide_quality.py"
+   python3 "$SLIDE_QUALITY_TOOL" slides/QUALITY_MANIFEST.json --stage final --report slides/QUALITY_REPORT.json
+   ```
+
+   Before review, `--stage draft` checks sources, counts, timing and object
+   bounds. It explicitly does not authorize completion. Exit code 1 blocks
+   completion. Read the errors and fix them; never change hashes or verdicts to
+   hide an unreviewed output. The checker verifies records, not scientific truth
+   or all possible layout errors; rendered inspection remains mandatory.
+4. Only after a passing final report set `phase: 9, status: "completed"`.
+   Otherwise deliver the useful draft with accurate status and remaining issues.
+
 ### Final Output Summary
 
 ```
-📊 Slide generation complete:
+📊 Slide files generated [ready / draft pending review]:
 - Talk type: [TALK_TYPE] ([TALK_MINUTES] min) for [VENUE]
 - Files:
   slides/
@@ -633,7 +748,7 @@ Next steps:
 4. Do a dry run with a colleague
 ```
 
-**State**: Write `SLIDES_STATE.json` with `phase: 8, status: "completed"`.
+**State**: Completion is controlled by Phase 9. Phase 8 alone remains a draft.
 
 ## Recommended Follow-up: `/slides-polish`
 
@@ -659,9 +774,11 @@ needed (re-run `/paper-slides` instead).
 
 - **Large file handling**: If the Write tool fails due to file size, immediately retry using Bash (`cat << 'EOF' > file`) to write in chunks. Do NOT ask the user for permission — just do it silently.
 - **One message per slide.** If a slide has two ideas, split it into two slides.
-- **Do NOT fabricate data.** All numbers must come from `paper/sections/*.tex`.
-- **Bullet points only** — never full sentences on slides. Sentence fragments are fine.
-- **Figure slides: figure ≥60% of slide area.** The figure IS the content.
+- **Do NOT fabricate data.** Trace numbers to the supplied paper, data or logs;
+  preserve metric definitions, source excerpts and run identity. A script's
+  self-report is not a measured result.
+- Use concise text, equations, editable tables or charts according to the slide's purpose.
+- Make plotted evidence readable; extract a labeled panel or redraw it from its source log.
 - **Progressive disclosure**: Use `\pause` or `\onslide` for complex method slides.
 - **De-AI polish**: Remove watch words from all slide text and talk script.
 - **Do NOT hallucinate citations.** Reference only papers cited in the paper.
@@ -670,6 +787,9 @@ needed (re-run `/paper-slides` instead).
 - **TikZ in columns: always use `\fittikz{}`**. Absolute node distances (e.g., `right=1cm of`, `minimum width=2.2cm`) inside `\column{0.5\textwidth}` routinely sum to >7.6 cm and overflow. No exceptions.
 - **`\linewidth` ≠ `\textwidth` inside columns.** Use `\linewidth` for anything that must fit within a `\column`; `\textwidth` spans the full slide width.
 - **Overfull boxes = blocker.** Any `Overfull \hbox` or `Overfull \vbox` in the compile log must be resolved before Phase 5. The mandatory audit in Phase 4 enforces this.
+- **Both formats need visual review.** A clean PDF does not prove the editable PPTX is clean.
+- **No mixed-run evidence.** Label intentional comparisons and retain source hashes.
+- **No premature completion.** An unavailable or negative independent review cannot produce completed status.
 
 ## Parameter Pass-Through
 
