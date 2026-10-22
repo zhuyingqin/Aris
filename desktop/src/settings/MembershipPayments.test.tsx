@@ -40,6 +40,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); writeCachedAccount(null); });
 
 describe("Desktop membership payments", () => {
+  it("keeps the agreed plan when a background account refresh changes the membership tier", async () => {
+    const panel = renderPanel();
+    await screen.findByRole("checkbox");
+    agree();
+    panel.rerender(<MembershipPayments language="cn" account={{ ...account, group: "plus", subscriptionName: "Plus" }} active onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /^Go/ }).getAttribute("aria-pressed")).toBe("true");
+    submit();
+    await waitFor(() => expect(newapiPaymentCheckout).toHaveBeenCalledWith(expect.objectContaining({ group: "go", expectedFen: 1900 })));
+  });
+
   it.each([['go', 'plus'], ['plus', 'pro'], ['pro', 'pro']] as const)("shows the current %s plan and selects %s for an existing member", async (tier, selected) => {
     const member = { ...account, group: tier, subscriptionName: tier };
     writeCachedAccount(member);

@@ -179,6 +179,7 @@ jobs:
         working-directory: desktop
         run: |
           npm run test:scripts
+          npx vitest run src/tests/AppAccountMenu.test.tsx src/tests/AppCodeNavigation.test.tsx src/tests/useAccountRefresh.test.tsx src/settings/MembershipPayments.test.tsx src/settings/SettingsConnection.test.tsx src/typeset/tests/TypesetVisualEditorSync.test.tsx
           npx vitest run src/platform.test.ts src/windowControls.test.ts src/chat/ChatCompanion.test.tsx src/chat/tests/Chat.test.tsx src/chat/tests/ChatThreadLanding.test.tsx src/chat/tests/docxReview.test.ts src/chat/tests/ChatImageReference.test.tsx src/chat/tests/ChatImageDeduplication.test.tsx src/chat/tests/SideFileViewer.test.tsx src/editor/tests/workspaceFiles.test.ts src/pdf/tests/runtime.test.ts src/chat/tests/AgentTaskCards.test.tsx src/figures/FigureStylePicker.test.tsx
           npm run typecheck
           npm run build
@@ -192,6 +193,8 @@ jobs:
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib state::tests -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib pinned_runtime_matches_the_offline_build_script -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib latex_toolchain_prompt -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib newapi:: -- --test-threads=1
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib figure_model_choices_survive_conflicting_defaults_and_allow_recovery -- --test-threads=1
 
   docx-converters:
     name: native Word equation and atomic-save regressions

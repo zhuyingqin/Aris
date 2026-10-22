@@ -231,7 +231,7 @@ export default function MembershipPayments({ language, account, active, onClose 
         {(!catalog.purchaseEnabled || !catalog.pagePayEnabled) && <p role="status">{t.unavailable}</p>}
         <div className="sp-membership-consent">
           <label><input type="checkbox" checked={consent} disabled={creating} aria-describedby={`${titleId}-terms`}
-            onChange={(event) => setConsent(event.target.checked)} />{t.consent}</label>
+            onChange={(event) => { setSelected(selected); setConsent(event.target.checked); }} />{t.consent}</label>
           <a href={`https://ensuanx.com/user-service-agreement.html?lang=${language === "cn" ? "zh" : "en"}`}
             onClick={(event) => { event.preventDefault(); void openExternalUrl(event.currentTarget.href).catch((failure) => setError(message(failure))); }}>
             {t.agreement}

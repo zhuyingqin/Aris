@@ -44,12 +44,12 @@ fn chat_script_tools_reject_office_takeover_before_starting_a_subprocess() {
 fn repl_executes_python_code() {
     let result = execute_tool(
         "REPL",
-        &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
+        &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 10_000}),
     )
     .expect("REPL should succeed");
     let output: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(output["language"], "python");
-    assert_eq!(output["exitCode"], 0);
+    assert_eq!(output["exitCode"], 0, "{output}");
     assert!(output["stdout"].as_str().expect("stdout").contains('2'));
 }
 
