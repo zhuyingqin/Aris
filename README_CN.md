@@ -220,47 +220,23 @@
 
 ## 🚀 安装
 
-SomniQ Studio 以 **Windows** 桌面应用形式发布（Tauri 2 + React + Vite），打包为 NSIS 安装包。
+SomniQ Studio 提供 **Windows 10/11 x64**（NSIS 安装包）和 **macOS 12+**（Apple 芯片与 Intel 通用 DMG）两个版本，在 [GitHub Releases](https://github.com/zhuyingqin/Aris/releases/latest) 下载。
 
-**依赖：** Windows 10/11 + WebView2 Runtime · Node.js 18+ · Rust stable（MSVC）· Visual Studio C++ Build Tools
-
-### 从源码运行
-
-```powershell
-git clone https://github.com/zhuyingqin/SomniQ.git
-cd SomniQ\desktop
-npm install
-npm run tauri dev
-```
-
-### 构建 Windows 安装包
-
-```powershell
-cd desktop
-npm run tauri build
-```
-
-产物在 `desktop\src-tauri\target\release\` 下：`aris-desktop.exe` 与 `SomniQ Studio_0.4.8_x64-setup.exe`。
+完整步骤（包括 Windows SmartScreen、macOS“仍要打开”等首次启动提示，以及更新、卸载和从源码构建）见 **[安装教程](docs/user-guide/installation.md)**。
 
 ---
 
 ## ⚙️ 首次配置
 
-首次启动会打开 **Settings**，在这里配置：
+首次启动后用 **SomniQ 账号** 登录（登录页可注册），选择界面语言和主题即可开始使用。模型通过账号自动同步，当前版本不再支持在应用中填写第三方 API Key；执行模型与 Reviewer 模型在 **设置 → 模型服务** 中选择。
 
-- **Executor** 与 **Reviewer** —— provider、model、base URL、API key
-- **Scopus API key**、**语言**、**记忆写入审批** 与对当前模型配置的 **连通性检查**
-
-配置保存在本地 `~/.config/SomniQ/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
+详见 **[快速上手](docs/user-guide/quick-start.md)** 与 **[账号、会员与模型](docs/user-guide/account-and-models.md)**；全部功能说明见 **[用户手册](docs/user-guide/README.md)**。
 
 ### MCP 与 Playwright
 
-SomniQ 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Extensions → Plugins** 与
-**Settings → Permissions & MCP** 中提供配置入口。Windows 安装包会内置
-`aris-playwright-mcp` launcher、vendored `@playwright/mcp` 和 Node runtime，因此用户添加
-Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Microsoft Edge
-（`--browser=msedge`）、启用 PDF 工具（`--caps=pdf`），并把浏览器 profile 与输出文件放在
-`.somniq/tmp/browser/`；如需自定义浏览器参数，可在 MCP 页面编辑。
+MCP 服务器在 **设置 → 插件** 中管理，配置保存在全局的 `~/.config/SomniQ/mcp.json`。安装包内置
+`aris-playwright-mcp` 启动器、vendored `@playwright/mcp` 和 Node 运行时，添加 Playwright 预设时不需要
+自己安装 Node.js / npm。详见 [插件、邮箱与手机远程](docs/user-guide/plugins-mail-remote.md) 与 [docs/mcp.md](docs/mcp.md)。
 
 ---
 
