@@ -22,6 +22,7 @@ import {
   pptMasterFixLabel,
 } from "./i18n";
 import PptMasterPreview from "./PptMasterPreview";
+import PluginPackages from "./PluginPackages";
 import type {
   McpConfigView,
   ManagedMcpServerSummary,
@@ -452,6 +453,15 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
       </header>
 
       <div className="ext-scroll">
+        {extTab === "plugins" && <PluginPackages
+          projectPath={currentProject?.path}
+          language={language}
+          onChanged={() => {
+            skillsList().then(setSkills).catch((error) => setError(String(error)));
+            mcpConfigGet().then(setView).catch((error) => setError(String(error)));
+            setTestResult(null);
+          }}
+        />}
         {extTab === "plugins" ? (
           !view ? (
             <div className="ext-empty">{copy.loadingMcp}</div>

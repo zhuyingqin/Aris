@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn plugin_skill_enablement_controls_shared_discovery_and_loading() {
+    let _guard = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("plugin-skill-lifecycle");
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("package");
+    fs::create_dir_all(source.join("skills/plugin-continuity")).unwrap();
+    fs::write(source.join("package.json"), r#"{"name":"continuity-plugin","version":"1.0.0","dsh":{"bundle":{"patch":"cordis.patch.yml"}}}"#).unwrap();
+    fs::write(source.join("cordis.patch.yml"), "- insert:\n  - name: '@deepseek-ai/dsh-skill-filesystem'\n    config:\n      includeDefaultRoots: false\n      customSkillDirs: ['./skills']\n").unwrap();
+    fs::write(source.join("skills/plugin-continuity/SKILL.md"), "---\nname: plugin-continuity\ndescription: Preserve research continuity\n---\nConsult the evidence ledger.\n").unwrap();
+    let context = runtime::ProjectExecutionContext::new(&root);
+    runtime::with_project_execution_context(&context, || {
+        let store = runtime::plugins::PluginStore::for_workspace(&root);
+        let preview = store.preview(&source).unwrap();
+        store.install(&source, &preview.digest).unwrap();
+        assert!(skill_markdown("plugin-continuity").is_none());
+        store.set_enabled("continuity-plugin", true).unwrap();
+        assert!(discover_skills().iter().any(|skill| skill.name == "plugin-continuity"));
+        assert!(skill_markdown("plugin-continuity").unwrap().contains("Consult the evidence ledger"));
+        // Explicit project skill overrides continue to win.
+        let local = runtime::aris_project_skills_dir(&root).join("plugin-continuity");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("SKILL.md"), "Project override").unwrap();
+        assert_eq!(skill_markdown("plugin-continuity").unwrap(), "Project override");
+        fs::remove_file(local.join("SKILL.md")).unwrap();
+        store.set_enabled("continuity-plugin", false).unwrap();
+        assert!(skill_markdown("plugin-continuity").is_none());
+        assert!(!discover_skills().iter().any(|skill| skill.name == "plugin-continuity"));
+    });
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn skill_loads_local_skill_prompt() {
     // Create a temporary skill directory
     let tmp = std::env::temp_dir().join(format!("aris-skill-test-{}", std::process::id()));

@@ -3559,6 +3559,9 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     // 2. Project-level .somniq/skills/
     if let Ok(cwd) = runtime::execution_current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
+        // Opt-in plugin snapshots follow explicit local overrides and use the
+        // same discovery/loader in Desktop, CLI and research execution.
+        roots.extend(runtime::plugins::PluginStore::for_workspace(&cwd).active_skill_roots().unwrap_or_default());
     }
 
     // 3. Legacy Claude Code skills are opt-in compatibility only.

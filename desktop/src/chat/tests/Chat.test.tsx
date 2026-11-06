@@ -9,6 +9,7 @@ import type {
   ProjectIntentObservation,
 } from "../../api/tauri";
 import type { AgentTaskCard } from "../../api/agentTasks";
+import type { ActiveUiPanel } from "../../api/plugins";
 import type {
   ChatReasoningEffortView,
   ChatTodoItem,
@@ -33,9 +34,9 @@ const apiMocks = vi.hoisted(() => ({
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
-  backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectSetCurrent: vi.fn<(id: string) => Promise<{ projects: DesktopProject[]; currentProject: DesktopProject }>>(),
   stateDir: vi.fn(() => Promise.resolve("F:/SomniQState")),
+  backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
   projectIntentObserve: vi.fn<(
     projectId: string,
@@ -135,6 +136,18 @@ const agentMocks = vi.hoisted(() => ({
   onChatAgentActivity: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
+const pluginMocks = vi.hoisted(() => ({
+  usePanels: vi.fn<() => { panels: ActiveUiPanel[]; loaded: boolean; error: string; refresh: () => Promise<void> }>(),
+  stateGet: vi.fn(() => Promise.resolve({ revision: 0, todoLists: {}, notes: {} })),
+}));
+vi.mock("../../extensions/useChatPluginPanels", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../extensions/useChatPluginPanels")>(),
+  useChatPluginPanels: pluginMocks.usePanels,
+}));
+vi.mock("../../api/plugins", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../api/plugins")>(),
+  pluginsUiStateGet: pluginMocks.stateGet,
+}));
 vi.mock("../../api/tauri", () => apiMocks);
 vi.mock("../../api/agentTasks", () => agentMocks);
 vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
@@ -382,6 +395,7 @@ describe("Chat export action", () => {
     portal.id = "app-chat-actions-portal";
     document.body.appendChild(portal);
     vi.clearAllMocks();
+    pluginMocks.usePanels.mockReturnValue({ panels: [], loaded: true, error: "", refresh: async () => {} });
     apiMocks.isTauri.mockReturnValue(true);
     agentMocks.chatAgentList.mockResolvedValue([]);
     apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 });
@@ -394,6 +408,12 @@ describe("Chat export action", () => {
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
+    apiMocks.projectSetCurrent.mockImplementation(async (id) => {
+      const projects = useStore.getState().projects;
+      const currentProject = projects.find((project) => project.id === id);
+      if (!currentProject) throw new Error(`Unknown project: ${id}`);
+      return { projects, currentProject };
+    });
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.chatEventsRead.mockResolvedValue([]);
     apiMocks.reviewWorkflowsList.mockResolvedValue([]);
@@ -408,12 +428,6 @@ describe("Chat export action", () => {
       return Promise.resolve(reasoningViewFor(model, storedEffort));
     });
     apiMocks.chatTasksGet.mockResolvedValue([]);
-    apiMocks.projectSetCurrent.mockImplementation(async (id) => {
-      const projects = useStore.getState().projects;
-      const currentProject = projects.find((project) => project.id === id);
-      if (!currentProject) throw new Error(`Unknown project: ${id}`);
-      return { projects, currentProject };
-    });
     apiMocks.workTaskList.mockResolvedValue([]);
     apiMocks.onWorkTaskChanged.mockImplementation(() => Promise.resolve(() => undefined));
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
@@ -449,6 +463,28 @@ describe("Chat export action", () => {
     expect(clampSidePanelWidth(1_400, 1_150)).toBe(730);
     expect(clampSidePanelWidth(200, 1_150)).toBe(320);
     expect(clampSidePanelWidth(900, 600)).toBe(320);
+  });
+
+  it("opens a user plugin in the existing sidebar and unloads it after disable", async () => {
+    apiMocks.isTauri.mockReturnValue(false);
+    const session = seedChatWithTurns();
+    const contribution: ActiveUiPanel = {
+      pluginName: "@lab/custom-desk", packageDigest: "abc", id: "desk", slot: "chat.sidebar", order: 0,
+      title: { en: "My research desk", cn: "我的研究台" },
+      widgets: [{ id: "todo", type: "todo-list", title: "Custom checklist" }],
+    };
+    pluginMocks.usePanels.mockReturnValue({ panels: [contribution], loaded: true, error: "", refresh: async () => {} });
+    const view = render(<Chat />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open plugin panel" }));
+    await screen.findByRole("tab", { name: "My research desk" });
+    await screen.findByRole("region", { name: "Custom checklist" });
+    expect(pluginMocks.stateGet).toHaveBeenCalledWith(defaultProject.path, "@lab/custom-desk", "desk", session.id);
+    fireEvent.click(screen.getByRole("button", { name: "Open plugin panel" }));
+    expect(screen.getAllByRole("tab", { name: "My research desk" })).toHaveLength(1);
+    pluginMocks.usePanels.mockReturnValue({ panels: [], loaded: true, error: "", refresh: async () => {} });
+    view.rerender(<Chat />);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Custom checklist" })).toBeNull());
+    expect(screen.queryByRole("tab", { name: "My research desk" })).toBeNull();
   });
 
   it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
@@ -1302,42 +1338,6 @@ describe("Chat export action", () => {
     ));
   });
 
-  it("keeps concurrent chats and completed replies in their independent projects", async () => {
-    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
-    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
-    const first = { ...makeSession(firstProject.id), id: "chat-first-project", title: "First project chat" };
-    const second = { ...makeSession(secondProject.id), id: "chat-second-project", title: "Second project chat" };
-    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First history" }] }];
-    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second history" }] }];
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
-    localStorage.setItem(CURRENT_KEY, first.id);
-    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
-
-    let finishFirst: ((reply: string) => void) | undefined;
-    let finishSecond: ((reply: string) => void) | undefined;
-    apiMocks.chatSend
-      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
-      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
-
-    render(<Chat />);
-    await userEvent.click(await screen.findByRole("button", { name: first.title }));
-    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project question");
-    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
-      first.id, expect.objectContaining({ projectId: firstProject.id }),
-    ));
-
-    act(() => useStore.setState({ currentProject: secondProject }));
-    await userEvent.click(await screen.findByRole("button", { name: second.title }));
-    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
-    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project question");
-    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
-      second.id, expect.objectContaining({ projectId: secondProject.id }),
-    ));
-    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
-
-    act(() => finishFirst?.("First project answer"));
   it("sends a second new chat in the same project while the first new chat is still running", async () => {
     let finishFirst: ((reply: string) => void) | undefined;
     let finishSecond: ((reply: string) => void) | undefined;
@@ -1537,6 +1537,42 @@ describe("Chat export action", () => {
     expect(apiMocks.chatCancel).not.toHaveBeenCalled();
   });
 
+  it("keeps concurrent chats and completed replies in their independent projects", async () => {
+    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
+    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
+    const first = { ...makeSession(firstProject.id), id: "chat-first-project", title: "First project chat" };
+    const second = { ...makeSession(secondProject.id), id: "chat-second-project", title: "Second project chat" };
+    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First history" }] }];
+    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
+    localStorage.setItem(CURRENT_KEY, first.id);
+    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
+
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: first.title }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      first.id, expect.objectContaining({ projectId: firstProject.id }),
+    ));
+
+    act(() => useStore.setState({ currentProject: secondProject }));
+    await userEvent.click(await screen.findByRole("button", { name: second.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      second.id, expect.objectContaining({ projectId: secondProject.id }),
+    ));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    act(() => finishFirst?.("First project answer"));
     await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
       expect.objectContaining({
         id: first.id,

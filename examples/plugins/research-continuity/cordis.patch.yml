@@ -1,0 +1,6 @@
+- insert:
+    - id: research-continuity-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        includeDefaultRoots: false
+        customSkillDirs: ['./skills']

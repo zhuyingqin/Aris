@@ -34,6 +34,7 @@ mod memory;
 mod newapi;
 mod oracle_web;
 mod platform;
+mod plugins;
 mod playwright_pdf;
 mod ppt_master;
 mod process;
@@ -995,6 +996,14 @@ pub fn run() {
             scheduled::scheduled_task_set_status,
             scheduled::scheduled_task_delete,
             mcp::mcp_config_get,
+            plugins::plugins_list,
+            plugins::plugins_preview,
+            plugins::plugins_install,
+            plugins::plugins_set_enabled,
+            plugins::plugins_remove,
+            plugins::plugins_ui_list,
+            plugins::plugins_ui_state_get,
+            plugins::plugins_ui_state_update,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
             oracle_web::oracle_web_status,

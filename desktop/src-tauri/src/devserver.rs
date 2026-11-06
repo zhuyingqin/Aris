@@ -38,6 +38,14 @@ use crate::engine::{ChatState, WorkflowSessionBinding, WorkflowTurnRequest};
 /// `/health` can report the surface and an unknown command fails loudly
 /// instead of silently doing nothing.
 const COMMANDS: &[&str] = &[
+    "plugins_list",
+    "plugins_preview",
+    "plugins_install",
+    "plugins_set_enabled",
+    "plugins_remove",
+    "plugins_ui_list",
+    "plugins_ui_state_get",
+    "plugins_ui_state_update",
     "profile_stats",
     "review_workflows_list",
     "review_workflow_load",
@@ -276,6 +284,21 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
     }
 
     match command {
+        "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_set_enabled" | "plugins_remove"
+        | "plugins_ui_list" | "plugins_ui_state_get" | "plugins_ui_state_update" => {
+            let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
+            let command = command.to_string();
+            crate::blocking::off_main_thread(move || match command.as_str() {
+                "plugins_list" => encode(store.list()?),
+                "plugins_preview" => encode(store.preview(parse::<String>(&args, "source")?)?),
+                "plugins_install" => encode(store.install(parse::<String>(&args, "source")?, &parse::<String>(&args, "expectedDigest")?)?),
+                "plugins_set_enabled" => encode(store.set_enabled(&parse::<String>(&args, "name")?, parse(&args, "enabled")?)?),
+                "plugins_ui_list" => encode(store.active_ui_panels()?),
+                "plugins_ui_state_get" => encode(store.ui_state_get(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?)?),
+                "plugins_ui_state_update" => encode(store.ui_state_update(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?, parse(&args, "expectedRevision")?, parse(&args, "action")?)?),
+                _ => encode(store.remove(&parse::<String>(&args, "name")?)?),
+            }).await
+        }
         "somni_image_settings" => encode(crate::image_api::somni_image_settings()),
         "somni_image_settings_set" => encode(crate::image_api::somni_image_settings_set(
             parse(&args, "enabled")?, args.get("model").and_then(Value::as_str).map(ToString::to_string),
