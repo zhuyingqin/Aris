@@ -1079,6 +1079,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 struct KernelToolExecutor {
     session_id: String,
     turn_id: String,
+    turn_agent: Option<crate::agent_threads::TurnAgent>,
     extra_blocked_tools: &'static [&'static str],
     cancelled: Option<Arc<AtomicBool>>,
     progress_sink: Option<ToolProgressSink>,
@@ -1337,6 +1338,22 @@ impl ToolExecutor for KernelToolExecutor {
         if tools::collaboration::is_tool(tool_name) {
             return collaboration::execute(&self.session_id, &self.turn_id, _tool_use_id, tool_name, input).map_err(ToolError::new);
         }
+        if tool_name == "LlmReview" {
+            return run_llm_review_tool(
+                self.turn_agent.as_ref(),
+                &self.session_id,
+                _tool_use_id,
+                self.project_execution_context.current_dir(),
+                self.cancelled.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                &value,
+            ).map_err(|message| {
+                if self.is_cancelled() || message == "interrupted by user" {
+                    ToolError::interrupted_by_user()
+                } else {
+                    ToolError::new(message)
+                }
+            });
+        }
         if crate::mail::is_mail_tool(tool_name) {
             return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
         }
@@ -1490,6 +1507,94 @@ fn browser_pdf_download_fallback(
             )),
         }
     })
+}
+
+#[derive(Deserialize)]
+struct LlmReviewToolInput {
+    prompt: String,
+    model: Option<String>,
+}
+
+fn run_llm_review_tool(
+    agent: Option<&crate::agent_threads::TurnAgent>,
+    session_id: &str,
+    tool_use_id: &str,
+    workspace: &Path,
+    cancelled: Arc<AtomicBool>,
+    input: &Value,
+) -> Result<String, String> {
+    let input: LlmReviewToolInput = serde_json::from_value(input.clone())
+        .map_err(|error| format!("invalid LlmReview input: {error}"))?;
+    if input.prompt.trim().is_empty() {
+        return Err("LlmReview prompt must not be empty".to_string());
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("interrupted by user".to_string());
+    }
+    let oracle = configured_reviewer_identity()
+        .is_some_and(|(provider, _)| provider.eq_ignore_ascii_case("oracle-web"));
+    if oracle {
+        return crate::oracle_web::run_bound_reviewer(input.prompt, cancelled);
+    }
+    // The turn/configuration already installed the Reviewer environment. Freeze
+    // that connection before starting the child; never use the Executor client.
+    let prepared = tools::prepare_llm_review(input.model)?;
+    let identity = prepared.figure_identity();
+    let mode = if review_runs_in_thread(
+        crate::config::review_mode(),
+        agent.is_some(),
+        Some(&identity.provider),
+    ) {
+        "subagent"
+    } else {
+        "oneshot"
+    };
+    let started = Instant::now();
+    crate::chat_events::record_wire_event(
+        session_id,
+        "reviewer.request",
+        json!({
+            "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+            "role": "reviewer", "mode": mode, "model": prepared.model(),
+            "provider": identity.provider, "prompt": input.prompt,
+        }),
+    );
+    let run = if mode == "subagent" {
+        let agent = agent.expect("subagent mode requires a bound turn");
+        crate::review_thread::run_tool_review(
+            &crate::review_thread::ConfiguredBackend(prepared), agent, &cancelled,
+            &crate::review_thread::ToolReviewRequest {
+                prompt: &input.prompt, tool_use_id, workspace,
+                provider: &identity.provider, model: &identity.model,
+            },
+        ).map(|round| {
+            crate::chat_events::record_wire_event(session_id, "reviewer.tools", json!({
+                "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+                "reviewerSessionId": round.reviewer_session_id,
+                "toolCalls": round.tool_calls.iter().map(|call| json!({
+                    "call": call.label, "ok": call.ok, "outputChars": call.output_chars,
+                })).collect::<Vec<_>>(),
+            }));
+            tools::LlmReviewRun { text: round.text, usages: round.usages }
+        }).map_err(|error| match error {
+            crate::review_thread::RoundError::Cancelled => "interrupted by user".to_string(),
+            crate::review_thread::RoundError::Failed(message) => format!(
+                "LlmReview sub-agent failed: {message}. No one-shot retry was sent. If this Reviewer cannot call tools, use review_mode=oneshot."
+            ),
+        })
+    } else {
+        prepared.run(&input.prompt, cancelled)
+    };
+    crate::chat_events::record_wire_event(
+        session_id,
+        "reviewer.response",
+        json!({
+            "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+            "role": "reviewer", "mode": mode, "durationMs": started.elapsed().as_millis(),
+            "text": run.as_ref().ok().map(|run| &run.text), "error": run.as_ref().err(),
+        }),
+    );
+    run.map(|run| run.text)
 }
 
 struct DesktopToolExecutor<T> {
@@ -9140,6 +9245,7 @@ async fn run_chat_turn_with_context(
             KernelToolExecutor {
                 session_id: worker_session_id.clone(),
                 turn_id: worker_audit_turn_id.clone(),
+                turn_agent: worker_turn_agent.clone(),
                 extra_blocked_tools,
                 cancelled: Some(worker_cancelled.clone()),
                 progress_sink: Some(progress_sink),

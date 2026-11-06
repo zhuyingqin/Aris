@@ -1271,13 +1271,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LlmReview",
-            description: "Send content to an external LLM reviewer for independent critical review. Supports OpenAI, Gemini, GLM, MiniMax, Kimi, and Anthropic-compatible endpoints. Routes by model name. Prefer omitting `model` and letting SomniQ use the user's configured reviewer.",
+            description: "Request independent critical review using the user's configured Reviewer. Desktop Chat prefers a fresh, isolated, read-only Reviewer sub-agent that can inspect project files. Web reviewers, explicit oneshot mode and hosts without a Chat agent tree use a single request. Each call is self-contained; include the review questions, evidence and requested output format. Prefer omitting `model`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "The full content to review, including context and specific review instructions."
+                        "description": "A self-contained review request with context, review questions, requested output format and project-relative evidence paths. Include the material inline when project read tools are unavailable."
                     },
                     "model": {
                         "type": "string",

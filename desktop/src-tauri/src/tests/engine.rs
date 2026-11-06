@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "llm_review_tool.rs"]
+mod llm_review_tool;
+
 struct MultiWorkspaceFixture {
     _temp: tempfile::TempDir,
     first: PathBuf,

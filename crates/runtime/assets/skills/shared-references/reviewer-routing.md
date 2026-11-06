@@ -12,8 +12,9 @@ LlmReview:
     [role + task + the material to review + output schema]
 ```
 
-That is the whole contract. There is no parameter, config, or effort level that
-changes the backend.
+That is the public call contract. The host selects the execution mode and uses
+the user's configured Reviewer connection; skills do not create an Executor
+child or choose a different backend themselves.
 
 ## Calling rules
 
@@ -22,9 +23,13 @@ changes the backend.
    reviewer override in this conversation. A wrong override silently falls back
    to the configured reviewer anyway, so guessing buys nothing.
 
-2. **Every call is self-contained.** `LlmReview` is single-shot — there is no
-   thread, no conversation id, no continuation call. For a multi-round review,
-   each round sends a **fresh, complete prompt** that restates:
+2. **Every call is self-contained.** Desktop Chat normally starts a fresh,
+   isolated, read-only Reviewer sub-agent for each call. It can read and search
+   the project over several model requests, using the configured Reviewer
+   connection. It does not share the Executor's conversation or the Chat's
+   automatic Reviewer conversation. There is no caller-visible conversation id
+   or continuation call. For a multi-round review, each round sends a
+   **fresh, complete prompt** that restates:
    - the material under review (or the file paths to read),
    - what the previous round found,
    - what changed since then,
@@ -32,7 +37,11 @@ changes the backend.
 
 3. **Pass file paths, not your own summaries**, wherever the reviewer can read
    the file itself. See `reviewer-independence.md` — summarizing for the
-   reviewer is how confirmation bias leaks in.
+   reviewer is how confirmation bias leaks in. Paths must be inside the bound
+   project workspace. The sub-agent cannot run tests, edit files or browse.
+   Web reviewers, explicit `review_mode=oneshot` and hosts without a Chat agent
+   tree keep the single-request route without project tools; include the
+   relevant material inline in those modes.
 
 4. **Long prompts go in a file.** When the material is more than a short note,
    write a dossier (e.g. `REVIEW_DOSSIER.md`) and send the path plus the
@@ -52,6 +61,7 @@ changes the backend.
 | `reviewer is disabled in SomniQ settings` | User turned the reviewer off | Stop and tell the user to configure a reviewer in Settings. Do not fake a review. |
 | `ARIS_REVIEWER_AUTH_TOKEN not set` / `..._BASE_URL not set` | Reviewer configured but incomplete | Same — surface it, don't substitute your own judgement. |
 | `<KEY>_API_KEY not set (needed for model '<m>')` | A `model` override routed to a provider with no key | Retry once **without** the `model` override. |
+| `LlmReview sub-agent failed: ...` | The isolated review could not finish | Surface the failure. Do not silently rerun as a paid single request or self-review. A Reviewer endpoint without tool support can use the explicit `review_mode=oneshot` compatibility setting. |
 
 Never silently self-review when `LlmReview` fails. A skill whose whole point is
 independent review must report that it could not get one.

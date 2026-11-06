@@ -1164,7 +1164,9 @@ fn llm_review_is_the_default_reviewer_backend() {
     assert!(section.contains("`LlmReview` is SomniQ's reviewer backend"));
     assert!(section.contains("reviewer the user configured in SomniQ settings"));
     assert!(section.contains("call `LlmReview` instead"));
-    assert!(section.contains("single-shot with no conversation continuation"));
+    assert!(section.contains("fresh, isolated Reviewer sub-agent for each call"));
+    assert!(section.contains("no caller-visible conversation continuation"));
+    assert!(section.contains("include the material inline when project tools are unavailable"));
 }
 
 #[test]
