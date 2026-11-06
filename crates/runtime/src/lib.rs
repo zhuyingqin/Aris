@@ -54,6 +54,7 @@ mod session;
 mod session_index;
 pub mod skill_registry;
 mod tool_outcome;
+mod task_plan;
 mod tool_recovery;
 mod tool_output_artifact;
 mod usage;

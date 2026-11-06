@@ -394,8 +394,10 @@ const REPL_WRITE_RE =
   /(?:\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?["'][^"']*[wax]|\.(?:write_text|write_bytes)\s*\()/i;
 
 function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
-  const parsed = parseToolBlockJson(block, "input");
-  const raw = (parsed as { todos?: unknown })?.todos;
+  if (block.isError || block.output === undefined) return null;
+  const output = parseToolBlockJson(block, "output") as { newTodos?: unknown; new_todos?: unknown } | null;
+  const parsed = parseToolBlockJson(block, "input") as { todos?: unknown } | null;
+  const raw = output?.newTodos ?? output?.new_todos ?? parsed?.todos;
   if (!Array.isArray(raw)) return null;
   const todos: ChatTodoItem[] = [];
   for (const entry of raw) {
@@ -415,17 +417,21 @@ function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
 // The latest persisted TodoWrite plan drives the floating workflow box. Plans
 // belong to the session, so keep the last snapshot across later user messages
 // and reloads instead of making it disappear at the next request boundary.
-export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
+export function latestTodoSnapshotFromTurns(turns: ChatTurn[]): ChatTodoItem[] | null {
   for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const blocks = turns[turnIndex].blocks;
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];
       if (block.kind !== "tool" || block.name !== "TodoWrite") continue;
       const todos = parseTodoList(block);
-      if (todos && todos.length > 0) return todos;
+      if (todos !== null) return todos;
     }
   }
-  return [];
+  return null;
+}
+
+export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
+  return latestTodoSnapshotFromTurns(turns) ?? [];
 }
 
 function stringField(record: Record<string, unknown> | null, keys: string[]): string | null {

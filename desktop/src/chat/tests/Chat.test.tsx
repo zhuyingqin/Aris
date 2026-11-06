@@ -635,7 +635,27 @@ describe("Chat export action", () => {
     await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
     const workflow = await screen.findByTitle("Repairing task persistence");
     await userEvent.click(workflow);
-    expect(screen.getByText("Repairing task persistence")).toBeTruthy();
+    expect(screen.getByRole("list").textContent).toContain("Repairing task persistence");
+  });
+
+  it("does not restore a stale persisted plan after a successful clear in the transcript", async () => {
+    const session = makeSession("default");
+    session.id = "session-cleared-tasks";
+    session.title = "Cleared task recovery";
+    session.turns = [{
+      id: "clear-plan", role: "assistant", blocks: [{
+        kind: "tool", name: "TodoWrite", input: JSON.stringify({ todos: [] }), output: JSON.stringify({ newTodos: [] }),
+      }],
+    }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatTasksGet.mockResolvedValue([{
+      content: "Old incomplete step", activeForm: "Running old incomplete step", status: "in_progress",
+    }]);
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
+    expect(screen.queryByTitle("Running old incomplete step")).toBeNull();
   });
 
   it("asks the backend to review project activity after a completed user question", async () => {

@@ -8,6 +8,7 @@ import {
   groupSessionsByProject,
   latestFileChangesFromTurns,
   latestTodosFromTurns,
+  latestTodoSnapshotFromTurns,
   makeId,
   makeSession,
   migrateSession,
@@ -22,7 +23,7 @@ function todoTurn(todos: unknown): ChatTurn {
   return {
     id: makeId("turn"),
     role: "assistant",
-    blocks: [{ kind: "tool", id: makeId("tool"), name: "TodoWrite", input: JSON.stringify({ todos }) }],
+    blocks: [{ kind: "tool", id: makeId("tool"), name: "TodoWrite", input: JSON.stringify({ todos }), output: JSON.stringify({ newTodos: todos }) }],
   };
 }
 
@@ -56,6 +57,27 @@ const SAMPLE = [
 ];
 
 describe("latestTodosFromTurns", () => {
+  it("ignores failed and still-running plan updates", () => {
+    const prior = todoTurn(SAMPLE);
+    const failed = todoTurn([{ content: "not committed", status: "completed" }]);
+    failed.blocks = failed.blocks.map((block) => ({ ...block, isError: true }));
+    const running = todoTurn([{ content: "not executed", status: "in_progress" }]);
+    running.blocks = running.blocks.map((block) => ({ ...block, output: undefined }));
+    expect(latestTodosFromTurns([prior, failed, running])).toEqual(SAMPLE);
+  });
+
+  it("prefers canonical tool results to attempted plan input", () => {
+    expect(latestTodosFromTurns([toolTurn("TodoWrite", { todos: SAMPLE }, {
+      newTodos: [{ ...SAMPLE[0], status: "completed" }],
+    })])).toEqual([{ ...SAMPLE[0], status: "completed" }]);
+  });
+
+  it("keeps an explicit cleared snapshot distinct from no recorded plan", () => {
+    expect(latestTodoSnapshotFromTurns([])).toBeNull();
+    expect(latestTodoSnapshotFromTurns([todoTurn(SAMPLE), todoTurn([])])).toEqual([]);
+    expect(latestTodosFromTurns([todoTurn(SAMPLE), todoTurn([])])).toEqual([]);
+  });
+
   it("returns the most recent TodoWrite plan", () => {
     const turns: ChatTurn[] = [
       todoTurn([{ content: "old", activeForm: "old", status: "pending" }]),

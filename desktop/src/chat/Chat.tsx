@@ -64,7 +64,7 @@ import { CHAT_COPY } from "./i18n";
 import {
   fileChangePathMatches,
   latestFileChangesFromTurns,
-  latestTodosFromTurns,
+  latestTodoSnapshotFromTurns,
   makeId,
   makeSession,
   migrateTurn,
@@ -1223,7 +1223,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   }, [currentSessionRef, currentChatBusy, language, run.acquireSendLock, run.beginRun, run.releaseSendLock]);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
-  const turnTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const turnTodos = useMemo(() => latestTodoSnapshotFromTurns(turns), [turns]);
   useEffect(() => {
     if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
     let active = true;
@@ -1238,9 +1238,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       active = false;
     };
   }, [currentSession?.id, currentSession?.remoteAgent]);
-  const workflowTodos = turnTodos.length > 0
-    ? turnTodos
-    : persistedTodos[currentId] ?? [];
+  const workflowTodos = turnTodos ?? persistedTodos[currentId] ?? [];
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],

@@ -19315,6 +19315,15 @@ body.somniq-resizing-col {
   white-space: nowrap;
 }
 
+.chat-workflow-chip-task {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-workflow-chip-files {
   flex-shrink: 0;
   color: var(--text-dim);
@@ -19446,6 +19455,11 @@ body.somniq-resizing-col {
   border-color: transparent;
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
   color: var(--accent);
+}
+
+.chat-workflow.paused .chat-workflow-chip-icon,
+.chat-workflow.paused .chat-workflow-step.status-in_progress .chat-workflow-step-icon {
+  color: var(--text-dim);
 }
 
 .chat-workflow-step-text {

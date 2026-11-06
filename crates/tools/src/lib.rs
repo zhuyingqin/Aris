@@ -1243,7 +1243,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TodoWrite",
-            description: "Update the structured task list for the current session. Keep todos at phase/milestone level rather than creating one item per file edit or tool call. Update only when a phase changes status or the plan materially changes; do not resend an unchanged list.",
+            description: "Update the structured task list for the current session. Keep todos at phase/milestone level rather than creating one item per file edit or tool call. Update only when a phase changes status or the plan materially changes; do not resend an unchanged list. After creating an execution plan, continue the authorized work through its remaining steps before ending the turn. Mark a step completed only after doing and verifying it. If blocked, waiting for user input/permission, or delivering a planning-only request, keep unfinished steps open and explain why execution is paused.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
