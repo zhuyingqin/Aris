@@ -21,6 +21,8 @@ use std::{
 
 #[path = "collaboration.rs"]
 pub(crate) mod collaboration;
+#[path = "question_input.rs"]
+mod question_input;
 
 use crate::slash_commands::{slash_command_specs, SlashCommand};
 use crate::system_prompt::{
@@ -1779,52 +1781,7 @@ fn latex_compile_input_path(input: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn validate_question_input(input: &str) -> Result<Value, ToolError> {
-    // Naming the expected shape matters as much as reporting the parse
-    // position. The observed failure is a payload carrying the flat fields but
-    // the closing punctuation of a `{"questions": [...]}` wrapper, and a bare
-    // "must be valid JSON" invites a retry that adds the wrapper instead of
-    // dropping the stray closers.
-    let value = serde_json::from_str::<Value>(input).map_err(|error| {
-        ToolError::new(format!(
-            "AskUserQuestion input must be valid JSON: {error}. Expected one object shaped \
-             {{\"question\": \"...\", \"options\": [{{\"label\": \"...\"}}]}}, not an array of \
-             questions."
-        ))
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        ToolError::new("AskUserQuestion input must be an object with `question` and `options`.")
-    })?;
-    let question = object
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if question.is_empty() {
-        return Err(ToolError::new(
-            "AskUserQuestion input must include a non-empty `question` string.",
-        ));
-    }
-    let options = object
-        .get("options")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::new("AskUserQuestion input must include an `options` array."))?;
-    let has_labeled_option = options.iter().any(|option| {
-        option
-            .get("label")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .is_some_and(|label| !label.is_empty())
-    });
-    if !has_labeled_option {
-        return Err(ToolError::new(
-            "AskUserQuestion input must include at least one option with a non-empty `label`.",
-        ));
-    }
-    Ok(value)
-}
-
-/// Project a validated `AskUserQuestion` input onto the board's pending-action
+/// Project a canonical `AskUserQuestion` input onto the board's pending-action
 /// shape.
 ///
 /// Flattens the tool's `{label, description}` options to their labels: the card
@@ -1903,15 +1860,16 @@ impl<T> DesktopToolExecutor<T> {
                 "AskUserQuestion is unavailable: the tool call has no id to answer.",
             ));
         }
-        // Fail fast on malformed or non-renderable input rather than blocking
-        // on a card the UI cannot answer.
-        let parsed = validate_question_input(input)?;
+        // Fail fast on input with no renderable question rather than blocking
+        // on a card the UI cannot answer. Recoverable shapes are read as-is;
+        // the cards below render the canonical form via `tool_input_for_ui`.
+        let read = question_input::read_question_input(input).map_err(ToolError::new)?;
         // A work task must not keep a model request or execution slot alive
         // while nobody is present to answer. Persist the question on its card,
         // then interrupt this turn. `work_task_reply` starts a fresh turn in
         // the same checkout and session with the answer as its user message.
         if let Some(binding) = self.work_task.as_ref() {
-            let action = work_task_question_action(tool_use_id, &parsed);
+            let action = work_task_question_action(tool_use_id, &read.question);
             if !crate::work_task::engine::question_raised(
                 &self.app,
                 &self.project_id,
@@ -1955,7 +1913,7 @@ impl<T> DesktopToolExecutor<T> {
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(answer) => {
                     cleanup();
-                    return Ok(answer);
+                    return Ok(read.tool_result(answer));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if self.cancelled.load(Ordering::SeqCst) || runtime::is_interrupted() {
@@ -3250,7 +3208,7 @@ fn project_evidence_search_tool_spec() -> tools::ToolSpec {
 fn ask_user_question_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
         name: ASK_USER_QUESTION_TOOL,
-        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
+        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Ask one question per call, with `question` and `options` at the top level of the input; there is no `questions` array. Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -3352,6 +3310,13 @@ const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 const MAX_TOOL_EVENT_CHARS: usize = 4_000;
 
 fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
+    // The question card renders only the strict flat shape, so give it the
+    // form the executor will actually ask rather than what the model wrote.
+    if tool_name == ASK_USER_QUESTION_TOOL {
+        if let Ok(read) = question_input::read_question_input(input) {
+            return read.question.to_string();
+        }
+    }
     if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
         return input.to_string();
     }
