@@ -57,7 +57,7 @@
 
 ## 3. 设计（逐项带 why 与避开的坑）
 
-版本边界：本节到 §7 已按设计稿修订 4（2026-10-21）更新；接口、schema、参数与测试以设计稿为准，这里只保留决定和理由。早期稿里的 `memory/projects/<id>/notes/` 路径、`← session:x#n` 来源、"压缩前补录、上下文已在缓存里"等说法均已作废。
+版本边界：本节到 §7 已按设计稿修订 4 与 §0.5 的实测（均为 2026-10-21）更新；接口、schema、参数与测试以设计稿为准，这里只保留决定和理由。早期稿里的 `memory/projects/<id>/notes/` 路径、`← session:x#n` 来源、"压缩前补录、上下文已在缓存里"等说法均已作废。
 
 ### 3.1 笔记文件
 
@@ -114,16 +114,16 @@
 
 ### 3.3 读取：一个工具，不注入旧 recall 块
 
-**索引**：复用每项目的 `session-index.sqlite3`（schema 升到 v3），新增 `notes_lines/notes_fts` 与 `session_chunks/session_chunks_fts`，FTS 用 `tokenize='trigram'`（设计稿 §6.1）。索引只做搜索，不做证据；删了可以重建。
+**索引**：复用每项目的 `session-index.sqlite3`（schema 升到 v3），新增 `notes_lines/notes_fts` 与 `session_chunks/session_chunks_fts`，FTS 用 `tokenize='trigram'`；会话切块另有一张 CJK 二元组影子列 `session_chunks_bigram_fts`（设计稿 §6.1、§0.5）。索引只做搜索，不做证据；删了可以重建。
 
 | 决定 | 为什么 | 避开 |
 |---|---|---|
 | `trigram` 分词器 | rusqlite 0.32 bundled 的 SQLite 3.46 自带；不需要分词器、停用词表、alias。它只做匹配，不抽主题 | P17、P18 |
-| 查询预处理：每个词项加引号；CJK 段拆成三元组 OR；少于 3 字的词走 LIKE | 裸短语是整句匹配（零命中）、`main.aux` 不加引号报语法错、两字词 trigram 命不中，内存 SQLite 都复现过 | P17 |
-| 两字词是中文常态，LIKE 会常走：`session_chunks` 上限定时间窗与扫描上限，验收 p95 ≤300 ms，不达标先加 CJK 二元组影子列 | 少于 3 字的 LIKE 用不上 trigram 索引，只能逐行扫 | P20 |
+| 查询预处理：每个词项加引号；CJK 段拆成三元组 OR；少于 3 字的词在会话里走二元组表、在笔记里走 LIKE | 裸短语是整句匹配（零命中）、`main.aux` 不加引号报语法错、两字词 trigram 命不中，内存 SQLite 都复现过 | P17 |
+| 两字词是中文常态，会话切块上的短词走 CJK 二元组影子列（每个 CJK 连续段展开成重叠二元组，存 `unicode61` 索引），LIKE 只留给很小的笔记表 | 在最大项目上实测：LIKE 不慢（典型查询 p95 33 ms），但命中常超过 50 条、没有 bm25，只能按时间排；二元组只要 2.1 MB、半秒构建，p95 1.1–2.4 ms，有 bm25（设计稿 §0.5） | P17 |
 | 覆盖率按查询词计；工具描述让模型写 2–5 个关键词，不写整句 | 按三元组计会让一个长词压过其他词 | — |
 | 全库候选，再过滤再排序 | 先裁后过滤是 P17 的一半 | P17 |
-| Session 消息按 ≈400 token 切块，工具结果不入块 | 论文项目 207 个 Session 共 3 GB，整条消息做命中单元太粗 | 新 |
+| Session 消息按 ≈400 token 切块，工具结果不入块 | 最大的论文项目有 207 个会话，可检索的用户与助手文本 383 万字、带文本的消息平均一千多字，整条消息做命中单元太粗（会话目录 3 GB 大多是原始请求日志，不在索引内） | 新 |
 | 笔记与历史各自按 bm25 排名后 RRF 融合 → 时间衰减 `max(0.1, 0.5^(天数/30))` × kind 权重 × 修正权重 → 归一 → MMR λ=0.7 → top 6，每条 ≤700 字符 | 两张表的 bm25 不可比；新的排前、近重复合并、噪音行自然沉底 | P13 的替代（矛盾靠排序不靠删除） |
 | 被 `replaces` 的旧行仍可命中，但带 `superseded_by` 附上新行 | 读时投影，不改文件 | P13 |
 | MEMORY.md 不衰减 | 常驻层不是日记 | — |
@@ -133,7 +133,7 @@
 
 **工具**：`memory_search(query, days?, kind?, scope?)` 返回 `notes/2026-10-20.md:14` 或 `session:x turn:…` 形式的来源；`memory_get(path, lines?)` 读上下文；`session_search` 保留做 R0，并新增 `turn_id` 参数取证据原文。描述文案照 `session_search` 的体例写，结果包在"不可信数据"框架里。
 
-**注入**：系统提示里的记忆块 = `MEMORY.md` + `USER.md`（已有预算）+ 本项目**今天和昨天**的笔记（剥掉来源，上限 1,500 字符，超出丢最旧的行）。快照按"会话 × 本地日"取一次并随会话持久化，同一会话同一天内逐字不变，重启后也一样（P1）。由 engine 把快照传给提示词构建函数，缓存键加快照哈希。MEMORY/USER 本期不冻结，写入生效后提示词随之变化。切到新注入后，删除 `builtin_research_recall_prompt` 调用和 6,000 字符渲染器；R0 的 session hits 也不注入（`session_search` 已能取，不付两次钱）。
+**注入**：系统提示里的记忆块 = `MEMORY.md` + `USER.md`（已有预算）+ 本项目**今天和昨天**的笔记（剥掉来源，上限 1,500 字符，超出丢最旧的行）。只收带 `turn:` 来源、且所在回合没读过外部内容（网页、文献、邮件、MCP）的行；其余照常可搜，不进系统提示，防止外部内容借笔记进入系统提示（设计稿 §5.7）。快照按"会话 × 本地日"取一次并随会话持久化，同一会话同一天内逐字不变，重启后也一样（P1）。由 engine 把快照传给提示词构建函数，缓存键加快照哈希。MEMORY/USER 本期不冻结，写入生效后提示词随之变化。切到新注入后，删除 `builtin_research_recall_prompt` 调用和 6,000 字符渲染器；R0 的 session hits 也不注入（`session_search` 已能取，不付两次钱）。
 
 **顺序**（P21）：注入块由 `memory_recall_block: legacy_v2 | notes | off` 三选一，阶段 A/B 默认仍是 `legacy_v2`；三方案对比通过后才切默认（§5）。flag 保留一个版本可回退。
 
@@ -168,5 +168,5 @@
 ## 7. 不做什么
 
 - 不做 subject 键、supersede 状态、TTL、候选状态机；不做"审查者"写入门禁。
-- 不先做向量：BM25(trigram) 加查询规则先跑，网关今天也没有 embedding 模型；缝留着。
+- 不先做向量：BM25(trigram + CJK 二元组) 加查询规则先跑，网关今天也没有 embedding 模型；缝留着。
 - 不照搬 TencentDB 的 L2 文件树和 persona.md：那是 L2/L3 的事，先把 L1 跑通。
