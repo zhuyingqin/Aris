@@ -16,23 +16,23 @@ interface Props {
 
 const COPY = {
   cn: {
-    scope: "当前会话", local: "本地", loading: "正在读取面板…", retry: "重新加载", saving: "正在保存…",
+    scope: "当前会话", local: "本地保存", from: "来自", loading: "正在读取面板…", retry: "重新加载", saving: "正在保存…",
     storage: "待办和笔记保存在此项目的当前会话中。",
     add: "添加待办", addLabel: "新待办", addPlaceholder: "添加下一步…", empty: "记下下一步，让研究继续。", remove: "删除",
     completed: "已完成", allDone: "待办已全部完成。", limit: "已达到 200 项上限，可先删除已完成的待办。",
     readOnly: "只读", planEmpty: "Agent 创建计划后，执行进度会显示在这里。",
     planStatus: { completed: "已完成", in_progress: "进行中", pending: "待处理" },
-    notes: "记下线索、想法或待核对的问题…", save: "保存笔记", saved: "已保存", unsaved: "未保存",
+    notes: "记下线索、想法或待核对的问题…", save: "保存笔记", saved: "已保存", unsaved: "未保存", saveHint: "Ctrl / ⌘ + Enter 保存",
     startSession: "发送第一条消息后，可以在这里添加待办和笔记，并随当前会话保存。",
   },
   en: {
-    scope: "This conversation", local: "Local", loading: "Loading panel…", retry: "Reload", saving: "Saving…",
+    scope: "This conversation", local: "Saved locally", from: "From", loading: "Loading panel…", retry: "Reload", saving: "Saving…",
     storage: "Todos and notes are saved in this project for the current conversation.",
     add: "Add todo", addLabel: "New todo", addPlaceholder: "Add a next step…", empty: "Capture a next step to keep your research moving.", remove: "Delete",
     completed: "Completed", allDone: "All caught up.", limit: "200-item limit reached. Delete completed todos to make room.",
     readOnly: "Read only", planEmpty: "Execution progress appears here when the agent creates a plan.",
     planStatus: { completed: "Completed", in_progress: "In progress", pending: "Pending" },
-    notes: "Capture a lead, an idea, or an open question…", save: "Save notes", saved: "Saved", unsaved: "Unsaved changes",
+    notes: "Capture a lead, an idea, or an open question…", save: "Save notes", saved: "Saved", unsaved: "Unsaved changes", saveHint: "Ctrl / ⌘ + Enter to save",
     startSession: "Send your first message to add todos and notes saved with this conversation.",
   },
 };
@@ -114,7 +114,7 @@ function NotesWidget({ id, title, saved, disabled, mutate, language }: {
     <textarea id={inputId} value={draft} maxLength={32000} disabled={disabled} rows={3} placeholder={copy.notes} onChange={(event) => { setDraft(event.target.value); setDirty(true); }} onKeyDown={(event) => {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) { event.preventDefault(); save(); }
     }} />
-    <div className="chat-plugin-note-actions"><span className="chat-plugin-caption"><SvgIcon name="messageCircle" size={11} />{copy.scope}</span>
+    <div className="chat-plugin-note-actions"><span className="chat-plugin-caption">{copy.saveHint}</span>
       <button type="button" className="chat-plugin-button" disabled={disabled || !dirty} title={`${copy.save} (Ctrl / ⌘ + Enter)`} onClick={save}><SvgIcon name="check" size={12} />{copy.save}</button>
     </div>
   </WidgetSection>;
@@ -138,6 +138,13 @@ function AgentPlanWidget({ title, todos, language }: { title: string; todos: Cha
       </li>)}</ol>
     </>}
   </WidgetSection>;
+}
+
+// The side-panel tab already names the panel (as DeepSeek Harness does), so
+// the body opens with one quiet line about where its content lives.
+function PanelMeta({ language }: { language: Language }) {
+  const copy = COPY[language];
+  return <p className="chat-plugin-meta" title={copy.storage}><SvgIcon name="messageCircle" size={12} />{copy.scope} · {copy.local}</p>;
 }
 
 function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Props) {
@@ -179,8 +186,8 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
   };
   const disabled = loading || saving || Boolean(error) || !state;
   return <div className="chat-plugin-panel" aria-label={uiText(panel.title, language)} aria-busy={loading || saving}>
-    <header className="chat-plugin-panel-header"><span className="chat-plugin-panel-mark" aria-hidden="true"><SvgIcon name="grid" size={17} /></span><div><h2>{uiText(panel.title, language)}</h2><span className="chat-plugin-caption">{copy.scope}</span></div><span className="chat-plugin-local" title={copy.storage}>{copy.local}</span></header>
     <div className="chat-plugin-panel-content">
+    <PanelMeta language={language} />
     {error && <div className="chat-plugin-error" role="alert"><p>{error}</p><button type="button" className="chat-plugin-button" onClick={() => void reload()} disabled={saving || loading}>{copy.retry}</button></div>}
     {loading && <p className="chat-plugin-empty" role="status">{copy.loading}</p>}
     {panel.widgets.map((widget) => {
@@ -194,7 +201,7 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
         ? <TodoWidget key={widget.id} id={widget.id} title={title} todos={state.todoLists[widget.id] ?? []} disabled={disabled} mutate={mutate} language={language} />
         : <NotesWidget key={widget.id} id={widget.id} title={title} saved={state.notes[widget.id] ?? ""} disabled={disabled} mutate={mutate} language={language} />;
     })}
-    <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{panel.pluginName}</span><span role="status">{saving ? copy.saving : ""}</span></footer>
+    <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{copy.from} {panel.pluginName}</span><span role="status">{saving ? copy.saving : ""}</span></footer>
     </div>
   </div>;
 }
@@ -203,8 +210,10 @@ export default function ChatPluginPanel(props: Props) {
   // The shared home draft is not a durable conversation. Never store personal
   // data under it: its id changes when the user sends their first message.
   if (!props.sessionId || props.sessionId === "chat-home") return <div className="chat-plugin-panel">
-    <header className="chat-plugin-panel-header"><h2>{uiText(props.panel.title, props.language)}</h2></header>
-    <p className="chat-plugin-empty">{COPY[props.language].startSession}</p>
+    <div className="chat-plugin-start">
+      <span className="chat-plugin-start-mark" aria-hidden="true"><SvgIcon name="messageCircle" size={18} /></span>
+      <p className="chat-plugin-empty">{COPY[props.language].startSession}</p>
+    </div>
   </div>;
   return <PanelBody key={JSON.stringify([props.projectPath, props.sessionId, props.panel.pluginName, props.panel.id, props.panel.packageDigest])} {...props} />;
 }

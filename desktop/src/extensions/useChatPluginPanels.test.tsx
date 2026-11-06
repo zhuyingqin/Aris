@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PLUGINS_CHANGED_EVENT, pluginsUiList, type ActiveUiPanel } from "../api/plugins";
-import { useChatPluginPanels } from "./useChatPluginPanels";
+import { uiPanelIcon, useChatPluginPanels } from "./useChatPluginPanels";
 import { UiListSlot } from "./uiSlots";
 
 vi.mock("../api/plugins", () => ({ PLUGINS_CHANGED_EVENT: "somniq:plugins-changed", pluginsUiList: vi.fn() }));
@@ -12,6 +12,13 @@ beforeEach(() => vi.resetAllMocks());
 afterEach(cleanup);
 
 describe("Chat UI slot lifecycle", () => {
+  it("names each panel's icon after its first interactive widget", () => {
+    expect(uiPanelIcon({ widgets: [{ id: "intro", type: "text", text: "Hi" }, { id: "notes", type: "notes", title: "Notes" }] })).toBe("notebook");
+    expect(uiPanelIcon({ widgets: [{ id: "todos", type: "todo-list", title: "Todos" }] })).toBe("list");
+    expect(uiPanelIcon({ widgets: [{ id: "plan", type: "agent-plan", title: "Plan" }] })).toBe("target");
+    expect(uiPanelIcon({ widgets: [] })).toBe("grid");
+  });
+
   it("retains DSH list ordering, duplicate rejection and idempotent disposal", () => {
     const slot = new UiListSlot<string>("chat.sidebar");
     const dispose = slot.register("chat.sidebar", "first", 5, "a");

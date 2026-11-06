@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/plugins";
 import PluginPackages from "./PluginPackages";
@@ -35,18 +35,27 @@ describe("Plugin packages", () => {
     fireEvent.click(screen.getByText("导入本地插件包"));
     fireEvent.change(screen.getByLabelText("插件包目录"), { target: { value: preview.source } });
     fireEvent.click(screen.getByText("预览"));
-    await screen.findByText("@lab/evidence");
+    await screen.findByRole("article", { name: "@lab/evidence" });
     expect(screen.getByText("verify-evidence")).toBeTruthy();
-    expect(screen.getByText("papers · python server.py")).toBeTruthy();
+    expect(screen.getByText("papers")).toBeTruthy();
+    expect(screen.getByText("python server.py")).toBeTruthy();
     fireEvent.click(screen.getByText("安装并保持停用"));
     await screen.findByText("已停用");
     expect(api.pluginsInstall).toHaveBeenCalledWith(projectPath, preview.source, preview.digest);
     expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "启用 @lab/evidence" }));
+    // A package with MCP servers shows the exact commands before it can start them.
+    fireEvent.click(screen.getByRole("switch", { name: "启用 @lab/evidence" }));
+    const enableConfirm = screen.getByRole("group", { name: "启用 @lab/evidence" });
+    expect(within(enableConfirm).getByText("python server.py")).toBeTruthy();
+    expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
+    fireEvent.click(within(enableConfirm).getByRole("button", { name: "确认启用" }));
     await screen.findByText("已启用");
     expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, true);
+    // Removal asks first.
     fireEvent.click(screen.getByRole("button", { name: "移除 @lab/evidence" }));
-    await waitFor(() => expect(screen.queryByText("@lab/evidence")).toBeNull());
+    expect(api.pluginsRemove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    await waitFor(() => expect(screen.queryByRole("article", { name: "@lab/evidence" })).toBeNull());
     expect(api.pluginsRemove).toHaveBeenCalledWith(projectPath, preview.name);
     expect(onChanged).toHaveBeenCalledTimes(3);
   });
@@ -56,9 +65,9 @@ describe("Plugin packages", () => {
     vi.mocked(api.pluginsSetEnabled).mockResolvedValue({ ...installed, canEnable: false, status: "blocked" });
     render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
     await screen.findByText("dsh-goal requires DeepSeek host");
-    fireEvent.click(screen.getByRole("button", { name: "Disable @lab/evidence" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Disable @lab/evidence" }));
     await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, false));
-    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Enable @lab/evidence" }).disabled).toBe(true));
+    await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("switch", { name: "Enable @lab/evidence" }).disabled).toBe(true));
   });
 
   it("discards an outstanding preview when the project changes", async () => {
@@ -72,7 +81,7 @@ describe("Plugin packages", () => {
     view.rerender(<PluginPackages projectPath="F:/other" language="en" onChanged={onChanged} />);
     resolvePreview(preview);
     await waitFor(() => expect(api.pluginsList).toHaveBeenCalledWith("F:/other"));
-    expect(screen.queryByText("@lab/evidence")).toBeNull();
+    expect(screen.queryByRole("article", { name: "@lab/evidence" })).toBeNull();
     expect(api.pluginsInstall).not.toHaveBeenCalled();
   });
 
@@ -85,7 +94,19 @@ describe("Plugin packages", () => {
     fireEvent.click(screen.getByText("Preview"));
     fireEvent.click(await screen.findByText("Install disabled"));
     await screen.findByRole("alert");
-    expect(screen.getByText("@lab/evidence")).toBeTruthy();
+    expect(screen.getByRole("article", { name: "@lab/evidence" })).toBeTruthy();
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("enables a package without MCP servers in one step and shows its capabilities", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([{ ...installed, name: "@somniq/panels", capabilities: { ...installed.capabilities, mcpServers: [] } }]);
+    vi.mocked(api.pluginsSetEnabled).mockResolvedValue({ ...installed, name: "@somniq/panels", capabilities: { ...installed.capabilities, mcpServers: [] }, enabled: true, status: "enabled" });
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    const card = await screen.findByRole("article", { name: "@somniq/panels" });
+    expect(within(card).getByText("1 Skills")).toBeTruthy();
+    expect(within(card).queryByText(/MCP/)).toBeNull();
+    fireEvent.click(within(card).getByRole("switch", { name: "Enable @somniq/panels" }));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true));
+    expect(screen.queryByRole("group", { name: "Enable @somniq/panels" })).toBeNull();
   });
 });

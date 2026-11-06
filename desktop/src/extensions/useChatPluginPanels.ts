@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PLUGINS_CHANGED_EVENT, pluginsUiList, type ActiveUiPanel, type UiText } from "../api/plugins";
+import { PLUGINS_CHANGED_EVENT, pluginsUiList, type ActiveUiPanel, type UiPanel, type UiText } from "../api/plugins";
+import type { SvgIconName } from "../SvgIcon";
 import { hasNativeBackend } from "../api/transport";
 import type { Language } from "../store";
 import { UiListSlot } from "./uiSlots";
 
 export const uiText = (text: UiText, language: Language) => typeof text === "string" ? text : text[language];
+/** A panel has no icon of its own; its first interactive widget names it best. */
+export const uiPanelIcon = (panel: Pick<UiPanel, "widgets">): SvgIconName => {
+  const widget = panel.widgets.find((item) => item.type !== "text");
+  return widget?.type === "todo-list" ? "list" : widget?.type === "notes" ? "notebook" : widget?.type === "agent-plan" ? "target" : "grid";
+};
 export const uiPanelKey = (panel: Pick<ActiveUiPanel, "pluginName" | "id">) =>
   `plugin:${encodeURIComponent(panel.pluginName)}:${encodeURIComponent(panel.id)}`;
 

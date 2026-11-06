@@ -11,7 +11,7 @@ export interface PluginPreview {
   capabilities: {
     skills: string[];
     skillRoots: string[];
-    mcpServers: { name: string; command: string; args: string[] }[];
+    mcpServers: { name: string; command: string; args: string[]; env?: Record<string, string> }[];
     uiPanels: UiPanel[];
   };
 }

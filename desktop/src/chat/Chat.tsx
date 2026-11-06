@@ -73,7 +73,7 @@ import {
 import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
 import ChatPluginPanel from "../extensions/ChatPluginPanel";
-import { uiPanelKey, uiText, useChatPluginPanels } from "../extensions/useChatPluginPanels";
+import { uiPanelIcon, uiPanelKey, uiText, useChatPluginPanels } from "../extensions/useChatPluginPanels";
 import type { ActiveUiPanel } from "../api/plugins";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
@@ -1357,7 +1357,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             sideTask.kind === "file" ? "document"
               : sideTask.kind === "agents" ? "branch"
                 : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
-                  : sideTask.kind === "image-workflow" ? "graph" : sideTask.kind === "plugin" ? "grid" : "sparkle"
+                  : sideTask.kind === "image-workflow" ? "graph" : sideTask.kind === "plugin" ? (contribution ? uiPanelIcon(contribution) : "grid") : "sparkle"
           } size={13} />,
         title: sideTask.kind === "file" ? sideTask.path : agent ? `${title} · ${agent.path}` : title,
         closable: true,
@@ -1945,7 +1945,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
               { id: "review", label: navigationCopy.addReview, hint: navigationCopy.addReviewHint, icon: <SvgIcon name="target" size={13} />, onSelect: addCodeReview },
               { id: "image-workflow", label: navigationCopy.addImage, hint: navigationCopy.addImageHint, icon: <SvgIcon name="graph" size={13} />, onSelect: addImageWorkflow },
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
-              ...pluginPanels.panels.map((panel) => ({ id: uiPanelKey(panel), label: uiText(panel.title, language), hint: panel.pluginName, icon: <SvgIcon name="grid" size={13} />, onSelect: () => openPluginPanel(panel) })),
+              ...pluginPanels.panels.map((panel) => ({ id: uiPanelKey(panel), label: uiText(panel.title, language), hint: panel.pluginName, icon: <SvgIcon name={uiPanelIcon(panel)} size={13} />, onSelect: () => openPluginPanel(panel) })),
             ]}
             action={activeSideTask?.handoff
               ? {
