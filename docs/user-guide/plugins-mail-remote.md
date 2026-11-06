@@ -19,8 +19,8 @@ MCP（Model Context Protocol）服务器可以为助手提供额外的工具，�
 | 预设 | 用途 | 前提 |
 | --- | --- | --- |
 | **Playwright** | 浏览器自动化（打开网页、获取 PDF 等） | 应用已内置运行时；Windows 使用系统自带的 Microsoft Edge，macOS 使用 Google Chrome（需已安装） |
-| **Codex** | 外部推理与独立审稿 | 本机已安装并登录 Codex CLI，且在 PATH 中 |
-| **Claude Code** | 使用 Claude Code 工具 | 本机已安装并登录 Claude Code CLI，且在 PATH 中 |
+| **Codex** | 外部推理与独立审稿 | 本机已安装并登录 Codex |
+| **Claude Code** | 使用 Claude Code 工具 | 本机已安装并登录 Claude Code |
 
 **添加自定义 MCP**：
 
@@ -32,9 +32,8 @@ MCP（Model Context Protocol）服务器可以为助手提供额外的工具，�
 使用须知：
 
 - 目前只支持以命令行方式启动的 **STDIO** 服务器，HTTP / SSE 类型的服务器会被识别但不会运行。
-- MCP 配置是全局的（保存在 `~/.config/SomniQ/mcp.json`），对所有项目生效。
-- 来自 `~/.claude.json`、`~/.claude/settings.json` 等外部配置的服务器以只读方式显示，需要在源文件中修改。
-- 项目中的 `.mcp.json` 只会在全局配置文件尚不存在时导入一次。
+- MCP 设置对所有项目生效。
+- 从 Claude Code 等其他工具中发现的服务器以只读方式显示，需要到原来的工具中修改。
 - MCP 工具需要完全访问权限：对话权限为 **自动批准** 时直接运行，**询问** / **接受编辑** 时会弹出权限确认，**计划** 模式下会被拒绝。
 - 浏览器类工具空闲 120 秒或累计运行 600 秒后会超时。
 
@@ -44,7 +43,6 @@ MCP（Model Context Protocol）服务器可以为助手提供额外的工具，�
 
 **技能** 标签列出所有可用技能，可搜索；选中后可以查看说明、路径、参数、所用工具和完整的 `SKILL.md`。来源标记为“内置”或“本地”。
 
-- **添加自己的技能**：把包含 `SKILL.md` 的文件夹放到 `~/.config/SomniQ/skills/`（所有项目可用）或 `<项目文件夹>/.somniq/skills/`（仅该项目可用）。
 - **受管技能 PPT Master**：用于制作可编辑的 PPTX 并逐页预览。提供 **安装** / **更新** / **修复运行时** / **卸载**；需要本机已安装 Python 并联网。
 
 在对话中输入 `/技能名` 即可运行技能，见 [对话 · 内置科研技能](chat.md#11-内置科研技能)。

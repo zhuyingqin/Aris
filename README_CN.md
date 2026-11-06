@@ -222,7 +222,7 @@
 
 SomniQ Studio 提供 **Windows 10/11 x64**（NSIS 安装包）和 **macOS 12+**（Apple 芯片与 Intel 通用 DMG）两个版本，在 [GitHub Releases](https://github.com/zhuyingqin/Aris/releases/latest) 下载。
 
-完整步骤（包括 Windows SmartScreen、macOS“仍要打开”等首次启动提示，以及更新、卸载和从源码构建）见 **[安装教程](docs/user-guide/installation.md)**。
+完整步骤（包括 Windows SmartScreen、macOS“仍要打开”等首次启动提示，以及更新与卸载）见 **[安装教程](docs/user-guide/installation.md)**；从源码构建见 [desktop/README.md](desktop/README.md)。
 
 ---
 

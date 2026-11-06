@@ -39,7 +39,7 @@
 
 1. 双击下载好的 `SomniQ.Studio_<版本号>_x64-setup.exe`。
 2. 如果出现蓝色窗口 **“Windows 已保护你的电脑”**：这是因为安装包尚未使用商业代码签名证书，并不代表文件有问题。点击 **“更多信息”**，再点击 **“仍要运行”**。
-3. 按安装向导完成安装。默认安装到当前用户目录（`%LOCALAPPDATA%\SomniQ Studio`），**不需要管理员权限**。
+3. 按安装向导完成安装。默认只为当前用户安装，**不需要管理员权限**。
 4. 如果系统缺少 WebView2 Runtime，安装程序会在后台自动下载安装，这一步需要联网。
 5. 安装完成后，从开始菜单或桌面快捷方式启动 **SomniQ Studio**。
 
@@ -68,18 +68,18 @@ xattr -dr com.apple.quarantine "/Applications/SomniQ Studio.app"
 3. 进入主界面后会出现 4 步新手引导，依次介绍左侧图标栏、对话、项目切换器和设置，可以点 **跳过**。
 4. 在页面顶部的项目切换器中选择 **添加本地项目…**，选一个文件夹作为项目，就可以开始在 **对话** 中工作了。
 
-## 6. 可选的外部工具
+## 6. 部分功能需要的软件
 
-SomniQ Studio 的核心功能开箱即用；以下工具只在使用对应功能时才需要：
+对话、文献、科研绘图等核心功能安装后即可使用。以下功能需要电脑上另外装有相应软件：
 
-| 功能 | 是否需要额外安装 | 说明 |
-| --- | --- | --- |
-| LaTeX 编译与 PDF ↔ 源码跳转 | 需要 TeX Live | 本机需安装 TeX Live，并确保 `latexmk`、`xelatex`、`pdflatex`、`lualatex` 中至少一个位于 PATH；正反向跳转还需要随 TeX Live 一起安装的 `synctex`。未安装时 LaTeX 页面会提示“尚未安装系统 LaTeX”。详见 [LaTeX 写作](latex.md)。 |
-| 浏览器自动化（Playwright 插件） | macOS 需要 Chrome | 安装包内置 Node 运行时和 Playwright MCP。Windows 上调用系统自带的 Microsoft Edge；macOS 上调用 Google Chrome，需要事先安装。详见 [插件、邮箱与手机远程](plugins-mail-remote.md)。 |
-| Jupyter 笔记本 / Python 实验 | 需要 Python | 在“代码”页使用 Python 内核时需要本机已安装 Python 与 Jupyter。详见 [代码与实验](code.md)。 |
-| MATLAB 内核 | 需要 MATLAB | 应用会自动发现本机已安装的 MATLAB。 |
+| 功能 | 需要的软件 |
+| --- | --- |
+| LaTeX 编译与预览 | TeX Live（macOS 为 MacTeX） |
+| 在代码页运行 Python / Jupyter 笔记本 | Python 与 Jupyter |
+| 让助手执行 MATLAB 代码 | MATLAB |
+| macOS 上的浏览器自动化（Playwright 插件） | Google Chrome |
 
-可以在 **设置 → 关于与环境 → 本地环境检查** 中查看 Python、Jupyter、MATLAB、LaTeX 等工具的检测结果（可用 / 需检查 / 未检测到），缺失时点击 **前往对话安装**，让助手在对话中帮你安装；也可以在这里指定首选的 Python / Conda 环境。
+缺少时，对应页面会给出提示。打开 **设置 → 关于与环境 → 本地环境检查** 可以查看各项是否可用；点击 **前往对话安装**，助手会帮你完成安装，并在下载或修改系统前征求你的确认。
 
 ## 7. 更新
 
@@ -95,39 +95,4 @@ SomniQ Studio 的核心功能开箱即用；以下工具只在使用对应功能
 
 **macOS**：退出应用后，把“应用程序”文件夹中的 SomniQ Studio 移到废纸篓。
 
-卸载程序 **不会删除** 你的配置和项目数据。Windows 卸载向导中如果勾选“Delete the application data”（删除应用数据），只会清除应用内置浏览器存储的界面偏好和头像（`%LOCALAPPDATA%\com.aris.studio`），下表中的数据仍会保留。如需彻底清除，可在卸载后手动删除：
-
-| 内容 | 位置 |
-| --- | --- |
-| 应用配置、项目列表、所有项目的对话记录与运行状态、记忆、技能、邮箱连接 | 用户主目录下的 `.config/SomniQ`（Windows 为 `C:\Users\<用户名>\.config\SomniQ`） |
-| 某个项目的文献库、文件编辑历史、临时文件 | 该项目文件夹内的 `.somniq/` 目录 |
-
-> 项目文件夹本身（论文、代码、数据）属于你的研究文件，卸载应用不会动它们。删除 `.config/SomniQ` 会丢失全部对话历史；删除某个项目的 `.somniq/` 会丢失该项目的文献库和编辑历史，请先备份再操作。
-
-## 9. 从源码构建（开发者）
-
-普通用户无需阅读本节。
-
-**准备环境**
-
-- Node.js 22
-- Rust stable 工具链（Windows 上使用 MSVC 目标，并安装 Visual Studio C++ 生成工具）
-- Windows：WebView2 Runtime；macOS：Xcode Command Line Tools
-
-**开发模式运行**
-
-```bash
-git clone https://github.com/zhuyingqin/Aris.git
-```
-
-```bash
-cd Aris/desktop && npm ci && npm run tauri dev
-```
-
-**构建安装包**
-
-```bash
-cd Aris/desktop && npm run tauri build
-```
-
-构建前会自动执行 `npm run build:resources`，准备内置的 Playwright MCP 和代码编辑器资源，这一步需要联网，耗时较长。Windows 产物位于 `desktop/src-tauri/target/release/bundle/nsis/`。
+卸载应用 **不会删除** 你的项目文件夹、对话记录和文献库。重新安装并登录后，可以继续使用原来的项目和对话。Windows 卸载向导中的“Delete the application data”（删除应用数据）只会清除界面偏好和头像。

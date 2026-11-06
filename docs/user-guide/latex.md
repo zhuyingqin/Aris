@@ -6,18 +6,12 @@
 
 ## 1. 准备 TeX Live
 
-LaTeX 页面调用本机安装的 **TeX Live** 编译，应用本身不内置 TeX 发行版。
+LaTeX 页面使用电脑上安装的 **TeX Live** 编译，应用本身不带 TeX 发行版。
 
-- 需要 `latexmk`、`xelatex`、`pdflatex`、`lualatex` 中至少一个位于系统 PATH（推荐完整安装 TeX Live，自带 `latexmk`）。
-- 源码与 PDF 之间的跳转需要 `synctex`，它随 TeX Live 一起安装。
-- 未检测到 TeX 时，LaTeX 文档库会显示“尚未安装系统 LaTeX”。点击 **前往对话安装**，助手会根据你的系统给出安装方案，在大体积下载或需要管理员权限前征求你的确认，安装完成后编译一个最小文档验证。
+- 未安装时，LaTeX 文档库会显示“尚未安装系统 LaTeX”。点击 **前往对话安装**，助手会根据你的系统给出安装方案，在大体积下载或需要管理员权限前征求你的确认，安装完成后编译一个最小文档验证。
+- 也可以自行从 TeX Live 官网 <https://tug.org/texlive/> 下载安装；macOS 请安装 MacTeX <https://tug.org/mactex/>。
 
-你也可以自行安装：
-
-- Windows / Linux：从 TeX Live 官网 <https://tug.org/texlive/> 下载安装程序。
-- macOS：安装 MacTeX <https://tug.org/mactex/>（基于 TeX Live）。
-
-安装后重启 SomniQ Studio，可在 **设置 → 关于与环境 → 本地环境检查** 中确认 LaTeX 显示为“可用”。
+安装后重启 SomniQ Studio，在 **设置 → 关于与环境 → 本地环境检查** 中确认 LaTeX 显示为“可用”。
 
 ## 2. 文档库与新建文档
 
@@ -35,7 +29,7 @@ LaTeX 页面调用本机安装的 **TeX Live** 编译，应用本身不内置 Te
 | 研究报告 | 报告类文档 |
 | 学术海报 | A1 Beamer 学术海报（beamerposter） |
 
-新文档创建在项目的 `.somniq/papers|slides|reports|poster/<标题>/main.tex` 下。已有的论文项目可以直接用项目切换器打开其所在文件夹，文档库会自动识别其中的主文档。
+新文档保存在当前项目中。已有的论文项目可以直接用项目切换器打开其所在文件夹，文档库会自动识别其中的主文档。
 
 > **中文文档**：模板默认是英文的，不含中文宏包。写中文请自行加入 `\usepackage{ctex}`（或使用 `ctexart` 等文档类），编译时会自动切换到 XeLaTeX。
 

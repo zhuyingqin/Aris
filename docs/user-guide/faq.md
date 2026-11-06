@@ -14,11 +14,7 @@
 应用尚未经过 Apple 公证。到 **系统设置 → 隐私与安全性** 中点击 **仍要打开**；macOS 14 及以下也可以按住 Control 点按应用，选择 **打开**。见 [安装教程](installation.md#4-在-macos-上安装)。
 
 **macOS 提示“已损坏，无法打开”。**
-确认安装包来自官方渠道后，在终端执行：
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/SomniQ Studio.app"
-```
+确认安装包来自官方渠道后，按 [安装教程 · 在 macOS 上安装](installation.md#4-在-macos-上安装) 中“已损坏，无法打开”的方法处理。
 
 **macOS 每次升级后都要重新允许访问“文稿”“桌面”等文件夹。**
 这是当前签名方式下的预期行为：授权在重启后保留，但在升级到新版本后需要重新授予一次。
@@ -78,7 +74,7 @@ xattr -dr com.apple.quarantine "/Applications/SomniQ Studio.app"
 该条目没有开放的 PDF 直链。可以手动 **上传本地 PDF**，或配置 Playwright 插件后使用 **Playwright MCP 获取 PDF**。
 
 **外部发现中 Semantic Scholar 显示缺少凭据。**
-Semantic Scholar 需要在系统环境变量中设置 `SEMANTIC_SCHOLAR_API_KEY`，设置后重启应用。其他数据源不受影响。
+当前版本中 Semantic Scholar 默认不可用，会被跳过；其他数据源不受影响，检索时可以取消勾选它。
 
 **怎么从 Zotero 迁移？**
 在 Zotero 中导出为 Zotero JSON，然后在 **文献 → 添加文献 → 导入文献库** 中导入。见 [文献](literature.md#1-添加文献)。
@@ -92,7 +88,7 @@ Semantic Scholar 需要在系统环境变量中设置 `SEMANTIC_SCHOLAR_API_KEY`
 加入 `\usepackage{ctex}`（或使用 `ctexart` 文档类），引擎保持“根据源码自动判断”或手动选 xelatex。
 
 **双击 PDF 不能跳回源码。**
-确认 `synctex` 在 PATH 中（随 TeX Live 安装），并在 LaTeX 页面重新编译一次。修改源码后未重新编译时，跳转位置是近似的。
+在 LaTeX 页面重新编译一次；修改源码后未重新编译时，跳转位置是近似的。仍然不行时，到 **设置 → 关于与环境 → 本地环境检查** 确认 LaTeX 显示为“可用”。
 
 **无法保存或编译，提示有待审阅的修改。**
 AI 或外部程序修改了文件，需要先在 **变更集** 中审阅并 **应用已审阅修改**。见 [LaTeX 写作](latex.md#6-审阅-ai-和外部修改)。
@@ -109,7 +105,7 @@ AI 或外部程序修改了文件，需要先在 **变更集** 中审阅并 **�
 先确认文件夹已被编辑器 **信任**（受限模式下笔记本不能运行），再到 **设置 → 关于与环境 → 本地环境检查** 确认 Python 和 Jupyter 可用。
 
 **待办任务启动失败，提示需要 Git 仓库。**
-待办任务和定时任务都在 Git 工作树中运行。在对话输入框下方的 Git 按钮中选择 **初始化 Git 仓库**，或在项目文件夹中自行 `git init` 并提交一次。
+待办任务和定时任务都在 Git 工作树中运行。在对话输入框下方的 Git 按钮中选择 **初始化 Git 仓库**。
 
 **定时任务没有按时运行。**
 定时任务只在应用打开时运行，关闭期间错过的触发会在下次启动时补跑一次。上一次运行尚未结束时，本次触发会被跳过。新邮件触发只支持 IMAP 账户。
