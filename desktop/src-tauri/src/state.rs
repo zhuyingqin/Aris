@@ -172,17 +172,22 @@ pub(crate) fn project_execution_context(
             project_runtime.join("tasks.json").into_os_string(),
         )
         .with_env("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
-    context = match readonly_roots_value()? {
+    context = match readonly_roots_value(&agent_store)? {
         Some(value) => context.with_env("ARIS_READONLY_ROOTS", value),
         None => context.without_env("ARIS_READONLY_ROOTS"),
     };
     Ok(context)
 }
 
-fn readonly_roots_value() -> io::Result<Option<std::ffi::OsString>> {
+/// Read-only roots for one project's turns. `agent_store` is this project's
+/// sub-agent store (`agents/agent-*.md`): the parent agent kept trying to
+/// read a sub-agent's full report there and got "outside the isolated
+/// workspace". Only this project's store is added, never the runtime root,
+/// so other projects' agents and the session logs stay unreadable.
+fn readonly_roots_value(agent_store: &std::path::Path) -> io::Result<Option<std::ffi::OsString>> {
     let user_skills = skills_dir();
     std::fs::create_dir_all(&user_skills)?;
-    let mut roots = vec![user_skills];
+    let mut roots = vec![user_skills, agent_store.to_path_buf()];
     if let Some(cache_dir) =
         runtime::extraction_report().and_then(|report| report.used_dir.as_ref())
     {
