@@ -11,7 +11,7 @@
 .typeset-workbench {
   --typeset-toolbar-h: 36px;
   --typeset-left-user-w: 204px;
-  --typeset-preview-user-w: 760px;
+  --typeset-preview-user-w: 640px;
   --typeset-rail-w: 40px;
   --typeset-resizer-w: 6px;
   --typeset-pdf-resizer-w: 6px;
@@ -251,7 +251,7 @@
       - 220px
     )
   );
-  --typeset-left-w: clamp(136px, var(--typeset-left-user-w), min(720px, var(--typeset-left-cap-w)));
+  --typeset-left-w: clamp(136px, var(--typeset-left-preferred-w, var(--typeset-left-user-w)), min(720px, var(--typeset-left-cap-w)));
   --typeset-preview-cap-w: max(
     220px,
     calc(
@@ -263,7 +263,7 @@
       - var(--typeset-pdf-resizer-w, 6px)
     )
   );
-  --typeset-preview-w: clamp(220px, var(--typeset-preview-user-w), min(1040px, var(--typeset-preview-cap-w)));
+  --typeset-preview-w: clamp(220px, var(--typeset-preview-preferred-w, var(--typeset-preview-user-w)), min(1040px, var(--typeset-preview-cap-w)));
   position: relative;
   display: grid;
   min-height: 0;
@@ -313,6 +313,39 @@
 
 .typeset-main-grid.project-hidden.pdf-hidden {
   grid-template-columns: var(--typeset-rail-w) minmax(0, 1fr);
+}
+
+.typeset-left-panel[hidden],
+.typeset-preview-stack[hidden],
+.typeset-resize-handle[hidden] {
+  display: none !important;
+}
+
+.typeset-editor-focus-btn {
+  display: inline-flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0 6px 0 4px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ol-muted-2);
+  cursor: pointer;
+}
+
+.typeset-editor-focus-btn:hover,
+.typeset-editor-focus-btn.active {
+  background: var(--ol-bg-3);
+  color: var(--ol-text);
+}
+
+.typeset-editor-focus-btn:focus-visible {
+  outline: 2px solid var(--ol-green);
+  outline-offset: 1px;
 }
 
 .typeset-rail {
@@ -553,8 +586,8 @@
   z-index: 50;
   display: flex;
   flex-direction: column;
-  width: 20px;
-  height: 42px;
+  width: 28px;
+  height: 56px;
   border-radius: 9999px;
   background: #ffffff;
   border: 1px solid #d1d5db;
@@ -572,8 +605,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 21px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -639,8 +672,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 32px;
+  width: 22px;
+  height: 40px;
   border-radius: 4px;
   padding: 0;
   border: 1px solid var(--ol-border, #d1d5db);
@@ -4062,10 +4095,22 @@
   background: #1b222c;
 }
 
-/* VS Code-style treatment for the raw LaTeX source only. All canvas, chrome,
-   selection and token colours flow through variables so an editor that is
-   already mounted follows a live app-theme change. The visual editor
-   deliberately keeps its document-like appearance. */
+/* Editable LaTeX source shares token colours in Code and Visual modes.
+   Canvas, selection and gutter styling stays scoped to the Code surface. */
+.typeset-editor-body .code-editor.typeset-latex-vscode,
+.typeset-visual-cm {
+  --typeset-code-invalid: #f48771;
+  --typeset-code-keyword: #ffcc00;
+  --typeset-code-entity: #4ec9b0;
+  --typeset-code-string: #ce9178;
+  --typeset-code-number: #b5cea8;
+  --typeset-code-atom: #ffcc00;
+  --typeset-code-variable: #9cdcfe;
+  --typeset-code-definition: #c586c0;
+  --typeset-code-comment: #6a9955;
+  --typeset-code-punctuation: #ffcc00;
+}
+
 .typeset-editor-body .code-editor.typeset-latex-vscode {
   --typeset-code-bg: #1e1e1e;
   --typeset-code-fg: #d4d4d4;
@@ -4083,21 +4128,17 @@
   --typeset-code-cursor: #aeafad;
   --typeset-code-matching-bg: #3a3d41;
   --typeset-code-matching-border: #858585;
-  --typeset-code-invalid: #f48771;
-  --typeset-code-keyword: #ffcc00;
-  --typeset-code-entity: #4ec9b0;
-  --typeset-code-string: #ce9178;
-  --typeset-code-number: #b5cea8;
-  --typeset-code-atom: #ffcc00;
-  --typeset-code-variable: #9cdcfe;
-  --typeset-code-definition: #c586c0;
-  --typeset-code-comment: #6a9955;
-  --typeset-code-punctuation: #ffcc00;
+  --typeset-code-indent-guide: #404040;
+  --typeset-code-indent-guide-active: #707070;
   background: var(--typeset-code-bg);
   color: var(--typeset-code-fg);
 }
 
 .typeset-editor-body .code-editor.typeset-latex-vscode .cm-editor {
+  /* CodeMirror's base-theme mode can differ from the app's CSS theme. Resolve
+     guide colours from the same canvas palette rather than its light default. */
+  --indent-marker-bg-color: var(--typeset-code-indent-guide);
+  --indent-marker-active-bg-color: var(--typeset-code-indent-guide-active);
   background: var(--typeset-code-bg);
   color: var(--typeset-code-fg);
   font-family: var(--font-mono);
@@ -4121,6 +4162,14 @@
 .typeset-editor-body .code-editor.typeset-latex-vscode .cm-content {
   padding: 10px 12px 80px;
   caret-color: var(--typeset-code-cursor);
+}
+
+/* The marker plugin paints the full logical line height. Wrapped source text
+   starts at the left edge again, so limit guides to the first visual row. */
+.typeset-editor-body .code-editor.typeset-latex-vscode .cm-indent-markers::before {
+  bottom: auto;
+  height: 1lh;
+  max-height: 100%;
 }
 
 .typeset-editor-body .code-editor.typeset-latex-vscode .cm-gutters {
@@ -7185,6 +7234,20 @@
   container-type: inline-size;
 }
 
+/* Keep the mounted PDF and its log in the same content track, below any
+   wrapping or dismissible notice. Neither surface needs a toolbar offset. */
+.typeset-pdf-content {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.typeset-pdf-content > .typeset-pdf-scroll,
+.typeset-pdf-content > .typeset-log {
+  grid-area: 1 / 1;
+}
+
 .typeset-preview-toolbar {
   min-height: var(--typeset-pdf-toolbar-h, 36px);
   height: var(--typeset-pdf-toolbar-h, 36px);
@@ -7665,23 +7728,26 @@
   color: #fff;
 }
 
-/* The toolbar clips vertically (it scrolls horizontally when narrow), so the
-   count badge has to stay inside the button's own 28px box minus the 4px the
-   toolbar leaves above it. */
-.typeset-log-toggle span {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  border-radius: 8px;
-  background: #d74a43;
-  color: #fff;
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 15px;
-  text-align: center;
+/* Keep severity and count together inside the toolbar's measured width. */
+.typeset-log-toggle.has-diagnostics {
+  width: auto;
+  max-width: 168px;
+  gap: 5px;
+  padding: 0 7px;
+}
+
+.typeset-log-toggle.diagnostics-error { color: var(--red, #d74a43); }
+.typeset-log-toggle.diagnostics-warning { color: var(--amber, #ba8b24); }
+.typeset-log-toggle.has-diagnostics.active { color: #fff; }
+
+.typeset-log-toggle .typeset-diagnostics-label {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .typeset-preview-file {
@@ -8580,15 +8646,34 @@
 .typeset-pdf-text-layer {
   position: absolute;
   inset: 0;
-  /* Above the page-wide SyncTeX target (z-index 1, and painted over any
-     auto-z-index sibling whatever the DOM order), below the link layer: the
-     per-word hover highlight and text selection only work if the pointer
-     reaches the runs, while a click on bare page still falls through to the
-     target underneath. */
   z-index: 1;
   overflow: hidden;
   border-radius: 2px;
   pointer-events: none;
+}
+
+/* Whitespace must belong to the same selectable surface as the text. Letting
+   it fall through to a button prevents drags from starting between PDF items,
+   beside equations, and at line endings. Page handlers provide inverse search. */
+.typeset-pdf-text-layer.reading {
+  pointer-events: auto;
+  cursor: text;
+  line-height: 1;
+  user-select: text;
+  -webkit-user-select: text;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+}
+
+/* Like the text spans, PDF line breaks must not take part in normal flow.
+   Otherwise their invisible line boxes steal the selection caret in gaps. */
+.typeset-pdf-text-layer br {
+  position: absolute;
+  white-space: pre;
+}
+
+.typeset-pdf-text-layer br::selection {
+  background: transparent;
 }
 
 .typeset-pdf-page-source-target,
@@ -8601,6 +8686,8 @@
   background: transparent;
   padding: 0;
   cursor: text;
+  /* Retain a keyboard target without placing a control under every text gap. */
+  pointer-events: none;
 }
 
 .typeset-pdf-link-layer {
@@ -8619,7 +8706,9 @@
   background: transparent;
   padding: 0;
   cursor: pointer;
-  pointer-events: auto;
+  /* Keyboard activation stays on this target. The page resolves pointer
+     clicks by annotation bounds after excluding a selection gesture. */
+  pointer-events: none;
 }
 
 .typeset-pdf-link:hover {
@@ -8662,6 +8751,10 @@
   height: auto;
   overflow: visible;
   transform-origin: 0 0;
+}
+
+.typeset-pdf-text-run.reading.linked {
+  cursor: pointer;
 }
 
 .typeset-pdf-text-run:hover {
@@ -8875,12 +8968,12 @@
   --typeset-log-info: #a5cbff;
   --typeset-log-accent: #68aafc;
   --typeset-log-focus: #8fc0ff;
-  position: absolute;
-  inset: var(--typeset-pdf-toolbar-h) 0 0 0;
+  position: relative;
   z-index: 5;
   display: grid;
   height: auto;
-  grid-template-rows: 44px minmax(0, 1fr) 46px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 44px minmax(0, 1fr) auto;
   border: 0;
   border-top: 1px solid var(--ol-border);
   border-radius: 0;
@@ -8989,6 +9082,7 @@
   align-items: stretch;
   gap: 1px;
   padding: 0 8px;
+  overflow-x: auto;
   background: var(--typeset-log-chrome);
   border-bottom: 1px solid var(--typeset-log-border);
 }
@@ -8997,6 +9091,7 @@
   position: relative;
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
   padding: 0 7px;
   border: 0;
@@ -9004,6 +9099,7 @@
   color: var(--typeset-log-text);
   cursor: pointer;
   font: 700 12px/1 var(--font-ui, sans-serif);
+  white-space: nowrap;
 }
 
 .typeset-log-tabs button::after {
@@ -9305,6 +9401,7 @@
 .typeset-log-footer {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
@@ -10152,6 +10249,20 @@
   background: #fff;
 }
 
+:root[data-theme="light"] .typeset-editor-body .code-editor.typeset-latex-vscode,
+:root[data-theme="light"] .typeset-visual-cm {
+  --typeset-code-invalid: #b3261e;
+  --typeset-code-keyword: var(--code-func);
+  --typeset-code-entity: var(--code-entity);
+  --typeset-code-string: var(--code-string);
+  --typeset-code-number: var(--code-number);
+  --typeset-code-atom: var(--code-func);
+  --typeset-code-variable: var(--code-variable);
+  --typeset-code-definition: var(--code-meta);
+  --typeset-code-comment: var(--code-comment);
+  --typeset-code-punctuation: var(--code-func);
+}
+
 :root[data-theme="light"] .typeset-editor-body .code-editor.typeset-latex-vscode {
   --typeset-code-bg: #ffffff;
   --typeset-code-fg: #1f1f1f;
@@ -10169,16 +10280,8 @@
   --typeset-code-cursor: #1f1f1f;
   --typeset-code-matching-bg: #e2e6ea;
   --typeset-code-matching-border: #7b8794;
-  --typeset-code-invalid: #b3261e;
-  --typeset-code-keyword: var(--code-func);
-  --typeset-code-entity: var(--code-entity);
-  --typeset-code-string: var(--code-string);
-  --typeset-code-number: var(--code-number);
-  --typeset-code-atom: var(--code-func);
-  --typeset-code-variable: var(--code-variable);
-  --typeset-code-definition: var(--code-meta);
-  --typeset-code-comment: var(--code-comment);
-  --typeset-code-punctuation: var(--code-func);
+  --typeset-code-indent-guide: #d3d3d3;
+  --typeset-code-indent-guide-active: #939393;
 }
 
 :root[data-theme="light"] .typeset-visual-pane,
@@ -11262,6 +11365,70 @@
   padding: 2px 6px;
   font-size: 10px;
   text-overflow: ellipsis;
+}
+
+.typeset-ai-chat-host .chat-pill.chat-model-pill {
+  max-width: 100%;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+/* Completed activity should support the answer without competing with it. */
+.typeset-ai-chat-host .chat-tool.chat-tool-activity {
+  margin: 3px 0 8px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.typeset-ai-chat-host .chat-tool-activity > .chat-tool-header {
+  min-height: 32px;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.tool-activity-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-activity-hint {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.typeset-ai-chat-host .md-think:not(.md-think-active) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.typeset-ai-chat-host .md-think-toggle {
+  min-height: 32px;
+  background: transparent;
+}
+
+.typeset-ai-chat-host .md-think:not(.md-think-active) .md-think-label,
+.typeset-ai-chat-host .md-think:not(.md-think-active) .md-think-icon {
+  color: var(--text-dim);
+}
+
+.typeset-ai-chat-host .md-think-preview { opacity: 1; }
+
+.typeset-ai-chat-host .md-think-body {
+  font-style: normal;
+  line-height: 1.6;
+}
+
+@container (max-width: 480px) {
+  .tool-activity-hint { display: none; }
 }
 
 .typeset-ai-chat-host .chat-upload-btn,

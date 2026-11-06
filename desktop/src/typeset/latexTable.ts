@@ -22,6 +22,10 @@ export type TableColumn = {
   align: TableColumnAlign;
   /** The column's own spec text, e.g. `l` or `p{3cm}` or `>{\bfseries}c`. */
   raw: string;
+  /** A recognized width for the preview, in CSS pixels or percent. */
+  width?: string;
+  /** Alignment implied by common paragraph-column definitions. */
+  previewAlign?: "l" | "c" | "r";
   /** A `|` immediately before this column. */
   leftBorder: boolean;
 };
@@ -47,6 +51,10 @@ export type TableModel = {
   /** Inside the braces of the column spec. */
   specFrom: number;
   specTo: number;
+  /** Final inter-column material, such as the closing `@{}`. */
+  specSuffix: string;
+  /** Source before the spec, including any optional vertical alignment. */
+  sourcePrefix: string;
   columns: TableColumn[];
   /** A trailing `|` after the last column. */
   rightBorder: boolean;
@@ -82,12 +90,26 @@ function skipGroup(text: string, index: number, open: string, close: string): nu
   return index;
 }
 
+/** Converts only literal TeX lengths; arbitrary macros remain source-only. */
+function previewColumnWidth(value: string): string | undefined {
+  const length = /^\s*(\d*\.?\d+)\s*(cm|mm|in|pt|bp|pc|em|ex)\s*$/.exec(value);
+  if (length) {
+    const amount = Number(length[1]);
+    if (amount <= 0) return undefined;
+    const pixels: Record<string, number> = { cm: 96 / 2.54, mm: 96 / 25.4, in: 96, pt: 96 / 72.27, bp: 96 / 72, pc: 96 / 72.27 * 12 };
+    return pixels[length[2]] ? amount * pixels[length[2]] + "px" : amount + length[2];
+  }
+  const relative = /^\s*(\d*\.?\d+)?\s*\\(?:textwidth|linewidth|columnwidth)\s*$/.exec(value);
+  if (relative) return Number(relative[1] ?? 1) * 100 + "%";
+  return undefined;
+}
+
 /**
  * Splits a column spec into columns. Decorations that are not columns of their
  * own (`@{…}`, `!{…}`, `>{…}`, `<{…}`) are carried on the column they qualify,
  * so an exotic spec still round-trips character for character.
  */
-export function parseColumnSpec(spec: string): { columns: TableColumn[]; rightBorder: boolean } {
+export function parseColumnSpec(spec: string): { columns: TableColumn[]; rightBorder: boolean; suffix: string } {
   const columns: TableColumn[] = [];
   let pendingBorder = false;
   let pendingPrefix = "";
@@ -100,44 +122,55 @@ export function parseColumnSpec(spec: string): { columns: TableColumn[]; rightBo
       continue;
     }
     if (char === "|") {
-      // A `|` after at least one column and with nothing left is the table's
-      // right edge; otherwise it is the next column's left border.
       pendingBorder = true;
       cursor += 1;
       continue;
     }
     if (char === "@" || char === "!" || char === ">" || char === "<") {
       const end = skipGroup(spec, cursor + 1, "{", "}");
-      pendingPrefix += spec.slice(cursor, end);
+      if (char === "<" && columns.length > 0) {
+        columns[columns.length - 1].raw += pendingPrefix + spec.slice(cursor, end);
+        pendingPrefix = "";
+      } else {
+        pendingPrefix += spec.slice(cursor, end);
+      }
       cursor = end;
       continue;
     }
-    if (char === "p" || char === "m" || char === "b") {
-      const end = skipGroup(spec, cursor + 1, "{", "}");
-      columns.push({ align: "other", raw: pendingPrefix + spec.slice(cursor, end), leftBorder: pendingBorder });
-      pendingBorder = false;
-      pendingPrefix = "";
+    const start = cursor;
+    cursor += 1;
+    // A package-defined column may have balanced parameters, e.g. L{2.7cm}
+    // or S[table-format=2.2]. Those characters never define extra columns.
+    const argumentsText: string[] = [];
+    while (cursor < spec.length) {
+      const beforeSpace = cursor;
+      while (/\s/.test(spec[cursor] ?? "") && cursor < spec.length) cursor += 1;
+      const open = spec[cursor];
+      const end = open === "{" ? skipGroup(spec, cursor, "{", "}")
+        : open === "[" ? skipGroup(spec, cursor, "[", "]") : cursor;
+      if (end === cursor) { cursor = beforeSpace; break; }
+      if (open === "{") argumentsText.push(spec.slice(cursor + 1, end - 1));
       cursor = end;
-      continue;
     }
-    if (char === "l" || char === "c" || char === "r") {
-      columns.push({ align: char, raw: pendingPrefix + char, leftBorder: pendingBorder });
-      pendingBorder = false;
-      pendingPrefix = "";
-      cursor += 1;
-      continue;
-    }
-    // Anything else (X, S, *, a package's own letter) is still a column.
-    columns.push({ align: "other", raw: pendingPrefix + char, leftBorder: pendingBorder });
+    const width = /[pmbLCR]/.test(char) && argumentsText[0]
+      ? previewColumnWidth(argumentsText[0]) : undefined;
+    const previewAlign = /[LCR]/.test(char)
+      ? char.toLowerCase() as "l" | "c" | "r" : undefined;
+    columns.push({
+      align: char === "l" || char === "c" || char === "r" ? char : "other",
+      raw: pendingPrefix + spec.slice(start, cursor),
+      leftBorder: pendingBorder,
+      ...(width ? { width } : {}),
+      ...(previewAlign ? { previewAlign } : {}),
+    });
     pendingBorder = false;
     pendingPrefix = "";
-    cursor += 1;
   }
-  return { columns, rightBorder: pendingBorder };
+  return { columns, rightBorder: pendingBorder, suffix: pendingPrefix };
 }
 
-export function serializeColumnSpec(columns: readonly TableColumn[], rightBorder: boolean): string {
-  return columns.map((column) => `${column.leftBorder ? "|" : ""}${column.raw}`).join("") + (rightBorder ? "|" : "");
+export function serializeColumnSpec(columns: readonly TableColumn[], rightBorder: boolean, suffix = ""): string {
+  return columns.map((column) => `${column.leftBorder ? "|" : ""}${column.raw}`).join("") + (rightBorder ? "|" : "") + suffix;
 }
 
 /** Leading rule commands in `segment`, and where the cells start after them. */
@@ -243,6 +276,7 @@ export function parseTable(source: string, from: number, to: number): TableModel
   if (!header) return null;
   let cursor = from + header[0].length;
   // `\begin{tabular}[t]{ll}` — the optional vertical-position argument.
+  while (cursor < to && /\s/.test(source[cursor])) cursor += 1;
   cursor = skipGroup(source, cursor, "[", "]");
   while (cursor < to && /\s/.test(source[cursor])) cursor += 1;
   if (source[cursor] !== "{") return null;
@@ -250,7 +284,7 @@ export function parseTable(source: string, from: number, to: number): TableModel
   if (specEnd < 0 || specEnd > to) return null;
   const specFrom = cursor + 1;
   const specTo = specEnd - 1;
-  const { columns, rightBorder } = parseColumnSpec(source.slice(specFrom, specTo));
+  const { columns, rightBorder, suffix } = parseColumnSpec(source.slice(specFrom, specTo));
   if (columns.length === 0) return null;
 
   const endMarker = source.lastIndexOf(`\\end{${header[1]}}`, to);
@@ -284,6 +318,8 @@ export function parseTable(source: string, from: number, to: number): TableModel
     to,
     specFrom,
     specTo,
+    specSuffix: suffix,
+    sourcePrefix: source.slice(from, specFrom),
     columns,
     rightBorder,
     rows,
@@ -308,8 +344,8 @@ export function serializeTable(model: TableModel): string {
   });
   const trailing = model.trailingRules.length > 0 ? `${separator}${model.trailingRules.join(" ")}` : "";
   const body = `${separator}${lines.join(` \\\\${separator}`)} \\\\${trailing}${separator}`;
-  const spec = serializeColumnSpec(model.columns, model.rightBorder);
-  return `\\begin{${model.environment}}{${spec}}${body}\\end{${model.environment}}`;
+  const spec = serializeColumnSpec(model.columns, model.rightBorder, model.specSuffix);
+  return `${model.sourcePrefix}${spec}}${body}\\end{${model.environment}}`;
 }
 
 function emptyCell(): TableCell {
@@ -387,7 +423,7 @@ export function setTableColumnAlign(model: TableModel, at: number, align: "l" | 
   return {
     ...model,
     columns: model.columns.map((candidate, index) =>
-      index === at ? { ...candidate, align, raw: raw || align } : candidate),
+      index === at ? { ...candidate, align, raw: raw || align, width: undefined, previewAlign: undefined } : candidate),
   };
 }
 

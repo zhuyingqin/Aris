@@ -301,6 +301,22 @@ export class LatexStructureIndex {
         requiredArguments: [],
       };
 
+      // Inline verbatim is bounded by its literal delimiter and cannot cross
+      // a newline. Tags, percent signs and math delimiters inside it are text.
+      if (control.name === "verb") {
+        const delimiter = source[control.controlTo];
+        if (delimiter && !/\s/.test(delimiter)) {
+          const newline = source.indexOf("\n", control.controlTo + 1);
+          const lineEnd = newline < 0 ? source.length : newline;
+          const close = source.indexOf(delimiter, control.controlTo + 1);
+          command.to = close >= 0 && close < lineEnd ? close + 1 : lineEnd;
+          commands.push(command);
+          rawRanges.push({ from: cursor, to: command.to });
+          cursor = command.to;
+          continue;
+        }
+      }
+
       if (control.name === "begin" || control.name === "end") {
         const envArguments = readFollowingArguments(source, control.controlTo, 1);
         const nameArgument = envArguments.required[0];
@@ -653,8 +669,11 @@ export function updateLatexStructure(
       return;
     }
     // Editing a control-sequence name (including inserting a letter at its end)
-    // changes how TeX tokenises all following characters.
-    if (previous.commands.some((command) => fromA <= command.controlTo && toA >= command.from)) {
+    // changes how TeX tokenises all following characters. Inline verbatim also
+    // has arbitrary literal delimiters, so edits anywhere in it need a rescan.
+    if (previous.commands.some((command) => (
+      fromA <= (command.name === "verb" ? command.to : command.controlTo) && toA >= command.from
+    ))) {
       safe = false;
       return;
     }

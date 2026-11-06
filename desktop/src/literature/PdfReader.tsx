@@ -17,7 +17,7 @@ import type { ChatModelOption } from "../types";
 import { SvgIcon } from "../SvgIcon";
 import { LITERATURE_COPY } from "./i18n";
 import PaperReadingPanel from "./PaperReadingPanel";
-import { isEditableTarget } from "./libraryInteraction";
+import { isEditableTarget, readLayoutPrefs, writeLayoutPrefs } from "./libraryInteraction";
 import PaperReadingContent from "./PaperReadingContent";
 import type {
   PdfAnnotation,
@@ -1244,8 +1244,12 @@ export default function PdfReader({
   const language = useStore((s) => s.language);
   const copy = LITERATURE_COPY[language];
   const viewControlsId = useId();
+  const toolbarId = useId();
   const readerRef = useRef<HTMLDivElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const collapseToolbarButtonRef = useRef<HTMLButtonElement | null>(null);
+  const expandToolbarButtonRef = useRef<HTMLButtonElement | null>(null);
+  const focusToolbarToggleRef = useRef(false);
   const moreToolsRef = useRef<HTMLDivElement | null>(null);
   const moreToolsButtonRef = useRef<HTMLButtonElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1270,6 +1274,7 @@ export default function PdfReader({
     y: FLOATING_TOOLBAR_INSET,
   });
   const [toolbarDragging, setToolbarDragging] = useState(false);
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(() => readLayoutPrefs().pdfToolbarCollapsed === true);
   const [moreToolsOpen, setMoreToolsOpen] = useState(false);
   const [moreToolsPosition, setMoreToolsPosition] = useState({ x: 80, y: 12 });
   const toolbarDragRef = useRef<{
@@ -1377,14 +1382,21 @@ export default function PdfReader({
   const [localReadingVisible, setLocalReadingVisible] = useState(false);
   const readingVisible = controlledReadingVisible ?? localReadingVisible;
   const guideToggleRef = useRef<HTMLButtonElement>(null);
+  const restoreReadingFocusRef = useRef(false);
   const setReadingVisible = (visible: boolean) => {
     setLocalReadingVisible(visible);
     onReadingVisibleChange?.(visible);
   };
   const closeReading = () => {
+    restoreReadingFocusRef.current = true;
     setReadingVisible(false);
-    guideToggleRef.current?.focus();
   };
+
+  useLayoutEffect(() => {
+    if (readingVisible || !restoreReadingFocusRef.current) return;
+    restoreReadingFocusRef.current = false;
+    (toolbarCollapsed ? expandToolbarButtonRef.current : guideToggleRef.current)?.focus({ preventScroll: true });
+  }, [readingVisible, toolbarCollapsed]);
   const annotationsVisible = showAnnotations && !readOnly;
 
   const closeMoreTools = useCallback((restoreFocus = false) => {
@@ -1552,6 +1564,23 @@ export default function PdfReader({
       y: current.y + direction[1] * step,
     }));
   }, [constrainToolbarPosition, resetToolbarPosition]);
+
+  const toggleToolbar = () => {
+    const collapsed = !toolbarCollapsed;
+    setMoreToolsOpen(false);
+    toolbarDragRef.current = null;
+    setToolbarDragging(false);
+    focusToolbarToggleRef.current = true;
+    setToolbarCollapsed(collapsed);
+    writeLayoutPrefs({ pdfToolbarCollapsed: collapsed });
+  };
+
+  useLayoutEffect(() => {
+    if (!focusToolbarToggleRef.current) return;
+    focusToolbarToggleRef.current = false;
+    const button = toolbarCollapsed ? expandToolbarButtonRef.current : collapseToolbarButtonRef.current;
+    button?.focus({ preventScroll: true });
+  }, [toolbarCollapsed]);
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
   const handleHighlightActivate = useCallback((annotationId: string, anchor: HighlightAnchor) => {
@@ -1756,6 +1785,7 @@ export default function PdfReader({
     readOnly,
     readingVisible,
     moreToolsOpen,
+    toolbarCollapsed,
   ]);
 
   // ── Lazy page rendering via IntersectionObserver ──────────────────────────────
@@ -2084,8 +2114,10 @@ export default function PdfReader({
       closeReading();
     }}>
       <div
+        id={toolbarId}
         ref={toolbarRef}
         className={"lit-pdf-toolbar floating" + (toolbarDragging ? " dragging" : "")}
+        hidden={toolbarCollapsed}
         role="toolbar"
         aria-orientation="vertical"
         aria-label={copy.pdfReader.floatingToolbarAria}
@@ -2095,6 +2127,18 @@ export default function PdfReader({
           maxHeight: containerSize.height > 0 ? Math.max(0, containerSize.height - FLOATING_TOOLBAR_INSET * 2) : undefined,
         }}
       >
+        <button
+          ref={collapseToolbarButtonRef}
+          type="button"
+          className="lit-pdf-toolbar-collapse"
+          aria-label={copy.pdfReader.collapseToolbar}
+          title={copy.pdfReader.collapseToolbar}
+          aria-expanded={true}
+          aria-controls={toolbarId}
+          onClick={toggleToolbar}
+        >
+          <SvgIcon name="chevronLeft" size={16} />
+        </button>
         <button
           type="button"
           className="lit-pdf-toolbar-handle"
@@ -2172,6 +2216,20 @@ export default function PdfReader({
           </button>
         </div>
       </div>
+      {toolbarCollapsed && (
+        <button
+          ref={expandToolbarButtonRef}
+          type="button"
+          className="lit-pdf-toolbar-restore"
+          aria-label={copy.pdfReader.expandToolbar}
+          title={copy.pdfReader.expandToolbar}
+          aria-expanded={false}
+          aria-controls={toolbarId}
+          onClick={toggleToolbar}
+        >
+          <SvgIcon name="chevronRight" size={16} />
+        </button>
+      )}
       <div ref={moreToolsRef} id={viewControlsId} className="lit-pdf-tools-popover" hidden={!moreToolsOpen}
         role="dialog" aria-label={copy.pdfReader.moreTools}
         style={{

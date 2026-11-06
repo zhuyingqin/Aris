@@ -740,6 +740,8 @@ export default function Typeset() {
   type LeftPanelTab = "files" | "review" | "ai";
   const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
   const {
+    editorFocused, toggleEditorFocus,
+    chatPanelResized, pdfPanelResized,
     projectPanelVisible, setProjectPanelVisible,
     pdfPanelVisible, setPdfPanelVisible,
     projectPanelWidth, pdfPanelWidth,
@@ -1073,6 +1075,12 @@ export default function Typeset() {
   }, []);
 
   const syncTexMappingStale = syncTexOutdated || dirty || compileResult?.pdfState === "stale" || compileResult?.pdfState === "partial";
+  const visualCompiledDocument = useMemo(() => {
+    if (syncTexMappingStale || !sourcePath || !previewPath || !loaded) return null;
+    const expectedPdf = compileResult?.outputPath ?? outputPathFor(documentRootPath ?? sourcePath);
+    if (!sameWorkspacePath(previewPath, expectedPdf)) return null;
+    return { pdfPath: previewPath, revision: refreshKey, source: loaded.content };
+  }, [compileResult?.outputPath, documentRootPath, loaded, previewPath, refreshKey, sourcePath, syncTexMappingStale]);
   useEffect(() => {
     // A background tab holding unsaved edits still counts: the close guard has
     // to warn about work the editor is not currently showing.
@@ -1321,8 +1329,8 @@ export default function Typeset() {
   }, [activeBeamerLine, previewPath, refreshKey, sourcePath, syncTexMappingStale]);
   const activeBeamerPage = syncedBeamerPage ?? activeBeamerFallbackPage;
   const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
-  const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
-  const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
+  const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive && !editorFocused;
+  const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive && !editorFocused;
   // A standalone file (e.g. a tikz figure with its own \documentclass) can
   // resolve its own compile root to itself even while it lives inside the
   // project that is already open in the sidebar. Re-rooting the tree to that
@@ -1341,8 +1349,8 @@ export default function Typeset() {
     if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
     const text = [error, compileResult?.stderr].filter(Boolean).join("\n").trim();
     if (!text) return 0;
-    const count = text.split(/\r?\n/).filter((line) => line.trim()).length;
-    return Math.min(count, 9);
+    // Raw log lines are one unstructured message, not a count of diagnostics.
+    return 1;
   }, [compileResult?.diagnostics, compileResult?.stderr, error]);
   const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
   const canUndoDraft = Boolean(activeEditorView && undoDepth(activeEditorView.state) > 0);
@@ -4277,6 +4285,8 @@ export default function Typeset() {
   const gridStyle = {
     "--typeset-left-user-w": `${projectPanelWidth}px`,
     "--typeset-preview-user-w": `${pdfPanelWidth}px`,
+    "--typeset-left-preferred-w": activeLeftTab === "ai" && !chatPanelResized ? "clamp(300px, 24cqw, 440px)" : undefined,
+    "--typeset-preview-preferred-w": !pdfPanelResized ? "min(640px, 36cqw)" : undefined,
   } as CSSProperties;
 
   return (
@@ -4407,9 +4417,7 @@ export default function Typeset() {
           />
         ) : (
           <>
-            {effectiveProjectPanelVisible && (
-              <>
-                <div className="typeset-left-panel file-tree-outline-panel-group">
+                <div className="typeset-left-panel file-tree-outline-panel-group" hidden={!effectiveProjectPanelVisible}>
                   {activeLeftTab === "files" && (
                     <>
                       <TypesetExplorer
@@ -4453,9 +4461,10 @@ export default function Typeset() {
                     />
                   )}
                   {aiPanelMounted && (
-                    <TypesetAiPanel visible={activeLeftTab === "ai"} prepareEditorContext={prepareChatEditorContext} />
+                    <TypesetAiPanel visible={effectiveProjectPanelVisible && activeLeftTab === "ai"} prepareEditorContext={prepareChatEditorContext} />
                   )}
                 </div>
+            {effectiveProjectPanelVisible && (
                 <div
                   className="typeset-resize-handle project"
                   data-resize-panel="project"
@@ -4480,8 +4489,8 @@ export default function Typeset() {
                   <button
                     type="button"
                     className="typeset-resizer-collapse-btn"
-                    title={copy.hideProjectFiles}
-                    aria-label="Collapse project panel"
+                    title={activeLeftTab === "ai" ? copy.hideAiPanel : activeLeftTab === "review" ? copy.hideReviewPanel : copy.hideProjectFiles}
+                    aria-label={copy.collapseSidePanel}
                     onClick={(event) => {
                       event.stopPropagation();
                       setProjectPanelVisible(false);
@@ -4497,14 +4506,13 @@ export default function Typeset() {
                     <span className="typeset-resizer-dot" />
                   </div>
                 </div>
-              </>
             )}
             {!effectiveProjectPanelVisible && (
               <button
                 type="button"
                 className="typeset-edge-expand-btn left"
                 title={copy.showProjectFiles}
-                aria-label="Expand project panel"
+                aria-label={copy.expandSidePanel}
                 onClick={() => setProjectPanelVisible(true)}
               >
                 <ToolIcon name="next" />
@@ -4513,6 +4521,8 @@ export default function Typeset() {
             <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label={copy.sourceEditorLabel}>
               {loaded && (
                 <TypesetEditorToolbar
+                  editorFocused={editorFocused}
+                  onToggleEditorFocus={slideFocusActive ? undefined : toggleEditorFocus}
                   spellCheck={spellCheck}
                   onToggleSpellCheck={toggleSpellCheck}
                   activeSlide={activeBeamerSlide}
@@ -4777,6 +4787,7 @@ export default function Typeset() {
                     <TypesetVisualEditor
                         path={sourcePath}
                         draft={editorDisplayDraft}
+                        compiledDocument={visualCompiledDocument}
                         diffLines={externalReviewDiffLines}
                         reviewHunks={externalReviewHunks}
                         numbering={visualNumbering}
@@ -4818,10 +4829,11 @@ export default function Typeset() {
                 <ToolIcon name="previous" />
               </button>
             )}
-            {effectivePdfPanelVisible && (
+            {pdfPanelVisible && !slideFocusActive && (
               <>
                 <div
                   className="typeset-resize-handle pdf"
+                  hidden={editorFocused}
                   data-resize-panel="pdf"
                   role="separator"
                   aria-label={copy.resizePdfPreview}
@@ -4889,7 +4901,7 @@ export default function Typeset() {
                     <span className="typeset-resizer-dot" />
                   </div>
                 </div>
-                <div className="typeset-preview-stack ide-redesign-pdf-container">
+                <div className="typeset-preview-stack ide-redesign-pdf-container" hidden={editorFocused}>
                   {isTypesetImagePath(previewPath) ? (
                     <TypesetImagePreview
                       path={previewPath}
@@ -4907,6 +4919,17 @@ export default function Typeset() {
                       dirty={dirty}
                       disabled={!sourcePath || saving || loading}
                       logOpen={logOpen}
+                      logPanel={logOpen ? (
+                        <CompileLog
+                          result={compileResult}
+                          status={compileStatus}
+                          error={error}
+                          liveLog={compileLiveLog}
+                          disabled={!sourcePath || saving || loading}
+                          onClearCacheCompile={() => void compile(true)}
+                          onDiagnosticClick={openDiagnostic}
+                        />
+                      ) : null}
                       diagnosticsCount={diagnosticsCount}
                       continueOnError={compileErrorHandling === "continue"}
                       canCancel={Boolean(activeCompileRunId)}
@@ -4937,17 +4960,6 @@ export default function Typeset() {
                       onHide={() => setPdfPanelVisible(false)}
                       forwardTarget={pdfForwardTarget}
                       forwardSearchNotice={forwardSearchNotice}
-                    />
-                  )}
-                  {logOpen && !isTypesetImagePath(previewPath) && (
-                    <CompileLog
-                      result={compileResult}
-                      status={compileStatus}
-                      error={error}
-                      liveLog={compileLiveLog}
-                      disabled={!sourcePath || saving || loading}
-                      onClearCacheCompile={() => void compile(true)}
-                      onDiagnosticClick={openDiagnostic}
                     />
                   )}
                 </div>

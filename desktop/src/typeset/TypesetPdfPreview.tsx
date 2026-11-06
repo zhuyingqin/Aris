@@ -37,6 +37,7 @@ import {
 } from "./pdfGeometry";
 import { PdfFallbackPage, PdfPage, type PdfClickPosition } from "./PdfPage";
 import { fitToolbarActions } from "./pdfToolbarLayout";
+import { selectedPdfPageRange } from "./pdfTextSelection";
 import { ToolIcon } from "./ToolIcon";
 import {
   DEFAULT_COMPILE_TIMEOUT_MINUTES,
@@ -77,6 +78,8 @@ export interface PdfPreviewProps {
   dirty: boolean;
   disabled: boolean;
   logOpen: boolean;
+  /** Overlays the PDF content while keeping notices and the toolbar visible. */
+  logPanel?: ReactNode;
   diagnosticsCount: number;
   continueOnError: boolean;
   engine: LatexEngineChoice;
@@ -142,6 +145,7 @@ export default function TypesetPdfPreview({
   dirty,
   disabled,
   logOpen,
+  logPanel,
   diagnosticsCount,
   continueOnError,
   engine,
@@ -626,13 +630,18 @@ export default function TypesetPdfPreview({
         start: Math.max(1, visibleStart - radius),
         end: Math.min(numPages, visibleEnd + radius),
       };
+      const selectedRange = selectedPdfPageRange(scroll);
+      if (selectedRange) {
+        nextRange.start = Math.min(nextRange.start, selectedRange.start);
+        nextRange.end = Math.max(nextRange.end, selectedRange.end);
+      }
       setRenderRange((range) => {
         // A long press followed by a drag can make the browser auto-scroll the
         // PDF while its native selection is still anchored in the page where
         // the gesture began. Replacing that page with a placeholder destroys
         // the anchor and makes the canvas disappear/re-render on every small
         // scroll correction. Keep mounted pages for the lifetime of the
-        // pointer gesture; the pointer-up pass below compacts the window again.
+        // pointer gesture; selected endpoints also stay mounted after mouseup.
         const stableRange = stablePdfRenderRange(range, nextRange, pointerScrollActiveRef.current);
         return range.start === stableRange.start && range.end === stableRange.end ? range : stableRange;
       });
@@ -659,6 +668,13 @@ export default function TypesetPdfPreview({
   }, [updateVisiblePages]);
 
   useEffect(() => {
+    let hadPdfSelection = false;
+    const selectionChanged = () => {
+      const scroll = scrollRef.current;
+      const hasPdfSelection = scroll !== null && selectedPdfPageRange(scroll) !== null;
+      if (hasPdfSelection || hadPdfSelection) scheduleVisiblePagesUpdate();
+      hadPdfSelection = hasPdfSelection;
+    };
     const finishPointerScroll = () => {
       if (!pointerScrollActiveRef.current) return;
       pointerScrollActiveRef.current = false;
@@ -668,11 +684,13 @@ export default function TypesetPdfPreview({
     window.addEventListener("pointercancel", finishPointerScroll);
     window.addEventListener("touchend", finishPointerScroll);
     window.addEventListener("touchcancel", finishPointerScroll);
+    document.addEventListener("selectionchange", selectionChanged);
     return () => {
       window.removeEventListener("pointerup", finishPointerScroll);
       window.removeEventListener("pointercancel", finishPointerScroll);
       window.removeEventListener("touchend", finishPointerScroll);
       window.removeEventListener("touchcancel", finishPointerScroll);
+      document.removeEventListener("selectionchange", selectionChanged);
     };
   }, [scheduleVisiblePagesUpdate]);
 
@@ -882,6 +900,12 @@ export default function TypesetPdfPreview({
   }, [compileMenuOpen, logOpen, numPages, presenting, scrollToPage, zoomMenuOpen]);
 
   const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
+  const diagnosticErrors = result?.diagnostics?.filter((item) => item.severity === "error").length ?? 0;
+  const diagnosticWarnings = result?.diagnostics?.filter((item) => item.severity === "warning").length ?? 0;
+  const diagnosticOther = Math.max(0, diagnosticsCount - diagnosticErrors - diagnosticWarnings);
+  const diagnosticsTone = diagnosticErrors > 0 ? "error" : diagnosticWarnings > 0 ? "warning" : "message";
+  const diagnosticsLabel = copy.diagnosticsSummary(diagnosticErrors, diagnosticWarnings, diagnosticOther);
+  const logLabel = diagnosticsCount > 0 ? `${copy.compileLog} · ${diagnosticsLabel}` : copy.compileLog;
   const previewStatusText = error
     ? copy.previewUnavailable(error)
     : loading
@@ -1232,13 +1256,15 @@ export default function TypesetPdfPreview({
           </div>
           <button
             type="button"
-            className={`typeset-log-toggle pdf-toolbar-btn log-btn${logOpen ? " active" : ""}`}
-            title={copy.compileLog}
-            aria-label={copy.compileLog}
+            className={`typeset-log-toggle pdf-toolbar-btn log-btn${logOpen ? " active" : ""}${diagnosticsCount > 0 ? ` has-diagnostics diagnostics-${diagnosticsTone}` : ""}`}
+            title={logLabel}
+            aria-label={logLabel}
+            aria-expanded={logOpen}
             onClick={onToggleLog}
           >
-            <ToolIcon name="logs" />
-            {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
+            {diagnosticErrors > 0 ? <SvgIcon name="error" size={14} />
+              : diagnosticWarnings > 0 ? <SvgIcon name="warning" size={14} /> : <ToolIcon name="logs" />}
+            {diagnosticsCount > 0 && <span className="typeset-diagnostics-label">{diagnosticsLabel}</span>}
           </button>
           {toolbarStatuses.length > 0 && (
             <div className="typeset-pdf-status-strip" ref={toolbarStatusRef}>
@@ -1530,78 +1556,82 @@ export default function TypesetPdfPreview({
           </button>
         </aside>
       )}
-      <div
-        className={`typeset-pdf-scroll${inverted ? " inverted" : ""}`}
-        ref={scrollRef}
-        // Clicking the PDF has to leave the keyboard *here*, or ArrowLeft /
-        // ArrowRight keep editing text in the source pane instead of turning
-        // the page. Not a tab stop: each page already exposes one.
-        tabIndex={-1}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-          pointerScrollActiveRef.current = true;
-          cancelProgrammaticScroll();
-        }}
-        onTouchStart={(event) => {
-          event.stopPropagation();
-          pointerScrollActiveRef.current = true;
-          cancelProgrammaticScroll();
-        }}
-        onTouchMove={(event) => event.stopPropagation()}
-        onMouseDown={(event) => {
-          if (event.currentTarget.contains(document.activeElement)) return;
-          event.currentTarget.focus({ preventScroll: true });
-        }}
-        onScroll={scheduleVisiblePagesUpdate}
-        onWheel={handlePdfWheel}
-      >
-        {!path && <div className="typeset-empty">{copy.noPdfSelected}</div>}
-        {path && loading && <div className="typeset-empty">{copy.loadingPdf}</div>}
-        {path && error ? (
-          <PdfFallbackPage error={error} outputPath={path} sourcePath={sourcePath} />
-        ) : (
-          null
-        )}
-        {pdf && !error && Array.from({ length: numPages }, (_, index) => {
-          const page = index + 1;
-          const estimatedSize = pageSizes[page] ?? pageSizes[1] ?? { width: 612, height: 792 };
-          if (page < renderRange.start || page > renderRange.end) {
+      <div className="typeset-pdf-content">
+        <div
+          className={`typeset-pdf-scroll${inverted ? " inverted" : ""}`}
+          ref={scrollRef}
+          // Clicking the PDF has to leave the keyboard *here*, or ArrowLeft /
+          // ArrowRight keep editing text in the source pane instead of turning
+          // the page. Not a tab stop: each page already exposes one.
+          tabIndex={-1}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            pointerScrollActiveRef.current = true;
+            cancelProgrammaticScroll();
+          }}
+          onTouchStart={(event) => {
+            event.stopPropagation();
+            pointerScrollActiveRef.current = true;
+            cancelProgrammaticScroll();
+          }}
+          onTouchMove={(event) => event.stopPropagation()}
+          onMouseDown={(event) => {
+            if (event.currentTarget.contains(document.activeElement)) return;
+            event.currentTarget.focus({ preventScroll: true });
+          }}
+          onScroll={scheduleVisiblePagesUpdate}
+          onWheel={handlePdfWheel}
+        >
+          {!path && <div className="typeset-empty">{copy.noPdfSelected}</div>}
+          {path && loading && <div className="typeset-empty">{copy.loadingPdf}</div>}
+          {path && error ? (
+            <PdfFallbackPage error={error} outputPath={path} sourcePath={sourcePath} />
+          ) : (
+            null
+          )}
+          {pdf && !error && Array.from({ length: numPages }, (_, index) => {
+            const page = index + 1;
+            const estimatedSize = pageSizes[page] ?? pageSizes[1] ?? { width: 612, height: 792 };
+            if (page < renderRange.start || page > renderRange.end) {
+              return (
+                <div
+                  key={`${path}:${refreshKey}:${page}`}
+                  className="typeset-pdf-page typeset-pdf-page-placeholder"
+                  data-pdf-page={page}
+                  ref={pageRefFor(page)}
+                  style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
+                  aria-label={copy.pdfPagePlaceholderLabel(page)}
+                />
+              );
+            }
+            const highlight = forwardTarget && forwardTarget.location.page === page
+              ? {
+                  left: forwardTarget.location.boxLeft * zoom,
+                  top: forwardTarget.location.boxTop * zoom,
+                  width: forwardTarget.location.boxWidth * zoom,
+                  height: forwardTarget.location.boxHeight * zoom,
+                  nonce: forwardTarget.nonce,
+                }
+              : null;
             return (
-              <div
+              <PdfPage
                 key={`${path}:${refreshKey}:${page}`}
-                className="typeset-pdf-page typeset-pdf-page-placeholder"
-                ref={pageRefFor(page)}
-                style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
-                aria-label={copy.pdfPagePlaceholderLabel(page)}
+                pdf={pdf}
+                page={page}
+                zoom={zoom}
+                estimatedSize={estimatedSize}
+                onSourceTextClick={onSourceTextClick}
+                onPageSize={pageSizeCallbackFor(page)}
+                pageRef={pageRefFor(page)}
+                onPointConverter={registerPointConverter}
+                onPdfLinkClick={followPdfLink}
+                highlight={highlight}
+                onRenderError={handlePageRenderError}
               />
             );
-          }
-          const highlight = forwardTarget && forwardTarget.location.page === page
-            ? {
-                left: forwardTarget.location.boxLeft * zoom,
-                top: forwardTarget.location.boxTop * zoom,
-                width: forwardTarget.location.boxWidth * zoom,
-                height: forwardTarget.location.boxHeight * zoom,
-                nonce: forwardTarget.nonce,
-              }
-            : null;
-          return (
-            <PdfPage
-              key={`${path}:${refreshKey}:${page}`}
-              pdf={pdf}
-              page={page}
-              zoom={zoom}
-              estimatedSize={estimatedSize}
-              onSourceTextClick={onSourceTextClick}
-              onPageSize={pageSizeCallbackFor(page)}
-              pageRef={pageRefFor(page)}
-              onPointConverter={registerPointConverter}
-              onPdfLinkClick={followPdfLink}
-              highlight={highlight}
-              onRenderError={handlePageRenderError}
-            />
-          );
-        })}
+          })}
+        </div>
+        {logPanel}
       </div>
       {presenting && pdf && typeof document !== "undefined" && createPortal(
         <TypesetPdfPresentation

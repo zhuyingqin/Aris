@@ -1,5 +1,5 @@
 /**
- * A deliberately small, lossless TikZ previewer for the Visual editor.
+ * A deliberately small TikZ graph fallback for the Visual editor.
  *
  * This is not a TeX engine. It renders the graph-shaped subset that appears
  * most often in research figures (`\node`, `\draw`/`\path`, named-node
@@ -39,6 +39,8 @@ type PreviewEdge = {
 type TikzStatement = {
   kind: "node" | "draw" | "path";
   source: string;
+  from: number;
+  to: number;
 };
 
 const DEFAULT_STROKE = "var(--visual-accent-bright)";
@@ -168,7 +170,7 @@ function statements(source: string): TikzStatement[] {
       else if (char === ")") parens = Math.max(0, parens - 1);
       else if (char === ";" && braces === 0 && brackets === 0 && parens === 0) break;
     }
-    result.push({ kind: match[1] as TikzStatement["kind"], source: source.slice(match.index, Math.min(source.length, end + 1)) });
+    result.push({ kind: match[1] as TikzStatement["kind"], source: source.slice(match.index, Math.min(source.length, end + 1)), from: match.index, to: Math.min(source.length, end + 1) });
     command.lastIndex = Math.min(source.length, end + 1);
   }
   return result;
@@ -273,10 +275,83 @@ function svgText(text: string, x: number, y: number, className: string): SVGText
   return element;
 }
 
-/** Render a best-effort SVG preview, or null when the source has no graph data. */
+/** Reject syntax whose layout the small fallback renderer cannot execute. */
+function supportedGraphSource(source: string): string | null {
+  const clean = source.replace(/\\[\s\S]|%[^\n]*/g, (token) => token.startsWith("%") ? "" : token).trim();
+  const picture = /^\\begin\{tikzpicture\}\s*(?:\[([^\]]*)\])?([\s\S]*)\\end\{tikzpicture\}$/.exec(clean);
+  if (!picture) return null;
+  const optionsSupported = (options: string, kind: "picture" | "node" | "edge") => splitTopLevel(options).every((option) => {
+    const equals = option.indexOf("=");
+    const key = (equals < 0 ? option : option.slice(0, equals)).trim();
+    const value = equals < 0 ? "" : option.slice(equals + 1).trim();
+    if (kind === "picture") return key === "node distance" && /^\d*\.?\d+\s*(?:cm)?$/.test(value);
+    if (["draw", "fill", "color", "text"].includes(key)) {
+      return (!value && key === "draw") || /^(?:[a-z]+|#[0-9a-f]{3,8})$/i.test(value);
+    }
+    if (kind === "node") {
+      if (["rectangle", "circle", "rounded corners"].includes(key)) return !value;
+      if (["minimum width", "minimum height"].includes(key)) return /^\d*\.?\d+\s*(?:cm)?$/.test(value);
+      if (["right", "left", "above", "below"].includes(key)) return /^(?:\d*\.?\d+\s*cm\s*)?of\s+[A-Za-z][\w:.-]*$/.test(value);
+    } else if (["->", "<-", "-Latex", "Latex-", "dashed", "densely dashed", "solid"].includes(key)) {
+      // The fallback only draws arrowheads at the end of an edge.
+      return !value && key !== "<-" && key !== "Latex-";
+    }
+    return false;
+  });
+  if (!optionsSupported(picture[1] ?? "", "picture")) return null;
+  const body = picture[2].trim();
+  const parsed = statements(body);
+  let cursor = 0;
+  const ids = new Set<string>();
+  const references: Array<{ id: string | null; target: string }> = [];
+  for (const [index, statement] of parsed.entries()) {
+    if (body.slice(cursor, statement.from).trim() || !statement.source.endsWith(";")) return null;
+    cursor = statement.to;
+    if (statement.kind === "node") {
+      const parts = nodeParts(statement.source);
+      if (!optionsSupported(parts.options, "node")) return null;
+      // A macro or calc expression in an `at` coordinate must never become (0,0).
+      const prefix = statement.source.slice(0, statement.source.indexOf("{"));
+      if (!/^\\node\s*(?:\[[^\]]*\]\s*)?(?:\([A-Za-z][\w:.-]*\)\s*)?(?:at\s*\(\s*-?(?:\d+\.?\d*|\.\d+)\s*,\s*-?(?:\d+\.?\d*|\.\d+)\s*\)\s*)?$/.test(prefix)) return null;
+      const reference = positionReference(parts.options);
+      if (index > 0 && !parts.at && !reference) return null;
+      if (parts.id) {
+        if (ids.has(parts.id)) return null;
+        ids.add(parts.id);
+      }
+      if (reference) references.push({ id: parts.id, target: reference.id });
+    } else {
+      if (!/^\\(?:draw|path)\s*(?:\[[^\]]*\])?\s*\([^()]+\)(?:\s*--\s*\([^()]+\))+\s*;$/.test(statement.source)) return null;
+      const options = /^\\(?:draw|path)\s*\[([^\]]*)\]/.exec(statement.source)?.[1] ?? "";
+      if (!optionsSupported(options, "edge")) return null;
+    }
+  }
+  if (body.slice(cursor).trim()) return null;
+  const unresolved = new Map(references.filter((ref) => ref.id).map((ref) => [ref.id!, ref.target]));
+  for (const ref of references) if (!ids.has(ref.target)) return null;
+  for (const id of unresolved.keys()) {
+    const visited = new Set<string>();
+    let target: string | undefined = id;
+    while (target && unresolved.has(target)) {
+      if (visited.has(target)) return null;
+      visited.add(target);
+      target = unresolved.get(target);
+    }
+  }
+  for (const statement of parsed.filter((item) => item.kind !== "node")) {
+    for (const coordinate of statement.source.matchAll(/\(([^()]+)\)/g)) {
+      if (!/^\s*-?(?:\d+\.?\d*|\.\d+)\s*,\s*-?(?:\d+\.?\d*|\.\d+)\s*$/.test(coordinate[1]) && !ids.has(coordinate[1].trim())) return null;
+    }
+  }
+  return body;
+}
+
+/** Render a simple graph only when all of its layout syntax is supported. */
 export function renderTikzPreview(source: string): SVGSVGElement | null {
   if (typeof document === "undefined") return null;
-  const parsed = statements(source);
+  const body = supportedGraphSource(source);
+  if (body === null) return null;
+  const parsed = statements(body);
   const nodeStatements = parsed.filter((statement) => statement.kind === "node");
   const nodes: PreviewNode[] = [];
   const references: Array<ReturnType<typeof positionReference>> = [];

@@ -27,6 +27,7 @@ import {
   type SyncTexViewportLike,
 } from "./syncTexMapping";
 import { ToolIcon } from "./ToolIcon";
+import { usePdfTextSelection } from "./pdfTextSelection";
 import { DEFAULT_SOURCE_PATH, outputPathFor } from "./typesetPaths";
 
 export interface PdfPageHighlight {
@@ -301,16 +302,21 @@ export const PdfPage = memo(function PdfPage({
 
   // A click that ends somewhere other than where it started was a drag — the
   // user was scrolling or selecting, not asking to navigate.
-  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
-  const clickWasStationary = (event: { clientX: number; clientY: number }) => {
+  const pointerDownRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const startTextSelection = usePdfTextSelection(textLayerRef, () => {
+    if (pointerDownRef.current) pointerDownRef.current.moved = true;
+  });
+  const clickWasStationary = (event: { clientX: number; clientY: number }, consume = true) => {
     const origin = pointerDownRef.current;
-    pointerDownRef.current = null;
-    return !origin || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= 4;
+    if (consume) pointerDownRef.current = null;
+    return !origin || (!origin.moved && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= 4);
   };
 
   return (
     <div
       className="typeset-pdf-page"
+      data-pdf-page={page}
       ref={(el) => {
         pageElementRef.current = el;
         pageRef?.(el);
@@ -320,7 +326,24 @@ export const PdfPage = memo(function PdfPage({
         height: `${estimatedSize.height * zoom}px`,
       } : undefined}
       onMouseDown={editable ? undefined : (event) => {
-        pointerDownRef.current = { x: event.clientX, y: event.clientY };
+        if (event.button !== 0) return;
+        pointerDownRef.current = { x: event.clientX, y: event.clientY, moved: false };
+        startTextSelection(event);
+      }}
+      onMouseMove={editable ? undefined : (event) => {
+        const origin = pointerDownRef.current;
+        if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 4) origin.moved = true;
+      }}
+      onClick={editable || !onPdfLinkClick ? undefined : (event) => {
+        if (event.detail === 0 || !clickWasStationary(event, false) || window.getSelection()?.isCollapsed === false) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const x = event.clientX - bounds.left;
+        const y = event.clientY - bounds.top;
+        const link = linkRuns.find((run) => x >= run.left && x <= run.left + run.width
+          && y >= run.top && y <= run.top + run.height);
+        if (!link) return;
+        event.stopPropagation();
+        onPdfLinkClick(link.destination);
       }}
       // Inverse search is a *double* click, as in Overleaf, SumatraPDF and
       // TeXstudio. A single click is left to the reader: it focuses the pane
@@ -337,9 +360,6 @@ export const PdfPage = memo(function PdfPage({
           className="typeset-pdf-page-source-target"
           aria-label={copy.jumpToSourcePageLabel(page)}
           title={copy.jumpToSourceTitle}
-          onMouseDown={(event) => {
-            pointerDownRef.current = { x: event.clientX, y: event.clientY };
-          }}
           onClick={(event) => {
             // `detail === 0` means the click came from the keyboard (Enter or
             // Space on the focused target), which is the one case where there
@@ -372,11 +392,10 @@ export const PdfPage = memo(function PdfPage({
                   ? `${link.borderWidth}px ${link.borderStyle} ${link.borderColor}`
                   : undefined,
               }}
-              onMouseDown={(event) => {
-                event.stopPropagation();
-                pointerDownRef.current = null;
-              }}
               onClick={(event) => {
+                // Pointer clicks are resolved on the page, so the annotation
+                // never intercepts a text-selection gesture underneath it.
+                if (event.detail !== 0) return;
                 event.stopPropagation();
                 onPdfLinkClick(link.destination);
               }}
@@ -386,11 +405,13 @@ export const PdfPage = memo(function PdfPage({
       )}
       {pageSize && (
         <div
-          className="typeset-pdf-text-layer"
+          className={`typeset-pdf-text-layer${editable ? "" : " reading"}`}
+          ref={textLayerRef}
           style={{ width: `${pageSize.width}px`, height: `${pageSize.height}px` }}
           aria-label={copy.pdfTextLayerLabel(page)}
         >
           {textRuns.map((run, index) => {
+            if (editable && !run.text) return null;
             const context = textRuns.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
             const draft = objectDrafts[run.id];
             const displayed = draft
@@ -425,7 +446,10 @@ export const PdfPage = memo(function PdfPage({
               return (
                 <Fragment key={run.id}>
                 <span
-                  className="typeset-pdf-text-run reading"
+                  className={`typeset-pdf-text-run reading${onPdfLinkClick && linkRuns.some((link) => (
+                    run.left < link.left + link.width && run.left + run.width > link.left
+                    && run.top < link.top + link.height && run.top + run.height > link.top
+                  )) ? " linked" : ""}`}
                   // Sized by its own text, then squeezed onto the glyphs — the
                   // pdf.js text-layer geometry. Forcing the box to the run's
                   // width instead would clip or stretch the selection, which is

@@ -236,6 +236,8 @@ export default function TypesetEditorToolbar({
   onPrepareCitationKeys,
   onSynchronizeBibliography,
   saving,
+  editorFocused = false,
+  onToggleEditorFocus,
 }: {
   /** Spell checking is a Visual-surface feature: with commands hidden the
    * page reads as prose, whereas Code mode would squiggle every macro. */
@@ -281,6 +283,8 @@ export default function TypesetEditorToolbar({
   onPrepareCitationKeys: (ids: string[]) => Promise<string[]>;
   onSynchronizeBibliography: () => Promise<void>;
   saving: boolean;
+  editorFocused?: boolean;
+  onToggleEditorFocus?: () => void;
 }) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].toolbar;
@@ -481,6 +485,18 @@ export default function TypesetEditorToolbar({
           <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>{copy.code}</button>
           <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>{copy.visual}</button>
         </div>
+        {onToggleEditorFocus && (
+          <button
+            type="button"
+            className={`typeset-editor-focus-btn${editorFocused ? " active" : ""}`}
+            aria-label={editorFocused ? copy.restorePanels : copy.focusEditor}
+            title={editorFocused ? copy.restorePanels : copy.focusEditor}
+            aria-pressed={editorFocused}
+            onClick={onToggleEditorFocus}
+          >
+            <ToolIcon name="focus" />
+          </button>
+        )}
       </div>
       <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label={copy.editorToolbarLabel}>
         {safeCompiledVisual && (
