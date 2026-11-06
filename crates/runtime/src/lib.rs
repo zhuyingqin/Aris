@@ -64,7 +64,8 @@ pub use pdf_text::{
     PdfTextExtraction, PdfTextQuality,
 };
 pub use bash::{
-    adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
+    adopted_background_note, apply_windows_utf8_env, background_pipe_note, execute_bash,
+    execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };

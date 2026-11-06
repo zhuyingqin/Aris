@@ -4539,6 +4539,7 @@ fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<Re
     let started = Instant::now();
     let mut command = runtime::hidden_command(runtime.program);
     command.args(runtime.args).arg(&input.code);
+    apply_child_utf8_env(&mut command);
     let output = runtime::run_managed_command_with_cancel(
         &mut command,
         format!(
@@ -6614,6 +6615,7 @@ fn execute_shell_command(
             .arg("-Command")
             .arg(&command_arg)
             .stdin(std::process::Stdio::null());
+        apply_child_utf8_env(&mut process);
         let log = runtime::background_log::create(&cwd, command);
         match &log {
             Some(log) => {
@@ -6662,6 +6664,7 @@ fn execute_shell_command(
     process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    apply_child_utf8_env(&mut process);
 
     let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(timeout);
     let output = runtime::run_managed_command_with_cancel_and_progress(
@@ -6746,6 +6749,17 @@ fn execute_shell_command(
         persisted_output_size: None,
         sandbox_status: None,
     })
+}
+
+/// PowerShell already reads native output as UTF-8 (see
+/// [`powershell_command_arg`]), but a Python child still wrote in the console
+/// code page: characters outside GBK raised `UnicodeEncodeError`, and the GBK
+/// bytes that did get through were decoded as UTF-8 into `�`. The REPL had
+/// the same failure. Both now get the bash tool's UTF-8 child environment.
+fn apply_child_utf8_env(process: &mut std::process::Command) {
+    if cfg!(windows) {
+        runtime::apply_windows_utf8_env(process);
+    }
 }
 
 fn powershell_command_arg(command: &str) -> String {
