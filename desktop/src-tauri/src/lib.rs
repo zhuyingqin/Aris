@@ -13,6 +13,9 @@ mod config;
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
 #[cfg(feature = "devserver")]
 pub mod devserver;
+/// One-shot model calls for the memory-L1 evaluation harness.
+#[cfg(feature = "memory-eval")]
+pub mod memory_eval_bridge;
 mod engine;
 mod env;
 mod files;

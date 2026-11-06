@@ -103,6 +103,8 @@ windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Secur
 # Hosts the AppCtx-ported commands over loopback HTTP for browser-based
 # debugging. Never enabled by `cargo tauri build`.
 devserver = ["dep:axum"]
+# One-shot model calls for the memory-L1 evaluation harness (examples only).
+memory-eval = []
 
 [[bin]]
 name = "aris-desktop"
@@ -111,6 +113,10 @@ path = "src/main.rs"
 [[example]]
 name = "devserver"
 required-features = ["devserver"]
+
+[[example]]
+name = "memory_eval_bridge"
+required-features = ["memory-eval"]
 
 [dev-dependencies]
 tempfile = "3.27"
