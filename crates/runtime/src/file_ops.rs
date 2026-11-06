@@ -1046,10 +1046,22 @@ pub(crate) fn replace_file_contents_unlocked(
     absolute_path: &Path,
     content: &str,
 ) -> io::Result<()> {
+    replace_file_contents_checked_unlocked(absolute_path, content, || Ok(()))
+}
+
+fn replace_file_contents_checked_unlocked(
+    absolute_path: &Path,
+    content: &str,
+    before_replace: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
     let permissions = fs::metadata(absolute_path)
         .ok()
         .map(|metadata| metadata.permissions());
-    crate::atomic_file::write_replace_unlocked(absolute_path, content.as_bytes())?;
+    crate::atomic_file::write_replace_unlocked_checked(
+        absolute_path,
+        content.as_bytes(),
+        before_replace,
+    )?;
     if let Some(permissions) = permissions {
         let _ = fs::set_permissions(absolute_path, permissions);
     }
@@ -1195,7 +1207,8 @@ pub fn write_file_with_context_expected(
 /// Revision-check and publish a set of complete files as one recoverable
 /// in-process transaction. All destination locks remain held from preflight
 /// through publication. If a later replacement fails, earlier replacements
-/// are restored from their exact preflight snapshots before the error returns.
+/// are restored from their preflight snapshots only while the published bytes
+/// still match. Audit writes run after destination locks and recovery cleanup.
 pub fn write_files_with_context_expected(
     requests: &[BatchWriteRequest],
     context: &FileMutationContext,
@@ -1225,7 +1238,7 @@ pub fn write_files_with_context_expected(
         .collect::<Vec<_>>();
     let batch_id = create_batch_write_id()?;
 
-    crate::atomic_file::with_paths_locked(&paths, || {
+    let snapshots = crate::atomic_file::with_paths_locked(&paths, || {
         let mut snapshots = Vec::with_capacity(prepared.len());
         for (path, request) in &prepared {
             let original = read_optional_utf8(path)?;
@@ -1261,15 +1274,35 @@ pub fn write_files_with_context_expected(
         )?;
 
         let mut published = 0_usize;
-        for (index, ((path, _), (_, content))) in prepared.iter().zip(snapshots.iter()).enumerate()
+        for (index, ((path, _), (original, content))) in
+            prepared.iter().zip(snapshots.iter()).enumerate()
         {
-            if let Err(error) = replace_file_contents_unlocked(path, content) {
+            let before_revision = current_revision(original.as_deref());
+            let publish = replace_file_contents_checked_unlocked(path, content, || {
+                let current = read_optional_utf8(path)?;
+                validate_expected_revision(path, Some(&before_revision), current.as_deref())
+            });
+            if let Err(error) = publish {
                 let mut rollback_errors = Vec::new();
                 for rollback_index in (0..published).rev() {
                     let rollback_path = &prepared[rollback_index].0;
+                    let published_revision =
+                        content_revision(snapshots[rollback_index].1.as_bytes());
+                    let check_published = || {
+                        let current = read_optional_utf8(rollback_path)?;
+                        validate_expected_revision(
+                            rollback_path,
+                            Some(&published_revision),
+                            current.as_deref(),
+                        )
+                    };
                     let rollback = match &snapshots[rollback_index].0 {
-                        Some(original) => replace_file_contents_unlocked(rollback_path, original),
-                        None => fs::remove_file(rollback_path),
+                        Some(original) => replace_file_contents_checked_unlocked(
+                            rollback_path,
+                            original,
+                            check_published,
+                        ),
+                        None => check_published().and_then(|()| fs::remove_file(rollback_path)),
                     };
                     if let Err(rollback_error) = rollback {
                         rollback_errors
@@ -1293,19 +1326,41 @@ pub fn write_files_with_context_expected(
             published += 1;
         }
 
-        let mut files = Vec::with_capacity(prepared.len());
-        for ((path, _), (original, content)) in prepared.iter().zip(snapshots.iter()) {
-            let file_path = display_path(path);
-            let structured_patch = make_patch(original.as_deref().unwrap_or(""), content);
-            let changes = make_file_changes(&file_path, original.as_deref(), Some(content));
-            let unified_diff =
-                make_unified_diff(&file_path, original.as_deref().unwrap_or(""), content);
-            let operation = if original.is_some() {
-                FileChangeOperation::Update
-            } else {
-                FileChangeOperation::Create
-            };
-            let change_id = record_text_file_change(
+        // Publication is complete. Remove the recovery journal before any audit
+        // can land; otherwise a later audit failure could make startup recovery
+        // roll back sources that already have Applied ledger records.
+        fs::remove_file(&journal_path).map_err(|error| {
+            io::Error::new(error.kind(), serde_json::json!({
+                "ok": false,
+                "code": "batch_write_journal_cleanup_failed",
+                "stage": "journal_cleanup",
+                "batchId": batch_id,
+                "published": prepared.len(),
+                "journalPath": display_path(&journal_path),
+                "journalState": "pending",
+                "auditState": "not_started",
+                "message": format!("All source files were published, but their pending recovery journal could not be removed: {error}"),
+                "retry": "Do not replay the batch. Inspect the published files and pending journal before recovery or another edit.",
+            }).to_string())
+        })?;
+        Ok::<_, io::Error>(snapshots)
+    })?;
+
+    // Auditing takes ledger/blob locks of its own. No source stripe may remain
+    // held here: its hash can collide with a ledger or snapshot stripe.
+    let mut files = Vec::with_capacity(prepared.len());
+    for ((path, _), (original, content)) in prepared.iter().zip(snapshots.iter()) {
+        let file_path = display_path(path);
+        let structured_patch = make_patch(original.as_deref().unwrap_or(""), content);
+        let changes = make_file_changes(&file_path, original.as_deref(), Some(content));
+        let unified_diff =
+            make_unified_diff(&file_path, original.as_deref().unwrap_or(""), content);
+        let operation = if original.is_some() {
+            FileChangeOperation::Update
+        } else {
+            FileChangeOperation::Create
+        };
+        let change_id = record_text_file_change(
                 context,
                 path,
                 operation,
@@ -1314,30 +1369,42 @@ pub fn write_files_with_context_expected(
                 structured_patch.clone(),
                 unified_diff,
                 None,
-            )?
+            )
+            .map_err(|error| io::Error::new(error.kind(), serde_json::json!({
+                "ok": false,
+                "code": "batch_write_audit_failed",
+                "stage": "audit",
+                "batchId": batch_id,
+                "filePath": display_path(path),
+                "published": prepared.len(),
+                "audited": files.len(),
+                "auditState": "unconfirmed",
+                "journalState": "removed",
+                "auditError": error.to_string(),
+                "message": "All source replacements were published; the failing audit record could not be confirmed. No sources were rolled back.",
+                "retry": "Repair audit storage, then re-read the source files and inspect their change records. Do not blindly replay the batch.",
+            }).to_string()))?
             .map(|record| record.change_id);
-            files.push(WriteFileOutput {
-                kind: if original.is_some() {
-                    "update"
-                } else {
-                    "create"
-                }
-                .to_string(),
-                file_path,
-                changes,
-                content: content.clone(),
-                structured_patch,
-                original_file: original.clone(),
-                git_diff: None,
-                change_id,
-                revision: content_revision(content.as_bytes()),
-                bytes: content.len(),
-                lines: content.lines().count(),
-            });
-        }
-        let _ = fs::remove_file(&journal_path);
-        Ok(BatchWriteOutput { batch_id, files })
-    })
+        files.push(WriteFileOutput {
+            kind: if original.is_some() {
+                "update"
+            } else {
+                "create"
+            }
+            .to_string(),
+            file_path,
+            changes,
+            content: content.clone(),
+            structured_patch,
+            original_file: original.clone(),
+            git_diff: None,
+            change_id,
+            revision: content_revision(content.as_bytes()),
+            bytes: content.len(),
+            lines: content.lines().count(),
+        });
+    }
+    Ok(BatchWriteOutput { batch_id, files })
 }
 
 fn create_batch_write_id() -> io::Result<String> {
@@ -1796,8 +1863,13 @@ pub fn multi_edit_file_with_context_expected(
                 ));
             }
 
-            // One atomic replacement makes the entire batch visible at once.
-            replace_file_contents_unlocked(&absolute_path, &updated)?;
+            // Recheck the actual read revision before every replacement attempt:
+            // another editor may save while a Windows sharing lock is retried.
+            // This guard also applies to callers that did not supply a token.
+            replace_file_contents_checked_unlocked(&absolute_path, &updated, || {
+                let current = read_optional_utf8(&absolute_path)?;
+                validate_expected_revision(&absolute_path, Some(&base_revision), current.as_deref())
+            })?;
             Ok::<_, io::Error>((original_file, updated, replacements))
         },
     )?;
@@ -1816,7 +1888,8 @@ pub fn multi_edit_file_with_context_expected(
         structured_patch.clone(),
         unified_diff,
         None,
-    )?
+    )
+    .map_err(|error| multi_edit_audit_failure(&absolute_path, &original_file, &updated, error))?
     .map(|record| record.change_id);
 
     Ok(MultiEditOutput {
@@ -1829,6 +1902,58 @@ pub fn multi_edit_file_with_context_expected(
         change_id,
         revision: content_revision(updated.as_bytes()),
     })
+}
+
+// Audit writes take their own striped path locks. Do not hold the source lock
+// through the audit: a ledger/blob path may hash to the same stripe. Only observe
+// the current source after failure. The audit append may already have landed,
+// and a later external save must never be overwritten by an automatic rollback.
+fn multi_edit_audit_failure(
+    path: &Path,
+    original: &str,
+    updated: &str,
+    audit_error: io::Error,
+) -> io::Error {
+    let (file_state, current_revision, read_error) =
+        crate::atomic_file::with_path_lock(path, || match fs::read(path) {
+            Ok(bytes) => {
+                let state = if bytes == original.as_bytes() {
+                    "original"
+                } else if bytes == updated.as_bytes() {
+                    "attempted_update"
+                } else {
+                    "changed_since_write"
+                };
+                (state, Some(content_revision(&bytes)), None)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                ("missing", Some(ABSENT_FILE_REVISION.to_string()), None)
+            }
+            Err(error) => ("unknown", None, Some(error.to_string())),
+        });
+    io::Error::new(
+        audit_error.kind(),
+        serde_json::json!({
+            "ok": false,
+            "code": "multi_edit_audit_failed",
+            "stage": "audit",
+            "filePath": display_path(path),
+            "published": true,
+            "auditState": "unconfirmed",
+            "auditError": {
+                "message": audit_error.to_string(),
+                "kind": format!("{:?}", audit_error.kind()),
+                "rawOsError": audit_error.raw_os_error(),
+                "ledgerRoot": display_path(&crate::change_ledger::change_ledger_root_for_path(path)),
+            },
+            "fileState": file_state,
+            "currentRevision": current_revision,
+            "readError": read_error,
+            "message": "multi_edit published the complete source replacement, but could not confirm the audit record. The current source state is reported without modifying it again.",
+            "retry": "Repair the audit storage error, then re-read this source and use its current revision before deciding whether another edit is needed. The source edit was published; do not blindly replay this batch.",
+        })
+        .to_string(),
+    )
 }
 
 fn multi_edit_parameter_issues(edits: &[MultiEditOperation]) -> Vec<MultiEditValidationIssue> {
