@@ -24,9 +24,11 @@ const COPY = {
     noCapabilities: "未声明可用能力",
     compatible: "可接入", blocked: "需要适配", enabled: "已启用", disabled: "已停用", cannotEnable: "无法启用",
     nextRun: "Chat 面板启用后立即出现在 Chat 顶部的面板按钮和侧栏 + 菜单中；Skills 和 MCP 从下一次加载与执行开始生效。",
-    previewNote: "安装后默认停用；启用时只接入当前项目，已有的本地 Skills 优先。",
+    previewNote: "安装后默认停用；启用时只接入当前项目，并记录在本机。本地 Skills 优先，SomniQ 自带的 Skill 不会被替换。",
     blockedTitle: "需要 DeepSeek 宿主能力",
     blockedNote: "此包依赖 SomniQ 尚未提供的宿主能力或配置，解决以下问题后才能启用。",
+    blockedLocalTitle: "暂时不能启用", blockedLocalNote: "先处理下面的问题，再启用这个包。",
+    approvalRequired: "项目文件要求运行这个包，但本机还没有批准这个版本，所以它不会运行。确认来源可信后打开开关即可批准。",
     confirmRemove: "移除后，此项目不再加载它的 Skills、MCP 和面板。会话中已保存的面板内容会保留。",
     confirm: "确认移除",
     enableMcpTitle: "启用后将在本机运行以下命令",
@@ -47,9 +49,11 @@ const COPY = {
     noCapabilities: "No capabilities declared",
     compatible: "Compatible", blocked: "Needs adaptation", enabled: "Enabled", disabled: "Disabled", cannotEnable: "Can't enable",
     nextRun: "Enabled Chat panels appear right away in the Chat header and the sidebar + menu. Skills and MCP apply from the next load and run.",
-    previewNote: "Packages install disabled and, once enabled, apply to this project only. Existing local Skills take priority.",
+    previewNote: "Packages install disabled. Enabling approves them on this computer for this project only. Local Skills take priority, and SomniQ's built-in Skills are never replaced.",
     blockedTitle: "Needs DeepSeek host capabilities",
     blockedNote: "This package relies on host capabilities or configuration SomniQ doesn't provide yet. Resolve these before enabling it.",
+    blockedLocalTitle: "Can't enable yet", blockedLocalNote: "Resolve the issues below before enabling this package.",
+    approvalRequired: "This project's files ask to run this package, but this computer hasn't approved this version, so it won't run. Turn it on once you trust the source to approve it.",
     confirmRemove: "This project will stop loading its Skills, MCP and panels. Panel content saved in conversations is kept.",
     confirm: "Remove package",
     enableMcpTitle: "Enabling runs these commands on this computer",
@@ -102,14 +106,21 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
   </dl>;
 }
 
+/** Blockers SomniQ itself raises; anything else is a DSH host capability it lacks. */
+const LOCAL_BLOCKERS = new Set(["integrity", "approvals", "skill-builtin", "skill-alias", "duplicate-capability", "empty"]);
+
 function Diagnostics({ item, copy }: { item: PluginPreview; copy: Copy }) {
   if (item.canEnable && item.diagnostics.length === 0) return null;
-  return <div className={`plugin-callout ${item.canEnable ? "is-info" : "is-warning"}`}>
-    <SvgIcon name={item.canEnable ? "info" : "warning"} size={15} />
+  const errors = item.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  const local = errors.length > 0 && errors.every((diagnostic) => LOCAL_BLOCKERS.has(diagnostic.code));
+  const warn = !item.canEnable || item.diagnostics.some((diagnostic) => diagnostic.severity !== "info");
+  return <div className={`plugin-callout ${warn ? "is-warning" : "is-info"}`}>
+    <SvgIcon name={warn ? "warning" : "info"} size={15} />
     <div>
-      {!item.canEnable && <><strong>{copy.blockedTitle}</strong><p>{copy.blockedNote}</p></>}
+      {!item.canEnable && <><strong>{local ? copy.blockedLocalTitle : copy.blockedTitle}</strong><p>{local ? copy.blockedLocalNote : copy.blockedNote}</p></>}
       {item.diagnostics.length > 0 && <ul>{item.diagnostics.map((diagnostic, index) =>
-        <li key={`${diagnostic.code}-${index}`}><code>{diagnostic.code}</code><span>{diagnostic.message}</span></li>)}</ul>}
+        <li key={`${diagnostic.code}-${index}`}><code>{diagnostic.code}</code>
+          <span>{diagnostic.code === "approval-required" ? copy.approvalRequired : diagnostic.message}</span></li>)}</ul>}
     </div>
   </div>;
 }

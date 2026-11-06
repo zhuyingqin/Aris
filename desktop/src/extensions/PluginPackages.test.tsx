@@ -109,4 +109,31 @@ describe("Plugin packages", () => {
     await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true));
     expect(screen.queryByRole("group", { name: "Enable @somniq/panels" })).toBeNull();
   });
+
+  it("explains a package the project asks for but this computer has not approved", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([{
+      ...installed,
+      diagnostics: [{ code: "approval-required", message: "This project asks to run this package", severity: "warning" }],
+    }]);
+    render(<PluginPackages projectPath={projectPath} language="cn" onChanged={onChanged} />);
+    const card = await screen.findByRole("article", { name: "@lab/evidence" });
+    expect(within(card).getByText(/本机还没有批准这个版本/)).toBeTruthy();
+    expect(within(card).queryByText("需要 DeepSeek 宿主能力")).toBeNull();
+    // Approving goes through the same reviewed confirmation as enabling.
+    fireEvent.click(within(card).getByRole("switch", { name: "启用 @lab/evidence" }));
+    expect(screen.getByRole("group", { name: "启用 @lab/evidence" })).toBeTruthy();
+    expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("does not call SomniQ's own blockers a missing DeepSeek host capability", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([{
+      ...installed, canEnable: false, status: "blocked",
+      diagnostics: [{ code: "skill-builtin", message: "Built-in SomniQ skills cannot be replaced by a plugin: research-review", severity: "error" }],
+    }]);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    const card = await screen.findByRole("article", { name: "@lab/evidence" });
+    expect(within(card).getByText("Can't enable yet")).toBeTruthy();
+    expect(within(card).queryByText("Needs DeepSeek host capabilities")).toBeNull();
+    expect(within(card).getByText(/cannot be replaced by a plugin/)).toBeTruthy();
+  });
 });

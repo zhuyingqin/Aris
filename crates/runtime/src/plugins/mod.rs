@@ -1,8 +1,15 @@
-//! Project-local, opt-in capability packages shared by Desktop and CLI.
+//! Project-scoped, opt-in capability packages shared by Desktop and CLI.
 //!
 //! Installation snapshots bytes before activation. Neither installation nor
 //! enablement executes package scripts, loads JavaScript, or connects to MCP.
 //! MCP execution still goes through the normal runtime permission checks.
+//!
+//! Trust lives outside the project. The workspace's `.somniq/plugins` only
+//! lists packages and asks for them; anything in a workspace can be written by
+//! the model's file tools or arrive with a cloned repository. The reviewed
+//! snapshots and this computer's approvals live under the SomniQ config
+//! directory, and a package runs only when the project asks for it AND the
+//! approval recorded here names the digest of the snapshot that would run.
 
 mod dsh;
 mod ui;
@@ -107,8 +114,29 @@ struct Registry {
     packages: BTreeMap<String, Record>,
 }
 
+/// This computer's approvals: project key -> package name -> approved digest.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Approvals {
+    schema: u32,
+    projects: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Execution-scoped project whose plugins apply to a run.
+///
+/// A work task runs in its own worktree, which has no `.somniq/plugins` of its
+/// own (or a copy the task itself may have edited). The task still belongs to
+/// its registered project, so Desktop names that project here and every
+/// consumer resolves plugins through [`PluginStore::for_execution`].
+pub const ARIS_PLUGIN_PROJECT_ROOT_ENV: &str = "ARIS_PLUGIN_PROJECT_ROOT";
+
 pub struct PluginStore {
+    /// `<project>/.somniq/plugins`: the install list and requested state.
     root: PathBuf,
+    /// The project directory; approvals are keyed by its canonical path.
+    workspace: PathBuf,
+    /// `<SomniQ config>/plugins`: reviewed snapshots and approvals.
+    user_root: PathBuf,
 }
 
 pub(super) fn valid_skill_name(name: &str) -> bool {
@@ -231,27 +259,57 @@ fn digest_files(files: &PackageFiles) -> String {
 impl PluginStore {
     #[must_use]
     pub fn for_workspace(workspace: impl AsRef<Path>) -> Self {
+        Self::with_user_root(
+            workspace,
+            crate::somniq_config_dir_from_env().join("plugins"),
+        )
+    }
+
+    /// The store for `workspace` with snapshots and approvals under
+    /// `user_root`. [`Self::for_workspace`] uses the SomniQ config directory;
+    /// tests pass a temporary one so they never write the user's approvals.
+    #[must_use]
+    pub fn with_user_root(workspace: impl AsRef<Path>, user_root: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.as_ref().to_path_buf();
         Self {
-            root: crate::somniq_project_dir(workspace).join("plugins"),
+            root: crate::somniq_project_dir(&workspace).join("plugins"),
+            workspace,
+            user_root: user_root.into(),
         }
+    }
+
+    /// The store whose plugins apply to the current execution: the project
+    /// named by [`ARIS_PLUGIN_PROJECT_ROOT_ENV`] when the run has one (a work
+    /// task in a worktree), otherwise `cwd`.
+    #[must_use]
+    pub fn for_execution(cwd: impl AsRef<Path>) -> Self {
+        let project = crate::execution_env_var_os(ARIS_PLUGIN_PROJECT_ROOT_ENV)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| cwd.as_ref().to_path_buf(), PathBuf::from);
+        Self::for_workspace(project)
     }
 
     fn registry_path(&self) -> PathBuf {
         self.root.join("registry.json")
     }
     fn snapshot_path(&self, digest: &str) -> PathBuf {
-        self.root.join("packages").join(digest)
+        self.user_root.join("packages").join(digest)
+    }
+    fn approvals_path(&self) -> PathBuf {
+        self.user_root.join("approvals.json")
     }
 
-    fn registry(&self) -> Result<Registry, String> {
-        for path in [
-            self.root.parent().unwrap().to_path_buf(),
-            self.root.clone(),
-            self.root.join("packages"),
-            self.root.join("quarantine"),
-            self.root.join("registry.lock"),
-            self.registry_path(),
-        ] {
+    /// Approvals are per project. A canonical path keys them so the Extensions
+    /// page, Chat and a work task bound to the same project agree.
+    fn project_key(&self) -> String {
+        crate::canonicalize(&self.workspace)
+            .unwrap_or_else(|_| self.workspace.clone())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn reject_symlinks(paths: impl IntoIterator<Item = PathBuf>) -> Result<(), String> {
+        for path in paths {
             match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err("Plugin state directories and registry must not be symlinks".into())
@@ -261,6 +319,102 @@ impl PluginStore {
                 Err(error) => return Err(error.to_string()),
             }
         }
+        Ok(())
+    }
+
+    fn approvals(&self) -> Result<Approvals, String> {
+        Self::reject_symlinks([
+            self.user_root.clone(),
+            self.user_root.join("approvals.lock"),
+            self.approvals_path(),
+        ])?;
+        let approvals: Approvals = match fs::read(self.approvals_path()) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                format!(
+                    "Plugin approvals file {} is unreadable: {e}",
+                    self.approvals_path().display()
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Approvals {
+                schema: 1,
+                projects: BTreeMap::new(),
+            },
+            Err(error) => return Err(error.to_string()),
+        };
+        if approvals.schema != 1
+            || approvals
+                .projects
+                .values()
+                .flat_map(BTreeMap::values)
+                .any(|digest| !valid_digest(digest))
+        {
+            return Err("Invalid or unsupported plugin approvals file".into());
+        }
+        Ok(approvals)
+    }
+
+    /// The digest this computer approved for `name` in this project, if any.
+    fn approved_digest(&self, name: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .approvals()?
+            .projects
+            .get(&self.project_key())
+            .and_then(|packages| packages.get(name))
+            .cloned())
+    }
+
+    /// Record (`Some`) or withdraw (`None`) this computer's approval.
+    ///
+    /// The approvals file is shared by every project, so the read/modify/write
+    /// holds a cross-process lock beside it. Called with the project's registry
+    /// lock already held; the order (registry, then approvals) is fixed.
+    fn set_approval(&self, name: &str, digest: Option<&str>) -> Result<(), String> {
+        let path = self.approvals_path();
+        crate::with_path_lock(&path, || {
+            self.approvals()?;
+            fs::create_dir_all(&self.user_root).map_err(|e| e.to_string())?;
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(self.user_root.join("approvals.lock"))
+                .map_err(|e| e.to_string())?;
+            lock.lock().map_err(|e| e.to_string())?;
+            let mut approvals = self.approvals()?;
+            let key = self.project_key();
+            match digest {
+                Some(digest) => {
+                    approvals
+                        .projects
+                        .entry(key)
+                        .or_default()
+                        .insert(name.to_string(), digest.to_string());
+                }
+                None => {
+                    if let Some(packages) = approvals.projects.get_mut(&key) {
+                        packages.remove(name);
+                        if packages.is_empty() {
+                            approvals.projects.remove(&key);
+                        }
+                    }
+                }
+            }
+            let bytes = serde_json::to_vec_pretty(&approvals).map_err(|e| e.to_string())?;
+            crate::atomic_file::write_replace_unlocked(&path, &bytes).map_err(|e| e.to_string())
+        })
+    }
+
+    fn registry(&self) -> Result<Registry, String> {
+        Self::reject_symlinks([
+            self.root.parent().unwrap().to_path_buf(),
+            self.root.clone(),
+            self.root.join("registry.lock"),
+            self.registry_path(),
+            self.user_root.clone(),
+            self.user_root.join("packages"),
+            self.user_root.join("quarantine"),
+        ])?;
         let registry: Registry = match fs::read(self.registry_path()) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|e| format!("Plugin registry: {e}"))?
@@ -368,6 +522,29 @@ impl PluginStore {
                 "A skill name is reserved by the activated SomniQ skill alias registry",
             ));
         }
+        // A plugin adds skills; it never replaces one SomniQ ships, the review
+        // and audit workflows included. Checked on every inspection, so an app
+        // update that adds a built-in of the same name blocks the package
+        // rather than letting it shadow the new built-in.
+        let builtin: Vec<&str> = capabilities
+            .skills
+            .iter()
+            .filter(|name| {
+                crate::BUNDLED_SKILLS
+                    .iter()
+                    .any(|(bundled, _)| bundled.eq_ignore_ascii_case(name))
+            })
+            .map(String::as_str)
+            .collect();
+        if !builtin.is_empty() {
+            diagnostics.push(Diagnostic::error(
+                "skill-builtin",
+                format!(
+                    "Built-in SomniQ skills cannot be replaced by a plugin: {}",
+                    builtin.join(", ")
+                ),
+            ));
+        }
         Ok(PluginPreview {
             name: name.into(),
             version: version.into(),
@@ -416,7 +593,7 @@ impl PluginStore {
             if target_exists && !intact {
                 // Keep the modified bytes for inspection, then restore the
                 // reviewed snapshot. Never recursively delete package trees.
-                let quarantine = self.root.join("quarantine");
+                let quarantine = self.user_root.join("quarantine");
                 fs::create_dir_all(&quarantine).map_err(|e| e.to_string())?;
                 let archive = tempfile::Builder::new()
                     .prefix("modified-")
@@ -426,9 +603,11 @@ impl PluginStore {
                 fs::rename(&target, archive.join("package")).map_err(|e| e.to_string())?;
             }
             if !intact {
-                fs::create_dir_all(self.root.join("packages")).map_err(|e| e.to_string())?;
-                let staging =
-                    tempfile::tempdir_in(self.root.join("packages")).map_err(|e| e.to_string())?;
+                // Snapshots are content-addressed and shared by every project,
+                // so another project may publish the same digest concurrently.
+                let packages = self.user_root.join("packages");
+                fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
+                let staging = tempfile::tempdir_in(&packages).map_err(|e| e.to_string())?;
                 for (path, file) in &files {
                     let destination = staging.path().join(path);
                     fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -443,7 +622,13 @@ impl PluginStore {
                         .map_err(|e| e.to_string())?;
                     }
                 }
-                fs::rename(staging.path(), &target).map_err(|e| e.to_string())?;
+                if let Err(error) = fs::rename(staging.path(), &target) {
+                    let published = package_files(&target)
+                        .is_ok_and(|files| digest_files(&files) == preview.digest);
+                    if !published {
+                        return Err(error.to_string());
+                    }
+                }
             }
             let record = Record {
                 name: preview.name.clone(),
@@ -476,8 +661,38 @@ impl PluginStore {
         }
     }
 
+    /// The package as it would run here. `enabled` is the project's request
+    /// AND this computer's approval of exactly this digest; a request alone —
+    /// workspace content the model or a cloned repository can write — never
+    /// starts anything.
     fn inspect_record(&self, record: &Record) -> InstalledPlugin {
-        let inspection = package_files(&self.snapshot_path(&record.digest)).and_then(|files| {
+        let mut package = self.inspect_snapshot(record);
+        let approval = self.approved_digest(&record.name);
+        let approved = matches!(&approval, Ok(Some(digest)) if digest == &record.digest);
+        match approval {
+            Err(error) => {
+                package.can_enable = false;
+                package.diagnostics.push(Diagnostic::error("approvals", error));
+            }
+            Ok(_) if record.enabled && !approved => package.diagnostics.push(Diagnostic {
+                code: "approval-required".into(),
+                message: "This project asks to run this package, but this computer has not approved this version. Turn it on to review and approve it.".into(),
+                severity: "warning".into(),
+            }),
+            Ok(_) => (),
+        }
+        Self::installed(package, record.enabled && approved)
+    }
+
+    fn inspect_snapshot(&self, record: &Record) -> PluginPreview {
+        let snapshot = self.snapshot_path(&record.digest);
+        if fs::symlink_metadata(&snapshot).is_err() {
+            return Self::unavailable(
+                record,
+                "The reviewed snapshot of this package is not on this computer; remove it and install it again",
+            );
+        }
+        let inspection = package_files(&snapshot).and_then(|files| {
             if digest_files(&files) != record.digest {
                 return Err(
                     "Installed package snapshot was modified; disable and reinstall it".into(),
@@ -489,7 +704,11 @@ impl PluginStore {
             }
             Ok(preview)
         });
-        let package = inspection.unwrap_or_else(|error| PluginPreview {
+        inspection.unwrap_or_else(|error| Self::unavailable(record, error))
+    }
+
+    fn unavailable(record: &Record, error: impl Into<String>) -> PluginPreview {
+        PluginPreview {
             name: record.name.clone(),
             version: record.version.clone(),
             description: record.description.clone(),
@@ -498,8 +717,7 @@ impl PluginStore {
             capabilities: PluginCapabilities::default(),
             diagnostics: vec![Diagnostic::error("integrity", error)],
             can_enable: false,
-        });
-        Self::installed(package, record.enabled)
+        }
     }
 
     pub fn list(&self) -> Result<Vec<InstalledPlugin>, String> {
@@ -518,7 +736,8 @@ impl PluginStore {
                 .packages
                 .get(name)
                 .ok_or("Plugin is not installed")?;
-            let mut view = self.inspect_record(record);
+            let view = self.inspect_record(record);
+            let digest = record.digest.clone();
             if enabled {
                 if !view.package.can_enable {
                     return Err(
@@ -533,13 +752,10 @@ impl PluginStore {
                     .iter()
                     .map(|v| v.to_ascii_lowercase())
                     .collect();
-                for other in registry
-                    .packages
-                    .values()
-                    .filter(|r| r.enabled && r.name != name)
-                {
+                for other in registry.packages.values().filter(|r| r.name != name) {
                     let other = self.inspect_record(other);
-                    if other.package.can_enable
+                    if other.enabled
+                        && other.package.can_enable
                         && other
                             .package
                             .capabilities
@@ -554,18 +770,13 @@ impl PluginStore {
                     }
                 }
             }
+            // The approval is what lets a package run, so it is written first
+            // when enabling and withdrawn first when disabling: a failure in
+            // between leaves the package stopped, never running unrequested.
+            self.set_approval(name, enabled.then_some(digest.as_str()))?;
             registry.packages.get_mut(name).unwrap().enabled = enabled;
             self.save(&registry)?;
-            view.enabled = enabled;
-            view.status = if !view.package.can_enable {
-                "blocked"
-            } else if enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-            .into();
-            Ok(view)
+            Ok(self.inspect_record(&registry.packages[name]))
         })
     }
 
@@ -573,11 +784,25 @@ impl PluginStore {
     pub fn remove(&self, name: &str) -> Result<(), String> {
         self.mutate(|| {
             let mut registry = self.registry()?;
-            if registry.packages.remove(name).is_none() {
+            if !registry.packages.contains_key(name) {
                 return Err("Plugin is not installed".into());
             }
+            // A later install of the same name starts unapproved.
+            self.set_approval(name, None)?;
+            registry.packages.remove(name);
             self.save(&registry)
         })
+    }
+
+    /// Snapshot directories of the packages that would run here, for callers
+    /// that must let the model read a plugin skill's own files.
+    pub fn active_snapshot_dirs(&self) -> Result<Vec<PathBuf>, String> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|p| p.enabled && p.package.can_enable)
+            .map(|p| self.snapshot_path(&p.package.digest))
+            .collect())
     }
 
     pub fn active_skill_roots(&self) -> Result<Vec<PathBuf>, String> {

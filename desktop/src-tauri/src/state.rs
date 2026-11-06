@@ -158,9 +158,17 @@ pub(crate) fn project_execution_context(
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;
     crate::projects::recover_project_writes(project_id, workspace);
+    // Plugins belong to the registered project, not to whatever directory the
+    // turn runs in: a work task's worktree must load the same approved set.
+    let plugin_root = crate::projects::project_path_for_registered_id(project_id)
+        .unwrap_or_else(|| workspace.clone());
 
     let mut context = runtime::ProjectExecutionContext::new(workspace)
         .with_env("ARIS_WORKSPACE_ROOT", workspace.as_os_str())
+        .with_env(
+            runtime::plugins::ARIS_PLUGIN_PROJECT_ROOT_ENV,
+            plugin_root.as_os_str(),
+        )
         .with_env("ARIS_RUNTIME_ROOT", project_runtime.as_os_str())
         .with_env("ARIS_DESKTOP_PROJECT_ID", project_id)
         .with_env("ARIS_RUN_STATE_DIR", run_state.as_os_str())
@@ -172,7 +180,7 @@ pub(crate) fn project_execution_context(
             project_runtime.join("tasks.json").into_os_string(),
         )
         .with_env("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
-    context = match readonly_roots_value(&agent_store)? {
+    context = match readonly_roots_value(&agent_store, &plugin_root)? {
         Some(value) => context.with_env("ARIS_READONLY_ROOTS", value),
         None => context.without_env("ARIS_READONLY_ROOTS"),
     };
@@ -184,7 +192,15 @@ pub(crate) fn project_execution_context(
 /// read a sub-agent's full report there and got "outside the isolated
 /// workspace". Only this project's store is added, never the runtime root,
 /// so other projects' agents and the session logs stay unreadable.
-fn readonly_roots_value(agent_store: &std::path::Path) -> io::Result<Option<std::ffi::OsString>> {
+///
+/// The reviewed snapshots of this project's approved plugins are read-only
+/// roots too: they live outside every workspace so that workspace content
+/// cannot change what runs, and a plugin skill's `references/` must still be
+/// readable. Only this project's active snapshots, never the whole cache.
+fn readonly_roots_value(
+    agent_store: &std::path::Path,
+    plugin_root: &std::path::Path,
+) -> io::Result<Option<std::ffi::OsString>> {
     let user_skills = skills_dir();
     std::fs::create_dir_all(&user_skills)?;
     let mut roots = vec![user_skills, agent_store.to_path_buf()];
@@ -193,6 +209,11 @@ fn readonly_roots_value(agent_store: &std::path::Path) -> io::Result<Option<std:
     {
         roots.push(cache_dir.join("skills"));
     }
+    roots.extend(
+        runtime::plugins::PluginStore::for_workspace(plugin_root)
+            .active_snapshot_dirs()
+            .unwrap_or_default(),
+    );
     roots.retain(|path| path.exists());
     if roots.is_empty() {
         return Ok(None);

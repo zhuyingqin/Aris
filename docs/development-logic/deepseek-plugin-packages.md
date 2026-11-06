@@ -53,12 +53,28 @@ HTTP transport 均须后续适配，不能静默丢弃配置。
 `PluginStore` 位于 `crates/runtime/src/plugins/`，Desktop 与 CLI 共用：
 
 ```
-<project>/.somniq/plugins/
-  registry.json                 # schema 1；来源、版本、摘要、启用状态
+<project>/.somniq/plugins/      # 工作区内容：只列出包、提出启用请求
+  registry.json                 # schema 1；来源、版本、摘要、请求启用
   registry.lock                 # OS advisory lock，崩溃后自动释放
-  packages/<sha256>/            # 安装时冻结的包内文件
+  ui-state/                     # 声明式面板的会话数据
+<SomniQ 配置>/plugins/          # ARIS_CONFIG_ROOT，默认 ~/.config/SomniQ
+  approvals.json                # 本机批准：项目规范路径 → 包名 → 摘要
+  approvals.lock
+  packages/<sha256>/            # 安装时冻结的包内文件，按摘要跨项目共享
   quarantine/modified-*/package # 重装时隔离保存损坏的旧快照
 ```
+
+**信任锚不在工作区里。** 工作区里的任何文件，都可能被模型的文件工具写入，
+也可能随克隆的仓库一起到来。所以 `registry.json` 的 `enabled` 只表示项目
+提出了请求。包要真正运行（MCP 进程、Skill 根、Chat 面板），必须同时满足
+两个条件：项目请求启用，本机 `approvals.json` 为该项目记录的摘要也等于
+将要运行的快照摘要。只在 Desktop 的插件页里由用户打开开关，才会写入批准；
+带 MCP 的包在写入前会先列出将要运行的命令和环境变量名。停用和移除会先撤回
+批准，再改注册表，所以中途失败时包只会停着，不会在没有请求的情况下运行。
+只有请求、没有批准的包显示为停用，并给出 `approval-required` 提示；快照
+不在本机的包显示为 blocked。被执行的字节也不在工作区里，所以文件工具改不到
+（文件工具只能写工作区）。已启用包的快照目录会加入该项目回合的只读根，
+插件 Skill 的 `references/` 因此仍然可读。
 
 预览和安装之间摘要不一致会拒绝安装。新包先完整写入临时目录，再发布快照，
 最后原子更新注册表。注册表写操作同时持有进程内路径锁与 OS 文件锁；
@@ -70,9 +86,20 @@ HTTP transport 均须后续适配，不能静默丢弃配置。
 脱离注册表，保留缓存，使正在运行的会话仍有有效资源路径。尚无缓存清理
 或版本升级事务；切换版本采用移除后重新导入。
 
-`crates/tools::skill_search_roots` 接入启用包，优先级为显式用户 Skills、
-显式项目 Skills、插件包、既有兼容根、内置后备。启用包之间的 Skill
-同名冲突会拒绝；已激活别名保留名也会拒绝。
+插件 Skill 排在所有来源之后：显式用户 Skills、显式项目 Skills、既有兼容根、
+随应用分发的 Skills、编译进程序的内置 Skills，最后才是插件包
+（`crates/tools` 的解析与列举，以及系统提示词里的 "Plugin" 分组都按这个
+顺序）。插件只能新增 Skill，不能替换任何已有 Skill。与内置 Skill 同名（不分
+大小写）会产生 `skill-builtin` 诊断，并阻止整包启用。这项检查在每次读取时都会
+重做，所以应用更新后新增的同名内置 Skill，也会让旧包停下来，不会被它遮住。解析时
+插件根目录也不会被拿来查找内置名字。启用包之间的 Skill 同名冲突会被拒绝，
+已激活别名的保留名也会被拒绝。
+
+插件归属于登记的项目，不跟着回合实际运行的目录走。工作任务（以及走同一内核的
+定时任务）在自己的 worktree 里运行；Desktop 的执行上下文会设置
+`ARIS_PLUGIN_PROJECT_ROOT`，指向登记的项目根。`ConfigLoader`、Skill
+解析和提示词列举都通过 `PluginStore::for_execution` 读取它，因此看到的批准
+插件集与 Chat 完全一致。
 
 `ConfigLoader` 仅向 MCP 集合添加已启用的包，不把包配置合并进权限、
 sandbox、hooks 或 model。已有手工 MCP 声明保持优先。未修改全局 mcp.json。

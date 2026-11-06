@@ -3559,9 +3559,6 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     // 2. Project-level .somniq/skills/
     if let Ok(cwd) = runtime::execution_current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
-        // Opt-in plugin snapshots follow explicit local overrides and use the
-        // same discovery/loader in Desktop, CLI and research execution.
-        roots.extend(runtime::plugins::PluginStore::for_workspace(&cwd).active_skill_roots().unwrap_or_default());
     }
 
     // 3. Legacy Claude Code skills are opt-in compatibility only.
@@ -3592,6 +3589,53 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// Roots of the approved plugins for this run, searched after every other
+/// root AND after the skills compiled into the binary. A plugin adds skills;
+/// it never replaces a local, user, compatibility or built-in one.
+fn plugin_skill_roots() -> Vec<std::path::PathBuf> {
+    runtime::execution_current_dir()
+        .ok()
+        .map(|cwd| {
+            runtime::plugins::PluginStore::for_execution(cwd)
+                .active_skill_roots()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+fn is_bundled_skill(name: &str) -> bool {
+    BUNDLED_SKILLS
+        .iter()
+        .any(|(bundled, _)| bundled.eq_ignore_ascii_case(name))
+}
+
+/// `root/<skill>/SKILL.md`, matching the directory name case-insensitively and
+/// never through a symlink.
+fn find_skill_in_root(root: &std::path::Path, requested: &str) -> Option<std::path::PathBuf> {
+    let direct = root.join(requested).join("SKILL.md");
+    if direct.exists() && !is_symlink(&direct) {
+        return Some(direct);
+    }
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        // Reject symlinks to prevent directory traversal
+        if is_symlink(&entry.path()) {
+            continue;
+        }
+        let path = entry.path().join("SKILL.md");
+        if !path.exists() || is_symlink(&path) {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(requested)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
     if requested.is_empty() {
@@ -3606,32 +3650,20 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
         return Err(format!("invalid skill name: {requested}"));
     }
 
-    for root in skill_search_roots() {
-        // Direct match: root/<skill>/SKILL.md
-        let direct = root.join(requested).join("SKILL.md");
-        if direct.exists() && !is_symlink(&direct) {
-            return Ok(direct);
-        }
-
-        // Case-insensitive scan
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                // Reject symlinks to prevent directory traversal
-                if is_symlink(&entry.path()) {
-                    continue;
-                }
-                let path = entry.path().join("SKILL.md");
-                if !path.exists() || is_symlink(&path) {
-                    continue;
-                }
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(requested)
-                {
-                    return Ok(path);
-                }
-            }
+    if let Some(path) = skill_search_roots()
+        .iter()
+        .find_map(|root| find_skill_in_root(root, requested))
+    {
+        return Ok(path);
+    }
+    // Callers fall back to the compiled copy of a built-in, which must win
+    // over any plugin, so plugin roots are not even consulted for its name.
+    if !is_bundled_skill(requested) {
+        if let Some(path) = plugin_skill_roots()
+            .iter()
+            .find_map(|root| find_skill_in_root(root, requested))
+        {
+            return Ok(path);
         }
     }
 
@@ -3657,10 +3689,12 @@ pub fn discover_skills() -> Vec<SkillMeta> {
     // a display label and is allowed to disagree.
     let mut skills: Vec<(String, SkillMeta)> = Vec::new();
 
-    for root in skill_search_roots() {
-        let entries = match std::fs::read_dir(&root) {
-            Ok(e) => e,
-            Err(_) => continue,
+    let collect = |root: &std::path::Path,
+                       seen: &mut std::collections::HashSet<String>,
+                       skills: &mut Vec<(String, SkillMeta)>,
+                       plugin: bool| {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
         };
         for entry in entries.flatten() {
             // Reject symlinks to prevent directory traversal
@@ -3672,8 +3706,9 @@ pub fn discover_skills() -> Vec<SkillMeta> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // First-found wins (ARIS user > ARIS project > explicit compat > bundled)
-            if seen.contains(&name) {
+            // First-found wins (ARIS user > ARIS project > explicit compat >
+            // bundled > plugin); a plugin never lists under a built-in's name.
+            if seen.contains(&name) || (plugin && is_bundled_skill(&name)) {
                 continue;
             }
             seen.insert(name.clone());
@@ -3682,9 +3717,13 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             let meta = parse_skill_frontmatter(&name, &content, skill_md);
             skills.push((name, meta));
         }
+    };
+
+    for root in skill_search_roots() {
+        collect(&root, &mut seen, &mut skills, false);
     }
 
-    // Bundled skills as final fallback (user overrides already took priority above)
+    // Bundled skills as fallback (user overrides already took priority above)
     for (name, content) in BUNDLED_SKILLS {
         if seen.contains(*name) {
             continue;
@@ -3696,6 +3735,10 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             std::path::PathBuf::from(format!("<bundled:{name}>")),
         );
         skills.push(((*name).to_string(), meta));
+    }
+
+    for root in plugin_skill_roots() {
+        collect(&root, &mut seen, &mut skills, true);
     }
 
     project_activated_aliases(&mut skills);

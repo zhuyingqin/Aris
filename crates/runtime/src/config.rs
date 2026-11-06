@@ -295,7 +295,8 @@ impl ConfigLoader {
         // Explicitly installed project capability packages augment MCP only.
         // Existing user/application declarations retain precedence and policy.
         // A corrupt package registry fails closed without breaking ordinary chat.
-        if let Ok(servers) = crate::plugins::PluginStore::for_workspace(&self.cwd).active_mcp_servers() {
+        // A work task's worktree resolves to its registered project.
+        if let Ok(servers) = crate::plugins::PluginStore::for_execution(&self.cwd).active_mcp_servers() {
             for (name, server) in servers {
                 mcp_servers.entry(name).or_insert(server);
             }
