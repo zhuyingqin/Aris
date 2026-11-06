@@ -433,13 +433,9 @@ export function useChatRun({
   const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
     compactedActivitySessions.current.add(sessionId);
     applyContextTokens(sessionId, tokensAfter);
-    setContextNotice({
-      kind: "compacted",
-      sessionId,
-      message: "Context was compacted automatically.",
-      detail: `Earlier messages were summarized; backend context is now ${formatCompactTokens(tokensAfter)} tokens.`,
-      createdAt: Date.now(),
-    });
+    // useChatStream already records the compaction in the conversation.
+    // Clear the resolved warning instead of showing a duplicate popup.
+    setContextNotice((notice) => notice?.sessionId === sessionId ? null : notice);
   }, [applyContextTokens]);
 
   const handleContextWarning = useCallback((event: {

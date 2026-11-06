@@ -1004,7 +1004,7 @@ describe("useChatStream concurrent sessions", () => {
 
   it("appends a compacted context notice when the backend compacts", async () => {
     let compactedHandler:
-      | ((event: { sessionId: string; removedMessageCount: number }) => void)
+      | ((event: { sessionId: string; removedMessageCount: number; tokensAfter?: number | null }) => void)
       | undefined;
     mocks.onChatContextCompacted.mockImplementation((handler) => {
       compactedHandler = handler;
@@ -1022,22 +1022,25 @@ describe("useChatStream concurrent sessions", () => {
       expect(next.blocks).toEqual([
         {
           kind: "notice",
-          message: "Context compacted automatically; 12 earlier messages were summarized.",
+          message: "Context compacted automatically; 12 earlier messages were summarized. Backend context is now 262.4k tokens.",
         },
       ]);
     });
 
+    const onContextCompacted = vi.fn();
     renderHook(() => useChatStream({
       patchAssistant,
       onComplete: vi.fn(),
       onError: vi.fn(),
+      onContextCompacted,
     }));
 
     act(() => {
-      compactedHandler?.({ sessionId: "chat-ctx", removedMessageCount: 12 });
+      compactedHandler?.({ sessionId: "chat-ctx", removedMessageCount: 12, tokensAfter: 262_400 });
     });
 
     expect(patchAssistant).toHaveBeenCalled();
+    expect(onContextCompacted).toHaveBeenCalledWith("chat-ctx", 262_400);
   });
 
   it("annotates the compaction notice with how much context was freed", async () => {
@@ -1110,7 +1113,7 @@ describe("useChatStream concurrent sessions", () => {
     expect(current.blocks).toEqual([
       {
         kind: "notice",
-        message: "Context compacted automatically; 10 earlier messages were summarized.",
+        message: "Context compacted automatically; 10 earlier messages were summarized. Backend context is now 1.2k tokens.",
       },
     ]);
     expect(onComplete).toHaveBeenCalledWith("chat-after-compact", "reply after compaction");

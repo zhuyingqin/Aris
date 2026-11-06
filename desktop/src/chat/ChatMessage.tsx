@@ -196,6 +196,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
   const previews = useMemo(() => imagePreviews ?? { paths: imagePathsFromTool(block, change), references: [] }, [block, change, imagePreviews]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
+  const toolCopy = CHAT_COPY[language];
   const running = block.output === undefined;
   const evidenceCount = evidenceSearch?.items.length ?? 0;
   const status = somniImage
@@ -253,12 +254,12 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
               ? `Completed · ${webSearch.coverage.unique}`
               : `Partial · ${webSearch.coverage.unique}`
         : running
-          ? "Running"
+          ? toolCopy.toolRunning
           : refusal
             ? language === "cn"
               ? `已拒绝 · ${refusal.code}`
               : `Refused · ${refusal.code}`
-            : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+            : block.isError ? toolCopy.toolFailed : change ? toolCopy.toolModified : toolCopy.toolSucceeded;
   // A refusal outranks the generic error styling: the call never ran, and the
   // amber state says "precondition unmet, reissue it" where red would say
   // "this broke". It stays ahead of `isError` because refusals now carry it.
@@ -284,6 +285,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
         role="button"
         tabIndex={running ? -1 : 0}
         aria-disabled={running}
+        aria-expanded={open}
         onClick={toggle}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -695,23 +697,26 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
  * into one card with a `current/total` progress counter. Expanding it reveals
  * the individual calls, each still independently expandable.
  */
-function ToolGroup({ blocks, imagePreviews }: { blocks: Extract<ChatBlock, { kind: "tool" }>[]; imagePreviews: ToolImagePreviews[] }) {
-  const [open, setOpen] = useDisclosure(blocks[0]?.id && `tool-group:${blocks[0].id}`);
+function ToolGroup({ blocks, imagePreviews, compact = false }: { blocks: Extract<ChatBlock, { kind: "tool" }>[]; imagePreviews: ToolImagePreviews[]; compact?: boolean }) {
+  const [open, setOpen] = useDisclosure(blocks[0]?.id && `${compact ? "inspection" : "tool-group"}:${blocks[0].id}`);
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const total = blocks.length;
   const done = blocks.filter((b) => b.output !== undefined).length;
   const running = done < total;
   const anyError = blocks.some((b) => b.isError);
-  const status = running ? "Running" : anyError ? "Failed" : "Succeeded";
+  const status = running ? copy.toolRunning : anyError ? copy.toolFailed : copy.toolSucceeded;
   const className = running ? "tool-running" : anyError ? "tool-error" : "tool-done";
   // While running, point at the call in flight (done + 1); when finished, total.
   const current = running ? Math.min(done + 1, total) : total;
   const toggle = () => setOpen((value) => !value);
   return (
-    <div className={`chat-tool chat-tool-group ${className}`}>
+    <div className={`chat-tool chat-tool-group ${className}${compact ? " chat-tool-activity" : ""}`}>
       <div
         className="chat-tool-header"
         role="button"
         tabIndex={0}
+        aria-expanded={open}
         onClick={toggle}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -721,11 +726,20 @@ function ToolGroup({ blocks, imagePreviews }: { blocks: Extract<ChatBlock, { kin
         }}
       >
         <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : anyError ? <SvgIcon name="error" size={11} /> : <SvgIcon name="check" size={11} />}</span>
-        <span className="tool-status-label">{status}</span>
-        <span className="tool-name">{blocks[0].name}</span>
-        <span className="tool-group-count" title={`${current} / ${total}`}>
-          {current}/{total}
-        </span>
+        {compact ? (
+          <>
+            <span className="tool-activity-summary">{copy.inspectedFiles(total)}</span>
+            <span className="tool-activity-hint">{copy.inspectionDetails}</span>
+          </>
+        ) : (
+          <>
+            <span className="tool-status-label">{status}</span>
+            <span className="tool-name">{blocks[0].name}</span>
+            <span className="tool-group-count" title={`${current} / ${total}`}>
+              {current}/{total}
+            </span>
+          </>
+        )}
         <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>
       </div>
       {/* The first preview must remain visible even when the tool group is collapsed. */}
@@ -1138,12 +1152,15 @@ function renderAssistantTextRun(
  * Renders a turn's blocks, collapsing runs of ≥2 consecutive calls to the same
  * tool into a single {@link ToolGroup}. Other blocks render individually.
  */
+const INSPECTION_TOOLS = new Set(["read_file", "grep_search", "glob_search", "list_dir"]);
+
 function renderBlocks(
   turn: ChatTurn,
   imagePreviews: TurnImagePreviewPlan,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
+  compactTools: boolean,
 ) {
   const blocks = turn.blocks;
   const evidenceSources = blocks
@@ -1163,6 +1180,25 @@ function renderBlocks(
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    // Keep writes, errors, pending calls and image output on their own surface.
+    // Only routine successful inspection calls share the quieter disclosure.
+    if (compactTools && block.kind === "tool" && INSPECTION_TOOLS.has(block.name)) {
+      const canCompact = (candidate: ChatBlock): candidate is ChatToolBlock => {
+        if (candidate.kind !== "tool" || !INSPECTION_TOOLS.has(candidate.name)
+          || candidate.output === undefined || candidate.isError || guardRefusalFromTool(candidate)) return false;
+        const previews = imagePreviews.tools.get(candidate);
+        return !previews?.paths.length && !previews?.references.length;
+      };
+      let j = i;
+      while (j < blocks.length && canCompact(blocks[j])) j += 1;
+      if (j - i > 1) {
+        const run = blocks.slice(i, j) as ChatToolBlock[];
+        out.push(<ToolGroup key={block.id ?? `inspection-${i}`} blocks={run} compact
+          imagePreviews={run.map(() => NO_TOOL_IMAGE_PREVIEWS)} />);
+        i = j;
+        continue;
+      }
+    }
     if (block.kind === "tool" && isAgentSpawn(block)) {
       let j = i + 1;
       while (j < blocks.length && isAgentSpawn(blocks[j])) j += 1;
@@ -1192,6 +1228,7 @@ function renderBlocks(
     // AskUserQuestion is interactive and rendered individually, never collapsed.
     if (
       block.kind === "tool"
+      && !(compactTools && INSPECTION_TOOLS.has(block.name))
       && block.name !== "TodoWrite"
       && block.name !== "AskUserQuestion"
       && block.name !== "ProjectEvidenceSearch"
@@ -1281,6 +1318,7 @@ function ChatMessage({
   const projectPath = useStore((state) => state.currentProject?.path ?? null);
   const imagePreviews = useMemo(() => imagePreviewsForTurn(turn, projectPath), [turn.blocks, turn.role, projectPath]);
   const copy = CHAT_COPY[language];
+  const compactTools = useStore((state) => state.tab === "typeset");
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   const blockNodes = renderBlocks(
@@ -1289,6 +1327,7 @@ function ChatMessage({
     onPermissionRespond,
     onQuestionRespond,
     onOpenIndependentReview,
+    compactTools,
   );
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
