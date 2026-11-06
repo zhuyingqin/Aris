@@ -34,6 +34,8 @@ const apiMocks = vi.hoisted(() => ({
   gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   backgroundProcessesList: vi.fn(() => Promise.resolve([])),
+  projectSetCurrent: vi.fn<(id: string) => Promise<{ projects: DesktopProject[]; currentProject: DesktopProject }>>(),
+  stateDir: vi.fn(() => Promise.resolve("F:/SomniQState")),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
   projectIntentObserve: vi.fn<(
     projectId: string,
@@ -406,6 +408,12 @@ describe("Chat export action", () => {
       return Promise.resolve(reasoningViewFor(model, storedEffort));
     });
     apiMocks.chatTasksGet.mockResolvedValue([]);
+    apiMocks.projectSetCurrent.mockImplementation(async (id) => {
+      const projects = useStore.getState().projects;
+      const currentProject = projects.find((project) => project.id === id);
+      if (!currentProject) throw new Error(`Unknown project: ${id}`);
+      return { projects, currentProject };
+    });
     apiMocks.workTaskList.mockResolvedValue([]);
     apiMocks.onWorkTaskChanged.mockImplementation(() => Promise.resolve(() => undefined));
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
@@ -1330,6 +1338,205 @@ describe("Chat export action", () => {
     expect(apiMocks.chatCancel).not.toHaveBeenCalled();
 
     act(() => finishFirst?.("First project answer"));
+  it("sends a second new chat in the same project while the first new chat is still running", async () => {
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First new chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const firstId = apiMocks.chatSend.mock.calls[0][0];
+    expect(firstId).not.toBe("chat-home");
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second new chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+
+    const secondId = apiMocks.chatSend.mock.calls[1][0];
+    expect(secondId).not.toBe("chat-home");
+    expect(secondId).not.toBe(firstId);
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(1, firstId, expect.objectContaining({
+      text: "First new chat question", projectId: defaultProject.id,
+    }));
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(2, secondId, expect.objectContaining({
+      text: "Second new chat question", projectId: defaultProject.id,
+    }));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First new chat answer"));
+    expect(screen.queryByText("First new chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+    await act(async () => finishSecond?.("Second new chat answer"));
+    expect(await screen.findByText("Second new chat answer")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+  });
+
+  it("keeps two existing chats in the same project sending and completing independently", async () => {
+    const first = {
+      ...makeSession(defaultProject.id),
+      id: "chat-same-project-first",
+      title: "First research chat",
+      titleSource: "user" as const,
+      model: "MiniMax-M3",
+    };
+    const second = {
+      ...makeSession(defaultProject.id),
+      id: "chat-same-project-second",
+      title: "Second research chat",
+      titleSource: "user" as const,
+      model: "gpt-6.1-sol",
+    };
+    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First chat history" }] }];
+    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second chat history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
+    localStorage.setItem(CURRENT_KEY, first.id);
+
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: first.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      first.id,
+      expect.objectContaining({ text: "First chat question", projectId: defaultProject.id, model: first.model }),
+    ));
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: second.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      second.id,
+      expect.objectContaining({ text: "Second chat question", projectId: defaultProject.id, model: second.model }),
+    ));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First chat answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        projectId: defaultProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First chat answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    // A first-chat completion must not release the second chat's send lock.
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Wait for second answer");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+
+    await act(async () => finishSecond?.("Second chat answer"));
+    expect(await screen.findByText("Second chat answer")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.click(screen.getByRole("button", { name: first.title }));
+    expect(await screen.findByText("First chat answer")).toBeTruthy();
+    expect(screen.queryByText("Second chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false");
+    expect(useStore.getState().currentProject?.id).toBe(defaultProject.id);
+  });
+
+  it("sends new home chats concurrently across project switches and preserves their owning projects", async () => {
+    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
+    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
+    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
+    mockModelPreference();
+    apiMocks.chatSuggestTitle
+      .mockResolvedValueOnce("First new project chat")
+      .mockResolvedValueOnce("Second new project chat");
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project home question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const firstId = apiMocks.chatSend.mock.calls[0][0];
+
+    // Exercise the real store action used by the app's project switcher.
+    // Switching to an empty project reuses chat-home, unlike the sidebar's
+    // project-specific New action, which directly creates a real session.
+    await act(async () => useStore.getState().switchProject(secondProject.id));
+    expect(apiMocks.projectSetCurrent).toHaveBeenCalledWith(secondProject.id);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" }));
+    await waitFor(() => expect(screen.getByText("Model: gpt-6.1-sol")).toBeTruthy());
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project home question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    const secondId = apiMocks.chatSend.mock.calls[1][0];
+    expect(firstId).not.toBe("chat-home");
+    expect(secondId).not.toBe("chat-home");
+    expect(secondId).not.toBe(firstId);
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(1, firstId, expect.objectContaining({
+      text: "First project home question", projectId: firstProject.id, model: CONFIGURED_EXECUTOR_MODEL,
+    }));
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(2, secondId, expect.objectContaining({
+      text: "Second project home question", projectId: secondProject.id, model: "gpt-6.1-sol",
+    }));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First project home answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: firstId,
+        projectId: firstProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First project home answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First project home answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await act(async () => finishSecond?.("Second project home answer"));
+    expect(await screen.findByText("Second project home answer")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: secondId,
+        projectId: secondProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "Second project home answer" }]),
+        })]),
+      }),
+    ));
+    await userEvent.click(await screen.findByRole("button", { name: "First new project chat" }));
+    expect(apiMocks.projectSetCurrent).toHaveBeenLastCalledWith(firstProject.id);
+    expect(useStore.getState().currentProject?.id).toBe(firstProject.id);
+    expect(await screen.findByText("First project home answer")).toBeTruthy();
+    expect(screen.queryByText("Second project home answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false");
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+  });
+
     await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
       expect.objectContaining({
         id: first.id,

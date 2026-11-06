@@ -1350,8 +1350,8 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         : "Remote Agent chat does not support attachments yet. Remove them before sending.");
       return;
     }
-    const sessionId = currentSession.id;
-    const sendLock = run.acquireSendLock(sessionId);
+    let sessionId = currentSession.id;
+    let sendLock = run.acquireSendLock(sessionId);
     if (sendLock == null) return;
     try {
       if (!status?.ready && !currentSession.remoteAgent && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
@@ -1392,6 +1392,16 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const edit = useCallback((turn: ChatTurn) => {
     const session = currentSessionRef.current;
     if (!session || run.runningSessionIdsRef.current.has(session.id)) return;
+      // The home draft is shared by every new chat. Once it becomes a real
+      // session, keep its send lock on that session so another new chat can
+      // send while this turn is still preparing or running.
+      if (session.id !== sessionId) {
+        const materializedLock = run.acquireSendLock(session.id);
+        run.releaseSendLock(sessionId, sendLock);
+        if (materializedLock == null) return;
+        sessionId = session.id;
+        sendLock = materializedLock;
+      }
     if (session.remoteAgent) {
       setError(language === "cn"
         ? "远程 Agent 的历史轮次不能在本机重写；可以继续发送一条更正消息。"
