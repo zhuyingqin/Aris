@@ -571,12 +571,26 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
             .clone()
             .unwrap_or_else(|| format!("work-task-{}-{}", task.id, run_seq)),
     };
+    // The plugins this run may use, frozen once for the whole run: the
+    // executor turn, every revision and the independent review all resolve
+    // plugins from this set, and it goes into the task record as the run's
+    // audit trail. Toggling a plugin while the task runs reaches its next run.
+    let plugin_run = Arc::new(crate::state::begin_plugin_run(
+        &project_path.to_path_buf(),
+        project_id,
+        format!("work-task {} run {run_seq}", task.id),
+    ));
+    let plugin_set = super::model::WorkTaskPluginSet {
+        run_seq,
+        set: plugin_run.set().clone(),
+    };
     if store::update(project_id, &task.id, |current| {
         if current.run_seq != run_seq {
             return Err("superseded".to_string());
         }
         current.worktree = Some(tree.clone());
         current.session_id = Some(session_id.clone());
+        current.plugin_set = Some(plugin_set.clone());
         current.status = WorkTaskStatus::Running;
         current.progress_message = Some("Running the model turn".to_string());
         current.last_heartbeat_at = Some(store::now_ms());
@@ -609,6 +623,7 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         crate::engine::WorkTaskTurnBinding {
             task_id: task.id.clone(),
             run_seq,
+            plugin_run: Some(plugin_run.clone()),
         },
         if resumed {
             resume_prompt(&task, &tree.branch)
@@ -671,6 +686,7 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         run_seq,
         &stop,
         &session_id,
+        &plugin_run,
         summary,
         snapshot,
     )
@@ -712,6 +728,8 @@ async fn review_and_revise(
     // revision turn in the old conversation — replaying a discarded attempt's
     // context into the run that replaced it.
     session_id: &str,
+    // The set the run froze; reviews and revisions stay within it.
+    plugin_run: &Arc<runtime::plugins::PluginRun>,
     mut summary: String,
     mut snapshot: WorkTaskReviewSnapshot,
 ) -> RunOutcome {
@@ -742,14 +760,19 @@ async fn review_and_revise(
         let flag = stop.flag.clone();
         let model = task.model.clone();
         let review_session = session_id.to_string();
+        let review_plugins = plugin_run.clone();
         let checked = crate::blocking::off_main_thread(move || {
-            Ok(crate::engine::run_work_task_review(
-                &review_session,
-                round as usize,
-                prompt,
-                flag,
-                model.as_deref(),
-            ))
+            // The Reviewer is a tool-less model call today; entering the run
+            // keeps it within the frozen set if it ever resolves plugins.
+            Ok(review_plugins.enter(|| {
+                crate::engine::run_work_task_review(
+                    &review_session,
+                    round as usize,
+                    prompt,
+                    flag,
+                    model.as_deref(),
+                )
+            }))
         })
         .await;
         let Ok(mut review) = checked else {
@@ -803,6 +826,7 @@ async fn review_and_revise(
             crate::engine::WorkTaskTurnBinding {
                 task_id: task.id.clone(),
                 run_seq,
+                plugin_run: Some(plugin_run.clone()),
             },
             revision_prompt(&review),
             task.model.clone(),
@@ -1499,6 +1523,12 @@ pub(crate) fn spawn_merge_repair(
     tauri::async_runtime::spawn(async move {
         let mut task = task;
         let mut error = merge_error;
+        // Every repair pass of this merge uses the plugin set it started with.
+        let plugin_run = Arc::new(crate::state::begin_plugin_run(
+            &project_path,
+            &project_id,
+            format!("work-task {} merge repair", task.id),
+        ));
         // A base branch can move while the Agent is working. Give the same
         // Agent up to two follow-up passes rather than bouncing an ordinary
         // concurrent edit back to the user immediately.
@@ -1518,6 +1548,7 @@ pub(crate) fn spawn_merge_repair(
                 crate::engine::WorkTaskTurnBinding {
                     task_id: task.id.clone(),
                     run_seq: task.run_seq,
+                    plugin_run: Some(plugin_run.clone()),
                 },
                 merge_repair_prompt(&task, &error),
                 task.model.clone(),

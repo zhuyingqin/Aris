@@ -1784,6 +1784,7 @@ fn work_task_runtime_streams_into_an_open_read_only_transcript() {
         binding: crate::engine::WorkTaskTurnBinding {
             task_id: "t1".to_string(),
             run_seq: 1,
+            plugin_run: None,
         },
     });
 

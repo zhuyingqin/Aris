@@ -42,6 +42,8 @@ const COMMANDS: &[&str] = &[
     "plugins_preview",
     "plugins_install",
     "plugins_set_enabled",
+    "plugins_upgrade",
+    "plugins_check_mcp",
     "plugins_remove",
     "plugins_ui_list",
     "plugins_ui_state_get",
@@ -284,14 +286,19 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
     }
 
     match command {
-        "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_set_enabled" | "plugins_remove"
+        "plugins_check_mcp" => {
+            let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
+            encode(crate::plugins::check_mcp(store, parse::<String>(&args, "name")?).await?)
+        }
+        "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_upgrade" | "plugins_set_enabled" | "plugins_remove"
         | "plugins_ui_list" | "plugins_ui_state_get" | "plugins_ui_state_update" => {
             let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
             let command = command.to_string();
             crate::blocking::off_main_thread(move || match command.as_str() {
                 "plugins_list" => encode(store.list()?),
-                "plugins_preview" => encode(store.preview(parse::<String>(&args, "source")?)?),
+                "plugins_preview" => encode(store.preview_import(parse::<String>(&args, "source")?)?),
                 "plugins_install" => encode(store.install(parse::<String>(&args, "source")?, &parse::<String>(&args, "expectedDigest")?)?),
+                "plugins_upgrade" => encode(store.upgrade(parse::<String>(&args, "source")?, &parse::<String>(&args, "expectedDigest")?, &parse::<String>(&args, "expectedCurrentDigest")?, parse(&args, "approve")?)?),
                 "plugins_set_enabled" => encode(store.set_enabled(&parse::<String>(&args, "name")?, parse(&args, "enabled")?)?),
                 "plugins_ui_list" => encode(store.active_ui_panels()?),
                 "plugins_ui_state_get" => encode(store.ui_state_get(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?)?),

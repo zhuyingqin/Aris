@@ -1446,3 +1446,39 @@ fn seed_reviewable_with(fixture: &Fixture, title: &str, file_name: &str) -> Stri
     .expect("stage review");
     task.id
 }
+
+/// The task row is the run's audit trail: it keeps the plugin set the run
+/// froze, tagged with the run, and rows written before it existed still load.
+#[test]
+fn a_task_row_records_the_plugin_set_its_run_froze() {
+    let mut task =
+        crate::work_task::model::WorkTask::new("t1".into(), "Title".into(), "Prompt".into(), 1);
+    assert!(serde_json::to_value(&task)
+        .unwrap()
+        .get("pluginSet")
+        .is_none());
+    task.plugin_set = Some(crate::work_task::model::WorkTaskPluginSet {
+        run_seq: 3,
+        set: runtime::plugins::PluginSet {
+            project: "F:/project".into(),
+            plugins: vec![runtime::plugins::FrozenPlugin {
+                name: "@lab/evidence".into(),
+                version: "1.2.3".into(),
+                digest: "a".repeat(64),
+            }],
+            fingerprint: "f".repeat(64),
+            frozen_at_ms: 7,
+            error: None,
+        },
+    });
+    let value = serde_json::to_value(&task).unwrap();
+    assert_eq!(value["pluginSet"]["runSeq"], 3);
+    assert_eq!(value["pluginSet"]["plugins"][0]["name"], "@lab/evidence");
+    assert_eq!(value["pluginSet"]["plugins"][0]["digest"], "a".repeat(64));
+    let back: crate::work_task::model::WorkTask = serde_json::from_value(value).unwrap();
+    assert_eq!(back, task);
+    let mut old = serde_json::to_value(&task).unwrap();
+    old.as_object_mut().unwrap().remove("pluginSet");
+    let old: crate::work_task::model::WorkTask = serde_json::from_value(old).unwrap();
+    assert_eq!(old.plugin_set, None);
+}

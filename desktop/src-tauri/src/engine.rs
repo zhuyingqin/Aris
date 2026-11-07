@@ -6616,6 +6616,27 @@ pub(crate) struct WorkTaskRuntimeContext {
 pub(crate) struct WorkTaskTurnBinding {
     pub(crate) task_id: String,
     pub(crate) run_seq: u32,
+    /// The plugin set the task's run froze when it started. Every executor
+    /// and revision turn of that run uses it, so toggling a plugin while the
+    /// task runs cannot change what it can use. `None` freezes per turn.
+    pub(crate) plugin_run: Option<Arc<runtime::plugins::PluginRun>>,
+}
+
+/// Put the plugin set a turn runs with into its session's event log (the
+/// Chat audit trail), stamped with the turn by the caller's [`TurnTag`].
+/// A turn that uses no plugins records nothing, so the log of a project
+/// without plugins does not grow by one entry per turn.
+///
+/// [`TurnTag`]: crate::chat_events::TurnTag
+pub(crate) fn record_turn_plugin_set(session_id: &str, run: &runtime::plugins::PluginRun) {
+    let set = run.set();
+    if set.plugins.is_empty() && set.error.is_none() {
+        return;
+    }
+    match serde_json::to_value(set) {
+        Ok(payload) => crate::chat_events::record_event(session_id, "plugin_set", payload),
+        Err(error) => eprintln!("SomniQ desktop: could not record the turn's plugin set: {error}"),
+    }
 }
 
 impl ChatTurnRuntime {
@@ -9162,22 +9183,38 @@ async fn run_chat_turn_with_context(
     let capture_workspace = worker_workspace.clone();
     let worker_work_task = work_task_runtime.clone();
     let worker_sessions_dir = sessions_dir.clone();
-    let worker_project_context =
-        match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
-            Ok(context) => context,
-            Err(error) => {
-                let error = error.to_string();
-                emit_turn_chat_error(
-                    &app,
-                    &session_id,
-                    &audit_turn_id,
-                    &error,
-                    emit_desktop_chat_events,
-                    &cancelled,
-                );
-                return Err(error);
-            }
-        };
+    // The plugin set this turn may use, fixed now. A work task's turns share
+    // the set its run froze; any other turn freezes its own. The worker owns
+    // it, so it stays registered until the turn has fully unwound.
+    let worker_plugin_run = work_task_runtime
+        .as_ref()
+        .and_then(|task| task.binding.plugin_run.clone())
+        .unwrap_or_else(|| {
+            Arc::new(crate::state::begin_plugin_run(
+                &worker_workspace,
+                &worker_project_id,
+                format!("chat {session_id} {audit_turn_id}"),
+            ))
+        });
+    let worker_project_context = match crate::state::project_run_execution_context(
+        &worker_workspace,
+        &worker_project_id,
+        &worker_plugin_run,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            let error = error.to_string();
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &audit_turn_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
+            return Err(error);
+        }
+    };
     let joined = tauri::async_runtime::spawn_blocking(move || {
         runtime::with_project_execution_context(&worker_project_context.clone(), || {
         // Every event this thread records for the session from here on is
@@ -9186,6 +9223,7 @@ async fn run_chat_turn_with_context(
         // session's next turn has begun keeps writing under its own, older id.
         let _turn_scope =
             crate::chat_events::TurnTag::new(&worker_session_id, &worker_audit_turn_id).enter();
+        record_turn_plugin_set(&worker_session_id, &worker_plugin_run);
         let feature_config = if worker_paper_reading.is_some() {
             runtime::RuntimeFeatureConfig::default()
         } else { match crate::mcp::config_loader(&worker_workspace)

@@ -134,15 +134,64 @@ pub fn sessions_dir_for_project(project_id: &str) -> PathBuf {
 }
 
 pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::Result<()> {
-    project_execution_context(workspace, project_id)?.apply_to_current_process()
+    // The process environment never belongs to a run: no plugin run token.
+    build_project_execution_context(workspace, project_id, None)?.apply_to_current_process()
 }
 
 /// Prepare the immutable environment inherited by one project-bound Chat
 /// turn. Unlike [`apply_project_environment`], this does not change the
 /// Desktop process's active project or working directory.
+///
+/// Built inside a run (a Desktop tool call re-binds its project for its own
+/// work), the context stays in that run and keeps its frozen plugin set.
 pub(crate) fn project_execution_context(
     workspace: &PathBuf,
     project_id: &str,
+) -> io::Result<runtime::ProjectExecutionContext> {
+    build_project_execution_context(
+        workspace,
+        project_id,
+        runtime::plugins::current_plugin_run(),
+    )
+}
+
+/// The registered project whose plugins apply to work in `workspace`: a work
+/// task's worktree belongs to the project it was created from.
+fn plugin_project_root(workspace: &PathBuf, project_id: &str) -> PathBuf {
+    crate::projects::project_path_for_registered_id(project_id).unwrap_or_else(|| workspace.clone())
+}
+
+/// Freeze the plugin set one run of `project_id` starts with.
+///
+/// Every Chat turn and WorkTask run holds one of these for as long as it
+/// runs; inside [`project_run_execution_context`] plugins resolve only from
+/// it, so the plugin page can enable, disable or upgrade a package without
+/// changing what an in-flight run, its revisions or its review can use.
+pub(crate) fn begin_plugin_run(
+    workspace: &PathBuf,
+    project_id: &str,
+    label: impl Into<String>,
+) -> runtime::plugins::PluginRun {
+    runtime::plugins::PluginRun::begin(
+        &runtime::plugins::PluginStore::for_workspace(plugin_project_root(workspace, project_id)),
+        label,
+    )
+}
+
+/// [`project_execution_context`] for one run: plugins (and the plugin
+/// snapshots readable as read-only roots) come from the set `run` froze.
+pub(crate) fn project_run_execution_context(
+    workspace: &PathBuf,
+    project_id: &str,
+    run: &runtime::plugins::PluginRun,
+) -> io::Result<runtime::ProjectExecutionContext> {
+    build_project_execution_context(workspace, project_id, Some(run.binding()))
+}
+
+fn build_project_execution_context(
+    workspace: &PathBuf,
+    project_id: &str,
+    run: Option<runtime::plugins::PluginRunBinding>,
 ) -> io::Result<runtime::ProjectExecutionContext> {
     let project_runtime = project_runtime_dir(project_id);
     let run_state = project_runtime.join("run-state");
@@ -160,8 +209,7 @@ pub(crate) fn project_execution_context(
     crate::projects::recover_project_writes(project_id, workspace);
     // Plugins belong to the registered project, not to whatever directory the
     // turn runs in: a work task's worktree must load the same approved set.
-    let plugin_root = crate::projects::project_path_for_registered_id(project_id)
-        .unwrap_or_else(|| workspace.clone());
+    let plugin_root = plugin_project_root(workspace, project_id);
 
     let mut context = runtime::ProjectExecutionContext::new(workspace)
         .with_env("ARIS_WORKSPACE_ROOT", workspace.as_os_str())
@@ -180,11 +228,22 @@ pub(crate) fn project_execution_context(
             project_runtime.join("tasks.json").into_os_string(),
         )
         .with_env("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
-    context = match readonly_roots_value(&agent_store, &plugin_root)? {
+    let plugin_dirs = match &run {
+        Some(run) => run.snapshot_dirs().to_vec(),
+        None => runtime::plugins::PluginStore::for_workspace(&plugin_root)
+            .active_snapshot_dirs()
+            .unwrap_or_default(),
+    };
+    context = match readonly_roots_value(&agent_store, plugin_dirs)? {
         Some(value) => context.with_env("ARIS_READONLY_ROOTS", value),
         None => context.without_env("ARIS_READONLY_ROOTS"),
     };
-    Ok(context)
+    // Outside a run nothing is frozen: clearing the token also keeps it out of
+    // the process environment when this context is applied to the process.
+    Ok(match run {
+        Some(run) => run.bind(context),
+        None => context.without_env(runtime::plugins::ARIS_PLUGIN_RUN_ENV),
+    })
 }
 
 /// Read-only roots for one project's turns. `agent_store` is this project's
@@ -196,10 +255,10 @@ pub(crate) fn project_execution_context(
 /// The reviewed snapshots of this project's approved plugins are read-only
 /// roots too: they live outside every workspace so that workspace content
 /// cannot change what runs, and a plugin skill's `references/` must still be
-/// readable. Only this project's active snapshots, never the whole cache.
+/// readable. Only the snapshots this run uses, never the whole cache.
 fn readonly_roots_value(
     agent_store: &std::path::Path,
-    plugin_root: &std::path::Path,
+    plugin_dirs: Vec<PathBuf>,
 ) -> io::Result<Option<std::ffi::OsString>> {
     let user_skills = skills_dir();
     std::fs::create_dir_all(&user_skills)?;
@@ -209,11 +268,7 @@ fn readonly_roots_value(
     {
         roots.push(cache_dir.join("skills"));
     }
-    roots.extend(
-        runtime::plugins::PluginStore::for_workspace(plugin_root)
-            .active_snapshot_dirs()
-            .unwrap_or_default(),
-    );
+    roots.extend(plugin_dirs);
     roots.retain(|path| path.exists());
     if roots.is_empty() {
         return Ok(None);

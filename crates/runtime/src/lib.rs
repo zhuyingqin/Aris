@@ -31,6 +31,7 @@ pub mod paper_guide;
 mod managed_job;
 mod mcp;
 mod mcp_client;
+mod mcp_health;
 mod mcp_stdio;
 mod oauth;
 mod paths;
@@ -171,6 +172,7 @@ pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
     scoped_mcp_config_hash, unwrap_ccr_proxy_url,
 };
+pub use mcp_health::{mcp_server_health, record_mcp_server_health, McpServerHealth};
 pub use mcp_client::{
     McpClaudeAiProxyTransport, McpClientAuth, McpClientBootstrap, McpClientTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,

@@ -457,6 +457,15 @@ impl WorkTaskReviewSnapshot {
     }
 }
 
+/// A run's frozen plugin set, tagged with the run it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTaskPluginSet {
+    pub run_seq: u32,
+    #[serde(flatten)]
+    pub set: runtime::plugins::PluginSet,
+}
+
 /// One task on the board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,6 +514,11 @@ pub struct WorkTask {
     /// What the independent Reviewer concluded, and after how many rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<WorkTaskReviewState>,
+    /// The plugins (name and digest) the latest run froze when it started.
+    /// Every executor, revision and review step of that run used exactly
+    /// these, whatever the plugin page changed while it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_set: Option<WorkTaskPluginSet>,
     /// Why the task failed. Present only on `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
@@ -589,6 +603,7 @@ impl WorkTask {
             changes: None,
             review_snapshot: None,
             review_state: None,
+            plugin_set: None,
             last_error: None,
             merge_commit: None,
             merge_intent: None,

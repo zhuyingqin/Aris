@@ -177,7 +177,9 @@ fn plugin_integrity_and_host_incompatibility_fail_closed_but_can_be_disabled() {
     store.install(&source, &preview.digest).unwrap();
     assert!(store.list().unwrap()[0].package.can_enable);
     assert_eq!(
-        fs::read_dir(store.user_root.join("quarantine")).unwrap().count(),
+        fs::read_dir(store.user_root.join("quarantine"))
+            .unwrap()
+            .count(),
         1
     );
     store.remove("first").unwrap();
@@ -216,9 +218,7 @@ fn plugin_symlinks_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let source = fixture(temp.path(), "first");
     std::os::unix::fs::symlink("/etc/passwd", source.join("secret")).unwrap();
-    assert!(test_store(&temp, temp.path())
-        .preview(source)
-        .is_err());
+    assert!(test_store(&temp, temp.path()).preview(source).is_err());
 }
 
 #[test]
@@ -784,7 +784,11 @@ fn workspace_state_alone_never_runs_a_package() {
     let request = |store: &PluginStore| {
         let mut registry = store.registry().unwrap();
         registry.packages.get_mut("first").unwrap().enabled = true;
-        fs::write(store.registry_path(), serde_json::to_vec(&registry).unwrap()).unwrap();
+        fs::write(
+            store.registry_path(),
+            serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
     };
     request(&store);
     let view = store.list().unwrap().remove(0);
@@ -826,7 +830,9 @@ fn workspace_state_alone_never_runs_a_package() {
     let elsewhere = PluginStore::with_user_root(&workspace, temp.path().join("other-computer"));
     let view = elsewhere.list().unwrap().remove(0);
     assert_eq!(view.status, "blocked");
-    assert!(view.package.diagnostics[0].message.contains("not on this computer"));
+    assert!(view.package.diagnostics[0]
+        .message
+        .contains("not on this computer"));
     assert!(elsewhere.active_mcp_servers().unwrap().is_empty());
 
     // Removing withdraws the approval, and an approval of one digest does not
@@ -907,4 +913,548 @@ fn a_run_in_a_worktree_loads_its_registered_projects_plugins() {
             .unwrap();
         assert_eq!(config.mcp().servers().len(), 1);
     });
+}
+
+/// The source of a second version of [`fixture`]: a new version string, a
+/// changed command line, an environment key and one more skill.
+fn fixture_v2(root: &Path, name: &str) -> PathBuf {
+    let source = fixture(&root.join("v2"), name);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest["version"] = "1.3.0".into();
+    fs::write(
+        source.join("package.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(source.join("overlay.yml"), "- id: mcp\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    transport: stdio\n    serverName: evidence\n    command: python\n    args: ['./server.py', '--strict']\n    env: { EVIDENCE_TOKEN_FILE: token.txt }\n    toolCallTimeoutMs: 1501\n").unwrap();
+    fs::create_dir_all(source.join("skills/plugin-audit")).unwrap();
+    fs::write(
+        source.join("skills/plugin-audit/SKILL.md"),
+        "---\nname: plugin-audit\ndescription: Audit claims\n---\nAudit.\n",
+    )
+    .unwrap();
+    source
+}
+
+fn install_enabled(store: &PluginStore, source: &Path) -> PluginPreview {
+    let preview = store.preview(source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    store.install(source, &preview.digest).unwrap();
+    store.set_enabled(&preview.name, true).unwrap();
+    preview
+}
+
+fn state_of(store: &PluginStore, name: &str) -> PluginLifecycle {
+    store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|plugin| plugin.package.name == name)
+        .unwrap()
+        .lifecycle
+}
+
+/// What a run bound to `run` in `project` resolves, as Chat and work tasks do.
+fn in_run<T>(project: &Path, run: &PluginRun, action: impl FnOnce() -> T) -> T {
+    let context = run.bind(
+        crate::ProjectExecutionContext::new(project)
+            .with_env(ARIS_PLUGIN_PROJECT_ROOT_ENV, project.as_os_str()),
+    );
+    crate::with_project_execution_context(&context, action)
+}
+
+fn record_health(store: &PluginStore, name: &str, outcome: &Result<usize, String>) {
+    let servers = store.package_mcp_servers(name).unwrap();
+    for (runtime_name, config) in servers {
+        crate::record_mcp_server_health(
+            &runtime_name,
+            &crate::scoped_mcp_config_hash(&config),
+            outcome.clone(),
+        );
+    }
+}
+
+#[test]
+fn plugin_lifecycle_walks_every_state_transition() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("lifecycle-project");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/lifecycle");
+    let preview = store.preview(&source).unwrap();
+    let name = preview.name.as_str();
+
+    // installed: on the list, approved nowhere.
+    store.install(&source, &preview.digest).unwrap();
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::Installed);
+    assert_eq!(state.mcp_servers[0].health, McpHealthState::Unchecked);
+    assert!(state.mcp_servers[0].runtime_name.ends_with("_evidence"));
+
+    // approval-required: the workspace asks, this computer has not approved.
+    let mut registry = store.registry().unwrap();
+    registry.packages.get_mut(name).unwrap().enabled = true;
+    fs::write(
+        store.registry_path(),
+        serde_json::to_vec(&registry).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state_of(&store, name).state, PluginState::ApprovalRequired);
+
+    // enabled: approved, configured for the next run, nothing using it yet.
+    store.set_enabled(name, true).unwrap();
+    assert_eq!(state_of(&store, name).state, PluginState::Enabled);
+
+    // running: an in-flight run froze exactly this version.
+    let run = PluginRun::begin(&store, "test run");
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::Running);
+    assert_eq!((state.active_runs, state.stale_runs), (1, 0));
+
+    // failed: the last real discovery of one of its servers failed.
+    record_health(&store, name, &Err("spawn python: not found".into()));
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::Failed);
+    assert_eq!(state.mcp_servers[0].health, McpHealthState::Failed);
+    assert_eq!(
+        state.mcp_servers[0].message.as_deref(),
+        Some("spawn python: not found")
+    );
+    // ... and recovers when the next discovery connects.
+    record_health(&store, name, &Ok(4));
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::Running);
+    assert_eq!(state.mcp_servers[0].health, McpHealthState::Connected);
+    assert_eq!(state.mcp_servers[0].tool_count, 4);
+
+    // needs-restart: disabled while a run still uses it.
+    store.set_enabled(name, false).unwrap();
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::NeedsRestart);
+    assert_eq!((state.active_runs, state.stale_runs), (1, 1));
+    // The run ending is the restart.
+    drop(run);
+    assert_eq!(state_of(&store, name).state, PluginState::Installed);
+
+    // needs-restart the other way: enabled after an in-flight run started.
+    let run = PluginRun::begin(&store, "started before enabling");
+    store.set_enabled(name, true).unwrap();
+    let state = state_of(&store, name);
+    assert_eq!(state.state, PluginState::NeedsRestart);
+    assert_eq!((state.active_runs, state.stale_runs), (0, 1));
+    drop(run);
+    assert_eq!(state_of(&store, name).state, PluginState::Enabled);
+
+    // Another project's runs are not this project's restarts.
+    let other = test_store(&temp, temp.path().join("lifecycle-other"));
+    let foreign = PluginRun::begin(&other, "another project");
+    assert_eq!(state_of(&store, name).state, PluginState::Enabled);
+    drop(foreign);
+
+    // blocked: a damaged snapshot runs nowhere, however it is configured.
+    fs::write(
+        store.snapshot_path(&preview.digest).join("server.py"),
+        "tampered",
+    )
+    .unwrap();
+    assert_eq!(state_of(&store, name).state, PluginState::Blocked);
+}
+
+#[test]
+fn plugin_mcp_health_comes_from_the_real_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("health-project"));
+    let source = fixture(temp.path(), "@test/health");
+    // A command that cannot start, so the discovery fails without Python.
+    for file in ["base.yml", "overlay.yml"] {
+        let patch = fs::read_to_string(source.join(file)).unwrap().replace(
+            "command: python",
+            "command: somniq-missing-mcp-binary-for-tests",
+        );
+        fs::write(source.join(file), patch).unwrap();
+    }
+    let preview = install_enabled(&store, &source);
+    let servers = store.package_mcp_servers(&preview.name).unwrap();
+    assert_eq!(servers.len(), 1);
+    let mut manager = crate::McpServerManager::from_servers(&servers);
+    let (_, failures) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(
+            manager.discover_tools_resilient_with_timeout(std::time::Duration::from_secs(10)),
+        );
+    assert_eq!(failures.len(), 1);
+    let state = state_of(&store, &preview.name);
+    assert_eq!(state.state, PluginState::Failed);
+    assert_eq!(state.mcp_servers[0].health, McpHealthState::Failed);
+    assert!(state.mcp_servers[0].message.is_some());
+    // A disabled package exposes no servers to check.
+    store.set_enabled(&preview.name, false).unwrap();
+    assert!(store.package_mcp_servers(&preview.name).unwrap().is_empty());
+}
+
+#[test]
+fn a_plugin_upgrade_shows_the_diff_and_needs_reapproval() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("upgrade-project"));
+    let v1 = install_enabled(&store, &fixture(temp.path(), "@test/upgrade"));
+    let v2_source = fixture_v2(temp.path(), "@test/upgrade");
+
+    let import = store.preview_import(&v2_source).unwrap();
+    let plan = import
+        .upgrade
+        .clone()
+        .expect("an installed name previews an upgrade");
+    assert_eq!(plan.current_version, "1.2.3");
+    assert_eq!(plan.current_digest, v1.digest);
+    assert!(plan.current_enabled);
+    assert_eq!(plan.change, VersionChange::Upgrade);
+    let diff = &plan.diff;
+    assert!(diff.changed);
+    assert_eq!(diff.skills.added, ["plugin-audit"]);
+    assert!(diff.skills.removed.is_empty());
+    assert_eq!(diff.commands.added, ["python ./server.py --strict"]);
+    assert_eq!(diff.commands.removed, ["python ./server.py --safe"]);
+    assert_eq!(diff.env_keys.added, ["EVIDENCE_TOKEN_FILE"]);
+    assert_eq!(diff.mcp_servers[0].change, ServerChange::Changed);
+    assert_eq!(diff.mcp_servers[0].env_added, ["EVIDENCE_TOKEN_FILE"]);
+    // A first install has no plan; the identical snapshot has nothing to do.
+    assert!(store
+        .preview_import(fixture(temp.path(), "@test/new"))
+        .unwrap()
+        .upgrade
+        .is_none());
+    let same = store
+        .preview_import(fixture(&temp.path().join("again"), "@test/upgrade"))
+        .unwrap();
+    assert_eq!(same.upgrade.unwrap().change, VersionChange::Identical);
+    // Installing over an installed name is refused: upgrading is its own step.
+    assert!(store.install(&v2_source, &import.package.digest).is_err());
+
+    // The diff was computed against v1; a changed installed version refuses.
+    assert!(store
+        .upgrade(&v2_source, &import.package.digest, &"0".repeat(64), true)
+        .unwrap_err()
+        .contains("changed after preview"));
+    let upgraded = store
+        .upgrade(&v2_source, &import.package.digest, &v1.digest, true)
+        .unwrap();
+    assert_eq!(upgraded.package.version, "1.3.0");
+    assert!(upgraded.enabled);
+    assert_eq!(
+        store.approved_digest(&v1.name).unwrap().as_deref(),
+        Some(import.package.digest.as_str())
+    );
+    let servers = store.active_mcp_servers().unwrap();
+    let McpServerConfig::Stdio(server) = &servers.values().next().unwrap().config else {
+        panic!("stdio");
+    };
+    assert!(server.args[0].contains(&import.package.digest));
+    assert_eq!(server.args[1], "--strict");
+    // The old snapshot is untouched, for runs that froze it.
+    assert!(store.snapshot_path(&v1.digest).join("server.py").is_file());
+
+    // Without approval the new version installs disabled and runs nowhere.
+    let v1_again = fixture(&temp.path().join("downgrade"), "@test/upgrade");
+    let back = store.preview_import(&v1_again).unwrap();
+    assert_eq!(
+        back.upgrade.as_ref().unwrap().change,
+        VersionChange::Downgrade
+    );
+    let downgraded = store
+        .upgrade(
+            &v1_again,
+            &back.package.digest,
+            &import.package.digest,
+            false,
+        )
+        .unwrap();
+    assert!(!downgraded.enabled);
+    assert_eq!(downgraded.lifecycle.state, PluginState::Installed);
+    assert_eq!(store.approved_digest(&v1.name).unwrap(), None);
+    assert!(store.active_mcp_servers().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_plugin_upgrade_rolls_back_to_the_running_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("rollback-project"));
+    let v1 = install_enabled(&store, &fixture(temp.path(), "@test/rollback"));
+    let v2_source = fixture_v2(temp.path(), "@test/rollback");
+    let v2 = store.preview(&v2_source).unwrap();
+    let registry_before = fs::read(store.registry_path()).unwrap();
+    let assert_v1_in_force = |store: &PluginStore| {
+        assert_eq!(fs::read(store.registry_path()).unwrap(), registry_before);
+        assert_eq!(
+            store.approved_digest(&v1.name).unwrap().as_deref(),
+            Some(v1.digest.as_str())
+        );
+        let view = store.list().unwrap().remove(0);
+        assert_eq!(view.package.version, "1.2.3");
+        assert!(view.enabled);
+        let roots = store.active_skill_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].starts_with(store.snapshot_path(&v1.digest)));
+    };
+
+    // Each step of the switch fails in turn, with and without re-approval.
+    for step in ["published", "approved"] {
+        for approve in [true, false] {
+            upgrade::FAIL_UPGRADE_AT.with(|fail| fail.set(Some(step)));
+            let error = store
+                .upgrade(&v2_source, &v2.digest, &v1.digest, approve)
+                .unwrap_err();
+            upgrade::FAIL_UPGRADE_AT.with(|fail| fail.set(None));
+            assert!(error.contains(step), "{error}");
+            assert_v1_in_force(&store);
+        }
+    }
+
+    // A skill collision with another enabled package refuses before anything moves.
+    let other = fixture(&temp.path().join("other"), "@test/other-audit");
+    fs::remove_dir_all(other.join("skills/plugin-evidence")).unwrap();
+    fs::create_dir_all(other.join("skills/plugin-audit")).unwrap();
+    fs::write(
+        other.join("skills/plugin-audit/SKILL.md"),
+        "---\nname: plugin-audit\ndescription: Another audit\n---\nAudit.\n",
+    )
+    .unwrap();
+    install_enabled(&store, &other);
+    let registry_before = fs::read(store.registry_path()).unwrap();
+    assert!(store
+        .upgrade(&v2_source, &v2.digest, &v1.digest, true)
+        .unwrap_err()
+        .contains("conflicts"));
+    assert_eq!(fs::read(store.registry_path()).unwrap(), registry_before);
+    assert_eq!(
+        store.approved_digest(&v1.name).unwrap().as_deref(),
+        Some(v1.digest.as_str())
+    );
+
+    // An unreadable approvals file stops the upgrade before it starts.
+    let approvals = fs::read(store.approvals_path()).unwrap();
+    fs::write(store.approvals_path(), "{broken").unwrap();
+    assert!(store
+        .upgrade(&v2_source, &v2.digest, &v1.digest, false)
+        .is_err());
+    assert_eq!(fs::read(store.registry_path()).unwrap(), registry_before);
+    fs::write(store.approvals_path(), approvals).unwrap();
+    // A package changed after its preview is refused outright.
+    fs::write(v2_source.join("server.py"), "changed after preview").unwrap();
+    assert!(store
+        .upgrade(&v2_source, &v2.digest, &v1.digest, true)
+        .unwrap_err()
+        .contains("changed after preview"));
+    assert_eq!(fs::read(store.registry_path()).unwrap(), registry_before);
+}
+
+/// Second package of the frozen-set test: its own skill and MCP server names.
+fn second_fixture(root: &Path) -> PathBuf {
+    let source = fixture(&root.join("second"), "second");
+    for file in ["base.yml", "overlay.yml"] {
+        let patch = fs::read_to_string(source.join(file))
+            .unwrap()
+            .replace("serverName: evidence", "serverName: second");
+        fs::write(source.join(file), patch).unwrap();
+    }
+    fs::remove_dir_all(source.join("skills/plugin-evidence")).unwrap();
+    fs::create_dir_all(source.join("skills/plugin-second")).unwrap();
+    fs::write(
+        source.join("skills/plugin-second/SKILL.md"),
+        "---\nname: plugin-second\ndescription: Second\n---\nSecond.\n",
+    )
+    .unwrap();
+    source
+}
+
+type Resolved = (Vec<String>, Vec<String>, Vec<PathBuf>);
+
+/// Skills, MCP server names and read-only roots as a run resolves them.
+fn resolve_plugins(project: &Path, home: &Path) -> Resolved {
+    let store = PluginStore::for_execution(project);
+    let mut skills: Vec<_> = store
+        .active_skill_roots()
+        .unwrap()
+        .into_iter()
+        .flat_map(|root| fs::read_dir(root).unwrap())
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    skills.sort();
+    let config = crate::ConfigLoader::new(project, home).load().unwrap();
+    let servers: Vec<_> = config
+        .mcp()
+        .servers()
+        .keys()
+        .map(|name| name.rsplit('_').next().unwrap().to_string())
+        .collect();
+    (skills, servers, store.active_snapshot_dirs().unwrap())
+}
+
+#[test]
+fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("frozen-project");
+    fs::create_dir_all(&project).unwrap();
+    let home = temp.path().join("home");
+    let store = test_store(&temp, &project);
+    let first = install_enabled(&store, &fixture(temp.path(), "first"));
+    let second_source = second_fixture(temp.path());
+    let second = store.preview(&second_source).unwrap();
+    assert!(second.can_enable, "{:?}", second.diagnostics);
+    store.install(&second_source, &second.digest).unwrap();
+
+    let run = PluginRun::begin(&store, "chat turn");
+    assert_eq!(
+        run.set().plugins,
+        [FrozenPlugin {
+            name: "first".into(),
+            version: "1.2.3".into(),
+            digest: first.digest.clone(),
+        }]
+    );
+    assert_eq!(run.snapshot_dirs(), [store.snapshot_path(&first.digest)]);
+    let frozen: Resolved = (
+        vec!["plugin-evidence".to_string()],
+        vec!["evidence".to_string()],
+        vec![store.snapshot_path(&first.digest)],
+    );
+    assert_eq!(
+        in_run(&project, &run, || resolve_plugins(&project, &home)),
+        frozen
+    );
+
+    // Mid-run: turn the first off and the second on, upgrade, even remove.
+    store.set_enabled("first", false).unwrap();
+    store.set_enabled("second", true).unwrap();
+    assert_eq!(
+        in_run(&project, &run, || resolve_plugins(&project, &home)),
+        frozen
+    );
+    let v2_source = fixture_v2(temp.path(), "first");
+    let v2 = store.preview(&v2_source).unwrap();
+    store
+        .upgrade(&v2_source, &v2.digest, &first.digest, false)
+        .unwrap();
+    store.remove("first").unwrap();
+    assert_eq!(
+        in_run(&project, &run, || resolve_plugins(&project, &home)),
+        frozen
+    );
+    // The review step enters the same run and sees the same set.
+    assert_eq!(
+        run.enter(|| PluginStore::for_execution(&project)
+            .active_snapshot_dirs()
+            .unwrap()),
+        frozen.2
+    );
+    // Work that re-binds its project inside the run (a Desktop tool call)
+    // inherits the run instead of falling back to the live configuration.
+    let rebound = in_run(&project, &run, || {
+        let binding = current_plugin_run().expect("inside a run");
+        assert_eq!(binding.snapshot_dirs(), frozen.2.as_slice());
+        binding.bind(
+            crate::ProjectExecutionContext::new(&project)
+                .with_env(ARIS_PLUGIN_PROJECT_ROOT_ENV, project.as_os_str()),
+        )
+    });
+    assert_eq!(
+        crate::with_project_execution_context(&rebound, || resolve_plugins(&project, &home)),
+        frozen
+    );
+    assert!(
+        current_plugin_run().is_none(),
+        "no run outside a bound context"
+    );
+    // A nested run inside it stays within the frozen set.
+    let nested = in_run(&project, &run, || {
+        PluginRun::begin(&PluginStore::for_execution(&project), "nested")
+    });
+    assert_eq!(nested.set().plugins, run.set().plugins);
+    drop(nested);
+
+    // Outside the run, the next run gets the new configuration.
+    let next: Resolved = (
+        vec!["plugin-second".to_string()],
+        vec!["second".to_string()],
+        vec![store.snapshot_path(&second.digest)],
+    );
+    let context = crate::ProjectExecutionContext::new(&project)
+        .with_env(ARIS_PLUGIN_PROJECT_ROOT_ENV, project.as_os_str());
+    assert_eq!(
+        crate::with_project_execution_context(&context, || resolve_plugins(&project, &home)),
+        next
+    );
+
+    // A token no live run holds resolves to nothing, never to the live set.
+    let none: Resolved = (vec![], vec![], vec![]);
+    let ended = run.bind(context.clone());
+    drop(run);
+    assert_eq!(
+        crate::with_project_execution_context(&ended, || resolve_plugins(&project, &home)),
+        none
+    );
+    // ... and so does work re-bound inside a run that has ended.
+    let leftover = crate::with_project_execution_context(&ended, || {
+        let binding = current_plugin_run().expect("the token is still there");
+        assert!(binding.snapshot_dirs().is_empty());
+        binding.bind(context.clone())
+    });
+    assert_eq!(
+        crate::with_project_execution_context(&leftover, || resolve_plugins(&project, &home)),
+        none
+    );
+    let forged = context.with_env(ARIS_PLUGIN_RUN_ENV, "f".repeat(32));
+    assert_eq!(
+        crate::with_project_execution_context(&forged, || resolve_plugins(&project, &home)),
+        none
+    );
+    // Nor does another project's run.
+    let elsewhere = test_store(&temp, temp.path().join("frozen-elsewhere"));
+    let foreign = PluginRun::begin(&elsewhere, "elsewhere");
+    assert_eq!(
+        in_run(&project, &foreign, || resolve_plugins(&project, &home)),
+        none
+    );
+}
+
+#[test]
+fn a_frozen_set_still_refuses_a_damaged_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("frozen-integrity");
+    let store = test_store(&temp, &project);
+    let preview = install_enabled(&store, &fixture(temp.path(), "first"));
+    let run = PluginRun::begin(&store, "run");
+    fs::write(
+        store.snapshot_path(&preview.digest).join("server.py"),
+        "tampered",
+    )
+    .unwrap();
+    let mut frozen = test_store(&temp, &project);
+    frozen.frozen = Some(Arc::new(run.set().clone()));
+    assert!(frozen.active_mcp_servers().unwrap().is_empty());
+    assert!(frozen.active_skill_roots().unwrap().is_empty());
+}
+
+#[test]
+fn plugin_mutations_do_not_deadlock_when_their_lock_stripes_collide() {
+    // The registry and approvals files are locked in-process by path stripe;
+    // taking one inside the other deadlocked when both shared a stripe.
+    let temp = tempfile::tempdir().unwrap();
+    let store = (0..10_000)
+        .map(|index| test_store(&temp, temp.path().join(format!("stripe-{index}"))))
+        .find(|store| {
+            crate::atomic_file::path_locks_collide(&store.registry_path(), &store.approvals_path())
+        })
+        .expect("some project path shares a stripe with the approvals file");
+    let source = fixture(temp.path(), "first");
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("first", true).unwrap();
+    let run = PluginRun::begin(&store, "run");
+    assert_eq!(run.set().plugins.len(), 1);
+    store.set_enabled("first", false).unwrap();
+    store.remove("first").unwrap();
 }

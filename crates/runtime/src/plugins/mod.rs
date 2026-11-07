@@ -10,16 +10,26 @@
 //! snapshots and this computer's approvals live under the SomniQ config
 //! directory, and a package runs only when the project asks for it AND the
 //! approval recorded here names the digest of the snapshot that would run.
+//!
+//! Lifecycle ([`lifecycle`]) keeps "installed", "approved and enabled",
+//! "running", "failed" and "needs restart" apart: a run freezes the set it
+//! starts with, so the page can say which runs still use what. Upgrades
+//! ([`upgrade`]) replace an installed version as one transaction.
 
 mod dsh;
+mod lifecycle;
 mod ui;
+mod upgrade;
 
+pub use lifecycle::*;
 pub use ui::*;
+pub use upgrade::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -90,10 +100,13 @@ pub struct PluginPreview {
 pub struct InstalledPlugin {
     #[serde(flatten)]
     pub package: PluginPreview,
-    /// Requested enablement; `status` also accounts for current integrity.
+    /// The project asks for it AND this computer approved this digest, so the
+    /// next run gets it. Configuration only; `lifecycle` says what runs.
     pub enabled: bool,
-    /// enabled means configured for the next run, never a process health check.
+    /// `enabled`, `disabled` or `blocked`: configuration and integrity only.
     pub status: String,
+    /// What is actually happening: in-flight runs, MCP health, restarts.
+    pub lifecycle: PluginLifecycle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +120,7 @@ struct Record {
     enabled: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registry {
     schema: u32,
@@ -137,6 +150,10 @@ pub struct PluginStore {
     workspace: PathBuf,
     /// `<SomniQ config>/plugins`: reviewed snapshots and approvals.
     user_root: PathBuf,
+    /// The set the current run froze when it started ([`PluginRun`]). When
+    /// present, what runs comes from here, not from the live registry, so
+    /// enabling or disabling a package mid-run cannot change an in-flight run.
+    frozen: Option<Arc<PluginSet>>,
 }
 
 pub(super) fn valid_skill_name(name: &str) -> bool {
@@ -275,18 +292,30 @@ impl PluginStore {
             root: crate::somniq_project_dir(&workspace).join("plugins"),
             workspace,
             user_root: user_root.into(),
+            frozen: None,
         }
     }
 
     /// The store whose plugins apply to the current execution: the project
     /// named by [`ARIS_PLUGIN_PROJECT_ROOT_ENV`] when the run has one (a work
     /// task in a worktree), otherwise `cwd`.
+    ///
+    /// Inside a run bound by [`PluginRun`] the packages that run are the ones
+    /// it froze. A run token this process did not issue, or one whose run has
+    /// ended, resolves to no plugins at all.
     #[must_use]
     pub fn for_execution(cwd: impl AsRef<Path>) -> Self {
         let project = crate::execution_env_var_os(ARIS_PLUGIN_PROJECT_ROOT_ENV)
             .filter(|value| !value.is_empty())
             .map_or_else(|| cwd.as_ref().to_path_buf(), PathBuf::from);
-        Self::for_workspace(project)
+        let mut store = Self::for_workspace(project);
+        if let Some(token) =
+            crate::execution_env_var_os(ARIS_PLUGIN_RUN_ENV).filter(|value| !value.is_empty())
+        {
+            let key = store.project_key();
+            store.frozen = Some(lifecycle::resolve_run(&token.to_string_lossy(), &key));
+        }
+        store
     }
 
     fn registry_path(&self) -> PathBuf {
@@ -366,11 +395,12 @@ impl PluginStore {
     /// Record (`Some`) or withdraw (`None`) this computer's approval.
     ///
     /// The approvals file is shared by every project, so the read/modify/write
-    /// holds a cross-process lock beside it. Called with the project's registry
-    /// lock already held; the order (registry, then approvals) is fixed.
+    /// holds a cross-process lock beside it. Called inside [`Self::mutate`],
+    /// which already holds the in-process locks of both files; the OS lock
+    /// order (registry, then approvals) is fixed.
     fn set_approval(&self, name: &str, digest: Option<&str>) -> Result<(), String> {
         let path = self.approvals_path();
-        crate::with_path_lock(&path, || {
+        {
             self.approvals()?;
             fs::create_dir_all(&self.user_root).map_err(|e| e.to_string())?;
             let lock = fs::OpenOptions::new()
@@ -402,7 +432,7 @@ impl PluginStore {
             }
             let bytes = serde_json::to_vec_pretty(&approvals).map_err(|e| e.to_string())?;
             crate::atomic_file::write_replace_unlocked(&path, &bytes).map_err(|e| e.to_string())
-        })
+        }
     }
 
     fn registry(&self) -> Result<Registry, String> {
@@ -442,8 +472,16 @@ impl PluginStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Run `action` holding this project's registry locks.
+    ///
+    /// The in-process locks of the registry AND the approvals file are taken
+    /// together, up front: they are striped by path hash, so taking the second
+    /// inside the first deadlocks whenever both paths land on one stripe.
+    /// [`Self::freeze`] takes the registry stripe too, so a run never starts
+    /// from a half-applied mutation.
     fn mutate<T>(&self, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        crate::with_path_lock(&self.registry_path(), || {
+        let paths = [self.registry_path(), self.approvals_path()];
+        crate::atomic_file::with_paths_locked(&paths, || {
             // Validate state paths before creating or opening anything there.
             self.registry()?;
             fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
@@ -582,54 +620,11 @@ impl PluginStore {
             let mut registry = self.registry()?;
             if registry.packages.contains_key(&preview.name) {
                 return Err(
-                    "Package already installed; remove it before installing a different version"
+                    "Package already installed; preview it again to upgrade the installed version"
                         .into(),
                 );
             }
-            let target = self.snapshot_path(&preview.digest);
-            let target_exists = fs::symlink_metadata(&target).is_ok();
-            let intact = target_exists
-                && package_files(&target).is_ok_and(|files| digest_files(&files) == preview.digest);
-            if target_exists && !intact {
-                // Keep the modified bytes for inspection, then restore the
-                // reviewed snapshot. Never recursively delete package trees.
-                let quarantine = self.user_root.join("quarantine");
-                fs::create_dir_all(&quarantine).map_err(|e| e.to_string())?;
-                let archive = tempfile::Builder::new()
-                    .prefix("modified-")
-                    .tempdir_in(quarantine)
-                    .map_err(|e| e.to_string())?
-                    .keep();
-                fs::rename(&target, archive.join("package")).map_err(|e| e.to_string())?;
-            }
-            if !intact {
-                // Snapshots are content-addressed and shared by every project,
-                // so another project may publish the same digest concurrently.
-                let packages = self.user_root.join("packages");
-                fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
-                let staging = tempfile::tempdir_in(&packages).map_err(|e| e.to_string())?;
-                for (path, file) in &files {
-                    let destination = staging.path().join(path);
-                    fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
-                    fs::write(&destination, &file.bytes).map_err(|e| e.to_string())?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        fs::set_permissions(
-                            &destination,
-                            fs::Permissions::from_mode(if file.executable { 0o755 } else { 0o644 }),
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                }
-                if let Err(error) = fs::rename(staging.path(), &target) {
-                    let published = package_files(&target)
-                        .is_ok_and(|files| digest_files(&files) == preview.digest);
-                    if !published {
-                        return Err(error.to_string());
-                    }
-                }
-            }
+            self.publish_snapshot(&files, &preview.digest)?;
             let record = Record {
                 name: preview.name.clone(),
                 version: preview.version.clone(),
@@ -642,8 +637,60 @@ impl PluginStore {
                 .packages
                 .insert(record.name.clone(), record.clone());
             self.save(&registry)?;
-            Ok(Self::installed(preview, record.enabled))
+            Ok(self.view(&record))
         })
+    }
+
+    /// Make `packages/<digest>` hold exactly `files`.
+    ///
+    /// Snapshots are content-addressed and never modified in place, so this
+    /// leaves every other version, and every run using one, untouched. An
+    /// existing snapshot that no longer matches its digest is moved to
+    /// quarantine for inspection, never recursively deleted.
+    fn publish_snapshot(&self, files: &PackageFiles, digest: &str) -> Result<(), String> {
+        let target = self.snapshot_path(digest);
+        let target_exists = fs::symlink_metadata(&target).is_ok();
+        let intact = target_exists
+            && package_files(&target).is_ok_and(|files| digest_files(&files) == digest);
+        if intact {
+            return Ok(());
+        }
+        if target_exists {
+            let quarantine = self.user_root.join("quarantine");
+            fs::create_dir_all(&quarantine).map_err(|e| e.to_string())?;
+            let archive = tempfile::Builder::new()
+                .prefix("modified-")
+                .tempdir_in(quarantine)
+                .map_err(|e| e.to_string())?
+                .keep();
+            fs::rename(&target, archive.join("package")).map_err(|e| e.to_string())?;
+        }
+        // Another project may publish the same digest concurrently.
+        let packages = self.user_root.join("packages");
+        fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
+        let staging = tempfile::tempdir_in(&packages).map_err(|e| e.to_string())?;
+        for (path, file) in files {
+            let destination = staging.path().join(path);
+            fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::write(&destination, &file.bytes).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(
+                    &destination,
+                    fs::Permissions::from_mode(if file.executable { 0o755 } else { 0o644 }),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Err(error) = fs::rename(staging.path(), &target) {
+            let published =
+                package_files(&target).is_ok_and(|files| digest_files(&files) == digest);
+            if !published {
+                return Err(error.to_string());
+            }
+        }
+        Ok(())
     }
 
     fn installed(package: PluginPreview, enabled: bool) -> InstalledPlugin {
@@ -658,6 +705,7 @@ impl PluginStore {
             package,
             enabled,
             status: status.into(),
+            lifecycle: PluginLifecycle::default(),
         }
     }
 
@@ -720,13 +768,57 @@ impl PluginStore {
         }
     }
 
+    /// Every installed package with its configuration AND lifecycle state.
     pub fn list(&self) -> Result<Vec<InstalledPlugin>, String> {
+        let runs = lifecycle::project_runs(&self.project_key());
         Ok(self
             .registry()?
             .packages
             .values()
-            .map(|record| self.inspect_record(record))
+            .map(|record| self.assessed(record, &runs))
             .collect())
+    }
+
+    /// One package as the plugin page shows it.
+    fn view(&self, record: &Record) -> InstalledPlugin {
+        self.assessed(record, &lifecycle::project_runs(&self.project_key()))
+    }
+
+    fn assessed(&self, record: &Record, runs: &[Arc<PluginSet>]) -> InstalledPlugin {
+        let mut view = self.inspect_record(record);
+        view.lifecycle = lifecycle::assess(&view, runs);
+        view
+    }
+
+    /// The enabled package (other than `name`) whose skills collide with
+    /// `capabilities`, if any.
+    fn skill_conflict(
+        &self,
+        registry: &Registry,
+        name: &str,
+        capabilities: &PluginCapabilities,
+    ) -> Option<String> {
+        let names: BTreeSet<_> = capabilities
+            .skills
+            .iter()
+            .map(|v| v.to_ascii_lowercase())
+            .collect();
+        registry
+            .packages
+            .values()
+            .filter(|r| r.name != name)
+            .map(|other| self.inspect_record(other))
+            .find(|other| {
+                other.enabled
+                    && other.package.can_enable
+                    && other
+                        .package
+                        .capabilities
+                        .skills
+                        .iter()
+                        .any(|v| names.contains(&v.to_ascii_lowercase()))
+            })
+            .map(|other| other.package.name)
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<InstalledPlugin, String> {
@@ -745,29 +837,10 @@ impl PluginStore {
                             .into(),
                     );
                 }
-                let names: BTreeSet<_> = view
-                    .package
-                    .capabilities
-                    .skills
-                    .iter()
-                    .map(|v| v.to_ascii_lowercase())
-                    .collect();
-                for other in registry.packages.values().filter(|r| r.name != name) {
-                    let other = self.inspect_record(other);
-                    if other.enabled
-                        && other.package.can_enable
-                        && other
-                            .package
-                            .capabilities
-                            .skills
-                            .iter()
-                            .any(|v| names.contains(&v.to_ascii_lowercase()))
-                    {
-                        return Err(format!(
-                            "Skill name conflicts with enabled plugin {}",
-                            other.package.name
-                        ));
-                    }
+                if let Some(other) =
+                    self.skill_conflict(&registry, name, &view.package.capabilities)
+                {
+                    return Err(format!("Skill name conflicts with enabled plugin {other}"));
                 }
             }
             // The approval is what lets a package run, so it is written first
@@ -776,7 +849,7 @@ impl PluginStore {
             self.set_approval(name, enabled.then_some(digest.as_str()))?;
             registry.packages.get_mut(name).unwrap().enabled = enabled;
             self.save(&registry)?;
-            Ok(self.inspect_record(&registry.packages[name]))
+            Ok(self.view(&registry.packages[name]))
         })
     }
 
@@ -794,22 +867,53 @@ impl PluginStore {
         })
     }
 
+    /// The packages that run here: the frozen set inside a [`PluginRun`],
+    /// otherwise what the registry and this computer's approvals allow now.
+    /// Snapshot integrity is checked either way.
+    fn running(&self) -> Result<Vec<InstalledPlugin>, String> {
+        match &self.frozen {
+            Some(set) => Ok(set
+                .plugins
+                .iter()
+                .map(|plugin| self.inspect_frozen(plugin))
+                .filter(|p| p.package.can_enable)
+                .collect()),
+            None => Ok(self
+                .registry()?
+                .packages
+                .values()
+                .map(|record| self.inspect_record(record))
+                .filter(|p| p.enabled && p.package.can_enable)
+                .collect()),
+        }
+    }
+
+    fn inspect_frozen(&self, plugin: &FrozenPlugin) -> InstalledPlugin {
+        let record = Record {
+            name: plugin.name.clone(),
+            version: plugin.version.clone(),
+            description: String::new(),
+            source: String::new(),
+            digest: plugin.digest.clone(),
+            enabled: true,
+        };
+        Self::installed(self.inspect_snapshot(&record), true)
+    }
+
     /// Snapshot directories of the packages that would run here, for callers
     /// that must let the model read a plugin skill's own files.
     pub fn active_snapshot_dirs(&self) -> Result<Vec<PathBuf>, String> {
         Ok(self
-            .list()?
+            .running()?
             .into_iter()
-            .filter(|p| p.enabled && p.package.can_enable)
             .map(|p| self.snapshot_path(&p.package.digest))
             .collect())
     }
 
     pub fn active_skill_roots(&self) -> Result<Vec<PathBuf>, String> {
         Ok(self
-            .list()?
+            .running()?
             .into_iter()
-            .filter(|p| p.enabled && p.package.can_enable)
             .flat_map(|p| {
                 let root = self.snapshot_path(&p.package.digest);
                 p.package
@@ -822,31 +926,59 @@ impl PluginStore {
     }
 
     pub fn active_mcp_servers(&self) -> Result<BTreeMap<String, ScopedMcpServerConfig>, String> {
-        let mut servers = BTreeMap::new();
-        for plugin in self
-            .list()?
-            .into_iter()
-            .filter(|p| p.enabled && p.package.can_enable)
-        {
-            let hash = format!("{:x}", Sha256::digest(plugin.package.name.as_bytes()));
-            for server in plugin.package.capabilities.mcp_servers {
-                let name = format!("p{}_{}", &hash[..8], server.name);
-                servers.insert(
-                    name,
-                    ScopedMcpServerConfig {
-                        scope: ConfigSource::Project,
-                        config: McpServerConfig::Stdio(McpStdioServerConfig {
-                            command: server.command,
-                            args: server.args,
-                            env: server.env,
-                            request_timeout_secs: server.request_timeout_secs,
-                        }),
-                    },
-                );
-            }
-        }
-        Ok(servers)
+        Ok(self
+            .running()?
+            .iter()
+            .flat_map(|plugin| mcp_entries(&plugin.package))
+            .map(|entry| (entry.runtime_name, entry.config))
+            .collect())
     }
+
+    /// The MCP servers `name` would start here, keyed by runtime name; empty
+    /// unless the package is approved, enabled and intact.
+    pub fn package_mcp_servers(
+        &self,
+        name: &str,
+    ) -> Result<BTreeMap<String, ScopedMcpServerConfig>, String> {
+        Ok(self
+            .running()?
+            .iter()
+            .filter(|plugin| plugin.package.name == name)
+            .flat_map(|plugin| mcp_entries(&plugin.package))
+            .map(|entry| (entry.runtime_name, entry.config))
+            .collect())
+    }
+}
+
+/// One MCP server a package declares, as the runtime names and starts it.
+struct McpEntry {
+    declared: String,
+    runtime_name: String,
+    config: ScopedMcpServerConfig,
+}
+
+/// Each package gets a stable MCP name prefix, so its servers never collide
+/// with another package's or a manually configured one.
+fn mcp_entries(package: &PluginPreview) -> Vec<McpEntry> {
+    let hash = format!("{:x}", Sha256::digest(package.name.as_bytes()));
+    package
+        .capabilities
+        .mcp_servers
+        .iter()
+        .map(|server| McpEntry {
+            declared: server.name.clone(),
+            runtime_name: format!("p{}_{}", &hash[..8], server.name),
+            config: ScopedMcpServerConfig {
+                scope: ConfigSource::Project,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: server.command.clone(),
+                    args: server.args.clone(),
+                    env: server.env.clone(),
+                    request_timeout_secs: server.request_timeout_secs,
+                }),
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

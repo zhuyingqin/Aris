@@ -183,6 +183,44 @@
 .plugin-import-actions p svg { flex: none; margin-top: 2px; color: var(--green); }
 .plugin-import-actions > div { display: flex; gap: 8px; }
 
+/* Lifecycle: what the package is doing, not just how it is configured */
+.plugin-state.is-running { color: var(--green); }
+.plugin-state.is-failed { color: var(--red); }
+.plugin-state.is-needs-restart, .plugin-state.is-approval-required { color: var(--amber); }
+.plugin-card.is-state-failed { border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
+.plugin-card.is-state-needs-restart { border-color: color-mix(in srgb, var(--amber) 30%, var(--border)); }
+.plugin-state-hint { margin: 8px 0 0 48px; color: var(--text-dim); font-size: 11.5px; line-height: 1.6; }
+.plugin-state-hint.is-failed { color: color-mix(in srgb, var(--red) 70%, var(--text)); }
+.plugin-state-hint.is-needs-restart { color: color-mix(in srgb, var(--amber) 70%, var(--text)); }
+.plugin-health {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  margin: 10px 0 2px 48px; padding: 8px 10px; border-radius: 9px; background: var(--bg-2); font-size: 12px;
+}
+.plugin-health ul { display: grid; gap: 4px; flex: 1 1 260px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.plugin-health li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; color: var(--text-dim); }
+.plugin-health strong { color: var(--text); font-weight: 600; }
+.plugin-health code {
+  flex-basis: 100%; color: var(--text-dim); overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", Consolas, monospace); font-size: 11px;
+}
+.plugin-health-dot { align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); opacity: .55; }
+.plugin-health li.is-connected .plugin-health-dot { background: var(--green); opacity: 1; }
+.plugin-health li.is-failed .plugin-health-dot { background: var(--red); opacity: 1; }
+.plugin-health li.is-failed > span { color: var(--red); }
+.plugin-check-btn { gap: 5px; min-height: 28px; font-size: 11.5px; }
+
+/* Upgrade preview */
+.plugin-upgrade-versions { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.plugin-diff { margin: 12px 0 0 48px; }
+.plugin-diff > strong { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 650; }
+.plugin-diff > p { margin: 0; color: var(--text-dim); font-size: 12px; }
+.plugin-card .plugin-diff .plugin-details { margin: 0; }
+.plugin-diff-items { display: flex; flex-wrap: wrap; gap: 5px; }
+.plugin-diff-items code { padding: 1px 6px; border-radius: 5px; background: var(--bg-3); overflow-wrap: anywhere; }
+.plugin-diff-items code.is-added { color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--bg-1)); }
+.plugin-diff-items code.is-removed { color: var(--red); background: color-mix(in srgb, var(--red) 9%, var(--bg-1)); }
+.plugin-diff-items code.is-changed { color: var(--amber); background: color-mix(in srgb, var(--amber) 10%, var(--bg-1)); }
+
 /* Empty, loading, footnote */
 .plugin-empty {
   display: grid; justify-items: center; gap: 6px; margin: 16px 0 12px; padding: 28px 24px;
@@ -207,7 +245,7 @@
   .plugin-packages .ext-section-head { flex-wrap: wrap; }
   .plugin-card-main { flex-wrap: wrap; }
   .plugin-card-controls { width: 100%; justify-content: flex-end; }
-  .plugin-confirm, .plugin-details, .plugin-card .plugin-callout { margin-left: 0; }
+  .plugin-confirm, .plugin-details, .plugin-card .plugin-callout, .plugin-state-hint, .plugin-health, .plugin-diff { margin-left: 0; }
   .plugin-details > div { grid-template-columns: 1fr; gap: 2px; }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -1003,6 +1003,8 @@ pub fn run() {
             plugins::plugins_preview,
             plugins::plugins_install,
             plugins::plugins_set_enabled,
+            plugins::plugins_upgrade,
+            plugins::plugins_check_mcp,
             plugins::plugins_remove,
             plugins::plugins_ui_list,
             plugins::plugins_ui_state_get,
