@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::{
     artifact_export_core, cancel_core, create_core, delete_core, list_core, pause_core,
     queue_scheduled_run, reply_core, return_to_todo_core, snapshot_core, start_core, update_core,
+    ScheduledRunOutcome, ScheduledRunRequest,
 };
 use crate::work_task::engine;
 use crate::work_task::model::{
@@ -1026,64 +1027,155 @@ fn restarting_a_task_drops_the_previous_attempts_result() {
 #[test]
 fn a_scheduled_firing_becomes_an_ordinary_queued_task() {
     let fixture = fixture("scheduled");
-    let queued = queue_scheduled_run(
+    let request = |automation: &str, key: &str| ScheduledRunRequest {
+        scheduled_task_id: automation.to_string(),
+        occurrence_key: key.to_string(),
+        title: "Nightly literature sweep".into(),
+        prompt: "Update the library.".into(),
+        model: None,
+        target_session_id: None,
+    };
+    let queued = match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-1", "automation-1:at:1"),
     )
-    .expect("queue");
+    .expect("queue")
+    {
+        ScheduledRunOutcome::Queued(task) => task,
+        other => panic!("expected a new card, got {other:?}"),
+    };
 
     assert_eq!(queued.status, WorkTaskStatus::Queued);
     assert_eq!(queued.title, "Nightly literature sweep");
     assert_eq!(queued.scheduled_task_id.as_deref(), Some("automation-1"));
+    assert_eq!(
+        queued.scheduled_occurrence_key.as_deref(),
+        Some("automation-1:at:1")
+    );
 
-    // A second firing while the first is still going is skipped, not stacked:
-    // two runs editing the same branch is the failure a short interval would
-    // otherwise produce every night.
+    // The same occurrence again — a restart that lost the receipt, a second
+    // tick — finds the card instead of queuing a twin.
+    match queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        request("automation-1", "automation-1:at:1"),
+    )
+    .expect("re-queue")
+    {
+        ScheduledRunOutcome::AlreadyQueued(task) => assert_eq!(task.id, queued.id),
+        other => panic!("expected the existing card, got {other:?}"),
+    }
+
+    // A later occurrence while the first is still going is held, not
+    // stacked: two runs against the same base branch is the failure a short
+    // interval would otherwise produce every night.
     store::update(&fixture.project_id, &queued.id, |task| {
         task.status = WorkTaskStatus::Running;
         Ok(())
     })
     .expect("stage running");
-    let error = queue_scheduled_run(
+    match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-1", "automation-1:at:2"),
     )
-    .expect_err("must skip");
-    assert!(error.contains("still running"), "unhelpful error: {error}");
+    .expect("busy is an outcome, not an error")
+    {
+        ScheduledRunOutcome::Busy { task_id, status } => {
+            assert_eq!(task_id, queued.id);
+            assert_eq!(status, WorkTaskStatus::Running);
+        }
+        other => panic!("expected busy, got {other:?}"),
+    }
 
     // A different automation is unaffected, and so is the same one once its
     // previous run has settled.
-    queue_scheduled_run(
-        &fixture.project_id,
-        &fixture.project_path,
-        "automation-2",
-        "Other".into(),
-        "Do the other thing.".into(),
-        None,
-    )
-    .expect("a different automation may run");
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-2", "automation-2:at:1"),
+        )
+        .expect("a different automation may run"),
+        ScheduledRunOutcome::Queued(_)
+    ));
     store::update(&fixture.project_id, &queued.id, |task| {
         task.status = WorkTaskStatus::Review;
         Ok(())
     })
     .expect("settle");
-    queue_scheduled_run(
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-1", "automation-1:at:2"),
+        )
+        .expect("the next firing runs once the previous one has settled"),
+        ScheduledRunOutcome::Queued(_)
+    ));
+    let cards = store::list(&fixture.project_id)
+        .into_iter()
+        .filter(|task| task.scheduled_task_id.as_deref() == Some("automation-1"))
+        .count();
+    assert_eq!(cards, 2, "one card per occurrence, no twins");
+}
+
+/// A conversation carries one turn at a time, and a run waiting on the user's
+/// answer resumes in it. A second automation aimed at the same conversation is
+/// held until both are clear, rather than interleaving two briefs.
+#[test]
+fn a_shared_conversation_holds_runs_from_other_automations() {
+    let fixture = fixture("scheduled-shared");
+    let request = |automation: &str, key: &str| ScheduledRunRequest {
+        scheduled_task_id: automation.to_string(),
+        occurrence_key: key.to_string(),
+        title: "Digest".into(),
+        prompt: "Write the digest.".into(),
+        model: None,
+        target_session_id: Some("chat-shared".to_string()),
+    };
+    let first = match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-a", "automation-a:at:1"),
     )
-    .expect("the next firing runs once the previous one has settled");
+    .expect("queue")
+    {
+        ScheduledRunOutcome::Queued(task) => task,
+        other => panic!("expected a new card, got {other:?}"),
+    };
+    assert_eq!(first.target_session_id.as_deref(), Some("chat-shared"));
+    store::update(&fixture.project_id, &first.id, |task| {
+        task.status = WorkTaskStatus::AwaitingInput;
+        task.session_id = Some("chat-shared".to_string());
+        Ok(())
+    })
+    .expect("stage awaiting input");
+
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-b", "automation-b:at:1"),
+        )
+        .expect("busy is an outcome"),
+        ScheduledRunOutcome::Busy { .. }
+    ));
+    store::update(&fixture.project_id, &first.id, |task| {
+        task.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("settle");
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-b", "automation-b:at:1"),
+        )
+        .expect("queue once clear"),
+        ScheduledRunOutcome::Queued(_)
+    ));
 }
 
 /// A rename is not a delete plus an add, and a reviewer told it was would

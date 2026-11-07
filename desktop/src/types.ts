@@ -98,11 +98,65 @@ export interface ConfigView {
   }[];
 }
 
+export type ScheduleKind = "once" | "interval" | "cron" | "rrule";
+export type ScheduleTargetMode = "session" | "new_once" | "new";
+export type ScheduleMissedPolicy = "run_latest" | "skip";
+
+/** What the scheduler did with one occurrence. Proves the run was queued (or
+ *  deliberately not) — never that it finished; that is `outcome`. */
+export interface ScheduledDelivery {
+  /** Occurrence identity; one record per key. */
+  key: string;
+  trigger: "schedule" | "manual" | "mail" | string;
+  /** Epoch ms: the scheduled instant, or the request time for manual/mail. */
+  occurrenceAt: number;
+  /** Earlier occurrences folded into this one by the missed-run policy. */
+  coalesced: number;
+  firstMissedAt?: number | null;
+  status: "queued" | "missed" | "skipped" | "failed" | string;
+  recordedAt: number;
+  projectId?: string | null;
+  workTaskId?: string | null;
+  targetSessionId?: string | null;
+  error?: string | null;
+  /** Written after a restart for a card that was already queued. */
+  recovered?: boolean;
+}
+
+/** How the work task a delivery produced went, read from the card itself. */
+export interface ScheduledDeliveryOutcome {
+  /** The card's status, or `missing` when the card was deleted. */
+  status: WorkTaskStatus | "missing";
+  reviewVerdict?: WorkTaskVerdict | null;
+  reviewExhausted?: boolean;
+  summary?: string | null;
+  error?: string | null;
+  sessionId?: string | null;
+  updatedAt?: number | null;
+}
+
+export interface ScheduledDeliveryView extends ScheduledDelivery {
+  outcome?: ScheduledDeliveryOutcome | null;
+}
+
+export interface ScheduledDeliveryHistory {
+  deliveries: ScheduledDeliveryView[];
+  earlierPruned: boolean;
+}
+
+export interface ScheduledTaskPreview {
+  timeZone: string;
+  /** Epoch ms as strings. */
+  occurrences: string[];
+  recurrence?: string | null;
+  startLocal?: string | null;
+}
+
 export interface ScheduledTask {
   id: string;
   title: string;
   scheduleLabel?: string;
-  status?: string; // "active" | "paused"
+  status?: string; // "active" | "paused" | "ended"
   sessionId?: string | null;
   model?: string | null;
   prompt?: string;
@@ -114,22 +168,54 @@ export interface ScheduledTask {
   lastRunAt?: string | null;
   lastError?: string | null;
   nextRun?: string | null;
-  triggerKind?: "interval" | "mail" | string;
+  /** `schedule` (on a calendar rule; v1 called it `interval`) or `mail`. */
+  triggerKind?: "schedule" | "interval" | "mail" | string;
   mailAccountId?: string;
   mailKeywords?: string[];
+  scheduleKind?: ScheduleKind | string;
+  /** Explicit IANA zone the rule is read in. */
+  timeZone?: string;
+  /** Wall-clock start in `timeZone`, `YYYY-MM-DDTHH:MM`. */
+  startLocal?: string | null;
+  cron?: string;
+  /** Normalised `DTSTART…
+RRULE:…`. */
+  recurrence?: string;
+  /** Just the RRULE body, for the editor. */
+  rruleRule?: string;
+  /** Upcoming occurrences (epoch ms strings), the committed one first. */
+  nextOccurrences?: string[];
+  missedPolicy?: ScheduleMissedPolicy | string;
+  targetMode?: ScheduleTargetMode | string;
+  projectId?: string | null;
+  /** A due occurrence is held because the previous run is still going. */
+  waitingReason?: string | null;
+  /** The stored rule does not compile; the task cannot fire until saved. */
+  scheduleError?: string | null;
+  lastDelivery?: ScheduledDelivery | null;
 }
 
 export interface ScheduledTaskInput {
   title: string;
   prompt: string;
+  /** The conversation for the `session` target; ignored otherwise. */
   sessionId: string;
   model?: string;
   intervalValue: number;
   intervalUnit: "minutes" | "hours" | "days";
   status?: "active" | "paused";
-  triggerKind?: "interval" | "mail";
+  triggerKind?: "schedule" | "mail";
   mailAccountId?: string;
   mailKeywords?: string[];
+  scheduleKind?: ScheduleKind;
+  timeZone?: string;
+  startLocal?: string;
+  cron?: string;
+  rrule?: string;
+  missedPolicy?: ScheduleMissedPolicy;
+  targetMode?: ScheduleTargetMode;
+  /** Where `new_once` / `new` targets run. */
+  projectId?: string;
 }
 
 export interface ConfigPatch {
@@ -1304,6 +1390,10 @@ export interface WorkTask {
   model?: string | null;
   /** The automation that produced this task, when one did. */
   scheduledTaskId?: string | null;
+  /** The one occurrence of that automation this card was queued for. */
+  scheduledOccurrenceKey?: string | null;
+  /** Conversation the automation's target mode chose for the run. */
+  targetSessionId?: string | null;
   /** What the run is doing right now, in one phrase. Coarse: set at the phase
    *  boundaries the engine can vouch for, never inferred. */
   progressMessage?: string | null;

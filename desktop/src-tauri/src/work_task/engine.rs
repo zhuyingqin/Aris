@@ -561,10 +561,15 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         Err(error) => return RunOutcome::Failed(error),
     };
     // A resume continues the same conversation, so the turn sees everything the
-    // interrupted one had already worked out rather than re-deriving it.
+    // interrupted one had already worked out rather than re-deriving it. A
+    // scheduled card may name the conversation it belongs to (its automation's
+    // fixed or reserved session); otherwise each run gets its own.
     let session_id = match task.session_id.clone() {
         Some(existing) if resumed => existing,
-        _ => format!("work-task-{}-{}", task.id, run_seq),
+        _ => task
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| format!("work-task-{}-{}", task.id, run_seq)),
     };
     if store::update(project_id, &task.id, |current| {
         if current.run_seq != run_seq {

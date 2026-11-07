@@ -211,6 +211,36 @@ pub(crate) fn insert(project_id: &str, task: WorkTask) -> Result<WorkTask, Strin
     Ok(task)
 }
 
+/// Insert `task` unless `refuse` objects to the tasks already on file.
+///
+/// One lock acquisition for the check and the write, which is what makes it a
+/// dedupe rather than a race: two callers asking "is there a card for this
+/// occurrence yet?" cannot both hear "no". `refuse` sees the whole project and
+/// returns why the insert must not happen; its value comes back as `Err`.
+pub(crate) fn insert_unless<T, F>(
+    project_id: &str,
+    task: WorkTask,
+    refuse: F,
+) -> Result<Result<WorkTask, T>, String>
+where
+    F: FnOnce(&[WorkTask]) -> Option<T>,
+{
+    let _guard = STORE_LOCK.lock();
+    let path = store_path(project_id);
+    let file = read_file_at(&path);
+    let mut tasks = file.tasks;
+    if let Some(reason) = refuse(&tasks) {
+        return Ok(Err(reason));
+    }
+    if tasks.iter().any(|existing| existing.id == task.id) {
+        return Err(format!("work task {} already exists", task.id));
+    }
+    tasks.push(task.clone());
+    sort_tasks(&mut tasks);
+    remember_revision(project_id, write_at(&path, file.revision, &tasks)?);
+    Ok(Ok(task))
+}
+
 /// Read-modify-write one task under the store lock.
 ///
 /// `mutate` returning `Err` aborts the write, so a caller can use it as a

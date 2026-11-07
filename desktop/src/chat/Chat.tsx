@@ -800,6 +800,33 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   }, [currentProject, restoreSession, setCurrentId, setTab]);
 
   /**
+   * Bring a scheduled task's conversation into view. A fixed-session target is
+   * an ordinary chat already in the sidebar; a reserved or per-delivery one
+   * exists only as the work task's transcript, so it is restored the way the
+   * task board restores a card's session.
+   */
+  const openScheduledSession = useCallback((sessionId: string, title: string) => {
+    if (!currentProject) return;
+    setCurrentId(sessionId);
+    if (!allSessions.some((session) => session.id === sessionId)) {
+      const now = Date.now();
+      restoreSession({
+        id: sessionId,
+        projectId: currentProject.id,
+        title,
+        ownerKind: "work_task",
+        turns: [],
+        draft: "",
+        draftAttachments: [],
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    setTab("chat");
+  }, [allSessions, currentProject, restoreSession, setCurrentId, setTab]);
+
+  /**
    * Bring the session the user just picked into view.
    *
    * From the standalone Chat tab that means switching to it. Embedded in
@@ -1782,7 +1809,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           document.getElementById("app-chat-actions-portal")!
         )}
         {tab === "scheduled" ? (
-          <ScheduledTasks />
+          <ScheduledTasks onOpenSession={openScheduledSession} />
         ) : tab === "tasks" ? (
           <Suspense fallback={<div className="tasks-empty"><span className="app-loading-spinner" /></div>}>
             <Tasks onOpenSession={openWorkTaskSession} />

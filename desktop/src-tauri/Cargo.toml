@@ -30,6 +30,15 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Scheduled tasks: explicit IANA zones (chrono-tz), RFC 5545 recurrence (rrule,
+# which is built on chrono-tz and resolves DST gaps/folds the RFC way), and
+# five-field Vixie Cron with documented DST behaviour (croner). iana-time-zone
+# was already in the lock file through chrono's clock feature; it names the
+# system zone that legacy tasks, which predate explicit zones, are read in.
+chrono-tz = "0.10"
+rrule = "0.14"
+croner = { version = "4", default-features = false, features = ["chrono"] }
+iana-time-zone = "0.1"
 semver = "1"
 toml = "0.8"
 encoding_rs = "0.8"

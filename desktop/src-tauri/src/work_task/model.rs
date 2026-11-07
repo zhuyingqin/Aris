@@ -526,6 +526,22 @@ pub struct WorkTask {
     /// can point at the cards it actually produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task_id: Option<String>,
+    /// The one occurrence of that automation this card was queued for.
+    ///
+    /// The dedupe key for scheduled dispatch: the scheduler looks it up under
+    /// the store lock before inserting, so a restart or a second tick that
+    /// re-derives the same occurrence finds this card instead of queuing a
+    /// twin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_occurrence_key: Option<String>,
+    /// Chat session the run must use, chosen by the automation's target mode
+    /// (its fixed conversation, the one it reserved, or one per delivery).
+    ///
+    /// `None` lets the engine mint a session per run, as it does for a card
+    /// made on the board. Only where the turns run changes; the independent
+    /// review still runs on its own packet, outside any conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_id: Option<String>,
     /// What the run is doing right now, in one phrase. Coarse by design — it is
     /// set at the phase boundaries the engine actually knows about, so it never
     /// claims progress the engine cannot vouch for.
@@ -578,6 +594,8 @@ impl WorkTask {
             merge_intent: None,
             model: None,
             scheduled_task_id: None,
+            scheduled_occurrence_key: None,
+            target_session_id: None,
             progress_message: None,
             last_heartbeat_at: None,
             pending_action: None,

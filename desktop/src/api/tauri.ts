@@ -284,8 +284,10 @@ import type {
   RemoteP2pOfferInput,
   RemoteP2pPendingSnapshot,
   RemoteP2pSessionInput,
+  ScheduledDeliveryHistory,
   ScheduledTask,
   ScheduledTaskInput,
+  ScheduledTaskPreview,
   SessionSummary,
   PptMasterStatus,
   SkillMeta,
@@ -860,6 +862,17 @@ export const scheduledTaskSetStatus = (id: string, status: "active" | "paused") 
   invoke<ScheduledTask>("scheduled_task_set_status", { id, status });
 export const scheduledTaskDelete = (id: string) =>
   invoke<void>("scheduled_task_delete", { id });
+/** What a rule would do, without saving it — the editor's live preview. */
+export const scheduledTaskPreview = (input: ScheduledTaskInput) =>
+  invoke<ScheduledTaskPreview>("scheduled_task_preview", { input });
+/** Delivery records joined to the work-task cards they produced. */
+export const scheduledTaskHistory = (id: string, limit?: number) =>
+  invoke<ScheduledDeliveryHistory>("scheduled_task_history", { id, limit: limit ?? null });
+/** Queue one run now, outside the rule; refused while a run is in flight. */
+export const scheduledTaskRunNow = (id: string) =>
+  invoke<ScheduledTask>("scheduled_task_run_now", { id });
+export const onScheduledTasksChanged = (handler: () => void) =>
+  listen("scheduled-tasks-changed", () => handler());
 export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
