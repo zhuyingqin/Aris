@@ -135,32 +135,6 @@ fn filesystem_error(operation: &str, path: &Path, error: impl std::fmt::Display)
         .detail(error.to_string())
 }
 
-/// One environment check, reported before the user commits to an install.
-///
-/// Modelled on a pre-flight rather than a post-mortem: the realistic failure on
-/// a fresh machine is "no Python", and learning that after a 90 MB download and
-/// a rolled-back staging directory is strictly worse than learning it up front.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PptMasterCheck {
-    /// Stable key; the frontend maps it to a localized label.
-    pub id: String,
-    pub status: PptMasterCheckStatus,
-    /// Free-text observation (an interpreter version, a path). May be empty.
-    pub detail: String,
-    pub fix: Option<PptMasterFix>,
-}
-
-/// No `Warn` today: every check either passes or blocks the install, and a
-/// status nothing emits would be a shape the UI has to handle without ever
-/// being exercised.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PptMasterCheckStatus {
-    Pass,
-    Fail,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PptMasterStatus {
@@ -335,12 +309,6 @@ fn managed_status() -> PptMasterStatus {
 #[tauri::command]
 pub async fn ppt_master_status() -> Result<PptMasterStatus, String> {
     crate::blocking::off_main_thread(|| Ok(managed_status())).await
-}
-
-/// Environment checks the operator can read before committing to an install.
-#[tauri::command]
-pub async fn ppt_master_preflight() -> Result<Vec<PptMasterCheck>, String> {
-    crate::blocking::off_main_thread(|| Ok(preflight_blocking())).await
 }
 
 #[tauri::command]
@@ -826,79 +794,6 @@ fn remove_known_directory(
     fs::remove_dir_all(path).map_err(|error| filesystem_error("remove", path, error))
 }
 
-/// Read the environment the installer will depend on, without touching it.
-///
-/// Runs before the 90 MB download rather than after it: on a machine with no
-/// Python the install is doomed from the first step, and finding that out from
-/// a rolled-back staging directory teaches the operator nothing they could not
-/// have been told in advance.
-fn preflight_blocking() -> Vec<PptMasterCheck> {
-    vec![interpreter_check(), skill_slot_check(&managed_status())]
-}
-
-/// Probe the interpreter the installer would actually launch.
-///
-/// Genuinely reads the environment, so it is the one part of the preflight that
-/// cannot be unit tested against a fixture — which is exactly why the decision
-/// logic lives in [`skill_slot_check`] instead of being tangled in here.
-fn interpreter_check() -> PptMasterCheck {
-    let mut command = bootstrap_python_command();
-    command.arg("--version");
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            let text = if output.stdout.trim_ascii().is_empty() {
-                output.stderr
-            } else {
-                output.stdout
-            };
-            PptMasterCheck {
-                id: "python".to_string(),
-                status: PptMasterCheckStatus::Pass,
-                detail: String::from_utf8_lossy(&text).trim().to_string(),
-                fix: None,
-            }
-        }
-        Ok(output) => PptMasterCheck {
-            id: "python".to_string(),
-            status: PptMasterCheckStatus::Fail,
-            detail: tail(String::from_utf8_lossy(&output.stderr).trim(), 400),
-            fix: Some(PptMasterFix::OpenUrl {
-                url: PYTHON_DOWNLOAD_URL.to_string(),
-            }),
-        },
-        Err(error) => PptMasterCheck {
-            id: "python".to_string(),
-            status: PptMasterCheckStatus::Fail,
-            detail: error.to_string(),
-            fix: Some(PptMasterFix::OpenUrl {
-                url: PYTHON_DOWNLOAD_URL.to_string(),
-            }),
-        },
-    }
-}
-
-/// Whether the install slot is free, given an already-taken status reading.
-///
-/// Takes the status rather than reading it, so the decision is testable against
-/// a fixture instead of against whatever Skills the developer happens to have
-/// installed. A same-name Skill from another source is a legitimate setup — it
-/// is reported, not treated as user error.
-fn skill_slot_check(status: &PptMasterStatus) -> PptMasterCheck {
-    let occupied = status.installed && !status.managed;
-    PptMasterCheck {
-        id: "skillSlot".to_string(),
-        status: if occupied {
-            PptMasterCheckStatus::Fail
-        } else {
-            PptMasterCheckStatus::Pass
-        },
-        detail: status.skill_path.clone(),
-        fix: occupied.then(|| PptMasterFix::RevealPath {
-            path: status.skill_path.clone(),
-        }),
-    }
-}
-
 fn list_decks_at(workspace: &Path) -> Result<Vec<PptMasterDeck>, String> {
     let slides_root = tools::layout::slides_dir_at(workspace).join(SKILL_NAME);
     if !slides_root.is_dir() {
@@ -1235,69 +1130,6 @@ mod tests {
             archive_rejected("symlink").params.get("reason").map(String::as_str),
             Some("symlink")
         );
-    }
-
-    /// Builds a status without touching the developer's real Skill directory —
-    /// `aris_user_skills_dir()` resolves through `HOME`, which no test may
-    /// depend on or write to.
-    fn status_fixture(temp: &Path, installed: bool, managed: bool) -> PptMasterStatus {
-        let skill = temp.join(SKILL_NAME);
-        fs::create_dir_all(&skill).expect("skill dir");
-        if installed {
-            fs::write(skill.join("SKILL.md"), "skill").expect("skill");
-        }
-        if managed {
-            let manifest = ManagedSkillManifest {
-                schema_version: 1,
-                name: SKILL_NAME.to_string(),
-                version: VERSION.to_string(),
-                commit: COMMIT.to_string(),
-                repository: REPOSITORY.to_string(),
-                installed_at: "now".to_string(),
-            };
-            fs::write(
-                skill.join(MANIFEST_FILE),
-                serde_json::to_vec(&manifest).expect("manifest"),
-            )
-            .expect("write manifest");
-        }
-        status_at(&skill, &temp.join("runtime"))
-    }
-
-    #[test]
-    fn a_free_skill_slot_passes_preflight_without_an_action() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let check = skill_slot_check(&status_fixture(temp.path(), true, true));
-        assert_eq!(check.status, PptMasterCheckStatus::Pass);
-        assert!(check.fix.is_none());
-    }
-
-    #[test]
-    fn a_foreign_skill_fails_preflight_and_points_at_the_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let status = status_fixture(temp.path(), true, false);
-        let check = skill_slot_check(&status);
-        assert_eq!(check.status, PptMasterCheckStatus::Fail);
-        assert!(matches!(
-            check.fix,
-            Some(PptMasterFix::RevealPath { ref path }) if path == &status.skill_path
-        ));
-    }
-
-    /// The one invariant that has to hold across every check: a failure the
-    /// user cannot act on is a dead end, so the preflight must never produce
-    /// one. Reads the real environment by design (that is what a preflight is),
-    /// but asserts only on structure, never on this machine's Python.
-    #[test]
-    fn every_failing_preflight_check_carries_an_action() {
-        let checks = preflight_blocking();
-        let ids = checks.iter().map(|check| check.id.as_str()).collect::<Vec<_>>();
-        assert_eq!(ids, ["python", "skillSlot"]);
-        for check in &checks {
-            if check.status == PptMasterCheckStatus::Fail {
-                assert!(check.fix.is_some(), "failing check {} has no fix", check.id);
-            }
-        }
     }
 
     #[test]

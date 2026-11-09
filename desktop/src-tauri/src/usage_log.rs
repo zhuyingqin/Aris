@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -188,6 +188,30 @@ pub fn append_turn_usage(
 
 pub(crate) fn usage_log_path() -> PathBuf {
     state::state_root().join("usage-log.jsonl")
+}
+
+/// Remove only this task's rows under the same lock used by append. Preserve
+/// unrelated and unrecognized rows byte-for-byte, including future schemas.
+pub(crate) fn remove_session_usage_at(path: &Path, session_id: &str) -> Result<(), String> {
+    let _guard = USAGE_LOG_LOCK.lock().map_err(|_| "usage log lock poisoned".to_string())?;
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Cannot remove figure usage records: {error}")),
+    };
+    let mut retained = Vec::with_capacity(content.len());
+    for line in content.split_inclusive(|byte| *byte == b'\n') {
+        let belongs = serde_json::from_slice::<serde_json::Value>(line).ok()
+            .is_some_and(|entry| entry.get("sessionId").and_then(|id| id.as_str()) == Some(session_id));
+        if !belongs { retained.extend_from_slice(line); }
+    }
+    if retained.len() == content.len() { return Ok(()); }
+    if retained.is_empty() {
+        fs::remove_file(path).map_err(|error| format!("Cannot remove figure usage records: {error}"))
+    } else {
+        runtime::write_file_atomically(path, &retained)
+            .map_err(|error| format!("Cannot remove figure usage records: {error}"))
+    }
 }
 
 /// Return only the usage entries belonging to one chat session. Debug exports

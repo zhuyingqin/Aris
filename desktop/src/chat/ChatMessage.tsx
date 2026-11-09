@@ -3,9 +3,14 @@ import type { ChatBlock, ChatTurn, NoticeRetryState } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
-import MarkdownContent, { ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
+import ChatImageReference from "./ChatImageReference";
+import { imagePreviewKey, normalizeImagePreviewSource, type ImagePreviewScope, type ToolImagePreviews } from "./imagePreviewIdentity";
+import MarkdownContent, { markdownImageSources, ThinkBlock, type MarkdownEvidenceSource } from "./MarkdownContent";
 import IndependentReviewBadge from "./IndependentReviewBadge";
 import ModelWaitIndicator from "./ModelWaitIndicator";
+import UserMessageText from "./UserMessageText";
+import { userMessageDisclosureKey } from "./userMessageCollapse";
+import { AgentSpawnNotice, isAgentSpawn } from "./AgentSpawnNotice";
 import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
@@ -13,6 +18,7 @@ import { useStore } from "../store";
 import { useDisclosure } from "./disclosureState";
 import { useOpenChatFile } from "./openChatFile";
 import { displayLocalFilePath } from "./localFileLinks";
+import LocalFileLabel from "./LocalFileLabel";
 import {
   diffFromTool,
   evidenceSearchSummaryFromTool,
@@ -161,7 +167,22 @@ function ToolProgressLog({
   );
 }
 
-function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
+const NO_TOOL_IMAGE_PREVIEWS: ToolImagePreviews = { paths: [], references: [] };
+
+function ToolImages({ previews }: { previews: ToolImagePreviews }) {
+  if (!previews.paths.length && !previews.references.length) return null;
+  return (
+    <div className="chat-tool-images">
+      {previews.paths.map((path) => (
+        <ChatImagePreview key={path} src={normalizeImagePreviewSource(path)} alt={path} title={path}
+          openPath={isDirectImageSource(path) ? undefined : normalizeImagePreviewSource(path)} className="chat-tool-image" />
+      ))}
+      {previews.references.map((path) => <ChatImageReference key={path} src={path} />)}
+    </div>
+  );
+}
+
+function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: "tool" }>; imagePreviews?: ToolImagePreviews }) {
   // Kept outside the component so a row that scrolls past the virtual window's
   // overscan margin and comes back remounts at the height it had, instead of
   // collapsing and shrinking the transcript's total height under the reader.
@@ -172,7 +193,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const refusal = useMemo(() => guardRefusalFromTool(block), [block]);
   const oracleWeb = useMemo(() => oracleWebSummaryFromTool(block), [block]);
   const somniImage = useMemo(() => somniImageSummaryFromTool(block), [block]);
-  const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
+  const previews = useMemo(() => imagePreviews ?? { paths: imagePathsFromTool(block, change), references: [] }, [block, change, imagePreviews]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
   const running = block.output === undefined;
@@ -303,20 +324,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         {!running && <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>}
       </div>
       <ToolProgressView block={block} />
-      {imagePaths.length > 0 && (
-        <div className="chat-tool-images">
-          {imagePaths.map((path) => (
-            <ChatImagePreview
-              key={path}
-              src={path}
-              alt={path}
-              title={path}
-              openPath={isDirectImageSource(path) ? undefined : path}
-              className="chat-tool-image"
-            />
-          ))}
-        </div>
-      )}
+      <ToolImages previews={previews} />
       {open && (
         <div className="chat-tool-body">
           {somniImage ? (
@@ -538,7 +546,7 @@ function displayDiffPaths(diff: string): string {
   ));
 }
 
-export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary }) {
+export function EditedFilesSummary({ summary, compact = false }: { summary: TurnFileChangeSummary; compact?: boolean }) {
   const language = useStore((state) => state.language);
   const openChatFile = useOpenChatFile();
   const summaryKey = summary.changeIds[0] ?? summary.files[0]?.path ?? "";
@@ -633,9 +641,10 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
               type="button"
               className="chat-change-file-path"
               title={displayLocalFilePath(file.path)}
+              aria-label={displayLocalFilePath(file.path)}
               onClick={() => openChatFile(file.path)}
             >
-              {displayLocalFilePath(file.path)}
+              {compact ? <LocalFileLabel path={file.path} /> : displayLocalFilePath(file.path)}
             </button>
             <span className="chat-change-file-stats">
               <span className="chat-change-added">{formatCount(file.addedLines, "+")}</span>
@@ -686,7 +695,7 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
  * into one card with a `current/total` progress counter. Expanding it reveals
  * the individual calls, each still independently expandable.
  */
-function ToolGroup({ blocks }: { blocks: Extract<ChatBlock, { kind: "tool" }>[] }) {
+function ToolGroup({ blocks, imagePreviews }: { blocks: Extract<ChatBlock, { kind: "tool" }>[]; imagePreviews: ToolImagePreviews[] }) {
   const [open, setOpen] = useDisclosure(blocks[0]?.id && `tool-group:${blocks[0].id}`);
   const total = blocks.length;
   const done = blocks.filter((b) => b.output !== undefined).length;
@@ -719,10 +728,13 @@ function ToolGroup({ blocks }: { blocks: Extract<ChatBlock, { kind: "tool" }>[] 
         </span>
         <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>
       </div>
+      {/* The first preview must remain visible even when the tool group is collapsed. */}
+      <ToolImages previews={{ paths: imagePreviews.flatMap((previews) => previews.paths),
+        references: [...new Set(imagePreviews.flatMap((previews) => previews.references))] }} />
       {open && (
         <div className="chat-tool-body chat-tool-group-body">
           {blocks.map((b, i) => (
-            <ToolCall key={b.id ?? i} block={b} />
+            <ToolCall key={b.id ?? i} block={b} imagePreviews={NO_TOOL_IMAGE_PREVIEWS} />
           ))}
         </div>
       )}
@@ -966,11 +978,50 @@ function QuestionCall({
   );
 }
 
+interface TurnImagePreviewPlan {
+  tools: Map<ChatToolBlock, ToolImagePreviews>;
+  markdown: Map<number, ImagePreviewScope>;
+}
+
+function imagePreviewsForTurn(turn: ChatTurn, projectPath: string | null): TurnImagePreviewPlan {
+  const plan: TurnImagePreviewPlan = { tools: new Map(), markdown: new Map() };
+  if (turn.role !== "assistant") return plan;
+  const seen = new Set<string>();
+  for (let index = 0; index < turn.blocks.length; index += 1) {
+    const block = turn.blocks[index];
+    if (block.kind === "text" || block.kind === "thinking") {
+      const start = index;
+      let text = block.kind === "text" ? block.text : "";
+      while (index + 1 < turn.blocks.length) {
+        const next = turn.blocks[index + 1];
+        if (next.kind !== "text" && next.kind !== "thinking") break;
+        if (next.kind === "text") text += next.text;
+        index += 1;
+      }
+      plan.markdown.set(start, { precedingKeys: new Set(seen), projectPath });
+      markdownImageSources(text).forEach((source) => seen.add(imagePreviewKey(source, projectPath)));
+    } else if (block.kind === "tool" && block.name !== "TodoWrite" && block.name !== "AskUserQuestion") {
+      const previews: ToolImagePreviews = { paths: [], references: [] };
+      const toolKeys = new Set<string>();
+      for (const path of imagePathsFromTool(block, diffFromTool(block))) {
+        const key = imagePreviewKey(path, projectPath);
+        if (toolKeys.has(key)) continue;
+        toolKeys.add(key);
+        (seen.has(key) ? previews.references : previews.paths).push(path);
+        seen.add(key);
+      }
+      plan.tools.set(block, previews);
+    }
+  }
+  return plan;
+}
+
 function renderSingleBlock(
   block: ChatBlock,
   index: number,
   turn: ChatTurn,
   evidenceSources: MarkdownEvidenceSource[],
+  imagePreviews: TurnImagePreviewPlan,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
@@ -982,12 +1033,15 @@ function renderSingleBlock(
         key={index}
         text={block.text}
         evidenceSources={evidenceSources}
+        imagePreviewScope={imagePreviews.markdown.get(index)}
         streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)}
       />
     ) : (
-      <div key={index} className="chat-text">
-        {block.text}
-      </div>
+      <UserMessageText
+        key={userMessageDisclosureKey(turn.id, index)}
+        text={block.text}
+        disclosureKey={userMessageDisclosureKey(turn.id, index)}
+      />
     );
   }
   if (block.kind === "thinking") {
@@ -1034,7 +1088,7 @@ function renderSingleBlock(
       />
     );
   }
-  return <ToolCall key={block.id ?? index} block={block} />;
+  return <ToolCall key={block.id ?? index} block={block} imagePreviews={imagePreviews.tools.get(block)} />;
 }
 
 function renderAssistantTextRun(
@@ -1044,6 +1098,7 @@ function renderAssistantTextRun(
   turn: ChatTurn,
   latestThinkingIndex: number,
   evidenceSources: MarkdownEvidenceSource[],
+  imagePreviewScope?: ImagePreviewScope,
 ) {
   const text = blocks
     .filter((block): block is Extract<ChatBlock, { kind: "text" }> => block.kind === "text")
@@ -1071,6 +1126,7 @@ function renderAssistantTextRun(
         <MarkdownContent
           text={text}
           evidenceSources={evidenceSources}
+          imagePreviewScope={imagePreviewScope}
           streaming={Boolean(turn.streaming && isTailRun && last?.kind === "text")}
         />
       )}
@@ -1084,6 +1140,7 @@ function renderAssistantTextRun(
  */
 function renderBlocks(
   turn: ChatTurn,
+  imagePreviews: TurnImagePreviewPlan,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
@@ -1106,6 +1163,15 @@ function renderBlocks(
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    if (block.kind === "tool" && isAgentSpawn(block)) {
+      let j = i + 1;
+      while (j < blocks.length && isAgentSpawn(blocks[j])) j += 1;
+      const run = blocks.slice(i, j) as Extract<ChatBlock, { kind: "tool" }>[];
+      out.push(<AgentSpawnNotice key={block.id ?? `agents-${i}`} blocks={run}
+        fallbacks={run.map(tool => <ToolCall key={tool.id ?? run.indexOf(tool)} block={tool} imagePreviews={imagePreviews.tools.get(tool)} />)} />);
+      i = j;
+      continue;
+    }
     if (turn.role === "assistant" && (block.kind === "text" || block.kind === "thinking")) {
       let j = i + 1;
       while (j < blocks.length && (blocks[j].kind === "text" || blocks[j].kind === "thinking")) {
@@ -1118,6 +1184,7 @@ function renderBlocks(
         turn,
         latestThinkingIndex,
         evidenceSources,
+        imagePreviews.markdown.get(i),
       ));
       i = j;
       continue;
@@ -1138,7 +1205,8 @@ function renderBlocks(
       }
       if (j - i > 1) {
         const run = blocks.slice(i, j) as Extract<ChatBlock, { kind: "tool" }>[];
-        out.push(<ToolGroup key={block.id ?? `group-${i}`} blocks={run} />);
+        out.push(<ToolGroup key={block.id ?? `group-${i}`} blocks={run}
+          imagePreviews={run.map((tool) => imagePreviews.tools.get(tool) ?? NO_TOOL_IMAGE_PREVIEWS)} />);
         i = j;
         continue;
       }
@@ -1148,6 +1216,7 @@ function renderBlocks(
       i,
       turn,
       evidenceSources,
+      imagePreviews,
       onPermissionRespond,
       onQuestionRespond,
       onOpenIndependentReview,
@@ -1209,11 +1278,14 @@ function ChatMessage({
   onOpenIndependentReview = () => undefined,
 }: Props) {
   const language = useStore((state) => state.language);
+  const projectPath = useStore((state) => state.currentProject?.path ?? null);
+  const imagePreviews = useMemo(() => imagePreviewsForTurn(turn, projectPath), [turn.blocks, turn.role, projectPath]);
   const copy = CHAT_COPY[language];
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   const blockNodes = renderBlocks(
     turn,
+    imagePreviews,
     onPermissionRespond,
     onQuestionRespond,
     onOpenIndependentReview,

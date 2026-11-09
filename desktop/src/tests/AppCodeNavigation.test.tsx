@@ -8,9 +8,13 @@ import { useStore } from "../store";
 import App from "../App";
 
 const bridge = vi.hoisted(() => ({
+  accountRefreshing: false,
   action: null as ((action: CodeShellAction) => void) | null,
   connection: null as ((connected: boolean) => void) | null,
   ready: null as ((revision: number) => void) | null,
+}));
+vi.mock("../useAccountRefresh", () => ({
+  useAccountRefresh: () => ({ account: null, refreshing: bridge.accountRefreshing, error: null, refresh: async () => {} }),
 }));
 vi.mock("../api/tauri", async (original) => ({
   ...await original<typeof import("../api/tauri")>(),
@@ -38,27 +42,64 @@ vi.mock("../workflows/Workflows", () => ({ default: () => null }));
 
 const originalState = useStore.getState();
 beforeEach(() => {
+  bridge.accountRefreshing = false;
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   useStore.setState({ ...originalState, tab: "lab", language: "cn", init: () => () => {}, error: null });
 });
-afterEach(() => { cleanup(); useStore.setState(originalState, true); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); useStore.setState(originalState, true); vi.unstubAllGlobals(); });
 
 async function readyApp() {
   const view = render(<App />);
+  await screen.findByTitle("Code workbench");
   await waitFor(() => expect(view.container.querySelector(".app-code-shell")).not.toBeNull());
   return view;
 }
 
 describe("Code module navigation in the app shell", () => {
+  it("routes the account membership action to the payment panel and closes the menu", async () => {
+    useStore.setState({ tab: "chat" });
+    render(<App />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "用户菜单" }));
+    await user.click(screen.getByRole("menuitem", { name: "购买会员" }));
+    await screen.findByText("Settings workspace");
+    expect(sessionStorage.getItem("somniq-settings-tab-request")).toBe("membership");
+    expect(screen.queryByRole("menu", { name: "用户菜单" })).toBeNull();
+  });
+  it("keeps one titlebar while the editor is loading or asking for workspace trust", async () => {
+    const user = userEvent.setup();
+    const project = { id: "p1", name: "持续学习", path: "E:/科研论文/持续学习", addedAt: 0, lastOpenedAt: 0 };
+    useStore.setState({ projects: [project], currentProject: project });
+    const view = await readyApp();
+    act(() => bridge.connection?.(false));
+    const header = view.container.querySelector<HTMLElement>(".app-head")!;
+    expect(header.hidden).toBe(true);
+    expect(view.container.querySelector(".app-code-shell")).not.toBeNull();
+    const titlebar = view.container.querySelector<HTMLElement>(".window-titlebar")!;
+    expect(within(titlebar).getByRole("button", { name: /当前功能：Code/ })).toBeTruthy();
+    expect(within(titlebar).getByRole("button", { name: "当前项目" }).textContent).toContain("持续学习");
+    const frame = screen.getByTitle("Code workbench");
+    act(() => bridge.connection?.(true));
+    await waitFor(() => expect(view.container.querySelector(".window-titlebar-code-actions")?.hasAttribute("hidden")).toBe(true));
+    expect(header.hidden).toBe(true);
+    expect(screen.getByTitle("Code workbench")).toBe(frame);
+    await user.click(within(titlebar).getByRole("button", { name: /当前功能：Code/ }));
+    await user.click(screen.getByRole("menuitemradio", { name: "设置" }));
+    await waitFor(() => expect(header.hidden).toBe(false));
+  });
+
   it("keeps the application rail in Figures and preserves its workspace when switching back", async () => {
     const user = userEvent.setup();
     useStore.setState({ tab: "chat" });
     const view = render(<App />);
-    await user.click(screen.getByRole("button", { name: "科研绘图" }));
-    const workspace = await screen.findByRole("region", { name: "科研绘图应用" });
+    const navigation = screen.getByRole("navigation", { name: "SomniQ 功能" });
+    const figures = within(navigation).getByRole("button", { name: "科研绘图" });
+    expect(within(navigation).getByRole("button", { name: "对话" }).nextElementSibling).toBe(figures);
+    expect(within(navigation).queryByRole("button", { name: "生成图片" })).toBeNull();
+    await user.click(figures);
+    const workspace = await screen.findByRole("region", { name: "科研绘图应用" }, { timeout: 10000 });
     await waitFor(() => expect(workspace.closest("[hidden]")).toBeNull());
     await user.type(within(workspace).getByRole("textbox", { name: "图形描述" }), "A points to B");
-    const navigation = screen.getByRole("navigation", { name: "SomniQ 功能" });
     expect(within(navigation).getByRole("button", { name: "科研绘图" }).getAttribute("aria-current")).toBe("page");
     await user.click(within(navigation).getByRole("button", { name: "对话" }));
     await waitFor(() => expect(workspace.closest("[hidden]")).not.toBeNull());
@@ -67,6 +108,41 @@ describe("Code module navigation in the app shell", () => {
     expect(screen.getByRole("region", { name: "科研绘图应用" })).toBe(workspace);
     expect((within(workspace).getByRole("textbox", { name: "图形描述" }) as HTMLTextAreaElement).value).toBe("A points to B");
     expect(view.container.querySelector(".app-navigation-shell")).not.toBeNull();
+  });
+
+  it("keeps an open account menu visible when the native controls reconnect", async () => {
+    const user = userEvent.setup();
+    const view = await readyApp();
+    act(() => bridge.connection?.(false));
+    const titlebar = view.container.querySelector<HTMLElement>(".window-titlebar")!;
+    await user.click(within(titlebar).getByRole("button", { name: "用户菜单" }));
+    const menu = screen.getByRole("menu", { name: "用户菜单" });
+    act(() => bridge.connection?.(true));
+    await waitFor(() => expect(screen.getByRole("menu", { name: "用户菜单" })).toBe(menu));
+    expect(menu.closest("[hidden]")).toBeNull();
+    expect(view.container.querySelector<HTMLElement>(".app-head")?.hidden).toBe(true);
+  });
+
+  it("keeps membership, settings and sign out reachable by keyboard while allowance is refreshing", async () => {
+    bridge.accountRefreshing = true;
+    const user = userEvent.setup();
+    await readyApp();
+    act(() => bridge.connection?.(false));
+    const trigger = screen.getByRole("button", { name: "用户菜单" });
+    await user.click(trigger);
+    expect(screen.getByRole("button", { name: "正在刷新额度" })).toHaveProperty("disabled", true);
+    const settings = screen.getByRole("menuitem", { name: /设置/ });
+    const membership = screen.getByRole("menuitem", { name: "购买会员" });
+    await waitFor(() => expect(document.activeElement).toBe(membership));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(settings);
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "退出登录" }));
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(membership);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "用户菜单" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("switches the visible workspace when a native editor action arrives and can return to Code", async () => {
@@ -95,7 +171,7 @@ describe("Code module navigation in the app shell", () => {
     await user.click(within(titlebar).getByRole("button", { name: "当前功能：Code，点击切换" }));
     const menu = screen.getByRole("menu", { name: "SomniQ 功能" });
     act(() => bridge.connection?.(false));
-    await waitFor(() => expect(view.container.querySelector(".app-code-shell")).toBeNull());
+    await waitFor(() => expect(view.container.querySelector(".window-titlebar-code-actions")?.hasAttribute("hidden")).toBe(false));
     expect(screen.getByRole("menu", { name: "SomniQ 功能" })).toBe(menu);
     act(() => bridge.connection?.(true));
     await waitFor(() => expect(view.container.querySelector(".app-code-shell")).not.toBeNull());

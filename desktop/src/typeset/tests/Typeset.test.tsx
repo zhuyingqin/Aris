@@ -308,6 +308,7 @@ beforeEach(() => {
   window.localStorage.removeItem("somniq-lab-preview");
   window.localStorage.removeItem("aris-lab-preview");
   window.localStorage.removeItem("somniq-typeset-compile-error-handling:project-a");
+  window.localStorage.removeItem(`somniq-typeset-library-folders:${project.path}`);
   if (!window.PointerEvent) {
     Object.defineProperty(window, "PointerEvent", {
       configurable: true,
@@ -690,6 +691,8 @@ describe("Typeset start page", () => {
     expect(screen.getByText("9 .tex files")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Expand Final project" }));
+    expect(screen.queryByText("ch2 foundations")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Ch2 folder" }));
     expect(await screen.findByText("ch2 foundations")).toBeTruthy();
   });
 
@@ -1030,6 +1033,7 @@ describe("Typeset start page", () => {
       expect.stringMatching(/^typeset-/),
       false,
       null,
+      null,
     ));
   });
 
@@ -1214,6 +1218,7 @@ describe("Typeset start page", () => {
       false,
       expect.stringMatching(/^typeset-/),
       false,
+      null,
       null,
     ));
     expect(mocks.fileWriteText).not.toHaveBeenCalled();
@@ -3429,6 +3434,7 @@ describe("Typeset start page", () => {
       expect.any(String),
       false,
       null,
+      null,
     ));
     expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("local.tex");
     await waitFor(() => expect(mocks.fileReadBytes).toHaveBeenCalledWith("main.pdf"));
@@ -3447,7 +3453,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: /Clear cache & recompile/ }));
 
     await waitFor(() =>
-      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String), false, null),
+      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String), false, null, null),
     );
   });
 
@@ -3968,6 +3974,7 @@ describe("Typeset start page", () => {
       expect.any(String),
       false,
       null,
+      null,
     ));
   });
 
@@ -4314,6 +4321,7 @@ describe("Typeset start page", () => {
       expect.any(String),
       true,
       null,
+      null,
     ));
   });
 
@@ -4369,6 +4377,26 @@ describe("Typeset start page", () => {
 
     expect(await screen.findByText("Showing last verified PDF")).toBeTruthy();
     expect(screen.getByText("PDF: stale")).toBeTruthy();
+  });
+
+  it("shows timeout diagnostics even when the managed process also marks the build interrupted", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: false, partialOutput: false, pdfState: "missing", inputPath: "main.tex",
+      outputPath: "main.pdf", engine: "latexmk", stdout: "No file main.toc.",
+      stderr: "LaTeXCompile exceeded timeout of 600000 ms", interrupted: true, timedOut: true,
+      durationMs: 600_000, rootSourceHash: "source", compiledAtUnixMs: 1,
+      diagnostics: [{ severity: "error", code: "compile_timeout", message: "LaTeX compilation timed out" }],
+    });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    expect(await screen.findByText("LaTeX compilation timed out")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Compile log" })).toBeTruthy();
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
   });
 
   it("cancels an active desktop compilation", async () => {
@@ -5638,7 +5666,66 @@ describe("Typeset start page", () => {
       expect.any(String),
       false,
       "xelatex",
+      null,
     ));
+  });
+
+  it("persists the custom compile time and forwards it to normal and cache-clearing builds", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    const first = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(first.container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(window.localStorage.getItem("somniq-typeset-compile-timeout-minutes:project-a")).toBe("30");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "paper.tex", "paper.pdf", false, expect.any(String), false, null, 1_800_000,
+    ));
+
+    first.unmount();
+    const reopened = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(reopened.container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    expect((screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement).value).toBe("30");
+    fireEvent.click(screen.getByRole("menuitem", { name: /Clear cache & recompile/ }));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "paper.tex", "paper.pdf", true, expect.any(String), false, null, 1_800_000,
+    ));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Recompile" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use app default" }));
+    expect(window.localStorage.getItem("somniq-typeset-compile-timeout-minutes:project-a")).toBeNull();
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "paper.tex", "paper.pdf", false, expect.any(String), false, null, null,
+    ));
+  });
+
+  it("restores the time limit when switching between projects", async () => {
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: "\\documentclass{article}\n", bytes: 24 });
+    window.localStorage.setItem("somniq-typeset-compile-timeout-minutes:project-a", "30");
+    window.localStorage.setItem("somniq-typeset-compile-timeout-minutes:project-b", "5");
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    expect((screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement).value).toBe("30");
+    await act(async () => { useStore.setState({ currentProject: { ...project, id: "project-b" } }); });
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    await waitFor(() => expect((screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement).value).toBe("5"));
+    await act(async () => { useStore.setState({ currentProject: project }); });
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    await waitFor(() => expect((screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement).value).toBe("30"));
   });
 
   it("compiles the chosen main document rather than the open file", async () => {
@@ -5666,6 +5753,7 @@ describe("Typeset start page", () => {
       false,
       expect.any(String),
       false,
+      null,
       null,
     ));
   });

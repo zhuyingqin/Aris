@@ -5,6 +5,7 @@ import {
   requestKindLabel, requestStatusLabel, requestTone, statusLabel, statusTone, styleLabel, type Language, type StepState,
 } from "./figureModel";
 import type { FigureDocument, FigureRun, FigureVersion } from "./types";
+import FigureResizeHandle, { useFigurePanelSize } from "./FigureResizeHandle";
 
 type T = (cn: string, en: string) => string;
 
@@ -63,11 +64,19 @@ export function ExportMenu({ disabled, t, onExport }: { disabled: boolean; t: T;
 }
 
 function FloatCard({ title, icon, meta, onClose, className, children, t }: { title: string; icon: SvgIconName; meta?: ReactNode; onClose: () => void; className: string; children: ReactNode; t: T }) {
-  return <section className={`figure-float ${className}`} aria-label={title}>
+  const panelRef = useRef<HTMLElement>(null);
+  const ledger = className === "figure-ledger";
+  const layout = useFigurePanelSize(ledger ? "ledger" : "artifacts");
+  return <section ref={panelRef} style={layout.style} className={`figure-float ${className}`} aria-label={title}>
     <header><SvgIcon name={icon} size={14} /><strong>{title}</strong>{meta && <span className="figure-float-meta">{meta}</span>}
       <button type="button" className="figure-icon-button" aria-label={t(`收起${title}`, `Hide ${title}`)} onClick={onClose}><SvgIcon name="close" size={12} /></button>
     </header>
     <div className="figure-float-body">{children}</div>
+    {!ledger && <FigureResizeHandle className="edge-start" label={t(`调整${title}宽度`, `Resize ${title} width`)} panelRef={panelRef}
+      directionX={-1} minWidth={260} reserveWidth={344} onResize={layout.resize} onReset={layout.reset} />}
+    <FigureResizeHandle className={ledger ? "corner-top-end" : "corner-bottom-start"} axis="both"
+      label={t(`调整${title}大小`, `Resize ${title}`)} panelRef={panelRef} directionX={ledger ? 1 : -1} directionY={ledger ? -1 : 1}
+      minWidth={260} reserveWidth={ledger ? 40 : 344} onResize={layout.resize} onReset={layout.reset} />
   </section>;
 }
 
@@ -145,7 +154,7 @@ export function ArtifactsCard({ run, document, language, t, displayed, versionIn
         <dt>Reviewer</dt><dd className="figure-verdict-model">{run.reviewer.model}<small>{run.reviewerVision ? t("真实图片探针通过", "Real image probe passed") : t("待验证／无视觉能力", "Unverified / unavailable")}</small></dd>
       </dl>
       {reviewedLatest && review && review.issues.length > 0 && <ul className="figure-issues">{review.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>}
-      {latest && !reviewedLatest && <p className="figure-hint">{t("当前版本尚未审查。编辑后的版本需要重新检查；论文插图建议导出 PDF 或 PNG。", "This version has not been reviewed. Edited versions need a new check; use PDF or PNG in your paper.")}</p>}
+      {latest && !reviewedLatest && <p className="figure-hint">{t("当前版本尚未审查。", "This version has not been reviewed.")}</p>}
       {run.error && <p className="figure-hint tone-danger">{run.error}</p>}
     </div>
 
@@ -160,7 +169,7 @@ export function ArtifactsCard({ run, document, language, t, displayed, versionIn
       : <ol className="figure-version-list">{[...run.versions].reverse().map((version) => {
         const current = version.index === latest?.index;
         const selected = versionIndex === null ? current : versionIndex === version.index;
-        return <li key={version.index}><button type="button" className={selected ? "selected" : ""} disabled={locked} onClick={() => onVersion(current ? null : version.index)}>
+        return <li key={version.index}><button type="button" className={selected ? "selected" : ""} disabled={locked} onClick={() => onVersion(version.index)}>
           <strong>v{version.index}</strong>
           <span>{AUTHOR[version.author]?.[language === "cn" ? 0 : 1] ?? version.author} · {formatTime(version.createdAt, true)}</span>
           <span className="figure-version-tags"><em>{version.classification}</em><em>{version.textCount} {t("文字", "labels")}</em>{current && <em className="current">{t("当前", "Current")}</em>}</span>
@@ -186,7 +195,6 @@ function TaskSpec({ run, language, t, locked, onDuplicate }: { run: FigureRun; l
     <div className="figure-group-label">{t("运行进度", "Progress")}</div>
     <PipelineList run={run} language={language} t={t} />
     <button type="button" className="figure-button block" disabled={locked} onClick={onDuplicate}><SvgIcon name="copy" size={13} />{t("用相同输入新建", "New task with these inputs")}</button>
-    <p className="figure-hint">{t("提交后输入固定；改描述或模型请新建任务。已有参考图会一并带入，不再重复生图。", "Inputs are fixed once submitted; change them in a new task. An existing reference image is reused, so no new image is generated.")}</p>
   </div>;
 }
 

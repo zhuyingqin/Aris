@@ -1,4 +1,157 @@
 use super::*;
+use crate::{
+    compile_latex_document, latex_compile_timeout_ms, latex_repair_guidance, run_latex_process,
+    LatexCompileBudget, LatexCompileRequest, LATEX_COMPILE_TIMEOUT_ENV,
+};
+use std::time::Instant;
+
+#[test]
+fn latex_timeout_is_independent_of_shell_and_can_be_overridden() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _latex_timeout = EnvGuard::unset(LATEX_COMPILE_TIMEOUT_ENV);
+    let _shell_timeout = EnvGuard::set("ARIS_SHELL_DEFAULT_TIMEOUT_MS", "120000");
+    assert_eq!(latex_compile_timeout_ms(None), 600_000);
+    assert_eq!(latex_compile_timeout_ms(Some(1_800_000)), 1_800_000);
+
+    let _override = EnvGuard::set(LATEX_COMPILE_TIMEOUT_ENV, "900000");
+    assert_eq!(latex_compile_timeout_ms(None), 900_000);
+    assert_eq!(latex_compile_timeout_ms(Some(45_000)), 45_000);
+}
+
+#[test]
+fn latex_timeout_rejects_invalid_default_overrides() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for value in ["", "0", "-1", "forever"] {
+        let _override = EnvGuard::set(LATEX_COMPILE_TIMEOUT_ENV, value);
+        assert_eq!(latex_compile_timeout_ms(None), 600_000, "{value}");
+    }
+}
+
+#[test]
+fn latex_process_uses_the_remaining_build_budget() {
+    let budget = LatexCompileBudget {
+        started: Instant::now() - Duration::from_secs(4),
+        timeout: Duration::from_millis(4_100),
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = runtime::hidden_command("cmd");
+        command.args(["/d", "/c", "ping -n 11 127.0.0.1 > nul"]);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = runtime::hidden_command("sh");
+        command.args(["-c", "sleep 10"]);
+        command
+    };
+    let workspace = std::env::temp_dir();
+    let started = Instant::now();
+    let output = run_latex_process(
+        &mut command,
+        "test-compiler",
+        &workspace.join("main.tex"),
+        &workspace,
+        &budget,
+        &|| false,
+        &mut |_| {},
+    )
+    .expect("managed compile process");
+    assert!(output.timed_out);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "a new pass reset the time budget"
+    );
+    assert!(budget.remaining().is_zero());
+}
+
+#[test]
+fn latex_timeout_with_only_generated_file_notices_needs_no_source_edit() {
+    let diagnostics = extract_latex_diagnostics(
+        "No file main.toc.\nNo file main.lof.\nNo file main.lot.\nNo file main.bbl.",
+        "Latexmk: Missing input file 'main.toc'\nLaTeXCompile exceeded timeout of 120000 ms",
+        false,
+        Some("timeout"),
+    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "compile_timeout");
+    assert_eq!(diagnostics[0].file_path, None);
+    assert_eq!(diagnostics[0].line, None);
+    let guidance = latex_repair_guidance(&diagnostics);
+    assert!(guidance.contains("increase timeoutMs"));
+    assert!(!guidance.contains("smallest source change"));
+}
+
+#[test]
+fn latex_source_error_stays_primary_even_when_build_times_out() {
+    let diagnostics = extract_latex_diagnostics(
+        "./main.tex:70: Extra alignment tab has been changed to \\cr.",
+        "LaTeXCompile exceeded timeout of 120000 ms",
+        false,
+        Some("timeout"),
+    );
+    assert_eq!(diagnostics[0].line, Some(70));
+    assert_eq!(diagnostics[0].code, "file_line_error");
+    assert!(latex_repair_guidance(&diagnostics).contains("smallest source change"));
+}
+
+#[test]
+fn latex_cancelled_and_unlocated_failures_do_not_request_source_edits() {
+    for status in ["interrupted", "exit_code:1"] {
+        let diagnostics = extract_latex_diagnostics("", "", false, Some(status));
+        assert!(!latex_repair_guidance(&diagnostics).contains("smallest source change"));
+    }
+}
+
+#[test]
+#[ignore = "requires a local TeX Live installation"]
+fn latex_local_texlive_smoke_builds_generated_auxiliaries() {
+    let root = temp_path("latex-multipass-smoke");
+    fs::create_dir_all(&root).expect("workspace");
+    fs::write(
+        root.join("main.tex"),
+        concat!(
+            "\\documentclass{article}\n\\begin{document}\n",
+            "\\tableofcontents\n\\listoffigures\n\\listoftables\n",
+            "\\section{Smoke test}\nCompiler fixture~\\cite{smoke}.\n",
+            "\\bibliographystyle{plain}\n\\bibliography{references}\n\\end{document}\n",
+        ),
+    )
+    .expect("source");
+    fs::write(
+        root.join("references.bib"),
+        "@misc{smoke, title={Compiler fixture}, author={Test}, year={2026}}\n",
+    )
+    .expect("bibliography");
+    let output = compile_latex_document(
+        LatexCompileRequest {
+            input_path: root.join("main.tex"),
+            output_path: root.join("main.pdf"),
+            compiler: Some("latexmk".to_string()),
+            engine: None,
+            timeout_ms: None,
+            clean_cache: false,
+            continue_on_error: false,
+        },
+        &root,
+        &|| false,
+        &mut |_| {},
+    )
+    .expect("compile");
+    assert!(output.success, "{}\n{}", output.stdout, output.stderr);
+    assert_eq!(output.pdf_state, LatexPdfState::Fresh);
+    for extension in ["pdf", "toc", "lof", "lot", "bbl"] {
+        assert!(
+            root.join(format!("main.{extension}")).is_file(),
+            "{extension}"
+        );
+    }
+    fs::remove_dir_all(root).expect("cleanup fixture");
+}
 
 #[test]
 fn latex_compile_prefers_unicode_engine_for_ctex_source() {

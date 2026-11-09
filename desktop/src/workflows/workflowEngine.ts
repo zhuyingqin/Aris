@@ -9,7 +9,6 @@ import type {
   ReviewDirection,
   ReviewLandscapeAnalysis,
   ReviewSearchPlan,
-  ReviewSearchQuery,
   ReviewWorkflowRun,
   ReviewWorkflowStage,
   WorkflowActivityEntry,
@@ -303,15 +302,6 @@ export function reopenStage(run: ReviewWorkflowRun, stageId: string): ReviewWork
     run.scoutPauseReason = `已回到「${stage.title}」修改；完成后可恢复自动侦察。`;
   }
   return run;
-}
-
-export function chunkItems<T>(items: T[], size: number) {
-  const safeSize = Math.max(1, Math.floor(size));
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += safeSize) {
-    chunks.push(items.slice(index, index + safeSize));
-  }
-  return chunks;
 }
 
 /**
@@ -943,53 +933,6 @@ export function reviewSearchPlanPreflightIssues(plan: ReviewSearchPlan) {
       ? scopusReviewQueryIssues(query.query).map((issue) => `Scopus：${issue}`)
       : [],
   );
-}
-
-export function normalizedPlan(
-  value: Partial<ReviewSearchPlan>,
-  run: ReviewWorkflowRun,
-): ReviewSearchPlan {
-  const allowedSources = new Set(run.databases);
-  const seenSources = new Set<string>();
-  // One query per source. A model that ignores the instruction and returns a
-  // broad/base/strict ladder must not smuggle it back in — the extra variants
-  // are exactly what made this stage unreadable.
-  const queries = (Array.isArray(value.queries) ? value.queries : [])
-    .filter((item): item is ReviewSearchQuery =>
-      Boolean(item && typeof item.query === "string" && typeof item.source === "string"),
-    )
-    .filter((item) => allowedSources.has(item.source))
-    .map((item, index) => {
-      const query = item.query.trim();
-      return {
-        id: item.id || `query-${index + 1}`,
-        source: item.source,
-        kind: "primary",
-        language: item.language || "English",
-        query: item.source === "scopus"
-          ? enforceScopusReviewDocumentType(query)
-          : query,
-        rationale: item.rationale?.trim() || "覆盖该领域的命名变体，并在标题级排除易误检方向。",
-      };
-    })
-    .filter((item) => item.query)
-    .filter((item) => {
-      if (seenSources.has(item.source)) return false;
-      seenSources.add(item.source);
-      return true;
-    });
-  if (!queries.length) return deterministicPlan(run);
-  return {
-    queries,
-    inclusionCriteria: Array.isArray(value.inclusionCriteria)
-      ? value.inclusionCriteria.filter(Boolean).slice(0, 12)
-      : [],
-    exclusionCriteria: Array.isArray(value.exclusionCriteria)
-      ? value.exclusionCriteria.filter(Boolean).slice(0, 12)
-      : [],
-    generatedBy: value.generatedBy || "Executor",
-    generatedAt: new Date().toISOString(),
-  };
 }
 
 /** Offline shape of the query the Executor is asked for: every naming variant

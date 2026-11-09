@@ -13,14 +13,24 @@ const identity = { model: 'fixture', provider: 'fixture', endpoint: 'https://fix
 const initial = { schemaVersion: 1, id: 'a'.repeat(32), title: 'SVG 对话测试', method: 'Input to output', style: 'paper', sourceMode: 'import', sourceMime: 'image/png', sourceHash: 'original', status: 'accepted', outputLimit: 0, executor: identity, reviewer: identity, executorVision: true, reviewerVision: true, revisionUsed: false, requests: [], review: null, svgEdits: [], error: null, createdAt: '', updatedAt: '',
   versions: [{ index: 1, hash: 'v1', svgPath: '', pngPath: '', pdfPath: '', author: 'user', classification: 'editable_vector', textCount: 2, vectorCount: 4, reviewStatus: 'accepted', renderer: 'fixture', fontFingerprint: 'fixture', createdAt: '' }] };
 const mockApi = `
-let run=${JSON.stringify(initial)}, active=false, notify=()=>{};
-const documents=[${JSON.stringify(svg)}];window.__svgCalls=[];
+const recovered=JSON.parse(sessionStorage.getItem('figure-fixture-state')||'null');
+let run=recovered?.run??${JSON.stringify(initial)}, active=false, notify=()=>{};
+const documents=recovered?.documents??[${JSON.stringify(svg)}];window.__svgCalls=[];window.__draftCalls=[];window.__manualSaves=0;
+let draft=recovered?.draft??null;
+const persist=()=>sessionStorage.setItem('figure-fixture-state',JSON.stringify({run,documents,draft}));
 const view=()=>({projectId:'fixture',run:structuredClone(run),active});
 export const figuresAvailable=()=>true;
 export const figureList=async()=>[view()];
 export const figureConnections=async()=>({executor:run.executor,reviewer:run.reviewer,image:{enabled:false,available:false,models:[]}});
 export const onFigureUpdated=async callback=>{notify=callback;return()=>{notify=()=>{}}};
-export const figureDocument=async(_project,_id,index)=>({svg:documents[(index??documents.length)-1],sourceDataUrl:null,previewDataUrl:null});
+export const figureDocument=async(_project,_id,index)=>({svg:index==null&&draft?draft.svg:documents[(index??documents.length)-1],sourceDataUrl:null,previewDataUrl:null,draft:index==null?draft:null});
+export const figureSaveDraft=async(_project,_id,expectedHash,svg,baseIndex)=>{window.__draftCalls.push({expectedHash,svg,baseIndex});draft={expectedHash,svg,baseIndex,updatedAt:''};persist();return draft};
+export const figureDiscardDraft=async()=>{draft=null;persist()};
+export const figureSave=async(_project,_id,expectedHash,svg,baseIndex)=>{
+ if(expectedHash!==run.versions.at(-1).hash)throw Error('Version conflict');
+ const index=documents.length+1;documents.push(svg);run.versions.push({...run.versions[0],index,hash:'v'+index,parentIndex:baseIndex,author:'user'});
+ window.__manualSaves++;draft=null;run.status='draft';persist();return view();
+};
 export const figureEditSvg=async input=>{
  if(active)throw Error('duplicate');window.__svgCalls.push(input);active=true;run.status='editing_svg';
  const edit={id:input.editId,baseVersion:input.baseIndex,baseHash:input.expectedHash,prompt:input.prompt,resultVersion:null,status:'running',error:null,createdAt:'',finishedAt:null};run.svgEdits.push(edit);
@@ -28,9 +38,9 @@ export const figureEditSvg=async input=>{
  return view();
 };
 const reject=()=>{throw Error('No external action allowed in SVG chat fixture')};
-export const figurePrepare=reject,figureStart=reject,figureSave=reject,figureReview=reject,figureCancel=reject,figureExport=reject,figureDelete=reject,figureEditImage=reject,figureSelectRaster=reject,figureRasterDocument=reject,figureExportRaster=reject,figureEditResultDocument=reject,figureResolveEditResult=reject;
+export const figurePrepare=reject,figureStart=reject,figureReview=reject,figureCancel=reject,figureExport=reject,figureDelete=reject,figureEditImage=reject,figureSelectRaster=reject,figureRasterDocument=reject,figureExportRaster=reject,figureEditResultDocument=reject,figureResolveEditResult=reject;
 `;
-const mockStore = `const state={currentProject:{id:'fixture',name:'SomniFig'},language:new URLSearchParams(location.search).get('language')==='en'?'en':'cn',setTab:()=>{},setFigureDirty:()=>{}};export const useStore=Object.assign(selector=>selector(state),{getState:()=>state});`;
+const mockStore = `const state={currentProject:{id:'fixture',name:'SomniFig'},language:new URLSearchParams(location.search).get('language')==='en'?'en':'cn',setTab:()=>{},figureDirty:false,setFigureDirty:value=>{state.figureDirty=value}};window.__figureState=state;export const useStore=Object.assign(selector=>selector(state),{getState:()=>state});`;
 
 (async () => {
   const bundle = await esbuild.build({ stdin: { contents: `import React from 'react';import {createRoot} from 'react-dom/client';import FigureStudio from './src/figures/FigureStudio.tsx';createRoot(document.getElementById('workspace')).render(React.createElement(FigureStudio));`, resolveDir: desktop, loader: 'tsx' }, bundle: true, write: false, outfile: 'preview.js', format: 'esm', jsx: 'automatic', target: 'esnext', define: { 'import.meta.env.DEV': 'false' }, plugins: [{ name: 'svg-fixtures', setup(build) {
@@ -104,7 +114,36 @@ const mockStore = `const state={currentProject:{id:'fixture',name:'SomniFig'},la
         await page.screenshot({ path: path.join(output, language + '-' + width + '.png') });
       }
       await page.setViewportSize({ width: 1280, height: 900 });
+      // Exercise real canvas dirty notifications, serialization, autosave,
+      // source editing, restart recovery, then an explicit version commit.
+      const chatToggle = page.getByRole('button', { name: language === 'cn' ? '对话修改' : 'Edit with chat', exact: true });
+      if (await chatToggle.getAttribute('aria-pressed') === 'true') await chatToggle.click();
+      const frame = page.frameLocator('iframe[title="SVG-Edit"]');
+      await frame.locator('#svgcontent #input').waitFor();
+      const bounds = await frame.locator('#svgcontent #input rect').boundingBox();
+      await page.mouse.move(bounds.x + 10, bounds.y + 10); await page.mouse.down();
+      await page.mouse.move(bounds.x + 35, bounds.y + 25, { steps: 8 }); await page.mouse.up();
+      await page.getByText(language === 'cn' ? '草稿已自动保存' : 'Draft autosaved', { exact: true }).waitFor();
+      assert.equal(await page.getByLabel(language === 'cn' ? '版本' : 'Version', { exact: true }).locator('option').count(), 4);
+      assert.equal(await page.evaluate(() => window.__svgCalls.length), 2);
+      await page.getByRole('button', { name: language === 'cn' ? 'SVG 源码' : 'SVG source', exact: true }).click();
+      await source.click(); await source.press('Control+End'); await source.press('Space');
+      await page.waitForFunction(() => window.__draftCalls.length === 2 && !window.__figureState.figureDirty);
+      const persisted = await page.evaluate(() => JSON.parse(sessionStorage.getItem('figure-fixture-state')));
+      assert.equal(persisted.run.versions.length, 3); assert(persisted.draft.svg.includes('Input'));
+      await page.reload(); await page.getByRole('button').filter({ hasText: 'SVG 对话测试' }).click();
+      await page.getByText(language === 'cn' ? '草稿已自动保存' : 'Draft autosaved', { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__figureState.figureDirty), false);
+      await frame.locator('#svgcontent #input').waitFor();
+      await page.getByRole('button', { name: language === 'cn' ? 'SVG 源码' : 'SVG source', exact: true }).click();
+      assert((await source.innerText()).includes('Input'));
+      await page.getByRole('button', { name: /^(保存新版本|Save version)/ }).click();
+      await page.waitForFunction(() => window.__manualSaves === 1 && !window.__figureState.figureDirty);
+      assert.equal(await page.getByLabel(language === 'cn' ? '版本' : 'Version', { exact: true }).locator('option').count(), 5);
+      assert.equal(await page.evaluate(() => JSON.parse(sessionStorage.getItem('figure-fixture-state')).draft), null);
+      assert.equal(await page.evaluate(() => window.__svgCalls.length), 0);
+      await page.evaluate(() => sessionStorage.removeItem('figure-fixture-state'));
     }
-    assert.deepEqual(errors, []); console.log('SVG source and conversation: syntax colors, edit/discard, light/dark themes, sequential edits, history, bilingual layout and original editor passed.');
+    assert.deepEqual(errors, []); console.log('SVG source and conversation: syntax colors, edit/discard, light/dark themes, sequential edits, history, bilingual layout, canvas/source draft autosave, restart recovery and explicit version commit passed.');
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

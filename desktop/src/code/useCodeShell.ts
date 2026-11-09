@@ -17,7 +17,7 @@ interface Options {
   onSignOut: () => void;
 }
 
-/** Keep the desktop header until the authenticated editor applies our controls. */
+/** Report when authenticated native controls can replace titlebar fallbacks. */
 export function useCodeShell(options: Options): boolean {
   const latest = useRef(options);
   latest.current = options;

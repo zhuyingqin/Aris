@@ -829,8 +829,7 @@ fn begin(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Capture every monitor and raise the selection overlay. Invoked by the
-/// global shortcut handler and by the composer's camera button.
-#[tauri::command]
+/// global shortcut handler.
 pub async fn screenshot_capture_begin(app: tauri::AppHandle) -> Result<(), String> {
     // Window creation has to drive the main event loop on Windows; running it
     // from the synchronous IPC path would deadlock WebView2 creation.
@@ -942,14 +941,8 @@ fn decode_png_data_url(png: &str) -> Result<Vec<u8>, String> {
 }
 
 fn write_png_to_clipboard(app: &tauri::AppHandle, png: &str) -> Result<(), String> {
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-
     let bytes = decode_png_data_url(png)?;
-    let image = tauri::image::Image::from_bytes(&bytes)
-        .map_err(|error| format!("could not read the screenshot: {error}"))?;
-    app.clipboard()
-        .write_image(&image)
-        .map_err(|error| format!("could not write to the clipboard: {error}"))
+    crate::clipboard::write_image_bytes(app, &bytes)
 }
 
 /// Put the annotated crop on the system clipboard and dismiss the overlay.

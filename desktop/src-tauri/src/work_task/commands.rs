@@ -523,15 +523,6 @@ pub(crate) fn cancel_core(
 }
 
 #[tauri::command]
-pub async fn work_task_retry(
-    app: AppHandle,
-    projects_state: State<'_, ProjectState>,
-    task_id: String,
-) -> Result<WorkTask, String> {
-    work_task_start(app, projects_state, task_id).await
-}
-
-#[tauri::command]
 pub async fn work_task_return_to_todo(
     app: AppHandle,
     projects_state: State<'_, ProjectState>,
@@ -709,23 +700,6 @@ pub async fn work_task_review_patch(
         engine::review_patch(&project_id, &task_id, path.as_deref())
     })
     .await
-}
-
-#[tauri::command]
-pub async fn work_task_reorder(
-    projects_state: State<'_, ProjectState>,
-    task_ids: Vec<String>,
-) -> Result<Vec<WorkTask>, String> {
-    let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || {
-        reorder_core(&project_id, &task_ids)?;
-        Ok(list_core(&project_id, &project_path))
-    })
-    .await
-}
-
-pub(crate) fn reorder_core(project_id: &str, task_ids: &[String]) -> Result<(), String> {
-    store::reorder(project_id, task_ids)
 }
 
 #[cfg(test)]

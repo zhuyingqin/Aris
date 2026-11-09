@@ -1,7 +1,7 @@
 import type { KeyboardEventHandler, Ref } from "react";
 import { SvgIcon } from "./SvgIcon";
 import type { Language } from "./store";
-import type { AccountMenuPlan } from "./accountMenuPlan";
+import { isPaidAccountPlan, type AccountMenuPlan } from "./accountMenuPlan";
 import { formatQuota } from "./settings/settingsFormatters";
 
 interface Props {
@@ -11,17 +11,26 @@ interface Props {
   avatar: string | null;
   plan: AccountMenuPlan;
   open: boolean;
+  refreshing?: boolean;
+  refreshError?: string | null;
+  onRefresh?: () => void;
   rootRef?: Ref<HTMLDivElement>;
   triggerRef?: Ref<HTMLButtonElement>;
   onMenuKeyDown: KeyboardEventHandler<HTMLDivElement>;
   onToggle: () => void;
   onSettings: () => void;
+  onMembership: () => void;
   onLogout: () => void;
 }
 
 const COPY = {
-  cn: { menu: "用户菜单", quota: "套餐额度", remaining: "剩余额度", remainingPercent: (percent: number) => `剩余 ${percent}%`, unavailable: "额度信息暂不可用", settings: "设置", logout: "退出登录" },
-  en: { menu: "User menu", quota: "Plan allowance", remaining: "Remaining allowance", remainingPercent: (percent: number) => `${percent}% remaining`, unavailable: "Allowance unavailable", settings: "Settings", logout: "Sign out" },
+  cn: { menu: "用户菜单", quota: "套餐额度", remaining: "剩余额度", remainingPercent: (percent: number) => `剩余 ${percent}%`, unavailable: "额度信息暂不可用", settings: "设置", logout: "退出登录", refresh: "刷新额度", refreshing: "正在刷新额度", refreshFailed: "刷新失败，显示上次额度" },
+  en: { menu: "User menu", quota: "Plan allowance", remaining: "Remaining allowance", remainingPercent: (percent: number) => `${percent}% remaining`, unavailable: "Allowance unavailable", settings: "Settings", logout: "Sign out", refresh: "Refresh allowance", refreshing: "Refreshing allowance", refreshFailed: "Refresh failed. Showing last allowance." },
+};
+
+const MEMBERSHIP_COPY = {
+  cn: { buy: "购买会员", upgrade: "会员升级" },
+  en: { buy: "Buy membership", upgrade: "Upgrade membership" },
 };
 
 const UsageIcon = () => (
@@ -36,7 +45,7 @@ const LogoutIcon = () => (
   </svg>
 );
 
-export default function AppAccountMenu({ language, name, initials, avatar, plan, open, rootRef, triggerRef, onMenuKeyDown, onToggle, onSettings, onLogout }: Props) {
+export default function AppAccountMenu({ language, name, initials, avatar, plan, open, refreshing = false, refreshError, onRefresh, rootRef, triggerRef, onMenuKeyDown, onToggle, onSettings, onMembership, onLogout }: Props) {
   const copy = COPY[language];
   const amount = plan.remaining === null ? "—" : formatQuota(plan.remaining);
   const renderAvatar = (profile = false) => (
@@ -59,8 +68,13 @@ export default function AppAccountMenu({ language, name, initials, avatar, plan,
               </span>
             </div>
           </div>
-          <section className="account-menu-quota" role="group" aria-label={copy.quota}>
-            <div className="account-menu-quota-title"><UsageIcon /><strong>{copy.quota}</strong></div>
+          <section className="account-menu-quota" role="group" aria-label={copy.quota} aria-busy={refreshing}>
+            <div className="account-menu-quota-title">
+              <UsageIcon /><strong>{copy.quota}</strong>
+              {onRefresh && <button className="account-menu-refresh" type="button" aria-label={refreshing ? copy.refreshing : copy.refresh} title={refreshing ? copy.refreshing : copy.refresh} disabled={refreshing} onClick={onRefresh}>
+                <SvgIcon name={refreshing ? "spinner" : "refresh"} size={13} />
+              </button>}
+            </div>
             <div className="account-menu-quota-summary">
               <span>{plan.remaining === null ? copy.unavailable : copy.remaining}</span>
               <strong>{amount}</strong>
@@ -73,8 +87,12 @@ export default function AppAccountMenu({ language, name, initials, avatar, plan,
                 <span className="account-menu-quota-caption">{copy.remainingPercent(plan.remainingPercent)}</span>
               </>
             )}
+            {refreshError && <span className="account-menu-refresh-error" role="status" title={refreshError}>{copy.refreshFailed}</span>}
           </section>
           <div className="account-menu-divider" role="separator" />
+          <button className="sidebar-user-menu-row account-menu-action account-menu-membership" type="button" role="menuitem" onClick={onMembership}>
+            <SvgIcon name="sparkle" size={16} /><span>{isPaidAccountPlan(plan.tier) ? MEMBERSHIP_COPY[language].upgrade : MEMBERSHIP_COPY[language].buy}</span><SvgIcon name="chevronRight" size={13} />
+          </button>
           <button className="sidebar-user-menu-row account-menu-action" type="button" role="menuitem" data-onboarding-target="user-settings" onClick={onSettings}>
             <SvgIcon name="settings" size={16} /><span>{copy.settings}</span><span className="account-menu-shortcut">Ctrl+,</span>
           </button>

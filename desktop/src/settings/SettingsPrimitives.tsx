@@ -24,7 +24,7 @@ export function SettingsAdvanced({ title, children }: { title: string; children:
   return <details className="settings-advanced settings-page-advanced"><summary>{title}<SvgIcon name="chevronDown" size={14} /></summary><div className="settings-advanced-body">{children}</div></details>;
 }
 
-export function SettingRow({ title, description, children, feedback }: { title: string; description?: string; children: ReactNode; feedback?: ReactNode }) {
+export function SettingRow({ title, description, children, feedback }: { title: ReactNode; description?: string; children: ReactNode; feedback?: ReactNode }) {
   return <div className="settings-row-entry">
     <div className="settings-row">
       <div className="settings-row-copy"><div className="settings-row-title">{title}</div>{description && <p>{description}</p>}</div>

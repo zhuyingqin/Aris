@@ -1,0 +1,22 @@
+\documentclass[UTF8,fontset=fandol]{ctexart}
+\usepackage[a4paper,margin=2cm]{geometry}
+\usepackage{amsmath}
+\input{diagram-styles}
+\pagestyle{empty}
+\begin{document}
+\section*{从观测到候选}
+\begin{center}\input{pipeline}\end{center}
+在特征模型与最优性条件成立时构造候选；不据此声称唯一性或全局最优性。
+\clearpage
+\section*{有边界的验证与修订}
+\begin{center}\input{decision-loop}\end{center}
+每次修订消耗预算；预算耗尽仍未通过时，报告未通过并保留证据。
+\clearpage
+\section*{负反馈中的信号关系}
+\begin{center}\input{feedback-loop}\end{center}
+示意中 $e_t=r_t-y_t$；信号关系本身不构成稳定性证明。
+\clearpage
+\section*{同一候选的两类检查}
+\begin{center}\input{parallel-checks}\end{center}
+拟合检查与重解控制支持不同判断；两条路径不代表执行一定并发。
+\end{document}

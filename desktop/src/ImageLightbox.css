@@ -144,3 +144,33 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.image-lightbox-card > header button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.image-lightbox-status[role="alert"] {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+
+.image-lightbox-status button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.image-lightbox-feedback {
+  padding: 6px 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.image-lightbox-feedback[role="alert"] {
+  color: var(--danger, #dc5b5b);
+}

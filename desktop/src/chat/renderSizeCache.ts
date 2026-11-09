@@ -32,10 +32,6 @@ export function readRenderedHeight(key: string | null | undefined): number | und
   return key ? heights.get(key) : undefined;
 }
 
-export function clearRenderedHeights(): void {
-  heights.clear();
-}
-
 /** Mermaid keys off the diagram source, not a block id: the same diagram keeps
  *  its height when it is re-rendered, re-themed, or appears in another turn. */
 export function mermaidSizeKey(code: string): string {

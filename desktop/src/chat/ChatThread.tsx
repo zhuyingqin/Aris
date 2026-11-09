@@ -108,18 +108,14 @@ export function scrollBottomLabel(language: Language) {
 }
 
 /**
- * Whether a row that just changed size should move the viewport with it.
- *
- * virtual-core reads this off the instance rather than from the options. Its
- * default additionally requires `scrollDirection !== "backward"`, which is right
- * for a feed of uniform cards and wrong for a transcript: a chat row is routinely
- * many times its estimate, so scrolling up measured row after row, and each of
- * those measurements shifted the content under the reader with nothing left to
- * anchor it (`.chat-scroll` sets `overflow-anchor: none`, so the browser will not
- * compensate either).
+ * Compensate rows entirely above the viewport, including during upward reading.
+ * A long assistant turn can straddle the viewport while new thinking or answer
+ * text arrives below it. Using the row's start treats that growth as if it were
+ * above the reader and drags the viewport by every streamed height change.
+ * virtual-core reads this callback off the instance rather than the options.
  */
 export function compensateAboveViewportResize(
-  item: Pick<VirtualItem, "start">,
+  item: Pick<VirtualItem, "end">,
   instance: {
     scrollElement: { scrollTop: number } | null;
     scrollOffset: number | null;
@@ -129,7 +125,7 @@ export function compensateAboveViewportResize(
   // corrections are applied by writing `scrollTop`, so within a burst of resizes
   // in one frame the DOM is the only value already carrying the earlier ones.
   const offset = instance.scrollElement?.scrollTop ?? instance.scrollOffset ?? 0;
-  return item.start < offset;
+  return item.end <= offset;
 }
 
 interface QuestionMarker {

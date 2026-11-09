@@ -72,9 +72,11 @@ exact request, immutable provider response artifact(s), normalized results,
 provider hit count, and rate-limit headers when exposed. Never place keys,
 cookies, or authorization values in a strategy, query, or explanation.
 
-Scopus starts with `COMPLETE`; only a `401`/`403` entitlement response can
-trigger one `STANDARD` retry, and the downgraded coverage remains visible in
-the `SearchRun`. The default is bounded retrieval, not implicit full export.
+With `SCOPUS_API_KEY`, Scopus starts at Elsevier with `COMPLETE`; a `401`/`403`
+response moves the rest of the search to the SomniQ school route when the
+user is signed in, and otherwise triggers one `STANDARD` retry. Without a key
+the school route is used from the start (STANDARD metadata, no abstracts).
+Route changes and downgraded coverage remain visible in the `SearchRun`. The default is bounded retrieval, not implicit full export.
 
 ## Profiles
 
@@ -89,8 +91,9 @@ the `SearchRun`. The default is bounded retrieval, not implicit full export.
   separate, explicit action and must use `LiteraturePdfDownload`; never
   overwrite an existing file.
 - `--profile scopus`: restrict `sources` to `scopus`, or give a `queries.scopus`
-  string in Scopus syntax. Preview the scope before running; COMPLETE-to-
-  STANDARD downgrade and coverage gaps must be reported.
+  string in Scopus syntax. Preview the scope before running; a switch to the
+  school route, a COMPLETE-to-STANDARD downgrade and coverage gaps must be
+  reported.
 
 ## Output discipline
 

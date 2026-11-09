@@ -259,6 +259,7 @@ async fn live_stream_smoke_test() {
             tools: None,
             tool_choice: None,
             thinking: None,
+            output_config: None,
             stream: false,
         })
         .await
@@ -441,6 +442,7 @@ fn sample_request(stream: bool) -> MessageRequest {
         }]),
         tool_choice: Some(ToolChoice::Auto),
         thinking: None,
+        output_config: None,
         stream,
     }
 }

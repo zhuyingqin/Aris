@@ -28,7 +28,39 @@ promise that the public web has been exhaustively enumerated.
 
 ### Providers
 
-`auto` is a fallback chain:
+Desktop `auto` and `all` use DeepSeek through
+`POST https://somni.ensuanx.com/v1/tools/search`. The shared account provider
+supplies the signed-in account's downstream model API token from the backend
+credential store. Dashboard access tokens, refresh cookies and provider keys
+are never sent to this route. New API owns channel selection, membership
+checks and billing: Go, Plus, Pro and 千研 can search; a successful request
+with results costs one credit, using monthly allowance first.
+
+Each DeepSeek batch sends exactly one original query with `count=maxResults`
+and `need_content=false`. Domain filters are included as query operators and
+enforced again on returned URLs. The final query, including those operators,
+must fit DeepSeek's 128 Unicode character limit; oversized queries fail before
+any request, following the [official API guide](https://api-docs.deepseek.com/zh-cn/guides/search).
+There is no automatic paid query expansion,
+retry, redirect following, or fallback after an access, quota or upstream
+failure. A five-minute cache is scoped to the API token fingerprint, so
+signing out or changing accounts cannot reuse another account's results.
+`providers=["deepseek"]` explicitly selects the same route. Legacy providers
+remain available by explicit name for compatibility.
+
+DeepSeek returns `results` with titles, URLs, summaries and optional dates.
+The adapter prefers the detailed summary for model reading and falls back to
+the short display snippet when no summary is available. It
+does not return a total count or pagination cursor; coverage therefore stays
+partial with `truncatedReason=provider_result_window` and no continuation.
+An empty window is not a claim that the public web contains no matching
+evidence. A model must explicitly reformulate when more evidence is needed.
+The Settings access check calls `GET /v1/models` and checks for the
+`deepseek-search` service ID without performing a paid search. Service IDs
+are excluded from the Desktop chat/reviewer model menus.
+
+For headless callers without a registered account provider, `auto` retains
+the legacy fallback chain:
 
 1. `ARIS_WEB_SEARCH_BASE_URL` (legacy
    `CLAWD_WEB_SEARCH_BASE_URL` remains readable);
@@ -61,8 +93,8 @@ if the current evidence is sufficient, continue the current provider for
 depth, or launch `providers=["all"]` for cross-provider diversity. Therefore a
 50-result batch ceiling never prevents a longer search.
 
-The desktop uses the built-in gateway for Bocha, Zhihu, and OpenAlex, so users
-do not configure their upstream credentials. Desktop and CLI share the
+The legacy adapters use the built-in gateway for Bocha, Zhihu, and OpenAlex,
+so users do not configure their upstream credentials. Desktop and CLI share the
 `https://somni.ensuanx.com/research/` base: `bocha` and `zhihu` are POST routes,
 while `openalex/works` and `openalex/works/{id-or-doi}` are GET routes. Every
 request, connectivity probe, and request preview must retain the `/research`

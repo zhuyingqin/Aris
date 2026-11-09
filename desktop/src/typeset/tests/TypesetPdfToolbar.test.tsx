@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import TypesetPdfPreview from "../TypesetPdfPreview";
+import TypesetPdfPreview, { type PdfPreviewProps } from "../TypesetPdfPreview";
 import { useStore } from "../../store";
 
 const mocks = vi.hoisted(() => ({
@@ -81,7 +81,7 @@ function stubLayout(toolbarWidth: number) {
 
 const noop = () => {};
 
-function renderToolbar(toolbarWidth: number) {
+function renderToolbar(toolbarWidth: number, overrides: Partial<PdfPreviewProps> = {}) {
   stubLayout(toolbarWidth);
   return render(
     <TypesetPdfPreview
@@ -97,6 +97,7 @@ function renderToolbar(toolbarWidth: number) {
       continueOnError={false}
       engine="auto"
       compileOnSave={false}
+      compileTimeoutMinutes={null}
       inverted={false}
       canCancel={false}
       onCompile={noop}
@@ -105,12 +106,14 @@ function renderToolbar(toolbarWidth: number) {
       onSetContinueOnError={noop}
       onSetEngine={noop}
       onSetCompileOnSave={noop}
+      onSetCompileTimeoutMinutes={noop}
       onToggleInverted={noop}
       onExportPdf={noop}
       onToggleLog={noop}
       onSourceTextClick={noop}
       onHide={noop}
       onSyncToPdf={noop}
+      {...overrides}
     />,
   );
 }
@@ -131,6 +134,52 @@ describe("compiled-PDF toolbar overflow", () => {
 
     expect(screen.queryByRole("button", { name: "More PDF actions" })).toBeNull();
     expect(container.querySelector(".pdf-open-external")).toBeTruthy();
+  });
+
+  it("applies a custom time limit from the compile options", () => {
+    const onSetCompileTimeoutMinutes = vi.fn();
+    renderToolbar(1200, { onSetCompileTimeoutMinutes });
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    const input = screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement;
+    expect(input.value).toBe("10");
+    fireEvent.change(input, { target: { value: "30" } });
+    fireEvent.submit(input.closest("form")!);
+    expect(onSetCompileTimeoutMinutes).toHaveBeenCalledWith(30);
+    expect(screen.queryByRole("menu", { name: "Compile options menu" })).toBeNull();
+  });
+
+  it.each(["", "0", "-2", "1.5", "150119987580"])("rejects the invalid time limit %j", (value) => {
+    const onSetCompileTimeoutMinutes = vi.fn();
+    renderToolbar(1200, { onSetCompileTimeoutMinutes });
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    const input = screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" });
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("alert").textContent).toContain("positive whole number");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(onSetCompileTimeoutMinutes).not.toHaveBeenCalled();
+  });
+
+  it("discards an unapplied draft on Escape and can restore the app default", () => {
+    const onSetCompileTimeoutMinutes = vi.fn();
+    renderToolbar(1200, { compileTimeoutMinutes: 25, onSetCompileTimeoutMinutes });
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "60" } });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onSetCompileTimeoutMinutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    expect((screen.getByRole("spinbutton") as HTMLInputElement).value).toBe("25");
+    fireEvent.click(screen.getByRole("button", { name: "Use app default" }));
+    expect(onSetCompileTimeoutMinutes).toHaveBeenCalledWith(null);
+  });
+
+  it("localizes the time limit setting in Chinese", () => {
+    useStore.setState({ language: "cn" });
+    renderToolbar(380);
+    fireEvent.click(screen.getByRole("button", { name: "编译选项" }));
+    expect(screen.getByRole("spinbutton", { name: "最长编译时间（分钟）" })).toBeTruthy();
+    expect(screen.getByText(/按项目保存，下次编译生效/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "应用" })).toBeTruthy();
   });
 
   it("keeps the PDF toolbar focused on controls rather than redundant labels", () => {

@@ -9,6 +9,24 @@ use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
+fn missing_posix_shell_never_falls_back_to_cmd() {
+    let result = super::windows_shell_launcher_for(None);
+    let error = result.err().expect("missing shell must fail before executing");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(error.to_string().contains("PowerShell tool"));
+    assert!(error.to_string().contains("No command was executed"));
+}
+
+#[test]
+fn available_posix_shell_preserves_the_command_interpreter() {
+    let launcher = super::windows_shell_launcher_for(Some("Git/bin/bash.exe".into()))
+        .expect("available shell");
+    assert_eq!(launcher.program, "Git/bin/bash.exe");
+    assert_eq!(launcher.args, &["-c"]);
+    assert!(launcher.posix);
+}
+
+#[test]
 fn decodes_cp936_shell_output_without_corrupting_chinese_paths() {
     let expected = "F:\\论文\\基准\\outputs\\fig_concept.png";
     let (bytes, _, had_errors) = GBK.encode(expected);
@@ -95,11 +113,12 @@ fn finds_git_bash_next_to_git_cmd_path_entry() {
 #[cfg(windows)]
 #[test]
 fn disabled_sandbox_preserves_user_home_for_posix_shell() {
-    if !super::windows_shell_launcher().posix {
+    if super::windows_shell_launcher().is_err() {
         return;
     }
     let status = SandboxStatus::default();
-    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false);
+    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false)
+        .expect("POSIX shell");
 
     assert!(
         command
@@ -112,7 +131,7 @@ fn disabled_sandbox_preserves_user_home_for_posix_shell() {
 #[cfg(windows)]
 #[test]
 fn active_filesystem_sandbox_redirects_posix_home() {
-    if !super::windows_shell_launcher().posix {
+    if super::windows_shell_launcher().is_err() {
         return;
     }
     let status = SandboxStatus {
@@ -121,7 +140,8 @@ fn active_filesystem_sandbox_redirects_posix_home() {
         filesystem_mode: FilesystemIsolationMode::WorkspaceOnly,
         ..SandboxStatus::default()
     };
-    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false);
+    let command = super::prepare_command("printf ok", std::path::Path::new("."), &status, false)
+        .expect("POSIX shell");
 
     assert!(command
         .get_envs()
@@ -162,7 +182,7 @@ fn default_timeout_prevents_foreground_hangs() {
 fn shell_backgrounded_service_returns_with_a_hint_instead_of_hanging() {
     let _guard = crate::test_env_lock();
     #[cfg(windows)]
-    if !super::windows_shell_launcher().posix {
+    if super::windows_shell_launcher().is_err() {
         return;
     }
     let started = Instant::now();

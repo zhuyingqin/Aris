@@ -1,4 +1,8 @@
 /* Models uses General's sections, setting rows, controls, and save feedback. */
+.settings-model-price {
+  margin-left: 8px;
+}
+.sp-settings-shell .settings-page-models .settings-row-control:has(> .sp-model-price-select) { --settings-control-width: 320px; }
 .sp-settings-shell .settings-page-models { container-type: inline-size; }
 .sp-settings-shell .settings-page-models .settings-row { min-height: var(--settings-row-height); padding-block: var(--settings-row-padding); }
 .sp-settings-shell .settings-page-models .settings-row-control:not(:empty):not(:has(.settings-switch)) { width: var(--settings-control-width); flex-basis: var(--settings-control-width); }

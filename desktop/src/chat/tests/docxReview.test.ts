@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatBlock, ChatTurn } from "../../types";
 import { isFileChangeTool, latestFileChangesFromTurns } from "../model";
-import { diffFromTool, fileChangesFromTurn } from "../toolSummaries";
+import { diffFromTool, fileChangeSummaryFromTurns } from "../toolSummaries";
 
 describe("DOCX changes in Chat", () => {
   it("keeps the audited text patch and change id available for review and undo", () => {
@@ -28,6 +28,6 @@ describe("DOCX changes in Chat", () => {
     expect(diffFromTool(block)).toMatchObject({
       path: "papers/report.docx", diff: patch, diffAvailability: "exact", changeId: "docx-change",
     });
-    expect(fileChangesFromTurn(turn)?.changeIds).toEqual(["docx-change"]);
+    expect(fileChangeSummaryFromTurns([turn])?.changeIds).toEqual(["docx-change"]);
   });
 });

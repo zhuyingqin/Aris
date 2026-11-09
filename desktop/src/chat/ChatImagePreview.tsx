@@ -1,19 +1,12 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { fileAssetUrl, fileOpen, fileReadBytes, isTauri } from "../api/tauri";
+import { fileAssetUrl, fileReadBytes, isTauri } from "../api/tauri";
 import ImageLightbox from "../ImageLightbox";
-import { imageMimeType } from "../imageFiles";
+import { imageMimeType, isImagePath } from "../imageFiles";
+import { useStore } from "../store";
+import { normalizeLocalFileHref } from "./localFileLinks";
 import { readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
-const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#].*)?$/i;
-const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/)/i;
-
-function decodeHref(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
+const DIRECT_IMAGE_SOURCE_RE = /^(data:image\/|blob:|https?:\/\/|asset:\/\/)/i;
 
 function stripLocationSuffix(path: string): string {
   const withoutHash = path.split("#", 1)[0];
@@ -24,33 +17,27 @@ function stripLocationSuffix(path: string): string {
 
 export function isPreviewableImagePath(value: string | null | undefined): value is string {
   if (!value) return false;
-  const trimmed = decodeHref(value.trim());
+  const trimmed = value.trim();
   if (/^(data:image\/|blob:)/i.test(trimmed)) return true;
-  const clean = stripLocationSuffix(trimmed);
-  if (!IMAGE_EXT_RE.test(clean)) return false;
-  if (/^https?:\/\//i.test(clean)) return true;
-  // A bare host name is neither a local relative path nor a URL. Treating it
-  // as a path would make `example.com/plot.png` call the local file API.
+  const clean = stripLocationSuffix(normalizeLocalFileHref(trimmed));
+  if (!isImagePath(clean)) return false;
+  if (/^https?:\/\//i.test(trimmed)) return true;
+  // Bare hosts must not be sent to the local file API.
   if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[\\/]|$)/i.test(clean)) return false;
-  if (/^[A-Za-z]:[\\/]/.test(clean)) return true;
-  if (/^\.{1,2}[\\/]/.test(clean)) return true;
-  if (/^[A-Za-z0-9_.-]+[\\/]/.test(clean)) return true;
-  return /^[^\s"'`<>\\/]+\.(?:png|jpe?g|gif|webp|svg|bmp)$/i.test(clean);
+  if (/^[a-z][a-z\d+.-]*:/i.test(clean) && !/^[a-z]:[\\/]/i.test(clean)) return false;
+  return !/[\x00\r\n<>"`|?*]/.test(clean);
 }
 
 export function isDirectImageSource(value: string | null | undefined): value is string {
-  return Boolean(value && DIRECT_IMAGE_SOURCE_RE.test(decodeHref(value.trim())));
+  return Boolean(value && DIRECT_IMAGE_SOURCE_RE.test(value.trim()));
 }
 
 function mimeTypeFromPath(path: string): string {
-  // PNG rather than a generic binary type: the caller already decided this is
-  // an image, and an unknown extension is usually a staged screenshot.
   return imageMimeType(stripLocationSuffix(path), "image/png");
 }
 
 function bytesToObjectUrl(bytes: ArrayBuffer, mimeType: string): string {
-  const blob = new Blob([bytes], { type: mimeType });
-  return URL.createObjectURL(blob);
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
 interface Props {
@@ -58,48 +45,40 @@ interface Props {
   alt?: string;
   title?: string;
   className?: string;
-  /**
-   * Local file behind the image. Clicking opens it in SomniQ's own viewer; the
-   * operating system's image application stays available from there, but is no
-   * longer what a plain click launches.
-   */
+  /** Original local file, when src is already a data/blob/asset URL. */
   openPath?: string;
+  /** Override the built-in viewer, for example the image workflow's gallery. */
   onClick?: () => void;
-  /**
-   * Declared type for callers that already know `src` is an image — chat
-   * attachments carry the browser's own MIME type. It overrides the extension
-   * sniffing, which is only a guess and is wrong for anything staged under a
-   * rewritten name (older uploads landed as `shot.png.pdf`).
-   */
+  /** Disable a second viewer when displaying an image inside a custom viewer. */
+  interactive?: boolean;
+  /** Uploaded images can have a staged name that does not match their type. */
   mimeType?: string;
 }
 
 export default function ChatImagePreview({
-  src,
-  alt,
-  title,
-  className,
-  openPath,
-  onClick,
-  mimeType,
+  src, alt, title, className, openPath, onClick, interactive = true, mimeType,
 }: Props) {
-  const normalizedSrc = useMemo(() => decodeHref(src.trim()), [src]);
+  const language = useStore((state) => state.language);
+  // Remote query strings and percent-encoded data URLs are opaque image data.
+  const normalizedSrc = useMemo(() => isDirectImageSource(src) ? src.trim() : normalizeLocalFileHref(src), [src]);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const declaredImageType = mimeType?.startsWith("image/") ? mimeType : null;
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
   const previewableLocalPath = (declaredImageType !== null && normalizedSrc.length > 0)
     || isPreviewableImagePath(normalizedSrc);
   const displaySrc = directSrc ?? objectUrl;
-  const canOpen = Boolean(openPath || onClick);
+  const imagePath = openPath ?? (directSrc ? undefined : stripLocationSuffix(normalizedSrc));
+
+  useEffect(() => setLightboxOpen(false), [normalizedSrc, openPath]);
 
   useEffect(() => {
     setFailed(false);
     setObjectUrl(null);
     setImgLoaded(false);
-    setLightboxOpen(false);
     if (directSrc || !previewableLocalPath) return;
 
     let disposed = false;
@@ -111,7 +90,10 @@ export default function ChatImagePreview({
       : fileReadBytes(localPath).then((bytes) => bytesToObjectUrl(bytes, localType));
     void imageUrlPromise
       .then((imageUrl) => {
-        if (disposed) return;
+        if (disposed) {
+          if (imageUrl.startsWith("blob:")) URL.revokeObjectURL(imageUrl);
+          return;
+        }
         url = imageUrl.startsWith("blob:") ? imageUrl : null;
         setObjectUrl(imageUrl);
       })
@@ -123,87 +105,63 @@ export default function ChatImagePreview({
       disposed = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [declaredImageType, directSrc, normalizedSrc, previewableLocalPath]);
+  }, [declaredImageType, directSrc, normalizedSrc, previewableLocalPath, reloadKey]);
 
   if (!directSrc && !previewableLocalPath) return null;
 
-  if (failed) {
-    return (
-      <button
-        type="button"
-        className={`chat-image-fallback${className ? ` ${className}` : ""}`}
-        onClick={() => {
-          if (openPath) void fileOpen(openPath).catch(() => undefined);
-        }}
-      >
-        {title ?? alt ?? normalizedSrc}
-      </button>
-    );
-  }
-
-  // An image has no size until its bytes arrive, so a transcript row containing
-  // one measures three different heights (loading badge, empty img, loaded img)
-  // and grows under the reader twice. Replaying the height this image rendered at
-  // last time means the row measures its final height on the first paint.
   const reserved = readRenderedHeight(normalizedSrc);
   const reserveStyle: CSSProperties | undefined = reserved && !imgLoaded
     ? { minHeight: reserved }
     : undefined;
-
-  if (!displaySrc) {
-    return (
-      <span
-        className={`chat-image-loading${className ? ` ${className}` : ""}`}
+  const image = failed ? (
+    <span>{language === "cn" ? "无法加载图片" : "Could not load image"} · {title ?? alt ?? normalizedSrc}</span>
+  ) : !displaySrc ? (
+    <span className="chat-image-loading" style={reserveStyle}>{title ?? alt ?? (language === "cn" ? "正在读取图片…" : "Loading image…")}</span>
+  ) : (
+    <>
+      <img
+        key={reloadKey}
+        className={`chat-image-preview-img ${imgLoaded ? "sq-loaded" : "sq-loading"}`}
+        src={displaySrc}
+        data-image-path={imagePath}
+        alt={alt ?? title ?? ""}
+        loading="lazy"
+        decoding="async"
         style={reserveStyle}
-      >
-        {title ?? alt ?? "Loading image..."}
-      </span>
-    );
-  }
-
-  const image = (
-    <img
-      className={`chat-image-preview-img ${imgLoaded ? "sq-loaded" : "sq-loading"}`}
-      src={displaySrc}
-      alt={alt ?? title ?? ""}
-      loading="lazy"
-      decoding="async"
-      style={reserveStyle}
-      onLoad={(event) => {
-        rememberRenderedHeight(normalizedSrc, event.currentTarget.offsetHeight);
-        setImgLoaded(true);
-      }}
-      onError={() => setFailed(true)}
-    />
+        onLoad={(event) => {
+          rememberRenderedHeight(normalizedSrc, event.currentTarget.offsetHeight);
+          setImgLoaded(true);
+        }}
+        onError={() => setFailed(true)}
+      />
+      {title && (openPath || onClick) && <span className="chat-image-caption">{title}</span>}
+    </>
   );
+  const previewClass = `${failed ? "chat-image-fallback" : "chat-image-preview"}${className ? ` ${className}` : ""}`;
 
-  if (!canOpen) {
-    return <span className={`chat-image-preview${className ? ` ${className}` : ""}`}>{image}</span>;
-  }
+  if (!interactive) return <span className={previewClass} data-image-path={imagePath}>{image}</span>;
 
   return (
     <>
       <button
         type="button"
-        className={`chat-image-preview chat-image-preview-button${className ? ` ${className}` : ""}`}
-        title={title ?? "Open image"}
-        onClick={() => {
-          onClick?.();
-          if (openPath) setLightboxOpen(true);
-        }}
+        className={`${previewClass} chat-image-preview-button`}
+        data-image-path={imagePath}
+        title={title ?? (language === "cn" ? "查看图片" : "Open image")}
+        aria-haspopup={onClick ? undefined : "dialog"}
+        onClick={() => onClick ? onClick() : setLightboxOpen(true)}
       >
         {image}
-        {title && <span className="chat-image-caption">{title}</span>}
       </button>
-      {lightboxOpen && openPath && (
-        // Rendered as a sibling, not a child: a portal nested inside the button
-        // would still bubble its clicks back through the React tree and reopen
-        // the viewer the moment it is closed.
+      {lightboxOpen && (
+        // Keep the portal outside the trigger so closing cannot reopen it.
         <ImageLightbox
           src={displaySrc}
           alt={alt}
           title={title}
-          path={openPath}
+          path={imagePath}
+          loadError={failed}
+          onRetry={() => { setFailed(false); setReloadKey((value) => value + 1); }}
           onClose={() => setLightboxOpen(false)}
         />
       )}

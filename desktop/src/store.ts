@@ -19,8 +19,9 @@ import {
   type NewApiLoginResult,
 } from "./api/tauri";
 import { isTypesetPreviewMode } from "./api/browserPreview";
-import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
-import { ACCOUNT_CACHE_KEY, ACCOUNT_LEGACY_CACHE_KEY, clearCachedUsageLogPages } from "./accountCache";
+import { formatUserFacingError } from "./errorMessage";
+import { clearCachedUsageLogPages, writeCachedAccount } from "./accountCache";
+import { clearModelPricingCache } from "./modelPricingState";
 import { isMacOS } from "./platform";
 import { MANAGED_NEWAPI_BASE_URL, approvedManagedNewApiBaseUrl } from "./managedNewApi";
 import {
@@ -249,13 +250,9 @@ const DEFAULT_MODEL = "MiniMax-M3";
 
 export function isManagedAuthInvalidError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
-  return (
-    AUTH_SESSION_EXPIRED_NEEDLES.some((needle) => lower.includes(needle)) ||
-    AUTH_TOKEN_INVALID_NEEDLES.some((needle) => lower.includes(needle)) ||
-    lower.includes("401 unauthorized") ||
-    (lower.includes("unauthorized") && lower.includes("token"))
-  );
+  // The backend emits this only after confirming that sign-in cannot renew.
+  // A model key or temporary access token can also return 401/Invalid token.
+  return message.trim().toLowerCase() === "login expired. please sign in again.";
 }
 
 function readStoredServer(): string {
@@ -287,7 +284,6 @@ async function persistManagedAuthResult(result: NewApiLoginResult, language: Lan
     executorProvider: "openai",
     executorModel: result.model,
     executorBaseUrl: result.baseUrl,
-    executorApiKey: result.token,
     language,
   });
 }
@@ -315,11 +311,11 @@ function rememberAuthServer(server: string) {
 function clearStoredAuth() {
   // In-memory caches first: they outlive the signed-out session otherwise.
   clearCachedUsageLogPages();
+  writeCachedAccount(null);
+  clearModelPricingCache();
   try {
     localStorage.removeItem(AUTH_FLAG_KEY);
     localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
-    localStorage.removeItem(ACCOUNT_CACHE_KEY);
-    localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
   } catch {
     // Ignore unavailable browser storage.
   }

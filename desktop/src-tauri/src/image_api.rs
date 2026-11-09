@@ -150,12 +150,13 @@ impl PreparedFigureImage {
             }
         })
     }
-    pub fn generate(&self, workspace: &Path, cancelled: Arc<AtomicBool>) -> Result<Value, String> {
+    pub fn generate(&self, workspace: &Path, figure_id: &str, cancelled: Arc<AtomicBool>) -> Result<Value, String> {
         let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
         let result = runtime.block_on(generate_with_cancel(&self.client, &self.request, Vec::new(), &cancelled))?;
         let run_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(24).map(char::from).collect();
-        save_result(&workspace, &run_id, &self.request, &[], result)
+        let directory = runtime::figures::directory(&workspace, figure_id)?;
+        save_result_in_directory(&workspace, &directory, &run_id, &self.request, &[], result)
     }
 }
 
@@ -315,6 +316,17 @@ fn save_result(
     result: api::ImageGenerationResult,
 ) -> Result<Value, String> {
     let directory = artifact_directory(workspace, run_id)?;
+    save_result_in_directory(workspace, &directory, run_id, request, files, result)
+}
+
+fn save_result_in_directory(
+    workspace: &Path,
+    directory: &Path,
+    run_id: &str,
+    request: &ImageGenerationRequest,
+    files: &[String],
+    result: api::ImageGenerationResult,
+) -> Result<Value, String> {
     let mut images = Vec::new();
     for (index, image) in result.images.into_iter().enumerate() {
         let path = directory.join(format!("image-{}.{}", index + 1, image.extension));

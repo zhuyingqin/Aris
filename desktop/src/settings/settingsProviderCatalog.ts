@@ -1,7 +1,4 @@
-import type { Language } from "../store";
-import type { ConfigView } from "../types";
-import { SETTINGS_COPY } from "./i18n";
-import { LEGACY_MANAGED_NEWAPI_BASE_URL, MANAGED_NEWAPI_BASE_URL, isLegacyManagedNewApiUrl } from "../managedNewApi";
+import { MANAGED_NEWAPI_BASE_URL, isLegacyManagedNewApiUrl } from "../managedNewApi";
 
 export interface PresetOption {
   label: string;
@@ -215,56 +212,4 @@ export function isManagedModelServerUrl(value: string | null | undefined): boole
   const normalized = (value ?? "").trim().replace(/\/+$/, "").toLowerCase();
   const managed = MANAGED_MODEL_SERVER_BASE_URL.toLowerCase();
   return !!managed && (normalized === managed || normalized === `${managed}/v1`);
-}
-
-export function displayServerValue(value: string, language: Language): string {
-  return isManagedModelServerUrl(value) ? SETTINGS_COPY[language].providers.managedModelServerLabel : value;
-}
-
-export function hideManagedServerAddress(value: string, language: Language): string {
-  const escaped = [MANAGED_MODEL_SERVER_BASE_URL, LEGACY_MANAGED_NEWAPI_BASE_URL]
-    .filter(Boolean)
-    .map((base) => base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  if (escaped.length === 0) return value;
-  return value.replace(new RegExp(`(?:${escaped.join("|")})(?:/v1)?`, "gi"), SETTINGS_COPY[language].providers.managedModelServerLabel);
-}
-
-export function suggestModels(url: string): string[] {
-  const lower = url.toLowerCase();
-  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-6-astra", "gpt-5.5"];
-  if (lower.includes("minimaxi.com")) return ["MiniMax-M3", "MiniMax-M2.7"];
-  if (lower.includes("deepseek.com")) return ["deepseek-v4-pro"];
-  if (lower.includes("openai.com")) return ["gpt-6-astra", "gpt-5.5", "gpt-5.4", "gpt-4o"];
-  if (lower.includes("bigmodel.cn")) return ["GLM-5", "GLM-5-Turbo"];
-  if (lower.includes("moonshot.cn")) return ["kimi-k2.5"];
-  if (lower.includes("anthropic.com") || lower.includes("newcli.com") || lower.includes("modelscope.cn")) return ["claude-opus-4-7", "claude-sonnet-4-6", "claude-fable-5.1", "claude-fable-5"];
-  if (lower.includes("dashscope.aliyuncs.com")) return ["qwen3.6-plus"];
-  if (lower.includes("volces.com")) return ["doubao-pro-4k"];
-  if (lower.includes("openrouter.ai")) return ["anthropic/claude-sonnet-4-6"];
-  return [];
-}
-
-export function formatServerLabel(server: string, language: Language, provider?: string): string {
-  const copy = SETTINGS_COPY[language].providers;
-  const source = server.trim() || provider?.trim() || "";
-  if (!source || source === "unknown") return copy.unknownLabel;
-  if (isManagedModelServerUrl(source)) return copy.managedModelServerLabel;
-  if (source === "OpenAI-compatible") return copy.protocolOpenAiCompatible;
-  if (source === "Anthropic-compatible") return copy.protocolAnthropicCompatible;
-  try {
-    const url = new URL(source);
-    return url.host || source;
-  } catch {
-    return source;
-  }
-}
-
-export function configuredServerLabel(config: ConfigView, language: Language): string {
-  const baseUrl = config.executorBaseUrl?.trim();
-  if (baseUrl) return formatServerLabel(baseUrl, language, config.executorProvider ?? undefined);
-  return config.executorProvider === "anthropic" ? "api.anthropic.com" : (config.executorProvider || SETTINGS_COPY[language].providers.serverNotConfigured);
-}
-
-export function providerKey(provider: string | null | undefined, baseUrl: string | null | undefined): string {
-  return `${provider?.trim() || detectProtocol(baseUrl ?? "")}::${(baseUrl ?? "").trim().replace(/\/+$/, "").toLowerCase()}`;
 }

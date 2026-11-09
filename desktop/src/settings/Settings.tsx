@@ -7,8 +7,8 @@ import {
 import { hasNativeBackend } from "../api/transport";
 import { isManagedAuthInvalidError, useStore } from "../store";
 import { formatUserFacingError } from "../errorMessage";
-import { readCachedAccount, writeCachedAccount } from "../accountCache";
-import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "../settingsTabRequest";
+import { getAccountSessionRevision, readCachedAccount, subscribeCachedAccount, writeCachedAccount } from "../accountCache";
+import { resolveSettingsTabRequest, SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY } from "../settingsTabRequest";
 import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
@@ -25,7 +25,6 @@ import {
   SETTINGS_NAV_GROUPS,
   SETTINGS_NAV_GROUP_LABELS,
   SETTINGS_NAV_LABELS,
-  resolveSettingsPageId,
   type SettingsPageId,
 } from "./settingsNav";
 import { PREVIEW_SETTINGS_DATA } from "./settingsPreviewData";
@@ -36,12 +35,12 @@ import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
 
 type SettingsTab = SettingsPageId;
 
-function readRequestedSettingsTab(): SettingsTab | null {
+function readRequestedSettingsTab(): SettingsTab | "membership" | null {
   try {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const fromUrl = params.get("settingsTab") || params.get("settings");
-      const requested = resolveSettingsPageId(fromUrl);
+      const requested = resolveSettingsTabRequest(fromUrl);
       if (requested) return requested;
     }
   } catch {
@@ -49,7 +48,7 @@ function readRequestedSettingsTab(): SettingsTab | null {
   }
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
-    const resolved = resolveSettingsPageId(value);
+    const resolved = resolveSettingsTabRequest(value);
     if (resolved) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       return resolved;
@@ -78,13 +77,29 @@ export default function Settings() {
   const [account, setAccount] = useState<NewApiAccount | null>(() => hasNativeBackend() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
+  const accountRequestRef = useRef(0);
+  const [initialRequest] = useState(readRequestedSettingsTab);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(initialRequest === "membership" ? "profile" : initialRequest ?? "general");
+  const [membershipOpen, setMembershipOpen] = useState(initialRequest === "membership");
   // Keep forms mounted after their first visit so category switches retain drafts.
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set([activeSettingsTab]));
   const preferences = usePreferenceSave();
   const navRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const scrollPositions = useRef(new Map<SettingsTab, number>());
+
+  useEffect(() => {
+    const unsubscribe = subscribeCachedAccount((next) => {
+      setAccount(next);
+      setAccountError("");
+      setManagedModels(next?.models ?? []);
+      setConfigView((current) => current ? { ...current, managedModels: next?.models ?? [] } : current);
+    });
+    return () => {
+      accountRequestRef.current += 1;
+      unsubscribe();
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = scrollPositions.current.get(activeSettingsTab) ?? 0;
@@ -133,9 +148,14 @@ export default function Settings() {
     }
     setAccountLoading(true);
     setAccountError("");
+    const request = ++accountRequestRef.current;
+    const session = getAccountSessionRevision();
+    const isCurrent = () => accountRequestRef.current === request && getAccountSessionRevision() === session;
     try {
-      applyRefreshedAccount(await newapiBootstrap());
+      const next = await newapiBootstrap();
+      if (isCurrent()) applyRefreshedAccount(next);
     } catch (error) {
+      if (!isCurrent()) return;
       const message = formatUserFacingError(error, language);
       setAccountError(message);
       if (isManagedAuthInvalidError(error)) {
@@ -144,7 +164,7 @@ export default function Settings() {
         logout();
       }
     } finally {
-      setAccountLoading(false);
+      if (accountRequestRef.current === request) setAccountLoading(false);
     }
   };
 
@@ -156,8 +176,9 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    const openRequestedTab = (tab: SettingsTab) => {
-      setActiveSettingsTab(tab);
+    const openRequestedTab = (tab: SettingsTab | "membership") => {
+      setActiveSettingsTab(tab === "membership" ? "profile" : tab);
+      if (tab === "membership") setMembershipOpen(true);
       try {
         sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       } catch {
@@ -166,7 +187,7 @@ export default function Settings() {
     };
     const onSettingsTabRequest = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
-      const resolved = resolveSettingsPageId(detail);
+      const resolved = resolveSettingsTabRequest(detail);
       if (resolved) {
         openRequestedTab(resolved);
         return;
@@ -242,6 +263,8 @@ export default function Settings() {
               account={account}
               accountLoading={accountLoading}
               active={activeSettingsTab === "profile"}
+              purchaseOpen={membershipOpen}
+              onPurchaseOpenChange={setMembershipOpen}
               onRefreshAccount={loadAccount}
             >{activity}</AccountSettings> : activity}
           />

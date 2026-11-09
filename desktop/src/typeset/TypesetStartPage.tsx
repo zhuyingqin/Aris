@@ -1,12 +1,13 @@
-// The empty-state landing surface: recent documents, library templates and the
-// "new paper" flow that seeds a workspace.
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+// Browse the local LaTeX library by project and source folder.
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { fileReveal, type TypesetDocument, type TypesetProject } from "../api/tauri";
 import { handoffEnvironmentInstall } from "../environmentInstall";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { FileIcon } from "./FileIcon";
-import { basename, dirname } from "./latexText";
+import { ToolIcon } from "./ToolIcon";
+import { basename, dirname, normalizePath } from "./latexText";
+import { buildTypesetLibraryFolders, typesetLibraryRows } from "./typesetLibraryFolders";
 import {
   documentCompileLabel,
   documentKindLabel,
@@ -18,68 +19,18 @@ import {
 } from "./TypesetLibraryCopy";
 
 const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
-import { ToolIcon } from "./ToolIcon";
+const TYPESET_LIBRARY_FOLDERS_STORAGE_PREFIX = "somniq-typeset-library-folders:";
 
 type TypesetLibraryPreferences = Record<string, { favorite?: boolean; archived?: boolean }>;
 
-type TypesetLibraryProject = {
-  key: string;
-  folderPath: string;
-  folderName: string;
-  texFileCount: number;
-  documents: TypesetDocument[];
-  modifiedEpochMs: number;
-};
-
-const PROJECT_ROOT_KEY = "__project-root__";
-
-/** Groups documents under the first-level project folder the backend reported,
- *  so chapter folders stay inside their project instead of listing as one
- *  library entry each. Projects that only hold include files still show up:
- *  holding a `.tex` file is what makes a folder a LaTeX project. */
-function groupTypesetDocuments(
-  projects: TypesetProject[],
-  documents: TypesetDocument[],
-  projectRootLabel: string,
-  sort: "modified" | "title",
-  keepEmptyProjects: boolean,
-): TypesetLibraryProject[] {
-  const groups = new Map<string, TypesetLibraryProject>();
-  const groupFor = (folderPath: string, texFileCount: number, name?: string) => {
-    const key = folderPath || PROJECT_ROOT_KEY;
-    const existing = groups.get(key);
-    if (existing) return existing;
-    const group: TypesetLibraryProject = {
-      key,
-      folderPath,
-      folderName: folderPath ? (name || basename(folderPath)) : projectRootLabel,
-      texFileCount,
-      documents: [],
-      modifiedEpochMs: 0,
-    };
-    groups.set(key, group);
-    return group;
-  };
-
-  for (const project of projects) {
-    const group = groupFor(project.path, project.texFileCount, project.name);
-    group.modifiedEpochMs = Math.max(group.modifiedEpochMs, project.modifiedEpochMs);
+function loadFolderExpansion(projectPath: string | null): Record<string, boolean> {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(`${TYPESET_LIBRARY_FOLDERS_STORAGE_PREFIX}${projectPath || "default"}`) || "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, expanded]) => typeof expanded === "boolean"));
+  } catch {
+    return {};
   }
-  for (const document of documents) {
-    // A document without a known project predates the project scan (optimistic
-    // inserts); fall back to its own folder so it never disappears.
-    const group = groupFor(document.projectPath ?? dirname(document.path), 0);
-    group.documents.push(document);
-    group.modifiedEpochMs = Math.max(group.modifiedEpochMs, document.modifiedEpochMs);
-    group.texFileCount = Math.max(group.texFileCount, group.documents.length);
-  }
-  return Array.from(groups.values())
-    .filter((group) => keepEmptyProjects || group.documents.length > 0)
-    .sort((left, right) => (
-      sort === "title"
-        ? left.folderName.localeCompare(right.folderName) || left.folderPath.localeCompare(right.folderPath)
-        : right.modifiedEpochMs - left.modifiedEpochMs || left.folderName.localeCompare(right.folderName)
-    ));
 }
 
 function typesetLibraryPreferenceKey(projectPath: string | null): string {
@@ -132,7 +83,8 @@ export default function TypesetStartPage({
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"modified" | "title">("modified");
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
-  const [projectExpansion, setProjectExpansion] = useState<Record<string, boolean>>({});
+  const [folderExpansion, setFolderExpansion] = useState(() => loadFolderExpansion(projectPath));
+  const [searchExpansion, setSearchExpansion] = useState<Record<string, boolean>>({});
   const [preferences, setPreferences] = useState<TypesetLibraryPreferences>(() => loadTypesetLibraryPreferences(projectPath));
   const [createOpen, setCreateOpen] = useState(false);
   const [template, setTemplate] = useState<TypesetTemplate>("article");
@@ -143,9 +95,28 @@ export default function TypesetStartPage({
     setScope("all");
     setSearch("");
     setSelectedPaths(new Set());
-    setProjectExpansion({});
+    setFolderExpansion(loadFolderExpansion(projectPath));
+    setSearchExpansion({});
     setPreferences(loadTypesetLibraryPreferences(projectPath));
   }, [projectPath]);
+
+  useEffect(() => setSearchExpansion({}), [search.trim(), scope]);
+
+  const updateFolderExpansion = (update: (current: Record<string, boolean>) => Record<string, boolean>) => {
+    if (search.trim()) {
+      setSearchExpansion(update);
+      return;
+    }
+    setFolderExpansion((current) => {
+      const next = update(current);
+      try {
+        window.localStorage.setItem(`${TYPESET_LIBRARY_FOLDERS_STORAGE_PREFIX}${projectPath || "default"}`, JSON.stringify(next));
+      } catch {
+        // Browsing remains available when local storage is full or disabled.
+      }
+      return next;
+    });
+  };
 
   const updatePreferences = useCallback((update: (current: TypesetLibraryPreferences) => TypesetLibraryPreferences) => {
     setPreferences((current) => {
@@ -190,21 +161,36 @@ export default function TypesetStartPage({
     };
     return documents
       .filter(matchesScope)
-      .filter((document) => !needle || `${document.title} ${document.path} ${document.kind}`.toLocaleLowerCase().includes(needle))
-      .sort((left, right) => sort === "title"
-        ? left.title.localeCompare(right.title) || left.path.localeCompare(right.path)
-        : right.modifiedEpochMs - left.modifiedEpochMs || left.title.localeCompare(right.title));
-  }, [documents, preferences, scope, search, sort]);
+      .filter((document) => !needle || `${document.title} ${document.path} ${document.kind}`.toLocaleLowerCase().includes(needle));
+  }, [documents, preferences, scope, search]);
 
-  const visiblePathSet = useMemo(() => new Set(visibleDocuments.map((document) => document.path)), [visibleDocuments]);
   // Only the unfiltered library lists projects that hold no root document:
   // inside a search or a category they would read as false matches.
   const keepEmptyProjects = !search.trim() && (scope === "all" || scope === "recent");
   const visibleProjects = useMemo(
-    () => groupTypesetDocuments(projects, visibleDocuments, copy.projectRoot, sort, keepEmptyProjects),
-    [copy.projectRoot, keepEmptyProjects, projects, sort, visibleDocuments],
+    () => {
+      const owner = (document: TypesetDocument) => normalizePath(document.projectPath ?? dirname(document.path));
+      const knownOwners = new Set(documents.map(owner));
+      const visibleOwners = new Set(visibleDocuments.map(owner));
+      // A folder containing only archived documents should not masquerade as
+      // an include-only project in the active library.
+      const metadata = projects.filter((project) => !knownOwners.has(normalizePath(project.path)) || visibleOwners.has(normalizePath(project.path)));
+      return buildTypesetLibraryFolders(metadata, visibleDocuments, copy.projectRoot, sort, keepEmptyProjects);
+    },
+    [copy.projectRoot, documents, keepEmptyProjects, projects, sort, visibleDocuments],
   );
-  const allVisibleSelected = visibleDocuments.length > 0 && visibleDocuments.every((document) => selectedPaths.has(document.path));
+  const rows = useMemo(() => typesetLibraryRows(visibleProjects, (folder, depth) => {
+    const saved = (search.trim() ? searchExpansion : folderExpansion)[folder.path];
+    return typeof saved === "boolean" ? saved : Boolean(search.trim())
+      || (depth === 0 && folder.folders.length === 0 && folder.documentCount <= 1);
+  }), [folderExpansion, search, searchExpansion, visibleProjects]);
+  const visiblePathSet = useMemo(() => new Set(rows.flatMap((row) => row.kind === "document" ? [row.document.path] : [])), [rows]);
+  const allVisibleSelected = visiblePathSet.size > 0 && [...visiblePathSet].every((path) => selectedPaths.has(path));
+  const setAllFoldersExpanded = (expanded: boolean) => {
+    const updates = Object.fromEntries(typesetLibraryRows(visibleProjects, () => true)
+      .flatMap((row) => row.kind === "folder" ? [[row.folder.path, expanded]] : []));
+    updateFolderExpansion((current) => ({ ...current, ...updates }));
+  };
   const title = copy.scopes[scope];
 
   const toggleSelection = (path: string) => {
@@ -360,13 +346,17 @@ export default function TypesetStartPage({
             </label>
           </div>
 
+          <div className="typeset-library-folder-controls" role="group" aria-label={copy.folderControls}>
+            <button type="button" onClick={() => setAllFoldersExpanded(true)} disabled={loading || visibleDocuments.length === 0}>{copy.expandAllFolders}</button>
+            <button type="button" onClick={() => setAllFoldersExpanded(false)} disabled={loading || visibleDocuments.length === 0}>{copy.collapseAllFolders}</button>
+          </div>
           {actionError && <div className="typeset-error-bar typeset-library-action-error">{actionError}</div>}
           <div className="typeset-library-table-wrap">
             <table className="typeset-library-table">
               <thead>
                 <tr>
                   <th className="typeset-library-select-col">
-                    <input type="checkbox" aria-label={copy.selectVisible} checked={allVisibleSelected} onChange={toggleSelectVisible} />
+                    <input type="checkbox" aria-label={copy.selectVisible} checked={allVisibleSelected} disabled={visiblePathSet.size === 0} onChange={toggleSelectVisible} />
                   </th>
                   <th>{copy.table.document}</th>
                   <th>{copy.table.type}</th>
@@ -376,49 +366,43 @@ export default function TypesetStartPage({
                 </tr>
               </thead>
               <tbody>
-                {visibleProjects.map((project) => {
-                  // A project holding only include files has nothing to reveal,
-                  // so it stays collapsed rather than opening onto an empty list.
-                  const expanded = projectExpansion[project.key] ?? (project.documents.length > 0 && project.documents.length <= 1);
-                  // A `main.tex` sitting in the project folder itself wins over a
-                  // chapter-level one, which is only a root document by accident.
-                  const isMainTex = (document: TypesetDocument) => basename(document.path).toLowerCase() === "main.tex";
-                  const primaryDocument = project.documents.find((document) => isMainTex(document) && dirname(document.path) === project.folderPath)
-                    ?? project.documents.find(isMainTex)
-                    ?? project.documents[0];
-                  return (
-                    <Fragment key={project.key}>
-                      <tr className="typeset-library-project-row">
+                {rows.map((row) => {
+                  const rowStyle = { "--typeset-library-depth": row.depth } as CSSProperties;
+                  if (row.kind === "folder") {
+                    const { folder, expanded, depth } = row;
+                    return (
+                      <tr key={`folder:${folder.path}`} className={`typeset-library-project-row${depth > 0 ? " typeset-library-subfolder-row" : ""}`} style={rowStyle}>
                         <td colSpan={6}>
                           <div className="typeset-library-project-header">
                             <button
                               type="button"
                               className="typeset-library-project-toggle"
-                              aria-label={copy.toggleProject(project.folderName, expanded)}
+                              aria-label={depth === 0 ? copy.toggleProject(folder.name, expanded) : copy.toggleFolder(folder.name, expanded)}
                               aria-expanded={expanded}
-                              onClick={() => setProjectExpansion((current) => ({
+                              disabled={folder.documentCount === 0}
+                              onClick={() => updateFolderExpansion((current) => ({
                                 ...current,
-                                [project.key]: !expanded,
+                                [folder.path]: !expanded,
                               }))}
                             >
                               <span className="typeset-library-project-caret"><ToolIcon name="chevron" /></span>
-                              <FileIcon path={project.folderPath || copy.projectRoot} dir />
+                              <FileIcon path={folder.path || copy.projectRoot} dir />
                               <span className="typeset-library-project-copy">
-                                <strong>{project.folderName}</strong>
-                                <em title={project.folderPath || copy.projectRoot}>{project.folderPath || copy.projectRoot}</em>
+                                <strong>{folder.name}</strong>
+                                <em title={folder.path || copy.projectRoot}>{folder.path || copy.projectRoot}</em>
                               </span>
                               <span className="typeset-library-project-count">
-                                {copy.documentsInProject(project.documents.length)}
-                                <i>{copy.texFilesInProject(project.texFileCount)}</i>
+                                {copy.documentsInProject(folder.documentCount)}
+                                {folder.texFileCount !== undefined && <i>{copy.texFilesInProject(folder.texFileCount)}</i>}
                               </span>
                             </button>
-                            {primaryDocument && (
+                            {folder.primaryDocument && (
                               <button
                                 type="button"
                                 className="typeset-library-project-open"
-                                title={copy.openProject(project.folderName)}
-                                aria-label={copy.openProject(project.folderName)}
-                                onClick={() => onOpenSource(primaryDocument.path)}
+                                title={depth === 0 ? copy.openProject(folder.name) : copy.openFolderDocument(folder.name)}
+                                aria-label={depth === 0 ? copy.openProject(folder.name) : copy.openFolderDocument(folder.name)}
+                                onClick={() => onOpenSource(folder.primaryDocument!.path)}
                               >
                                 <ToolIcon name="open" />
                               </button>
@@ -426,52 +410,44 @@ export default function TypesetStartPage({
                           </div>
                         </td>
                       </tr>
-                      {expanded && project.documents.map((document) => {
-                        const archived = Boolean(preferences[document.path]?.archived);
-                        const favorite = Boolean(preferences[document.path]?.favorite);
-                        return (
-                          <tr
-                            key={document.path}
-                            className={archived ? "typeset-library-project-document archived" : "typeset-library-project-document"}
-                            onDoubleClick={() => onOpenSource(document.path)}
-                          >
-                            <td className="typeset-library-select-col">
-                              <input
-                                type="checkbox"
-                                aria-label={copy.selectDocument(document.title)}
-                                checked={selectedPaths.has(document.path)}
-                                onChange={() => toggleSelection(document.path)}
-                              />
-                            </td>
-                            <td>
-                              <button type="button" className="typeset-library-document" onClick={() => onOpenSource(document.path)}>
-                                <FileIcon path={document.path} />
-                                <span>
-                                  <strong>{document.title}</strong>
-                                  <em title={document.path}>{dirname(document.path) || copy.projectRoot}</em>
-                                </span>
-                              </button>
-                            </td>
-                            <td><span className={`typeset-library-kind ${document.kind}`}>{documentKindLabel(document.kind, language)}</span></td>
-                            <td><time dateTime={new Date(document.modifiedEpochMs).toISOString()}>{documentRelativeTime(document.modifiedEpochMs, language)}</time></td>
-                            <td><span className={`typeset-library-status ${document.compileState}`}>{documentCompileLabel(document.compileState, language)}</span></td>
-                            <td className="typeset-library-actions-col">
-                              <div className="typeset-library-actions" aria-label={copy.actionsFor(document.title)}>
-                                <button type="button" title={copy.open} aria-label={copy.openDocument(document.title)} onClick={() => onOpenSource(document.path)}><ToolIcon name="open" /></button>
-                                <button type="button" title={copy.reveal} aria-label={copy.revealDocument(document.title)} onClick={() => revealDocument(document.path)}><ToolIcon name="files" /></button>
-                                <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}><SvgIcon name="star" size={16} /></button>
-                                <button type="button" title={archived ? copy.restore : copy.archive} aria-label={copy.archiveDocument(document.title, archived)} onClick={() => toggleArchived(document.path)}><ToolIcon name={archived ? "undo" : "download"} /></button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </Fragment>
+                    );
+                  }
+                  const { document } = row;
+                  const archived = Boolean(preferences[document.path]?.archived);
+                  const favorite = Boolean(preferences[document.path]?.favorite);
+                  return (
+                    <tr
+                      key={`document:${document.path}`}
+                      className={archived ? "typeset-library-project-document archived" : "typeset-library-project-document"}
+                      style={rowStyle}
+                      onDoubleClick={() => onOpenSource(document.path)}
+                    >
+                      <td className="typeset-library-select-col">
+                        <input type="checkbox" aria-label={copy.selectDocument(document.title)} checked={selectedPaths.has(document.path)} onChange={() => toggleSelection(document.path)} />
+                      </td>
+                      <td>
+                        <button type="button" className="typeset-library-document" onClick={() => onOpenSource(document.path)}>
+                          <FileIcon path={document.path} />
+                          <span><strong>{document.title}</strong><em title={document.path}>{document.title === basename(document.path) ? dirname(document.path) || copy.projectRoot : basename(document.path)}</em></span>
+                        </button>
+                      </td>
+                      <td><span className={`typeset-library-kind ${document.kind}`}>{documentKindLabel(document.kind, language)}</span></td>
+                      <td><time dateTime={new Date(document.modifiedEpochMs).toISOString()}>{documentRelativeTime(document.modifiedEpochMs, language)}</time></td>
+                      <td><span className={`typeset-library-status ${document.compileState}`}>{documentCompileLabel(document.compileState, language)}</span></td>
+                      <td className="typeset-library-actions-col">
+                        <div className="typeset-library-actions" aria-label={copy.actionsFor(document.title)}>
+                          <button type="button" title={copy.open} aria-label={copy.openDocument(document.title)} onClick={() => onOpenSource(document.path)}><ToolIcon name="open" /></button>
+                          <button type="button" title={copy.reveal} aria-label={copy.revealDocument(document.title)} onClick={() => revealDocument(document.path)}><ToolIcon name="files" /></button>
+                          <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}><SvgIcon name="star" size={16} /></button>
+                          <button type="button" title={archived ? copy.restore : copy.archive} aria-label={copy.archiveDocument(document.title, archived)} onClick={() => toggleArchived(document.path)}><ToolIcon name={archived ? "undo" : "download"} /></button>
+                        </div>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
             </table>
-            {!loading && visibleDocuments.length === 0 && (
+            {!loading && visibleProjects.length === 0 && (
               <div className="typeset-library-empty">
                 <ToolIcon name="files" />
                 <strong>{documents.length === 0 ? copy.emptyRootTitle : copy.emptyViewTitle}</strong>

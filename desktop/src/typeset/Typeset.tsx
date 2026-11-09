@@ -121,6 +121,7 @@ import {
   compileErrorHandlingStorageKey,
   loadCompileErrorHandling,
   loadCompileOnSave,
+  loadCompileTimeoutMinutes,
   loadLatexEngineChoice,
   loadMainDocument,
   loadPdfInverted,
@@ -128,6 +129,7 @@ import {
   projectScopedKey,
   writeStoredValue,
   COMPILE_ON_SAVE_STORAGE_PREFIX,
+  COMPILE_TIMEOUT_STORAGE_PREFIX,
   LATEX_ENGINE_STORAGE_PREFIX,
   MAIN_DOCUMENT_STORAGE_PREFIX,
   PDF_INVERT_STORAGE_KEY,
@@ -682,6 +684,7 @@ export default function Typeset() {
   const [compileErrorHandling, setCompileErrorHandling] = useState<CompileErrorHandling>(() => loadCompileErrorHandling(currentProject?.id));
   const [latexEngine, setLatexEngine] = useState<LatexEngineChoice>(() => loadLatexEngineChoice(currentProject?.id));
   const [compileOnSave, setCompileOnSave] = useState(() => loadCompileOnSave(currentProject?.id));
+  const [compileTimeoutMinutes, setCompileTimeoutMinutes] = useState(() => loadCompileTimeoutMinutes(currentProject?.id));
   const [mainDocumentPath, setMainDocumentPath] = useState<string | null>(() => loadMainDocument(currentProject?.id));
   const [pdfInverted, setPdfInverted] = useState(() => loadPdfInverted());
   const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
@@ -850,6 +853,7 @@ export default function Typeset() {
 
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
+    setCompileTimeoutMinutes(loadCompileTimeoutMinutes(currentProject?.id));
   }, [currentProject?.id]);
 
   // Citation completion reads the shared literature store. Loading it
@@ -997,6 +1001,14 @@ export default function Typeset() {
     writeStoredValue(
       projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, currentProject?.id),
       value ? "on" : "off",
+    );
+  }, [currentProject?.id]);
+
+  const setCompileTimeoutPreference = useCallback((value: number | null) => {
+    setCompileTimeoutMinutes(value);
+    writeStoredValue(
+      projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, currentProject?.id),
+      value === null ? null : String(value),
     );
   }, [currentProject?.id]);
 
@@ -3327,11 +3339,12 @@ export default function Typeset() {
         runId,
         compileErrorHandling === "continue",
         latexEngine === "auto" ? null : latexEngine,
+        compileTimeoutMinutes === null ? null : compileTimeoutMinutes * 60_000,
       );
       if (!ownsCompile()) return;
       setCompileResult(result);
       setDocumentRootPath(result.inputPath || compilePath);
-      const interrupted = result.interrupted;
+      const interrupted = result.interrupted && !result.timedOut;
       setCompileStatus(interrupted ? "idle" : result.success ? "success" : result.partialOutput ? "partial" : "error");
       // Reveal the log only when the build reported problems; a clean success
       // returns focus to the freshly rendered PDF.
@@ -4903,9 +4916,11 @@ export default function Typeset() {
                       onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
                       engine={latexEngine}
                       compileOnSave={compileOnSave}
+                      compileTimeoutMinutes={compileTimeoutMinutes}
                       inverted={pdfInverted}
                       onSetEngine={setLatexEnginePreference}
                       onSetCompileOnSave={setCompileOnSavePreference}
+                      onSetCompileTimeoutMinutes={setCompileTimeoutPreference}
                       onToggleInverted={togglePdfInverted}
                       onExportPdf={() => void exportPreviewPdf()}
                       onExportProject={() => void exportProjectArchive()}

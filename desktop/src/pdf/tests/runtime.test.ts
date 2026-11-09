@@ -64,6 +64,29 @@ describe("shared PDF.js runtime", () => {
     const request = mocks.getDocument.mock.calls[0][0] as { data: Uint8Array };
     expect(request.data).toEqual(source);
     expect(request.data).not.toBe(source);
+    expect(request).toMatchObject({
+      cMapUrl: new URL("pdfjs/cmaps/", globalThis.document.baseURI).href,
+      cMapPacked: true,
+    });
+  });
+
+  it("loads font maps from a nested app document instead of the worker's assets directory", async () => {
+    const base = globalThis.document.createElement("base");
+    base.href = "https://local.example/research/index.html";
+    globalThis.document.head.append(base);
+    vi.stubEnv("BASE_URL", "./");
+    mocks.getDocument.mockReturnValue({ promise: Promise.resolve({ destroy: vi.fn() }) });
+    try {
+      const { openPdfDocument } = await import("../runtime");
+      await openPdfDocument(new Uint8Array([37, 80, 68, 70]));
+      expect(mocks.getDocument).toHaveBeenCalledWith(expect.objectContaining({
+        cMapUrl: "https://local.example/research/pdfjs/cmaps/",
+        cMapPacked: true,
+      }));
+    } finally {
+      base.remove();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("preserves PDF bytes from an ArrayBuffer created in another realm", async () => {
@@ -108,6 +131,10 @@ describe("shared PDF.js runtime", () => {
     expect(request.rangeChunkSize).toBe(PDF_RANGE_CHUNK_SIZE);
     expect(request.disableStream).toBe(true);
     expect(request.disableAutoFetch).toBe(true);
+    expect(request).toMatchObject({
+      cMapUrl: new URL("pdfjs/cmaps/", globalThis.document.baseURI).href,
+      cMapPacked: true,
+    });
   });
 });
 

@@ -1,9 +1,9 @@
 use super::{
-    apply_bundled_internal_config, apply_deepseek_executor, apply_patch,
-    apply_reviewer_environment_from, build_view, clear_newapi_session, deepseek_executor_key,
+    apply_bundled_internal_config, apply_patch,
+    apply_reviewer_environment_from, build_view, clear_newapi_session,
     normalize_managed_model_slots, normalize_web_proxy_patch, read_verified, review_enabled_from,
-    sanitize_legacy_managed_http,
-    upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
+    review_mode_from, sanitize_legacy_managed_http,
+    upsert_verified, write_verified, ConfigPatch, ReviewMode, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -77,14 +77,9 @@ fn verified_registry_round_trips_through_json() {
 }
 
 #[test]
-fn builtin_deepseek_executor_uses_openai_responses_transport() {
-    let mut obj = Map::new();
-    apply_deepseek_executor(&mut obj, "deepseek-token".to_string());
-
-    assert_eq!(obj["executor_provider"], "openai");
-    assert_eq!(obj["executor_model"], "deepseek-v4-pro");
-    assert_eq!(obj["executor_base_url"], "https://api.deepseek.com/v1");
-    assert_eq!(obj["executor_transport"], "responses");
+fn retired_builtin_presets_do_not_offer_third_party_keys() {
+    assert!(super::builtin_executor_summaries().is_empty());
+    assert!(!super::switch_to_builtin_executor("deepseek-v4-pro").unwrap());
 }
 
 #[test]
@@ -121,11 +116,11 @@ fn managed_executor_update_does_not_require_admin_api_access() {
         ..Default::default()
     };
 
-    assert!(!patch.changes_admin_api_settings(&obj));
+    assert!(!patch.changes_external_api_settings(&obj));
 }
 
 #[test]
-fn manual_executor_api_update_requires_admin_api_access() {
+fn manual_executor_update_is_an_external_api_change() {
     let obj = serde_json::json!({
         "newapi_base_url": "http://gateway.example",
         "newapi_executor_base_url": "http://gateway.example/v1",
@@ -143,7 +138,7 @@ fn manual_executor_api_update_requires_admin_api_access() {
         ..Default::default()
     };
 
-    assert!(patch.changes_admin_api_settings(&obj));
+    assert!(patch.changes_external_api_settings(&obj));
 }
 
 #[test]
@@ -162,7 +157,7 @@ fn managed_reviewer_update_does_not_require_admin_api_access() {
         ..Default::default()
     };
 
-    assert!(!patch.changes_admin_api_settings(&obj));
+    assert!(!patch.changes_external_api_settings(&obj));
 }
 
 #[test]
@@ -183,7 +178,7 @@ fn managed_reviewer_disable_does_not_require_admin_api_access() {
         ..Default::default()
     };
 
-    assert!(!patch.changes_admin_api_settings(&obj));
+    assert!(!patch.changes_external_api_settings(&obj));
 }
 
 #[test]
@@ -215,6 +210,63 @@ fn automatic_review_defaults_off_and_can_be_enabled_without_clearing_reviewer() 
     assert_eq!(obj["reviewer_provider"], "openai");
     assert_eq!(obj["reviewer_model"], "gpt-5.5");
     assert_eq!(obj["reviewer_api_key"], "reviewer-token");
+}
+
+#[test]
+fn review_mode_defaults_to_the_thread_and_only_an_explicit_oneshot_goes_back() {
+    let mut obj = Map::new();
+    assert_eq!(review_mode_from(&obj), ReviewMode::Thread);
+    assert_eq!(build_view(&obj).review_mode, "thread");
+
+    for (stored, expected) in [
+        ("oneshot", ReviewMode::Oneshot),
+        ("  OneShot ", ReviewMode::Oneshot),
+        ("thread", ReviewMode::Thread),
+        // A typo must not quietly pick the old path.
+        ("one-shot", ReviewMode::Thread),
+        ("", ReviewMode::Thread),
+    ] {
+        obj.insert("review_mode".to_string(), Value::String(stored.to_string()));
+        assert_eq!(review_mode_from(&obj), expected, "{stored:?}");
+    }
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            review_mode: Some("Oneshot".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(obj["review_mode"], "oneshot");
+    assert_eq!(build_view(&obj).review_mode, "oneshot");
+    // Other settings leave it alone.
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            review_enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(obj["review_mode"], "oneshot");
+    // A blank or unknown value is "no preference": the key goes, the default returns.
+    for blank in ["", "  ", "sideways"] {
+        apply_patch(
+            &mut obj,
+            ConfigPatch {
+                review_mode: Some("oneshot".to_string()),
+                ..Default::default()
+            },
+        );
+        apply_patch(
+            &mut obj,
+            ConfigPatch {
+                review_mode: Some(blank.to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(!obj.contains_key("review_mode"), "{blank:?}");
+        assert_eq!(review_mode_from(&obj), ReviewMode::Thread);
+    }
 }
 
 #[test]
@@ -280,79 +332,22 @@ fn python_environment_path_round_trips_and_can_be_cleared() {
 }
 
 #[test]
-fn web_search_service_credentials_are_masked_persisted_and_exported() {
-    let _guard = crate::test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::env::remove_var("OPENALEX_API_KEY");
-    std::env::remove_var("BRAVE_SEARCH_API_KEY");
-    std::env::remove_var("EXA_API_KEY");
-    std::env::remove_var("ZHIHU_ACCESS_SECRET");
-
-    let mut obj = Map::new();
-    apply_patch(
-        &mut obj,
-        ConfigPatch {
-            openalex_api_key: Some("openalex-secret".to_string()),
-            bocha_api_key: Some("bocha-search-secret".to_string()),
-            brave_search_api_key: Some("brave-search-secret".to_string()),
-            exa_api_key: Some("exa-search-secret".to_string()),
-            zhihu_access_secret: Some("zhihu-access-secret".to_string()),
-            ..Default::default()
-        },
-    );
-
-    assert_eq!(obj["openalex_api_key"], "openalex-secret");
-    assert_eq!(obj["bocha_api_key"], "bocha-search-secret");
-    assert_eq!(obj["brave_search_api_key"], "brave-search-secret");
-    assert_eq!(obj["exa_api_key"], "exa-search-secret");
-    assert_eq!(obj["zhihu_access_secret"], "zhihu-access-secret");
-    let view = build_view(&obj);
-    assert!(view.has_openalex_key);
-    assert_ne!(view.openalex_key_masked.as_deref(), Some("openalex-secret"));
-    assert!(view.has_bocha_api_key);
-    assert_eq!(view.bocha_api_key_masked.as_deref(), Some("boch…cret"));
-    assert!(view.has_brave_search_key);
-    assert_eq!(view.brave_search_key_masked.as_deref(), Some("brav…cret"));
-    assert!(view.has_exa_key);
-    assert_eq!(view.exa_key_masked.as_deref(), Some("exa-…cret"));
-    assert!(view.has_zhihu_access_secret);
-    assert_eq!(
-        view.zhihu_access_secret_masked.as_deref(),
-        Some("zhih…cret")
-    );
-
-    apply_reviewer_environment_from(&obj, true);
-    assert_eq!(
-        std::env::var("OPENALEX_API_KEY").as_deref(),
-        Ok("openalex-secret")
-    );
-    assert_eq!(
-        std::env::var("BOCHA_API_KEY").as_deref(),
-        Ok("bocha-search-secret")
-    );
-    assert_eq!(
-        std::env::var("BRAVE_SEARCH_API_KEY").as_deref(),
-        Ok("brave-search-secret")
-    );
-    assert_eq!(
-        std::env::var("EXA_API_KEY").as_deref(),
-        Ok("exa-search-secret")
-    );
-    assert_eq!(
-        std::env::var("ZHIHU_ACCESS_SECRET").as_deref(),
-        Ok("zhihu-access-secret")
-    );
-
-    for key in [
-        "ARIS_REVIEWER_PROVIDER",
-        "OPENALEX_API_KEY",
-        "BRAVE_SEARCH_API_KEY",
-        "EXA_API_KEY",
-        "ZHIHU_ACCESS_SECRET",
-    ] {
-        std::env::remove_var(key);
-    }
+fn retired_api_keys_are_rejected_before_saving() {
+    with_temp_home("retired-api-patches", |config_path| {
+        let initial = serde_json::json!({"language":"cn", "memory_write_approval":true}).to_string();
+        std::fs::write(config_path, &initial).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for field in ["executorApiKey", "reviewerApiKey", "summarizerApiKey",
+            "scopusApiKey", "openalexApiKey", "bochaApiKey", "braveSearchApiKey",
+            "exaApiKey", "zhihuAccessSecret"] {
+            let value = Value::Object(Map::from_iter([(field.to_string(), Value::String("retired-secret".into()))]));
+            let patch: ConfigPatch = serde_json::from_value(value.clone()).unwrap();
+            let error = runtime.block_on(super::config_set(patch)).err().expect("retired key rejected");
+            assert!(error.contains("removed"));
+            assert!(!error.contains("retired-secret"));
+            assert_eq!(std::fs::read_to_string(config_path).unwrap(), initial);
+        }
+    });
 }
 
 #[test]
@@ -406,7 +401,7 @@ fn web_proxy_rejects_credentials_and_non_http_schemes() {
 }
 
 #[test]
-fn reviewer_api_update_requires_admin_api_access() {
+fn manual_reviewer_update_is_an_external_api_change() {
     let obj = Map::new();
     let patch = ConfigPatch {
         reviewer_provider: Some("openai".to_string()),
@@ -416,7 +411,7 @@ fn reviewer_api_update_requires_admin_api_access() {
         ..Default::default()
     };
 
-    assert!(patch.changes_admin_api_settings(&obj));
+    assert!(patch.changes_external_api_settings(&obj));
 }
 
 #[test]
@@ -457,8 +452,8 @@ fn bundled_internal_config_fills_missing_without_overwriting_existing() {
     assert!(apply_bundled_internal_config(&resources).expect("apply internal config"));
     let saved = crate::config::load_object();
     assert_eq!(saved["executor_model"], "existing-model");
-    assert_eq!(saved["executor_api_key"], "existing-key");
-    assert_eq!(saved["executor_provider"], "openai");
+    assert!(saved.get("executor_api_key").is_none());
+    assert!(saved.get("executor_provider").is_none());
 
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&resources);
@@ -682,7 +677,7 @@ fn orphaned_managed_key_is_not_treated_as_a_byok_credential() {
 }
 
 #[test]
-fn clear_newapi_session_removes_only_managed_credentials() {
+fn clear_newapi_session_also_discards_retired_third_party_keys() {
     let _guard = crate::test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -742,11 +737,10 @@ fn clear_newapi_session_removes_only_managed_credentials() {
     assert!(saved.get("newapi_executor_api_key").is_none());
     assert!(saved.get("executor_api_key").is_none());
     assert!(saved.get("reviewer_api_key").is_none());
-    assert_eq!(saved["summarizer_api_key"], "summarizer-token");
+    assert!(saved.get("summarizer_api_key").is_none());
 
     let verified = read_verified(&saved);
-    assert_eq!(verified.len(), 1);
-    assert_eq!(verified[0].api_key, "openai-token");
+    assert!(verified.is_empty());
 
     let _ = std::fs::remove_dir_all(&home);
     restore_home(previous_home, previous_userprofile);
@@ -820,32 +814,7 @@ fn clear_newapi_session_keeps_managed_reviewer_model() {
     restore_home(previous_home, previous_userprofile);
 }
 
-#[test]
-fn deepseek_executor_key_can_reuse_reviewer_key() {
-    let _guard = crate::test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::env::remove_var("DEEPSEEK_API_KEY");
 
-    let mut obj = Map::new();
-    obj.insert(
-        "reviewer_provider".to_string(),
-        Value::String("deepseek".to_string()),
-    );
-    obj.insert(
-        "reviewer_model".to_string(),
-        Value::String("deepseek-v4-pro".to_string()),
-    );
-    obj.insert(
-        "reviewer_api_key".to_string(),
-        Value::String("reviewer-token".to_string()),
-    );
-
-    assert_eq!(
-        deepseek_executor_key(&obj).as_deref(),
-        Some("reviewer-token")
-    );
-}
 
 #[test]
 fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
@@ -884,74 +853,290 @@ fn account_reviewer_exports_gateway_session_metadata_and_clears_it_on_switch() {
     }).as_object().unwrap().clone();
     apply_reviewer_environment_from(&obj, true);
     assert_eq!(std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").as_deref(), Ok("https://gateway.test/v1"));
-    let account = tools::prepare_llm_review(None).unwrap().figure_identity();
+    // The account key reaches the Reviewer in-process, never via the
+    // environment every Agent command inherits.
+    assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+    assert_eq!(tools::process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").as_deref(), Some("gateway-token"));
+    assert_eq!(tools::prepare_llm_review(None).unwrap().figure_identity().model, "MiniMax-M3");
     obj.remove("newapi_executor_base_url");
     obj.remove("newapi_executor_api_key");
     obj.insert("reviewer_api_key".into(), Value::String("own-token".into()));
     apply_reviewer_environment_from(&obj, true);
     assert!(std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").is_err());
-    let custom = tools::prepare_llm_review(None).unwrap().figure_identity();
-    assert_eq!(account.model, custom.model);
-    assert_eq!(account.provider, custom.provider);
-    assert_ne!(account.signature, custom.signature);
+    // A retired key cannot replace the account's in-process credential.
+    assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+    assert!(tools::process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").is_none());
     for (key, value) in prior {
         match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
     }
 }
 
 #[test]
-fn forced_reviewer_environment_sets_current_values_after_clearing() {
+fn forced_reviewer_environment_sets_account_values_without_exporting_key() {
+    let _guard = crate::test_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
+    std::env::set_var("ARIS_REVIEWER_MODEL", "old-model");
+    std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");
+    let obj = serde_json::json!({
+        "reviewer_provider": "custom", "reviewer_model": "gpt-5.5",
+        "reviewer_base_url": "https://gateway.test/v1",
+        "newapi_executor_base_url": "https://gateway.test/v1",
+        "newapi_executor_api_key": "new-token"
+    }).as_object().unwrap().clone();
+    apply_reviewer_environment_from(&obj, true);
+    assert_eq!(std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(), Ok("custom"));
+    assert_eq!(std::env::var("ARIS_REVIEWER_MODEL").as_deref(), Ok("gpt-5.5"));
+    assert_eq!(std::env::var("ARIS_REVIEWER_BASE_URL").as_deref(), Ok("https://gateway.test/v1"));
+    assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+    assert_eq!(tools::process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").as_deref(), Some("new-token"));
+    apply_reviewer_environment_from(&Map::new(), true);
+}
+
+/// Point `config.json` at a fresh temp HOME for one test.
+fn with_temp_home(name: &str, body: impl FnOnce(&std::path::Path)) {
     let _guard = crate::test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
-    std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
-    std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");
+    let previous_home = std::env::var("HOME").ok();
+    let previous_userprofile = std::env::var("USERPROFILE").ok();
+    let home = temp_dir(name);
+    std::env::set_var("HOME", &home);
+    std::env::set_var("USERPROFILE", &home);
+    let config_path = crate::state::config_path();
+    std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+    body(&config_path);
+    let _ = std::fs::remove_dir_all(&home);
+    restore_home(previous_home, previous_userprofile);
+}
 
-    let mut obj = Map::new();
-    obj.insert(
-        "reviewer_provider".to_string(),
-        Value::String("deepseek".to_string()),
-    );
-    obj.insert(
-        "reviewer_model".to_string(),
-        Value::String("deepseek-v4-pro".to_string()),
-    );
-    obj.insert(
-        "reviewer_base_url".to_string(),
-        Value::String("https://api.deepseek.com/anthropic".to_string()),
-    );
-    obj.insert(
-        "reviewer_api_key".to_string(),
-        Value::String("new-token".to_string()),
-    );
+fn signed_in_config(official: &str) -> Value {
+    serde_json::json!({
+        "newapi_base_url": official,
+        "newapi_user_id": 7,
+        "newapi_executor_base_url": format!("{official}/v1"),
+        "managed_models": ["MiniMax-M3"],
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_base_url": format!("{official}/v1"),
+        "reviewer_provider": "custom",
+        "reviewer_model": "MiniMax-M3",
+        "reviewer_base_url": format!("{official}/v1"),
+        "verified_executors": [
+            { "provider": "openai", "model": "MiniMax-M3", "base_url": format!("{official}/v1"), "api_key": "" },
+            { "provider": "openai", "model": "gpt-5.5", "base_url": "https://api.openai.com/v1", "api_key": "own-key" }
+        ]
+    })
+}
 
-    apply_reviewer_environment_from(&obj, true);
+#[test]
+fn account_model_key_stays_out_of_config_json_but_reaches_every_reader() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    with_temp_home("managed-key-overlay", |config_path| {
+        std::fs::write(config_path, signed_in_config(&official).to_string()).expect("write config");
 
-    assert_eq!(
-        std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(),
-        Ok("deepseek")
-    );
-    assert_eq!(
-        std::env::var("ARIS_REVIEWER_MODEL").as_deref(),
-        Ok("deepseek-v4-pro")
-    );
-    assert_eq!(
-        std::env::var("ARIS_REVIEWER_BASE_URL").as_deref(),
-        Ok("https://api.deepseek.com/anthropic")
-    );
-    assert_eq!(
-        std::env::var("ARIS_REVIEWER_AUTH_TOKEN").as_deref(),
-        Ok("new-token")
-    );
+        crate::config::persist_newapi_executor_credentials(&official, "sk-account", Some(5))
+            .expect("persist credentials");
 
-    for key in [
-        "ARIS_REVIEWER_PROVIDER",
-        "ARIS_REVIEWER_MODEL",
-        "ARIS_REVIEWER_BASE_URL",
-        "ARIS_REVIEWER_AUTH_TOKEN",
-        "DEEPSEEK_API_KEY",
+        let on_disk = std::fs::read_to_string(config_path).expect("read config");
+        assert!(!on_disk.contains("sk-account"), "key written to config.json: {on_disk}");
+        let stored = crate::managed_key::stored_for_tests(&official).expect("credential stored");
+        assert_eq!(stored.key, "sk-account");
+        assert_eq!(stored.token_id, Some(5));
+
+        // A fresh process reads it back from the credential store.
+        crate::managed_key::forget_cache_for_tests();
+        let obj = crate::config::load_object();
+        assert_eq!(obj["newapi_executor_api_key"], "sk-account");
+        assert_eq!(obj["executor_api_key"], "sk-account");
+        assert_eq!(obj["reviewer_api_key"], "sk-account");
+        let verified = read_verified(&obj);
+        assert_eq!(verified[0].api_key, "sk-account");
+        assert_eq!(verified.len(), 1);
+        assert_eq!(
+            crate::config::cached_newapi_token_key(&official, 5).as_deref(),
+            Some("sk-account")
+        );
+        assert!(crate::config::cached_newapi_token_key(&official, 6).is_none());
+
+        // Saving a read config never restores retired third-party keys.
+        crate::config::save_object(&obj).expect("save");
+        let on_disk = std::fs::read_to_string(config_path).expect("read config");
+        assert!(!on_disk.contains("sk-account"), "key written back on save: {on_disk}");
+        assert!(!on_disk.contains("own-key"));
+
+        clear_newapi_session().expect("logout");
+        crate::managed_key::forget_cache_for_tests();
+        assert!(crate::managed_key::stored_for_tests(&official).is_none());
+        let obj = crate::config::load_object();
+        assert!(obj.get("newapi_executor_api_key").is_none());
+        assert!(obj.get("executor_api_key").is_none());
+    });
+}
+
+#[test]
+fn startup_moves_a_plaintext_account_key_into_the_credential_store() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    with_temp_home("managed-key-migration", |config_path| {
+        let mut legacy = signed_in_config(&official);
+        legacy["newapi_executor_api_key"] = Value::String("sk-legacy".into());
+        legacy["newapi_token_id"] = Value::from(9);
+        legacy["executor_api_key"] = Value::String("sk-legacy".into());
+        legacy["reviewer_api_key"] = Value::String("sk-legacy".into());
+        legacy["verified_executors"][0]["api_key"] = Value::String("sk-legacy".into());
+        std::fs::write(config_path, legacy.to_string()).expect("write config");
+
+        assert!(crate::config::move_managed_key_to_credential_store().expect("migrate"));
+
+        let on_disk = std::fs::read_to_string(config_path).expect("read config");
+        assert!(!on_disk.contains("sk-legacy"), "plaintext left behind: {on_disk}");
+        let stored = crate::managed_key::stored_for_tests(&official).expect("credential stored");
+        assert_eq!(stored.key, "sk-legacy");
+        assert_eq!(stored.token_id, Some(9));
+        assert_eq!(crate::config::load_object()["executor_api_key"], "sk-legacy");
+        assert!(!crate::config::move_managed_key_to_credential_store().expect("second run"));
+        clear_newapi_session().expect("logout");
+    });
+}
+
+#[test]
+fn account_key_is_not_laid_over_a_model_endpoint_on_another_host() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    with_temp_home("managed-key-other-host", |config_path| {
+        std::fs::write(config_path, signed_in_config(&official).to_string()).expect("write config");
+        crate::config::persist_newapi_executor_credentials(&official, "sk-account", Some(5))
+            .expect("persist credentials");
+        let mut tampered = serde_json::from_str::<Value>(
+            &std::fs::read_to_string(config_path).expect("read config"),
+        )
+        .expect("config JSON");
+        tampered["newapi_executor_base_url"] = Value::String("https://attacker.example/v1".into());
+        tampered["executor_base_url"] = Value::String("https://attacker.example/v1".into());
+        std::fs::write(config_path, tampered.to_string()).expect("write tampered config");
+
+        let obj = crate::config::load_object();
+        assert!(obj.get("newapi_executor_api_key").is_none());
+        assert!(obj.get("executor_api_key").is_none());
+        clear_newapi_session().expect("logout");
+    });
+}
+
+#[test]
+fn a_replaced_account_key_reaches_in_process_readers() {
+    let official = crate::newapi::configured_managed_base().expect("build endpoint");
+    with_temp_home("managed-key-rotation", |config_path| {
+        std::fs::write(config_path, signed_in_config(&official).to_string()).expect("write config");
+        crate::config::persist_newapi_executor_credentials(&official, "sk-old", Some(5))
+            .expect("persist old key");
+        apply_reviewer_environment_from(&crate::config::load_object(), true);
+        assert_eq!(
+            tools::process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").as_deref(),
+            Some("sk-old")
+        );
+
+        crate::config::persist_newapi_executor_credentials(&official, "sk-new", Some(6))
+            .expect("persist new key");
+
+        assert_eq!(
+            tools::process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").as_deref(),
+            Some("sk-new")
+        );
+        assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+        clear_newapi_session().expect("logout");
+        apply_reviewer_environment_from(&Map::new(), true);
+        for key in [
+            "ARIS_REVIEWER_PROVIDER",
+            "ARIS_REVIEWER_MODEL",
+            "ARIS_REVIEWER_BASE_URL",
+            "ARIS_REVIEWER_ROUTING_SESSION_BASE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+    });
+}
+
+#[test]
+fn startup_cleans_legacy_keys_and_keeps_account_executor_and_reviewer() {
+    let official = crate::newapi::configured_managed_base().unwrap();
+    with_temp_home("retired-api-migration", |config_path| {
+        let mut legacy = signed_in_config(&official);
+        legacy["managed_models"] = serde_json::json!(["MiniMax-M3", "gpt-5.5"]);
+        legacy["reviewer_model"] = Value::String("gpt-5.5".into());
+        legacy["newapi_executor_api_key"] = Value::String("sk-account".into());
+        legacy["executor_api_key"] = Value::String("sk-account".into());
+        legacy["reviewer_api_key"] = Value::String("sk-account".into());
+        for field in ["summarizer_api_key", "scopus_api_key", "openalex_api_key",
+            "bocha_api_key", "brave_search_api_key", "exa_api_key", "zhihu_access_secret"] {
+            legacy[field] = Value::String("old-third-party".into());
+        }
+        legacy["summarizer_provider"] = Value::String("anthropic".into());
+        legacy["summarizer_base_url"] = Value::String("https://third-party.example".into());
+        std::fs::write(config_path, legacy.to_string()).unwrap();
+        super::move_managed_key_to_credential_store().unwrap();
+        super::retire_third_party_api_settings().unwrap();
+        let saved = std::fs::read_to_string(config_path).unwrap();
+        for secret in ["old-third-party", "own-key", "sk-account"] {
+            assert!(!saved.contains(secret));
+        }
+        let loaded = super::managed_config_object().unwrap();
+        assert_eq!(loaded["executor_api_key"], "sk-account");
+        assert_eq!(loaded["reviewer_api_key"], "sk-account");
+        assert_eq!(loaded["executor_model"], "MiniMax-M3");
+        assert_eq!(loaded["reviewer_model"], "gpt-5.5");
+        assert!(loaded.get("summarizer_provider").is_none());
+        assert!(loaded.get("scopus_api_key").is_none());
+        assert_eq!(read_verified(&loaded).len(), 1);
+        assert!(!super::retire_third_party_api_settings().unwrap());
+        clear_newapi_session().unwrap();
+    });
+}
+
+#[test]
+fn legacy_keys_are_ignored_before_cleanup_without_changing_preferences() {
+    with_temp_home("retired-api-read", |config_path| {
+        let legacy = serde_json::json!({
+            "executor_provider":"openai", "executor_model":"own-model",
+            "executor_base_url":"https://third-party.example/v1",
+            "executor_api_key":"old-third-party", "scopus_api_key":"old-third-party",
+            "language":"en", "memory_write_approval":true,
+            "verified_executors":[{"provider":"openai","model":"own-model",
+                "base_url":"https://third-party.example/v1","api_key":"old-third-party"}]
+        }).to_string();
+        std::fs::write(config_path, &legacy).unwrap();
+        let loaded = super::load_object();
+        assert!(loaded.get("executor_api_key").is_none());
+        assert!(loaded.get("executor_base_url").is_none());
+        assert!(loaded.get("scopus_api_key").is_none());
+        assert!(read_verified(&loaded).is_empty());
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), legacy);
+        assert!(super::retire_third_party_api_settings().unwrap());
+        let saved = std::fs::read_to_string(config_path).unwrap();
+        assert!(!saved.contains("old-third-party"));
+        let saved: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["language"], "en");
+        assert_eq!(saved["memory_write_approval"], true);
+    });
+}
+
+#[test]
+fn manual_connections_are_rejected_and_account_choices_remain_available() {
+    let official = crate::newapi::configured_managed_base().unwrap();
+    let mut obj = signed_in_config(&official).as_object().unwrap().clone();
+    obj.insert("managed_models".into(), serde_json::json!(["MiniMax-M3", "gpt-5.5"]));
+    for value in [
+        serde_json::json!({"executorProvider":"openai","executorBaseUrl":"https://third-party.example/v1","executorModel":"own"}),
+        serde_json::json!({"reviewerProvider":"custom","reviewerModel":"own"}),
+        serde_json::json!({"summarizerProvider":"openai","summarizerBaseUrl":"https://third-party.example/v1"})
     ] {
-        std::env::remove_var(key);
+        let patch: ConfigPatch = serde_json::from_value(value).unwrap();
+        assert!(patch.validate_account_settings(&obj).is_err());
+    }
+    for value in [
+        serde_json::json!({"executorProvider":"openai","executorModel":"MiniMax-M3"}),
+        serde_json::json!({"reviewerProvider":"custom","reviewerModel":"gpt-5.5"}),
+        serde_json::json!({"summarizerModel":"gpt-5.5"}),
+        serde_json::json!({"reviewerProvider":"","reviewerModel":"","reviewerBaseUrl":""})
+    ] {
+        let patch: ConfigPatch = serde_json::from_value(value).unwrap();
+        assert!(patch.validate_account_settings(&obj).is_ok());
     }
 }

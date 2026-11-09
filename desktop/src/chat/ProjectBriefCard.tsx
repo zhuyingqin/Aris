@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   backgroundProcessStop,
   backgroundProcessesList,
@@ -355,6 +355,7 @@ export default function ProjectBriefCard({
   reviewSaving,
   reviewError,
   onReviewEnabledChange,
+  agentTasks,
   backgroundProcesses = [],
   stoppingBackgroundPids = [],
   onStopBackgroundProcess,
@@ -372,6 +373,7 @@ export default function ProjectBriefCard({
   reviewSaving?: boolean;
   reviewError?: string | null;
   onReviewEnabledChange: (enabled: boolean) => void;
+  agentTasks?: ReactNode;
   backgroundProcesses?: BackgroundProcessView[];
   stoppingBackgroundPids?: number[];
   onStopBackgroundProcess?: (pid: number) => void;
@@ -450,6 +452,7 @@ export default function ProjectBriefCard({
         </button>
       </div>
       <div className="project-brief-body">
+        {agentTasks}
         {imageAssistActivity && (
           <section className={`project-brief-image-assist is-${imageAssistActivity.stage}`} aria-label={language === "cn" ? "图片互助" : "Image assist"}>
             <div className="project-brief-image-assist-head">

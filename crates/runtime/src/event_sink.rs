@@ -84,6 +84,45 @@ pub enum EventType {
         deactivated: Vec<String>,
         active_tool_count: usize,
     },
+    /// A user turn began: the user message is in the session and the first
+    /// provider request is about to be built.
+    ///
+    /// Together with [`EventType::TurnFinished`] this is the runtime's own
+    /// statement of where a turn starts and ends. Agent supervision derives an
+    /// agent's status purely from these two events instead of keeping a second,
+    /// separately mutated state that the runtime could disagree with.
+    TurnStarted,
+    /// A turn ended, by completing, failing or being interrupted. Emitted
+    /// exactly once for every [`EventType::TurnStarted`].
+    TurnFinished {
+        outcome: TurnOutcome,
+        /// The last non-empty assistant text of a completed turn, which is the
+        /// answer a supervising agent receives as the turn's result.
+        last_message: Option<String>,
+    },
+}
+
+/// How a turn ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Completed,
+    /// The caller cancelled the turn. Not a fault: the session and any partial
+    /// work are preserved and the agent stays available.
+    Interrupted,
+    Failed {
+        message: String,
+    },
+}
+
+impl TurnOutcome {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Interrupted => "interrupted",
+            Self::Failed { .. } => "failed",
+        }
+    }
 }
 
 impl fmt::Display for EventType {
@@ -104,6 +143,8 @@ impl fmt::Display for EventType {
             Self::CompactionSummaryFallback { reason } => {
                 write!(f, "compaction_summary_fallback:{reason}")
             }
+            Self::TurnStarted => write!(f, "turn_started"),
+            Self::TurnFinished { outcome, .. } => write!(f, "turn_finished:{}", outcome.as_str()),
         }
     }
 }
@@ -141,6 +182,39 @@ pub struct NoopEventSink;
 
 impl EventSink for NoopEventSink {
     fn emit(&mut self, _event: &RuntimeEvent) {}
+}
+
+/// Delivers every event to each of several sinks, in the order they were added.
+///
+/// A runtime has exactly one sink, so a caller that needs more than one
+/// observer (the desktop's own logging next to an agent's lifecycle reporting)
+/// joins them here. One sink cannot starve or reorder another: each sees every
+/// event, one after the other, on the thread that emitted it.
+#[derive(Default)]
+pub struct TeeEventSink {
+    sinks: Vec<Box<dyn EventSink>>,
+}
+
+impl TeeEventSink {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a sink; it receives events after every sink added before it.
+    #[must_use]
+    pub fn with(mut self, sink: Box<dyn EventSink>) -> Self {
+        self.sinks.push(sink);
+        self
+    }
+}
+
+impl EventSink for TeeEventSink {
+    fn emit(&mut self, event: &RuntimeEvent) {
+        for sink in &mut self.sinks {
+            sink.emit(event);
+        }
+    }
 }
 
 /// Writes events as JSONL to a file.
@@ -325,6 +399,24 @@ impl EventSink for JsonlEventSink {
                     active_tool_count,
                 )
             }
+            EventType::TurnStarted => {
+                format!(
+                    r#"{{"ts":"{}","session":"{}","event":"turn_started"}}"#,
+                    event.timestamp,
+                    escape_json(&sanitize_field(&self.session_id, 60)),
+                )
+            }
+            // The outcome only: the answer text is the conversation's content
+            // and a failure message can quote it, so neither belongs in a
+            // metadata log.
+            EventType::TurnFinished { outcome, .. } => {
+                format!(
+                    r#"{{"ts":"{}","session":"{}","event":"turn_finished","outcome":"{}"}}"#,
+                    event.timestamp,
+                    escape_json(&sanitize_field(&self.session_id, 60)),
+                    outcome.as_str(),
+                )
+            }
         };
 
         // Best-effort write; never crash the runtime on log failure
@@ -471,5 +563,53 @@ mod tests {
         assert_eq!(value["consecutive_no_new"], 4);
         assert_eq!(value["fingerprint"], "abcdef123456");
         assert!(value.get("output").is_none());
+    }
+
+    struct Recording {
+        name: &'static str,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EventSink for Recording {
+        fn emit(&mut self, event: &RuntimeEvent) {
+            self.seen
+                .lock()
+                .expect("log")
+                .push(format!("{}:{}", self.name, event.event_type));
+        }
+    }
+
+    #[test]
+    fn a_tee_sink_gives_every_sink_every_event_in_order() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut tee = TeeEventSink::new()
+            .with(Box::new(Recording {
+                name: "first",
+                seen: seen.clone(),
+            }))
+            .with(Box::new(NoopEventSink))
+            .with(Box::new(Recording {
+                name: "second",
+                seen: seen.clone(),
+            }));
+        let event = |event_type| RuntimeEvent {
+            timestamp: now_iso8601(),
+            session_id: String::new(),
+            event_type,
+        };
+
+        tee.emit(&event(EventType::TurnStarted));
+        tee.emit(&event(EventType::SessionEnd));
+
+        assert_eq!(
+            *seen.lock().expect("log"),
+            vec![
+                "first:turn_started",
+                "second:turn_started",
+                "first:session_end",
+                "second:session_end",
+            ]
+        );
+        TeeEventSink::new().emit(&event(EventType::TurnStarted));
     }
 }

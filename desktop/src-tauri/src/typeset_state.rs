@@ -1382,16 +1382,6 @@ pub async fn typeset_revision_list() -> Result<Vec<TypesetProjectRevisionSummary
 }
 
 #[tauri::command]
-pub async fn typeset_revision_read(id: String) -> Result<TypesetProjectRevision, String> {
-    off_main_thread(move || {
-        let root = files::workspace_root()?;
-        let ledger = load_revision_ledger(&root)?;
-        Ok(find_revision(&ledger, &id)?.clone())
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn typeset_revision_compare(
     base_revision_id: String,
     target_revision_id: String,

@@ -187,22 +187,6 @@ pub struct ResearchMemoryCaptureDelivery {
     pub occurred_at: String,
 }
 
-/// Minimal, ordered lineage used by governance surfaces for R2/R3. Keeping this
-/// separate from `ResearchMemoryAtom` avoids turning a provenance lookup into a
-/// second recall/search API.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResearchMemoryAtomProvenance {
-    pub atom_id: String,
-    pub statement: String,
-    pub kind: String,
-    pub status: String,
-    pub subject_key: Option<String>,
-    pub source_session_id: String,
-    pub source_event_ids: Vec<String>,
-    /// Whether this line is eligible for unconditional standing R3 injection.
-    pub standing_injected: bool,
-}
-
 /// What a [`ResearchMemoryStore::rebuild_derived`] pass did, for the Settings
 /// page to report. `atoms_preserved` counts the rows a replay deliberately did
 /// not touch: user corrections and confirmations.
@@ -915,63 +899,6 @@ impl ResearchMemoryStore {
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(true)
-    }
-
-    /// Resolves the R1 lineage for displayed R2/R3 lines in caller-provided
-    /// order. The R2 card and R3 profile are projections, so their own rows do
-    /// not duplicate source Session ids or event ids.
-    pub fn atom_provenance(
-        &self,
-        project_id: &str,
-        atom_ids: &[String],
-    ) -> Result<Vec<ResearchMemoryAtomProvenance>, String> {
-        validate_project(project_id)?;
-        if atom_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.open()?;
-        let placeholders = (0..atom_ids.len())
-            .map(|index| format!("?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT id, statement, kind, status, subject_key, source_session_id,
-                    source_event_ids, source_class
-             FROM research_memory_atoms
-             WHERE project_id=?1 AND id IN ({placeholders})"
-        );
-        let mut values = vec![rusqlite::types::Value::from(project_id.to_string())];
-        values.extend(atom_ids.iter().cloned().map(rusqlite::types::Value::from));
-        let mut statement = connection
-            .prepare(&sql)
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(values), |row| {
-                let kind = row.get::<_, String>(2)?;
-                let status = row.get::<_, String>(3)?;
-                let source_class = row.get::<_, String>(7)?;
-                let standing_injected = R3_STANDING_KINDS.contains(&kind.as_str())
-                    && (source_class == SOURCE_CLASS_USER
-                        || HUMAN_VOUCHED_STATUSES.contains(&status.as_str()))
-                    && !matches!(status.as_str(), "superseded" | "deleted" | "conflict");
-                Ok(ResearchMemoryAtomProvenance {
-                    atom_id: row.get(0)?,
-                    statement: row.get(1)?,
-                    kind,
-                    status,
-                    subject_key: row.get(4)?,
-                    source_session_id: row.get(5)?,
-                    source_event_ids: parse_json_vec(&row.get::<_, String>(6)?),
-                    standing_injected,
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        let mut by_id = BTreeMap::new();
-        for row in rows {
-            let provenance = row.map_err(|error| error.to_string())?;
-            by_id.insert(provenance.atom_id.clone(), provenance);
-        }
-        Ok(atom_ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
     pub fn dead_letters(

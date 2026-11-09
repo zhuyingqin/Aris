@@ -1,0 +1,14 @@
+% Body fragment; requires diagram-styles.tex in the preamble.
+\begin{tikzpicture}[node distance=0.72cm]
+  \node[sq process,text width=2.1cm] (observations)
+    {示范数据\\$(x_i,u_i)$};
+  \node[sq process,text width=2.1cm,right=of observations] (features)
+    {构造特征\\$\Psi(x,u)$};
+  \node[sq process,text width=2.1cm,right=of features] (conditions)
+    {辨识条件\\$G\theta=b$};
+  \node[sq result,text width=2.1cm,right=of conditions] (candidates)
+    {候选代价\\$\theta\in\Theta$};
+  \draw[sq arrow] (observations.east) -- node[sq label,above] {估计} (features.west);
+  \draw[sq arrow] (features.east) -- node[sq label,above] {堆叠} (conditions.west);
+  \draw[sq arrow] (conditions.east) -- node[sq label,above] {求解} (candidates.west);
+\end{tikzpicture}

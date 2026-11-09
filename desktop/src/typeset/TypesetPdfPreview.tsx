@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -37,6 +38,11 @@ import {
 import { PdfFallbackPage, PdfPage, type PdfClickPosition } from "./PdfPage";
 import { fitToolbarActions } from "./pdfToolbarLayout";
 import { ToolIcon } from "./ToolIcon";
+import {
+  DEFAULT_COMPILE_TIMEOUT_MINUTES,
+  MAX_COMPILE_TIMEOUT_MINUTES,
+  parseCompileTimeoutMinutes,
+} from "./typesetPreferences";
 import TypesetPdfPresentation from "./TypesetPdfPresentation";
 import { setWindowFullscreen } from "../windowControls";
 
@@ -75,6 +81,7 @@ export interface PdfPreviewProps {
   continueOnError: boolean;
   engine: LatexEngineChoice;
   compileOnSave: boolean;
+  compileTimeoutMinutes: number | null;
   inverted: boolean;
   canCancel: boolean;
   onCompile: () => void;
@@ -83,6 +90,7 @@ export interface PdfPreviewProps {
   onSetContinueOnError: (value: boolean) => void;
   onSetEngine: (value: LatexEngineChoice) => void;
   onSetCompileOnSave: (value: boolean) => void;
+  onSetCompileTimeoutMinutes: (value: number | null) => void;
   onToggleInverted: () => void;
   onExportPdf: () => void;
   /** Zip the project source to a path the user picks. */
@@ -138,6 +146,7 @@ export default function TypesetPdfPreview({
   continueOnError,
   engine,
   compileOnSave,
+  compileTimeoutMinutes,
   inverted,
   canCancel,
   onCompile,
@@ -146,6 +155,7 @@ export default function TypesetPdfPreview({
   onSetContinueOnError,
   onSetEngine,
   onSetCompileOnSave,
+  onSetCompileTimeoutMinutes,
   onToggleInverted,
   onExportPdf,
   onExportProject,
@@ -181,6 +191,15 @@ export default function TypesetPdfPreview({
   const xrefRepairsRef = useRef<string | null>(null);
   const [compileMenuOpen, setCompileMenuOpen] = useState(false);
   const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
+  const compileTimeoutId = useId();
+  const [compileTimeoutDraft, setCompileTimeoutDraft] = useState("");
+  const [compileTimeoutInvalid, setCompileTimeoutInvalid] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!compileMenuOpen) return;
+    setCompileTimeoutDraft(String(compileTimeoutMinutes ?? DEFAULT_COMPILE_TIMEOUT_MINUTES));
+    setCompileTimeoutInvalid(false);
+  }, [compileMenuOpen, compileTimeoutMinutes]);
   const [presenting, setPresenting] = useState(false);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const [zoomMenuPosition, setZoomMenuPosition] = useState({ top: 0, right: 8 });
@@ -1035,7 +1054,8 @@ export default function TypesetPdfPreview({
                 const rect = event.currentTarget.getBoundingClientRect();
                 setCompileMenuPosition({
                   top: rect.bottom + 7,
-                  right: Math.max(8, window.innerWidth - rect.right),
+                  // The 250px menu must fit even when its trigger is near the left edge.
+                  right: Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - 250 - 8)),
                 });
                 setCompileMenuOpen(true);
               }}
@@ -1048,7 +1068,7 @@ export default function TypesetPdfPreview({
                 className="typeset-compile-menu"
                 role="menu"
                 aria-label={copy.compileOptionsMenu}
-                style={compileMenuPosition}
+                style={{ ...compileMenuPosition, maxHeight: `calc(100vh - ${compileMenuPosition.top + 8}px)` }}
               >
                 <div className="typeset-compile-menu-section" role="presentation">
                   <span>{copy.compileErrorHandling}</span>
@@ -1105,6 +1125,58 @@ export default function TypesetPdfPreview({
                     {engine === choice && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                   </button>
                 ))}
+                <div className="typeset-compile-menu-divider" role="presentation" />
+                <form
+                  className="typeset-compile-timeout"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const minutes = parseCompileTimeoutMinutes(compileTimeoutDraft);
+                    if (minutes === null) {
+                      setCompileTimeoutInvalid(true);
+                      return;
+                    }
+                    onSetCompileTimeoutMinutes(minutes);
+                    setCompileMenuOpen(false);
+                  }}
+                  noValidate
+                >
+                  <label htmlFor={compileTimeoutId}>{copy.compileTimeoutMinutes}</label>
+                  <div className="typeset-compile-timeout-controls">
+                    <input
+                      id={compileTimeoutId}
+                      type="number"
+                      min={1}
+                      max={MAX_COMPILE_TIMEOUT_MINUTES}
+                      step={1}
+                      value={compileTimeoutDraft}
+                      aria-invalid={compileTimeoutInvalid}
+                      aria-describedby={`${compileTimeoutId}-help${compileTimeoutInvalid ? ` ${compileTimeoutId}-error` : ""}`}
+                      onChange={(event) => {
+                        setCompileTimeoutDraft(event.target.value);
+                        setCompileTimeoutInvalid(false);
+                      }}
+                    />
+                    <button type="submit">{copy.compileTimeoutApply}</button>
+                  </div>
+                  <small id={`${compileTimeoutId}-help`}>
+                    {compileTimeoutMinutes === null ? `${copy.compileTimeoutDefault} ` : ""}
+                    {copy.compileTimeoutHelp}
+                  </small>
+                  {compileTimeoutInvalid && (
+                    <small id={`${compileTimeoutId}-error`} role="alert">{copy.compileTimeoutInvalid}</small>
+                  )}
+                  {compileTimeoutMinutes !== null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetCompileTimeoutMinutes(null);
+                        setCompileMenuOpen(false);
+                      }}
+                    >
+                      {copy.compileTimeoutReset}
+                    </button>
+                  )}
+                </form>
                 <div className="typeset-compile-menu-divider" role="presentation" />
                 <button
                   type="button"

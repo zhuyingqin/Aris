@@ -179,6 +179,7 @@ pub fn execute_bash_with_cancel_and_progress(
     on_progress: impl FnMut(crate::ManagedCommandProgress),
 ) -> io::Result<BashCommandOutput> {
     // Pre-execution safety check
+    crate::document_safety::ensure_document_command_safe(&input.command)?;
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
     }
@@ -223,7 +224,7 @@ pub fn execute_bash_with_cancel_and_progress(
                 sandbox_status: reportable_sandbox_status(sandbox_status),
             });
         }
-        let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
+        let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false)?;
         let log = crate::background_log::create(&cwd, &input.command);
         child.stdin(Stdio::null());
         match &log {
@@ -273,7 +274,7 @@ fn execute_bash_blocking(
     should_cancel: impl Fn() -> bool,
     on_progress: impl FnMut(crate::ManagedCommandProgress),
 ) -> io::Result<BashCommandOutput> {
-    let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true);
+    let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true)?;
     let timeout_ms = resolve_foreground_shell_timeout_ms(input.timeout);
     let result = crate::run_managed_command_with_cancel_and_progress(
         &mut command,
@@ -527,7 +528,7 @@ fn prepare_command(
     cwd: &std::path::Path,
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
-) -> Command {
+) -> io::Result<Command> {
     if create_dirs && sandbox_status.filesystem_active {
         prepare_sandbox_dirs(cwd);
     }
@@ -537,11 +538,11 @@ fn prepare_command(
         prepared.args(launcher.args);
         prepared.current_dir(cwd);
         prepared.envs(launcher.env);
-        return prepared;
+        return Ok(prepared);
     }
 
     if cfg!(windows) {
-        let launcher = windows_shell_launcher();
+        let launcher = windows_shell_launcher()?;
         let isolate_home = launcher.posix && sandbox_status.filesystem_active;
         if isolate_home {
             prepare_sandbox_dirs(cwd);
@@ -562,7 +563,7 @@ fn prepare_command(
             prepared.env("PATH", windows_posix_path());
         }
         apply_windows_utf8_env(&mut prepared);
-        return prepared;
+        return Ok(prepared);
     }
 
     let mut prepared = hidden_command("sh");
@@ -571,7 +572,7 @@ fn prepare_command(
         prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
         prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
     }
-    prepared
+    Ok(prepared)
 }
 
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
@@ -586,20 +587,20 @@ struct WindowsShellLauncher {
     posix: bool,
 }
 
-fn windows_shell_launcher() -> WindowsShellLauncher {
-    if let Some(program) = detect_windows_posix_shell() {
-        WindowsShellLauncher {
-            program,
-            args: &["-c"],
-            posix: true,
-        }
-    } else {
-        WindowsShellLauncher {
-            program: String::from("cmd"),
-            args: &["/C"],
-            posix: false,
-        }
-    }
+fn windows_shell_launcher() -> io::Result<WindowsShellLauncher> {
+    windows_shell_launcher_for(detect_windows_posix_shell())
+}
+
+fn windows_shell_launcher_for(program: Option<String>) -> io::Result<WindowsShellLauncher> {
+    let program = program.ok_or_else(|| io::Error::new(
+        io::ErrorKind::NotFound,
+        "The bash tool requires a working POSIX shell; none was found. No command was executed. Use the PowerShell tool with PowerShell syntax on Windows, or install Git Bash. Commands are never silently routed to cmd.exe or PowerShell.",
+    ))?;
+    Ok(WindowsShellLauncher {
+        program,
+        args: &["-c"],
+        posix: true,
+    })
 }
 
 fn detect_windows_posix_shell() -> Option<String> {

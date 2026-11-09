@@ -394,18 +394,6 @@ pub fn code_bridge_set_theme(
     });
 }
 
-/// Flush every dirty editor. Called before an AI turn touches the tree.
-#[tauri::command]
-pub fn code_bridge_save_all(state: tauri::State<'_, CodeBridgeState>) {
-    state.send(HostToBridge::SaveAll);
-}
-
-/// Tell the workbench that `paths` changed underneath it.
-#[tauri::command]
-pub fn code_bridge_reload(state: tauri::State<'_, CodeBridgeState>, paths: Vec<String>) {
-    state.send(HostToBridge::ReloadFromDisk { paths });
-}
-
 /// Open a file in the workbench, for chat's "click a path to open it".
 #[tauri::command]
 pub fn code_bridge_open_file(state: tauri::State<'_, CodeBridgeState>, path: String) -> bool {

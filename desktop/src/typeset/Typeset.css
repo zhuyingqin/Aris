@@ -1115,6 +1115,35 @@
   margin: 0 24px 12px;
 }
 
+.typeset-library-folder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 24px 12px;
+}
+
+.typeset-library-folder-controls button {
+  min-height: 28px;
+  border: 1px solid var(--ol-border);
+  border-radius: 5px;
+  padding: 4px 9px;
+  background: transparent;
+  color: var(--ol-muted-2);
+  font: 11px/1.3 var(--font-ui, sans-serif);
+  cursor: pointer;
+}
+
+.typeset-library-folder-controls button:hover:not(:disabled),
+.typeset-library-folder-controls button:focus-visible {
+  background: var(--ol-panel-hover);
+  color: var(--ol-text);
+}
+
+.typeset-library-folder-controls button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
 .typeset-library-table-wrap {
   min-height: 300px;
   overflow: auto;
@@ -1181,7 +1210,7 @@
   min-width: 0;
   align-items: center;
   gap: 4px;
-  padding: 6px 12px 6px 8px;
+  padding: 6px 12px 6px calc(8px + min(var(--typeset-library-depth, 0), 8) * 20px);
 }
 
 .typeset-library-project-toggle {
@@ -1203,6 +1232,19 @@
 .typeset-library-project-toggle:hover,
 .typeset-library-project-toggle:focus-visible {
   background: color-mix(in srgb, var(--ol-panel-hover) 84%, transparent);
+}
+
+.typeset-library-project-toggle:disabled {
+  cursor: default;
+  background: transparent;
+}
+
+.typeset-library-project-toggle:disabled .typeset-library-project-caret {
+  visibility: hidden;
+}
+
+.typeset-library-subfolder-row td {
+  background: transparent;
 }
 
 .typeset-library-project-caret {
@@ -1309,7 +1351,7 @@
 }
 
 .typeset-library-project-document td:nth-child(2) {
-  padding-left: 26px;
+  padding-left: calc(6px + min(var(--typeset-library-depth, 1), 9) * 20px);
 }
 
 .typeset-library-select-col {
@@ -7158,7 +7200,7 @@
    gives way first when the pane narrows. Its controls stay rigid: only the
    strip may give up width, which is also what keeps the row measurable. */
 .typeset-pdf-left {
-  min-width: 0;
+  min-width: min-content;
   align-self: stretch;
   gap: 10px;
   flex: 0 1 auto;
@@ -7264,6 +7306,8 @@
   position: fixed;
   z-index: 1000;
   width: 250px;
+  max-width: calc(100vw - 16px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid rgb(213 224 235 / 24%);
   border-radius: 6px;
@@ -7332,6 +7376,58 @@
   color: #bac4cc;
   font-size: 10.5px;
   line-height: 1.35;
+}
+
+.typeset-compile-timeout {
+  display: grid;
+  gap: 6px;
+  padding: 8px 9px;
+}
+
+.typeset-compile-timeout label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.typeset-compile-timeout-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.typeset-compile-timeout input {
+  min-width: 0;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #596575;
+  border-radius: 4px;
+  background: #20262f;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.typeset-compile-timeout input:focus-visible {
+  outline: 2px solid #8fd7ae;
+  outline-offset: 1px;
+}
+
+.typeset-compile-timeout input[aria-invalid="true"] {
+  border-color: #f2a29c;
+}
+
+.typeset-compile-timeout button {
+  width: auto;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.typeset-compile-timeout-controls button {
+  flex-shrink: 0;
+  background: #303c49;
+}
+
+.typeset-compile-timeout [role="alert"] {
+  color: #f2a29c;
 }
 
 .typeset-tree-menu {

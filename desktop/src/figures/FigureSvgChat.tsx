@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { SvgIcon } from "../SvgIcon";
 import { figureEditSvg } from "./figureApi";
 import type { FigureView } from "./types";
+import FigureResizeHandle, { useFigurePanelSize } from "./FigureResizeHandle";
 
 type T = (cn: string, en: string) => string;
 interface Props {
@@ -16,6 +17,8 @@ export default function FigureSvgChat({ view, dirty, busy, historical, t, onUpda
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
   const submitting = useRef(false);
+  const panelRef = useRef<HTMLElement>(null);
+  const layout = useFigurePanelSize("svg-chat");
   // Retain the ID across an ambiguous IPC failure, so retry cannot send twice.
   const submission = useRef<{ key: string; id: string } | null>(null);
   const latest = run.versions.at(-1);
@@ -38,12 +41,11 @@ export default function FigureSvgChat({ view, dirty, busy, historical, t, onUpda
     } catch (error) { onError(String(error)); }
     finally { submitting.current = false; setSending(false); onBusy(false); }
   };
-  return <section className="figure-float figure-svg-chat" aria-label={t("SVG 对话修改", "Edit SVG with chat")}>
+  return <section ref={panelRef} style={layout.style} className="figure-float figure-svg-chat" aria-label={t("SVG 对话修改", "Edit SVG with chat")}>
     <header><SvgIcon name="messageCircle" size={14} /><strong>{t("SVG 对话修改", "Edit SVG with chat")}</strong>
       <button type="button" className="figure-icon-button" aria-label={t("收起 SVG 对话", "Close SVG chat")} onClick={onClose}><SvgIcon name="close" size={12} /></button>
     </header>
     <div className="figure-svg-chat-history" aria-live="polite">
-      <p className="figure-hint">{t("描述要改的文字、箭头或布局。修改后保存新版本，并独立审查。", "Describe changes to labels, arrows or layout. Each edit saves a new version and receives an independent review.")}</p>
       {(run.svgEdits ?? []).map((edit) => {
         const version = run.versions.find((version) => version.index === edit.resultVersion);
         const running = edit.status === "running";
@@ -74,5 +76,9 @@ export default function FigureSvgChat({ view, dirty, busy, historical, t, onUpda
         <button type="button" className="figure-icon-button" style={{ visibility: view.active ? "visible" : "hidden" }} aria-label={t("取消 SVG 修改", "Cancel SVG edit")} title={t("取消 SVG 修改", "Cancel SVG edit")} onClick={onCancel}><SvgIcon name="stop" size={14} /></button>
       </div>
     </form>
+    <FigureResizeHandle className="edge-start" label={t("调整 SVG 对话宽度", "Resize SVG chat width")} panelRef={panelRef}
+      directionX={-1} minWidth={260} reserveWidth={344} onResize={layout.resize} onReset={layout.reset} />
+    <FigureResizeHandle className="corner-bottom-start" axis="both" label={t("调整 SVG 对话大小", "Resize SVG chat")}
+      panelRef={panelRef} directionX={-1} minWidth={260} reserveWidth={344} onResize={layout.resize} onReset={layout.reset} />
   </section>;
 }

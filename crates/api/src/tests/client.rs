@@ -414,6 +414,7 @@ fn message_request_stream_helper_sets_stream_true() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        output_config: None,
         stream: false,
     };
 
@@ -857,7 +858,7 @@ fn anthropic_artifact_waits_for_late_headers_and_never_resends_a_timeout() {
         });
         let request = MessageRequest {
             model: "claude-test".into(), max_tokens: 64, messages: vec![],
-            system: None, tools: None, tool_choice: None, thinking: None, stream: true,
+            system: None, tools: None, tool_choice: None, thinking: None, output_config: None, stream: true,
         };
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             match client.stream_message(&request).await {

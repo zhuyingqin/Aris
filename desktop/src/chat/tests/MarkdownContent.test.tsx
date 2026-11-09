@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,7 +21,7 @@ vi.mock("mermaid", () => ({
   },
 }));
 
-import MarkdownContent from "../MarkdownContent";
+import MarkdownContent, { ThinkBlock } from "../MarkdownContent";
 import { extractSvgMetrics, mermaidThemeVariables } from "../MermaidDiagram";
 import { useStore } from "../../store";
 
@@ -47,6 +47,44 @@ beforeEach(() => {
 });
 
 afterEach(() => cleanup());
+
+describe("streaming reasoning scroll", () => {
+  it("preserves a reader's position inside reasoning and resumes following at its bottom", () => {
+    const view = render(<ThinkBlock content="First step" streaming />);
+    const body = view.container.querySelector<HTMLDivElement>(".md-think-body")!;
+    Object.defineProperties(body, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 180 },
+    });
+    body.scrollTop = 200;
+    fireEvent.scroll(body);
+
+    view.rerender(<ThinkBlock content="First step\n\nSecond step" streaming />);
+    expect(body.scrollTop).toBe(200);
+
+    body.scrollTop = 820;
+    fireEvent.scroll(body);
+    Object.defineProperty(body, "scrollHeight", { value: 1_200 });
+    view.rerender(<ThinkBlock content="First step\n\nSecond step\n\nThird step" streaming />);
+    expect(body.scrollTop).toBe(1_200);
+  });
+
+  it("keeps scrolling a bounded reasoning pane from changing transcript following", () => {
+    const onTranscriptWheel = vi.fn();
+    const view = render(<div onWheel={onTranscriptWheel}><ThinkBlock content="First step" streaming /></div>);
+    const body = view.container.querySelector<HTMLDivElement>(".md-think-body")!;
+    Object.defineProperties(body, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 180 },
+    });
+    fireEvent.wheel(body, { deltaY: -100 });
+    expect(onTranscriptWheel).not.toHaveBeenCalled();
+
+    Object.defineProperty(body, "scrollHeight", { value: 100 });
+    fireEvent.wheel(body, { deltaY: -100 });
+    expect(onTranscriptWheel).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("MarkdownContent", () => {
   it("uses a light Mermaid palette when the app is in Light mode", () => {

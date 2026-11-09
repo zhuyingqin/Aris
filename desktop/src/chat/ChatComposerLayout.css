@@ -7,6 +7,7 @@
 .chat .chat-input-wrap { padding-bottom: clamp(10px, 0.75rem, 16px); }
 
 .chat-input-wrap .chat-input {
+  container: chat-composer / inline-size;
   gap: 0.25rem;
   padding: 0.5rem;
   border-radius: 1rem;
@@ -19,21 +20,30 @@
 
 .chat-input-wrap .chat-input-footer {
   min-height: var(--chat-composer-control-size);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.5rem;
   padding: 0 0.5rem;
 }
 
 .chat-input-wrap .chat-footer-left {
-  flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
   gap: 0.375rem;
+  min-width: min(16rem, 100%);
   max-width: 100%;
 }
 
 .chat-input-wrap .chat-footer-right {
   flex: 0 1 auto;
   gap: 0.375rem;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.chat-input-wrap .chat-footer-right .chat-pill-wrap {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .chat-input-wrap .chat-upload-btn,
@@ -52,6 +62,51 @@
 
 .chat-input-wrap .chat-workspace-bar {
   flex: 0 1 auto;
-  min-width: min(6rem, 100%);
+  min-width: min(3rem, 100%);
   max-width: min(15rem, 100%);
+}
+
+/* Split panes can be narrow in a wide window. Choose rows from the card's
+   width, so changing a model name or context percentage cannot add a row. */
+@container chat-composer (min-width: 28rem) and (max-width: 40rem) {
+  .chat-input-wrap .chat-footer-left {
+    min-width: max-content;
+  }
+
+  .chat-input-wrap .chat-workspace-bar {
+    flex: 0 0 var(--chat-composer-control-size);
+    min-width: 0;
+  }
+
+  .chat-workspace-git {
+    justify-content: center;
+    width: var(--chat-composer-control-size);
+    height: var(--chat-composer-control-size);
+    padding: 0;
+  }
+
+  .chat-workspace-branch,
+  .chat-workspace-chevron {
+    display: none;
+  }
+}
+
+@container chat-composer (max-width: 28rem) {
+  .chat-input-wrap .chat-input-footer {
+    flex-wrap: wrap;
+  }
+
+  .chat-input-wrap .chat-footer-left,
+  .chat-input-wrap .chat-footer-right {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  .chat-input-wrap .chat-footer-right {
+    justify-content: flex-end;
+  }
+
+  .chat-footer-right .ctx-ring {
+    margin-right: auto;
+  }
 }

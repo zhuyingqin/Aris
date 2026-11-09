@@ -1,6 +1,5 @@
 import type { Language } from "../store";
 import type {
-  PptMasterCheck,
   PptMasterError,
   PptMasterErrorCode,
 } from "../types";
@@ -56,7 +55,6 @@ export const EXTENSIONS_COPY: Record<Language, {
   /** One sentence per backend error code. Kept exhaustive by the Rust test
    *  `installer_error_codes_are_exhaustive`. */
   pptMasterErrors: Record<PptMasterErrorCode, (params: Record<string, string>) => string>;
-  pptMasterChecks: Record<string, string>;
   pptMasterEvidence: string;
   pptMasterFixOpenUrl: string;
   pptMasterFixRevealPath: string;
@@ -195,10 +193,6 @@ export const EXTENSIONS_COPY: Record<Language, {
           : `安装包缺少 ${p.missing ?? "必需文件"}。`,
       filesystemFailed: (p) => `文件操作失败（${p.operation ?? ""}）：${p.path ?? ""}`,
       notReady: (p) => `安装流程未报错，但结果仍不可用（状态：${p.state ?? "未知"}）。`,
-    },
-    pptMasterChecks: {
-      python: "Python 解释器",
-      skillSlot: "技能安装位置",
     },
     pptMasterEvidence: "原始输出",
     pptMasterFixOpenUrl: "前往下载",
@@ -340,10 +334,6 @@ export const EXTENSIONS_COPY: Record<Language, {
       filesystemFailed: (p) => `A file operation failed (${p.operation ?? ""}): ${p.path ?? ""}`,
       notReady: (p) => `Every step reported success, but the result is still unusable (state: ${p.state ?? "unknown"}).`,
     },
-    pptMasterChecks: {
-      python: "Python interpreter",
-      skillSlot: "Skill install location",
-    },
     pptMasterEvidence: "Raw output",
     pptMasterFixOpenUrl: "Open download page",
     pptMasterFixRevealPath: "Show in file manager",
@@ -458,12 +448,4 @@ export function pptMasterFixLabel(
   if (error.fix.kind === "openUrl") return copy.pptMasterFixOpenUrl;
   if (error.fix.kind === "revealPath") return copy.pptMasterFixRevealPath;
   return copy.pptMasterFixRetry;
-}
-
-/** Localized label for a preflight check row. */
-export function pptMasterCheckLabel(
-  check: PptMasterCheck,
-  copy: ExtensionsCopyTable,
-): string {
-  return copy.pptMasterChecks[check.id] ?? check.id;
 }

@@ -20,6 +20,7 @@ import { useStore } from "../store";
 import type { CodeActiveEditor, CodeBridgeAsk, CodeServerStatus } from "../types";
 import { currentSomniqColors } from "./codeTheme";
 import { CODE_COPY } from "./i18n";
+import { listenForWorkspaceTrust, workbenchFrameUrl } from "./workspaceTrust";
 import "./Code.css";
 
 // Remote compute is the one Lab panel with no counterpart inside the
@@ -110,12 +111,18 @@ export default function CodePane({ onWorkbenchReadyChange }: { onWorkbenchReadyC
   const [activeEditor, setActiveEditor] = useState<CodeActiveEditor | null>(null);
   const [computeOpen, setComputeOpen] = useState(false);
   const startedRef = useRef(false);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
   const connectionEvents = useRef(0);
   const projectPath = currentProject?.path ?? null;
 
   // A connected extension alone is not enough if this pane is showing the
   // trust notice, preparation state, or an error fallback instead of an iframe.
   const workbenchVisible = isTauri() && trusted && frameKey(status) !== null;
+  const workbenchUrl = frameKey(status);
+  useEffect(() => {
+    if (!workbenchVisible || !workbenchUrl || !frameRef.current) return;
+    return listenForWorkspaceTrust(frameRef.current, workbenchUrl);
+  }, [workbenchUrl, workbenchVisible]);
   useEffect(() => {
     onWorkbenchReadyChange?.(workbenchVisible);
     return () => onWorkbenchReadyChange?.(false);
@@ -344,10 +351,11 @@ export default function CodePane({ onWorkbenchReadyChange }: { onWorkbenchReadyC
     return (
       <div className="code-pane code-pane-split">
         <iframe
+          ref={frameRef}
           key={url}
           className="code-frame"
           title={copy.frameTitle}
-          src={url}
+          src={workbenchFrameUrl(url)}
           // The workbench needs clipboard access for copy/paste to behave, and
           // its extension host runs in a nested worker frame.
           allow="clipboard-read; clipboard-write"

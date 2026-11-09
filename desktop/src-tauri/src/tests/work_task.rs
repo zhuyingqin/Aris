@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     artifact_export_core, cancel_core, create_core, delete_core, list_core, pause_core,
-    queue_scheduled_run, reorder_core, reply_core, return_to_todo_core, snapshot_core, start_core,
-    update_core,
+    queue_scheduled_run, reply_core, return_to_todo_core, snapshot_core, start_core, update_core,
 };
 use crate::work_task::engine;
 use crate::work_task::model::{
@@ -516,37 +515,6 @@ fn a_vanished_worktree_is_reported_on_the_card_and_by_the_diff() {
     );
 }
 
-/// Board order drives the launch queue, so a drag has to be durable and must
-/// not disturb cards that were not part of it.
-#[test]
-fn reordering_rewrites_only_the_named_cards() {
-    let fixture = fixture("reorder");
-    let first =
-        create_core(&fixture.project_id, "First".into(), String::new(), None).expect("create");
-    let second =
-        create_core(&fixture.project_id, "Second".into(), String::new(), None).expect("create");
-    let third =
-        create_core(&fixture.project_id, "Third".into(), String::new(), None).expect("create");
-
-    reorder_core(&fixture.project_id, &[third.id.clone(), first.id.clone()]).expect("reorder");
-
-    let ordered = store::list(&fixture.project_id)
-        .into_iter()
-        .map(|task| task.title)
-        .collect::<Vec<_>>();
-    assert_eq!(ordered[0], "Third");
-    assert_eq!(ordered[1], "First");
-    // The card that was not dragged keeps its original ordering key, so it
-    // sorts after the two that were just renumbered from zero.
-    assert_eq!(ordered[2], "Second");
-    assert_eq!(
-        store::get(&fixture.project_id, &second.id)
-            .expect("task")
-            .sort_order,
-        second.sort_order
-    );
-}
-
 /// Deleting takes the isolation with it, or the worktree is stranded with
 /// nothing left on the board referencing it.
 #[test]
@@ -565,35 +533,6 @@ fn deleting_a_task_also_removes_its_worktree() {
     assert!(!Path::new(&tree_path).exists());
 }
 
-/// Board columns render freshest-first, so a reorder must not hand the frontend
-/// a set of timestamps that re-sorts the cards the user just arranged.
-#[test]
-fn reordering_does_not_invert_the_dragged_order_on_the_board() {
-    let fixture = fixture("reorder-freshness");
-    let first = create_core(&fixture.project_id, "First".into(), String::new(), None).unwrap();
-    let second = create_core(&fixture.project_id, "Second".into(), String::new(), None).unwrap();
-    let third = create_core(&fixture.project_id, "Third".into(), String::new(), None).unwrap();
-
-    // The user drags them into this order.
-    reorder_core(
-        &fixture.project_id,
-        &[third.id.clone(), first.id.clone(), second.id.clone()],
-    )
-    .expect("reorder");
-
-    // The board sorts by `updatedAt` descending. Reordered cards must tie, so
-    // the fallback is the sortOrder just written.
-    let tasks = store::list(&fixture.project_id);
-    let stamps = tasks.iter().map(|task| task.updated_at).collect::<Vec<_>>();
-    assert_eq!(
-        stamps
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        1,
-        "a single drag must stamp one timestamp, got {stamps:?}"
-    );
-}
 // ── Recovery from an interrupted process ─────────────────────────────────────
 
 /// Put a task into the state a process that died mid-merge leaves behind.

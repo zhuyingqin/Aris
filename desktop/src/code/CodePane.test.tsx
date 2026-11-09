@@ -21,6 +21,7 @@ import { useAppearance } from "../appearance";
 import type { CodeBridgeAsk, CodeServerStatus } from "../types";
 import { CODE_COPY } from "./i18n";
 import CodePane, { askPromptFor, downloadPercent, frameKey } from "./CodePane";
+import { workbenchFrameUrl } from "./workspaceTrust";
 
 vi.mock("../api/tauri", () => ({
   isTauri: () => true,
@@ -276,7 +277,7 @@ describe("CodePane", () => {
 
     await waitFor(() => {
       const frame = document.querySelector("iframe.code-frame") as HTMLIFrameElement | null;
-      expect(frame?.getAttribute("src")).toBe(READY.url);
+      expect(frame?.getAttribute("src")).toBe(workbenchFrameUrl(READY.url!));
     });
     expect(codeServerEnsure).toHaveBeenCalledWith("D:/work", "en");
   });

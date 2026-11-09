@@ -1,4 +1,10 @@
 import { primaryModifier, isMacOS } from "../platform";
+import AgentTaskCards, { AgentTaskList, isAgentTaskActive } from "./AgentTaskCards";
+import { AgentTaskIdentity, agentTaskDisplayName } from "./agentTaskPresentation";
+import { AgentTaskNavigation } from "./AgentSpawnNotice";
+import AgentTaskPanel from "./AgentTaskPanel";
+import { useAgentTasks } from "./useAgentTasks";
+import type { AgentTaskCard } from "../api/agentTasks";
 import {
   lazy,
   Suspense,
@@ -70,6 +76,7 @@ import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
+import { useModelPricing } from "../useModelPricing";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useBackgroundProcesses, useProjectBrief } from "./ProjectBriefCard";
@@ -196,6 +203,8 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
  */
 type SidePanelTab =
   | { kind: "task"; id: string; projectId: string; title: string; handoff: string | null }
+  | { kind: "agent"; id: string; projectId: string; title: string; handoff: null; rootSessionId: string; childSessionId: string }
+  | { kind: "agents"; id: string; projectId: string; title: string; handoff: null; rootSessionId: string }
   | { kind: "reviewer"; id: string; projectId: string; title: string; handoff: null }
   | { kind: "review"; id: string; projectId: string; title: string; handoff: null }
   | { kind: "image-workflow"; id: string; projectId: string; title: string; handoff: null }
@@ -225,21 +234,23 @@ function sidePanelStateKey(projectId: string, sessionId: string): string {
   return `${SIDE_PANEL_STATE_KEY}:${encodeURIComponent(projectId)}:${encodeURIComponent(sessionId)}`;
 }
 
-function isStoredSidePanelTab(value: unknown, projectId: string): value is SidePanelTab {
+function isStoredSidePanelTab(value: unknown, projectId: string, sessionId: string): value is SidePanelTab {
   if (!value || typeof value !== "object") return false;
   const tab = value as Partial<SidePanelTab>;
   if (tab.projectId !== projectId || typeof tab.id !== "string" || typeof tab.title !== "string") return false;
   if (tab.kind === "task" || tab.kind === "reviewer" || tab.kind === "review" || tab.kind === "image-workflow") return true;
+  if (tab.kind === "agent") return tab.rootSessionId === sessionId && typeof tab.childSessionId === "string" && tab.childSessionId.length > 0;
+  if (tab.kind === "agents") return tab.rootSessionId === sessionId;
   return tab.kind === "file" && typeof (tab as { path?: unknown }).path === "string";
 }
 
-function readStoredSidePanelState(key: string, projectId: string): StoredSidePanelState {
+function readStoredSidePanelState(key: string, projectId: string, sessionId: string): StoredSidePanelState {
   const empty: StoredSidePanelState = { tabs: [], activeId: null, open: false, sequence: 0 };
   if (typeof window === "undefined") return empty;
   try {
     const parsed = JSON.parse(window.localStorage?.getItem(key) ?? "null") as Partial<StoredSidePanelState> | null;
     if (!parsed) return empty;
-    const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter((tab) => isStoredSidePanelTab(tab, projectId)) : [];
+    const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter((tab) => isStoredSidePanelTab(tab, projectId, sessionId)) : [];
     const activeId = typeof parsed.activeId === "string" && tabs.some((tab) => tab.id === parsed.activeId)
       ? parsed.activeId
       : tabs.at(-1)?.id ?? null;
@@ -454,6 +465,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   // Shared "latest value" refs so the controllers can read current state from
   // async callbacks without re-subscribing.
   const currentSessionRef = useRef(currentSession);
+  const modelPricing = useModelPricing(!currentSession?.remoteAgent);
   currentSessionRef.current = currentSession;
   const allSessionsRef = useRef(allSessions);
   allSessionsRef.current = allSessions;
@@ -832,6 +844,28 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     setSideTaskPaneOpen(true);
   }, [currentProject, language]);
 
+  const openAgentList = useCallback(() => {
+    if (!currentProject || !currentId) return;
+    const id = `agent-list:${currentId}`;
+    setSideTaskTabs(current => current.some(task => task.id === id) ? current : [...current, {
+      kind: "agents", id, projectId: currentProject.id, rootSessionId: currentId,
+      title: language === "cn" ? "子智能体" : "Agents", handoff: null,
+    }]);
+    setActiveSideTaskId(id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, currentId, language]);
+
+  const openAgentTask = useCallback((agent: AgentTaskCard) => {
+    if (!currentProject || agent.rootSessionId !== currentId || (agent.projectId && agent.projectId !== currentProject.id)) return;
+    const id = `agent-task:${agent.sessionId}`;
+    setSideTaskTabs(current => current.some(tab => tab.id === id) ? current : [...current, {
+      kind: "agent", id, projectId: currentProject.id, title: agentTaskDisplayName(agent, language), handoff: null,
+      rootSessionId: currentId, childSessionId: agent.sessionId,
+    }]);
+    setActiveSideTaskId(id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, currentId, language]);
+
   const addCodeReview = useCallback(() => {
     if (!currentProject) return;
     const existing = sideTaskTabs.find((tab) => tab.kind === "review");
@@ -1059,13 +1093,13 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       setSideTaskPaneOpen(false);
       return;
     }
-    const restored = readStoredSidePanelState(sidePanelStorageKey, currentProjectId);
+    const restored = readStoredSidePanelState(sidePanelStorageKey, currentProjectId, currentId);
     sideTaskSequenceRef.current = restored.sequence;
     setSideTaskTabs(restored.tabs);
     setActiveSideTaskId(restored.activeId);
     setSideTaskPaneOpen(restored.open);
     setHydratedSidePanelKey(sidePanelStorageKey);
-  }, [currentProjectId, sidePanelStorageKey]);
+  }, [currentProjectId, currentId, sidePanelStorageKey]);
 
   useEffect(() => {
     if (!sidePanelStorageKey || hydratedSidePanelKey !== sidePanelStorageKey) return;
@@ -1173,6 +1207,20 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   // local stream hook. Read only the bridge's live buffer here: persisted turn
   // flags cannot prove that a transport is still active after a crash.
   const currentChatBusy = run.currentChatBusy || isRemoteSessionStreaming(currentId);
+  const agentTasks = useAgentTasks(currentSession?.id ?? "", currentSession?.projectId, currentChatBusy, Boolean(currentSession && !currentSession.remoteAgent && isTauri()));
+  const agentNavigation = useMemo(() => ({
+    rootSessionId: currentId, agents: agentTasks.agents, language,
+    onOpenList: openAgentList, onOpenTask: openAgentTask,
+  }), [currentId, agentTasks.agents, language, openAgentList, openAgentTask]);
+  const resumeAgentTask = useCallback((target: string) => {
+    const session = currentSessionRef.current;
+    if (!session || currentChatBusy) return;
+    const lock = run.acquireSendLock(session.id);
+    if (lock == null) return;
+    void run.beginRun(session, session.turns,
+      language === "cn" ? `继续子任务 ${target}，在原有子会话中续派；先核对已完成结果和检查点，不重复交付，也不要重放状态不明的外部操作。` : `Continue child ${target} in its original session. Check completed results and checkpoints first; do not redeliver consumed results or replay uncertain external operations.`, [])
+      .finally(() => run.releaseSendLock(session.id, lock));
+  }, [currentSessionRef, currentChatBusy, language, run.acquireSendLock, run.beginRun, run.releaseSendLock]);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
   const turnTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
@@ -1263,20 +1311,27 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       resize: "Resize side panel",
     };
   const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
-    sideTaskTabs.map((sideTask) => ({
-      id: sideTask.id,
-      label: sideTask.title,
-      icon: <SvgIcon name={
-        sideTask.kind === "file" ? "document"
-          : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
-            : sideTask.kind === "image-workflow" ? "graph"
-              : "sparkle"
-      } size={13} />,
-      title: sideTask.kind === "file" ? sideTask.path : sideTask.title,
-      closable: true,
-      closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
-    }))
-  ), [navigationCopy.close, sideTaskTabs]);
+    sideTaskTabs.map((sideTask) => {
+      const agent = sideTask.kind === "agent" ? agentTasks.agents.find(item => item.sessionId === sideTask.childSessionId) : undefined;
+      const title = sideTask.kind === "agents" ? (language === "cn" ? "子智能体" : "Agents")
+        : agent ? agentTaskDisplayName(agent, language) : sideTask.title;
+      return {
+        id: sideTask.id,
+        label: title,
+        icon: sideTask.kind === "agent"
+          ? <AgentTaskIdentity agent={agent ?? { sessionId: sideTask.childSessionId, status: { state: "pending_init" } }} size={18} showStatus={Boolean(agent)} />
+          : <SvgIcon name={
+            sideTask.kind === "file" ? "document"
+              : sideTask.kind === "agents" ? "branch"
+                : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
+                  : sideTask.kind === "image-workflow" ? "graph" : "sparkle"
+          } size={13} />,
+        title: sideTask.kind === "file" ? sideTask.path : agent ? `${title} · ${agent.path}` : title,
+        closable: true,
+        closeLabel: `${navigationCopy.close}: ${title}`,
+      };
+    })
+  ), [navigationCopy.close, sideTaskTabs, agentTasks.agents, language]);
   const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
 
   const sendHandoffToMain = useCallback((content: string) => {
@@ -1442,7 +1497,10 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const projectBriefAvailable = projectBrief.brief !== null
     || projectBrief.repository !== null
     || background.processes.length > 0
+    || agentTasks.agents.length > 0
+    || Boolean(agentTasks.error)
     || imageAssistActivity !== null;
+  const runningTaskCount = background.processes.length + agentTasks.agents.filter(isAgentTaskActive).length;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
     && !projectBrief.hidden
@@ -1620,31 +1678,31 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             </div>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
             <div className="chat-head-actions-group">
-              {projectBriefAvailable && !sideTaskPaneOpen && (
+              {projectBriefAvailable && (
                 <button
                   type="button"
-                  className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
-                  onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
-                  title={projectBrief.hidden
+                  className={`chat-project-brief-toggle${projectBriefVisible ? " active" : ""}`}
+                  onClick={() => { setSideTaskPaneOpen(false); projectBrief.setHidden(projectBriefVisible); }}
+                  title={!projectBriefVisible
                     ? (language === "cn" ? "显示项目摘要" : "Show project summary")
                     : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                  aria-label={projectBrief.hidden
+                  aria-label={!projectBriefVisible
                     ? (language === "cn" ? "显示项目摘要" : "Show project summary")
                     : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
-                  aria-pressed={!projectBrief.hidden}
+                  aria-pressed={projectBriefVisible}
                   aria-controls="project-brief-popover"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
                   </svg>
-                  {background.processes.length > 0 && (
+                  {runningTaskCount > 0 && (
                     <span
                       className="chat-project-brief-badge"
                       title={language === "cn"
-                        ? `${background.processes.length} 个后台进程正在运行`
-                        : `${background.processes.length} background processes running`}
+                        ? `${runningTaskCount} 个任务正在运行`
+                        : `${runningTaskCount} tasks running`}
                     >
-                      {background.processes.length}
+                      {runningTaskCount}
                     </span>
                   )}
                 </button>
@@ -1681,6 +1739,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           </Suspense>
         ) : (
           <>
+        <AgentTaskNavigation.Provider value={agentNavigation}>
         <ChatThread
           key={currentId}
           sessionId={currentId}
@@ -1709,6 +1768,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           onQuestionRespond={run.respondQuestion}
           onOpenIndependentReview={openIndependentReview}
         />
+        </AgentTaskNavigation.Provider>
         {(workflowTodos.length > 0 || workflowFileChanges.length > 0 || workflowFileChangeSummary) && !pendingCommandSelection && (
           <WorkflowFlow
             todos={workflowTodos}
@@ -1777,6 +1837,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           onPermissionChange={run.changePermission}
           modelName={activeModel}
           modelOptions={workflowSession ? [] : run.modelSelectOptions}
+          modelPricing={modelPricing}
           modelBusy={run.modelBusy}
           canSwitchModel={!workflowSession && run.canSwitchModel}
           onModelChange={run.changeModel}
@@ -1869,6 +1930,24 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                     onOpenInWorkspace={openWorkflowFile}
                     onMetadataChange={updateSideTaskMetadata}
                   />
+                ) : sideTask.kind === "agents" ? (
+                  <AgentTaskList agents={agentTasks.agents} language={language} error={agentTasks.error} onOpenTask={openAgentTask} />
+                ) : sideTask.kind === "agent" ? (
+                  <AgentTaskPanel
+                    sessionId={sideTask.rootSessionId}
+                    projectId={sideTask.projectId}
+                    childSessionId={sideTask.childSessionId}
+                    agent={agentTasks.agents.find(agent => agent.sessionId === sideTask.childSessionId)}
+                    language={language}
+                    visible={sideTaskPaneOpen && tab === "chat" && activeSideTaskId === sideTask.id}
+                    busy={currentChatBusy}
+                    stopping={agentTasks.stopping === sideTask.childSessionId}
+                    error={agentTasks.error}
+                    onStop={agent => void agentTasks.stop(agent)}
+                    onResume={resumeAgentTask}
+                    onOpenEvidence={openSideFile}
+                    onOpenList={openAgentList}
+                  />
                 ) : sideTask.kind === "review" ? (
                   sideTaskPaneOpen && activeSideTaskId === sideTask.id && (
                     <Suspense fallback={<div className="git-empty" role="status"><span className="app-loading-spinner" /></div>}>
@@ -1924,6 +2003,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             reviewSaving={projectBrief.reviewSaving}
             reviewError={projectBrief.reviewError}
             onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
+            agentTasks={<AgentTaskCards agents={agentTasks.agents} error={agentTasks.error} language={language} onOpenList={openAgentList} />}
             backgroundProcesses={background.processes}
             stoppingBackgroundPids={background.stopping}
             onStopBackgroundProcess={(pid) => void background.stop(pid)}
@@ -1944,6 +2024,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           x={composer.fileMenu.x}
           y={composer.fileMenu.y}
           path={composer.fileMenu.path}
+          image={composer.fileMenu.image}
           projectRoot={currentProject?.path}
           onOpenInWorkspace={openWorkflowFile}
           onOpenInSidePanel={openSideFile}

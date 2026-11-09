@@ -51,7 +51,7 @@ export function useChatComposer({
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [chatDragging, setChatDragging] = useState(false);
-  const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string; image?: boolean } | null>(null);
 
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
@@ -142,6 +142,12 @@ export function useChatComposer({
 
   const handleChatContextMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
     let node = e.target as HTMLElement | null;
+    const imagePath = node?.closest("[data-image-path]")?.getAttribute("data-image-path");
+    if (imagePath) {
+      e.preventDefault();
+      setFileMenu({ x: e.clientX, y: e.clientY, path: imagePath, image: true });
+      return;
+    }
     // Markdown may place syntax-highlight spans inside inline <code>. Check
     // the semantic ancestor first, then walk to this chat surface rather than
     // relying on a fixed wrapper depth.

@@ -1,3 +1,4 @@
 {
-  "baseUrl": "https://somni.ensuanx.com"
+  "baseUrl": "https://somni.ensuanx.com",
+  "paymentOrigin": "https://ensuanx.com"
 }

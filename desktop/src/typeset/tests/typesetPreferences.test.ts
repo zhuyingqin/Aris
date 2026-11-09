@@ -5,6 +5,8 @@ import {
   compileErrorHandlingStorageKey,
   loadCompileErrorHandling,
   loadCompileOnSave,
+  loadCompileTimeoutMinutes,
+  parseCompileTimeoutMinutes,
   loadLatexEngineChoice,
   loadMainDocument,
   loadPdfInverted,
@@ -13,6 +15,8 @@ import {
   readStoredValue,
   writeStoredValue,
   COMPILE_ON_SAVE_STORAGE_PREFIX,
+  COMPILE_TIMEOUT_STORAGE_PREFIX,
+  MAX_COMPILE_TIMEOUT_MINUTES,
   LATEX_ENGINE_STORAGE_PREFIX,
   MAIN_DOCUMENT_STORAGE_PREFIX,
   PDF_INVERT_STORAGE_KEY,
@@ -96,6 +100,27 @@ describe("compile-on-save", () => {
     expect(loadCompileOnSave("p")).toBe(false);
     writeStoredValue(projectScopedKey(COMPILE_ON_SAVE_STORAGE_PREFIX, "p"), "false");
     expect(loadCompileOnSave("p")).toBe(true);
+  });
+});
+
+describe("compile time limit", () => {
+  it("leaves an unset or invalid limit to the compiler default", () => {
+    expect(loadCompileTimeoutMinutes("p")).toBeNull();
+    for (const stored of ["", " ", "0", "-1", "1.5", "NaN", "Infinity", "abc", String(MAX_COMPILE_TIMEOUT_MINUTES + 1)]) {
+      writeStoredValue(projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, "p"), stored);
+      expect(loadCompileTimeoutMinutes("p")).toBeNull();
+    }
+  });
+
+  it("restores whole minutes independently for each project and resets to default", () => {
+    writeStoredValue(projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, "one"), "30");
+    writeStoredValue(projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, "two"), "5");
+    expect(loadCompileTimeoutMinutes("one")).toBe(30);
+    expect(loadCompileTimeoutMinutes("two")).toBe(5);
+    expect(loadCompileTimeoutMinutes("three")).toBeNull();
+    writeStoredValue(projectScopedKey(COMPILE_TIMEOUT_STORAGE_PREFIX, "one"), null);
+    expect(loadCompileTimeoutMinutes("one")).toBeNull();
+    expect(parseCompileTimeoutMinutes(String(MAX_COMPILE_TIMEOUT_MINUTES))).toBe(MAX_COMPILE_TIMEOUT_MINUTES);
   });
 });
 

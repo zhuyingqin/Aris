@@ -19,6 +19,23 @@ describe("formatUserFacingError", () => {
     expect(formatUserFacingError("model not found")).toBe("所选模型当前不可用，请在设置中更换模型后重试。");
   });
 
+  it("explains upstream key expiry before generic authentication or sign-in hints", () => {
+    const error = 'OpenAI API error 401 Unauthorized: {"error":{"message":"This API key has expired. Create a new API key in OpenCode Console. Signing in again will not renew this key.","type":"authentication_error","code":"api_key_expired"}}';
+    expect(formatUserFacingError(error)).toBe("所选模型的服务端密钥已过期，请切换模型或联系服务管理员。");
+    expect(formatUserFacingError(new Error(error), "en")).toBe("The selected model's service credential has expired. Switch models or contact the service administrator.");
+    expect(formatUserFacingError(error + " Please sign in again. https://gateway.internal sk-private-key")).toBe(formatUserFacingError(error));
+    expect(formatUserFacingError('HTTP 401 {"error":{"code":"api_key_expired","message":"The account API key expired"}}')).toBe("身份验证失败，请重新登录或检查 API Key。");
+  });
+
+  it("explains a rejected reasoning continuation without exposing the provider dump", () => {
+    const error = 'OpenAI API error 400 Bad Request: {"error":{"message":"Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API. (request_id: test-request-id)","type":"invalid_request_error","param":"","code":"invalid_request_error"}}';
+
+    expect(formatUserFacingError(error)).toBe("模型未能接续工具调用所需的思考记录，请重试或切换模型后继续。");
+    expect(formatUserFacingError(error, "en")).toBe("The model could not continue with the reasoning history required for tool calls. Retry or switch models to continue.");
+    expect(formatUserFacingError("Missing reasoning_content for an assistant tool call", "en")).toBe(formatUserFacingError(error, "en"));
+    expect(formatUserFacingError("reasoning_content is required: https://gateway.internal/token?secret=value")).toBe(formatUserFacingError(error));
+  });
+
   it("does not leak paths or credentials from otherwise unknown failures", () => {
     expect(formatUserFacingError("failed to write C:\\Users\\name\\secret.txt")).toBe("无法访问本地文件，请检查文件是否存在及访问权限。");
     expect(formatUserFacingError("request failed: Authorization: Bearer sk-secret-value")).toBe("服务暂时不可用，请稍后重试。");

@@ -70,16 +70,6 @@ export function measureText(text: string, fontSize: number): { width: number; he
   return { width, height };
 }
 
-/** Tools whose gesture is a drag between two corners. */
-export function isDragTool(tool: AnnotationTool): boolean {
-  return tool === "rect" || tool === "ellipse" || tool === "arrow" || tool === "mosaic";
-}
-
-/** Tools whose gesture is a freehand stroke. */
-export function isStrokeTool(tool: AnnotationTool): boolean {
-  return tool === "pen" || tool === "highlight";
-}
-
 /** Drop shapes too small to be intentional (a click with a tool selected). */
 export function isUsableAnnotation(annotation: Annotation): boolean {
   switch (annotation.kind) {

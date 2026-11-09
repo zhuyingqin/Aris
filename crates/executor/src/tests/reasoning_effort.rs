@@ -1,4 +1,7 @@
-use super::{closest_level, levels_for_model, model_has_levels, ALL_LEVELS, DEFAULT_LEVEL};
+use super::{
+    claude_thinking, closest_level, levels_for_model, model_has_levels, ClaudeThinking,
+    ALL_LEVELS, DEFAULT_LEVEL,
+};
 
 /// The published per-model tables (OpenAI model pages, read 2026-09-02). These
 /// are the assertions that would have caught the shipped bug: the composer
@@ -130,6 +133,10 @@ fn every_subset_stays_ordered_along_the_full_ladder() {
         "gpt-5-mini",
         "o3-mini",
         "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-fable-5-1",
+        "claude-mythos-preview",
+        "claude-haiku-4-5-20251001",
     ] {
         let ranks: Vec<_> = levels_for_model(model)
             .iter()
@@ -141,4 +148,55 @@ fn every_subset_stays_ordered_along_the_full_ladder() {
         assert_eq!(ranks, sorted, "{model}: levels must ascend without repeats");
     }
     assert!(rank(DEFAULT_LEVEL).is_some());
+}
+
+/// Claude 4.7 and later answer `{"type": "enabled"}` with a 400 and 5.x think by
+/// default, so the shape is read from the model ID (thinking docs, read
+/// 2026-10-17).
+#[test]
+fn claude_thinking_shape_follows_the_model_generation() {
+    use ClaudeThinking::{Adaptive, Manual, Unsupported};
+    for (model, expected) in [
+        ("claude-opus-4-8", Adaptive { on_by_default: false, xhigh: true }),
+        ("claude-opus-4-7", Adaptive { on_by_default: false, xhigh: true }),
+        ("claude-opus-4.7", Adaptive { on_by_default: false, xhigh: true }),
+        ("claude-opus-4-6", Adaptive { on_by_default: false, xhigh: false }),
+        ("claude-sonnet-4-6", Adaptive { on_by_default: false, xhigh: false }),
+        ("claude-opus-5-5", Adaptive { on_by_default: true, xhigh: true }),
+        ("claude-sonnet-5", Adaptive { on_by_default: true, xhigh: true }),
+        ("claude-haiku-5-5", Adaptive { on_by_default: true, xhigh: true }),
+        ("claude-fable-5-1", Adaptive { on_by_default: true, xhigh: true }),
+        ("claude-mythos-preview", Adaptive { on_by_default: true, xhigh: false }),
+        ("claude-opus-4-5-20251101", Manual),
+        ("claude-haiku-4-5-20251001", Manual),
+        ("claude-sonnet-4-20250514", Manual),
+        ("claude-3-7-sonnet-20250219", Manual),
+        ("anthropic.claude-sonnet-4-5-20250929-v1:0", Manual),
+        ("claude-3-5-sonnet-latest", Unsupported),
+    ] {
+        assert_eq!(claude_thinking(model), Some(expected), "{model}");
+    }
+    assert_eq!(claude_thinking("gpt-5.6-sol"), None);
+    assert_eq!(claude_thinking("deepseek-v4-pro"), None);
+}
+
+#[test]
+fn claude_ladders_offer_only_levels_the_model_accepts() {
+    assert_eq!(
+        levels_for_model("claude-sonnet-4-6"),
+        ["none", "low", "medium", "high", "max"]
+    );
+    assert_eq!(
+        levels_for_model("claude-fable-5-1"),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        levels_for_model("claude-mythos-preview"),
+        ["low", "medium", "high", "max"]
+    );
+    assert!(!model_has_levels("claude-3-5-sonnet-latest"));
+    // A model that thinks by default cannot be asked for `none`.
+    assert_eq!(closest_level("claude-opus-5-5", "none"), Some("low"));
+    // No `xhigh` on Sonnet 4.6: the tie breaks upward.
+    assert_eq!(closest_level("claude-sonnet-4-6", "xhigh"), Some("max"));
 }

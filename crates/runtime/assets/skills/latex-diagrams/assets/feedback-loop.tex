@@ -1,0 +1,21 @@
+% Body fragment; scalar negative-feedback schematic, not a stability claim.
+\begin{tikzpicture}
+  \node[sq base] (reference) at (-5.7,0) {$r_t$};
+  \node[circle,draw=sqInk,line width=0.85pt,minimum size=0.6cm,inner sep=0pt]
+    (sum) at (-4.4,0) {};
+  \node[sq process,text width=1.8cm] (controller) at (-1.9,0) {控制器\\$\pi$};
+  \node[sq process,text width=1.8cm] (plant) at (1.8,0) {被控系统\\$f$};
+  \coordinate (tap) at (4.1,0);
+  \node[sq base] (measurement) at (5.1,0) {$y_t$};
+  \node[sq base] (disturbance) at (1.8,1.8) {扰动 $d_t$};
+  \draw[sq arrow] (reference.east) -- (sum.west);
+  \node[font=\small] at ($(sum.west)+(-0.16,0.22)$) {$+$};
+  \node[font=\small] at ($(sum.south)+(0.22,-0.12)$) {$-$};
+  \draw[sq arrow] (sum.east) -- node[sq label,above] {$e_t$} (controller.west);
+  \draw[sq arrow] (controller.east) -- node[sq label,above] {$u_t$} (plant.west);
+  \draw[sq arrow] (plant.east) -- (measurement.west);
+  \draw[sq arrow] (disturbance.south) -- (plant.north);
+  \fill[sqInk] (tap) circle (1.5pt);
+  \draw[sq arrow] (tap) -- ++(0,-1.65) -| (sum.south);
+  \node[sq base,font=\small] at (0,-1.95) {测量反馈 $y_t$，误差 $e_t=r_t-y_t$};
+\end{tikzpicture}

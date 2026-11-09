@@ -13,6 +13,8 @@ export const CHAT_COPY: Record<Language, {
   projectsSection: string;
   showMoreChats: string;
   showFewerChats: string;
+  collapseProject: (project: string) => string;
+  expandProject: (project: string) => string;
   newChatInProject: (project: string) => string;
   newChatInThisProject: string;
   unread: string;
@@ -59,6 +61,8 @@ export const CHAT_COPY: Record<Language, {
   copy: string;
   copied: string;
   editAndResend: string;
+  expandMessage: string;
+  collapseMessage: string;
   continue: string;
   image: string;
   file: string;
@@ -76,6 +80,8 @@ export const CHAT_COPY: Record<Language, {
     projectsSection: "项目",
     showMoreChats: "更多对话",
     showFewerChats: "收起对话",
+    collapseProject: (project) => `收起项目 ${project}`,
+    expandProject: (project) => `展开项目 ${project}`,
     newChatInProject: (project) => `在 ${project} 中新建任务`,
     newChatInThisProject: "在此项目中新建任务",
     unread: "未读",
@@ -127,6 +133,8 @@ export const CHAT_COPY: Record<Language, {
     copy: "复制",
     copied: "已复制",
     editAndResend: "编辑并重新发送",
+    expandMessage: "展开全文",
+    collapseMessage: "收起",
     continue: "继续",
     image: "图片",
     file: "文件",
@@ -144,6 +152,8 @@ export const CHAT_COPY: Record<Language, {
     projectsSection: "Projects",
     showMoreChats: "Show more",
     showFewerChats: "Show less",
+    collapseProject: (project) => `Collapse project ${project}`,
+    expandProject: (project) => `Expand project ${project}`,
     newChatInProject: (project) => `New task in ${project}`,
     newChatInThisProject: "New task in this project",
     unread: "Unread",
@@ -195,6 +205,8 @@ export const CHAT_COPY: Record<Language, {
     copy: "Copy",
     copied: "Copied",
     editAndResend: "Edit and resend",
+    expandMessage: "Show more",
+    collapseMessage: "Show less",
     continue: "Continue",
     image: "Image",
     file: "File",

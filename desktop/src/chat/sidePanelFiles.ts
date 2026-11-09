@@ -1,4 +1,6 @@
 import { basename, extension } from "../editor/workspaceFiles";
+import { isImagePath } from "../imageFiles";
+export { imageMimeType } from "../imageFiles";
 
 /**
  * How the side panel should render a file. Everything that is not a known
@@ -17,42 +19,12 @@ export interface SidePanelMetadata {
   handoff: string | null;
 }
 
-const IMAGE_EXTENSIONS = new Set([
-  ".apng",
-  ".avif",
-  ".bmp",
-  ".gif",
-  ".ico",
-  ".jpeg",
-  ".jpg",
-  ".png",
-  ".svg",
-  ".webp",
-]);
-
-const IMAGE_MIME: Record<string, string> = {
-  ".apng": "image/apng",
-  ".avif": "image/avif",
-  ".bmp": "image/bmp",
-  ".gif": "image/gif",
-  ".ico": "image/x-icon",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".webp": "image/webp",
-};
-
 export function sideFileKind(path: string): SideFileKind {
   const ext = extension(path);
   if (ext === ".pdf") return "pdf";
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (isImagePath(path)) return "image";
   if (ext === ".md" || ext === ".markdown") return "markdown";
   return "text";
-}
-
-export function imageMimeType(path: string): string {
-  return IMAGE_MIME[extension(path)] ?? "application/octet-stream";
 }
 
 /** Tab label for a file: the file name, shortened so the tab strip stays readable. */

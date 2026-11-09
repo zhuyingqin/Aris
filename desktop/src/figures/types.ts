@@ -39,11 +39,15 @@ export interface FigureRasterVersion {
 }
 export interface FigureRasterDocument { dataUrl: string; hash: string; index: number; width: number; height: number; editPrompts?: string[]; resolvedPrompt?: string | null; promptModel?: string | null }
 export interface FigureView { projectId: string; run: FigureRun; active: boolean; activeCount?: number }
-export interface FigureDocument { svg: string | null; rawOutput?: string | null; sourceDataUrl: string | null; previewDataUrl: string | null }
+export interface FigureEditingDraft { svg: string; expectedHash: string | null; baseIndex: number | null; updatedAt: string }
+export interface FigureDocument { svg: string | null; rawOutput?: string | null; sourceDataUrl: string | null; previewDataUrl: string | null; draft?: FigureEditingDraft | null }
 export interface FigureConnections {
-  executor: ModelIdentity; reviewer: ModelIdentity;
+  // Invalid selections retain their model names and choices, without runnable identities.
+  executor: ModelIdentity | null; reviewer: ModelIdentity | null;
+  executorModel?: string | null; reviewerModel?: string | null;
   executorModels?: string[]; reviewerModels?: string[];
   image: { enabled: boolean; available: boolean; model: string | null; models: string[] };
+  error?: string | null;
 }
 export interface PrepareFigure {
   projectId: string; id: string; title: string; method: string; style: string;

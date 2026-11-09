@@ -2,11 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { fileOpen, fileRead } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import { workspaceFileOpenTarget } from "../editor/workspaceFiles";
+import { isImagePath } from "../imageFiles";
+import { copyImageToClipboard } from "../imageClipboard";
+import { useStore } from "../store";
 
 interface Props {
   x: number;
   y: number;
   path: string;
+  image?: boolean;
   projectRoot?: string;
   onClose: () => void;
   onAttach: (path: string, content: string) => void;
@@ -19,13 +23,17 @@ export default function FilePathMenu({
   x,
   y,
   path,
+  image = false,
   projectRoot,
   onClose,
   onAttach,
   onOpenInWorkspace,
   onOpenInSidePanel,
 }: Props) {
+  const language = useStore((state) => state.language);
   const [openInOpen, setOpenInOpen] = useState(false);
+  const [copyingImage, setCopyingImage] = useState(false);
+  const [copyImageError, setCopyImageError] = useState(false);
   const [pos, setPos] = useState({ x, y });
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -77,9 +85,15 @@ export default function FilePathMenu({
   }, [onClose]);
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    // A menu above the image viewer owns Escape until it closes.
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
   }, [onClose]);
 
   const copy = (text: string) => {
@@ -97,6 +111,20 @@ export default function FilePathMenu({
     }
   };
 
+  const handleCopyImage = async () => {
+    if (copyingImage) return;
+    setCopyingImage(true);
+    setCopyImageError(false);
+    try {
+      await copyImageToClipboard(path);
+      onClose();
+    } catch {
+      setCopyImageError(true);
+    } finally {
+      setCopyingImage(false);
+    }
+  };
+
   return (
     <div
       ref={menuRef}
@@ -105,6 +133,21 @@ export default function FilePathMenu({
       role="menu"
       aria-label="File options"
     >
+      {(image || isImagePath(path)) && (
+        <>
+          <button role="menuitem" disabled={copyingImage} onClick={() => void handleCopyImage()}>
+            {language === "cn"
+              ? copyingImage ? "正在复制图片…" : "复制图片"
+              : copyingImage ? "Copying image…" : "Copy image"}
+          </button>
+          {copyImageError && (
+            <div className="file-path-menu-error" role="alert">
+              {language === "cn" ? "图片复制失败，请重试。" : "Could not copy image. Try again."}
+            </div>
+          )}
+          <div className="file-path-menu-divider" />
+        </>
+      )}
       <button role="menuitem" onClick={() => void handleAttach()}>
         附加为上下文
       </button>

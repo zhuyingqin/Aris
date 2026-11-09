@@ -1,0 +1,84 @@
+/* Loaded with App, before the lazy editor or its extension host starts. */
+.app.app-code-shell {
+  grid-template-rows: var(--app-titlebar-height, 36px) minmax(0, 1fr);
+  grid-template-areas: "title" "main";
+}
+
+.app.app-code-shell .window-titlebar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.app.app-code-shell > .app-head {
+  display: none;
+}
+
+.window-titlebar-center {
+  display: flex;
+  align-self: stretch;
+  min-width: 0;
+}
+
+.window-titlebar-center .window-titlebar-drag {
+  flex: 1;
+  min-width: 0;
+}
+
+.window-titlebar-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.5rem;
+  position: relative;
+  z-index: 300;
+}
+
+.window-titlebar-code-actions[hidden] {
+  display: none;
+}
+
+.window-titlebar-code-actions .project-switcher-trigger {
+  display: flex;
+  width: max-content;
+  max-width: min(14.25rem, 26vw);
+  height: var(--app-control-size, 32px);
+  gap: 0.375rem;
+  padding: 0 0.625rem;
+  font-size: 0.8125rem;
+}
+
+.window-titlebar-code-actions .project-switcher-icon {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 1rem;
+}
+
+.window-titlebar-code-switcher {
+  position: relative;
+  z-index: 300;
+  min-width: 0;
+  padding-left: 0.5rem;
+}
+
+.window-titlebar-code-switcher .product-switcher-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: var(--app-control-size, 32px);
+  padding: 0 0.5rem;
+  color: var(--text);
+  font-size: 0.8125rem;
+}
+
+.window-titlebar-code-switcher .product-menu {
+  top: calc(100% + 0.25rem);
+  max-height: calc(100vh - var(--app-titlebar-height, 36px) - 0.5rem);
+}
+
+.window-titlebar-code-switcher .product-menu-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  justify-items: stretch;
+  height: auto;
+  padding: 6px 8px;
+  color: var(--text);
+}

@@ -4,6 +4,7 @@ import { figureEditImage, figureEditResultDocument, figureResolveEditResult, fig
 import { imagePoint, rectangleRegion, regionArea, selectionMask, type ImagePoint, type ImageRegion } from "./rasterSelection";
 import type { FigureRasterDocument, FigureView } from "./types";
 import { statusLabel } from "./figureModel";
+import FigureResizeHandle, { useFigurePanelSize } from "./FigureResizeHandle";
 
 type Props = {
   view: FigureView; available: boolean; locked: boolean;
@@ -25,13 +26,14 @@ export default function FigureRasterEditor({ view, available, locked, t, onUpdat
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
+  const controlsRef = useRef<HTMLElement>(null);
+  const layout = useFigurePanelSize("png-controls");
   const stroke = useRef<ImageRegion>([]);
   const versions = run.rasterVersions ?? [];
   const historyPrompt = versions.find((version) => version.index === image?.index)?.prompt;
   const result = run.pendingRasterEdit;
   const displayImage = result && resultChoice !== "keep" ? (resultPreview?.choice === resultChoice ? resultPreview.image : null) : image;
   const latest = versions.at(-1)?.index;
-  const beforeSvg = !run.imageConfirmed && !run.versions.length;
   const disabled = busy || locked || view.active;
   const unresolved = run.status === "unknown" || run.requests.some((r) => r.status === "unknown" || r.status === "submitted");
   const exhausted = run.requests.length >= 199 || versions.length >= 100;
@@ -149,8 +151,10 @@ export default function FigureRasterEditor({ view, available, locked, t, onUpdat
       <p className="figure-raster-caption">{result ? t("切换查看结果，选择采用方式。原图仍保留。", "Preview the result and choose how to use it. The original is kept.") : scope === "whole" ? t("整张图片都在修改范围内。修改结果保存为新版本，原图仍保留。", "The whole image can change. Results are saved as a new version; the original is kept.")
         : t("在图上拖动圈出修改区域，可添加多个圈选。圈外像素保留原样。", "Drag to select an area; add more regions as needed. Pixels outside the selection stay unchanged.")}{displayImage && <span>{displayImage.width} × {displayImage.height}</span>}</p>
     </div>
-    <aside className="figure-raster-controls">
-      <div><h2>{t("先调整图片，再生成 SVG", "Refine the image before SVG")}</h2><p className="figure-hint">{beforeSvg ? t("确认图片后，才会开始 SVG 重建和独立审查。", "SVG reconstruction and independent review begin when you confirm this image.") : t("选择用于 SVG 的图片版本。", "Choose the image version to use for SVG.")}</p></div>
+    <FigureResizeHandle label={t("调整图片与修改区域宽度", "Resize image and edit panel")} panelRef={controlsRef}
+      directionX={-1} minWidth={240} reserveWidth={332} onResize={layout.resize} onReset={layout.reset} />
+    <aside ref={controlsRef} style={layout.style} className="figure-raster-controls">
+      <h2>{t("图片修改", "Image edits")}</h2>
       {result && <section className="figure-raster-result" aria-label={t("采用图片结果", "Use image result")}>
         <strong>{t("预览修改结果", "Preview edited image")}</strong>
         <p className="figure-hint">{t("图片画幅变化较大，请检查预览后应用修改。", "The image canvas changed considerably. Check the preview before applying your edit.")}</p>

@@ -1416,6 +1416,15 @@ fn delete_gateway_token(gateway_url: &str) -> Result<(), String> {
     delete_keyring_secret(&gateway_token_secret_account(gateway_url))
 }
 
+/// Gateway calls identify the release, so the edge's access log can tell which
+/// desktop version paired or relayed.
+fn remote_gateway_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(runtime::client_user_agent())
+        .build()
+        .expect("static remote gateway HTTP client configuration must be valid")
+}
+
 fn gateway_token(gateway_url: &str) -> Result<String, String> {
     let account = gateway_token_secret_account(gateway_url);
     let Some(token) = read_keyring_secret(&account)? else {
@@ -1543,7 +1552,7 @@ async fn gateway_paired_device_ids(
     token: &str,
 ) -> Result<BTreeSet<String>, String> {
     let overview: GatewayMeResponse = gateway_response_json(
-        reqwest::Client::new()
+        remote_gateway_client()
             .get(format!("{gateway_url}/v1/me"))
             .bearer_auth(token),
     )
@@ -1606,7 +1615,7 @@ async fn announce_account_ownership(gateway_url: &str, display_name: Option<Stri
     };
     // The label travels with the announcement so a rename reaches the
     // account's web surfaces without waiting for another pairing.
-    let response = reqwest::Client::new()
+    let response = remote_gateway_client()
         .post(format!("{gateway_url}/v1/account/desktops"))
         .json(&serde_json::json!({ "display_name": display_name }))
         .bearer_auth(token)
@@ -1681,7 +1690,7 @@ async fn gateway_pending_claim(
     token: &str,
     pairing_id: &str,
 ) -> Result<Option<GatewayPendingClaim>, String> {
-    let client = reqwest::Client::new();
+    let client = remote_gateway_client();
     let response = client
         .get(format!("{gateway_url}/v1/pairings/{pairing_id}/claims"))
         .bearer_auth(token)
@@ -1769,7 +1778,7 @@ async fn retry_one_pending_gateway_revocation(app: &AppHandle, device_id: &str) 
     let Ok(token) = gateway_token(&gateway_url) else {
         return;
     };
-    let client = reqwest::Client::new();
+    let client = remote_gateway_client();
     let result: Result<GatewayRevokeDeviceResponse, String> = gateway_response_json(
         client
             .delete(format!("{gateway_url}/v1/devices/{device_id}"))
@@ -4037,7 +4046,7 @@ async fn start_pairing_for_account_request(
         Ok(())
     })?;
     let ice_servers = with_store(state, |store| Ok(store.ice_servers.clone()))?;
-    let client = reqwest::Client::new();
+    let client = remote_gateway_client();
     let mut request =
         client
             .post(format!("{gateway_url}/v1/pairings"))
@@ -4670,7 +4679,7 @@ pub async fn remote_control_approve_pairing(
         &identity.signing_key,
     )
     .map_err(|error| format!("cannot sign pairing approval: {error}"))?;
-    let client = reqwest::Client::new();
+    let client = remote_gateway_client();
     let response: GatewayApprovePairingResponse = gateway_response_json(
         client
             .post(format!("{gateway_url}/v1/pairings/{pairing_id}/approve"))

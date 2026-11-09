@@ -10,10 +10,11 @@
 //!   arXiv Atom metadata search, normalised into one record shape and
 //!   deduplicated. Scopus and OpenAlex are the published-venue core; arXiv runs
 //!   last as a preprint supplement, so a paper found in the core keeps its
-//!   peer-reviewed record and only borrows arXiv's open PDF link. Scopus needs
-//!   `SCOPUS_API_KEY` (desktop Settings exports it) and auto-joins the default
-//!   set only when the key is present. OpenAlex uses the built-in SomniQ
-//!   research gateway, so its provider key never enters desktop settings.
+//!   peer-reviewed record and only borrows arXiv's open PDF link. Scopus goes
+//!   to Elsevier directly with `SCOPUS_API_KEY` (desktop Settings exports it)
+//!   and otherwise — or once Elsevier refuses the key off campus — through the
+//!   SomniQ school route for the signed-in account. OpenAlex uses the built-in
+//!   SomniQ research gateway, so its provider key never enters desktop settings.
 //! - `LiteratureLibraryUpsert` — compatibility projection refresh for records
 //!   that are already canonical. It cannot ingest untracked search results.
 //! - `LiteraturePdfDownload` — fetch a PDF into `papers/` and, when a paper
@@ -29,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::research_account;
 use crate::{collapse_whitespace, read_json_file};
 
 const PAPERS_DIR: &str = crate::layout::PAPERS_DIR;
@@ -400,10 +402,6 @@ impl ParsedTimeWindow {
 }
 
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
-
-pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, String> {
-    run_literature_search_with_cancel(input, &|| false)
-}
 
 pub fn run_literature_search_with_cancel(
     input: LiteratureSearchInput,
@@ -1370,7 +1368,7 @@ fn search_protocol_draft(
     // One source that cannot compile the question is a coverage gap the run
     // records per source. Failing the whole call for it — which is what the old
     // Scopus/CJK pre-flight did, and Scopus joins the default set whether or not
-    // its key is configured — threw away the four sources that could have
+    // it has a route — threw away the four sources that could have
     // answered. Only a question no requested source can express is an error.
     let expressible = draft.databases.iter().any(|source| {
         draft.queries.contains_key(source)
@@ -1933,10 +1931,6 @@ pub fn run_literature_library_upsert(
     let base = runtime::workspace_root_from_env();
     let stats = library_upsert_at(&base, &input.papers, input.search.as_ref())?;
     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
-}
-
-pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<String, String> {
-    run_literature_pdf_download_with_cancel(input, &|| false)
 }
 
 pub fn run_literature_pdf_download_with_cancel(
@@ -8733,23 +8727,14 @@ struct AdapterAvailability {
 
 fn adapter_availability(source: &str) -> AdapterAvailability {
     match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" if scopus_api_key().is_err() => AdapterAvailability {
-            status: "missing_credentials",
-            execution_mode: "not_available",
-            coverage_note: "Scopus was requested but SCOPUS_API_KEY is not configured; the run will record an explicit unauthorised source attempt.",
-            quota_policy: "Configure SCOPUS_API_KEY in Settings before execution."
-        },
-        "scopus" => AdapterAvailability {
-            status: "available",
-            execution_mode: "confirmed_network_search",
-            coverage_note: "Searches Scopus with COMPLETE first. A 401/403 entitlement response is preserved and followed once by STANDARD.",
-            quota_policy: "Uses SCOPUS_API_KEY; captures exposed Elsevier rate-limit headers."
-        },
+        "scopus" => scopus_availability(scopus_api_key().is_ok(), school_route_signed_in()),
         "openalex" => AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
-            coverage_note: "Open metadata coverage; abstract and OA fields depend on the indexed work record.",
-            quota_policy: "Captures exposed rate-limit headers; OPENALEX_MAILTO remains request-only."
+            coverage_note:
+                "Open metadata coverage; abstract and OA fields depend on the indexed work record.",
+            quota_policy:
+                "Captures exposed rate-limit headers; OPENALEX_MAILTO remains request-only.",
         },
         "semantic-scholar" | "semantic_scholar" | "semanticscholar"
             if semantic_scholar_api_key().is_none() =>
@@ -8770,38 +8755,90 @@ fn adapter_availability(source: &str) -> AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
             coverage_note: "Metadata and citation coverage from Semantic Scholar.",
-            quota_policy: "Uses SEMANTIC_SCHOLAR_API_KEY and captures exposed rate-limit headers."
+            quota_policy: "Uses SEMANTIC_SCHOLAR_API_KEY and captures exposed rate-limit headers.",
         },
         "crossref" => AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
-            coverage_note: "DOI metadata coverage; publisher abstracts and PDF links may be absent.",
-            quota_policy: "Captures exposed rate-limit headers when supplied."
+            coverage_note:
+                "DOI metadata coverage; publisher abstracts and PDF links may be absent.",
+            quota_policy: "Captures exposed rate-limit headers when supplied.",
         },
         "arxiv" => AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
-            coverage_note: "Preprint supplement, capped below venue sources to avoid crowding them out.",
-            quota_policy: "Captures exposed rate-limit headers when supplied."
+            coverage_note:
+                "Preprint supplement, capped below venue sources to avoid crowding them out.",
+            quota_policy: "Captures exposed rate-limit headers when supplied.",
         },
         _ => AdapterAvailability {
             status: "not_implemented",
             execution_mode: "not_available",
             coverage_note: "No registered adapter exists for this source.",
-            quota_policy: "Unavailable."
+            quota_policy: "Unavailable.",
         },
+    }
+}
+
+/// Scopus is reachable with an Elsevier key (which works on a subscribing
+/// network) or, without one, through the school route for a signed-in account.
+fn scopus_availability(has_key: bool, signed_in: bool) -> AdapterAvailability {
+    match (has_key, signed_in) {
+        (true, true) => AdapterAvailability {
+            status: "available",
+            execution_mode: "confirmed_network_search",
+            coverage_note: "Searches Elsevier directly with SCOPUS_API_KEY, COMPLETE first. A 401/403 response (Elsevier refuses the key outside a subscribing network) is preserved and the rest of the search uses the SomniQ school route.",
+            quota_policy: "Uses SCOPUS_API_KEY and captures exposed Elsevier rate-limit headers; school-route pages spend the shared institutional allowance.",
+        },
+        (true, false) => AdapterAvailability {
+            status: "available",
+            execution_mode: "confirmed_network_search",
+            coverage_note: "Searches Elsevier directly with SCOPUS_API_KEY, COMPLETE first. A 401/403 entitlement response is preserved and followed once by STANDARD; sign in to SomniQ to fall back to the school route instead.",
+            quota_policy: "Uses SCOPUS_API_KEY; captures exposed Elsevier rate-limit headers.",
+        },
+        (false, true) => AdapterAvailability {
+            status: "available",
+            execution_mode: "confirmed_network_search",
+            coverage_note: "Searches Scopus through the SomniQ school route with the signed-in account: STANDARD metadata without abstracts; the same record from another source supplies its abstract.",
+            quota_policy: "Each page of up to 200 records spends one request of the shared institutional allowance; the school's remaining allowance is recorded per page.",
+        },
+        (false, false) => AdapterAvailability {
+            status: "missing_credentials",
+            execution_mode: "not_available",
+            coverage_note: "Scopus was requested but there is neither SCOPUS_API_KEY nor a signed-in SomniQ account for the school route; the run will record an explicit unauthorised source attempt.",
+            quota_policy: "Sign in to SomniQ, or configure SCOPUS_API_KEY in Settings, before execution.",
+        },
+    }
+}
+
+fn scopus_request_preview(has_key: bool, query: &str, limit: usize) -> Value {
+    if has_key {
+        json!({
+            "method": "GET",
+            "url": SCOPUS_ELSEVIER_URL,
+            "query": { "query": scopus_query(query), "count": limit.min(SCOPUS_PAGE_MAX), "cursor": "*", "view": "COMPLETE" },
+            "authentication": "SCOPUS_API_KEY (redacted)",
+            "fallback": "SomniQ school route on 401/403 when signed in, otherwise STANDARD"
+        })
+    } else {
+        json!({
+            "method": "POST",
+            "url": scopus_school_url(),
+            "body": {
+                "query": scopus_query(query),
+                "view": "STANDARD",
+                "count": limit.min(SCOPUS_SCHOOL_PAGE_MAX),
+                "cursor": "*",
+                "include_abstracts": false
+            },
+            "authentication": "SomniQ account session (redacted)"
+        })
     }
 }
 
 fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
     match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" => json!({
-            "method": "GET",
-            "url": "https://api.elsevier.com/content/search/scopus",
-            "query": { "query": scopus_query(query), "count": limit.min(SCOPUS_PAGE_MAX), "cursor": "*", "view": "COMPLETE" },
-            "authentication": "SCOPUS_API_KEY (redacted)",
-            "fallback": "STANDARD on 401/403 entitlement response"
-        }),
+        "scopus" => scopus_request_preview(scopus_api_key().is_ok(), query, limit),
         "openalex" => json!({
             "method": "GET",
             "url": format!("{}/openalex/works", crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL),
@@ -9246,9 +9283,10 @@ impl Engine {
 
 /// Resolve which engines to run, always in priority order regardless of the
 /// order `sources` lists them. Empty `sources` means the full default set,
-/// which always includes Scopus: a missing `SCOPUS_API_KEY` is reported as an
-/// explicit unauthorised source attempt rather than silently dropping the
-/// source, so the run records the coverage gap instead of hiding it.
+/// which always includes Scopus: with neither `SCOPUS_API_KEY` nor a signed-in
+/// account it is reported as an explicit unauthorised source attempt rather
+/// than silently dropping the source, so the run records the coverage gap
+/// instead of hiding it.
 /// arXiv always runs last as the preprint supplement.
 fn planned_engines(sources: &[String]) -> Vec<Engine> {
     let explicit = |name: &str| {
@@ -9279,8 +9317,9 @@ fn planned_engines(sources: &[String]) -> Vec<Engine> {
 /// Blocking remote metadata search, run in canonical-priority order (Scopus →
 /// OpenAlex → Crossref → arXiv) so dedupe keeps the published-venue record and
 /// arXiv only fills the gaps (e.g. an open PDF link). Empty `sources` means the
-/// full default set, which always includes Scopus; a missing `SCOPUS_API_KEY`
-/// surfaces as a per-source warning instead of dropping the source.
+/// full default set, which always includes Scopus; with no route to Scopus
+/// (no key, signed out) it surfaces as a per-source warning instead of
+/// dropping the source.
 pub fn search_remote(
     query: &str,
     sources: &[String],
@@ -11468,15 +11507,6 @@ fn scopus_operand_end(tokens: &[ScopusToken], op: usize) -> Option<usize> {
     }
 }
 
-/// The query as it will actually be sent to Scopus, after field-code wrapping
-/// and proximity normalisation.
-///
-/// Exposed because a caller that reports "0 results" needs to be able to show
-/// the query the provider actually answered, not the one it was handed.
-pub fn scopus_query_for_provider(query: &str) -> String {
-    scopus_query(query)
-}
-
 /// Bare keyword queries become `TITLE-ABS-KEY(...)`; queries that already use
 /// Scopus field codes pass through untouched.
 fn scopus_query(query: &str) -> String {
@@ -11549,8 +11579,133 @@ fn scopus_phrase(query: &str) -> String {
     collapse_whitespace(&query.replace(['"', '“', '”'], " ").replace(['–', '—'], "-"))
 }
 
+/// Elsevier's Scopus Search API, called directly with `SCOPUS_API_KEY`.
+/// Elsevier grants access by the caller's network: the same key that works on
+/// a subscribing campus is refused with 401/403 anywhere else.
+const SCOPUS_ELSEVIER_URL: &str = "https://api.elsevier.com/content/search/scopus";
+
+/// Records per school-route request. The school answers with STANDARD
+/// metadata, which Elsevier serves 200 to a request; every request spends one
+/// unit of an allowance shared by every SomniQ user, so pages stay large.
+const SCOPUS_SCHOOL_PAGE_MAX: usize = 200;
+
+/// Neither an Elsevier key nor a signed-in account. Worded so the run files it
+/// as an unauthorised attempt rather than a provider failure.
+const SCOPUS_NO_ROUTE_MESSAGE: &str = "Scopus needs an Elsevier API key (SCOPUS_API_KEY) or a signed-in SomniQ account for the school route; sign in to SomniQ or configure the key in Settings";
+
+/// Header naming the account whose `Authorization` bearer token is presented,
+/// as the account service's own user API expects it.
+const SCOPUS_SCHOOL_USER_HEADER: &str = "New-Api-User";
+
+/// The school's Scopus search, relayed by the SomniQ research gateway. The
+/// school holds the Elsevier entitlement and calls from its campus network, so
+/// this route works wherever the desktop is.
+fn scopus_school_url() -> String {
+    format!(
+        "{}/scopus/search",
+        crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopusRoute {
+    Elsevier,
+    School,
+}
+
+impl ScopusRoute {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Elsevier => "elsevier",
+            Self::School => "school",
+        }
+    }
+
+    const fn page_max(self) -> usize {
+        match self {
+            Self::Elsevier => SCOPUS_PAGE_MAX,
+            Self::School => SCOPUS_SCHOOL_PAGE_MAX,
+        }
+    }
+}
+
+type ScopusAccountLookup<'a> =
+    &'a dyn Fn() -> Result<Option<research_account::ResearchAccountCredential>, String>;
+
+/// Where one Scopus search may be sent, and with what.
+struct ScopusAccess<'a> {
+    elsevier_url: String,
+    school_url: String,
+    api_key: Option<String>,
+    /// The signed-in account the school route presents; `Ok(None)` when
+    /// signed out. Asked per request so a long search renews its session.
+    account: ScopusAccountLookup<'a>,
+}
+
+/// The signed-in account, if its session was issued by the research gateway's
+/// own host. A token from any other account service is never sent there.
+fn school_route_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
+    let Some(provider) = research_account::current_provider() else {
+        return Ok(None);
+    };
+    Ok(provider.credential()?.filter(|credential| {
+        research_account::same_origin(
+            &credential.issuer,
+            crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL,
+        )
+    }))
+}
+
+/// Whether the school route has an account to present, from local state only.
+fn school_route_signed_in() -> bool {
+    research_account::current_provider()
+        .and_then(|provider| provider.session_issuer())
+        .is_some_and(|issuer| {
+            research_account::same_origin(&issuer, crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL)
+        })
+}
+
 fn search_scopus(
     client: &reqwest::blocking::Client,
+    query: &str,
+    limit: usize,
+    time_window: Option<&ParsedTimeWindow>,
+    sort_order: &str,
+    initial_cursor: Option<&str>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<AdapterSearchOutcome, String> {
+    let access = ScopusAccess {
+        elsevier_url: SCOPUS_ELSEVIER_URL.to_string(),
+        school_url: scopus_school_url(),
+        api_key: scopus_api_key().ok(),
+        account: &school_route_account,
+    };
+    search_scopus_with(
+        client,
+        &access,
+        query,
+        limit,
+        time_window,
+        sort_order,
+        initial_cursor,
+        should_cancel,
+    )
+}
+
+/// One page of Scopus results, whichever route answered it.
+struct ScopusPage {
+    papers: Vec<RemotePaper>,
+    entries: usize,
+    total: usize,
+    next_cursor: Option<String>,
+    /// The school reports this explicitly; Elsevier leaves it to the cursor.
+    has_more: Option<bool>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_scopus_with(
+    client: &reqwest::blocking::Client,
+    access: &ScopusAccess<'_>,
     query: &str,
     limit: usize,
     time_window: Option<&ParsedTimeWindow>,
@@ -11564,12 +11719,21 @@ fn search_scopus(
                 .to_string(),
         );
     }
-    let api_key = scopus_api_key()?;
     let query = scopus_query_with_time_window(&scopus_query(query), time_window);
-    // COMPLETE view includes abstracts but needs extra entitlement — fall back
-    // to the STANDARD view (no abstracts) once, then keep using it for the rest
-    // of the pages instead of failing the search.
+    let provider_sort = scopus_sort_parameter(sort_order);
+    // With a key Elsevier goes first: on a subscribing campus it answers
+    // directly. Without one the school route is the only way in.
+    let mut route = if access.api_key.is_some() {
+        ScopusRoute::Elsevier
+    } else {
+        ScopusRoute::School
+    };
+    let mut switched_to_school = false;
+    // COMPLETE view includes abstracts but needs extra entitlement. When the
+    // school route is not available either, fall back to the STANDARD view
+    // (no abstracts) once and keep using it instead of failing the search.
     let mut view = "COMPLETE";
+    let mut school_view: Option<String> = None;
     let mut papers = Vec::new();
     let mut fetched_entries = 0usize;
     let mut cursor = initial_cursor
@@ -11582,111 +11746,220 @@ fn search_scopus(
     let mut quotas = Vec::new();
     let mut warnings = Vec::new();
     let mut exhausted = false;
-    // Scopus caps each page at SCOPUS_PAGE_MAX, so page through until we reach
-    // the requested `limit` or exhaust the result set.
+    // Each route caps its page size, so page through until we reach the
+    // requested `limit` or exhaust the result set.
     loop {
-        let count = (limit - papers.len()).min(SCOPUS_PAGE_MAX);
+        let count = limit.saturating_sub(papers.len()).min(route.page_max());
         if count == 0 {
             break;
         }
-        // Scopus pages 25 rows at a time, so a large protocol is dozens of
-        // requests; without this a stop would only land at the source boundary.
-        // Checked after the natural exit so a stop arriving as the last page
-        // lands cannot relabel a finished source as interrupted.
+        // A large protocol is many requests; without this a stop would only
+        // land at the source boundary. Checked after the natural exit so a
+        // stop arriving as the last page lands cannot relabel a finished
+        // source as interrupted.
         stop_before_next_page(should_cancel, "Scopus")?;
         let page_cursor = cursor.clone();
-        let request = |view: &str| {
-            let mut params: Vec<(&str, String)> = vec![
-                ("query", query.clone()),
-                ("count", count.to_string()),
-                ("cursor", page_cursor.clone()),
-                ("view", view.to_string()),
-            ];
-            if let Some(provider_sort) = scopus_sort_parameter(sort_order) {
-                params.push(("sort", provider_sort.to_string()));
+        let page = match route {
+            ScopusRoute::Elsevier => {
+                let api_key = access.api_key.clone().unwrap_or_default();
+                let request = |view: &str| {
+                    let mut params: Vec<(&str, String)> = vec![
+                        ("query", query.clone()),
+                        ("count", count.to_string()),
+                        ("cursor", page_cursor.clone()),
+                        ("view", view.to_string()),
+                    ];
+                    if let Some(provider_sort) = provider_sort {
+                        params.push(("sort", provider_sort.to_string()));
+                    }
+                    client
+                        .get(&access.elsevier_url)
+                        .header("X-ELS-APIKey", api_key.clone())
+                        .header("Accept", "application/json")
+                        .query(&params)
+                };
+                let request_record = |view: &str| {
+                    json!({
+                        "method": "GET",
+                        "url": access.elsevier_url,
+                        "route": ScopusRoute::Elsevier.label(),
+                        "query": {
+                            "query": query,
+                            "count": count,
+                            "cursor": page_cursor,
+                            "view": view,
+                            "sortOrder": sort_order,
+                            "providerSort": provider_sort,
+                        },
+                        "authentication": "SCOPUS_API_KEY (redacted)",
+                    })
+                };
+                let mut response = send_provider_request("Scopus", || request(view))?;
+                requests.push(request_record(view));
+                quotas.push(response_quota(&response));
+                raw_artifacts.push(provider_artifact(
+                    "provider-response",
+                    "json",
+                    "application/json",
+                    &response,
+                ));
+                if matches!(response.status, 401 | 403) {
+                    // Off campus Elsevier refuses the key whatever the view,
+                    // so the school route is preferred over a STANDARD retry
+                    // that would be refused the same way on every page.
+                    match (access.account)() {
+                        Ok(Some(_)) => {
+                            warnings.push(format!(
+                                "Elsevier refused SCOPUS_API_KEY (HTTP {}), as it does outside a subscribing network; the provider response is retained and the rest of this search uses the SomniQ school route.",
+                                response.status
+                            ));
+                            route = ScopusRoute::School;
+                            switched_to_school = true;
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(error) => warnings.push(format!(
+                            "Elsevier refused SCOPUS_API_KEY (HTTP {}) and the SomniQ school route has no usable account session: {error}",
+                            response.status
+                        )),
+                    }
+                }
+                if matches!(response.status, 401 | 403) && view == "COMPLETE" {
+                    warnings.push(
+                        "Scopus COMPLETE was not permitted; the provider response is retained and this run continues with STANDARD metadata."
+                            .to_string(),
+                    );
+                    view = "STANDARD";
+                    response = send_provider_request("Scopus", || request(view))?;
+                    let mut record = request_record(view);
+                    record["fallbackFrom"] = json!("COMPLETE");
+                    requests.push(record);
+                    quotas.push(response_quota(&response));
+                    raw_artifacts.push(provider_artifact(
+                        "provider-response",
+                        "json",
+                        "application/json",
+                        &response,
+                    ));
+                }
+                require_success(&response, "Scopus")?;
+                let body: Value =
+                    serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
+                let results = &body["search-results"];
+                let entries = results["entry"].as_array().cloned().unwrap_or_default();
+                ScopusPage {
+                    // An empty result set arrives as one
+                    // `{ "error": "Result set was empty" }` entry — filter_map
+                    // drops it because it has no title.
+                    papers: entries.iter().filter_map(scopus_entry_to_paper).collect(),
+                    entries: entries.len(),
+                    total: scopus_total_results(results),
+                    next_cursor: results["cursor"]["@next"]
+                        .as_str()
+                        .or_else(|| results["cursor"]["next"].as_str())
+                        .map(str::to_string),
+                    has_more: None,
+                }
             }
-            client
-                .get("https://api.elsevier.com/content/search/scopus")
-                .header("X-ELS-APIKey", api_key.clone())
-                .header("Accept", "application/json")
-                .query(&params)
-        };
-        let mut response = send_provider_request("Scopus", || request(view))?;
-        requests.push(json!({
-            "method": "GET",
-            "url": "https://api.elsevier.com/content/search/scopus",
-            "query": {
-                "query": query,
-                "count": count,
-                "cursor": page_cursor,
-                "view": view,
-                "sortOrder": sort_order,
-                "providerSort": scopus_sort_parameter(sort_order),
-            },
-            "authentication": "SCOPUS_API_KEY (redacted)",
-        }));
-        quotas.push(response_quota(&response));
-        raw_artifacts.push(provider_artifact(
-            "provider-response",
-            "json",
-            "application/json",
-            &response,
-        ));
-        if matches!(response.status, 401 | 403) && view == "COMPLETE" {
-            warnings.push(
-                "Scopus COMPLETE was not permitted; the provider response is retained and this run continues with STANDARD metadata."
-                    .to_string(),
-            );
-            view = "STANDARD";
-            response = send_provider_request("Scopus", || request(view))?;
-            requests.push(json!({
-                "method": "GET",
-                "url": "https://api.elsevier.com/content/search/scopus",
-                "query": {
+            ScopusRoute::School => {
+                let account = match (access.account)() {
+                    Ok(Some(account)) => account,
+                    Ok(None) => return Err(SCOPUS_NO_ROUTE_MESSAGE.to_string()),
+                    Err(error) => {
+                        return Err(format!(
+                            "Scopus school route needs a signed-in SomniQ account (or an Elsevier API key): {error}"
+                        ))
+                    }
+                };
+                let mut payload = json!({
                     "query": query,
+                    "view": "STANDARD",
                     "count": count,
                     "cursor": page_cursor,
-                    "view": view,
-                    "sortOrder": sort_order,
-                    "providerSort": scopus_sort_parameter(sort_order),
-                },
-                "authentication": "SCOPUS_API_KEY (redacted)",
-                "fallbackFrom": "COMPLETE"
-            }));
-            quotas.push(response_quota(&response));
-            raw_artifacts.push(provider_artifact(
-                "provider-response",
-                "json",
-                "application/json",
-                &response,
-            ));
+                    "include_abstracts": false,
+                });
+                if let Some(provider_sort) = provider_sort {
+                    payload["sort"] = json!(provider_sort);
+                }
+                let response = send_provider_request("Scopus", || {
+                    client
+                        .post(&access.school_url)
+                        .bearer_auth(&account.access_token)
+                        .header(SCOPUS_SCHOOL_USER_HEADER, account.user_id.to_string())
+                        .header("Accept", "application/json")
+                        .json(&payload)
+                })?;
+                let mut recorded_body = payload.clone();
+                recorded_body["sortOrder"] = json!(sort_order);
+                requests.push(json!({
+                    "method": "POST",
+                    "url": access.school_url,
+                    "route": ScopusRoute::School.label(),
+                    "body": recorded_body,
+                    "authentication": "SomniQ account session (redacted)",
+                }));
+                raw_artifacts.push(provider_artifact(
+                    "provider-response",
+                    "json",
+                    "application/json",
+                    &response,
+                ));
+                let body: Option<Value> = serde_json::from_slice(&response.body).ok();
+                quotas.push(json!({
+                    "headers": response.headers,
+                    "school": body.as_ref().and_then(|body| body.get("quota")).cloned(),
+                }));
+                if matches!(response.status, 401 | 403) {
+                    return Err(format!(
+                        "Scopus school route HTTP {}: the gateway did not accept the SomniQ account session; sign in to SomniQ again",
+                        response.status
+                    ));
+                }
+                require_success(&response, "Scopus school route")?;
+                let body = body.ok_or_else(|| {
+                    "Scopus school route answered with a body that is not JSON".to_string()
+                })?;
+                let entries = body["entries"].as_array().ok_or_else(|| {
+                    let detail = String::from_utf8_lossy(&response.body)
+                        .chars()
+                        .take(240)
+                        .collect::<String>();
+                    format!("Scopus school route answered without an `entries` list: {detail}")
+                })?;
+                if let Some(reported) = body["view"].as_str() {
+                    school_view = Some(reported.to_string());
+                }
+                let pagination = &body["pagination"];
+                ScopusPage {
+                    papers: entries
+                        .iter()
+                        .filter_map(scopus_school_entry_to_paper)
+                        .collect(),
+                    entries: entries.len(),
+                    total: scopus_json_count(&body["total_hits"]),
+                    next_cursor: pagination["next_cursor"].as_str().map(str::to_string),
+                    has_more: pagination["has_more"].as_bool(),
+                }
+            }
+        };
+        if page.total > 0 {
+            hit_count = Some(page.total as u64);
         }
-        require_success(&response, "Scopus")?;
-        let body: Value = serde_json::from_slice(&response.body).map_err(|e| e.to_string())?;
-        let results = &body["search-results"];
-        let total = scopus_total_results(results);
-        if total > 0 {
-            hit_count = Some(total as u64);
-        }
-        let entries = results["entry"].as_array().cloned().unwrap_or_default();
-        // An empty result set arrives as one `{ "error": "Result set was empty" }`
-        // entry — filter_map drops it because it has no title.
-        let before = papers.len();
-        papers.extend(entries.iter().filter_map(scopus_entry_to_paper));
-        let added = papers.len() - before;
-        fetched_entries = fetched_entries.saturating_add(entries.len());
-        let next_cursor = results["cursor"]["@next"]
-            .as_str()
-            .or_else(|| results["cursor"]["next"].as_str())
-            .map(str::to_string)
+        let added = page.papers.len();
+        papers.extend(page.papers);
+        fetched_entries = fetched_entries.saturating_add(page.entries);
+        let next_cursor = page
+            .next_cursor
             .filter(|next| !next.is_empty() && next != &cursor);
         if let Some(next) = next_cursor.as_ref() {
             cursor = next.clone();
         }
         // Stop at the reported total (when known), a short page (no more rows),
-        // or when a page yields nothing usable.
-        exhausted = (total > 0 && fetched_entries >= total)
-            || entries.len() < count
+        // a provider that says there is nothing more, or when a page yields
+        // nothing usable.
+        exhausted = (page.total > 0 && fetched_entries >= page.total)
+            || page.entries < count
+            || page.has_more == Some(false)
             || next_cursor.is_none();
         if exhausted || added == 0 {
             break;
@@ -11695,26 +11968,40 @@ fn search_scopus(
     papers = dedupe_remote_ordered(papers);
     papers.truncate(limit);
     let unique = papers.len();
+    let used_school = route == ScopusRoute::School;
+    let reported_view = if used_school {
+        school_view.unwrap_or_else(|| "STANDARD".to_string())
+    } else {
+        view.to_string()
+    };
+    let coverage_note = if switched_to_school {
+        "Elsevier refused SCOPUS_API_KEY from this network, so the remaining pages came through the SomniQ school route (STANDARD metadata without abstracts; the same record from another source supplies its abstract)."
+    } else if used_school {
+        "Scopus metadata came through the SomniQ school route (STANDARD metadata without abstracts; the same record from another source supplies its abstract)."
+    } else if view == "STANDARD" {
+        "Scopus COMPLETE entitlement was unavailable; STANDARD fallback may omit abstract fields."
+    } else {
+        "Scopus COMPLETE metadata was requested; actual fields remain subject to provider entitlement and index coverage."
+    };
     Ok(AdapterSearchOutcome {
         papers,
         variant_ranks: Vec::new(),
         request: json!({
             "provider": "scopus",
+            "route": if switched_to_school { "elsevier_then_school" } else { route.label() },
             "requests": requests,
-            "view": view,
-            "fallbackPolicy": "COMPLETE_to_STANDARD_on_401_or_403",
+            "view": reported_view,
+            "fallbackPolicy": if access.api_key.is_some() {
+                "elsevier_COMPLETE_then_school_route_on_401_or_403_else_STANDARD"
+            } else {
+                "school_route"
+            },
         }),
         raw_artifacts,
         hit_count,
         quota: Value::Array(quotas),
         warnings,
-        coverage_note: Some(if view == "STANDARD" {
-            "Scopus COMPLETE entitlement was unavailable; STANDARD fallback may omit abstract fields."
-                .to_string()
-        } else {
-            "Scopus COMPLETE metadata was requested; actual fields remain subject to provider entitlement and index coverage."
-                .to_string()
-        }),
+        coverage_note: Some(coverage_note.to_string()),
         coverage: runtime::SearchCoverage {
             total_hits: hit_count,
             fetched: u64::try_from(fetched_entries).unwrap_or(u64::MAX),
@@ -11750,10 +12037,80 @@ fn scopus_query_with_time_window(query: &str, time_window: Option<&ParsedTimeWin
 /// string). Missing/unparseable means "unknown" — pagination then relies on
 /// short-page detection instead.
 fn scopus_total_results(results: &Value) -> usize {
-    match &results["opensearch:totalResults"] {
+    scopus_json_count(&results["opensearch:totalResults"])
+}
+
+/// A count that may arrive as a JSON number or a numeric string.
+fn scopus_json_count(value: &Value) -> usize {
+    match value {
         Value::String(value) => value.trim().parse().unwrap_or(0),
         value => usize::try_from(value.as_u64().unwrap_or(0)).unwrap_or(0),
     }
+}
+
+/// Maps one entry of the school route's own response format, which flattens
+/// Elsevier's `dc:`/`prism:` fields into plain names.
+fn scopus_school_entry_to_paper(entry: &Value) -> Option<RemotePaper> {
+    let title = collapse_whitespace(entry["title"].as_str()?);
+    if title.is_empty() {
+        return None;
+    }
+    let text = |key: &str| {
+        entry[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let scopus_id = text("scopus_id").map(str::to_string).or_else(|| {
+        text("eid")
+            .and_then(|eid| eid.rsplit('-').next())
+            .map(str::to_string)
+    });
+    let doi = text("doi").map(str::to_lowercase);
+    let authors = entry["authors"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(collapse_whitespace)
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let cover_date = text("cover_date").unwrap_or("");
+    let year = cover_date
+        .get(0..4)
+        .and_then(|year| year.parse().ok())
+        .or_else(|| match &entry["year"] {
+            Value::String(year) => year.trim().parse().ok(),
+            year => year.as_u64().and_then(|year| u32::try_from(year).ok()),
+        });
+    let cited_by = match &entry["citedby_count"] {
+        Value::String(value) => value.trim().parse().ok(),
+        value => value.as_u64(),
+    };
+    let url = text("eid")
+        .map(|eid| format!("https://www.scopus.com/record/display.uri?eid={eid}&origin=inward"))
+        .or_else(|| doi.as_ref().map(|doi| format!("https://doi.org/{doi}")));
+    let id = scopus_id
+        .map(|id| format!("scopus:{id}"))
+        .or_else(|| doi.as_ref().map(|doi| format!("doi:{doi}")))
+        .unwrap_or_else(|| format!("title:{}", normalized_title(&title)));
+    Some(RemotePaper {
+        id,
+        title,
+        authors,
+        year,
+        venue: collapse_whitespace(text("publication_name").unwrap_or("")),
+        doi,
+        arxiv_id: None,
+        summary: strip_jats(text("abstract").unwrap_or("")),
+        url,
+        pdf_url: None,
+        source: "Scopus".to_string(),
+        published: (!cover_date.is_empty()).then(|| cover_date.to_string()),
+        cited_by,
+    })
 }
 
 fn scopus_entry_to_paper(entry: &Value) -> Option<RemotePaper> {

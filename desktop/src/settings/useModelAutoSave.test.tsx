@@ -13,74 +13,69 @@ function setup() {
   return renderHook(() => {
     const [configView, setConfigView] = useState<ConfigView | null>(baseline);
     const [draft, setDraft] = useState<ConfigPatch>({});
-    const [key, setKey] = useState("");
     const saving = useModelAutoSave({ configView, setConfigView, draft, setDraft, language: "cn",
-      secrets: [{ field: "scopusApiKey", present: "hasScopusKey", masked: "scopusKeyMasked", value: key, setValue: setKey }],
     });
-    return { configView, setConfigView, draft, setDraft, key, setKey, saving };
+    return { configView, setConfigView, draft, setDraft, saving };
   });
 }
 const advance = (milliseconds: number) => act(async () => { await vi.advanceTimersByTimeAsync(milliseconds); });
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.mocked(configSet).mockReset().mockImplementation(async (patch) => ({ ...baseline, ...patch, hasScopusKey: true, scopusKeyMasked: "masked" }));
+  vi.mocked(configSet).mockReset().mockImplementation(async (patch) => ({ ...baseline, ...patch }));
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-it("debounces edits and saves only model parameters without retaining plaintext in ConfigView", async () => {
+it("debounces edits and saves only model parameters without accepting third-party key fields", async () => {
   const { result } = setup();
   await advance(1000);
   expect(configSet).not.toHaveBeenCalled();
-  act(() => { result.current.setDraft({ webProxyUrl: "first", language: "en", memoryWriteApproval: true }); result.current.setKey(" first-key "); });
+  act(() => { result.current.setDraft({ webProxyUrl: "first", language: "en", memoryWriteApproval: true }); result.current.setDraft((draft) => ({ ...draft, summarizerModel: "first-model" })); });
   await advance(300);
   act(() => result.current.setDraft((draft) => ({ ...draft, webProxyUrl: "latest" })));
   await advance(499);
   expect(configSet).not.toHaveBeenCalled();
   await advance(1);
   expect(configSet).toHaveBeenCalledTimes(1);
-  expect(configSet).toHaveBeenLastCalledWith({ webProxyUrl: "latest", scopusApiKey: "first-key" });
-  expect(result.current.key).toBe("");
+  expect(configSet).toHaveBeenLastCalledWith({ webProxyUrl: "latest", summarizerModel: "first-model" });
   expect(result.current.configView).not.toHaveProperty("scopusApiKey");
-  expect(result.current.configView?.scopusKeyMasked).toBe("masked");
+  expect(result.current.configView?.summarizerModel).toBe("first-model");
 });
 
 it("serializes writes and preserves newer edits and independently saved preferences", async () => {
   let finish!: (view: ConfigView) => void;
   vi.mocked(configSet).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   const { result } = setup();
-  act(() => { result.current.setDraft({ webProxyUrl: "first" }); result.current.setKey("first-key"); });
+  act(() => { result.current.setDraft({ webProxyUrl: "first" }); result.current.setDraft((draft) => ({ ...draft, summarizerModel: "first-model" })); });
   await advance(500);
   act(() => {
     result.current.setDraft({ webProxyUrl: "second" });
-    result.current.setKey("second-key");
+    result.current.setDraft((draft) => ({ ...draft, summarizerModel: "second-model" }));
     result.current.setConfigView((view) => view ? { ...view, language: "en", memoryWriteApproval: !baseline.memoryWriteApproval } : view);
   });
   await advance(1000);
   expect(configSet).toHaveBeenCalledTimes(1);
   await act(async () => { finish({ ...baseline, webProxyUrl: "first" }); });
-  expect(result.current.key).toBe("second-key");
+  expect(result.current.draft.summarizerModel).toBe("second-model");
   expect(result.current.draft.webProxyUrl).toBe("second");
   expect(result.current.configView?.language).toBe("en");
   expect(result.current.configView?.memoryWriteApproval).toBe(!baseline.memoryWriteApproval);
   await advance(500);
-  expect(configSet).toHaveBeenLastCalledWith({ webProxyUrl: "second", scopusApiKey: "second-key" });
-  expect(result.current.key).toBe("");
+  expect(configSet).toHaveBeenLastCalledWith({ webProxyUrl: "second", summarizerModel: "second-model" });
 });
 
 it("keeps failed drafts without a retry loop and saves them after explicit retry", async () => {
   vi.mocked(configSet).mockRejectedValueOnce(new Error("Disk is read-only"));
   const { result } = setup();
-  act(() => result.current.setKey("pending-key"));
+  act(() => result.current.setDraft((draft) => ({ ...draft, summarizerModel: "pending-model" })));
   await advance(500);
   expect(result.current.saving.error).toBeTruthy();
-  expect(result.current.key).toBe("pending-key");
+  expect(result.current.draft.summarizerModel).toBe("pending-model");
   await advance(5000);
   expect(configSet).toHaveBeenCalledTimes(1);
   act(() => result.current.saving.retry());
   await advance(500);
   expect(configSet).toHaveBeenCalledTimes(2);
   expect(result.current.saving.error).toBe("");
-  expect(result.current.key).toBe("");
 });
 
 it("accepts server normalization without repeatedly saving the same input", async () => {
@@ -95,11 +90,11 @@ it("accepts server normalization without repeatedly saving the same input", asyn
 
 it("flushes the debounce when leaving Settings", async () => {
   const { result, unmount } = setup();
-  act(() => result.current.setKey("last-edit"));
+  act(() => result.current.setDraft((draft) => ({ ...draft, summarizerModel: "last-edit" })));
   unmount();
   await act(async () => {});
   expect(configSet).toHaveBeenCalledTimes(1);
-  expect(configSet).toHaveBeenLastCalledWith({ scopusApiKey: "last-edit" });
+  expect(configSet).toHaveBeenLastCalledWith({ summarizerModel: "last-edit" });
   await advance(1000);
   expect(configSet).toHaveBeenCalledTimes(1);
 });
@@ -108,12 +103,19 @@ it("finishes newer edits after leaving while a save is pending", async () => {
   let finish!: (view: ConfigView) => void;
   vi.mocked(configSet).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   const { result, unmount } = setup();
-  act(() => result.current.setKey("first-key"));
+  act(() => result.current.setDraft((draft) => ({ ...draft, summarizerModel: "first-model" })));
   await advance(500);
-  act(() => result.current.setKey("last-edit"));
+  act(() => result.current.setDraft((draft) => ({ ...draft, summarizerModel: "last-edit" })));
   unmount();
   expect(configSet).toHaveBeenCalledTimes(1);
   await act(async () => { finish(baseline); });
   expect(configSet).toHaveBeenCalledTimes(2);
-  expect(configSet).toHaveBeenLastCalledWith({ scopusApiKey: "last-edit" });
+  expect(configSet).toHaveBeenLastCalledWith({ summarizerModel: "last-edit" });
+});
+
+it("ignores retired API keys in a stale draft", async () => {
+  const { result } = setup();
+  act(() => result.current.setDraft({ scopusApiKey: "retired", executorApiKey: "retired" } as ConfigPatch));
+  await advance(1000);
+  expect(configSet).not.toHaveBeenCalled();
 });

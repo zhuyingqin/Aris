@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isMacOS, primaryModifier, primaryShortcut } from "./platform";
+import { isMacOS, primaryModifier } from "./platform";
 
 afterEach(() => vi.restoreAllMocks());
 describe("platform shortcuts", () => {
@@ -8,9 +8,7 @@ describe("platform shortcuts", () => {
     expect(isMacOS()).toBe(true);
     expect(primaryModifier({ metaKey: true, ctrlKey: false })).toBe(true);
     expect(primaryModifier({ metaKey: false, ctrlKey: true })).toBe(false);
-    expect(primaryShortcut("S")).toBe("⌘S");
     platform.mockReturnValue("Win32");
     expect(primaryModifier({ metaKey: false, ctrlKey: true })).toBe(true);
-    expect(primaryShortcut("S")).toBe("Ctrl+S");
   });
 });

@@ -15,7 +15,10 @@ import ChatReasoningPanel from "./ChatReasoningPanel";
 import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 import { groupChatModels } from "./modelGroups";
+import { modelPriceView, type ModelPricingState } from "../modelPricing";
 import { reasoningLevelName } from "./reasoningLevels";
+import { useMacImeGuard } from "./useMacImeGuard";
+import "../modelPricing.css";
 import "./ChatComposerGit.css";
 import "./ChatComposerModel.css";
 import "./ChatComposerLayout.css";
@@ -333,6 +336,7 @@ interface Props {
   onPermissionChange?: (mode: string) => void;
   modelName?: string | null;
   modelOptions?: { value: string; label: string }[];
+  modelPricing?: ModelPricingState | null;
   modelBusy?: boolean;
   canSwitchModel?: boolean;
   onModelChange?: (model: string) => void;
@@ -377,6 +381,7 @@ function ChatComposer({
   onPermissionChange,
   modelName,
   modelOptions,
+  modelPricing,
   modelBusy,
   canSwitchModel,
   onModelChange,
@@ -404,13 +409,20 @@ function ChatComposer({
   const readingStyle = useAppearance(({ value }) => `${value.font}:${value.bodySize}:${value.lineHeight}:${value.readingWidth}`);
   const copy = CHAT_COPY[language];
   const modelGroups = useMemo(
-    () => groupChatModels(modelOptions ?? [], language === "cn" ? "其他模型" : "Other models"),
-    [modelOptions, language],
+    () => {
+      const options = modelOptions ?? [];
+      const priceSortValues = new Map(options.map(({ value }) => [
+        value, modelPriceView(value, modelPricing, language)?.sortValue ?? Infinity,
+      ]));
+      return groupChatModels(options, language === "cn" ? "其他模型" : "Other models", priceSortValues);
+    },
+    [modelOptions, modelPricing, language],
   );
   const activeModelSeries = modelGroups.find((group) => group.options.some((option) => option.value === modelName))?.series ?? null;
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const macIme = useMacImeGuard();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activePickerItemRef = useRef<HTMLButtonElement | null>(null);
   const [pickerMode, setPickerMode] = useState<"skill" | "file" | null>(null);
@@ -445,6 +457,7 @@ function ChatComposer({
   const dismissContextLabel = language === "cn" ? "关闭上下文提示" : "Dismiss context notice";
   const modelSettingsLabel = language === "cn" ? "模型与思考强度" : "Model and reasoning effort";
   const canChooseModel = Boolean(canSwitchModel && modelOptions?.length && onModelChange);
+  const activePrice = modelName ? modelPriceView(modelName, modelPricing, language) : null;
   const canAdjustReasoning = Boolean(reasoningSupported && reasoningApplied && reasoningOptions.length && onReasoningEffortChange);
   const reasoningLabel = reasoningApplied
     ? reasoningLevelName(reasoningEffort, language)
@@ -867,6 +880,7 @@ function ChatComposer({
                 {attachment.kind === "image" && (attachment.preview || attachment.path) ? (
                   <ChatImagePreview
                     src={attachment.preview ?? attachment.path!}
+                    openPath={attachment.path}
                     alt={attachment.name}
                     mimeType={attachment.mimeType}
                   />
@@ -910,6 +924,10 @@ function ChatComposer({
           value={input}
           aria-busy={busy}
           placeholder={ready ? copy.messagePlaceholder : copy.configurePlaceholder}
+          onCompositionStart={macIme.onCompositionStart}
+          onCompositionEnd={macIme.onCompositionEnd}
+          onKeyUp={macIme.onKeyUp}
+          onBlur={macIme.onBlur}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -923,6 +941,9 @@ function ChatComposer({
             }
           }}
           onKeyDown={(event) => {
+            // Do not preventDefault: the input method still needs this key to
+            // confirm text or navigate its own candidates.
+            if (macIme.isImeKeyDown(event)) return;
             if (pickerMode) {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
@@ -1163,12 +1184,14 @@ function ChatComposer({
                     setModelMenuOpen((value) => !value);
                   }}
                   disabled={modelBusy || reasoningBusy || (!canChooseModel && (!canAdjustReasoning || busy))}
-                  title={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}`}
+                  title={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}${activePrice ? `\n${activePrice.title}` : ""}`}
                   aria-label={reasoningSupported ? `${modelName ?? (language === "cn" ? "模型" : "Model")} · ${reasoningLabel}` : undefined}
+                  aria-description={activePrice?.title}
                   aria-haspopup="dialog"
                   aria-expanded={modelMenuOpen}
                 >
                   <span className="chat-model-pill-name">{modelName ?? (language === "cn" ? "模型" : "Model")}</span>
+                  {activePrice && <span className={`model-price-badge chat-model-price is-${activePrice.kind}`} aria-hidden="true">{activePrice.label}</span>}
                   {reasoningSupported && (
                     <>
                       <span className="chat-model-pill-separator" aria-hidden="true">·</span>
@@ -1194,23 +1217,30 @@ function ChatComposer({
                             <span className="chat-model-group-count" aria-hidden="true">{group.options.length}</span>
                             <SvgIcon name={expandedModelSeries === group.series ? "chevronDown" : "chevronRight"} size={12} />
                           </button>
-                          {expandedModelSeries === group.series && group.options.map((opt) => (
+                          {expandedModelSeries === group.series && group.options.map((opt) => {
+                            const price = modelPriceView(opt.value, modelPricing, language);
+                            return (
                             <button
                               type="button"
                               key={opt.value}
                               className={`chat-pill-menu-item chat-model-option${modelName === opt.value ? " active" : ""}`}
                               role="menuitemradio"
                               aria-checked={modelName === opt.value}
+                              title={price?.title}
+                              aria-description={price?.title}
                               disabled={modelBusy || reasoningBusy}
                               onClick={() => {
                                 void onModelChange?.(opt.value);
                                 setModelMenuOpen(false);
                               }}
                             >
-                              <span>{opt.label}</span>
-                              {modelName === opt.value && <SvgIcon name="check" size={12} />}
+                              <span className="chat-model-option-name">{opt.label}</span>
+                              <span className="chat-model-option-meta">
+                                {price && <span className={`model-price-badge chat-model-price is-${price.kind}`} aria-hidden="true">{price.label}</span>}
+                              </span>
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
                       ))}
                     </div>}

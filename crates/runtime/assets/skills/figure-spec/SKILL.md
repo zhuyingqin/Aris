@@ -21,7 +21,8 @@ Generate publication-quality **architecture diagrams**, **workflow pipelines**, 
 
 **Do NOT use for:**
 - Data plots (bar/line/scatter) — use `/paper-figure`
-- Natural/qualitative illustrations — use `/paper-illustration`
+- Native TikZ explanations embedded in LaTeX papers or Beamer slides — use `/latex-diagrams`
+- Conceptual/scenario illustrations — use existing `SomniImage` when available; see the [image and hybrid guide](../latex-diagrams/references/image-generation.md). Qualitative experimental results require actual source images.
 - Quick state-machine / flowchart — use `/mermaid-diagram` (lighter syntax)
 
 ## Core Properties
@@ -243,7 +244,7 @@ Three-stage horizontal cascade with inputs feeding in from top, outputs exiting 
 
 - **`/paper-writing`** (Workflow 3): when `illustration: figurespec` (default for architecture figures), this skill handles Phase 2b
 - **`/paper-figure`**: handles data plots; they complement each other (data + architecture = complete figure set)
-- **`/paper-illustration`**: fallback for figures that need natural/qualitative style (method illustrations with photos, qualitative result grids)
+- **`SomniImage`**: existing generation route for conceptual/scenario artwork, optionally combined with native notation through `/latex-diagrams`; photos and qualitative result grids retain their actual source assets
 - **`/mermaid-diagram`**: lighter alternative for simple flowcharts
 
 ## Review Tracing

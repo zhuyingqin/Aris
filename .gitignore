@@ -87,3 +87,8 @@ site/temp_release_*/
 /desktop/.audit/
 /docs/business/
 desktop/public/figure-editor/
+desktop/public/pdfjs/
+
+# Python test caches
+__pycache__/
+*.py[cod]

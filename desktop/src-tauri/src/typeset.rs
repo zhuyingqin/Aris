@@ -69,6 +69,7 @@ pub async fn latex_compile(
     run_id: Option<String>,
     continue_on_error: Option<bool>,
     engine: Option<String>,
+    timeout_ms: Option<u64>,
 ) -> Result<LatexCompileResult, String> {
     let cancellation = Arc::new(AtomicBool::new(false));
     if let Some(run_id) = run_id.as_ref() {
@@ -85,6 +86,7 @@ pub async fn latex_compile(
             clean_cache.unwrap_or(false),
             continue_on_error.unwrap_or(false),
             engine,
+            timeout_ms,
             LatexProgressReporter::new(app, run_id),
             cancellation,
         )
@@ -442,6 +444,7 @@ fn latex_compile_blocking(
     clean_cache: bool,
     continue_on_error: bool,
     engine: Option<String>,
+    timeout_ms: Option<u64>,
     progress: LatexProgressReporter,
     cancellation: Arc<AtomicBool>,
 ) -> Result<LatexCompileResult, String> {
@@ -481,7 +484,7 @@ fn latex_compile_blocking(
             output_path: output_path.clone(),
             compiler: None,
             engine,
-            timeout_ms: None,
+            timeout_ms,
             clean_cache,
             continue_on_error,
         },

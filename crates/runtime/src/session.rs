@@ -102,6 +102,34 @@ impl From<JsonError> for SessionError {
 }
 
 impl Session {
+    /// Tool intents saved before a crash, without a durable outcome. These are
+    /// evidence of uncertainty, never a queue of operations to execute again.
+    #[must_use]
+    pub fn unresolved_tool_calls(&self) -> Vec<(String, String)> {
+        let mut pending = BTreeMap::new();
+        for message in &self.messages {
+            for block in &message.blocks {
+                match block {
+                    ContentBlock::ToolUse { id, name, .. } => { pending.insert(id.clone(), name.clone()); }
+                    ContentBlock::ToolResult { tool_use_id, .. } => { pending.remove(tool_use_id); }
+                    _ => {}
+                }
+            }
+        }
+        pending.into_iter().collect()
+    }
+
+    /// Seal unresolved intents with an explicit unknown outcome before a new
+    /// turn. The runtime only executes newly returned model calls.
+    pub fn seal_uncertain_tool_calls(&mut self) {
+        let blocks = self.unresolved_tool_calls().into_iter().map(|(tool_use_id, tool_name)| ContentBlock::ToolResult {
+            tool_use_id, tool_name,
+            output: "Execution outcome is unknown after interruption. This operation has NOT been replayed. Inspect existing evidence and reconcile its effects before considering any new action; do not assume success or retry an external operation automatically.".into(),
+            is_error: true,
+        }).collect::<Vec<_>>();
+        if !blocks.is_empty() { self.messages.push(ConversationMessage { role: MessageRole::Tool, blocks, usage: None }); }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -654,6 +682,11 @@ const CANONICAL_EVENT_KINDS: &[&str] = &[
 ];
 const SESSION_RESET_KIND: &str = "session_reset";
 const SESSION_CHECKPOINT_KIND: &str = "session_checkpoint";
+/// Kinds that record how agents relate to each other (`agent.spawn`,
+/// `agent.mail.sent`, ...). A checkpoint folds a turn's UI rows into the
+/// canonical stream, but nothing folds these: they are the only record of who
+/// started whom and who told whom what, so compaction never removes them.
+const DURABLE_EVENT_KIND_PREFIX: &str = "agent.";
 
 /// What a compaction pass removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -667,6 +700,10 @@ fn line_kind_is(line: &str, kinds: &[&str]) -> bool {
     kinds
         .iter()
         .any(|kind| line.contains(&format!("\"kind\":\"{kind}\"")))
+}
+
+fn line_kind_is_durable(line: &str) -> bool {
+    line.contains(&format!("\"kind\":\"{DURABLE_EVENT_KIND_PREFIX}"))
 }
 
 /// Drop the rows of an event log that no reader can reach any more.
@@ -715,7 +752,9 @@ pub fn compact_session_event_log_unlocked(path: &Path) -> Result<EventLogCompact
         let before_reset = last_reset.is_some_and(|reset| index < reset);
         let superseded = last_checkpoint.is_some_and(|checkpoint| index < checkpoint)
             && !line_kind_is(&line, CANONICAL_EVENT_KINDS);
-        if ours && (before_reset || superseded) {
+        // A reset or checkpoint makes a row unreachable for *replaying the
+        // conversation*; agent rows are not part of that, so they stay.
+        if ours && !line_kind_is_durable(&line) && (before_reset || superseded) {
             removed_lines += 1;
             removed_bytes += line.len() as u64 + 1;
             continue;

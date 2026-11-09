@@ -75,8 +75,6 @@ export interface ProjectFocus {
   currentAssumptions: string;
 }
 
-export type BriefField = "problem" | "method" | "results" | "limits" | "forYou";
-
 /** One Brief section. New Briefs require extracted PDF full text; `abstract`
  * remains for legacy records and abstract-only screening evidence. */
 export interface BriefSection {
@@ -501,23 +499,6 @@ export interface LiteratureLibrary {
   projectFocus?: ProjectFocus;
 }
 
-/** Normalized Zotero-style relationship read model. The current UI still
- * consumes LiteratureLibrary for compatibility, while new panels can query
- * this graph without treating a paper JSON object as the write boundary. */
-export interface LiteratureRelationSnapshot {
-  collections: LiteratureCollection[];
-  items: Record<string, {
-    recordId: string;
-    collectionIds: string[];
-    tags: string[];
-    attachments: LiteratureAttachment[];
-    notes: LiteratureNote[];
-    annotations: PdfAnnotation[];
-    relations: LiteratureLibraryItemRelation[];
-  }>;
-  specialCollections?: LiteratureSpecialCollection[];
-}
-
 export interface LiteratureSpecialCollection {
   id: string;
   kind: "all" | "unfiled" | "duplicates" | "trash" | string;
@@ -654,12 +635,6 @@ export interface RemoteLiteraturePaper {
   citedBy?: number;
 }
 
-export interface LiteratureSearchResult {
-  papers: RemoteLiteraturePaper[];
-  warnings: string[];
-  sourceCounts: Array<{ source: string; count: number }>;
-}
-
 export interface LiteratureQueryVariant {
   kind: string;
   query: string;
@@ -756,14 +731,6 @@ export interface LiteratureProtocolExecution {
    * keeps every record and cursor it had, so it can be continued. Absent on
    * runs written before stopping was supported. */
   cancelled?: boolean;
-}
-
-export interface LiteratureUpsertResult {
-  searchId?: string;
-  added: number;
-  merged: number;
-  total: number;
-  libraryPath: string;
 }
 
 export const emptyLibrary = (): LiteratureLibrary => ({

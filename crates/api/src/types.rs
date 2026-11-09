@@ -13,18 +13,29 @@ pub struct MessageRequest {
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
-    /// Anthropic extended-thinking configuration. Omitted for ordinary turns.
+    /// Anthropic thinking configuration. Omitted for ordinary turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    /// `{"effort": …}` for models that take an effort level — how adaptive
+    /// thinking is steered. Omitted elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
 }
 
+/// `{"type": "adaptive"}` on Claude 4.6 and later, `{"type": "enabled",
+/// "budget_tokens": N}` on the manual-only models before it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     #[serde(rename = "type")]
     pub kind: String,
-    pub budget_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// `"summarized"` asks for readable thinking text; models that think by
+    /// default otherwise return it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 impl MessageRequest {
@@ -53,23 +64,6 @@ impl InputMessage {
         }
     }
 
-    #[must_use]
-    pub fn user_tool_result(
-        tool_use_id: impl Into<String>,
-        content: impl Into<String>,
-        is_error: bool,
-    ) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: vec![InputContentBlock::ToolResult {
-                tool_use_id: tool_use_id.into(),
-                content: vec![ToolResultContentBlock::Text {
-                    text: content.into(),
-                }],
-                is_error,
-            }],
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

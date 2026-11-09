@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../../types";
 import { useStore } from "../../store";
 import ChatComposer, { attachmentFromFile, attachmentFromPath, resizeComposerTextarea } from "../ChatComposer";
+import { priceFixture, pricingCatalog, pricingState } from "../../tests/modelPricingFixture";
 
 const attachmentApiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -28,6 +29,7 @@ class ResizeObserverMock {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({ language: "en" });
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
   attachmentApiMocks.isTauri.mockReturnValue(false);
   attachmentApiMocks.chatImportAttachment.mockReset();
   attachmentApiMocks.chatImportAttachmentData.mockReset();
@@ -332,8 +334,81 @@ function modelComposer(overrides: Partial<ComponentProps<typeof ChatComposer>> =
     modelName="gpt-6.1-sol" modelOptions={GROUPED_MODELS} canSwitchModel onModelChange={vi.fn()} {...overrides} />;
 }
 
+describe("ChatComposer relative model prices", () => {
+  it("orders prices numerically within each series and keeps ties and unknown prices stable", async () => {
+    const user = userEvent.setup();
+    const onModelChange = vi.fn();
+    const modelIds = ["gpt-unknown-a", "deepseek-v4.1-flash", "gpt-ten", "gpt-two-b",
+      "gpt-per-request", "gpt-free", "gpt-tiny", "gpt-two-a", "gpt-unknown-b"];
+    const modelOptions = modelIds.map((value) => ({ value, label: value }));
+    const modelPricing = pricingState({ catalog: pricingCatalog({ models: [
+      priceFixture("gpt-ten", 10, 40), priceFixture("gpt-two-a", 2, 8), priceFixture("gpt-two-b", 2, 8),
+      { ...priceFixture("gpt-per-request", 0, 0), billing: "per_request" },
+      priceFixture("gpt-free", 0, 0), priceFixture("gpt-tiny", 0.00001, 0.00004),
+    ] }) });
+    render(modelComposer({ modelName: "gpt-ten", modelOptions, modelPricing, onModelChange }));
+    await user.click(screen.getByRole("button", { name: "gpt-ten" }));
+    const menu = screen.getByRole("menu", { name: "Switch model" });
+    expect(within(menu).getAllByRole("group").map((group) => group.getAttribute("aria-label")))
+      .toEqual(["GPT", "DeepSeek"]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.querySelector(".chat-model-option-name")?.textContent))
+      .toEqual(["gpt-free", "gpt-tiny", "gpt-per-request", "gpt-two-b", "gpt-two-a", "gpt-ten", "gpt-unknown-a", "gpt-unknown-b"]);
+    expect(screen.getByRole("menuitemradio", { name: "gpt-ten" }).getAttribute("aria-checked")).toBe("true");
+    expect(modelOptions.map((option) => option.value)).toEqual(modelIds);
+    await user.click(screen.getByRole("menuitemradio", { name: "gpt-two-a" }));
+    expect(onModelChange).toHaveBeenCalledWith("gpt-two-a");
+  });
+
+  it("updates an open category when prices load or change without changing the selected model", async () => {
+    const user = userEvent.setup();
+    const onModelChange = vi.fn();
+    const props = { modelName: "gpt-high", onModelChange,
+      modelOptions: ["gpt-high", "gpt-low"].map((value) => ({ value, label: value })) };
+    const { rerender } = render(modelComposer({ ...props, modelPricing: pricingState({ catalog: null, loading: true }) }));
+    await user.click(screen.getByRole("button", { name: "gpt-high" }));
+    const order = () => screen.getAllByRole("menuitemradio").map((item) => item.querySelector(".chat-model-option-name")?.textContent);
+    expect(order()).toEqual(["gpt-high", "gpt-low"]);
+    const stateFor = (highInput: number) => pricingState({ catalog: pricingCatalog({ models: [
+      priceFixture("gpt-high", highInput, highInput * 4), priceFixture("gpt-low", 2, 8),
+    ] }) });
+    rerender(modelComposer({ ...props, modelPricing: stateFor(10) }));
+    expect(order()).toEqual(["gpt-low", "gpt-high"]);
+    rerender(modelComposer({ ...props, modelPricing: stateFor(1) }));
+    expect(order()).toEqual(["gpt-high", "gpt-low"]);
+    expect(screen.getByRole("menuitemradio", { name: "gpt-high" }).getAttribute("aria-checked")).toBe("true");
+    expect(onModelChange).not.toHaveBeenCalled();
+  });
+
+  it("shows active and option prices without changing submitted model IDs", async () => {
+    const user = userEvent.setup();
+    const onModelChange = vi.fn();
+    render(modelComposer({ modelPricing: pricingState(), onModelChange }));
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" });
+    expect(trigger.textContent).toContain("18×");
+    expect(trigger.title).toContain("Input 10× · Output 20×");
+    await user.click(trigger);
+    expect(screen.queryByText(/deepseek-v4.1-flash peak = 1×/)).toBeNull();
+    expect(trigger.title).toContain("deepseek-v4.1-flash peak = 1×");
+    expect(screen.getByRole("menuitemradio", { name: "gpt-6.1-sol" }).textContent).toContain("18×");
+    await user.click(screen.getByRole("menuitem", { name: "DeepSeek" }));
+    const baseline = screen.getByRole("menuitemradio", { name: "deepseek-v4.1-flash" });
+    expect(baseline.textContent).toContain("1×");
+    await user.click(baseline);
+    expect(onModelChange).toHaveBeenCalledWith("deepseek-v4.1-flash");
+  });
+
+  it("keeps models selectable when prices are unavailable", async () => {
+    const user = userEvent.setup();
+    render(modelComposer({ modelPricing: pricingState({ catalog: null, failed: true }) }));
+    const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" });
+    expect(trigger.textContent).toContain("Price unavailable");
+    await user.click(trigger);
+    expect((screen.getByRole("menuitemradio", { name: "gpt-6.1-sol" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
 describe("ChatComposer model series", () => {
-  it("opens only the current series and preserves model labels, order, and selection", async () => {
+  it("opens the current series and folds every other series, including single-model series", async () => {
     const user = userEvent.setup();
     render(modelComposer());
     const trigger = screen.getByRole("button", { name: "gpt-6.1-sol" });
@@ -343,6 +418,12 @@ describe("ChatComposer model series", () => {
     expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual(["MiniMax", "GPT", "DeepSeek", "Laya", "LongCat", "MiMo"]);
     expect(within(groups[1]).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["gpt-5.6-luna", "gpt-6-astra", "gpt-6.1-sol"]);
     expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(3);
+    for (const label of ["DeepSeek", "Laya", "LongCat", "MiMo"]) {
+      const group = within(menu).getByRole("group", { name: label });
+      expect(within(group).getByRole("menuitem", { name: label }).getAttribute("aria-expanded")).toBe("false");
+      expect(group.querySelector(".chat-model-group-count")?.textContent).toBe("1");
+      expect(within(group).queryByRole("menuitemradio")).toBeNull();
+    }
     expect(within(menu).getByRole("menuitem", { name: "GPT" }).getAttribute("aria-expanded")).toBe("true");
     expect(within(menu).getByRole("menuitem", { name: "MiniMax" }).getAttribute("aria-expanded")).toBe("false");
     expect(within(menu).getByRole("menuitemradio", { name: "gpt-6.1-sol" }).getAttribute("aria-checked")).toBe("true");
@@ -358,7 +439,9 @@ describe("ChatComposer model series", () => {
     const menu = screen.getByRole("menu", { name: "Switch model" });
     const minimax = within(menu).getByRole("menuitem", { name: "MiniMax" });
     await user.click(minimax);
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash-Preview"]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual([
+      "MiniMax-M3", "MiniMax-M3.1-Flash-Preview",
+    ]);
     expect(within(menu).getByRole("menuitem", { name: "GPT" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByRole("menu")).toBe(menu);
     await user.click(minimax);
@@ -513,6 +596,7 @@ describe("ChatComposer combined model and reasoning panel", () => {
     expect(screen.getByRole("slider").getAttribute("max")).toBe("2");
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
     expect(screen.getByRole("menuitem", { name: "DeepSeek" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("menuitemradio", { name: "deepseek-v4.1-flash" }).getAttribute("aria-checked")).toBe("true");
   });
 });
 
@@ -761,5 +845,20 @@ describe("ChatComposer picker keyboard operation", () => {
     const preview = await screen.findByRole("img", { name: "shot.png" });
     expect((preview as HTMLImageElement).src).toMatch(/^data:image\/png;base64,/);
     expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeTruthy();
+  });
+});
+
+
+describe("attachment image opening", () => {
+  it("lets a pasted image open in-app before the message is sent", async () => {
+    const user = userEvent.setup();
+    render(<ComposerHarness />);
+    await user.upload(screen.getByTestId("chat-file-input"), new File(["fake-png"], "pasted.png", { type: "image/png" }));
+    const preview = await screen.findByRole("img", { name: "pasted.png" });
+    await user.click(preview);
+    expect(screen.getByRole("dialog", { name: "pasted.png" })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("img", { name: "pasted.png" })).toBeTruthy();
   });
 });

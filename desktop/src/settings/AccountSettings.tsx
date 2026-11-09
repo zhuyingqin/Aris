@@ -18,12 +18,16 @@ import {
 } from "./settingsFormatters";
 import { PREVIEW_SETTINGS_DATA, USAGE_LOG_PAGE_SIZE } from "./settingsPreviewData";
 import { SETTINGS_LAYOUT_COPY } from "./settingsLayoutCopy";
+import MembershipPayments from "./MembershipPayments";
+import { accountMenuPlan, isPaidAccountPlan } from "../accountMenuPlan";
 
 interface Props {
   language: Language;
   account: NewApiAccount | null;
   accountLoading: boolean;
   active?: boolean;
+  purchaseOpen: boolean;
+  onPurchaseOpenChange: (open: boolean) => void;
   onRefreshAccount: () => Promise<void>;
   children?: ReactNode;
 }
@@ -33,6 +37,8 @@ export default function AccountSettings({
   account,
   accountLoading,
   active = true,
+  purchaseOpen,
+  onPurchaseOpenChange,
   onRefreshAccount,
   children,
 }: Props) {
@@ -153,6 +159,7 @@ export default function AccountSettings({
   const subscriptionTotalQuota = subscriptionUsedQuota + subscriptionRemainingQuota;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
   const accountPageRefreshing = accountLoading || usageLoading;
+  const paidMembership = isPaidAccountPlan(accountMenuPlan(account, language).tier);
   const usageLogTotal = usageLogs?.total ?? 0;
   const usageLogItems = usageLogs?.items ?? [];
   const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
@@ -168,6 +175,10 @@ export default function AccountSettings({
           <div className="sp-section-title">{SETTINGS_LAYOUT_COPY[language].accountOverview}</div>
         </div>
         <div className="sp-update-actions">
+          {account && hasNativeBackend() && <button className="sp-btn sp-btn-primary" onClick={() => onPurchaseOpenChange(true)} type="button">
+            <SvgIcon name="credit" size={13} />
+            {language === "cn" ? (paidMembership ? "会员升级" : "购买会员") : (paidMembership ? "Upgrade membership" : "Buy membership")}
+          </button>}
           <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={accountPageRefreshing} type="button">
             <SvgIcon name={accountPageRefreshing ? "spinner" : "refresh"} size={13} />
             {accountPageRefreshing ? copy.authRefreshing : copy.authRefresh}
@@ -236,6 +247,13 @@ export default function AccountSettings({
           </div>
         </>
       ) : null}
+      {account && hasNativeBackend() && <MembershipPayments
+        key={account.username}
+        language={language}
+        account={account}
+        active={active && purchaseOpen}
+        onClose={() => onPurchaseOpenChange(false)}
+      />}
       {children}
       {account ? (
         <>

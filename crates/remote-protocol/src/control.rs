@@ -69,12 +69,6 @@ impl DeviceScopes {
         self.0.contains(&scope)
     }
 
-    /// Returns whether every scope in `other` is granted by this set.
-    #[must_use]
-    pub fn is_superset_of(&self, other: &Self) -> bool {
-        self.0.is_superset(&other.0)
-    }
-
     /// Returns whether this set is no more permissive than `other`.
     #[must_use]
     pub fn is_subset_of(&self, other: &Self) -> bool {

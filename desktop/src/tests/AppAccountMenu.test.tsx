@@ -6,13 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import AppAccountMenu from "../AppAccountMenu";
 
 function menu(overrides: Partial<ComponentProps<typeof AppAccountMenu>> = {}) {
-  return <AppAccountMenu language="cn" name="研究工作区" initials="研究" avatar={null} plan={{ tier: "pro", label: "Pro", remaining: 2_000_000, remainingPercent: 20 }} open rootRef={undefined} triggerRef={undefined} onMenuKeyDown={vi.fn()} onToggle={vi.fn()} onSettings={vi.fn()} onLogout={vi.fn()} {...overrides} />;
+  return <AppAccountMenu language="cn" name="研究工作区" initials="研究" avatar={null} plan={{ tier: "pro", label: "Pro", remaining: 2_000_000, remainingPercent: 20 }} open rootRef={undefined} triggerRef={undefined} onMenuKeyDown={vi.fn()} onToggle={vi.fn()} onSettings={vi.fn()} onMembership={vi.fn()} onLogout={vi.fn()} {...overrides} />;
 }
 
 afterEach(cleanup);
 
 describe("AppAccountMenu", () => {
-  it("shows the user and one allowance with only settings and sign-out actions", () => {
+  it("shows the user and one allowance with membership, settings and sign-out actions", () => {
     render(menu());
     const popup = screen.getByRole("menu", { name: "用户菜单" });
     expect(within(popup).getByText("研究工作区")).toBeTruthy();
@@ -20,8 +20,19 @@ describe("AppAccountMenu", () => {
     expect(within(popup).getByRole("group", { name: "套餐额度" })).toBeTruthy();
     expect(within(popup).getByText("$4.00")).toBeTruthy();
     expect(within(popup).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("20");
-    expect(within(popup).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["设置Ctrl+,", "退出登录"]);
-    expect(popup.querySelectorAll("button")).toHaveLength(2);
+    expect(within(popup).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["会员升级", "设置Ctrl+,", "退出登录"]);
+    expect(popup.querySelectorAll("button")).toHaveLength(3);
+  });
+
+  it.each([
+    ["free", "cn", "购买会员"], ["go", "cn", "会员升级"],
+    ["plus", "en", "Upgrade membership"], ["pro", "en", "Upgrade membership"],
+    ["unknown", "en", "Buy membership"],
+  ] as const)("opens membership for %s accounts in %s", async (tier, language, label) => {
+    const onMembership = vi.fn();
+    render(menu({ language, plan: { tier, label: tier, remaining: 0, remainingPercent: 0 }, onMembership }));
+    await userEvent.setup().click(screen.getByRole("menuitem", { name: label }));
+    expect(onMembership).toHaveBeenCalledOnce();
   });
 
   it("keeps settings and logout connected to their existing handlers", async () => {

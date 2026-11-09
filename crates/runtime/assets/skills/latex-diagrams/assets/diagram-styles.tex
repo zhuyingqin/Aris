@@ -1,0 +1,19 @@
+% Preamble fragment. The containing document owns its fonts and page geometry.
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds}
+\definecolor{sqInk}{HTML}{243247}
+\definecolor{sqBlue}{HTML}{245E95}
+\definecolor{sqTeal}{HTML}{167D7D}
+\definecolor{sqAmber}{HTML}{9A5E16}
+\tikzset{
+  sq base/.style={font=\normalsize,text=sqInk,align=center,inner sep=5pt},
+  sq process/.style={sq base,rounded corners=2pt,draw=sqBlue,
+    fill=sqBlue!5,line width=0.8pt,text width=2.45cm,minimum height=1.0cm},
+  sq result/.style={sq process,draw=sqTeal,fill=sqTeal!6},
+  sq pending/.style={sq process,draw=sqAmber,fill=sqAmber!7},
+  sq decision/.style={sq base,font=\small,diamond,aspect=1.8,draw=sqBlue,
+    fill=sqBlue!5,line width=0.8pt,text width=2.15cm,inner sep=2pt},
+  sq line/.style={draw=sqInk,line width=0.85pt},
+  sq arrow/.style={sq line,-{Stealth[length=2mm,width=1.4mm]}},
+  sq label/.style={font=\small,text=sqInk,inner sep=1.5pt}
+}

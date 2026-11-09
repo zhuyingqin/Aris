@@ -1,15 +1,19 @@
 // Bundled ARIS skills compiled in from assets/skills/ via build.rs
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
+pub mod agent_control;
+pub mod agent_trace;
 mod atomic_file;
 pub mod background_log;
 mod bash;
 mod cache;
 mod change_ledger;
+pub mod client_identity;
 mod compact;
 mod config;
 mod conversation;
 pub mod docx;
+pub mod document_safety;
 pub mod event_sink;
 mod evidence_ledger;
 mod execution_context;
@@ -64,6 +68,10 @@ pub use bash::{
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };
+pub use client_identity::{
+    client_outdated_error, client_outdated_message, client_user_agent, CLIENT_OUTDATED_CODE,
+    CLIENT_VERSION,
+};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use change_ledger::{
     change_ledger_root_for_path, change_ledger_root_from_env, compare_and_replace_text_file,
@@ -89,16 +97,16 @@ pub use config::{
 pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
     autonomous_max_turn_duration_from_env, autonomous_max_turn_iterations_from_env,
-    max_turn_duration_from_env, max_turn_iterations_from_env,
+    is_inter_agent_message, max_turn_duration_from_env, max_turn_iterations_from_env,
     soft_checkpoint_context_ratio_from_env, soft_checkpoint_token_growth_ratio_from_env,
     soft_checkpoint_tool_call_interval_from_env, strip_trailing_internal_continuation_messages,
     ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
     DynamicToolRouting, RuntimeError, StaticToolExecutor, ToolError, ToolExecution, ToolExecutor,
-    ToolInvocation, ToolMedia, ToolOutput, TurnSummary,
+    ToolInvocation, ToolMedia, ToolOutput, TurnInput, TurnInputSource, TurnSummary,
 };
 pub use event_sink::{
     epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
+    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink, TurnOutcome,
 };
 pub use evidence_ledger::{
     evidence_guard_mode, EvidenceGuardMode, NO_NEW_EVIDENCE_BLOCK_CALLS,
@@ -236,7 +244,7 @@ pub use reports::{
 };
 pub use research_memory::{
     canonicalize_research_memory_text, is_research_memory_session_id, research_memory_db_path,
-    ResearchMemoryAtom, ResearchMemoryAtomProvenance, ResearchMemoryCapture,
+    ResearchMemoryAtom, ResearchMemoryCapture,
     ResearchMemoryCaptureDelivery, ResearchMemoryCard, ResearchMemoryDeadLetter,
     ResearchMemoryLegacyPurge, ResearchMemoryProfile, ResearchMemoryRebuild,
     ResearchMemoryRebuildSummary, ResearchMemoryRecall, ResearchMemorySnapshot,

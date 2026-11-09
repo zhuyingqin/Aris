@@ -1,0 +1,15 @@
+% Body fragment; the two exits distinguish acceptance from exhausted budget.
+\begin{tikzpicture}
+  \node[sq process] (candidate) at (-4.2,1.4) {构建候选\\保存当前版本};
+  \node[sq decision] (validation) at (0,1.4) {验证通过？\\$\varepsilon\leq\tau$};
+  \node[sq result] (accepted) at (4.2,1.4) {交付当前版本\\附验证记录};
+  \node[sq decision] (budget) at (0,-1.1) {修订预算\\仍有剩余？};
+  \node[sq process] (revision) at (-4.2,-1.1) {修订候选\\消耗一次预算};
+  \node[sq pending] (unresolved) at (4.2,-1.1) {报告未通过\\保留现有证据};
+  \draw[sq arrow] (candidate.east) -- (validation.west);
+  \draw[sq arrow] (validation.east) -- node[sq label,above] {是} (accepted.west);
+  \draw[sq arrow] (validation.south) -- node[sq label,right] {否} (budget.north);
+  \draw[sq arrow] (budget.west) -- node[sq label,above] {是} (revision.east);
+  \draw[sq arrow] (budget.east) -- node[sq label,above] {否} (unresolved.west);
+  \draw[sq arrow] (revision.north) -- (candidate.south);
+\end{tikzpicture}
