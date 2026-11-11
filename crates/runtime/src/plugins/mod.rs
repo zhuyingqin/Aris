@@ -16,14 +16,18 @@
 //! starts with, so the page can say which runs still use what. Upgrades
 //! ([`upgrade`]) replace an installed version as one transaction.
 
+mod authoring;
 mod dsh;
 mod lifecycle;
 mod ui;
 mod upgrade;
+mod versions;
 
+pub use authoring::*;
 pub use lifecycle::*;
 pub use ui::*;
 pub use upgrade::*;
+pub use versions::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -36,8 +40,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
 
-const MAX_FILES: usize = 2048;
-const MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_FILES: usize = 2048;
+pub(super) const MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_DEPTH: usize = 32;
 struct PackageFile {
     bytes: Vec<u8>,
     executable: bool,
@@ -50,6 +55,15 @@ pub struct Diagnostic {
     pub code: String,
     pub message: String,
     pub severity: String,
+    /// Package-relative file the problem is in, when one file is to blame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Where in that file: a JSON pointer, or a patch row id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// One sentence on how to fix it, so an agent can repair its own package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl Diagnostic {
@@ -58,7 +72,20 @@ impl Diagnostic {
             code: code.into(),
             message: message.into(),
             severity: "error".into(),
+            file: None,
+            path: None,
+            hint: authoring::hint_for(code).map(str::to_string),
         }
+    }
+
+    fn in_file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
+    }
+
+    fn at(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 
@@ -107,6 +134,10 @@ pub struct InstalledPlugin {
     pub status: String,
     /// What is actually happening: in-flight runs, MCP health, restarts.
     pub lifecycle: PluginLifecycle,
+    /// Versions this one replaced, newest first; each can be restored.
+    pub history: Vec<PluginVersion>,
+    /// The digest the package was first installed with, when known.
+    pub original_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +149,14 @@ struct Record {
     source: String,
     digest: String,
     enabled: bool,
+    /// The versions this record replaced, newest first ([`MAX_PLUGIN_HISTORY`]).
+    /// Their snapshots stay on this computer, so any of them can come back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history: Vec<PluginVersion>,
+    /// The digest this package was first installed with: "the original",
+    /// whether it is running now or in the history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -142,6 +181,10 @@ struct Approvals {
 /// its registered project, so Desktop names that project here and every
 /// consumer resolves plugins through [`PluginStore::for_execution`].
 pub const ARIS_PLUGIN_PROJECT_ROOT_ENV: &str = "ARIS_PLUGIN_PROJECT_ROOT";
+
+/// The installed package is no longer the one a user approved or confirmed.
+pub const PACKAGE_CHANGED_SINCE_SHOWN: &str =
+    "The installed package changed after it was shown to you; review it again";
 
 pub struct PluginStore {
     /// `<project>/.somniq/plugins`: the install list and requested state.
@@ -197,7 +240,7 @@ fn package_files(source: &Path) -> Result<PackageFiles, String> {
     let mut total = 0;
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
-        .max_depth(32)
+        .max_depth(MAX_DEPTH)
         .sort_by_file_name()
     {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -208,8 +251,8 @@ fn package_files(source: &Path) -> Result<PackageFiles, String> {
             ));
         }
         if entry.file_type().is_dir() {
-            if entry.depth() >= 32 {
-                return Err("Package directory depth exceeds 32".into());
+            if entry.depth() >= MAX_DEPTH {
+                return Err(format!("Package directory depth exceeds {MAX_DEPTH}"));
             }
             continue;
         }
@@ -542,9 +585,13 @@ impl PluginStore {
                 "A package must not contribute duplicate skill or MCP names",
             ));
         }
+        // Only when nothing else explains it: a declaration that failed to
+        // validate also leaves no capabilities, and "empty" would send the
+        // author to fix the wrong thing.
         if capabilities.skills.is_empty()
             && capabilities.mcp_servers.is_empty()
             && capabilities.ui_panels.is_empty()
+            && !diagnostics.iter().any(|d| d.severity == "error")
         {
             diagnostics.push(Diagnostic::error(
                 "empty",
@@ -632,6 +679,8 @@ impl PluginStore {
                 source: preview.source.clone(),
                 digest: preview.digest.clone(),
                 enabled: false,
+                history: vec![],
+                original: Some(preview.digest.clone()),
             };
             registry
                 .packages
@@ -706,6 +755,8 @@ impl PluginStore {
             enabled,
             status: status.into(),
             lifecycle: PluginLifecycle::default(),
+            history: vec![],
+            original_digest: None,
         }
     }
 
@@ -723,13 +774,18 @@ impl PluginStore {
                 package.diagnostics.push(Diagnostic::error("approvals", error));
             }
             Ok(_) if record.enabled && !approved => package.diagnostics.push(Diagnostic {
-                code: "approval-required".into(),
-                message: "This project asks to run this package, but this computer has not approved this version. Turn it on to review and approve it.".into(),
                 severity: "warning".into(),
+                ..Diagnostic::error(
+                    "approval-required",
+                    "This project asks to run this package, but this computer has not approved this version. Turn it on to review and approve it.",
+                )
             }),
             Ok(_) => (),
         }
-        Self::installed(package, record.enabled && approved)
+        let mut view = Self::installed(package, record.enabled && approved);
+        view.history = record.history.clone();
+        view.original_digest = record.original.clone();
+        view
     }
 
     fn inspect_snapshot(&self, record: &Record) -> PluginPreview {
@@ -822,12 +878,35 @@ impl PluginStore {
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<InstalledPlugin, String> {
+        self.set_enabled_checked(name, enabled, None)
+    }
+
+    /// Enable exactly the version a user was shown and approved. Refused when
+    /// the installed digest changed in between, checked under the same lock as
+    /// the approval write, so a swap after the card cannot ride on the click.
+    pub fn enable_approved(
+        &self,
+        name: &str,
+        approved_digest: &str,
+    ) -> Result<InstalledPlugin, String> {
+        self.set_enabled_checked(name, true, Some(approved_digest))
+    }
+
+    fn set_enabled_checked(
+        &self,
+        name: &str,
+        enabled: bool,
+        expected_digest: Option<&str>,
+    ) -> Result<InstalledPlugin, String> {
         self.mutate(|| {
             let mut registry = self.registry()?;
             let record = registry
                 .packages
                 .get(name)
                 .ok_or("Plugin is not installed")?;
+            if expected_digest.is_some_and(|expected| expected != record.digest) {
+                return Err(PACKAGE_CHANGED_SINCE_SHOWN.into());
+            }
             let view = self.inspect_record(record);
             let digest = record.digest.clone();
             if enabled {
@@ -855,10 +934,22 @@ impl PluginStore {
 
     /// Detach the package. Snapshots remain cached so existing runs keep valid paths.
     pub fn remove(&self, name: &str) -> Result<(), String> {
+        self.remove_checked(name, None)
+    }
+
+    /// Remove exactly the version a user confirmed removing.
+    pub fn remove_confirmed(&self, name: &str, confirmed_digest: &str) -> Result<(), String> {
+        self.remove_checked(name, Some(confirmed_digest))
+    }
+
+    fn remove_checked(&self, name: &str, expected_digest: Option<&str>) -> Result<(), String> {
         self.mutate(|| {
             let mut registry = self.registry()?;
-            if !registry.packages.contains_key(name) {
+            let Some(record) = registry.packages.get(name) else {
                 return Err("Plugin is not installed".into());
+            };
+            if expected_digest.is_some_and(|expected| expected != record.digest) {
+                return Err(PACKAGE_CHANGED_SINCE_SHOWN.into());
             }
             // A later install of the same name starts unapproved.
             self.set_approval(name, None)?;
@@ -896,6 +987,8 @@ impl PluginStore {
             source: String::new(),
             digest: plugin.digest.clone(),
             enabled: true,
+            history: vec![],
+            original: None,
         };
         Self::installed(self.inspect_snapshot(&record), true)
     }

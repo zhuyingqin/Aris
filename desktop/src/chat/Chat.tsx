@@ -73,7 +73,8 @@ import {
 import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
 import ChatPluginPanel from "../extensions/ChatPluginPanel";
-import { uiPanelIcon, uiPanelKey, uiText, useChatPluginPanels } from "../extensions/useChatPluginPanels";
+import ChatBriefGlances from "../extensions/ChatBriefGlances";
+import { PLUGIN_PAGE_ACTION_EVENT, uiPanelIcon, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "../extensions/useChatPluginPanels";
 import type { ActiveUiPanel } from "../api/plugins";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
@@ -513,6 +514,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const pluginProjectPath = currentSession && currentSession.projectId === currentProject?.id && !currentSession.remoteAgent
     ? currentProject.path : undefined;
   const pluginPanels = useChatPluginPanels(pluginProjectPath);
+  const briefGlances = useChatPluginPanels(pluginProjectPath, "chat.brief");
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
@@ -1476,6 +1478,43 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     focusComposer();
   }, [focusComposer, language, run.runningSessionIdsRef, setDraft, setEditingTurnId, setError, updateSession]);
 
+  // A plugin panel's button or form: the text goes through the composer, so
+  // what it asks for runs as an ordinary turn of the user's. `send` only sends
+  // when the composer held nothing else; otherwise the user reviews and sends.
+  const [panelSend, setPanelSend] = useState<{ sessionId: string; text: string } | null>(null);
+  const runPanelPrompt = useCallback((prompt: string, sendNow: boolean) => {
+    const session = currentSessionRef.current;
+    if (!session || !prompt) return;
+    const draft = session.draft.trim();
+    setDraft(session.id, draft ? `${draft}\n\n${prompt}` : prompt);
+    focusComposer();
+    if (sendNow && !draft) setPanelSend({ sessionId: session.id, text: prompt });
+  }, [currentSessionRef, focusComposer, setDraft]);
+  useEffect(() => {
+    if (!panelSend) return;
+    setPanelSend(null);
+    // Send only the text the click put there, in the conversation it was
+    // clicked in. A busy chat keeps it in the composer instead.
+    if (currentSession?.id === panelSend.sessionId && composer.input === panelSend.text && composer.attachments.length === 0) void sendRef.current();
+  }, [panelSend, currentSession?.id, composer.input, composer.attachments.length]);
+
+  // The backend only accepts project-relative panel paths; the viewer reads absolute ones.
+  const openPanelFile = useCallback((path: string) => {
+    const root = currentProject?.path.replace(/[\\/]+$/, "");
+    if (root) openSideFile(`${root}${root.includes("\\") ? "\\" : "/"}${root.includes("\\") ? path.replace(/\//g, "\\") : path}`);
+  }, [currentProject?.path, openSideFile]);
+  // A plugin page in the navigation rail hands its clicks here. Only a
+  // conversation of the page's own project is sent to without a second look.
+  useEffect(() => {
+    const act = (event: Event) => {
+      const action = (event as CustomEvent<PluginPageAction>).detail;
+      if (action.type === "prompt") runPanelPrompt(action.text, action.send && Boolean(pluginProjectPath));
+      else if (action.type === "open-file") openPanelFile(action.path);
+    };
+    window.addEventListener(PLUGIN_PAGE_ACTION_EVENT, act);
+    return () => window.removeEventListener(PLUGIN_PAGE_ACTION_EVENT, act);
+  }, [runPanelPrompt, openPanelFile, pluginProjectPath]);
+
   const startFromPrompt = useCallback((prompt: string) => {
     const session = currentSessionRef.current;
     if (!session) return;
@@ -1569,7 +1608,8 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     || background.processes.length > 0
     || agentTasks.agents.length > 0
     || Boolean(agentTasks.error)
-    || imageAssistActivity !== null;
+    || imageAssistActivity !== null
+    || briefGlances.panels.length > 0;
   const runningTaskCount = background.processes.length + agentTasks.agents.filter(isAgentTaskActive).length;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
@@ -2003,7 +2043,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                   (() => {
                     const panel = pluginPanels.panels.find((item) => uiPanelKey(item) === sideTask.id);
                     return panel && pluginProjectPath
-                      ? <ChatPluginPanel panel={panel} projectPath={pluginProjectPath} sessionId={currentId} language={language} agentTodos={workflowTodos} />
+                      ? <ChatPluginPanel panel={panel} projectPath={pluginProjectPath} sessionId={currentId} language={language} agentTodos={workflowTodos} onPrompt={runPanelPrompt} onOpenFile={openPanelFile} />
                       : <div className="chat-plugin-panel"><p role={pluginPanels.error ? "alert" : "status"}>{pluginPanels.error || (language === "cn" ? "正在读取插件面板…" : "Loading plugin panel…")}</p><button type="button" className="chat-plugin-button" onClick={() => void pluginPanels.refresh()}>{language === "cn" ? "重新加载" : "Reload"}</button></div>;
                   })()
                 ) : sideTask.kind === "file" ? (
@@ -2089,6 +2129,9 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             reviewError={projectBrief.reviewError}
             onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
             agentTasks={<AgentTaskCards agents={agentTasks.agents} error={agentTasks.error} language={language} onOpenList={openAgentList} />}
+            glances={pluginProjectPath && briefGlances.panels.length > 0
+              ? <ChatBriefGlances panels={briefGlances.panels} all={briefGlances.all} projectPath={pluginProjectPath} language={language} onPrompt={runPanelPrompt} onOpenFile={openPanelFile} />
+              : undefined}
             backgroundProcesses={background.processes}
             stoppingBackgroundPids={background.stopping}
             onStopBackgroundProcess={(pid) => void background.stop(pid)}

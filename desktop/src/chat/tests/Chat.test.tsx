@@ -187,7 +187,7 @@ vi.mock("../ChatThread", () => ({
         }}
       />
       {turns.map((turn) => (
-        <article key={turn.id} data-role={turn.role}>
+        <article key={turn.id} data-role={turn.role} data-origin={turn.origin}>
           {turn.blocks.map((block, index) => (
             block.kind === "text"
               ? <div key={index}>{block.text}</div>
@@ -1256,6 +1256,133 @@ describe("Chat export action", () => {
     expect(request.text).not.toContain("Partial stopped response:");
     expect(request.text).toContain("already in the conversation above");
     expect(request.text).toContain("Do not repeat the completed portion");
+  });
+
+  it("runs one verification turn after a plugin approval, shown as the app's marker", async () => {
+    const session = makeSession("default");
+    session.id = "session-plugin";
+    session.title = "Plugin task";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    let toolHandler: ((event: unknown) => void) | undefined;
+    let resultHandler: ((event: unknown) => void) | undefined;
+    (apiMocks.onChatTool as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      toolHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    (apiMocks.onChatToolResult as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      resultHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const card = {
+      kind: "enable", name: "@local/notes", version: "0.1.0", description: "", digest: "sha256:a", source: "x",
+      capabilities: { skills: [], uiPanels: [], mcpServers: [] }, approveOn: "desktop",
+    };
+    (apiMocks.chatSend as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async (sessionId: string) => {
+        toolHandler?.({ sessionId, id: "pm-1", name: "PluginManager", input: "{}", ready: true, pluginApproval: card });
+        resultHandler?.({
+          sessionId, id: "pm-1", name: "PluginManager", isError: false,
+          output: JSON.stringify({ action: "request_enable", application: "next-turn" }),
+        });
+        return "Approved; it applies from the next turn.";
+      })
+      .mockResolvedValue("Verified the plugin.");
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Plugin task" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Make a notes panel plugin");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    const followUp = apiMocks.chatSend.mock.calls[1][1] as { text: string };
+    expect(followUp.text).toContain("approved the plugin change");
+    expect(followUp.text).toContain("PluginManager list");
+    // The app's turn is a marker, not a user message the user could edit.
+    const marker = (await screen.findByText("Plugin enabled · verifying it")).closest("article");
+    expect(marker?.getAttribute("data-origin")).toBe("plugin-continuation");
+    // The app's turn is not read as the user's question.
+    expect(apiMocks.projectIntentObserve).not.toHaveBeenCalledWith(
+      "default",
+      session.id,
+      [expect.objectContaining({ text: "Plugin enabled · verifying it" })],
+    );
+    await screen.findByText("Verified the plugin.");
+    // One follow-up per approval: the verification turn starts no other.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a new chat with a draft handed over from another view, without sending it", async () => {
+    const session = makeSession("default");
+    session.id = "session-existing";
+    session.title = "Existing chat";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    session.draft = "my unsent words";
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Existing chat" }));
+    act(() => useStore.setState({ pendingNewChatDraft: "Use the somniq-plugin-development skill to build me a plugin" }));
+
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value)
+      .toBe("Use the somniq-plugin-development skill to build me a plugin"));
+    expect(useStore.getState().pendingNewChatDraft).toBeNull();
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
+    // The existing chat keeps its own draft: the hand-off opened a new one.
+    expect(screen.queryByText("Earlier question")).toBeNull();
+  });
+
+  it("does not follow up a turn whose plugin card was declined", async () => {
+    const session = makeSession("default");
+    session.id = "session-plugin-declined";
+    session.title = "Declined plugin";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    let toolHandler: ((event: unknown) => void) | undefined;
+    let resultHandler: ((event: unknown) => void) | undefined;
+    (apiMocks.onChatTool as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      toolHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    (apiMocks.onChatToolResult as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      resultHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const card = {
+      kind: "enable", name: "@local/notes", version: "0.1.0", description: "", digest: "sha256:a", source: "x",
+      capabilities: { skills: [], uiPanels: [], mcpServers: [] }, approveOn: "desktop",
+    };
+    (apiMocks.chatSend as ReturnType<typeof vi.fn>).mockImplementationOnce(async (sessionId: string) => {
+      toolHandler?.({ sessionId, id: "pm-1", name: "PluginManager", input: "{}", ready: true, pluginApproval: card });
+      resultHandler?.({
+        sessionId, id: "pm-1", name: "PluginManager", isError: false,
+        output: JSON.stringify({ action: "request_enable", application: "rejected" }),
+      });
+      return "You declined.";
+    });
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Declined plugin" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Make a notes panel plugin");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await screen.findByText("You declined.");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-origin]")).toBeNull();
   });
 
   it("resumes a failed turn from the preserved backend session instead of discarding its work", async () => {

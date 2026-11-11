@@ -2,13 +2,15 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
-  pluginsCheckMcp, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsSetEnabled, pluginsUpgrade,
+  bridgeBackendPluginChanges, PLUGINS_CHANGED_EVENT, samePluginProject,
+  pluginsCheckMcp, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsRollback, pluginsSetEnabled, pluginsUpgrade,
   type InstalledPlugin, type ListChange, type PluginImportPreview, type PluginLifecycle, type PluginMcpStatus,
-  type PluginPreview, type PluginState, type PluginUpgradePlan,
+  type PluginPreview, type PluginState, type PluginUpgradePlan, type PluginVersion,
 } from "../api/plugins";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
-import type { Language } from "../store";
+import { useStore, type Language } from "../store";
 import { uiText } from "./useChatPluginPanels";
+import { pluginCreationDraft, pluginNeedsRepair, pluginRepairDraft } from "./pluginAuthoringDrafts";
 import "./PluginPackages.css";
 
 const COPY = {
@@ -21,6 +23,9 @@ const COPY = {
     emptyTitle: "还没有插件包", empty: "插件包可以为研究项目添加 Skills、MCP 工具和 Chat 侧栏面板。导入前会先展示来源、版本和能力。",
     emptyAction: "从本地目录导入",
     enable: "启用", disable: "停用", remove: "移除", details: "详情", hideDetails: "收起详情",
+    history: (n: number) => `历史版本 ${n}`, hideHistory: "收起历史版本", original: "原版", replacedAt: "被替换于",
+    rollback: "回退到这个版本", rollbackNote: (to: string, from: string) => `v${to} 会替换当前的 v${from}。当前版本会留在历史里，随时可以再换回来；面板里的数据不受影响。`,
+    rollbackStopped: "回退后插件保持停用，需要你再次启用。", confirmRollback: "确认回退",
     source: "本地来源", snapshot: "文件快照", skills: "Skills", mcp: "MCP", ui: "Chat 面板", none: "无",
     noCapabilities: "未声明可用能力",
     compatible: "可接入", blocked: "需要适配", enabled: "已启用", disabled: "已停用", cannotEnable: "无法启用",
@@ -53,6 +58,8 @@ const COPY = {
     upgradeBlockedNote: "新版本暂时不能启用，升级后这个包会停用。正在运行的回合继续使用旧版本。",
     identicalNote: "已经安装了完全相同的版本，无需升级。",
     noProject: "选择项目后管理插件包。", retry: "重新加载", loadFailed: "插件包读取失败",
+    askAiCreate: "让 AI 创建插件", askAiCreateHint: "新开一个对话，把需求草稿放进输入框，由你确认后发送。",
+    askAiFix: "让 AI 修复", askAiFixHint: "新开一个对话，带上这个包的来源和诊断，由你确认后发送。",
   },
   en: {
     title: "Plugin packages", scope: "This project", description: "Import local packages to add Skills, MCP and Chat side panels to this project.",
@@ -63,6 +70,9 @@ const COPY = {
     emptyTitle: "No plugin packages yet", empty: "Packages add Skills, MCP tools and Chat side panels to a research project. You can review the source, version and capabilities before importing.",
     emptyAction: "Import from a folder",
     enable: "Enable", disable: "Disable", remove: "Remove", details: "Details", hideDetails: "Hide details",
+    history: (n: number) => `Earlier versions ${n}`, hideHistory: "Hide earlier versions", original: "Original", replacedAt: "Replaced",
+    rollback: "Go back to this version", rollbackNote: (to: string, from: string) => `v${to} replaces the current v${from}. The current version stays in this list, so you can switch back any time; panel data is not affected.`,
+    rollbackStopped: "It stays disabled after going back; enable it again when you are ready.", confirmRollback: "Go back",
     source: "Local source", snapshot: "File snapshot", skills: "Skills", mcp: "MCP", ui: "Chat panels", none: "None",
     noCapabilities: "No capabilities declared",
     compatible: "Compatible", blocked: "Needs adaptation", enabled: "Enabled", disabled: "Disabled", cannotEnable: "Can't enable",
@@ -95,6 +105,8 @@ const COPY = {
     upgradeBlockedNote: "The new version can't be enabled yet, so the package is disabled by the upgrade. Runs in progress keep the old version.",
     identicalNote: "This exact version is already installed; there is nothing to upgrade.",
     noProject: "Select a project to manage packages.", retry: "Reload", loadFailed: "Couldn't load packages",
+    askAiCreate: "Ask AI to create a plugin", askAiCreateHint: "Opens a new chat with a request draft in the composer; you review and send it.",
+    askAiFix: "Ask AI to fix", askAiFixHint: "Opens a new chat with this package's source and diagnostics; you review and send it.",
   },
 };
 type Copy = typeof COPY["cn"];
@@ -159,7 +171,7 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
   return <dl className="plugin-details" id={id}>
     <div><dt>{copy.skills}</dt><dd>{skills.length ? <span className="plugin-tags">{skills.map((skill) => <code key={skill}>{skill}</code>)}</span> : copy.none}</dd></div>
     <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} /> : copy.none}</dd></div>
-    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language)).join("、") : copy.none}</dd></div>
+    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? (language === "cn" ? "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）" : " (own page: runs the package's page code, sandboxed, no network)") : "")).join("、") : copy.none}</dd></div>
     <div><dt>{copy.source}</dt><dd><code className="plugin-path">{item.source}</code></dd></div>
     <div><dt>{copy.snapshot}</dt><dd><code title={item.digest}>{item.digest.slice(0, 16)}</code></dd></div>
   </dl>;
@@ -222,11 +234,43 @@ function McpHealth({ name, servers, copy, canCheck, checking, onCheck }: {
   </div>;
 }
 
-function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemove, onCheck }: {
+/** The versions upgrades replaced, newest first; any of them can come back. */
+function VersionHistory({ item, copy, language, busy, onRollback }: {
+  item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; onRollback: (version: PluginVersion) => void;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const history = item.history ?? [];
+  const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(language === "cn" ? "zh-CN" : "en", { dateStyle: "medium", timeStyle: "short" });
+  return <ol className="plugin-history" aria-label={copy.history(history.length)}>
+    {history.map((version) => <li key={version.digest}>
+      <div className="plugin-history-row">
+        <span className="plugin-version">v{version.version}</span>
+        {version.digest === item.originalDigest && <span className="plugin-badge is-ok">{copy.original}</span>}
+        <small>{copy.replacedAt} {when(version.replacedAt)}</small>
+        <code title={version.digest}>{version.digest.slice(0, 8)}</code>
+        <button type="button" className="ext-secondary-btn plugin-history-btn" disabled={busy} aria-expanded={confirming === version.digest}
+          onClick={() => setConfirming((value) => value === version.digest ? null : version.digest)}>
+          <SvgIcon name="reset" size={12} />{copy.rollback}
+        </button>
+      </div>
+      {confirming === version.digest && <div className="plugin-confirm is-caution" role="group" aria-label={copy.rollback}>
+        <p>{copy.rollbackNote(version.version, item.version)}{item.enabled ? "" : ` ${copy.rollbackStopped}`}</p>
+        <div className="plugin-confirm-actions">
+          <button type="button" className="ext-secondary-btn" onClick={() => setConfirming(null)}>{copy.cancel}</button>
+          <button type="button" className="ext-primary-btn" disabled={busy} onClick={() => { setConfirming(null); onRollback(version); }}>{copy.confirmRollback}</button>
+        </div>
+      </div>}
+    </li>)}
+  </ol>;
+}
+
+function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemove, onCheck, onRepair, onRollback }: {
   item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; checking: boolean;
-  onToggle: () => void; onRemove: () => void; onCheck: () => void;
+  onToggle: () => void; onRemove: () => void; onCheck: () => void; onRepair: () => void; onRollback: (version: PluginVersion) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const earlier = item.history?.length ?? 0;
   const [confirming, setConfirming] = useState<"remove" | "enable" | null>(null);
   const detailsId = useId();
   const lifecycle = lifecycleOf(item);
@@ -248,6 +292,9 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
         <button type="button" className="plugin-details-toggle" aria-expanded={detailsOpen} aria-controls={detailsId} onClick={() => setDetailsOpen((value) => !value)}>
           {detailsOpen ? copy.hideDetails : copy.details}<SvgIcon name={detailsOpen ? "chevronUp" : "chevronDown"} size={12} />
         </button>
+        {earlier > 0 && <button type="button" className="plugin-details-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)}>
+          {historyOpen ? copy.hideHistory : copy.history(earlier)}<SvgIcon name={historyOpen ? "chevronUp" : "chevronDown"} size={12} />
+        </button>}
       </PackageHeading>
       <div className="plugin-card-controls">
         <span className={`plugin-state is-${lifecycle.state}`}>{stateLabel}</span>
@@ -280,7 +327,13 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
       </div>
     </div>}
     <Diagnostics item={item} copy={copy} />
+    {pluginNeedsRepair(item) && <div className="plugin-repair">
+      <button type="button" className="ext-secondary-btn" title={copy.askAiFixHint} onClick={onRepair}>
+        <SvgIcon name="sparkle" size={13} />{copy.askAiFix}
+      </button>
+    </div>}
     {detailsOpen && <PackageDetails item={item} copy={copy} language={language} id={detailsId} />}
+    {historyOpen && earlier > 0 && <VersionHistory item={item} copy={copy} language={language} busy={busy} onRollback={onRollback} />}
   </article>;
 }
 
@@ -372,6 +425,22 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
 
   useEffect(() => { if (importOpen) sourceInput.current?.focus(); }, [importOpen]);
 
+  // An agent's PluginManager call or an approval card in the Chat changed
+  // this project's plugins: show what is installed now.
+  useEffect(() => {
+    if (!projectPath) return;
+    bridgeBackendPluginChanges();
+    const changed = (event: Event) => {
+      if (!samePluginProject((event as CustomEvent<string>).detail, projectPath)) return;
+      const request = epoch.current;
+      pluginsList(projectPath).then((items) => {
+        if (epoch.current === request) setPackages(items);
+      }).catch(() => undefined);
+    };
+    window.addEventListener(PLUGINS_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(PLUGINS_CHANGED_EVENT, changed);
+  }, [projectPath]);
+
   async function act(action: () => Promise<void>) {
     const request = epoch.current;
     setBusy(true); setError("");
@@ -443,6 +512,17 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
     });
   }
 
+  /** Put back an earlier version; a running package keeps running on it (this click approves it). */
+  function rollback(item: InstalledPlugin, version: PluginVersion) {
+    if (!projectPath) return;
+    const request = epoch.current;
+    bound(async () => {
+      const result = await pluginsRollback(projectPath, item.name, version.digest, item.digest, item.enabled);
+      if (epoch.current !== request) return;
+      replace(result); onChanged();
+    });
+  }
+
   /** A connection check can take a while; it holds only its own card. */
   function checkMcp(item: InstalledPlugin) {
     if (!projectPath) return;
@@ -466,6 +546,13 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
 
   const enabledCount = packages.filter((item) => item.enabled).length;
 
+  /** Open a new chat with a draft in its composer; nothing is sent. */
+  function askAi(draft: string) {
+    const { setPendingNewChatDraft, setTab } = useStore.getState();
+    setPendingNewChatDraft(draft);
+    setTab("chat");
+  }
+
   return <section className="ext-section plugin-packages" aria-label={copy.title} aria-busy={busy || loading}>
     <div className="ext-section-head">
       <div>
@@ -475,6 +562,8 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
       </div>
       <div className="plugin-head-actions">
         <button type="button" className="ext-secondary-btn plugin-icon-only" disabled={busy || loading || !projectPath} onClick={refresh} aria-label={copy.refresh} title={copy.refresh}><SvgIcon name={busy ? "spinner" : "refresh"} size={14} /></button>
+        <button type="button" className="ext-secondary-btn" disabled={!projectPath} title={copy.askAiCreateHint}
+          onClick={() => askAi(pluginCreationDraft(language))}><SvgIcon name="sparkle" size={14} />{copy.askAiCreate}</button>
         <button type="button" className="ext-secondary-btn" disabled={busy || loading || !projectPath || importOpen} onClick={openImport}><SvgIcon name="plus" size={14} />{copy.add}</button>
       </div>
     </div>
@@ -530,10 +619,15 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
         <span className="plugin-empty-mark" aria-hidden="true"><SvgIcon name="grid" size={20} /></span>
         <strong>{copy.emptyTitle}</strong>
         <p>{copy.empty}</p>
-        <button type="button" className="ext-secondary-btn" disabled={busy} onClick={openImport}><SvgIcon name="folder" size={14} />{copy.emptyAction}</button>
+        <div className="plugin-empty-actions">
+          <button type="button" className="ext-secondary-btn" disabled={busy} onClick={openImport}><SvgIcon name="folder" size={14} />{copy.emptyAction}</button>
+          <button type="button" className="ext-secondary-btn" title={copy.askAiCreateHint}
+            onClick={() => askAi(pluginCreationDraft(language))}><SvgIcon name="sparkle" size={14} />{copy.askAiCreate}</button>
+        </div>
       </div> : <div className="plugin-list">
         {packages.map((item) => <InstalledCard key={item.name} item={item} copy={copy} language={language} busy={busy}
-          checking={checking === item.name} onToggle={() => toggle(item)} onRemove={() => remove(item)} onCheck={() => checkMcp(item)} />)}
+          checking={checking === item.name} onToggle={() => toggle(item)} onRemove={() => remove(item)} onCheck={() => checkMcp(item)}
+          onRepair={() => askAi(pluginRepairDraft(item, projectPath, language))} onRollback={(version) => rollback(item, version)} />)}
       </div>}
       {packages.length > 0 && <p className="plugin-footnote"><SvgIcon name="info" size={13} />{copy.nextRun}</p>}
     </>}

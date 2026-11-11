@@ -208,6 +208,10 @@
 .plugin-health li.is-failed .plugin-health-dot { background: var(--red); opacity: 1; }
 .plugin-health li.is-failed > span { color: var(--red); }
 .plugin-check-btn { gap: 5px; min-height: 28px; font-size: 11.5px; }
+/* "Ask AI to fix": below the diagnostics of a package that cannot run. */
+.plugin-repair { display: flex; justify-content: flex-end; }
+.plugin-repair .ext-secondary-btn { gap: 5px; min-height: 28px; font-size: 11.5px; }
+.plugin-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 
 /* Upgrade preview */
 .plugin-upgrade-versions { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
@@ -252,3 +256,11 @@
   .plugin-switch span, .plugin-card { transition: none; }
   .plugin-skeleton { animation: none; }
 }
+
+/* Earlier versions an upgrade replaced; each can come back. */
+.plugin-history { list-style: none; margin: 10px 0 0; padding: 8px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.plugin-history-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.plugin-history-row small { color: var(--text-dim); }
+.plugin-history-row code { color: var(--text-dim); font-size: 11px; }
+.plugin-history-btn { margin-left: auto; padding: 3px 9px; font-size: 12px; }
+.plugin-history .plugin-confirm { margin-top: 6px; }

@@ -11,6 +11,29 @@ use serde_json::Value;
 
 use super::{Diagnostic, PackageFiles, PluginCapabilities, PluginMcp};
 
+/// The only DSH plugin rows SomniQ translates; any other row needs the host.
+pub(super) const SKILL_FILESYSTEM: &str = "@deepseek-ai/dsh-skill-filesystem";
+pub(super) const MCP_CLIENT: &str = "@deepseek-ai/dsh-mcp-client";
+pub(super) const SKILL_CONFIG_KEYS: &[&str] = &["customSkillDirs", "includeDefaultRoots"];
+pub(super) const MCP_CONFIG_KEYS: &[&str] = &[
+    "transport",
+    "serverName",
+    "command",
+    "args",
+    "env",
+    "toolCallTimeoutMs",
+];
+pub(super) const MCP_TRANSPORTS: &[&str] = &["stdio"];
+pub(super) const MAX_MCP_SERVER_NAME: usize = 32;
+pub(super) const MAX_TOOL_CALL_TIMEOUT_MS: u64 = 1_800_000;
+/// Fields a patch row may carry; loader lifecycle and isolation options need
+/// the DeepSeek host.
+pub(super) const ROW_KEYS: &[&str] = &["id", "name", "config", "group", "disabled"];
+pub(super) const NODE_PLATFORMS: &[&str] = &[
+    "aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin",
+    "netbsd",
+];
+
 pub(super) fn relative_path(value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value);
     if value.is_empty()
@@ -111,10 +134,13 @@ fn apply_patches(rows: &mut Vec<Value>, patches: &[Value], diagnostics: &mut Vec
                             .unwrap()
                             .extend(insert.clone());
                     }
-                    _ => diagnostics.push(Diagnostic::error(
-                        "patch-target",
-                        format!("Insert target {id} is absent or is not a group"),
-                    )),
+                    _ => diagnostics.push(
+                        Diagnostic::error(
+                            "patch-target",
+                            format!("Insert target {id} is absent or is not a group"),
+                        )
+                        .at(id),
+                    ),
                 }
             } else {
                 rows.extend(insert.clone());
@@ -122,26 +148,31 @@ fn apply_patches(rows: &mut Vec<Value>, patches: &[Value], diagnostics: &mut Vec
             continue;
         }
         let Some(target) = id.and_then(|id| find_entry(rows, id)) else {
-            diagnostics.push(Diagnostic::error(
+            let mut diagnostic = Diagnostic::error(
                 "patch-target",
                 format!("Patch target {} is absent", id.unwrap_or("<missing>")),
-            ));
+            );
+            diagnostic.path = id.map(str::to_string);
+            diagnostics.push(diagnostic);
             continue;
         };
         if patch["name"]
             .as_str()
             .is_some_and(|name| Some(name) != target["name"].as_str())
         {
-            diagnostics.push(Diagnostic::error(
-                "patch-name",
-                "Name-qualified patch does not match its target",
-            ));
+            diagnostics.push(
+                Diagnostic::error("patch-name", "Name-qualified patch does not match its target")
+                    .at(id.unwrap_or_default()),
+            );
             continue;
         }
         if fields.contains_key("group")
             || (target["group"] == true && fields.contains_key("config"))
         {
-            diagnostics.push(Diagnostic::error("group-replacement", "Changing a group's structure through overrides requires the DeepSeek host; use group insert patches"));
+            diagnostics.push(
+                Diagnostic::error("group-replacement", "Changing a group's structure through overrides requires the DeepSeek host; use group insert patches")
+                    .at(id.unwrap_or_default()),
+            );
             continue;
         }
         if let Some(target) = target.as_object_mut() {
@@ -162,37 +193,42 @@ pub(super) fn capabilities(
 ) -> PluginCapabilities {
     let mut capabilities = PluginCapabilities::default();
     if manifest["dsh"].get("client").is_some() {
-        diagnostics.push(Diagnostic::error(
-            "client",
-            "DSH client extensions require the DeepSeek frontend host",
-        ));
+        diagnostics.push(
+            Diagnostic::error(
+                "client",
+                "DSH client extensions require the DeepSeek frontend host",
+            )
+            .in_file("package.json")
+            .at("/dsh/client"),
+        );
     }
     if manifest["dsh"]
         .get("manifestVersion")
         .is_some_and(|v| v != 1)
     {
-        diagnostics.push(Diagnostic::error(
-            "manifest-version",
-            "Only DSH manifestVersion 1 is supported",
-        ));
+        diagnostics.push(
+            Diagnostic::error("manifest-version", "Only DSH manifestVersion 1 is supported")
+                .in_file("package.json")
+                .at("/dsh/manifestVersion"),
+        );
     }
     let bundle = &manifest["dsh"]["bundle"];
     if let Some(declared) = bundle.get("platforms") {
         let platforms = declared.as_array();
-        let known = [
-            "aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32",
-            "cygwin", "netbsd",
-        ];
         if platforms.is_none_or(|platforms| {
             platforms.is_empty()
                 || platforms
                     .iter()
-                    .any(|v| v.as_str().is_none_or(|v| !known.contains(&v)))
+                    .any(|v| v.as_str().is_none_or(|v| !NODE_PLATFORMS.contains(&v)))
         }) {
-            diagnostics.push(Diagnostic::error(
-                "platform",
-                "dsh.bundle.platforms must be a nonempty list of Node platform names",
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    "platform",
+                    "dsh.bundle.platforms must be a nonempty list of Node platform names",
+                )
+                .in_file("package.json")
+                .at("/dsh/bundle/platforms"),
+            );
         }
         let current = if cfg!(windows) {
             "win32"
@@ -203,10 +239,11 @@ pub(super) fn capabilities(
         };
         if platforms.is_some_and(|platforms| !platforms.iter().any(|v| v.as_str() == Some(current)))
         {
-            diagnostics.push(Diagnostic::error(
-                "platform",
-                format!("Bundle does not support {current}"),
-            ));
+            diagnostics.push(
+                Diagnostic::error("platform", format!("Bundle does not support {current}"))
+                    .in_file("package.json")
+                    .at("/dsh/bundle/platforms"),
+            );
         }
     }
     let patches = match &bundle["patch"] {
@@ -215,10 +252,14 @@ pub(super) fn capabilities(
             paths.iter().filter_map(Value::as_str).collect()
         }
         _ => {
-            diagnostics.push(Diagnostic::error(
-                "manifest",
-                "package.json must declare dsh.bundle.patch as a path or an ordered array of paths",
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    "manifest",
+                    "package.json must declare dsh.bundle.patch as a path or an ordered array of paths",
+                )
+                .in_file("package.json")
+                .at("/dsh/bundle/patch"),
+            );
             return capabilities;
         }
     };
@@ -230,6 +271,7 @@ pub(super) fn capabilities(
                 .ok_or_else(|| format!("Missing patch: {filename}"))
                 .and_then(|file| yaml_json(&file.bytes))
         });
+        let start = diagnostics.len();
         match parsed {
             Ok(Value::Array(patches)) => apply_patches(&mut rows, &patches, diagnostics),
             Ok(_) => diagnostics.push(Diagnostic::error(
@@ -237,6 +279,12 @@ pub(super) fn capabilities(
                 format!("{filename} must contain a YAML sequence"),
             )),
             Err(error) => diagnostics.push(Diagnostic::error("patch", error)),
+        }
+        // Everything the patch file itself caused points at that file; row
+        // translation below runs on the merged rows, so it names the row.
+        let file = filename.trim_start_matches("./").to_string();
+        for diagnostic in &mut diagnostics[start..] {
+            diagnostic.file = Some(file.clone());
         }
     }
     translate_rows(&rows, files, root, &mut capabilities, diagnostics);
@@ -263,10 +311,10 @@ fn translate_rows(
                 .get("group")
                 .is_some_and(|v| !v.is_boolean() && !v.is_null())
         {
-            diagnostics.push(Diagnostic::error(
-                "entry",
-                format!("{label}: invalid entry or disabled value"),
-            ));
+            diagnostics.push(
+                Diagnostic::error("entry", format!("{label}: invalid entry or disabled value"))
+                    .at(label),
+            );
             continue;
         }
         if row["disabled"] == true {
@@ -276,19 +324,22 @@ fn translate_rows(
             .as_object()
             .unwrap()
             .keys()
-            .any(|k| !matches!(k.as_str(), "id" | "name" | "config" | "group" | "disabled"))
+            .any(|k| !ROW_KEYS.contains(&k.as_str()))
         {
-            diagnostics.push(Diagnostic::error("host-options", format!("{label}: loader lifecycle, injection or isolation options require the DeepSeek host")));
+            diagnostics.push(
+                Diagnostic::error("host-options", format!("{label}: loader lifecycle, injection or isolation options require the DeepSeek host"))
+                    .at(label),
+            );
             continue;
         }
         if row["group"] == true {
             if let Some(children) = row["config"].as_array() {
                 translate_rows(children, files, root, result, diagnostics);
             } else {
-                diagnostics.push(Diagnostic::error(
-                    "group",
-                    format!("{label}: group config must be an array"),
-                ));
+                diagnostics.push(
+                    Diagnostic::error("group", format!("{label}: group config must be an array"))
+                        .at(label),
+                );
             }
             continue;
         }
@@ -297,13 +348,13 @@ fn translate_rows(
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         let translated = match row["name"].as_str() {
-            Some("@deepseek-ai/dsh-skill-filesystem") => translate_skills(&config, files, result),
-            Some("@deepseek-ai/dsh-mcp-client") => translate_mcp(&config, root, result),
+            Some(SKILL_FILESYSTEM) => translate_skills(&config, files, result),
+            Some(MCP_CLIENT) => translate_mcp(&config, root, result),
             Some(name) => Err(format!("{name} requires the DeepSeek/Cordis host")),
             None => Err("Entry requires a plugin name".into()),
         };
         if let Err(error) = translated {
-            diagnostics.push(Diagnostic::error("capability", format!("{label}: {error}")));
+            diagnostics.push(Diagnostic::error("capability", format!("{label}: {error}")).at(label));
         }
     }
 }
@@ -325,7 +376,7 @@ fn translate_skills(
     files: &PackageFiles,
     result: &mut PluginCapabilities,
 ) -> Result<(), String> {
-    allowed_keys(config, &["customSkillDirs", "includeDefaultRoots"])?;
+    allowed_keys(config, SKILL_CONFIG_KEYS)?;
     if config["includeDefaultRoots"] != false {
         return Err(
             "Set includeDefaultRoots: false; SomniQ supplies its own project and user skill roots"
@@ -387,25 +438,18 @@ fn translate_mcp(
     root: &Path,
     result: &mut PluginCapabilities,
 ) -> Result<(), String> {
-    allowed_keys(
-        config,
-        &[
-            "transport",
-            "serverName",
-            "command",
-            "args",
-            "env",
-            "toolCallTimeoutMs",
-        ],
-    )?;
-    if config["transport"] != "stdio" {
+    allowed_keys(config, MCP_CONFIG_KEYS)?;
+    if !config["transport"]
+        .as_str()
+        .is_some_and(|transport| MCP_TRANSPORTS.contains(&transport))
+    {
         return Err("Only stdio MCP is supported by the SomniQ runtime".into());
     }
     let name = config["serverName"]
         .as_str()
         .ok_or("MCP serverName is required")?;
     if name.is_empty()
-        || name.len() > 32
+        || name.len() > MAX_MCP_SERVER_NAME
         || !name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
@@ -449,7 +493,7 @@ fn translate_mcp(
         Some(value) => Some(
             value
                 .as_u64()
-                .filter(|v| *v > 0 && *v <= 1_800_000)
+                .filter(|v| *v > 0 && *v <= MAX_TOOL_CALL_TIMEOUT_MS)
                 .ok_or("toolCallTimeoutMs must be 1..1800000")?
                 .div_ceil(1000),
         ),

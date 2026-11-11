@@ -1,5 +1,34 @@
 # ARIS-Code Changelog
 
+## v0.4.87 (2026-11-10)
+
+- **Project plugins from a conversation** — create, diagnose, install and edit
+  local plugin packages in Chat, with explicit desktop approval before enabling
+  executable capabilities. Packages share one lifecycle, keep version history
+  and support upgrade review and rollback. Each run keeps a frozen plugin set.
+- **Plugin pages and research panels** — project pages, compact Chat glances,
+  tables, metrics, charts and editable notes keep research state close to the
+  conversation. Custom pages run in sandboxed frames and communicate through
+  the host's declared interfaces. Starter packages cover panels, pages, skills,
+  task planning and Python MCP tools.
+- **Reliable scheduled research work** — calendar, recurrence and Cron rules
+  use explicit time zones, idempotent dispatch and delivery history. Work tasks
+  also isolate changes for ordinary project folders through a private shadow
+  repository, preserving review and acceptance without adding a Git repository
+  to the user's folder.
+- **Research continuity and independent review** — unfinished task plans keep
+  their turn moving, Reviewer calls use fresh isolated child sessions, and
+  project turns can read their own sub-agent reports. Chat submission locks,
+  question input and Windows file writes handle their recovery paths.
+- **Reading, writing and Chat polish** — select PDF text, fold LaTeX
+  environments, copy rendered formulas as source, and keep visual tables,
+  equations and diagram previews synchronized. Chat localizes tool states and
+  presents routine inspection more quietly.
+- **Release consistency** — desktop and shared Rust manifests and lockfiles
+  target 0.4.87. The release workflow can build Windows x64 and macOS universal
+  installers, signed updater payloads and the combined manifest from a selected
+  branch, retaining the result as a draft for review.
+
 ## v0.4.86 (2026-10-22)
 
 - **Membership payments in the desktop app** — purchase Go, Plus or Pro with

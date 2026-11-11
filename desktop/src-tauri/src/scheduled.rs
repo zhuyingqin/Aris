@@ -532,6 +532,18 @@ fn normalize_input(
     let missed_policy = normalize_missed_policy(input.missed_policy.as_deref())?;
     let (target_mode, target_thread_id, project_id) =
         normalize_target(&input, task_id, host)?;
+    // A task that could never run is refused here, not turned into a failed
+    // delivery on every occurrence. Any project folder can host runs since
+    // plain folders got a private repository (`work_task::shadow`); what
+    // cannot is a project that is no longer registered, a folder that is
+    // gone, or a machine without Git.
+    let project_path = (host.project_path)(&project_id).ok_or_else(|| {
+        format!(
+            "this task would run in project '{project_id}', which is not in SomniQ's project \
+             list any more, so there is nowhere to run it"
+        )
+    })?;
+    crate::work_task::worktree::ensure_can_host_tasks(&project_path)?;
 
     Ok(NormalizedTaskInput {
         title: if title.is_empty() {

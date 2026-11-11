@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  A panel page. It draws everything: change the layout, look and behaviour freely.
+  It may link other package files by relative path (stylesheets, scripts, images,
+  fonts, vendored libraries; .mjs modules import each other as "pkg:<path>"), but
+  nothing loads from the network.
+  The host gives the page `window.somniq`:
+    await somniq.ready()            -> { language: "en" | "cn", theme, data }
+    await somniq.set(widgetId, v)   -> saves one declared widget's value
+    somniq.onData(fn)               -> called when the agent (or this page) changes data
+    somniq.prompt(text)             -> puts text in the Chat composer
+    somniq.openFile(path)           -> opens a project-relative file beside the chat
+    somniq.asset(path) / somniq.text(path) -> a package file (relative to this page) as a data: URL / text
+  Theme colors arrive as CSS variables (--somniq-bg, --somniq-surface, --somniq-raised,
+  --somniq-border, --somniq-text, --somniq-muted, --somniq-accent, --somniq-font).
+  The "cards" widget of ui.json holds: [{ "id", "title", "note"?, "column": "todo" | "doing" | "done" }]
+-->
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 var(--somniq-font, system-ui, sans-serif);
+    color: var(--somniq-text, #e6e9ee); background: var(--somniq-bg, #10151c);
+    display: flex; flex-direction: column; padding: 20px 28px 24px; gap: 18px;
+  }
+  header { display: flex; align-items: flex-end; gap: 16px; }
+  header h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  header p { margin: 2px 0 0; color: var(--somniq-muted, #8b95a3); font-size: 13px; }
+  header .spacer { flex: 1; }
+  button {
+    font: inherit; color: inherit; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--somniq-border, #2a323d); background: var(--somniq-surface, #161c24); padding: 7px 12px;
+  }
+  button:hover { border-color: var(--somniq-accent, #f0a23b); }
+  button.primary { background: var(--somniq-accent, #f0a23b); border-color: transparent; color: #1a1205; font-weight: 600; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--somniq-accent, #f0a23b); outline-offset: 2px; }
+  .meter { height: 4px; border-radius: 4px; background: var(--somniq-border, #2a323d); overflow: hidden; }
+  .meter span { display: block; height: 100%; width: 0; background: var(--somniq-accent, #f0a23b); transition: width .25s ease; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  section {
+    min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px;
+    border-radius: 14px; background: var(--somniq-surface, #161c24); border: 1px solid var(--somniq-border, #2a323d);
+  }
+  section.over { border-color: var(--somniq-accent, #f0a23b); }
+  section h2 { margin: 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--somniq-muted, #8b95a3); display: flex; gap: 8px; }
+  section h2 b { margin-left: auto; font-weight: 600; color: var(--somniq-text, #e6e9ee); }
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1; }
+  li {
+    padding: 10px 12px; border-radius: 10px; cursor: grab; position: relative;
+    background: var(--somniq-raised, #1c232d); border: 1px solid var(--somniq-border, #2a323d);
+  }
+  li:hover { border-color: color-mix(in srgb, var(--somniq-accent, #f0a23b) 55%, transparent); }
+  li strong { display: block; font-weight: 550; padding-right: 22px; overflow-wrap: anywhere; }
+  li small { display: block; margin-top: 3px; color: var(--somniq-muted, #8b95a3); overflow-wrap: anywhere; }
+  li .remove { position: absolute; top: 6px; right: 6px; padding: 0 6px; border: 0; background: none; color: var(--somniq-muted, #8b95a3); opacity: 0; }
+  li:hover .remove, li .remove:focus-visible { opacity: 1; }
+  .empty { color: var(--somniq-muted, #8b95a3); font-size: 13px; padding: 6px 2px; }
+  form { display: flex; gap: 8px; }
+  input {
+    flex: 1; min-width: 0; font: inherit; color: inherit; padding: 7px 10px; border-radius: 8px;
+    border: 1px solid var(--somniq-border, #2a323d); background: var(--somniq-bg, #10151c);
+  }
+  #status { color: var(--somniq-muted, #8b95a3); font-size: 12px; min-height: 18px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } body { padding: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <div><h1 id="title"></h1><p id="summary"></p></div>
+  <span class="spacer"></span>
+  <button id="plan" class="primary"></button>
+</header>
+<div class="meter" aria-hidden="true"><span id="meter"></span></div>
+<main id="board"></main>
+<div id="status" role="status"></div>
+<script>
+const COPY = {
+  en: { title: "Focus board", todo: "To do", doing: "In progress", done: "Done", add: "Add a card…", empty: "Nothing here yet.", remove: "Remove",
+        summary: (d, n) => n ? `${d} of ${n} done` : "Add a card, or ask the agent to plan the next steps.",
+        plan: "Plan next steps", failed: "Could not save: ",
+        prompt: "Look at this project's current state and propose the next steps. Write them to the Focus board panel (widget \"cards\") with PluginPanel, keeping the cards that are already there." },
+  cn: { title: "专注看板", todo: "待办", doing: "进行中", done: "已完成", add: "添加卡片…", empty: "这里还没有内容。", remove: "删除",
+        summary: (d, n) => n ? `已完成 ${d} / ${n}` : "添加一张卡片，或让 AI 规划下一步。",
+        plan: "规划下一步", failed: "保存失败：",
+        prompt: "查看此项目当前的状态并提出下一步。用 PluginPanel 写入“专注看板”面板（组件 \"cards\"），保留已有的卡片。" },
+};
+const COLUMNS = ["todo", "doing", "done"];
+let copy = COPY.en;
+let cards = [];
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => { const node = Object.assign(document.createElement(tag), props); node.append(...children); return node; };
+// Data comes from disk and from the agent: keep only what this page understands.
+const clean = (value) => (Array.isArray(value) ? value : []).filter((card) => card && typeof card.title === "string")
+  .map((card, index) => ({ id: String(card.id ?? `c${index}`), title: card.title, note: typeof card.note === "string" ? card.note : "", column: COLUMNS.includes(card.column) ? card.column : "todo" }));
+
+async function save(next) {
+  const before = cards;
+  cards = next; render();
+  try { await somniq.set("cards", cards); $("status").textContent = ""; }
+  catch (error) { cards = before; render(); $("status").textContent = copy.failed + error.message; }
+}
+
+function render() {
+  const done = cards.filter((card) => card.column === "done").length;
+  $("title").textContent = copy.title;
+  $("plan").textContent = copy.plan;
+  $("summary").textContent = copy.summary(done, cards.length);
+  $("meter").style.width = cards.length ? `${done / cards.length * 100}%` : "0";
+  $("board").replaceChildren(...COLUMNS.map((column) => {
+    const mine = cards.filter((card) => card.column === column);
+    const list = el("ul", {}, ...mine.map((card) => {
+      const item = el("li", { draggable: true }, el("strong", { textContent: card.title }));
+      if (card.note) item.append(el("small", { textContent: card.note }));
+      item.append(el("button", { className: "remove", textContent: "×", title: copy.remove, ariaLabel: `${copy.remove}: ${card.title}`, onclick: () => save(cards.filter((other) => other.id !== card.id)) }));
+      item.ondragstart = (event) => event.dataTransfer.setData("text/plain", card.id);
+      return item;
+    }));
+    if (!mine.length) list.append(el("li", { className: "empty", textContent: copy.empty, draggable: false, style: "background:none;border:0;cursor:default" }));
+    const input = el("input", { placeholder: copy.add, maxLength: 200, ariaLabel: copy.add });
+    const form = el("form", { onsubmit: (event) => {
+      event.preventDefault();
+      const title = input.value.trim();
+      if (title) save([...cards, { id: `c${Date.now().toString(36)}`, title, note: "", column }]);
+    } }, input, el("button", { textContent: "+", ariaLabel: copy.add }));
+    const section = el("section", {}, el("h2", {}, copy[column], el("b", { textContent: String(mine.length) })), list, form);
+    section.ondragover = (event) => { event.preventDefault(); section.classList.add("over"); };
+    section.ondragleave = () => section.classList.remove("over");
+    section.ondrop = (event) => {
+      event.preventDefault(); section.classList.remove("over");
+      const id = event.dataTransfer.getData("text/plain");
+      if (cards.some((card) => card.id === id && card.column !== column)) save(cards.map((card) => card.id === id ? { ...card, column } : card));
+    };
+    return section;
+  }));
+}
+
+$("plan").onclick = () => somniq.prompt(copy.prompt);
+somniq.ready().then(({ language, data }) => {
+  copy = COPY[language] ?? COPY.en;
+  cards = clean(data.cards);
+  render();
+  somniq.onData((next) => { cards = clean(next.cards); render(); });
+});
+</script>
+</body>
+</html>

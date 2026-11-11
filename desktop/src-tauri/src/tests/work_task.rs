@@ -134,25 +134,148 @@ fn a_task_needs_a_title() {
     assert_eq!(task.status, WorkTaskStatus::Todo);
 }
 
-/// A project with no repository has nowhere to isolate the work. Refusing at
-/// queue time rather than at launch keeps the card where the user can see why.
+/// A plain folder used to be refused ("work tasks need a Git repository"),
+/// which is what made every scheduled run in a research folder fail. It now
+/// queues like any project; what is still refused up front is a folder that
+/// is not there, and the refusal leaves the card where the user can see why.
 #[test]
-fn starting_a_task_outside_a_repository_is_refused_before_the_card_moves() {
+fn a_plain_folder_can_start_a_task_but_a_missing_one_is_refused() {
     let fixture = fixture("no-repo");
-    let bare = fixture._temp.path().join("not-a-repo");
-    std::fs::create_dir_all(&bare).expect("dir");
+    let plain = fixture._temp.path().join("not-a-repo");
+    std::fs::create_dir_all(&plain).expect("dir");
     let task =
         create_core(&fixture.project_id, "Task".into(), String::new(), None).expect("create");
+    let queued = start_core(&fixture.project_id, &plain, &task.id).expect("plain folders queue");
+    assert_eq!(queued.status, WorkTaskStatus::Queued);
 
-    let error = start_core(&fixture.project_id, &bare, &task.id).expect_err("must refuse");
-    assert!(error.contains("Git repository"), "unhelpful error: {error}");
+    let other =
+        create_core(&fixture.project_id, "Other".into(), String::new(), None).expect("create");
+    let missing = fixture._temp.path().join("moved-away");
+    let error = start_core(&fixture.project_id, &missing, &other.id).expect_err("must refuse");
+    assert!(error.contains("does not exist"), "unhelpful error: {error}");
     assert_eq!(
-        store::get(&fixture.project_id, &task.id)
+        store::get(&fixture.project_id, &other.id)
             .expect("task")
             .status,
         WorkTaskStatus::Todo,
         "a refused start must leave the card in todo"
     );
+}
+
+/// A plain folder: everything a task does happens in a checkout cut from a
+/// snapshot of the folder, and accepting writes exactly the task's changes
+/// back — keeping what the user edited in the folder meanwhile, never
+/// creating a `.git` in it.
+#[test]
+fn accepting_a_task_in_a_plain_folder_writes_its_changes_back() {
+    let fixture = fixture("plain-accept");
+    let folder = fixture._temp.path().join("research folder");
+    std::fs::create_dir_all(folder.join("chapters")).expect("dirs");
+    std::fs::write(folder.join("chapters/intro.md"), "draft\r\n").expect("seed");
+    std::fs::write(folder.join("obsolete.md"), "old\n").expect("seed");
+    std::fs::write(folder.join("todo.md"), "user list\n").expect("seed");
+
+    let task = create_core(&fixture.project_id, "Edit".into(), "edit it".into(), None)
+        .expect("create");
+    let tree = worktree::create(&folder, &fixture.project_id, &task.id).expect("checkout");
+    assert!(tree.shadow_git_dir.is_some(), "a plain folder is recorded as such");
+    assert!(!folder.join(".git").exists());
+    let checkout = Path::new(&tree.path);
+    assert_eq!(
+        std::fs::read(checkout.join("chapters/intro.md")).expect("copied"),
+        b"draft\r\n",
+        "the checkout is a faithful copy"
+    );
+
+    // The task's work.
+    std::fs::write(checkout.join("chapters/intro.md"), "revised\r\n").expect("edit");
+    std::fs::write(checkout.join("summary.md"), "new\n").expect("add");
+    std::fs::remove_file(checkout.join("obsolete.md")).expect("delete");
+    std::fs::create_dir_all(checkout.join(".somniq/sessions")).expect("runtime");
+    std::fs::write(checkout.join(".somniq/sessions/s.json"), "{}").expect("runtime");
+    assert!(worktree::commit_all(checkout, "task: edit", &tree.base_sha).expect("commit"));
+    let snapshot = engine::capture_snapshot(checkout, &tree.base_sha).expect("review");
+    let mut changed = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    changed.sort();
+    assert_eq!(
+        changed,
+        vec!["chapters/intro.md", "obsolete.md", "summary.md"],
+        "runtime scaffolding stays out of the reviewed diff"
+    );
+    store::update(&fixture.project_id, &task.id, |row| {
+        row.worktree = Some(tree.clone());
+        row.status = WorkTaskStatus::Review;
+        row.review_snapshot = Some(snapshot.clone());
+        Ok(())
+    })
+    .expect("stage review");
+
+    // Meanwhile the user keeps working in the folder.
+    std::fs::write(folder.join("todo.md"), "user list, updated\n").expect("user edit");
+
+    let done = engine::accept(&fixture.project_id, &folder, &task.id).expect("accept");
+    assert_eq!(done.status, WorkTaskStatus::Done);
+    assert_eq!(
+        std::fs::read(folder.join("chapters/intro.md")).expect("landed"),
+        b"revised\r\n"
+    );
+    assert_eq!(std::fs::read_to_string(folder.join("summary.md")).expect("added"), "new\n");
+    assert!(!folder.join("obsolete.md").exists(), "the task's delete lands too");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("todo.md")).expect("kept"),
+        "user list, updated\n",
+        "the user's own edit survives the accept"
+    );
+    assert!(!folder.join(".somniq/sessions/s.json").exists());
+    assert!(!folder.join(".git").exists(), "still a plain folder");
+    assert!(!checkout.exists(), "the checkout is tidied up");
+}
+
+/// A file the snapshot left out is one the accept must never replace: Git
+/// stops the merge instead, the folder keeps its bytes, and the card goes
+/// back to review with the reason.
+#[test]
+fn accepting_never_overwrites_a_file_the_snapshot_left_out() {
+    let fixture = fixture("plain-collide");
+    let folder = fixture._temp.path().join("data folder");
+    std::fs::create_dir_all(folder.join("data")).expect("dirs");
+    std::fs::write(folder.join("readme.md"), "seed\n").expect("seed");
+    let big = std::fs::File::create(folder.join("data/raw.bin")).expect("big");
+    big.set_len(crate::work_task::shadow::MAX_FILE_BYTES + 1)
+        .expect("size");
+    drop(big);
+
+    let task = create_core(&fixture.project_id, "Data".into(), String::new(), None)
+        .expect("create");
+    let tree = worktree::create(&folder, &fixture.project_id, &task.id).expect("checkout");
+    let checkout = Path::new(&tree.path);
+    assert!(!checkout.join("data/raw.bin").exists(), "too large to copy");
+    // Not knowing it exists, the task writes a file at the same path.
+    std::fs::create_dir_all(checkout.join("data")).expect("dir");
+    std::fs::write(checkout.join("data/raw.bin"), "placeholder").expect("write");
+    worktree::commit_all(checkout, "task: data", &tree.base_sha).expect("commit");
+    store::update(&fixture.project_id, &task.id, |row| {
+        row.worktree = Some(tree.clone());
+        row.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("stage review");
+
+    let error = engine::accept(&fixture.project_id, &folder, &task.id)
+        .expect_err("the merge must refuse");
+    assert!(error.contains("raw.bin"), "the refusal names the file: {error}");
+    assert_eq!(
+        std::fs::metadata(folder.join("data/raw.bin")).expect("kept").len(),
+        crate::work_task::shadow::MAX_FILE_BYTES + 1,
+        "the user's file is untouched"
+    );
+    let row = store::get(&fixture.project_id, &task.id).expect("task");
+    assert_eq!(row.status, WorkTaskStatus::Review);
+    assert!(row.last_error.is_some());
 }
 
 /// The prompt is replayed at launch, so a running task's instruction must not
@@ -378,7 +501,7 @@ fn a_merge_that_cannot_run_returns_the_card_to_review_with_the_reason() {
 
     // The failure is recoverable, so the card must not be marked unmergeable:
     // the user switches back and accepts again.
-    let listed = list_core(&fixture.project_id, &fixture.project_path);
+    let listed = list_core(&fixture.project_id);
     let card = listed.iter().find(|task| task.id == task_id).expect("card");
     assert!(
         !card.worktree_missing,
@@ -486,7 +609,7 @@ fn a_vanished_worktree_is_reported_on_the_card_and_by_the_diff() {
     // Removed outside Git, the way a user cleaning up temp files would.
     std::fs::remove_dir_all(&tree.path).expect("remove worktree");
 
-    let listed = list_core(&fixture.project_id, &fixture.project_path);
+    let listed = list_core(&fixture.project_id);
     let card = listed.iter().find(|task| task.id == task_id).expect("card");
     assert!(
         card.worktree_missing,
@@ -810,13 +933,13 @@ fn cancelling_still_discards_the_checkout_that_a_pause_would_keep() {
 #[test]
 fn the_snapshot_revision_advances_with_every_write() {
     let fixture = fixture("revision");
-    let empty = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let empty = snapshot_core(&fixture.project_id);
     assert_eq!(empty.revision, 0);
     assert!(empty.tasks.is_empty());
 
     let task =
         create_core(&fixture.project_id, "One".into(), String::new(), None).expect("create");
-    let after_create = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_create = snapshot_core(&fixture.project_id);
     assert_eq!(after_create.revision, 1);
     assert_eq!(after_create.tasks.len(), 1);
 
@@ -828,11 +951,11 @@ fn the_snapshot_revision_advances_with_every_write() {
         None,
     )
     .expect("rename");
-    let after_update = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_update = snapshot_core(&fixture.project_id);
     assert_eq!(after_update.revision, 2);
 
     delete_core(&fixture.project_id, &fixture.project_path, &task.id).expect("delete");
-    let after_delete = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_delete = snapshot_core(&fixture.project_id);
     assert_eq!(after_delete.revision, 3);
     assert!(after_delete.tasks.is_empty());
 

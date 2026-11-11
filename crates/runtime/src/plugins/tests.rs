@@ -583,7 +583,7 @@ fn plugin_ui_rejects_unknown_slots_code_and_invalid_declarations() {
     value["panels"][0]["id"] = "../desk".into();
     invalid.push(value);
     let mut value = base.clone();
-    value["schemaVersion"] = 2.into();
+    value["schemaVersion"] = 4.into();
     invalid.push(value);
     let mut value = base.clone();
     value["panels"][0]["title"]["code"] = "anything".into();
@@ -1457,4 +1457,580 @@ fn plugin_mutations_do_not_deadlock_when_their_lock_stripes_collide() {
     assert_eq!(run.set().plugins.len(), 1);
     store.set_enabled("first", false).unwrap();
     store.remove("first").unwrap();
+}
+
+#[test]
+fn an_approval_or_removal_applies_only_to_the_digest_the_user_saw() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let name = "@local/approved";
+    let v1 = fixture(temp.path(), name);
+    let shown = store.preview(&v1).unwrap();
+    store.install(&v1, &shown.digest).unwrap();
+
+    // The installed version is swapped after the card was shown.
+    let v2 = fixture_v2(temp.path(), name);
+    let replacement = store.preview(&v2).unwrap();
+    store.upgrade(&v2, &replacement.digest, &shown.digest, false).unwrap();
+
+    let error = store.enable_approved(name, &shown.digest).unwrap_err();
+    assert_eq!(error, PACKAGE_CHANGED_SINCE_SHOWN);
+    let error = store.remove_confirmed(name, &shown.digest).unwrap_err();
+    assert_eq!(error, PACKAGE_CHANGED_SINCE_SHOWN);
+    let listed = store.list().unwrap();
+    assert!(!listed[0].enabled, "a stale approval must not enable the new bytes");
+
+    assert!(store.enable_approved(name, &replacement.digest).unwrap().enabled);
+    store.remove_confirmed(name, &replacement.digest).unwrap();
+    assert!(store.list().unwrap().is_empty());
+}
+
+/// A schema 2 package: a session panel and a project board.
+fn board_fixture(root: &Path, store: &PluginStore) {
+    let source = ui_fixture(root, "board");
+    fs::write(source.join("ui.json"), serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "panels": [
+            { "id": "chat", "slot": "chat.sidebar", "title": "Chat", "widgets": [
+                {"id":"todos","type":"todo-list","title":"Tasks"},
+                {"id":"notes","type":"notes","title":"Notes"},
+                {"id":"plan","type":"agent-plan","title":"Plan"},
+                {"id":"runs","type":"table","title":"Runs","columns":[{"key":"name","title":"Run"},{"key":"acc","title":"Accuracy"}]},
+                {"id":"go","type":"button","label":"Go","action":{"type":"prompt","text":"Refresh"}}
+            ]},
+            { "id": "board", "slot": "chat.sidebar", "title": "Board", "scope": "project", "widgets": [
+                {"id":"summary","type":"metrics","title":"Summary"},
+                {"id":"items","type":"list","title":"Items"},
+                {"id":"findings","type":"markdown","title":"Findings"},
+                {"id":"progress","type":"progress","title":"Progress"},
+                {"id":"trend","type":"chart","title":"Trend","chart":"bar"}
+            ]}
+        ]
+    })).unwrap()).unwrap();
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("board", true).unwrap();
+}
+
+#[test]
+fn schema_1_documents_cannot_use_what_schema_2_added() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = ui_fixture(temp.path(), "desk");
+    let base: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    assert!(store.preview(&source).unwrap().can_enable);
+    let button = serde_json::json!({"id":"go","type":"button","label":"Go","action":{"type":"prompt","text":"Go"}});
+    let problems = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        store
+            .preview(&source)
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .map(|d| (d.path.unwrap_or_default(), d.message))
+            .collect::<Vec<_>>()
+    };
+    let found = problems(&|v| {
+        v["panels"][0]["scope"] = "project".into();
+        v["panels"][0]["widgets"][0] = button.clone();
+    });
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].0, "/panels/0/scope");
+    assert_eq!(found[1].0, "/panels/0/widgets/0/type");
+    assert!(found[1].1.contains("schemaVersion 2"));
+    // The same document is valid once it declares schema 2.
+    assert!(problems(&|v| {
+        v["schemaVersion"] = 2.into();
+        v["panels"][0]["scope"] = "project".into();
+        v["panels"][0]["widgets"][0] = button.clone();
+    })
+    .is_empty());
+    // Declarations that would not render or would reach outside are refused.
+    let refused: [&dyn Fn(&mut serde_json::Value); 6] = [
+        &|w| w["action"]["text"] = "Use {{missing}}".into(),
+        &|w| w["action"] = serde_json::json!({"type":"open-file","path":"../secret.txt"}),
+        &|w| w["action"] = serde_json::json!({"type":"tool","name":"shell"}),
+        &|w| *w = serde_json::json!({"id":"t","type":"table","title":"T","columns":[]}),
+        &|w| *w = serde_json::json!({"id":"f","type":"form","title":"F","fields":[{"key":"a","label":"A","input":"select"}],"submit":{"label":"Go","action":{"type":"prompt","text":"{{a}}"}}}),
+        &|w| *w = serde_json::json!({"id":"f","type":"form","title":"F","fields":[{"key":"a","label":"A","input":"text","options":["x"]}],"submit":{"label":"Go","action":{"type":"prompt","text":"{{a}}"}}}),
+    ];
+    for edit in refused {
+        let found = problems(&|v| {
+            v["schemaVersion"] = 2.into();
+            let mut widget = button.clone();
+            edit(&mut widget);
+            v["panels"][0]["widgets"][0] = widget;
+        });
+        assert!(!found.is_empty());
+    }
+}
+
+#[test]
+fn the_agent_fills_widgets_and_every_value_is_checked_against_its_widget() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    board_fixture(temp.path(), &store);
+    let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+    let set = |panel: &str, session: &str, widget: &str, value: &str| {
+        store.ui_widget_set("board", panel, session, widget, json(value))
+    };
+
+    // Session panel: the agent replaces the user's widgets too.
+    let state = set(
+        "chat",
+        "s1",
+        "todos",
+        r#"[{"text":" Read the paper "},{"text":"Run it","completed":true}]"#,
+    )
+    .unwrap();
+    assert_eq!(state.revision, 1);
+    let todos = &state.todo_lists["todos"];
+    assert_eq!(todos[0].text, "Read the paper");
+    assert!(todos[1].completed && todos[0].id != todos[1].id);
+    let state = set("chat", "s1", "notes", r#""Checked on GPU 2""#).unwrap();
+    assert_eq!(state.notes["notes"], "Checked on GPU 2");
+    let state = set(
+        "chat",
+        "s1",
+        "runs",
+        r#"[{"name":"baseline","acc":0.81},{"name":"ours","acc":null}]"#,
+    )
+    .unwrap();
+    assert_eq!(state.revision, 3);
+    assert_eq!(state.data["runs"][0]["acc"], 0.81);
+    // The user's panel still holds revision 1: its save is refused, then works.
+    let stale = store.ui_state_update(
+        "board",
+        "chat",
+        "s1",
+        1,
+        UiAction::NotesSet {
+            widget_id: "notes".into(),
+            text: "mine".into(),
+        },
+    );
+    assert!(stale.unwrap_err().contains("reload"));
+    let state = store
+        .ui_state_update(
+            "board",
+            "chat",
+            "s1",
+            3,
+            UiAction::TodoSetCompleted {
+                widget_id: "todos".into(),
+                item_id: todos[0].id.clone(),
+                completed: true,
+            },
+        )
+        .unwrap();
+    assert!(state.todo_lists["todos"][0].completed);
+    assert_eq!(state.data["runs"][1]["name"], "ours");
+    // Another conversation sees none of it.
+    assert_eq!(
+        store.ui_state_get("board", "chat", "s2").unwrap(),
+        UiPanelState::default()
+    );
+    assert!(store.ui_state_get("board", "chat", "").is_err());
+
+    // Values outside a widget's shape never reach storage.
+    for (panel, widget, value) in [
+        ("chat", "runs", r#"[{"name":"x","loss":1}]"#),
+        ("chat", "runs", r#"[{"name":{"nested":true}}]"#),
+        ("chat", "runs", r#""a table""#),
+        ("chat", "plan", r#"[]"#),
+        ("chat", "go", r#""x""#),
+        ("chat", "todos", r#"[{"text":"  "}]"#),
+        ("chat", "missing", r#""x""#),
+        ("board", "summary", r#"[{"label":"Acc","value":0.9,"tone":"great"}]"#),
+        ("board", "summary", r#"[{"label":"Acc"}]"#),
+        ("board", "items", r#"[{"title":"A","path":"../outside.md"}]"#),
+        ("board", "items", r#"[{"title":"A","url":"javascript:alert(1)"}]"#),
+        ("board", "items", r#"[{"title":"A","html":"<b>x</b>"}]"#),
+        ("board", "progress", r#"{"value":1.5}"#),
+        ("board", "trend", r#"{"labels":["a","b"],"series":[{"name":"s","values":[1]}]}"#),
+        ("board", "trend", r#"{"labels":["a"],"series":[]}"#),
+        ("board", "findings", r#"{"text":"x"}"#),
+    ] {
+        let error = set(panel, "s1", widget, value).expect_err(value);
+        assert!(!error.is_empty());
+    }
+    assert_eq!(store.ui_state_get("board", "chat", "s1").unwrap().revision, 4);
+
+    // Project panel: one copy, whichever conversation writes or reads it.
+    set(
+        "board",
+        "s1",
+        "summary",
+        r#"[{"label":"Accuracy","value":"81.2%","hint":"3 seeds","tone":"good"},{"label":"Runs","value":12}]"#,
+    )
+    .unwrap();
+    set(
+        "board",
+        "s2",
+        "items",
+        r#"[{"title":"Table 2","detail":"main result","tag":"csv","path":"results/table2.csv"},{"title":"Paper","url":"https://arxiv.org/abs/1706.03762"}]"#,
+    )
+    .unwrap();
+    set("board", "s2", "findings", r###""## Result\n\n**Ours** wins.""###).unwrap();
+    set("board", "", "progress", r#"{"value":0.5,"label":"6 of 12"}"#).unwrap();
+    let state = set(
+        "board",
+        "s3",
+        "trend",
+        r#"{"labels":["e1","e2"],"series":[{"name":"loss","values":[1.5,null]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(state.revision, 5);
+    assert_eq!(state.data.len(), 5);
+    assert_eq!(store.ui_state_get("board", "board", "s9").unwrap(), state);
+    assert_eq!(store.ui_state_get("board", "board", "").unwrap(), state);
+    // Session and project data live in different files.
+    assert_eq!(fs::read_dir(store.root.join("ui-state")).unwrap().count(), 2);
+
+    // A package revised to narrow a widget drops the value it no longer accepts.
+    store.set_enabled("board", false).unwrap();
+    store.remove("board").unwrap();
+    let source = temp.path().join("board");
+    let mut ui: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    ui["panels"][0]["widgets"][3]["columns"] = serde_json::json!([{"key":"name","title":"Run"}]);
+    fs::write(source.join("ui.json"), serde_json::to_vec(&ui).unwrap()).unwrap();
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("board", true).unwrap();
+    let state = store.ui_state_get("board", "chat", "s1").unwrap();
+    assert!(state.data.is_empty());
+    assert_eq!(state.notes["notes"], "Checked on GPU 2");
+}
+
+/// A schema 3 package whose page draws itself and keeps free-form data.
+fn page_fixture(root: &Path) -> PathBuf {
+    let source = ui_fixture(root, "canvas");
+    fs::write(source.join("ui.json"), serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 3,
+        "panels": [{ "id": "canvas", "slot": "nav.page", "title": "Canvas", "scope": "project", "page": "./ui/page.html",
+            "widgets": [{"id":"cards","type":"json","title":"Cards"}]
+        }]
+    })).unwrap()).unwrap();
+    fs::create_dir_all(source.join("ui")).unwrap();
+    fs::write(source.join("ui/page.html"), "<!doctype html><h1>canvas-page</h1>").unwrap();
+    fs::write(source.join("ui/app.js"), "window.ok = 1;").unwrap();
+    fs::write(source.join("ui/logo.svg"), "<svg/>").unwrap();
+    fs::write(source.join("ui/notes.bin"), [0u8, 1]).unwrap();
+    source
+}
+
+#[test]
+fn a_page_panel_serves_its_reviewed_html_and_keeps_free_form_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = page_fixture(temp.path());
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    assert_eq!(preview.capabilities.ui_panels[0].page.as_deref(), Some("./ui/page.html"));
+    store.install(&source, &preview.digest).unwrap();
+    // Installed but not approved: nothing hands the page to a frame.
+    assert!(store.ui_page("canvas", "canvas").is_err());
+    store.set_enabled("canvas", true).unwrap();
+
+    // Editing the draft afterwards changes nothing: the snapshot is served.
+    fs::write(source.join("ui/page.html"), "<h1>edited-after-review</h1>").unwrap();
+    let page = store.ui_page("canvas", "canvas").unwrap();
+    assert!(page.html.contains("canvas-page"));
+    assert_eq!(page.path, "ui/page.html");
+    // Every file the page can use, from the reviewed snapshot; package.json is not one.
+    assert_eq!(page.assets.keys().collect::<Vec<_>>(), ["ui.json", "ui/app.js", "ui/logo.svg", "ui/page.html"]);
+    assert_eq!(page.assets["ui/app.js"].mime, "text/javascript");
+    assert_eq!(page.assets["ui/logo.svg"].data, "PHN2Zy8+");
+    assert_eq!(page.package_digest, preview.digest);
+    assert!(store.ui_page("canvas", "missing").is_err());
+
+    let value = serde_json::json!({"columns": ["todo"], "cards": [{"id": 1, "note": null, "tags": ["a", {"deep": true}]}]});
+    let state = store.ui_widget_set("canvas", "canvas", "ignored-session", "cards", value.clone()).unwrap();
+    assert_eq!(state.data["cards"], value);
+    assert_eq!(store.ui_state_get("canvas", "canvas", "").unwrap().data["cards"], value);
+    // The page writes as the user does: with the revision it last saw.
+    let action: UiAction = serde_json::from_value(serde_json::json!({"type":"widgetSet","widgetId":"cards","value":[1,2]})).unwrap();
+    assert!(store.ui_state_update("canvas", "canvas", "", 0, action.clone()).unwrap_err().contains("reload"));
+    assert_eq!(store.ui_state_update("canvas", "canvas", "", 1, action).unwrap().data["cards"], serde_json::json!([1, 2]));
+    let big = serde_json::Value::String("x".repeat(300 * 1024));
+    assert!(store.ui_widget_set("canvas", "canvas", "", "cards", big).is_err());
+
+    store.set_enabled("canvas", false).unwrap();
+    assert!(store.ui_page("canvas", "canvas").is_err());
+}
+
+#[test]
+fn a_page_declaration_is_checked_before_it_can_be_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = page_fixture(temp.path());
+    let base: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    let problems = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        let preview = store.preview(&source).unwrap();
+        assert_eq!(preview.can_enable, preview.diagnostics.is_empty());
+        preview
+            .diagnostics
+            .into_iter()
+            .map(|d| (d.path.unwrap_or_default(), d.message))
+            .collect::<Vec<_>>()
+    };
+    assert!(problems(&|_| ()).is_empty());
+    // A page that keeps no data is still a page.
+    assert!(problems(&|v| v["panels"][0]["widgets"] = serde_json::json!([])).is_empty());
+
+    let found = problems(&|v| v["schemaVersion"] = 2.into());
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].0, "/panels/0/page");
+    assert!(found[0].1.contains("schemaVersion 3"));
+    assert_eq!(found[1].0, "/panels/0/widgets/0/type");
+
+    // A page can sit in the Chat sidebar too, with either scope.
+    assert!(problems(&|v| {
+        v["panels"][0]["slot"] = "chat.sidebar".into();
+        v["panels"][0]["scope"] = "session".into();
+    })
+    .is_empty());
+
+    for (page, expected) in [
+        ("ui/missing.html", "Missing panel page file"),
+        ("ui.json", ".html"),
+        ("../outside.html", "package-relative"),
+        ("C:/outside.html", "package-relative"),
+    ] {
+        let found = problems(&|v| v["panels"][0]["page"] = page.into());
+        assert_eq!(found.len(), 1, "{page}: {found:?}");
+        assert_eq!(found[0].0, "/panels/0/page");
+        assert!(found[0].1.contains(expected), "{page}: {found:?}");
+    }
+
+    // Free-form data belongs to a page; a host-drawn panel cannot show it.
+    let found = problems(&|v| {
+        v["panels"][0].as_object_mut().unwrap().remove("page");
+    });
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "/panels/0/widgets/0/type");
+
+    // Libraries, fonts and images ride along, up to a total.
+    fs::write(source.join("ui/vendor.js"), vec![b' '; 12 * 1024 * 1024]).unwrap();
+    assert!(problems(&|_| ())[0].1.contains("add up to"));
+    fs::remove_file(source.join("ui/vendor.js")).unwrap();
+    fs::write(source.join("ui/page.html"), vec![b' '; 1024 * 1024 + 1]).unwrap();
+    assert!(problems(&|_| ())[0].1.contains("at most"));
+    fs::write(source.join("ui/page.html"), [0xff, 0xfe, 0x00]).unwrap();
+    assert!(problems(&|_| ())[0].1.contains("UTF-8"));
+}
+
+#[test]
+fn a_glance_in_the_summary_is_small_and_may_share_a_page_panels_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = page_fixture(temp.path());
+    fs::write(source.join("ui/glance.html"), "<!doctype html><p>glance</p>").unwrap();
+    let base = serde_json::json!({
+        "schemaVersion": 3,
+        "panels": [
+            { "id": "canvas", "slot": "nav.page", "title": "Canvas", "scope": "project", "page": "./ui/page.html",
+              "widgets": [{"id":"cards","type":"json","title":"Cards"}] },
+            { "id": "glance", "slot": "chat.brief", "title": "Canvas", "scope": "project", "page": "./ui/glance.html", "dataPanel": "canvas" }
+        ]
+    });
+    let problems = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        let preview = store.preview(&source).unwrap();
+        assert_eq!(preview.can_enable, preview.diagnostics.is_empty());
+        preview.diagnostics.into_iter().map(|d| (d.path.unwrap_or_default(), d.message)).collect::<Vec<_>>()
+    };
+    assert!(problems(&|_| ()).is_empty());
+    let at = |found: Vec<(String, String)>| found.into_iter().map(|(path, _)| path).collect::<Vec<_>>();
+
+    // A host-drawn glance with small widgets of its own is fine; a table is not.
+    assert!(problems(&|v| {
+        let glance = v["panels"][1].as_object_mut().unwrap();
+        glance.remove("page");
+        glance.remove("dataPanel");
+        glance.insert("widgets".into(), serde_json::json!([{"id":"m","type":"metrics","title":"M"},{"id":"p","type":"progress","title":"P"}]));
+    }).is_empty());
+    assert_eq!(at(problems(&|v| {
+        let glance = v["panels"][1].as_object_mut().unwrap();
+        glance.remove("page");
+        glance.remove("dataPanel");
+        glance.insert("widgets".into(), serde_json::json!([{"id":"t","type":"table","title":"T","columns":[{"key":"a","title":"A"}]}]));
+    })), ["/panels/1/widgets/0/type"]);
+    // The summary belongs to the project, and the slot is new in schema 3.
+    assert_eq!(at(problems(&|v| {
+        v["panels"][1]["scope"] = "session".into();
+    })), ["/panels/1/scope", "/panels/1/dataPanel"]);
+    let old = problems(&|v| {
+        v["schemaVersion"] = 2.into();
+    });
+    assert!(old.iter().any(|(path, _)| path == "/panels/1/slot"), "{old:?}");
+
+    // dataPanel: another panel of this package that keeps its own data.
+    for (edit, expected) in [
+        (Box::new(|v: &mut serde_json::Value| v["panels"][1]["dataPanel"] = "nope".into()) as Box<dyn Fn(&mut serde_json::Value)>, "names no panel"),
+        (Box::new(|v: &mut serde_json::Value| v["panels"][1]["dataPanel"] = "glance".into()), "another panel"),
+        (Box::new(|v: &mut serde_json::Value| v["panels"][1]["widgets"] = serde_json::json!([{"id":"x","type":"json","title":"X"}])), "keeps no data"),
+        (Box::new(|v: &mut serde_json::Value| { v["panels"][1].as_object_mut().unwrap().remove("page"); }), "panel with a page"),
+        (Box::new(|v: &mut serde_json::Value| v["panels"][0]["dataPanel"] = "glance".into()), "keeps its own data"),
+    ] {
+        let found = problems(&*edit);
+        assert!(found.iter().any(|(path, message)| path.ends_with("/dataPanel") && message.contains(expected)), "{expected}: {found:?}");
+    }
+
+    // Installed, the glance's page is served, and its data is the page panel's.
+    fs::write(source.join("ui.json"), serde_json::to_vec(&base).unwrap()).unwrap();
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("canvas", true).unwrap();
+    assert!(store.ui_page("canvas", "glance").unwrap().html.contains("glance"));
+    store.ui_widget_set("canvas", "canvas", "", "cards", serde_json::json!([{"title": "shared"}])).unwrap();
+    assert_eq!(store.ui_state_get("canvas", "canvas", "").unwrap().data["cards"][0]["title"], "shared");
+}
+
+#[test]
+fn an_upgrade_keeps_the_version_it_replaced_and_any_of_them_comes_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = page_fixture(temp.path());
+    let first = store.preview(&source).unwrap();
+    store.install(&source, &first.digest).unwrap();
+    store.set_enabled("canvas", true).unwrap();
+    assert!(store.list().unwrap()[0].history.is_empty());
+
+    // Two edits of the page, each upgraded while running.
+    let mut digests = vec![first.digest.clone()];
+    for (version, html) in [("1.0.1", "<h1>second</h1>"), ("1.0.2", "<h1>third</h1>")] {
+        fs::write(source.join("ui/page.html"), html).unwrap();
+        let manifest = fs::read_to_string(source.join("package.json")).unwrap();
+        fs::write(source.join("package.json"), manifest.replace(&format!("\"{}\"", if version == "1.0.1" { "1.0.0" } else { "1.0.1" }), &format!("\"{version}\""))).unwrap();
+        let next = store.preview(&source).unwrap();
+        store.upgrade(&source, &next.digest, digests.last().unwrap(), true).unwrap();
+        digests.push(next.digest);
+    }
+    let plugin = store.list().unwrap().remove(0);
+    assert_eq!(plugin.package.version, "1.0.2");
+    let history: Vec<_> = plugin.history.iter().map(|v| (v.version.as_str(), v.digest.as_str())).collect();
+    assert_eq!(history, [("1.0.1", digests[1].as_str()), ("1.0.0", digests[0].as_str())]);
+    assert!(plugin.history.iter().all(|v| v.replaced_at > 0));
+
+    // Back to the original: it runs again, approved by this click, and the
+    // version it replaced joins the history instead of being lost.
+    let back = store.rollback("canvas", &digests[0], &digests[2], true).unwrap();
+    assert!(back.enabled);
+    assert_eq!(back.package.version, "1.0.0");
+    assert_eq!(store.ui_page("canvas", "canvas").unwrap().html, "<!doctype html><h1>canvas-page</h1>");
+    let history: Vec<_> = back.history.iter().map(|v| v.version.as_str()).collect();
+    assert_eq!(history, ["1.0.2", "1.0.1"]);
+    // The original is known by its digest, wherever it is now.
+    assert_eq!(back.original_digest.as_deref(), Some(digests[0].as_str()));
+
+    // Only an earlier version, only from the version the user was looking at.
+    assert!(store.rollback("canvas", &"0".repeat(64), &digests[0], true).unwrap_err().contains("not an earlier version"));
+    assert!(store.rollback("canvas", &digests[2], &digests[1], true).unwrap_err().contains("changed after preview"));
+    // Without approval it comes back stopped.
+    let stopped = store.rollback("canvas", &digests[2], &digests[0], false).unwrap();
+    assert!(!stopped.enabled);
+}
+
+#[test]
+fn the_history_is_capped_but_keeps_the_original() {
+    let record = |history: Vec<PluginVersion>| Record {
+        name: "p".into(), version: "9".into(), description: String::new(), source: String::new(),
+        digest: "current".into(), enabled: true, history, original: Some("d0".into()),
+    };
+    let version = |n: usize| PluginVersion { version: n.to_string(), digest: format!("d{n}"), source: String::new(), replaced_at: 1 };
+    let full: Vec<_> = (0..MAX_PLUGIN_HISTORY).rev().map(version).collect();
+    let next = versions::history_after(&record(full), "new");
+    assert_eq!(next.len(), MAX_PLUGIN_HISTORY);
+    assert_eq!(next[0].digest, "current");
+    assert_eq!(next.last().unwrap().digest, "d0");
+    // Rolling back to d3 takes it out of the history.
+    let back = versions::history_after(&record(vec![version(3), version(2)]), "d3");
+    assert_eq!(back.iter().map(|v| v.digest.as_str()).collect::<Vec<_>>(), ["current", "d2"]);
+}
+
+#[test]
+fn a_checkout_hands_the_installed_bytes_to_a_draft_without_losing_edits() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = page_fixture(temp.path());
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+
+    let out = store.checkout("canvas", false).unwrap();
+    assert_eq!((out.status, out.directory.as_str()), ("checked-out", ".somniq/plugin-drafts/canvas"));
+    let draft = workspace.join(".somniq/plugin-drafts/canvas");
+    assert_eq!(store.preview(&draft).unwrap().digest, preview.digest);
+    assert!(out.files.contains(&"ui/page.html".to_string()));
+    assert_eq!(store.checkout("canvas", false).unwrap().status, "unchanged");
+
+    // The agent's edits are never overwritten silently.
+    fs::write(draft.join("ui/page.html"), "<h1>edited</h1>").unwrap();
+    let exists = store.checkout("canvas", false).unwrap();
+    assert_eq!(exists.status, "exists");
+    assert!(exists.draft_digest.is_some());
+    assert_eq!(fs::read_to_string(draft.join("ui/page.html")).unwrap(), "<h1>edited</h1>");
+    let replaced = store.checkout("canvas", true).unwrap();
+    assert_eq!(replaced.moved_aside.as_deref(), Some(".somniq/plugin-drafts/canvas-previous-1"));
+    assert_eq!(fs::read_to_string(workspace.join(".somniq/plugin-drafts/canvas-previous-1/ui/page.html")).unwrap(), "<h1>edited</h1>");
+    assert_eq!(store.preview(&draft).unwrap().digest, preview.digest);
+    assert!(store.checkout("@nobody/else", false).is_err());
+}
+
+#[test]
+fn an_upgrade_card_shows_every_changed_file_and_the_drafts_own_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = page_fixture(temp.path());
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.checkout("canvas", false).unwrap();
+    let draft = workspace.join(".somniq/plugin-drafts/canvas");
+    fs::write(draft.join("ui/page.html"), "<h1>new look</h1>").unwrap();
+    fs::write(draft.join("ui/extra.css"), "h1{color:red}").unwrap();
+    fs::remove_file(draft.join("ui/logo.svg")).unwrap();
+    fs::write(draft.join("ui/notes.bin"), [0u8, 2, 255]).unwrap();
+    let next = store.preview(&draft).unwrap();
+
+    let changes = store.draft_changes(&draft, &next.digest).unwrap();
+    let summary: Vec<_> = changes.iter().map(|c| (c.path.as_str(), c.change, c.binary)).collect();
+    assert_eq!(summary, [
+        ("ui/extra.css", FileChangeKind::Added, false),
+        ("ui/logo.svg", FileChangeKind::Removed, false),
+        ("ui/notes.bin", FileChangeKind::Changed, true),
+        ("ui/page.html", FileChangeKind::Changed, false),
+    ]);
+    let page = changes.iter().find(|c| c.path == "ui/page.html").unwrap();
+    assert_eq!(page.before.as_deref(), Some("<!doctype html><h1>canvas-page</h1>"));
+    assert_eq!(page.after.as_deref(), Some("<h1>new look</h1>"));
+    assert!(changes[2].before.is_none() && changes[2].after.is_none());
+
+    let shown = store.draft_page(&draft, &next.digest, "canvas").unwrap();
+    assert_eq!(shown.page.html, "<h1>new look</h1>");
+    assert_eq!(shown.panel.id, "canvas");
+    assert!(shown.page.assets.contains_key("ui/extra.css"));
+    assert!(store.draft_page(&draft, &next.digest, "nope").is_err());
+    // The card is for exactly those bytes: an edit after it was shown is refused.
+    fs::write(draft.join("ui/page.html"), "<h1>sneaky</h1>").unwrap();
+    assert!(store.draft_page(&draft, &next.digest, "canvas").unwrap_err().contains("changed after"));
+    assert!(store.draft_changes(&draft, &next.digest).is_err());
 }

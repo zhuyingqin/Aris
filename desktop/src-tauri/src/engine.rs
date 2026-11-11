@@ -64,6 +64,15 @@ pub struct ChatState {
     // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
     // `chat_question_respond` can deliver the user's answer to the blocked tool.
     question_prompts: QuestionPromptRegistry,
+    // `PluginManager` calls waiting on an approval card, keyed by tool-use id.
+    // Only `chat_plugin_approval_respond` (a click in the main window) answers.
+    plugin_approvals: crate::plugins::PluginApprovalRegistry,
+}
+
+impl ChatState {
+    pub(crate) fn plugin_approvals(&self) -> crate::plugins::PluginApprovalRegistry {
+        self.plugin_approvals.clone()
+    }
 }
 
 struct RunningTurn {
@@ -589,6 +598,7 @@ impl Default for ChatState {
             project_switching: AtomicBool::new(false),
             permission_prompts: Arc::new(Mutex::new(HashMap::new())),
             question_prompts: Arc::new(Mutex::new(HashMap::new())),
+            plugin_approvals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1237,6 +1247,8 @@ fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
         "bash"
             | "PowerShell"
             | ASK_USER_QUESTION_TOOL
+            // Waiting on an approval card is not progress to animate.
+            | crate::plugins::PLUGIN_MANAGER_TOOL
             | CHATGPT_WEB_IMAGE_TOOL
             | SOMNI_IMAGE_TOOL
             | LATEX_COMPILE_TOOL
@@ -1612,6 +1624,10 @@ struct DesktopToolExecutor<T> {
     work_task: Option<WorkTaskTurnBinding>,
     cancelled: Arc<AtomicBool>,
     questions: QuestionPromptRegistry,
+    plugin_approvals: crate::plugins::PluginApprovalRegistry,
+    /// The turn's permission mode. Most tools are gated by the runtime's
+    /// policy; `PluginManager` gates per action, so it needs the mode itself.
+    permission_mode: PermissionMode,
     latex_repair_guard: LatexRepairGuard,
     /// Probes already spent by this turn. The executor is rebuilt per turn, so
     /// the budget resets with it.
@@ -1931,6 +1947,71 @@ fn work_task_question_action(
 }
 
 impl<T> DesktopToolExecutor<T> {
+    /// `PluginManager`: the store operations plus the approval card, which is
+    /// shown from here and answered only by `chat_plugin_approval_respond`.
+    fn run_plugin_manager(&self, tool_use_id: &str, input: &str) -> Result<String, ToolError> {
+        // Plugins belong to the registered project; a work task's worktree
+        // previews drafts in its own workspace against them.
+        let plugin_root = crate::state::plugin_project_root(&self.workspace, &self.project_id);
+        // Nobody is present to click a card in these runs. Scheduled runs are
+        // work tasks too.
+        let unattended = if self.work_task.is_some() {
+            Some("work task or scheduled run")
+        } else if self.workflow.is_some() {
+            Some("review workflow")
+        } else {
+            None
+        };
+        let (delivery, app, session_id) = (self.event_delivery, &self.app, self.session_id.as_str());
+        let show_card = |card: Value| {
+            publish_chat_event(
+                delivery,
+                app,
+                "chat-tool",
+                session_id,
+                "tool_call",
+                json!({
+                    "sessionId": session_id,
+                    "id": tool_use_id,
+                    "name": crate::plugins::PLUGIN_MANAGER_TOOL,
+                    "input": tool_input_for_ui(crate::plugins::PLUGIN_MANAGER_TOOL, input),
+                    // Emitted after the card is registered: the UI may answer.
+                    "ready": true,
+                    "pluginApproval": card,
+                }),
+            );
+        };
+        let changed = || crate::plugins::emit_plugins_changed(app, &plugin_root);
+        let call = crate::plugins::PluginToolCall {
+            workspace: &self.workspace,
+            plugin_root: &plugin_root,
+            session_id,
+            tool_use_id,
+            permission_mode: self.permission_mode,
+            unattended,
+            approvals: &self.plugin_approvals,
+            cancelled: &self.cancelled,
+            show_card: &show_card,
+            changed: &changed,
+        };
+        crate::plugins::run_plugin_manager_tool(&call, input)
+    }
+
+    /// `PluginPanel`: the agent reads and fills the panels plugins declare.
+    fn run_plugin_panel(&self, input: &str) -> Result<String, ToolError> {
+        let plugin_root = crate::state::plugin_project_root(&self.workspace, &self.project_id);
+        let (output, change) = crate::plugins::run_plugin_panel_tool(
+            &plugin_root,
+            &self.session_id,
+            self.permission_mode,
+            input,
+        )?;
+        if let Some(change) = change {
+            crate::plugins::emit_plugin_panel_changed(&self.app, &plugin_root, &change);
+        }
+        Ok(output)
+    }
+
     fn emit_question_tool_card(&self, tool_use_id: &str, input: &str) {
         let payload = json!({
             "sessionId": self.session_id,
@@ -2184,6 +2265,8 @@ fn is_desktop_tool(tool_name: &str) -> bool {
             | REVIEW_WORKFLOW_STATE_TOOL
             | WORKFLOW_SCOPUS_PROBE_TOOL
             | PROJECT_EVIDENCE_SEARCH_TOOL
+            | crate::plugins::PLUGIN_MANAGER_TOOL
+            | crate::plugins::PLUGIN_PANEL_TOOL
             | COMPUTE_NODES_TOOL
             | COMPUTE_JOB_SUBMIT_TOOL
             | SOMNI_IMAGE_TOOL
@@ -2267,6 +2350,10 @@ where
         } else if tool_name == PROJECT_EVIDENCE_SEARCH_TOOL {
             crate::knowledge::project_evidence_search_tool_at(&self.workspace, input)
                 .map_err(ToolError::new)
+        } else if tool_name == crate::plugins::PLUGIN_MANAGER_TOOL {
+            self.run_plugin_manager(tool_use_id, input)
+        } else if tool_name == crate::plugins::PLUGIN_PANEL_TOOL {
+            self.run_plugin_panel(input)
         } else if tool_name == COMPUTE_NODES_TOOL {
             crate::compute::tool_nodes(&self.app)
                 .and_then(|value| {
@@ -2936,6 +3023,15 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     }
     if !is_blocked_tool(PROJECT_EVIDENCE_SEARCH_TOOL, extra_blocked_tools) {
         specs.push(project_evidence_search_tool_spec());
+    }
+    // An agent writing a plugin previews, installs and asks for approval here;
+    // only the user's click on the card enables anything.
+    if !is_blocked_tool(crate::plugins::PLUGIN_MANAGER_TOOL, extra_blocked_tools) {
+        specs.push(crate::plugins::plugin_manager_tool_spec());
+    }
+    // The data side of a plugin panel: what its widgets show.
+    if !is_blocked_tool(crate::plugins::PLUGIN_PANEL_TOOL, extra_blocked_tools) {
+        specs.push(crate::plugins::plugin_panel_tool_spec());
     }
     if !is_blocked_tool(COMPUTE_NODES_TOOL, extra_blocked_tools) {
         specs.push(compute_nodes_tool_spec());
@@ -9107,6 +9203,7 @@ async fn run_chat_turn_with_context(
     // A paired device continues the selected desktop session rather than
     // getting an independent permission profile. The session's local policy
     // remains the authority for every tool call.
+    let worker_plugin_approvals = state.plugin_approvals.clone();
     let (permission_mode, permission_prompts, question_prompts) = if autonomous_workflow {
         // An autonomous action has no user to answer a permission prompt, and
         // `DesktopPermissionPrompter` blocks until one arrives. Read-only is
@@ -9402,6 +9499,8 @@ async fn run_chat_turn_with_context(
                 .map(|task| task.binding.clone()),
             cancelled: worker_cancelled.clone(),
             questions: question_prompts,
+            plugin_approvals: worker_plugin_approvals,
+            permission_mode,
             latex_repair_guard: LatexRepairGuard::default(),
             scopus_probes_spent: 0,
             inner: mcp_bundle.executor,

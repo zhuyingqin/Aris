@@ -387,6 +387,7 @@ mod tests {
             branch: "somniq/task-t1".into(),
             base_branch: "main".into(),
             base_sha: "abc123".into(),
+            ..Default::default()
         });
         task.pending_action = Some(super::super::model::WorkTaskPendingAction::Question {
             tool_use_id: "toolu_1".into(),

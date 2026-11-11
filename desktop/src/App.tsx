@@ -16,6 +16,8 @@ import Chat from "./chat/Chat";
 import { clientRunningConversationCount } from "./chat/chatActivity";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
+import PluginPage from "./extensions/PluginPage";
+import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, pluginPageIcon, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
 import AppNavigationRail from "./AppNavigationRail";
@@ -318,6 +320,13 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     </ModuleIcon>,
   },
   {
+    id: "extensions", label: "Plugins",
+    icon: <ModuleIcon>
+      {/* A puzzle piece: one tab on top, one on the right. */}
+      <path d="M4 6.5h5a2 2 0 1 1 4 0h5V11a2 2 0 1 1 0 4v4.5H4Z" />
+    </ModuleIcon>,
+  },
+  {
     id: "workflows", label: "Workflows",
     icon: <ModuleIcon>
       <rect x="3" y="3" width="6" height="6" rx="1.5" />
@@ -333,6 +342,10 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
     </ModuleIcon>,
   },
 ];
+
+/** How many of `PRIMARY_NAV_ITEMS` get their own rail button; the rest go
+ * under "More". */
+const RAIL_PRIMARY_COUNT = 6;
 
 const UTILITY_NAV_ITEMS: NavItem[] = [
   {
@@ -489,12 +502,37 @@ export default function App() {
   const runningConversationCountRef = useRef(0);
   const runningFigureCountRef = useRef(0);
 
+  // Pages that enabled plugins add to the rail. One is shown in the Plugins
+  // module's place, so it needs no module of its own.
+  const pluginPages = useChatPluginPanels(currentProject?.path, "nav.page");
+  const [pluginPageKey, setPluginPageKey] = useState<string | null>(null);
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
+    setPluginPageKey(null);
     startTabTransition(() => setTab(nextTab));
     setProjectMenuOpen(false);
     setUserMenuOpen(false);
   }, [setTab, startTabTransition]);
+  const openPluginPage = useCallback((key: string) => {
+    selectTab("extensions");
+    setPluginPageKey(key);
+  }, [selectTab]);
+  // A page's button or form does its work in Chat, as an ordinary turn.
+  const runPluginPageAction = useCallback((action: PluginPageAction) => {
+    if (action.type === "open-panel") return requestPluginPage(action.pluginName, action.panelId);
+    selectTab("chat");
+    window.dispatchEvent(new CustomEvent<PluginPageAction>(PLUGIN_PAGE_ACTION_EVENT, { detail: action }));
+  }, [selectTab]);
+
+  // A glance or another page asks for a page; only a page the rail has opens.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const key = (event as CustomEvent<string>).detail;
+      if (pluginPages.panels.some((panel) => uiPanelKey(panel) === key)) openPluginPage(key);
+    };
+    window.addEventListener(PLUGIN_OPEN_PAGE_EVENT, open);
+    return () => window.removeEventListener(PLUGIN_OPEN_PAGE_EVENT, open);
+  }, [pluginPages.panels, openPluginPage]);
 
   const setProjectSwitcherOpen = useCallback((open: boolean) => {
     if (open) setUserMenuOpen(false);
@@ -835,7 +873,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
-  const navigationShell = chatShell || renderedTab === "settings" || renderedTab === "figures";
+  const navigationShell = chatShell || renderedTab === "settings" || renderedTab === "figures" || renderedTab === "extensions";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
@@ -914,10 +952,17 @@ export default function App() {
     setUserMenuOpen(false);
     userMenuTriggerRef.current?.focus();
   });
-  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, 5).map((item) => ({ ...item, label: copy.nav[item.id] }));
-  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(5), ...UTILITY_NAV_ITEMS]
+  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, RAIL_PRIMARY_COUNT).map((item) => ({ ...item, label: copy.nav[item.id] }));
+  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(RAIL_PRIMARY_COUNT), ...UTILITY_NAV_ITEMS]
     .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
     .map((item) => ({ ...item, label: copy.nav[item.id] }));
+
+  // Disabling the plugin, or switching project, takes the page away with it.
+  const pluginPage = renderedTab === "extensions" && currentProject
+    ? pluginPages.panels.find((panel) => uiPanelKey(panel) === pluginPageKey) : undefined;
+  const pluginNavigationItems = pluginPages.panels.map((panel) => ({
+    id: uiPanelKey(panel), label: uiText(panel.title, language), icon: <SvgIcon name={pluginPageIcon(panel)} size={20} />,
+  }));
 
   const codeShellReady = useCodeShell({
     enabled: codeMounted,
@@ -1082,6 +1127,10 @@ export default function App() {
         items={navigationItems}
         moreItems={moreNavigationItems}
         activeTab={renderedTab}
+        pluginItems={pluginNavigationItems}
+        pluginRailCount={RAIL_PLUGIN_PAGES}
+        activePlugin={pluginPage ? pluginPageKey : null}
+        onSelectPlugin={openPluginPage}
         update={renderUpdateIndicator()}
         account={accountControl}
         onSelect={selectTab}
@@ -1161,7 +1210,9 @@ export default function App() {
               <Mail />
             </Suspense>
           )}
-          {renderedTab === "extensions" && <Extensions />}
+          {renderedTab === "extensions" && (pluginPage && currentProject
+            ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
+            : <Extensions />)}
           {renderedTab === "settings" && <Settings />}
         </ErrorBoundary>
 

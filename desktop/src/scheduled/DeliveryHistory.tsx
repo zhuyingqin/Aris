@@ -2,6 +2,7 @@ import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ScheduledDeliveryHistory, ScheduledDeliveryView } from "../types";
 import type { SCHEDULED_TASKS_COPY } from "./i18n";
+import { describeScheduledError } from "./errorText";
 import { formatInZone } from "./scheduleFormat";
 
 type ScheduledTasksCopy = (typeof SCHEDULED_TASKS_COPY)["cn"];
@@ -67,7 +68,7 @@ export function DeliveryHistory({
                     )}
                     {delivery.recovered && <span className="sched-history-meta">{copy.historyRecovered}</span>}
                     {delivery.error && delivery.status !== "queued" && (
-                      <span className="sched-history-error" title={delivery.error}>{delivery.error}</span>
+                      <span className="sched-history-error" title={delivery.error}>{describeScheduledError(delivery.error, language)}</span>
                     )}
                   </div>
                   <div className="sched-history-col" data-testid="outcome">
@@ -84,7 +85,7 @@ export function DeliveryHistory({
                           </span>
                         )}
                         {outcome.error && (
-                          <span className="sched-history-error" title={outcome.error}>{outcome.error}</span>
+                          <span className="sched-history-error" title={outcome.error}>{describeScheduledError(outcome.error, language)}</span>
                         )}
                       </>
                     ) : (

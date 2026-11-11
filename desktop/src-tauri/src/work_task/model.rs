@@ -197,6 +197,15 @@ pub struct WorkTaskWorktree {
     /// Commit the worktree was created at. The merge reads this to tell "the
     /// base moved" from "the task changed nothing".
     pub base_sha: String,
+    /// Set when the project is a plain folder rather than a Git checkout: the
+    /// private repository SomniQ keeps for it outside the folder (see
+    /// [`super::shadow`]). Every project-side Git command for this task — the
+    /// merge, the recovery check, the cleanup — runs against it, with the
+    /// folder as its working tree. Recorded rather than re-derived, so a
+    /// `git init` in the folder while a card is in review cannot redirect the
+    /// merge into a repository that has never heard of the task's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_git_dir: Option<String>,
 }
 
 /// A merge that was started and may not have finished.
@@ -876,6 +885,7 @@ mod tests {
             branch: "somniq/task/t1".into(),
             base_branch: "main".into(),
             base_sha: "aaa".into(),
+            ..Default::default()
         });
         task.session_id = Some("work-task-t1-1".into());
         task.last_error = Some("tectonic exited with status 1".into());

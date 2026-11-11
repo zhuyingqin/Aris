@@ -43,11 +43,15 @@ const COMMANDS: &[&str] = &[
     "plugins_install",
     "plugins_set_enabled",
     "plugins_upgrade",
+    "plugins_rollback",
+    "plugins_draft_changes",
+    "plugins_draft_page",
     "plugins_check_mcp",
     "plugins_remove",
     "plugins_ui_list",
     "plugins_ui_state_get",
     "plugins_ui_state_update",
+    "plugins_ui_page",
     "profile_stats",
     "review_workflows_list",
     "review_workflow_load",
@@ -291,7 +295,8 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
             encode(crate::plugins::check_mcp(store, parse::<String>(&args, "name")?).await?)
         }
         "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_upgrade" | "plugins_set_enabled" | "plugins_remove"
-        | "plugins_ui_list" | "plugins_ui_state_get" | "plugins_ui_state_update" => {
+        | "plugins_ui_list" | "plugins_ui_state_get" | "plugins_ui_state_update" | "plugins_ui_page"
+        | "plugins_rollback" | "plugins_draft_changes" | "plugins_draft_page" => {
             let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
             let command = command.to_string();
             crate::blocking::off_main_thread(move || match command.as_str() {
@@ -299,9 +304,13 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
                 "plugins_preview" => encode(store.preview_import(parse::<String>(&args, "source")?)?),
                 "plugins_install" => encode(store.install(parse::<String>(&args, "source")?, &parse::<String>(&args, "expectedDigest")?)?),
                 "plugins_upgrade" => encode(store.upgrade(parse::<String>(&args, "source")?, &parse::<String>(&args, "expectedDigest")?, &parse::<String>(&args, "expectedCurrentDigest")?, parse(&args, "approve")?)?),
+                "plugins_rollback" => encode(store.rollback(&parse::<String>(&args, "name")?, &parse::<String>(&args, "digest")?, &parse::<String>(&args, "expectedCurrentDigest")?, parse(&args, "approve")?)?),
+                "plugins_draft_changes" => encode(store.draft_changes(parse::<String>(&args, "source")?, &parse::<String>(&args, "digest")?)?),
+                "plugins_draft_page" => encode(store.draft_page(parse::<String>(&args, "source")?, &parse::<String>(&args, "digest")?, &parse::<String>(&args, "panelId")?)?),
                 "plugins_set_enabled" => encode(store.set_enabled(&parse::<String>(&args, "name")?, parse(&args, "enabled")?)?),
                 "plugins_ui_list" => encode(store.active_ui_panels()?),
                 "plugins_ui_state_get" => encode(store.ui_state_get(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?)?),
+                "plugins_ui_page" => encode(store.ui_page(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?)?),
                 "plugins_ui_state_update" => encode(store.ui_state_update(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?, parse(&args, "expectedRevision")?, parse(&args, "action")?)?),
                 _ => encode(store.remove(&parse::<String>(&args, "name")?)?),
             }).await

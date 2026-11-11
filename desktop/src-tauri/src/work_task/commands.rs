@@ -33,8 +33,8 @@ fn new_task_id(now: u64) -> String {
 
 #[tauri::command]
 pub async fn work_task_list(projects_state: State<'_, ProjectState>) -> Result<Vec<WorkTask>, String> {
-    let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || Ok(list_core(&project_id, &project_path))).await
+    let (project_id, _) = binding(&projects_state)?;
+    crate::blocking::off_main_thread(move || Ok(list_core(&project_id))).await
 }
 
 /// The board's load: the same rows as [`work_task_list`], plus the store
@@ -47,15 +47,15 @@ pub async fn work_task_list(projects_state: State<'_, ProjectState>) -> Result<V
 pub async fn work_task_snapshot(
     projects_state: State<'_, ProjectState>,
 ) -> Result<WorkTaskSnapshot, String> {
-    let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || Ok(snapshot_core(&project_id, &project_path))).await
+    let (project_id, _) = binding(&projects_state)?;
+    crate::blocking::off_main_thread(move || Ok(snapshot_core(&project_id))).await
 }
 
-pub(crate) fn snapshot_core(project_id: &str, project_path: &Path) -> WorkTaskSnapshot {
+pub(crate) fn snapshot_core(project_id: &str) -> WorkTaskSnapshot {
     let snapshot = store::snapshot(project_id);
     WorkTaskSnapshot {
         revision: snapshot.revision,
-        tasks: stamp_derived(project_path, snapshot.tasks),
+        tasks: stamp_derived(snapshot.tasks),
     }
 }
 
@@ -70,18 +70,16 @@ pub(crate) fn snapshot_core(project_id: &str, project_path: &Path) -> WorkTaskSn
 /// board treats the two differently: this one withdraws Accept, while
 /// `last_error` — for instance the reason a merge did not go through — leaves
 /// it offered so the user can fix the cause and try again.
-pub(crate) fn list_core(project_id: &str, project_path: &Path) -> Vec<WorkTask> {
-    stamp_derived(project_path, store::list(project_id))
+pub(crate) fn list_core(project_id: &str) -> Vec<WorkTask> {
+    stamp_derived(store::list(project_id))
 }
 
-fn stamp_derived(project_path: &Path, tasks: Vec<WorkTask>) -> Vec<WorkTask> {
-    let repository = worktree::is_git_repository(project_path);
+fn stamp_derived(tasks: Vec<WorkTask>) -> Vec<WorkTask> {
+    // Not gated on the project being a repository any more: a plain folder's
+    // tasks have checkouts too, and theirs can vanish the same way.
     tasks
         .into_iter()
         .map(|mut task| {
-            if !repository {
-                return task;
-            }
             if let Some(tree) = task.worktree.as_ref() {
                 task.worktree_missing = !Path::new(&tree.path).is_dir();
             }
@@ -123,7 +121,7 @@ pub(crate) fn create_core(
 /// `todo` until a second click is a step nobody wants: a user who describes a
 /// task means it to run. Saving without starting is still offered, explicitly.
 ///
-/// Atomic from the user's side: the repository check that would refuse the
+/// Atomic from the user's side: the host check that would refuse the
 /// launch runs *before* the row is written, so a project that cannot host a
 /// task never produces a card that silently refuses to start.
 #[tauri::command]
@@ -139,9 +137,7 @@ pub async fn work_task_create_and_start(
         let project_id = project_id.clone();
         let project_path = project_path.clone();
         move || {
-            if !worktree::is_git_repository(&project_path) {
-                return Err(NOT_A_REPOSITORY.to_string());
-            }
+            worktree::ensure_can_host_tasks(&project_path)?;
             let created = create_core(&project_id, title, prompt, model)?;
             start_core(&project_id, &project_path, &created.id)
         }
@@ -202,9 +198,7 @@ pub(crate) fn queue_scheduled_run(
     project_path: &Path,
     request: ScheduledRunRequest,
 ) -> Result<ScheduledRunOutcome, String> {
-    if !worktree::is_git_repository(project_path) {
-        return Err(NOT_A_REPOSITORY.to_string());
-    }
+    worktree::ensure_can_host_tasks(project_path)?;
     let title = request.title.trim().to_string();
     if title.is_empty() {
         return Err("a work task needs a title".to_string());
@@ -354,19 +348,16 @@ pub async fn work_task_start(
 }
 
 /// Queue a task, refusing up front what the engine would only discover at
-/// launch — a project that is not a repository has nowhere to isolate the work,
-/// and finding that out after the card has moved is worse than not moving it.
-pub(crate) const NOT_A_REPOSITORY: &str =
-    "work tasks need a Git repository: this project is not one, so there is no branch to isolate the work on";
-
+/// launch. Any folder can host a task (a plain folder gets a private
+/// repository, see `shadow`), but not without Git installed or a folder that
+/// is gone — and finding that out after the card has moved is worse than not
+/// moving it.
 pub(crate) fn start_core(
     project_id: &str,
     project_path: &Path,
     task_id: &str,
 ) -> Result<WorkTask, String> {
-    if !worktree::is_git_repository(project_path) {
-        return Err(NOT_A_REPOSITORY.to_string());
-    }
+    worktree::ensure_can_host_tasks(project_path)?;
     store::update(project_id, task_id, |task| {
         match task.status {
             status

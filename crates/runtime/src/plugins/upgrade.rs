@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::{package_files, InstalledPlugin, PluginMcp, PluginPreview, PluginStore, Record};
+use super::{package_files, InstalledPlugin, PackageFiles, PluginMcp, PluginPreview, PluginStore, Record};
 
 /// A package preview, plus what installing it would replace.
 #[derive(Debug, Clone, Serialize)]
@@ -146,7 +146,11 @@ fn diff(
             .capabilities
             .ui_panels
             .iter()
-            .map(|panel| panel.id.clone())
+            // A panel gaining or losing its own page is a change to review.
+            .map(|panel| match panel.page {
+                Some(_) => format!("{} (page)", panel.id),
+                None => panel.id.clone(),
+            })
             .collect()
     };
     let servers = |package: &PluginPreview| -> BTreeMap<String, PluginMcp> {
@@ -306,7 +310,21 @@ impl PluginStore {
     ) -> Result<InstalledPlugin, String> {
         let files = package_files(source.as_ref())?;
         let source = crate::canonicalize(source).map_err(|e| e.to_string())?;
-        let candidate = self.inspect(&files, &source.to_string_lossy())?;
+        self.replace_with(&files, &source.to_string_lossy(), expected_digest, expected_current_digest, approve)
+    }
+
+    /// The transaction behind [`Self::upgrade`] and [`Self::rollback`]: make
+    /// `files` (shown as coming from `source`) the installed version, keeping
+    /// the one it replaces in the history.
+    pub(super) fn replace_with(
+        &self,
+        files: &PackageFiles,
+        source: &str,
+        expected_digest: &str,
+        expected_current_digest: &str,
+        approve: bool,
+    ) -> Result<InstalledPlugin, String> {
+        let candidate = self.inspect(&files, source)?;
         if candidate.digest != expected_digest {
             return Err("Package changed after preview; preview the upgrade again".into());
         }
@@ -364,6 +382,8 @@ impl PluginStore {
                         source: candidate.source.clone(),
                         digest: candidate.digest.clone(),
                         enabled: approve,
+                        history: super::versions::history_after(&record, &candidate.digest),
+                        original: super::versions::original_of(&record),
                     },
                 );
                 self.save(&next)?;

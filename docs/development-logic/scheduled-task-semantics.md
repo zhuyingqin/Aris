@@ -156,6 +156,52 @@ automation for every mode, because runs against the same base branch should
 not stack up. It also holds a run when another card is using the target
 conversation.
 
+## Projects that are plain folders
+
+From 0.4.68 to 0.4.86 a scheduled run was a work task, and a work task
+required the project to be a Git repository. Every run in a plain folder
+(most research projects, and the default workspace that the old
+session-to-project lookup sent everything to) was recorded as `failed` with
+"work tasks need a Git repository". Nothing ran.
+
+Plain folders now get the same isolation from a private repository
+(`desktop/src-tauri/src/work_task/shadow.rs`):
+
+- SomniQ keeps a bare repository for the folder under
+  `<config>/desktop-runtime/work-task-shadow/<name>-<hash of path>.git`. It
+  uses the folder as that repository's working tree. Nothing is written into
+  the folder, so it gets no `.git` and no `.gitignore`.
+- Each run takes a snapshot of the folder on branch `somniq/snapshot` and
+  cuts the task's checkout from it as a linked worktree. Inside that checkout
+  everything else works unchanged: the commit, the review snapshot, the
+  independent Reviewer and the revision loop.
+- Accepting takes a fresh snapshot first, so edits the user made meanwhile
+  become the base. It then merges that into the task checkout, so any conflict
+  lands there. Last, it fast-forwards the snapshot branch with
+  `--no-overwrite-ignore`, which is the step that writes the accepted files
+  into the folder. Git refuses to overwrite anything the snapshot does not
+  track, including files the rules ignore.
+- Some files are never copied:
+  - caches such as `node_modules/`, virtual environments and `__pycache__`;
+  - SomniQ's runtime data, except the deliverable roots `papers`, `slides`,
+    `poster`, `web`, `notebooks`, `reports` and `experiments`;
+  - Office lock files and SQLite sidecars;
+  - files over 50 MB, and files another program holds open.
+
+  The task prompt tells the model about these exclusions. A folder that is
+  still over 50 000 files or 2 GB after these exclusions is refused, with the
+  reason, and is not half-copied.
+- A snapshot is byte-for-byte: `* -text -filter -ident` in `info/attributes`,
+  with `core.autocrlf=false`. The repository sets its own identity, hooks path
+  and signing settings, so the user's global Git configuration cannot derail
+  a commit.
+
+Git still has to be installed. Saving a task now refuses up front in three
+cases, instead of recording a failed delivery at every occurrence: the
+project is not registered, the folder is gone, or Git is missing. The page
+explains the known failures in the user's language (`errorText.ts`), and that
+includes the legacy message still sitting in old delivery history.
+
 ## Records and compatibility
 
 The record is still `automations/<id>/automation.toml`, now at version 2. It
@@ -207,5 +253,11 @@ From `desktop/src-tauri` (with `CARGO_TARGET_DIR` off the F: drive):
 and Lord Howe gaps and folds, coalescing, the skip policy, dedupe across both
 crash points, busy deferral, one-shot ending, and v1 cadence.
 `cargo test --lib work_task` covers the occurrence-key dedupe and the
-shared-conversation hold. From `desktop/`: `npx vitest run src/scheduled`,
+shared-conversation hold, plus the plain-folder path:
+- snapshot rules, byte fidelity and the size limit;
+- accepting writes changes back and keeps the user's concurrent edits;
+- a file left out of the snapshot is never overwritten.
+
+`cargo test --lib scheduled` also covers delivery into a plain folder and the
+save-time refusal for an unregistered project. From `desktop/`: `npx vitest run src/scheduled`,
 `npm run typecheck`, `npm run build`.

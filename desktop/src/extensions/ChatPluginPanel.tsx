@@ -1,22 +1,28 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { pluginsUiStateGet, pluginsUiStateUpdate, type ActiveUiPanel, type UiAction, type UiPanelState, type UiTodo } from "../api/plugins";
-import { SvgIcon, type SvgIconName } from "../SvgIcon";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { PLUGIN_PANEL_CHANGED_EVENT, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiAction, type UiPanelState, type UiTodo } from "../api/plugins";
+import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
 import type { ChatTodoItem } from "../types";
-import { uiText } from "./useChatPluginPanels";
+import { DataWidgetView, isDataWidget, type PanelActions } from "./ChatPluginDataWidgets";
+import PluginEditButton from "./PluginEditButton";
+import PluginPageFrame from "./PluginPageFrame";
+import { WidgetSection } from "./ChatPluginSection";
+import { requestPluginPage, uiText } from "./useChatPluginPanels";
 import "./ChatPluginPanel.css";
 
-interface Props {
+interface Props extends PanelActions {
   panel: ActiveUiPanel;
   projectPath: string;
   sessionId: string;
   language: Language;
   agentTodos: ChatTodoItem[];
+  /** A glance in the project summary: no storage line, no footer. */
+  compact?: boolean;
 }
 
 const COPY = {
   cn: {
-    scope: "当前会话", local: "本地保存", from: "来自", loading: "正在读取面板…", retry: "重新加载", saving: "正在保存…",
+    scope: "当前会话", projectScope: "整个项目共用", projectStorage: "此面板的内容保存在项目中，项目的每个会话看到的是同一份。", local: "本地保存", from: "来自", loading: "正在读取面板…", retry: "重新加载", saving: "正在保存…",
     storage: "待办和笔记保存在此项目的当前会话中。",
     add: "添加待办", addLabel: "新待办", addPlaceholder: "添加下一步…", empty: "记下下一步，让研究继续。", remove: "删除",
     completed: "已完成", allDone: "待办已全部完成。", limit: "已达到 200 项上限，可先删除已完成的待办。",
@@ -26,7 +32,7 @@ const COPY = {
     startSession: "发送第一条消息后，可以在这里添加待办和笔记，并随当前会话保存。",
   },
   en: {
-    scope: "This conversation", local: "Saved locally", from: "From", loading: "Loading panel…", retry: "Reload", saving: "Saving…",
+    scope: "This conversation", projectScope: "Shared by this project", projectStorage: "This panel is saved with the project: every conversation in it sees the same content.", local: "Saved locally", from: "From", loading: "Loading panel…", retry: "Reload", saving: "Saving…",
     storage: "Todos and notes are saved in this project for the current conversation.",
     add: "Add todo", addLabel: "New todo", addPlaceholder: "Add a next step…", empty: "Capture a next step to keep your research moving.", remove: "Delete",
     completed: "Completed", allDone: "All caught up.", limit: "200-item limit reached. Delete completed todos to make room.",
@@ -38,28 +44,6 @@ const COPY = {
 };
 
 type Mutate = (action: UiAction) => Promise<boolean>;
-
-// Adapted from DeepSeek Harness TodoPanel / DisclosureRow at fcc0ad4 (MIT).
-// Keep the compact icon/title/summary disclosure, with SomniQ tokens and a
-// native button. Hidden bodies stay mounted so folding never discards a draft.
-function WidgetSection({ title, icon, summary, preview, attention, children }: {
-  title: string; icon: SvgIconName; summary?: string; preview?: string; attention?: boolean; children: ReactNode;
-}) {
-  const [open, setOpen] = useState(true);
-  const bodyId = useId();
-  return <section className="chat-plugin-widget" aria-label={title}>
-    <h3 className="chat-plugin-widget-heading">
-      <button type="button" className="chat-plugin-disclosure" aria-label={title} aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((value) => !value)}>
-        <SvgIcon name={icon} size={15} className="chat-plugin-widget-icon" />
-        <span className="chat-plugin-widget-title">{title}</span>
-        {summary && <span className={`chat-plugin-summary${attention ? " has-changes" : ""}`}>{summary}</span>}
-        <SvgIcon name={open ? "chevronDown" : "chevronRight"} size={12} className="chat-plugin-chevron" />
-      </button>
-    </h3>
-    {!open && preview && <p className="chat-plugin-plan-summary">{preview}</p>}
-    <div id={bodyId} className="chat-plugin-widget-body" hidden={!open}>{children}</div>
-  </section>;
-}
 
 function TodoWidget({ id, title, todos, disabled, mutate, language }: {
   id: string; title: string; todos: UiTodo[]; disabled: boolean; mutate: Mutate; language: Language;
@@ -142,12 +126,14 @@ function AgentPlanWidget({ title, todos, language }: { title: string; todos: Cha
 
 // The side-panel tab already names the panel (as DeepSeek Harness does), so
 // the body opens with one quiet line about where its content lives.
-function PanelMeta({ language }: { language: Language }) {
+function PanelMeta({ language, project }: { language: Language; project: boolean }) {
   const copy = COPY[language];
-  return <p className="chat-plugin-meta" title={copy.storage}><SvgIcon name="messageCircle" size={12} />{copy.scope} · {copy.local}</p>;
+  return project
+    ? <p className="chat-plugin-meta" title={copy.projectStorage}><SvgIcon name="folder" size={12} />{copy.projectScope} · {copy.local}</p>
+    : <p className="chat-plugin-meta" title={copy.storage}><SvgIcon name="messageCircle" size={12} />{copy.scope} · {copy.local}</p>;
 }
 
-function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Props) {
+export function PanelBody({ panel, projectPath, sessionId, language, agentTodos, onPrompt, onOpenFile, compact = false }: Props) {
   const copy = COPY[language];
   const [state, setState] = useState<UiPanelState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -155,9 +141,15 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
   const [error, setError] = useState("");
   const generation = useRef(0);
   const writing = useRef(false);
-  const reload = useCallback(async () => {
+  // An agent wrote this panel while one of the user's own saves was in flight.
+  const stale = useRef(false);
+  // `quiet`: pick up an agent's write without blanking or locking the panel.
+  const reload = useCallback(async (quiet = false) => {
+    if (quiet && writing.current) { stale.current = true; return; }
     const request = ++generation.current;
-    setLoading(true); setError("");
+    stale.current = false;
+    if (!quiet) setLoading(true);
+    setError("");
     try {
       const next = await pluginsUiStateGet(projectPath, panel.pluginName, panel.id, sessionId);
       if (request === generation.current) setState(next);
@@ -166,6 +158,16 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
   }, [projectPath, panel.pluginName, panel.id, sessionId]);
 
   useEffect(() => { void reload(); return () => { ++generation.current; }; }, [reload]);
+  useEffect(() => {
+    // The agent's writes bump the revision, so without this reload the user's
+    // next save would be refused as out of date.
+    const changed = (event: Event) => {
+      const change = (event as CustomEvent<PluginPanelChange>).detail;
+      if (change?.pluginName === panel.pluginName && change.panelId === panel.id && samePluginProject(change.projectPath, projectPath)) void reload(true);
+    };
+    window.addEventListener(PLUGIN_PANEL_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(PLUGIN_PANEL_CHANGED_EVENT, changed);
+  }, [reload, panel.pluginName, panel.id, projectPath]);
   const mutate: Mutate = async (action) => {
     if (!state || writing.current || loading || error) return false;
     writing.current = true;
@@ -182,16 +184,21 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
     } finally {
       writing.current = false;
       if (request === generation.current) setSaving(false);
+      if (stale.current) void reload(true);
     }
   };
+  const actions: PanelActions = { onPrompt, onOpenFile };
   const disabled = loading || saving || Boolean(error) || !state;
-  return <div className="chat-plugin-panel" aria-label={uiText(panel.title, language)} aria-busy={loading || saving}>
+  return <div className={`chat-plugin-panel${compact ? " is-compact" : ""}`} aria-label={uiText(panel.title, language)} aria-busy={loading || saving}>
     <div className="chat-plugin-panel-content">
-    <PanelMeta language={language} />
+    {!compact && <PanelMeta language={language} project={panel.scope === "project"} />}
     {error && <div className="chat-plugin-error" role="alert"><p>{error}</p><button type="button" className="chat-plugin-button" onClick={() => void reload()} disabled={saving || loading}>{copy.retry}</button></div>}
     {loading && <p className="chat-plugin-empty" role="status">{copy.loading}</p>}
     {panel.widgets.map((widget) => {
       if (widget.type === "text") return <p className="chat-plugin-text" key={widget.id}>{uiText(widget.text, language)}</p>;
+      if (widget.type === "json") return null;
+      // Forms and buttons hold no stored data, so they work while it loads.
+      if (isDataWidget(widget)) return <DataWidgetView key={widget.id} widget={widget} value={state?.data?.[widget.id]} language={language} actions={actions} />;
       const title = uiText(widget.title, language);
       if (widget.type === "agent-plan") return <AgentPlanWidget key={widget.id} title={title} todos={agentTodos} language={language} />;
       // Keep drafts mounted across a failed save/reload. Scope changes remount
@@ -201,12 +208,25 @@ function PanelBody({ panel, projectPath, sessionId, language, agentTodos }: Prop
         ? <TodoWidget key={widget.id} id={widget.id} title={title} todos={state.todoLists[widget.id] ?? []} disabled={disabled} mutate={mutate} language={language} />
         : <NotesWidget key={widget.id} id={widget.id} title={title} saved={state.notes[widget.id] ?? ""} disabled={disabled} mutate={mutate} language={language} />;
     })}
-    <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{copy.from} {panel.pluginName}</span><span role="status">{saving ? copy.saving : ""}</span></footer>
+    {!compact && <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{copy.from} {panel.pluginName}</span><span role="status">{saving ? copy.saving : ""}</span><PluginEditButton panel={panel} language={language} compact onPrompt={(text) => onPrompt?.(text, false)} /></footer>}
     </div>
   </div>;
 }
 
+/** A panel that draws itself, in the sidebar: the same sandboxed frame as a page. */
+function OwnPage({ panel, projectPath, sessionId, language, onPrompt, onOpenFile }: Props) {
+  return <div className="chat-plugin-panel chat-plugin-own-page" aria-label={uiText(panel.title, language)}>
+    <PluginPageFrame panel={panel} projectPath={projectPath} sessionId={sessionId} language={language}
+      onAction={(action) => action.type === "prompt" ? onPrompt?.(action.text, false) : action.type === "open-file" ? onOpenFile?.(action.path) : requestPluginPage(action.pluginName, action.panelId)} />
+    <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{COPY[language].from} {panel.pluginName}</span><PluginEditButton panel={panel} language={language} compact onPrompt={(text) => onPrompt?.(text, false)} /></footer>
+  </div>;
+}
+
 export default function ChatPluginPanel(props: Props) {
+  // A project panel has one copy whatever the conversation, so it is neither
+  // remounted when the conversation changes nor held back on the home draft.
+  const Body = props.panel.page ? OwnPage : PanelBody;
+  if (props.panel.scope === "project") return <Body key={JSON.stringify([props.projectPath, props.panel.pluginName, props.panel.id, props.panel.packageDigest])} {...props} sessionId="" />;
   // The shared home draft is not a durable conversation. Never store personal
   // data under it: its id changes when the user sends their first message.
   if (!props.sessionId || props.sessionId === "chat-home") return <div className="chat-plugin-panel">
@@ -215,5 +235,5 @@ export default function ChatPluginPanel(props: Props) {
       <p className="chat-plugin-empty">{COPY[props.language].startSession}</p>
     </div>
   </div>;
-  return <PanelBody key={JSON.stringify([props.projectPath, props.sessionId, props.panel.pluginName, props.panel.id, props.panel.packageDigest])} {...props} />;
+  return <Body key={JSON.stringify([props.projectPath, props.sessionId, props.panel.pluginName, props.panel.id, props.panel.packageDigest])} {...props} />;
 }

@@ -31,6 +31,7 @@ import type {
   SessionSummary,
 } from "../types";
 import { DeliveryHistory } from "./DeliveryHistory";
+import { describeScheduledError } from "./errorText";
 import { SCHEDULED_TASKS_COPY, type TaskTemplate } from "./i18n";
 import {
   COMMON_TIME_ZONES,
@@ -494,7 +495,7 @@ function TaskRow({
       </div>
 
       <div className="sched-task-card-footer">
-        <span className={faulted ? "sched-run-summary error" : "sched-run-summary"} title={task.waitingReason ?? task.lastError ?? task.scheduleError ?? undefined}>
+        <span className={faulted ? "sched-run-summary error" : "sched-run-summary"} title={describeScheduledError(task.waitingReason ?? task.lastError ?? task.scheduleError, language) || undefined}>
           <SvgIcon name={faulted ? "warning" : "clock"} size={12} />
           <span>{runSummary(task, copy, language)}</span>
         </span>
@@ -868,7 +869,7 @@ export default function ScheduledTasks({
       setPane("tasks");
       showToast(copy.noErrorValue);
     } catch (error) {
-      setError(String(error));
+      setError(describeScheduledError(String(error), language));
     } finally {
       setBusy(false);
     }
@@ -896,7 +897,7 @@ export default function ScheduledTasks({
       setHistoryRevision((value) => value + 1);
       showToast(copy.runNowDone);
     } catch (error) {
-      setError(String(error));
+      setError(describeScheduledError(String(error), language));
     } finally {
       setBusy(false);
     }
@@ -1243,7 +1244,7 @@ export default function ScheduledTasks({
                     </div>
                     <div
                       className="sched-metric-val"
-                      title={selectedTask.scheduleError || selectedTask.lastError || selectedTask.waitingReason || copy.noErrorValue}
+                      title={describeScheduledError(selectedTask.scheduleError || selectedTask.lastError || selectedTask.waitingReason, language) || copy.noErrorValue}
                     >
                       {selectedTask.scheduleError
                         ? copy.scheduleErrorLabel
@@ -1255,6 +1256,13 @@ export default function ScheduledTasks({
                     </div>
                   </div>
                 </div>
+              )}
+              {/* The reason itself, readable without hovering: "last run
+                  failed" alone does not tell the user what to fix. */}
+              {selectedTask && !selectedTask.scheduleError && (selectedTask.lastError || selectedTask.waitingReason) && (
+                <p className="sched-history-error" role="status" data-testid="sched-error-detail">
+                  {describeScheduledError(selectedTask.lastError || selectedTask.waitingReason, language)}
+                </p>
               )}
 
               {/* Group 1: Trigger & Schedule Rules */}

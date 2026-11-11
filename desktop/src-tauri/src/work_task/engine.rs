@@ -286,10 +286,11 @@ fn recover_merge_locked(
         );
     };
 
-    let landed = worktree::branch_is_merged_into(project_path, &intent.branch, &intent.base_branch);
+    let repo = worktree::ProjectRepo::for_task(project_path, task.worktree.as_ref());
+    let landed = worktree::branch_is_merged_into(&repo, &intent.branch, &intent.base_branch);
     match landed {
         Ok(true) => {
-            let commit = worktree::resolve(project_path, &intent.base_branch)
+            let commit = worktree::resolve_in(&repo, &intent.base_branch)
                 .unwrap_or_else(|_| intent.base_head.clone());
             // The work is on the base branch, so the checkout is finished with
             // — but the branch stays, exactly as on the live path.
@@ -625,11 +626,14 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
             run_seq,
             plugin_run: Some(plugin_run.clone()),
         },
-        if resumed {
-            resume_prompt(&task, &tree.branch)
-        } else {
-            task_prompt(&task, &tree.branch)
-        },
+        with_folder_note(
+            if resumed {
+                resume_prompt(&task, &tree.branch)
+            } else {
+                task_prompt(&task, &tree.branch)
+            },
+            &tree,
+        ),
         task.model.clone(),
         stop.flag.clone(),
     )
@@ -1127,6 +1131,27 @@ fn task_prompt(task: &WorkTask, branch: &str) -> String {
     prompt
 }
 
+/// Say what the checkout is when the project is a plain folder.
+///
+/// The rest of the prompt talks about a Git worktree and a branch, which is
+/// true of the checkout but not of the project. Without this the model reads
+/// "the user's own checkout" as a repository it can inspect, and a file the
+/// snapshot left out (a dataset over the size limit) looks like something it
+/// should recreate.
+fn with_folder_note(mut prompt: String, tree: &super::model::WorkTaskWorktree) -> String {
+    if tree.shadow_git_dir.is_some() {
+        prompt.push_str(&format!(
+            "\n\nThe project itself is a plain folder, not a Git repository. This checkout is a \
+             copy of it that SomniQ tracks with a private repository; when the user accepts your \
+             work, the changed files are written back into the folder. Files over {} MB, caches \
+             such as `node_modules/` or `.venv/`, and files another program held open were not \
+             copied. If something you expected is missing, say so rather than recreating it.",
+            super::shadow::MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    prompt
+}
+
 /// Where a task is told to put each kind of output.
 ///
 /// Without this the model has one place to write and everything becomes a
@@ -1327,8 +1352,11 @@ fn accept_locked(project_id: &str, project_path: &Path, task_id: &str) -> Result
     // merge leaves enough for `recover_merge` to ask Git what happened. A
     // `merging` row cannot be cancelled by the user, so without this it would
     // have no way out at all.
-    let base_head = worktree::resolve(project_path, &tree.base_branch)
-        .unwrap_or_else(|_| tree.base_sha.clone());
+    let base_head = worktree::resolve_in(
+        &worktree::ProjectRepo::for_task(project_path, Some(&tree)),
+        &tree.base_branch,
+    )
+    .unwrap_or_else(|_| tree.base_sha.clone());
     store::update(project_id, task_id, |task| {
         task.status = WorkTaskStatus::Merging;
         task.merge_intent = Some(WorkTaskMergeIntent {
@@ -1492,8 +1520,11 @@ fn prepare_merge_repair_locked(
     if !worktree::has_unmerged_paths(Path::new(&tree.path))? {
         return Err(merge_error.to_string());
     }
-    let base_head = worktree::resolve(project_path, &tree.base_branch)
-        .unwrap_or_else(|_| tree.base_sha.clone());
+    let base_head = worktree::resolve_in(
+        &worktree::ProjectRepo::for_task(project_path, Some(&tree)),
+        &tree.base_branch,
+    )
+    .unwrap_or_else(|_| tree.base_sha.clone());
     let merge_session_id = task
         .session_id
         .clone()
@@ -1901,6 +1932,7 @@ mod tests {
             branch: "somniq/task/merge-1".into(),
             base_branch: "main".into(),
             base_sha: "abc".into(),
+            ..Default::default()
         });
         let prompt = merge_repair_prompt(&task, "both added: library.json");
 

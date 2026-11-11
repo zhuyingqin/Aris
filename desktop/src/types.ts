@@ -1,4 +1,5 @@
 // Shared JSON shapes used by the desktop frontend.
+import type { PluginApprovalCard } from "./api/plugins";
 
 export interface DesktopCommandSpec {
   name: string;
@@ -1235,6 +1236,9 @@ export interface WorkTaskWorktree {
   branch: string;
   baseBranch: string;
   baseSha: string;
+  /** Present when the project is a plain folder: the private repository
+   *  SomniQ keeps for it outside the folder. */
+  shadowGitDir?: string;
 }
 
 /** A merge that was started and may not have finished. Present only while
@@ -1551,6 +1555,8 @@ export type ChatBlock =
       progress?: ChatToolProgress;
       /** AskUserQuestion only: backend answer channel is registered. */
       ready?: boolean;
+      /** PluginManager only: the approval card this call waits on. */
+      pluginApproval?: PluginApprovalCard;
     };
 
 export interface ChatToolProgress {
@@ -1596,6 +1602,12 @@ export interface ChatTurn {
   blocks: ChatBlock[];
   /** Product-owned transcript entries are visible but cannot be edited/retried. */
   readOnly?: boolean;
+  /**
+   * Set on a user-role turn the app inserted instead of the user, such as the
+   * verification turn after a plugin approval. It renders as a marker and is
+   * not read as the user's question.
+   */
+  origin?: "plugin-continuation";
   /**
    * Absolute index of a turn the quick preview omitted because it was too large
    * (`large_turn_placeholder` in sessions.rs). It survives hydration so the

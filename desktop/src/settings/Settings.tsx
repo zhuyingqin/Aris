@@ -19,7 +19,6 @@ import AboutSettings from "./AboutSettings";
 import AccountSettings from "./AccountSettings";
 import GeneralSettings from "./GeneralSettings";
 import ModelsSettings from "./ModelsSettings";
-import Extensions from "../extensions/Extensions";
 import { SETTINGS_COPY } from "./i18n";
 import {
   SETTINGS_NAV_GROUPS,
@@ -306,12 +305,6 @@ export default function Settings() {
           managedModels={managedModels}
           connection={connection}
         /></SettingsPage>
-      )}
-
-      {(activeSettingsTab === "extensions" || visitedTabs.has("extensions")) && (
-        <SettingsPage kind="extensions" title={layoutCopy.extensions} hidden={activeSettingsTab !== "extensions"}><div className="sp-extensions-embed">
-          <Extensions embedded />
-        </div></SettingsPage>
       )}
 
       {(activeSettingsTab === "remote" || visitedTabs.has("remote")) && (

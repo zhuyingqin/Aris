@@ -157,7 +157,7 @@ pub(crate) fn project_execution_context(
 
 /// The registered project whose plugins apply to work in `workspace`: a work
 /// task's worktree belongs to the project it was created from.
-fn plugin_project_root(workspace: &PathBuf, project_id: &str) -> PathBuf {
+pub(crate) fn plugin_project_root(workspace: &PathBuf, project_id: &str) -> PathBuf {
     crate::projects::project_path_for_registered_id(project_id).unwrap_or_else(|| workspace.clone())
 }
 

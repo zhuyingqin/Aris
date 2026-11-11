@@ -125,7 +125,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "api"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "aris-chat"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "api",
  "aris-executor",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "api",
  "aris-chat",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "aris-executor"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "api",
  "reqwest 0.12.28",
@@ -1063,7 +1063,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "compute"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "glob",
  "remote-protocol",
@@ -3996,7 +3996,7 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
 name = "notebook"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "jupyter-protocol",
  "jupyter-zmq-client",
@@ -5502,7 +5502,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "remote-protocol"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -5691,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
@@ -7481,7 +7481,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tools"
-version = "0.4.86"
+version = "0.4.87"
 dependencies = [
  "api",
  "aris-executor",

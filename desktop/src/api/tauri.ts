@@ -2,6 +2,7 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+import type { PluginApprovalCard } from "./plugins";
 
 import { notifyChatModelsUpdated } from "../modelEvents";
 import { getAccountSessionRevision } from "../accountCache";
@@ -2651,8 +2652,18 @@ export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
   listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void,
-) => listen<{ sessionId: string; id?: string; name: string; input: string; ready?: boolean }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: ChatToolCallEvent) => void,
+) => listen<ChatToolCallEvent>("chat-tool", (e) => handler(e.payload));
+/** A streamed or re-announced tool call. `ready` and `pluginApproval` come
+ *  only once the backend is waiting on the call. */
+export interface ChatToolCallEvent {
+  sessionId: string;
+  id?: string;
+  name: string;
+  input: string;
+  ready?: boolean;
+  pluginApproval?: PluginApprovalCard;
+}
 export const onChatToolProgress = (
   handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
 ) =>

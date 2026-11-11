@@ -187,6 +187,22 @@ describe("ScheduledTasks", () => {
     expect(onOpenSession).toHaveBeenCalledWith("chat-1", "Weekday digest");
   });
 
+  it("says why the last run failed without hovering, in the user's language", async () => {
+    useStore.setState({ language: "cn" });
+    // What 0.4.68–0.4.86 left on every task in a plain folder.
+    scheduledTasksList.mockResolvedValue([
+      cronTask({
+        lastError:
+          "work tasks need a Git repository: this project is not one, so there is no branch to isolate the work on",
+      }),
+    ]);
+    render(<ScheduledTasks />);
+
+    const detail = await screen.findByTestId("sched-error-detail");
+    expect(detail.textContent).toContain("新版本已支持普通文件夹");
+    expect(detail.textContent).not.toContain("work tasks need a Git repository");
+  });
+
   it("maps a new-conversation target onto the save without a bound chat", async () => {
     scheduledTaskUpdate.mockResolvedValue(cronTask({ targetMode: "new", sessionId: null }));
     render(<ScheduledTasks />);

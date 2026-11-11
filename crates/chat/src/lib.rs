@@ -856,6 +856,53 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             optional: resolve_named(catalog, &["ReadMediaFile"]),
         });
     }
+    // Writing a SomniQ plugin is preview-driven: without `PluginManager` the
+    // model can write a package but never learn whether it would load.
+    if contains_any(
+        lowered,
+        &[
+            "plugin",
+            "插件",
+            "sidebar panel",
+            "侧栏面板",
+            "mcp tool",
+            "mcp server",
+            "mcp 工具",
+            "包成工具",
+            "包装成工具",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugins",
+            reason: "plugin authoring intent",
+            required: resolve_named(catalog, &["PluginManager", "write_file"]),
+            optional: resolve_named(catalog, &["read_file", "edit_file", "PluginPanel"]),
+        });
+    }
+    // A plugin panel shows what the agent writes to it; its buttons and forms
+    // send prompts that name the tool. ("面板" alone is also panel data.)
+    if contains_any(
+        lowered,
+        &[
+            "pluginpanel",
+            "sidebar panel",
+            "plugin panel",
+            "dashboard",
+            "侧栏面板",
+            "插件面板",
+            "看板",
+            "更新面板",
+            "刷新面板",
+            "面板里",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugin-panels",
+            reason: "plugin panel data intent",
+            required: resolve_named(catalog, &["PluginPanel"]),
+            optional: vec![],
+        });
+    }
     if contains_any(
         lowered,
         &[

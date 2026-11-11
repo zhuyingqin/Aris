@@ -1761,3 +1761,35 @@ fn releasing_a_brokered_session_forgets_both_registrations() {
         "a released brokered session must no longer be routable as Image Assist"
     );
 }
+
+#[test]
+fn a_paired_device_has_no_way_to_approve_a_plugin() {
+    // Plugin approvals are this computer's: a phone sees the card without
+    // buttons. No advertised capability names plugins, and no control command
+    // shaped like an approval parses. (A phone's `AnswerChatQuestion` only
+    // reaches `question_prompts`; approval cards wait in a separate registry.)
+    assert!(!format!("{REMOTE_WORKSPACE_CAPABILITIES:?}")
+        .to_ascii_lowercase()
+        .contains("plugin"));
+    for kind in [
+        "respond_plugin_approval",
+        "plugin_approval_respond",
+        "chat_plugin_approval_respond",
+        "approve_plugin",
+        "set_plugin_enabled",
+        "install_plugin",
+    ] {
+        let command = serde_json::json!({
+            "type": kind,
+            "project_id": "project",
+            "session_id": "session",
+            "tool_use_id": "tool",
+            "digest": "sha256:x",
+            "approve": true,
+        });
+        assert!(
+            serde_json::from_value::<remote_protocol::ControlCommand>(command).is_err(),
+            "{kind} must not be a remote command"
+        );
+    }
+}

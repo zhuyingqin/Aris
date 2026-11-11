@@ -589,6 +589,61 @@ fn edit_input(title: &str) -> ScheduledTaskInput {
     }
 }
 
+/// The regression users hit: in a project that is a plain folder rather than a
+/// Git repository, every delivery from 0.4.68 to 0.4.86 was recorded as
+/// `failed` with "work tasks need a Git repository", so nothing ever ran. The
+/// occurrence is queued like any other now, and the folder stays a folder.
+#[test]
+fn a_plain_folder_project_receives_its_runs() {
+    let fixture = fixture("plain");
+    let folder = fixture._temp.path().join("plain folder");
+    std::fs::create_dir_all(&folder).expect("folder");
+    std::fs::write(folder.join("notes.md"), "notes\n").expect("seed");
+    interval_task(&fixture, "task-plain");
+
+    let project_id = fixture.project_id.clone();
+    let known = project_id.clone();
+    let path = folder.clone();
+    let resolve = move |id: &str| (id == known).then(|| path.clone());
+    let session = move |_: &str| Some(project_id.clone());
+    let host = HostLookups {
+        project_path: &resolve,
+        session_project: &session,
+    };
+    let pumped = process_due(&host, "task-plain", T0 + 1_000).expect("tick");
+
+    assert_eq!(pumped.map(|(_, path)| path), Some(folder.clone()));
+    let receipts = deliveries("task-plain");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].status,
+        ledger::DELIVERY_QUEUED,
+        "delivery error: {:?}",
+        receipts[0].error
+    );
+    assert_eq!(cards_for(&fixture, "task-plain").len(), 1);
+    assert!(read_record("task-plain").expect("record").last_error.is_none());
+    assert!(!folder.join(".git").exists(), "queuing must not touch the folder");
+}
+
+/// A task whose project is gone can never run, so saving one is refused with
+/// the reason instead of producing a failed delivery on every occurrence.
+#[test]
+fn saving_a_task_for_an_unregistered_project_is_refused() {
+    let fixture = fixture("unregistered");
+    let resolve = |_: &str| None::<PathBuf>;
+    let session = |_: &str| Some("project-0123456789abcdef".to_string());
+    let host = HostLookups {
+        project_path: &resolve,
+        session_project: &session,
+    };
+    interval_task(&fixture, "task-unregistered");
+    let Err(error) = update_core("task-unregistered", edit_input("Renamed"), T0, &host) else {
+        panic!("saving a task for an unregistered project must be refused");
+    };
+    assert!(error.contains("not in SomniQ's project list"), "unhelpful error: {error}");
+}
+
 /// Renaming a task must not move, skip or re-fire its next run; changing the
 /// rule must re-commit it from now.
 #[test]

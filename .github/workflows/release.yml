@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag matching the desktop version (for example v0.4.87)
+        required: true
+        type: string
+      draft:
+        description: Keep the release as a draft for review
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -12,15 +22,22 @@ jobs:
   release-metadata:
     runs-on: ubuntu-22.04
     outputs:
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
       release_timestamp: ${{ steps.timestamp.outputs.release_timestamp }}
       release_unix_timestamp: ${{ steps.timestamp.outputs.release_unix_timestamp }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve release tag
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Verify release version and managed gateway TLS
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.release_tag }}
         run: |
           python3 - <<'PY'
           import json
@@ -116,7 +133,7 @@ jobs:
         working-directory: desktop
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_NAME: ${{ needs.release-metadata.outputs.release_tag }}
         run: npm run generate:updater-json -- src-tauri/target/release/bundle/nsis
 
       - name: Upload desktop artifact
@@ -200,7 +217,7 @@ jobs:
         working-directory: desktop
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_NAME: ${{ needs.release-metadata.outputs.release_tag }}
         run: npm run generate:updater-json -- src-tauri/target/universal-apple-darwin/release/bundle/macos --platform macos --out latest-macos.json
 
       - name: Upload desktop artifact
@@ -216,6 +233,7 @@ jobs:
 
   release:
     needs:
+      - release-metadata
       - desktop-windows
       - desktop-macos
     runs-on: ubuntu-22.04
@@ -225,7 +243,7 @@ jobs:
 
       - name: Prepare release notes from the changelog
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.release-metadata.outputs.release_tag }}
         run: |
           python3 - <<'PY'
           import os
@@ -258,7 +276,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: SomniQ Studio ${{ github.ref_name }}
+          name: SomniQ Studio ${{ needs.release-metadata.outputs.release_tag }}
+          tag_name: ${{ needs.release-metadata.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
           body_path: release-notes.md
           files: |
             SomniQ Studio_*_x64-setup.exe

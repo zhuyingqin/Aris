@@ -130,6 +130,8 @@ export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): C
     role: raw.role === "assistant" ? "assistant" : "user",
     blocks,
     readOnly: Boolean(raw.readOnly),
+    // An app-inserted turn must come back as one, or it reads as the user's.
+    origin: raw.origin === "plugin-continuation" ? raw.origin : undefined,
     omittedTurnIndex: typeof raw.omittedTurnIndex === "number" && Number.isFinite(raw.omittedTurnIndex)
       ? raw.omittedTurnIndex
       : undefined,

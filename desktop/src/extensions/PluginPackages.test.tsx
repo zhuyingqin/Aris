@@ -3,10 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/plugins";
 import PluginPackages from "./PluginPackages";
+import { useStore } from "../store";
 
-vi.mock("../api/plugins", () => ({
+vi.mock("../api/plugins", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/plugins")>()),
   pluginsList: vi.fn(), pluginsPreview: vi.fn(), pluginsInstall: vi.fn(),
   pluginsSetEnabled: vi.fn(), pluginsRemove: vi.fn(), pluginsUpgrade: vi.fn(), pluginsCheckMcp: vi.fn(),
+  bridgeBackendPluginChanges: vi.fn(),
 }));
 
 const pkg: api.PluginPreview = {
@@ -262,5 +265,52 @@ describe("Plugin packages", () => {
     fireEvent.click(screen.getByText("Preview"));
     expect(await screen.findByRole("button", { name: "Upgrade and disable" })).toBeTruthy();
     expect(screen.getByText(/the package is disabled by the upgrade/)).toBeTruthy();
+  });
+
+  it("shows a change an agent or an approval card made in the Chat", async () => {
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    await waitFor(() => expect(api.pluginsList).toHaveBeenCalledTimes(1));
+    expect(api.bridgeBackendPluginChanges).toHaveBeenCalled();
+    vi.mocked(api.pluginsList).mockResolvedValue([enabled]);
+    window.dispatchEvent(new CustomEvent(api.PLUGINS_CHANGED_EVENT, { detail: "F:/elsewhere" }));
+    window.dispatchEvent(new CustomEvent(api.PLUGINS_CHANGED_EVENT, { detail: String.raw`\\?\F:\project` }));
+    await screen.findByRole("article", { name: "@lab/evidence" });
+    expect(api.pluginsList).toHaveBeenCalledTimes(2);
+  });
+
+  it("hands plugin creation and repair to a new chat as drafts, sending nothing", async () => {
+    useStore.setState({ tab: "settings", pendingNewChatDraft: null });
+    const blocked: api.InstalledPlugin = {
+      ...installed, name: "@lab/broken", canEnable: false, status: "blocked",
+      diagnostics: [{ code: "capability", message: "transport http is not supported", severity: "error" }],
+      lifecycle: lifecycle("blocked"),
+    };
+    vi.mocked(api.pluginsList).mockResolvedValue([blocked, enabled]);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    await screen.findByRole("article", { name: "@lab/broken" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask AI to create a plugin" }));
+    expect(useStore.getState().pendingNewChatDraft).toContain("somniq-plugin-development");
+    expect(useStore.getState().tab).toBe("chat");
+
+    // Only the package that cannot run offers a repair.
+    expect(screen.getAllByRole("button", { name: "Ask AI to fix" })).toHaveLength(1);
+    useStore.setState({ tab: "settings", pendingNewChatDraft: null });
+    fireEvent.click(screen.getByRole("button", { name: "Ask AI to fix" }));
+    const draft = useStore.getState().pendingNewChatDraft ?? "";
+    expect(draft).toContain("@lab/broken");
+    expect(draft).toContain("transport http is not supported");
+    expect(useStore.getState().tab).toBe("chat");
+    expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("offers plugin creation from the empty state too", async () => {
+    useStore.setState({ pendingNewChatDraft: null });
+    render(<PluginPackages projectPath={projectPath} language="cn" onChanged={onChanged} />);
+    await screen.findByText("还没有插件包");
+    const buttons = screen.getAllByRole("button", { name: "让 AI 创建插件" });
+    expect(buttons.length).toBe(2);
+    fireEvent.click(buttons[1]);
+    expect(useStore.getState().pendingNewChatDraft).toContain("帮我做一个插件");
   });
 });
