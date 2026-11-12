@@ -1,5 +1,30 @@
 # ARIS-Code Changelog
 
+## v0.4.88 (2026-11-11)
+
+- **Native Word work in Chat** — generate new DOCX files with local Pandoc,
+  edit exact text and formatting while preserving non-target package content,
+  and render final revisions through LibreOffice. Version checks, candidate
+  publication, audit records and undo cover document writes.
+- **Daily office documents** — convert tab-separated quotations to native
+  tables, repeat table headers, skip cover numbering, change a selected section's
+  orientation, populate supported content controls, accept supported inline
+  revisions and clear explicitly scoped personal properties. Native contents
+  indexes are calculated by LibreOffice and remain updatable.
+- **Agent document workflows** — Chinese office requests expose the production
+  document tools. Product guidance preserves formatting and later instructions,
+  rereads structural anchors and distinguishes rendering from visual/editor
+  approval. Ten natural-language cases use the shared Chat runtime; fourteen
+  direct document cases retain their own checks and evidence.
+- **Dependencies and validation scope** — Pandoc, LibreOffice and Python with
+  python-docx/odfpy are separately installed local engines; native TOC calculation
+  also needs LibreOffice's Python UNO support. Word/WPS, independent visual review
+  and legacy binary .doc remain unverified. Known input-glyph and Agent narrative
+  counting defects are retained in the acceptance reports.
+- **Windows release** — manifests and lockfiles target 0.4.88. The locally built
+  x64 installer is provided with SHA-256 checksums; this local asset has no updater
+  signature and is intended for manual installation.
+
 ## v0.4.87 (2026-11-10)
 
 - **Project plugins from a conversation** — create, diagnose, install and edit

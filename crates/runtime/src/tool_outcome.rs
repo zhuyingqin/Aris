@@ -52,8 +52,28 @@ fn classifier(tool_name: &str) -> Option<fn(&str) -> bool> {
         }
         "WebSearch" => web_search_output_reports_failure,
         "read_files" => batch_read_output_reports_failure,
+        "export_docx"
+        | "format_docx"
+        | "render_docx"
+        | "delete_docx_paragraphs"
+        | "export_docx_pdf"
+        | "edit_docx_structure"
+        | "remove_odt_highlight" => docx_output_reports_failure,
         _ => return None,
     })
+}
+
+// A valid candidate may have been published while its requested render failed.
+// Keep the artifact/diagnostics, and let every surface see the failed work.
+fn docx_output_reports_failure(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    let evidence = value.get("evidence").unwrap_or(&value);
+    matches!(
+        evidence.get("state").and_then(serde_json::Value::as_str),
+        Some("failed" | "unavailable" | "cancelled")
+    )
 }
 
 /// A batch remains useful when at least one requested window was read. Mark it

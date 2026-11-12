@@ -14,20 +14,18 @@ use runtime::BUNDLED_SKILLS;
 
 use api::AuthSource;
 use aris_executor::{
-    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, NoopStreamObserver,
-    StreamObserver,
+    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, NoopStreamObserver, StreamObserver,
 };
 use runtime::{
     abort_large_write, append_file_with_context_expected, append_write_chunk, begin_large_write,
     commit_large_write, edit_file_with_context_expected, get_file_change, glob_search, grep_search,
-    list_file_changes, multi_edit_file_with_context_expected,
-    read_file_with_images, record_text_file_change, revert_file_change,
-    write_file_with_context_expected, write_files_with_context_expected, ApiRequest,
-    BashCommandInput, BatchWriteRequest, ConversationRuntime, FileChangeGetInput,
-    FileChangeListInput, FileChangeOperation, FileChangeRecord, FileChangeRevertInput,
-    FileMutationContext, GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy,
-    Session, StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor,
-    ToolInvocation, MAX_FILE_TOOL_PAYLOAD_BYTES,
+    list_file_changes, multi_edit_file_with_context_expected, read_file_with_images,
+    record_text_file_change, revert_file_change, write_file_with_context_expected,
+    write_files_with_context_expected, ApiRequest, BashCommandInput, BatchWriteRequest,
+    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
+    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput,
+    MultiEditOperation, PermissionMode, PermissionPolicy, Session, StructuredPatchHunk, TokenUsage,
+    ToolError, ToolExecution, ToolExecutor, ToolInvocation, MAX_FILE_TOOL_PAYLOAD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -122,6 +120,7 @@ pub fn tool_execution(name: &str) -> ToolExecution {
     match name {
         "read_file"
         | "read_docx"
+        | "read_odt"
         | "read_files"
         | "ReadMediaFile"
         | "WorkspaceLayout"
@@ -207,6 +206,85 @@ impl ToolRunContext {
     }
 }
 
+fn docx_range_schema() -> Value {
+    json!({"type":"object","properties":{"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1},"expected_text":{"type":"string"}},"required":["start","end","expected_text"],"additionalProperties":false})
+}
+
+fn docx_tabs_schema() -> Value {
+    json!({"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","properties":{"position_pt":{"type":"number","exclusiveMinimum":0,"maximum":1584},"alignment":{"type":"string","enum":["left","right","center","decimal"]}},"required":["position_pt","alignment"],"additionalProperties":false}})
+}
+
+fn docx_structure_schema() -> Value {
+    let anchor = json!({"paragraph_id":{"type":"string"},"expected_text":{"type":"string"}});
+    let variant = |action: &str, fields: Value, anchored: bool| {
+        let mut properties = fields.as_object().unwrap().clone();
+        if anchored {
+            properties.extend(anchor.as_object().unwrap().clone());
+        }
+        properties.insert("action".into(), json!({"type":"string","enum":[action]}));
+        let required: Vec<_> = properties.keys().cloned().collect();
+        json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+    };
+    let mut operations = vec![
+        variant("insert_blank_page", json!({}), true),
+        variant(
+            "insert_breaks",
+            json!({"breaks":{"type":"array","minItems":1,"maxItems":256,"items":{
+            "type":"object","properties":{"offset":{"type":"integer","minimum":0},"kind":{"type":"string","enum":["tab","line","page"]}},
+            "required":["offset","kind"],"additionalProperties":false}}}),
+            true,
+        ),
+        variant(
+            "insert_table",
+            json!({"position":{"type":"string","enum":["before","after"]},
+            "rows":{"type":"integer","minimum":1,"maximum":128},"columns":{"type":"integer","minimum":1,"maximum":32}}),
+            true,
+        ),
+        variant(
+            "insert_image",
+            json!({"offset":{"type":"integer","minimum":0},"image_path":{"type":"string"},
+            "image_revision":{"type":"string"},"width_pt":{"type":"number","minimum":1,"maximum":1584}}),
+            true,
+        ),
+        variant(
+            "text_to_table",
+            json!({"paragraphs":{"type":"array","minItems":1,"maxItems":128,"items":{
+            "type":"object","properties":anchor,"required":["paragraph_id","expected_text"],"additionalProperties":false}},
+            "delimiter":{"type":"string","minLength":1,"maxLength":1}}),
+            false,
+        ),
+        variant(
+            "page_numbers",
+            json!({"alignment":{"type":"string","enum":["left","center","right"]}}),
+            false,
+        ),
+        variant("repeat_table_header", json!({"header_rows":{"type":"integer","minimum":1,"maximum":16}}), true),
+        variant("section_orientation", json!({"section_index":{"type":"integer","minimum":0},"orientation":{"type":"string","enum":["portrait","landscape"]}}), false),
+        variant("remove_personal_metadata", json!({}), false),
+        variant("accept_revisions", json!({}), false),
+        variant("fill_content_control", json!({"control_id":{"type":"string"},"expected_text":{"type":"string"},"text":{"type":"string","maxLength":16384}}), false),
+        variant("insert_table_of_contents", json!({"levels":{"type":"integer","minimum":1,"maximum":9}}), true),
+        variant(
+            "bibliography_reference",
+            json!({"marker":{"type":"string"},"after_paragraph_id":{"type":"string"},
+            "after_expected_text":{"type":"string"},"bookmark":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_]{0,39}$"},
+            "number":{"type":"integer","minimum":1,"maximum":100000},"entry":{"type":"string","minLength":1,"maxLength":16384}}),
+            true,
+        ),
+    ];
+    for operation in &mut operations {
+        if operation["properties"]["action"]["enum"][0] == "page_numbers" {
+            operation["properties"]["skip_first_page"] = json!({"type":"boolean","default":false,"description":"Hide the cover page number while preserving its header."});
+            operation["properties"]["start_at"] = json!({"type":"integer","minimum":1,"maximum":100000,"description":"First visible page number; use 1 with skip_first_page for body numbering 1,2,..."});
+        }
+    }
+    json!({"type":"object","properties":{
+        "path":{"type":"string"},"expected_source_revision":{"type":"string"},"output_path":{"type":"string"},
+        "expected_revision":{"type":"string"},"render_pdf":{"type":"boolean","default":true},
+        "operations":{"type":"array","minItems":1,"maxItems":64,"items":{"anyOf":operations}}
+    },"required":["path","expected_source_revision","output_path","operations"],"additionalProperties":false})
+}
+
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     let specs = vec![
         ToolSpec {
@@ -281,6 +359,95 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     }}
                 }, "required": ["path", "expected_revision", "edits"], "additionalProperties": false
             }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "export_docx",
+            description: "Generate a new editable DOCX from a saved Markdown source using local Pandoc and a Word reference template. Read the source first and pass its revision. An existing output requires its current expected_revision; otherwise use a new candidate filename. The built-in research template supplies A4/CJK styles; supply reference_doc for institutional or journal requirements. Pandoc's reference body is ignored. Local raster images are embedded from allowed read paths with revisions; remote image URLs are rejected, so save them locally first. Unsupported formulas or other warnings fail before replacing output. Never use this to round-trip an existing DOCX. Local PDF rendering is attempted by default; rendered pages still need independent visual review. Missing engines return explicit status; configure SOMNIQ_PANDOC and SOMNIQ_LIBREOFFICE.",
+            input_schema: json!({"type":"object","properties":{
+                "source_path":{"type":"string"}, "expected_source_revision":{"type":"string"},
+                "output_path":{"type":"string"}, "reference_doc":{"type":"string"},
+                "expected_revision":{"type":"string"}, "render_pdf":{"type":"boolean","default":true}
+            },"required":["source_path","expected_source_revision","output_path"],"additionalProperties":false}),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "format_docx",
+            description: "Format main-document paragraphs or exact character ranges through python-docx. Copy paragraph_id/revision from read_docx; use a candidate output_path. range uses zero-based Unicode code-point offsets [start,end) plus exact expected_text, limited to plain direct text runs; range and run_filter accept only character properties. run_filter=italic selects effective italic runs including inherited styles. Supports fonts/size, color RGB, sub/superscript, strikethrough, existing paragraph styles, alignment, native tab_stops, spacing and keep/widow controls. Tab stops position text only: insert native tabs separately with edit_docx_structure. compact_empty_paragraph shrinks plain whitespace-only body paragraphs AND their paragraph marks to 1 pt and disables grid snapping; cannot combine with size/spacing/style controls. Preserves text, objects, math and other package parts. Fields, tracked changes, controls and signatures are rejected. Existing output requires expected_revision. Requires local python-docx (SOMNIQ_PYTHON). Audited and reversible. Inspect every PDF page; Word/WPS verification stays unverified.",
+            input_schema: json!({"type":"object","properties":{
+                "path":{"type":"string"}, "expected_source_revision":{"type":"string"},
+                "output_path":{"type":"string"}, "expected_revision":{"type":"string"},
+                "render_pdf":{"type":"boolean","default":true},
+                "operations":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{
+                    "paragraph_id":{"type":"string"}, "style":{"type":"string"},
+                    "font_name":{"type":"string"}, "east_asia_font":{"type":"string"},
+                    "font_size_pt":{"type":"number","minimum":5,"maximum":72},
+                    "alignment":{"type":"string","enum":["left","center","right","justify"]},
+                    "line_spacing":{"type":"number","minimum":0.5,"maximum":4},
+                    "space_before_pt":{"type":"number","minimum":0,"maximum":144},
+                    "space_after_pt":{"type":"number","minimum":0,"maximum":144},
+                    "first_line_indent_pt":{"type":"number","minimum":-144,"maximum":144},
+                    "keep_with_next":{"type":"boolean"}, "widow_control":{"type":"boolean"},
+                    "compact_empty_paragraph":{"type":"boolean"},
+                    "range":docx_range_schema(),
+                    "run_filter":{"type":"string","enum":["italic"]},
+                    "subscript":{"type":"boolean"},"superscript":{"type":"boolean"},
+                    "strikethrough":{"type":"boolean"},"color":{"type":"string","pattern":"^[0-9A-Fa-f]{6}$"},
+                    "tab_stops":docx_tabs_schema()
+                },"required":["paragraph_id"],"additionalProperties":false}}
+            },"required":["path","expected_source_revision","output_path","operations"],"additionalProperties":false}),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "edit_docx_structure",
+            description: "Apply bounded native structure edits using python-docx to a versioned DOCX candidate. Read paragraph IDs/text and documentStructure first; use exact snapshot anchors, zero-based Unicode offsets, and reread IDs after edits. insert_breaks inserts tab/line/page breaks; insert_blank_page makes a separate empty page after a body paragraph. insert_table inserts an empty native table; insert_image embeds a versioned local image. text_to_table converts contiguous unquoted delimited paragraphs, preserving emphasis; use a real tab delimiter when cell values contain commas. page_numbers adds PAGE fields to empty footers; skip_first_page=true,start_at=1 hides the cover number and numbers body pages 1,2,... while preserving headers. repeat_table_header selects the first row through an exact paragraph anchor. section_orientation uses the observed zero-based section_index. fill_content_control uses observed control_id/expected_text for plain text or an existing dropdown choice, preserving controls/options; locked/bound controls are refused. accept_revisions accepts supported inline run revisions into a separate candidate; structural/move revisions are refused. Perform revision acceptance or control filling in a separate snapshot before other edits. remove_personal_metadata clears core author/last modifier and application company/manager; it does not comprehensively sanitize comments or other hidden data. insert_table_of_contents replaces one exact placeholder with a populated, updatable native TOC using private local LibreOffice UNO (SOMNIQ_LIBREOFFICE_PYTHON). bibliography_reference inserts a linked native REF field and numbered entry. Untargeted math, media, package parts, fields and protected objects are preserved. Audited and reversible; render evidence still needs page inspection and target-editor verification.",
+            input_schema: docx_structure_schema(),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "remove_odt_highlight",
+            description: "Remove all ODT text highlighting via odfpy while preserving ODT format, text, other styles and package members. Supply exact source revision from read_odt; use a candidate .odt output. Existing output requires expected_revision. Local odfpy 1.4.1 and lxml required (SOMNIQ_PYTHON). Rejects encrypted/signed/scripted files and external embedded resources. Audited and reversible; default local LibreOffice PDF rendering returns pending visual review and unverified Word/WPS compatibility.",
+            input_schema: json!({"type":"object","properties":{
+                "path":{"type":"string"},"expected_source_revision":{"type":"string"},
+                "output_path":{"type":"string"},"expected_revision":{"type":"string"},
+                "render_pdf":{"type":"boolean","default":true}
+            },"required":["path","expected_source_revision","output_path"],"additionalProperties":false}),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "read_odt",
+            description: "Read a local ODT text snapshot and exact revision before native highlight removal. No conversion or editor UI. Returns paragraph text and a revision token for remove_odt_highlight.",
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "delete_docx_paragraphs",
+            description: "Atomically delete 1-128 explicitly selected plain body paragraphs from a DOCX candidate through python-docx. Copy paragraph_id and exact expected_text from the latest read_docx and supply expected_source_revision. Use for removing duplicate records; do not replace their text with empty strings, which leaves blank paragraphs/pages. Deletions use the original snapshot IDs for the entire batch; reread IDs after a successful structural edit. Rejects table-cell paragraphs, fields, native math, drawings, links, references, breaks, section carriers, numbering, tracked changes, controls and signatures. Other document children and package parts remain intact. Existing output requires expected_revision. Default rendering produces page evidence, not independent visual approval. Audited and reversible with change_revert.",
+            input_schema: json!({"type":"object","properties":{
+                "path":{"type":"string"}, "expected_source_revision":{"type":"string"},
+                "output_path":{"type":"string"}, "expected_revision":{"type":"string"},
+                "render_pdf":{"type":"boolean","default":true},
+                "deletions":{"type":"array","minItems":1,"maxItems":128,"items":{
+                    "type":"object","properties":{"paragraph_id":{"type":"string"},"expected_text":{"type":"string"}},
+                    "required":["paragraph_id","expected_text"],"additionalProperties":false}}
+            },"required":["path","expected_source_revision","output_path","deletions"],"additionalProperties":false}),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "export_docx_pdf",
+            description: "Export an exact saved DOCX revision to a deliverable PDF using local LibreOffice. Read the source first and supply expected_source_revision. Defaults to the same directory and file stem with .pdf; set output_path for an explicit destination. Existing PDF requires its current expected_revision, otherwise choose a new candidate. Publishes the exact rendered PDF bytes with document/PDF hashes and page count through the versioned binary ledger; conversion/cancellation/version failures preserve existing output. Audited and reversible with change_revert. Uses the same offline preflight, isolated profile and owned processes as render_docx. Inspect every page; Word/WPS compatibility and independent visual approval remain unverified.",
+            input_schema: json!({"type":"object","properties":{
+                "path":{"type":"string"},"expected_source_revision":{"type":"string"},
+                "output_path":{"type":"string"},"expected_revision":{"type":"string"}
+            },"required":["path","expected_source_revision"],"additionalProperties":false}),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "render_docx",
+            description: "Render an exact saved DOCX revision to PDF with local LibreOffice using an isolated profile and owned processes. Returns document/PDF hashes, actual page count and evidence paths. Open the PDF in the document viewer to inspect every page; ReadMediaFile accepts page images, not PDFs. A rendered state proves conversion only: visualReview remains pending and Word/WPS compatibility remains unverified. Automatic rendering rejects linked external content, macros and embedded objects. Does not open, attach to, or terminate the user's Word/WPS session. Configure SOMNIQ_LIBREOFFICE if unavailable.",
+            input_schema: json!({"type":"object","properties":{
+                "path":{"type":"string"},"expected_revision":{"type":"string"}
+            },"required":["path","expected_revision"],"additionalProperties":false}),
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
@@ -1447,7 +1614,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     // General-web search remains before scholarly discovery in the default
     // registry because most conversations are not paper searches. The runtime
     // enforces LiteratureSearch first for paper-identification requests.
-    specs.into_iter().chain(collaboration::tool_specs()).collect()
+    specs
+        .into_iter()
+        .chain(collaboration::tool_specs())
+        .collect()
 }
 
 /// Input schema of `LiteratureSearch`, shared with the `search` argument of
@@ -1583,6 +1753,57 @@ fn execute_tool_with_cancel_and_progress_in_context(
                     .map_err(runtime::document_safety::document_read_error)?,
             )
         }),
+        "export_docx" => from_value::<runtime::document_export::DocxExportInput>(input)
+            .and_then(|input| {
+                to_pretty_json(
+                    runtime::document_export::export_docx(
+                        &input,
+                        &context.mutation_context("export_docx"),
+                        should_cancel,
+                    )
+                    .map_err(io_to_string)?,
+                )
+            }),
+        "format_docx" => from_value::<runtime::document_export::DocxFormatInput>(input)
+            .and_then(|input| {
+                to_pretty_json(
+                    runtime::document_export::format_docx(
+                        &input,
+                        &context.mutation_context("format_docx"),
+                        should_cancel,
+                    )
+                    .map_err(io_to_string)?,
+                )
+            }),
+        "read_odt" => input.get("path").and_then(Value::as_str).ok_or_else(|| "path required".to_owned())
+            .and_then(|path| to_pretty_json(runtime::document_export::read_odt(path).map_err(|e| e.to_string())?)),
+        "edit_docx_structure" => from_value::<runtime::document_export::DocxStructureInput>(input)
+            .and_then(|input| to_pretty_json(runtime::document_export::edit_docx_structure(
+                &input, &context.mutation_context("edit_docx_structure"), should_cancel,
+            ).map_err(|e| e.to_string())?)),
+        "remove_odt_highlight" => from_value::<runtime::document_export::OdtHighlightInput>(input)
+            .and_then(|input| to_pretty_json(runtime::document_export::remove_odt_highlight(
+                &input, &context.mutation_context("remove_odt_highlight"), should_cancel,
+            ).map_err(|e| e.to_string())?)),
+        "delete_docx_paragraphs" => from_value::<runtime::document_export::DocxDeleteParagraphsInput>(input)
+            .and_then(|input| {
+                to_pretty_json(runtime::document_export::delete_docx_paragraphs(
+                    &input, &context.mutation_context("delete_docx_paragraphs"), should_cancel,
+                ).map_err(io_to_string)?)
+            }),
+        "export_docx_pdf" => from_value::<runtime::document_export::DocxPdfExportInput>(input)
+            .and_then(|input| {
+                to_pretty_json(runtime::document_export::export_docx_pdf(
+                    &input, &context.mutation_context("export_docx_pdf"), should_cancel,
+                ).map_err(io_to_string)?)
+            }),
+        "render_docx" => from_value::<runtime::document_export::DocxRenderInput>(input)
+            .and_then(|input| {
+                to_pretty_json(
+                    runtime::document_export::render_docx(&input, should_cancel)
+                        .map_err(io_to_string)?,
+                )
+            }),
         "edit_docx" => from_value::<EditDocxInput>(input).and_then(|input| {
             validate_file_tool_payload_bytes(
                 "edit_docx",
@@ -2293,7 +2514,6 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
     to_pretty_json(execute_tool_search(input))
 }
@@ -2878,7 +3098,6 @@ struct SkillInput {
     skill: String,
     args: Option<String>,
 }
-
 
 #[derive(Debug, Deserialize)]
 struct ToolSearchInput {
@@ -3690,9 +3909,9 @@ pub fn discover_skills() -> Vec<SkillMeta> {
     let mut skills: Vec<(String, SkillMeta)> = Vec::new();
 
     let collect = |root: &std::path::Path,
-                       seen: &mut std::collections::HashSet<String>,
-                       skills: &mut Vec<(String, SkillMeta)>,
-                       plugin: bool| {
+                   seen: &mut std::collections::HashSet<String>,
+                   skills: &mut Vec<(String, SkillMeta)>,
+                   plugin: bool| {
         let Ok(entries) = std::fs::read_dir(root) else {
             return;
         };
@@ -3910,8 +4129,6 @@ impl SubagentToolExecutor {
             project_execution_context: None,
         }
     }
-
-
 }
 
 impl ToolExecutor for SubagentToolExecutor {
@@ -4571,8 +4788,7 @@ fn execute_structured_output(input: StructuredOutputInput) -> StructuredOutputRe
 }
 
 fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<ReplOutput, String> {
-    runtime::document_safety::ensure_document_command_safe(&input.code)
-        .map_err(io_to_string)?;
+    runtime::document_safety::ensure_document_command_safe(&input.code).map_err(io_to_string)?;
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
@@ -5330,7 +5546,8 @@ pub fn compile_latex_document(
         && !output.timed_out
         && output.status.success()
         && output_path.is_file();
-    if !output.interrupted && !output.timed_out && output.status.success() && !output_path.is_file() {
+    if !output.interrupted && !output.timed_out && output.status.success() && !output_path.is_file()
+    {
         success = false;
         stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
         return_code_interpretation = Some("missing_output".to_string());
@@ -6375,10 +6592,16 @@ fn latex_repair_guidance(diagnostics: &[LatexDiagnostic]) -> String {
     }) {
         return "Fix only the primary source diagnostic with the smallest source change, preserve the current diff, then rerun LaTeXCompile. Do not invoke a TeX compiler from REPL.".to_string();
     }
-    if diagnostics.iter().any(|diagnostic| diagnostic.code == "compile_timeout") {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "compile_timeout")
+    {
         return "The compile exceeded its time budget without reporting a source error. Inspect the raw compiler log for a slow or stalled TeX/bibliography process. If more time is needed, increase timeoutMs (or SOMNIQ_LATEX_COMPILE_TIMEOUT_MS for Desktop) and recompile unchanged. Missing .toc/.lof/.lot/.bbl files alone are generated-file notices, not source errors. Do not make speculative source edits.".to_string();
     }
-    if diagnostics.iter().any(|diagnostic| diagnostic.code == "compile_interrupted") {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "compile_interrupted")
+    {
         return "Compilation was cancelled. Recompile unchanged when ready; cancellation does not identify a source error.".to_string();
     }
     "Inspect the raw compiler log and TeX toolchain before editing source; no concrete source error was reported. Recompile once the failure is understood.".to_string()
@@ -7123,11 +7346,23 @@ impl PreparedLlmReview {
         self
     }
     pub fn freeze_for_figures(mut self) -> Self {
-        if matches!(self.protocol, ReviewerProtocol::OpenAiCompat) { self.figure_transport = Some(aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model)); }
+        if matches!(self.protocol, ReviewerProtocol::OpenAiCompat) {
+            self.figure_transport = Some(aris_executor::selected_openai_transport(
+                aris_executor::OpenAiTransport::Auto,
+                &openai_executor_base_url(&self.base_url),
+                &self.model,
+            ));
+        }
         self
     }
     fn figure_transport(&self) -> aris_executor::OpenAiTransport {
-        self.figure_transport.unwrap_or_else(|| aris_executor::selected_openai_transport(aris_executor::OpenAiTransport::Auto, &openai_executor_base_url(&self.base_url), &self.model))
+        self.figure_transport.unwrap_or_else(|| {
+            aris_executor::selected_openai_transport(
+                aris_executor::OpenAiTransport::Auto,
+                &openai_executor_base_url(&self.base_url),
+                &self.model,
+            )
+        })
     }
     /// A separate Reviewer connection and context, with actual multimodal
     /// content and a single submission. Existing text-review callers are intact.
@@ -7152,7 +7387,8 @@ impl PreparedLlmReview {
                 )
                 .map(|client| {
                     aris_executor::ExecutorClient::OpenAI(
-                        client.with_transport(self.figure_transport())
+                        client
+                            .with_transport(self.figure_transport())
                             .with_routing_session_header(self.send_routing_session_header)
                             .with_single_request(budget),
                     )
@@ -7167,7 +7403,9 @@ impl PreparedLlmReview {
                     budget,
                     observer,
                 )
-                .map(|client| aris_executor::ExecutorClient::Anthropic(client.with_single_request(budget))),
+                .map(|client| {
+                    aris_executor::ExecutorClient::Anthropic(client.with_single_request(budget))
+                }),
             },
             session_id,
             request,
@@ -7177,12 +7415,32 @@ impl PreparedLlmReview {
 
     pub fn figure_identity(&self) -> runtime::figures::ModelIdentity {
         let (provider, base, transport) = match self.protocol {
-            ReviewerProtocol::OpenAiCompat => ("openai-compatible", openai_executor_base_url(&self.base_url), self.figure_transport().as_config_value()),
-            ReviewerProtocol::AnthropicCompat => ("anthropic-compatible", anthropic_executor_base_url(&self.base_url), "anthropic_messages"),
+            ReviewerProtocol::OpenAiCompat => (
+                "openai-compatible",
+                openai_executor_base_url(&self.base_url),
+                self.figure_transport().as_config_value(),
+            ),
+            ReviewerProtocol::AnthropicCompat => (
+                "anthropic-compatible",
+                anthropic_executor_base_url(&self.base_url),
+                "anthropic_messages",
+            ),
         };
         let endpoint = base;
-        let signature = runtime::figures::hash(format!("reviewer|{}|{}|{}|session-header={}|somniq-figure-vision-v2-light-reasoning", self.model, endpoint, transport, self.send_routing_session_header).as_bytes());
-        runtime::figures::ModelIdentity { model: self.model.clone(), provider: provider.into(), endpoint, transport: transport.into(), signature }
+        let signature = runtime::figures::hash(
+            format!(
+                "reviewer|{}|{}|{}|session-header={}|somniq-figure-vision-v2-light-reasoning",
+                self.model, endpoint, transport, self.send_routing_session_header
+            )
+            .as_bytes(),
+        );
+        runtime::figures::ModelIdentity {
+            model: self.model.clone(),
+            provider: provider.into(),
+            endpoint,
+            transport: transport.into(),
+            signature,
+        }
     }
 
     /// The model this connection talks to.
@@ -7311,11 +7569,9 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
     // the API key and ARIS_REVIEWER_BASE_URL for the endpoint. Routes through
     // the same OpenAI-compat call path — no third routing path added.
     if matches!(reviewer_provider.as_deref(), Some("custom" | "opencode")) {
-        let key = process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN")
-            .ok_or_else(|| {
-                "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for custom reviewer)"
-                    .to_string()
-            })?;
+        let key = process_secrets::secret_var("ARIS_REVIEWER_AUTH_TOKEN").ok_or_else(|| {
+            "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for custom reviewer)".to_string()
+        })?;
         // For Custom reviewer, refuse to fall back to gpt-5.5 — that would
         // silently send the user's request to the wrong model on their custom
         // proxy. Require explicit model from input or ARIS_REVIEWER_MODEL.
@@ -7335,7 +7591,9 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         })?;
         let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
         let send_routing_session_header = api::connection_uses_routing_session_header(
-            reviewer_provider.as_deref().unwrap_or_default(), &base, managed_base.as_deref(),
+            reviewer_provider.as_deref().unwrap_or_default(),
+            &base,
+            managed_base.as_deref(),
         );
         return Ok(PreparedLlmReview {
             protocol: ReviewerProtocol::OpenAiCompat,
@@ -7409,9 +7667,8 @@ pub fn prepare_llm_review(model: Option<String>) -> Result<PreparedLlmReview, St
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
     let managed_base = std::env::var("ARIS_REVIEWER_ROUTING_SESSION_BASE_URL").ok();
-    let send_routing_session_header = api::connection_uses_routing_session_header(
-        "", &base_url, managed_base.as_deref(),
-    );
+    let send_routing_session_header =
+        api::connection_uses_routing_session_header("", &base_url, managed_base.as_deref());
     Ok(PreparedLlmReview {
         protocol: ReviewerProtocol::OpenAiCompat,
         api_key: key,
@@ -7513,7 +7770,11 @@ fn call_openai_compat_reviewer(
         Vec::new(),
         reviewer_stream_observer(cancelled),
     )
-    .map(|client| aris_executor::ExecutorClient::OpenAI(client.with_routing_session_header(send_routing_session_header)))
+    .map(|client| {
+        aris_executor::ExecutorClient::OpenAI(
+            client.with_routing_session_header(send_routing_session_header),
+        )
+    })
     .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
     run_reviewer_turn(client, prompt)
 }

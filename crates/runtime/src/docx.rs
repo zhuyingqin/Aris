@@ -36,6 +36,7 @@ pub struct DocxReadOutput {
     pub total_paragraphs: usize,
     pub next_offset: Option<usize>,
     pub native_equation_count: usize,
+    pub document_structure: serde_json::Value,
     pub warnings: Vec<String>,
 }
 
@@ -151,6 +152,67 @@ fn xml_part(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<Strin
         return Err(error("size_limit", name));
     }
     String::from_utf8(bytes).map_err(|e| error("invalid_xml_encoding", e))
+}
+
+/// Preflight for offline rendering, using the same bounded package reader.
+/// External hyperlinks remain clickable; linked content and executable parts
+/// require an explicit specialised workflow instead of automatic conversion.
+pub(crate) fn ensure_local_render(bytes: &[u8]) -> io::Result<()> {
+    let mut zip = archive(bytes)?;
+    let names = zip.file_names().map(str::to_owned).collect::<Vec<_>>();
+    for name in &names {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("vbaproject")
+            || lower.starts_with("word/activex/")
+            || lower.starts_with("word/embeddings/")
+        {
+            return Err(error(
+                "active_content",
+                "automatic rendering does not load macros, ActiveX or embedded objects",
+            ));
+        }
+        if name.ends_with(".rels") {
+            let xml = xml_part(&mut zip, name)?;
+            let relations = Document::parse(&xml).map_err(|e| error("invalid_xml", e))?;
+            if relations.descendants().any(|node| {
+                node.attribute("TargetMode") == Some("External")
+                    && !node
+                        .attribute("Type")
+                        .is_some_and(|kind| kind.ends_with("/hyperlink"))
+            }) {
+                return Err(error(
+                    "external_resource",
+                    "save linked images, templates and data locally before rendering",
+                ));
+            }
+        }
+    }
+    for name in story_parts(&zip) {
+        let xml = xml_part(&mut zip, &name)?;
+        let story = Document::parse(&xml).map_err(|e| error("invalid_xml", e))?;
+        let instruction = story
+            .descendants()
+            .filter(|node| is(*node, WORD, "instrText") || is(*node, WORD, "fldSimple"))
+            .map(|node| {
+                if is(node, WORD, "fldSimple") {
+                    node.attribute((WORD, "instr")).unwrap_or("")
+                } else {
+                    node.text().unwrap_or("")
+                }
+            })
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if instruction.contains("DDE")
+            || instruction.contains("INCLUDETEXT")
+            || instruction.contains("INCLUDEPICTURE")
+        {
+            return Err(error(
+                "external_resource",
+                "automatic rendering does not update external-content fields",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn is(node: Node<'_, '_>, namespace: &str, tag: &str) -> bool {
@@ -287,6 +349,52 @@ fn paragraphs(xml: &str, part: &str) -> io::Result<Vec<Paragraph>> {
     Ok(output)
 }
 
+pub(crate) struct DocxInspection {
+    pub total_paragraphs: usize,
+    pub native_equation_count: usize,
+}
+
+pub(crate) fn inspect_bytes(bytes: &[u8]) -> io::Result<DocxInspection> {
+    let mut zip = archive(bytes)?;
+    let mut inspection = DocxInspection { total_paragraphs: 0, native_equation_count: 0 };
+    for part in story_parts(&zip) {
+        for paragraph in paragraphs(&xml_part(&mut zip, &part)?, &part)? {
+            inspection.total_paragraphs += 1;
+            inspection.native_equation_count += paragraph.snapshot.native_equation_count;
+        }
+    }
+    Ok(inspection)
+}
+
+fn document_structure(xml: &str) -> io::Result<serde_json::Value> {
+    let doc = Document::parse(xml).map_err(|e| error("invalid_xml", e))?;
+    let paragraphs: Vec<_> = doc.descendants().filter(|n| is(*n, WORD, "p")).collect();
+    let sections: Vec<_> = doc.descendants().filter(|n| is(*n, WORD, "sectPr")
+        && !n.ancestors().any(|a| is(a, WORD, "sectPrChange"))).take(128).enumerate().map(|(index, node)| {
+        let size = node.children().find(|n| is(*n, WORD, "pgSz"));
+        let dimension = |name| size.and_then(|n| n.attribute((WORD, name))).and_then(|v| v.parse::<u32>().ok()).map(|n| f64::from(n) / 20.0);
+        serde_json::json!({"index":index,"widthPt":dimension("w"),"heightPt":dimension("h")})
+    }).collect();
+    let controls: Vec<_> = doc.descendants().filter(|n| is(*n, WORD, "sdt")).take(128).map(|node| {
+        let props = node.children().find(|n| is(*n, WORD, "sdtPr"));
+        let property = |name| props.and_then(|p| p.children().find(|n| is(*n, WORD, name)));
+        let value = node.children().find(|n| is(*n, WORD, "sdtContent")).map(|content|
+            content.descendants().filter(|n| is(*n, WORD, "t")).filter_map(|n| n.text()).collect::<String>()).unwrap_or_default();
+        let dropdown = property("dropDownList");
+        let options: Vec<_> = dropdown.map(|d| d.children().filter(|n| is(*n, WORD, "listItem"))
+            .map(|n| serde_json::json!({"displayText":n.attribute((WORD,"displayText")),"value":n.attribute((WORD,"value"))})).collect()).unwrap_or_default();
+        let kind = if property("text").is_some() { "text" } else if dropdown.is_some() { "dropdown" } else { "unsupported" };
+        let owner = node.ancestors().find(|n| is(*n, WORD, "p")).or_else(|| node.descendants().find(|n| is(*n, WORD, "p")));
+        let paragraph_id = owner.and_then(|p| paragraphs.iter().position(|n| *n == p)).map(|i| format!("word/document.xml:p{}", i + 1));
+        serde_json::json!({"controlId":property("id").and_then(|n| n.attribute((WORD,"val"))),
+            "tag":property("tag").and_then(|n| n.attribute((WORD,"val"))),"paragraphId":paragraph_id,
+            "kind":kind,"value":value.chars().take(16384).collect::<String>(),"valueTruncated":value.chars().count()>16384,
+            "options":options,"bound":property("dataBinding").is_some(),"locked":property("lock").is_some()})
+    }).collect();
+    Ok(serde_json::json!({"sections":sections,"contentControls":controls,
+        "scope":"Main-document structure; control filling uses edit_docx_structure, not edit_docx. Lists are capped at 128."}))
+}
+
 pub fn read_docx(
     path: &str,
     offset: Option<usize>,
@@ -309,10 +417,12 @@ pub fn read_docx(
     let end = start
         .saturating_add(limit.unwrap_or(40).clamp(1, 100))
         .min(total);
+    let structure = document_structure(&xml_part(&mut zip, "word/document.xml")?)?;
     Ok(DocxReadOutput {
         file_path: path.to_string_lossy().to_string(), revision: crate::file_ops::content_revision(&bytes),
         paragraphs: snapshots.drain(start..end).collect(), total_paragraphs: total,
         next_offset: (end < total).then_some(end), native_equation_count: equation_count,
+        document_structure: structure,
         warnings: vec!["Text preview preserves native equation boundaries; it does not verify page layout or mathematical correctness. Edits preserve equations and the first matched text run's formatting.".to_string()],
     })
 }

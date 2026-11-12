@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.87"
+version = "0.4.88"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -125,6 +125,10 @@ required-features = ["devserver"]
 
 [[example]]
 name = "memory_eval_bridge"
+required-features = ["memory-eval"]
+
+[[example]]
+name = "office_agent_acceptance"
 required-features = ["memory-eval"]
 
 [dev-dependencies]

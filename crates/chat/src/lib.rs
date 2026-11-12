@@ -812,7 +812,24 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     let terms = lowered
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .collect::<Vec<_>>();
+    if terms.contains(&"odt") {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "ODT document intent",
+            required: resolve_named(catalog, &["read_odt", "remove_odt_highlight"]),
+            optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
     let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))
+        || contains_any(
+            lowered,
+            &["公文格式", "word排版", "word 排版", "文档格式", "文档排版",
+              "重复表头", "跨页表头", "自动目录", "接受修订", "内容控件", "隐藏作者",
+              "文档脱敏", "封面页码", "封面不编号", "正文从1", "正文从 1",
+              "报价单", "报销单", "会议纪要", "合同价款"],
+        )
+        || (lowered.contains("文档")
+            && contains_any(lowered, &["字体", "行距", "段落", "两页", "2页"]))
         || (terms.contains(&"word")
             && contains_any(
                 lowered,
@@ -826,7 +843,19 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         groups.push(ToolGroup {
             profile: "documents",
             reason: "Word document intent",
-            required: resolve_named(catalog, &["read_docx", "edit_docx"]),
+            required: resolve_named(
+                catalog,
+                &[
+                    "read_docx",
+                    "edit_docx",
+                    "export_docx",
+                    "format_docx",
+                    "render_docx",
+                    "delete_docx_paragraphs",
+                    "export_docx_pdf",
+                    "edit_docx_structure",
+                ],
+            ),
             optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
         });
     }
@@ -835,10 +864,21 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],
     ) || (contains_any(
         lowered,
-        &["image", "illustration", "picture", "图片", "图像", "插画", "的图", "张图"],
+        &[
+            "image",
+            "illustration",
+            "picture",
+            "图片",
+            "图像",
+            "插画",
+            "的图",
+            "张图",
+        ],
     ) && contains_any(
         lowered,
-        &["generate", "create", "edit", "生成", "画", "绘", "修改", "编辑"],
+        &[
+            "generate", "create", "edit", "生成", "画", "绘", "修改", "编辑",
+        ],
     ));
     if drawing_intent {
         // Prefer the configured API before generic file creation/media extras.
@@ -1259,7 +1299,22 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     }
     if contains_any(
         lowered,
-        &["agent", "delegate", "parallel", "subtask", "collaboration", "智能体", "委派", "并行", "子任务", "续派", "协作", "跨模块", "后端恢复", "前端状态同步"],
+        &[
+            "agent",
+            "delegate",
+            "parallel",
+            "subtask",
+            "collaboration",
+            "智能体",
+            "委派",
+            "并行",
+            "子任务",
+            "续派",
+            "协作",
+            "跨模块",
+            "后端恢复",
+            "前端状态同步",
+        ],
     ) {
         groups.push(ToolGroup {
             profile: "delegation",
@@ -1269,7 +1324,12 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         });
     }
     if contains_any(lowered, &["skill", "技能"]) {
-        groups.push(ToolGroup {profile:"skills",reason:"skill intent",required:Vec::new(),optional:resolve_named(catalog,&["Skill"])});
+        groups.push(ToolGroup {
+            profile: "skills",
+            reason: "skill intent",
+            required: Vec::new(),
+            optional: resolve_named(catalog, &["Skill"]),
+        });
     }
     if contains_any(
         lowered,
@@ -2419,12 +2479,14 @@ pub fn resolve_settings_executor_config(
                 )
             })?;
             let base_url = if provider == "opencode" {
-                get("executor_base_url").ok_or("Set the endpoint of this fixed OpenCode connection")?
+                get("executor_base_url")
+                    .ok_or("Set the endpoint of this fixed OpenCode connection")?
             } else {
                 get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
             };
             let send_routing_session_header = api::connection_uses_routing_session_header(
-                &provider, &base_url,
+                &provider,
+                &base_url,
                 obj.get("newapi_executor_base_url").and_then(Value::as_str),
             );
             // Absent/unknown → `Auto`, i.e. the historical behaviour. A

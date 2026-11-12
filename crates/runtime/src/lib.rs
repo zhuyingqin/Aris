@@ -13,6 +13,7 @@ mod compact;
 mod config;
 mod conversation;
 pub mod docx;
+pub mod document_export;
 pub mod document_safety;
 pub mod event_sink;
 mod evidence_ledger;

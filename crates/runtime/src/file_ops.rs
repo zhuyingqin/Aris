@@ -545,7 +545,7 @@ pub fn read_file_with_images(
     read_file(path, offset, limit).map(ReadFileResult::Text)
 }
 
-fn image_media_type(path: &str) -> Option<&'static str> {
+pub(crate) fn image_media_type(path: &str) -> Option<&'static str> {
     let extension = Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())?
@@ -1070,12 +1070,12 @@ fn replace_file_contents_checked_unlocked(
 
 fn read_optional_utf8(path: &Path) -> io::Result<Option<String>> {
     if path.extension().is_some_and(|ext| {
-        ["doc", "docx", "docm", "dotx", "dotm"]
+        ["doc", "docx", "docm", "dotx", "dotm", "odt", "ott"]
             .iter()
             .any(|kind| ext.eq_ignore_ascii_case(kind))
     }) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput,
-            "Word files are binary packages: use read_docx/edit_docx for DOCX; do not overwrite them with text tools. Legacy .doc requires conversion first."));
+            "Office files are binary packages: use read_docx/edit_docx for DOCX or read_odt/remove_odt_highlight for ODT; do not overwrite them with text tools. Legacy .doc requires conversion first."));
     }
     match fs::read(path) {
         Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|error| {
@@ -4459,7 +4459,7 @@ fn normalize_search_base(
     Ok(canonical)
 }
 
-fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
+pub(crate) fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
     let canonical = canonicalize_allow_missing(&candidate)?;

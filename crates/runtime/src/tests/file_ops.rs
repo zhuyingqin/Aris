@@ -1162,8 +1162,10 @@ fn batch_write_preserves_external_saves_during_a_locked_publication_and_rollback
         fs::write(&first, "later first\n").expect("external save of published first");
         fs::write(&second, "later second\n").expect("external save while second is locked");
     }
-    drop(held);
+    // Keep replacement blocked until the retry has observed the external save.
+    // Dropping held first lets a check of the old bytes race with the rename.
     let result = writer.join().expect("batch writer thread");
+    drop(held);
     assert!(
         observed_second_temporary,
         "observe second publication before external saves"

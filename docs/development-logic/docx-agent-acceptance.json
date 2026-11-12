@@ -1,0 +1,1378 @@
+{
+  "schemaVersion": 1,
+  "reportedAt": "2026-11-12T02:11:36.728769+00:00",
+  "scope": "Natural-language model runs using Desktop configured connection, product prompt, shared Chat and production builtin routing/tools; no UI automation.",
+  "startedAt": "2026-11-12T01:15:09.432259+00:00",
+  "agentRunnerRevision": "sha256:37cf3f2745b350db190fddc334bd79134d97e51a76a33f543cc70948c6e84267",
+  "toolRunnerRevision": "sha256:821b818794bc662b186c57abffa3bdd0e51b94e3edffd53b108924e951e1d153",
+  "anonymousFixtures": true,
+  "originalCustomerFiles": false,
+  "implementationRevisions": {
+    "crates/runtime/src/document_export.rs": "sha256:6142c9c3b3d61c4372f85453e221fbad9e66bf17cc29097fccca1aa09a9b3eaa",
+    "crates/runtime/src/docx.rs": "sha256:eb9d4987681e611780cbe40f954f31171dbfea97777ba236c7552f0a5ede07ec",
+    "crates/runtime/assets/docx/format_docx.py": "sha256:94d0434379c941612eed0a6145f157a65e13e704b16f461cc895e18df2d4c173",
+    "crates/runtime/assets/docx/structure_docx.py": "sha256:6c24b579ae7e18730b25894e1a5ca22a6373ca15d777f072e218aad985bcc379",
+    "crates/runtime/assets/docx/format_odt.py": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e",
+    "crates/tools/src/lib.rs": "sha256:bc3bbc42afb0847fa613a622091a53614162e096e11355ac9bcbd2bee8eafb90",
+    "crates/runtime/assets/docx/office_docx.py": "sha256:d129875baea7cde2d24092f5af0cd30b6e4d1da400801ef78a3ab5b8fd94e841",
+    "crates/runtime/assets/docx/toc_index.py": "sha256:0a373af7eb9a9b92b5e2313a44b5cab4f352b46e6895e3d3c54cd8ba68d02030",
+    "crates/chat/src/lib.rs": "sha256:cc52cb37b617f06503101a7214332a0e0f4c1548e77e65cc9b745809b2e1dd54",
+    "crates/runtime/assets/prompts/system.md": "sha256:7d3ff8d2b1f4e9cdde03846e610bfdf5b228f5af214ef559cf8bf45465f93e02",
+    "tools/docx/run_office_acceptance.py": "sha256:e877caed44728505c67c610e46698301d1c323fecfbc1ecb710ccc1adaf0cce4",
+    "tools/docx/office_fixtures.py": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab",
+    "tools/docx/office_cases.json": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3",
+    "desktop/src-tauri/examples/office_agent_acceptance.rs": "sha256:c6e79820e477d79132def3eed3e36a65dbde61fbc2a914d191b8b8efb28f031e",
+    "tools/docx/run_agent_acceptance.py": "sha256:00fdf5bb5e3a0cac03406d58c7cb1aa05a52c0866e149be0e37704816409a72c"
+  },
+  "harnessVersion": 2,
+  "evidenceOutsideWorkspace": true,
+  "futureTurnsWrittenBeforePresentation": false,
+  "independentReviewer": "not_run",
+  "wordWpsVerification": "not_run",
+  "visualReview": "pending",
+  "completedAt": "2026-11-12T02:08:09.253244+00:00",
+  "runState": "complete",
+  "executionMode": "Nine completed single-turn cases retained; future-exposed multi-turn case invalidated and replaced with causal two-turn snapshots.",
+  "causallyVerifiedMultiturn": true,
+  "productionSourcesIdenticalAcrossHarnesses": true,
+  "harnesses": [
+    {
+      "id": "v1-single-turn",
+      "caseCount": 9,
+      "agentRunnerPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\office-agent-acceptance-v1.exe",
+      "agentRunnerRevision": "sha256:b706d296f773cd6e7dc4b8892ee0b381a5d6ef929218791f8486b704abf8de4a",
+      "implementationRevisions": {
+        "crates/runtime/src/document_export.rs": "sha256:6142c9c3b3d61c4372f85453e221fbad9e66bf17cc29097fccca1aa09a9b3eaa",
+        "crates/runtime/src/docx.rs": "sha256:eb9d4987681e611780cbe40f954f31171dbfea97777ba236c7552f0a5ede07ec",
+        "crates/runtime/assets/docx/format_docx.py": "sha256:94d0434379c941612eed0a6145f157a65e13e704b16f461cc895e18df2d4c173",
+        "crates/runtime/assets/docx/structure_docx.py": "sha256:6c24b579ae7e18730b25894e1a5ca22a6373ca15d777f072e218aad985bcc379",
+        "crates/runtime/assets/docx/format_odt.py": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e",
+        "crates/tools/src/lib.rs": "sha256:bc3bbc42afb0847fa613a622091a53614162e096e11355ac9bcbd2bee8eafb90",
+        "crates/runtime/assets/docx/office_docx.py": "sha256:d129875baea7cde2d24092f5af0cd30b6e4d1da400801ef78a3ab5b8fd94e841",
+        "crates/runtime/assets/docx/toc_index.py": "sha256:0a373af7eb9a9b92b5e2313a44b5cab4f352b46e6895e3d3c54cd8ba68d02030",
+        "crates/chat/src/lib.rs": "sha256:cc52cb37b617f06503101a7214332a0e0f4c1548e77e65cc9b745809b2e1dd54",
+        "crates/runtime/assets/prompts/system.md": "sha256:7d3ff8d2b1f4e9cdde03846e610bfdf5b228f5af214ef559cf8bf45465f93e02",
+        "tools/docx/run_office_acceptance.py": "sha256:e877caed44728505c67c610e46698301d1c323fecfbc1ecb710ccc1adaf0cce4",
+        "tools/docx/office_fixtures.py": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab",
+        "tools/docx/office_cases.json": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3",
+        "desktop/src-tauri/examples/office_agent_acceptance.rs": "sha256:087b0a683acb3a9f1ae9a1aac9f4322b71bbfad6689fe040a70446e10e86e6d8",
+        "tools/docx/run_agent_acceptance.py": "sha256:445538c6d009c40a2c243151879eef6ab1110403f5ef7d3a28901d0f3edc0273"
+      }
+    },
+    {
+      "id": "v2-causal-multiturn",
+      "caseCount": 1,
+      "agentRunnerPath": "F:\\Agent\\Aris\\target-codex-release-0.4.87\\release\\examples\\office_agent_acceptance.exe",
+      "agentRunnerRevision": "sha256:37cf3f2745b350db190fddc334bd79134d97e51a76a33f543cc70948c6e84267",
+      "implementationRevisions": {
+        "crates/runtime/src/document_export.rs": "sha256:6142c9c3b3d61c4372f85453e221fbad9e66bf17cc29097fccca1aa09a9b3eaa",
+        "crates/runtime/src/docx.rs": "sha256:eb9d4987681e611780cbe40f954f31171dbfea97777ba236c7552f0a5ede07ec",
+        "crates/runtime/assets/docx/format_docx.py": "sha256:94d0434379c941612eed0a6145f157a65e13e704b16f461cc895e18df2d4c173",
+        "crates/runtime/assets/docx/structure_docx.py": "sha256:6c24b579ae7e18730b25894e1a5ca22a6373ca15d777f072e218aad985bcc379",
+        "crates/runtime/assets/docx/format_odt.py": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e",
+        "crates/tools/src/lib.rs": "sha256:bc3bbc42afb0847fa613a622091a53614162e096e11355ac9bcbd2bee8eafb90",
+        "crates/runtime/assets/docx/office_docx.py": "sha256:d129875baea7cde2d24092f5af0cd30b6e4d1da400801ef78a3ab5b8fd94e841",
+        "crates/runtime/assets/docx/toc_index.py": "sha256:0a373af7eb9a9b92b5e2313a44b5cab4f352b46e6895e3d3c54cd8ba68d02030",
+        "crates/chat/src/lib.rs": "sha256:cc52cb37b617f06503101a7214332a0e0f4c1548e77e65cc9b745809b2e1dd54",
+        "crates/runtime/assets/prompts/system.md": "sha256:7d3ff8d2b1f4e9cdde03846e610bfdf5b228f5af214ef559cf8bf45465f93e02",
+        "tools/docx/run_office_acceptance.py": "sha256:e877caed44728505c67c610e46698301d1c323fecfbc1ecb710ccc1adaf0cce4",
+        "tools/docx/office_fixtures.py": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab",
+        "tools/docx/office_cases.json": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3",
+        "desktop/src-tauri/examples/office_agent_acceptance.rs": "sha256:c6e79820e477d79132def3eed3e36a65dbde61fbc2a914d191b8b8efb28f031e",
+        "tools/docx/run_agent_acceptance.py": "sha256:00fdf5bb5e3a0cac03406d58c7cb1aa05a52c0866e149be0e37704816409a72c"
+      }
+    }
+  ],
+  "components": [
+    {
+      "resultsPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\pre-clean-results.json",
+      "resultsRevision": "sha256:af75fed0db846a66954dbe96336163627756880d7f23538534758e5f78d4de1a",
+      "acceptedCaseIds": [
+        "quotation_table",
+        "cover_page_numbering",
+        "external_redaction",
+        "automatic_contents",
+        "fillable_controls",
+        "accept_revisions",
+        "long_table_header",
+        "landscape_appendix",
+        "only_text"
+      ],
+      "invalidatedCaseIds": [
+        "latest_no_tables"
+      ]
+    },
+    {
+      "resultsPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\results.json",
+      "resultsRevision": "sha256:76882ddd00955af04f76dda587679955809f01552197329486baf86a1dec1be6",
+      "acceptedCaseIds": [
+        "latest_no_tables"
+      ]
+    }
+  ],
+  "invalidatedCase": {
+    "case": "latest_no_tables",
+    "harnessVersion": "v1",
+    "acceptanceStatus": "invalid_due_to_future_turn_exposure",
+    "includedInFinalAcceptanceCounts": false,
+    "evidence": "Before completing turn one, the model read request.json containing both future turns and wrote a seven-person paragraph plan instead of the requested eight-person table.",
+    "cause": "The evaluator saved the full future-turn request inside the model workspace; the example also saved it inside a visible agent-evidence directory. The final-only assertion could not prove the first instruction had ever been fulfilled.",
+    "repair": "Keep harness logs outside the model workspace, do not persist unpresented turn text before presenting it, snapshot the result after each completed turn, and require eight people plus a native table at turn one followed by seven people, five executors and zero tables at turn two.",
+    "scope": "A harness validity issue. Do not count the contaminated case as conversational instruction-following success. Preserve completed single-turn cases separately."
+  },
+  "counts": {
+    "automated_pass": 10
+  },
+  "expectedCases": 10,
+  "completedCases": 10,
+  "models": [
+    "deepseek-v4.1-flash"
+  ],
+  "results": [
+    {
+      "id": "quotation_table",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table",
+        "request": "请处理工作目录中的 input.docx：把制表符报价清单转为5行4列表格；品名内的逗号不能分列，金额原样保留、数字右对齐，并交付同名PDF。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\input.docx",
+      "sourceRevision": "sha256:48d2ec52e2eaed5860332e269249dcd9909ac4a998eb2b04bbb2c5303d64a9f8",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "native table retains all five rows, commas and exact amounts",
+          "passed": true
+        },
+        {
+          "label": "numeric data cells are right aligned",
+          "passed": true
+        },
+        {
+          "label": "requested same-name PDF delivered with all values",
+          "passed": true
+        },
+        {
+          "label": "quotation note preserved on one page",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\agent-evidence\\summary.json",
+      "toolCalls": 11,
+      "toolErrors": 1,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\result.docx",
+      "candidateRevision": "sha256:e11f161966881e72f25eb0c20723c8ff1eea57b27fb82fc46074195e409be863",
+      "evidence": {
+        "documentRevision": "sha256:e11f161966881e72f25eb0c20723c8ff1eea57b27fb82fc46074195e409be863",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\.somniq\\artifacts\\docx\\run-mnw2yi\\document.pdf",
+        "pdfRevision": "sha256:7dfa43695f2577393e6db0b062554c3a53b84a7dc4d6dd4405a67724fffae202",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\.somniq\\artifacts\\docx\\run-mnw2yi\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\quotation_table\\evaluation\\page-001.png",
+          "revision": "sha256:0fbd60c455ba17bdd51ffb124842c67f1988941e583a4877255132f76175abf9",
+          "text": "公用品 价办 报 单\n品名 数量 单价（元） 小计（元）\n打印纸,A4 10 28.50 285.00\n文件夹 12 7.25 87.00\n记号笔 6 4.50 27.00\n合计 399.00\n报价有效期：2026 年11 月30 日；价格含税，不含运输。",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "报价清单转表格与同名 PDF",
+      "audit": {
+        "id": "quotation_table",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 11,
+        "executedCallErrors": 1,
+        "attemptedCalls": 13,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:dfcc517186244a2e703746120e567a9b28973367337d779d0c737029310de890",
+        "toolCallsRevision": "sha256:fcf034c12bf2b689a706a882d88200fe2d9c05dc4e0c98628d6833db7657d17e"
+      }
+    },
+    {
+      "id": "cover_page_numbering",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering",
+        "request": "请处理工作目录中的 input.docx：三页报告封面不显示页码，第二页开始显示1、2，其他版式保持不变。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\input.docx",
+      "sourceRevision": "sha256:80ba963e1810e47bed6b555a37f9e2eb82156ce4449403771d2c7c19fc7dba38",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "original three pages and body text retained",
+          "passed": true
+        },
+        {
+          "label": "cover unnumbered, body numbered 1 and 2",
+          "passed": true
+        },
+        {
+          "label": "original headers preserved",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\agent-evidence\\summary.json",
+      "toolCalls": 10,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\result.docx",
+      "candidateRevision": "sha256:890865a8062ab6aff0e9922d2bc2bc72f1fb32475bf69846bf650030556f1f5d",
+      "evidence": {
+        "documentRevision": "sha256:890865a8062ab6aff0e9922d2bc2bc72f1fb32475bf69846bf650030556f1f5d",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\.somniq\\artifacts\\docx\\run-4U5gB0\\document.pdf",
+        "pdfRevision": "sha256:c61ad6017d99db84ca59e74f8813210974f8a4b19eb317640876b3ef91b7d8a9",
+        "pageCount": 3,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\.somniq\\artifacts\\docx\\run-4U5gB0\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\evaluation\\page-001.png",
+          "revision": "sha256:46896fd9bf0eb5ceb7ce7ba0ec41929311338cf5650e5e522fe0a03568d90971",
+          "text": "目 告项 总结报\n报告日期：2026 年11 月11 日\n封面不显示页码，正文从下一页开始。",
+          "footerNumbers": []
+        },
+        {
+          "page": 2,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\evaluation\\page-002.png",
+          "revision": "sha256:6873022116bbae0da0047fd7df5df01659331841362e48e85cebbec7ccb1d3e9",
+          "text": "示例单位 · 内部资料\n1\n第 1 部分 行执 记录\nRPT-1-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-08 本期事项按计划推进，交付物与责任人已核对。",
+          "footerNumbers": [
+            {
+              "value": "1",
+              "x": 294.75,
+              "y": 38.589
+            }
+          ]
+        },
+        {
+          "page": 3,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\cover_page_numbering\\evaluation\\page-003.png",
+          "revision": "sha256:a9ea82a2530a7d8b1a1421d9fc5de7bc692baa2b6b81cd89766587098b9bcb77",
+          "text": "示例单位 · 内部资料\n2\n第 2 部分 行执 记录\nRPT-2-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-08 本期事项按计划推进，交付物与责任人已核对。",
+          "footerNumbers": [
+            {
+              "value": "2",
+              "x": 294.75,
+              "y": 38.589
+            }
+          ]
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "封面无页码、正文 1 和 2",
+      "audit": {
+        "id": "cover_page_numbering",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 10,
+        "executedCallErrors": 0,
+        "attemptedCalls": 13,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:d7fbed645ff9f64f93f10db0c1e4b3f56c4c0616c910a119b07871443785f45f",
+        "toolCallsRevision": "sha256:2046131f0c819b01502653f2edc7d7466a8a69f1deb33cf2b4f163011a7fb766"
+      }
+    },
+    {
+      "id": "external_redaction",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction",
+        "request": "请处理工作目录中的 input.docx：将正文联系人和电话脱敏，同时清除作者及最后修改者等隐藏个人信息；项目编号和预算不变。姓名改为联系人A，电话改为已隐藏。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\input.docx",
+      "sourceRevision": "sha256:d8087f6f3bf92088b4870711c50e0496972db3310071cdc2eb98eaf200ec8abd",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "visible contact and phone replaced with requested values",
+          "passed": true
+        },
+        {
+          "label": "author and last saver cleared",
+          "passed": true
+        },
+        {
+          "label": "identifier and budget retained",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\agent-evidence\\summary.json",
+      "toolCalls": 11,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\result.docx",
+      "candidateRevision": "sha256:852308dd1e790c3f03518a74a9cd329e261d83a04ebf96065c473531e85741d2",
+      "evidence": {
+        "documentRevision": "sha256:852308dd1e790c3f03518a74a9cd329e261d83a04ebf96065c473531e85741d2",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\.somniq\\artifacts\\docx\\run-5lKq5w\\document.pdf",
+        "pdfRevision": "sha256:786a02bcdc0c8a89465896708825c688aa678a3114e932c85ae78d97a49ca54c",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\.somniq\\artifacts\\docx\\run-5lKq5w\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\external_redaction\\evaluation\\page-001.png",
+          "revision": "sha256:a1ba7dd764ca554af3bbbed62eb9963fdd37220d910082bfb1106be071ce0465",
+          "text": "外情况 明对 说\n联系人：联系人 A；电话：已隐藏。\n项目编号：PRJ-2026-011；预算金额：25,000.00 元。\n本文仅用于说明本期项目进度。",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "正文与指定作者属性脱敏",
+      "audit": {
+        "id": "external_redaction",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 11,
+        "executedCallErrors": 0,
+        "attemptedCalls": 13,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:3a768c054fa98710cf01f9d9c35ae3d537555778e6ba758048d7c15df579cadd",
+        "toolCallsRevision": "sha256:f997b259621d45bf552d9df26dbbe81f6641f9cd0f6ebf08894d33d49dd56f15"
+      }
+    },
+    {
+      "id": "automatic_contents",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents",
+        "request": "请处理工作目录中的 input.docx：根据现有一级、二级标题插入可更新的原生目录和页码，不使用手写目录代替。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\input.docx",
+      "sourceRevision": "sha256:787a98e2982b7309b8dcf026db9154acf6f0e57642e904a753fd741c6dd0c200",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "native TOC field populated with six entries",
+          "passed": true
+        },
+        {
+          "label": "all headings and body retained",
+          "passed": true
+        },
+        {
+          "label": "each directory number identifies its actual heading page",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\agent-evidence\\summary.json",
+      "toolCalls": 8,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\result.docx",
+      "candidateRevision": "sha256:a957f3d9087338b8a72dd480eb4f0be3e6fdd0812f3ed5c3f06f35d72199596e",
+      "evidence": {
+        "documentRevision": "sha256:a957f3d9087338b8a72dd480eb4f0be3e6fdd0812f3ed5c3f06f35d72199596e",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\.somniq\\artifacts\\docx\\run-YyOdPt\\document.pdf",
+        "pdfRevision": "sha256:aca228a4b440729a7623fed847e6415009bc9d1b68d08046f90894b62222f30c",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\.somniq\\artifacts\\docx\\run-YyOdPt\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\automatic_contents\\evaluation\\page-001.png",
+          "revision": "sha256:b376dd5243b90d753d7a4c20586e0fb7217734c515b13ea8c74165d7aa1c377a",
+          "text": "1\n季度工作 告报\n1 本期工作....................................................................................................................................1\n1.1 进度与成果........................................................................................................................1\n2 本期工作....................................................................................................................................1\n2.1 进度与成果........................................................................................................................1\n3 本期工作....................................................................................................................................1\n3.1 进度与成果........................................................................................................................1\n1 本期工作\n1.1 度与成果进\n季度事项 1：过程记录及交付清单完整。\n2 本期工作\n2.1 度与成果进\n季度事项 2：过程记录及交付清单完整。\n3 本期工作\n3.1 度与成果进\n季度事项 3：过程记录及交付清单完整。",
+          "footerNumbers": [
+            {
+              "value": "1",
+              "x": 294.75,
+              "y": 38.589
+            }
+          ]
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "原生自动目录及实际页码",
+      "audit": {
+        "id": "automatic_contents",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 8,
+        "executedCallErrors": 0,
+        "attemptedCalls": 11,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:52957b0a175c8957f712ec78f4f4e576f54c023688ceac4e0f07c362e2271a54",
+        "toolCallsRevision": "sha256:8af56be18d281461d937b0daef6357196e262ea733a74d8f1d61293510227bab"
+      }
+    },
+    {
+      "id": "fillable_controls",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls",
+        "request": "请处理工作目录中的 input.docx：填写原生内容控件中的姓名，同时保留下拉列表及其选项；不能把控件转成普通文字。姓名填写周示例。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\input.docx",
+      "sourceRevision": "sha256:acee5b067a53669e79cab11b65f0d7e03f1bb0d3fb4eb3523d54cacc1910742d",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "name filled in retained native control",
+          "passed": true
+        },
+        {
+          "label": "properties, dropdown and options preserved",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\agent-evidence\\summary.json",
+      "toolCalls": 6,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\result.docx",
+      "candidateRevision": "sha256:4ad87309f21eb9ce5056d386ffc7fe1e62708b78bb42407b96282c440724dd5c",
+      "evidence": {
+        "documentRevision": "sha256:4ad87309f21eb9ce5056d386ffc7fe1e62708b78bb42407b96282c440724dd5c",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\.somniq\\artifacts\\docx\\run-nkAviR\\document.pdf",
+        "pdfRevision": "sha256:5579efbbd0b82ff011fef76b8c932ea92d95d0301335e6ca238d27f86f90644c",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\.somniq\\artifacts\\docx\\run-nkAviR\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\fillable_controls\\evaluation\\page-001.png",
+          "revision": "sha256:58ae8f9326b8d14f3ab2de79be5f0893152d27c8608d25b5b6b272b2b2b6fe8f",
+          "text": "人 信息登 表员 记\n姓名：周示例\n部门：行政\n请保留文字控件和部门下拉选项。",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "填写姓名并保留原生控件",
+      "audit": {
+        "id": "fillable_controls",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 6,
+        "executedCallErrors": 0,
+        "attemptedCalls": 8,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:100c2757f9bacdb7951094e4dc234c45e4bbcdc25e153493a59775b79c2166aa",
+        "toolCallsRevision": "sha256:966539b5b58a99a1badcf4c3f7438741396daf7417b0f0cc335d105ad3e240d9"
+      }
+    },
+    {
+      "id": "accept_revisions",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions",
+        "request": "请处理工作目录中的 input.docx：接受合同中的全部修订，成稿只保留新金额11,000.00，不残留插入、删除修订标记。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\input.docx",
+      "sourceRevision": "sha256:add9969306b660db12f50fb3474f86d8eeba2d67da49ed394b6bbb00db34581b",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "new amount accepted without deleted amount or revision nodes",
+          "passed": true
+        },
+        {
+          "label": "other contract clause retained",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\agent-evidence\\summary.json",
+      "toolCalls": 8,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\result.docx",
+      "candidateRevision": "sha256:e192f4ad6d5564202177e610ba81ee5a262f5f019d9ec8ac5e655c64957bc725",
+      "evidence": {
+        "documentRevision": "sha256:e192f4ad6d5564202177e610ba81ee5a262f5f019d9ec8ac5e655c64957bc725",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\.somniq\\artifacts\\docx\\run-yEuQ7g\\document.pdf",
+        "pdfRevision": "sha256:de3505f5636de322a01404c87f7a604698297d4b86085d77bb1e71ec909ed780",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\.somniq\\artifacts\\docx\\run-yEuQ7g\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-a\\accept_revisions\\evaluation\\page-001.png",
+          "revision": "sha256:efe91ea73b221a9d58508445aa75f5197c7d01a49e16872fdd5f577f0b7c1091",
+          "text": "采 合同修 稿购 订\n合同价款为人民币 11,000.00 元。\n交付与验收条款维持原约定。",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "接受支持的合同内联修订",
+      "audit": {
+        "id": "accept_revisions",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 8,
+        "executedCallErrors": 0,
+        "attemptedCalls": 10,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:065fa703bbe72ec6b14fe29f989904458dbc9ddeaeb1dbca6ce57b77306785b2",
+        "toolCallsRevision": "sha256:1edc830a39e22aef70bc301d0a5aa7f2cc19c98cd40741503c20411186b42c2e"
+      }
+    },
+    {
+      "id": "long_table_header",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header",
+        "request": "请处理工作目录中的 input.docx：现有60条库存明细跨页时每页重复首行表头，保持全部编码、数量及原表格内容。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\input.docx",
+      "sourceRevision": "sha256:b20756f51812c39ba6f8de5d1be6a004c00527a6d258072151d7d25a9ddea7d1",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "native repeat header set",
+          "passed": true
+        },
+        {
+          "label": "all original table text retained",
+          "passed": true
+        },
+        {
+          "label": "multiple pages with header on each and all 60 records",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\agent-evidence\\summary.json",
+      "toolCalls": 9,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\result.docx",
+      "candidateRevision": "sha256:3d6d91b3991e2c1868e13f77f340b628d8b5e26ce83a823206b2294b76c57eb5",
+      "evidence": {
+        "documentRevision": "sha256:3d6d91b3991e2c1868e13f77f340b628d8b5e26ce83a823206b2294b76c57eb5",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\.somniq\\artifacts\\docx\\run-UyJsZA\\document.pdf",
+        "pdfRevision": "sha256:2f01d8f1b886f92046ed450c309b321f1377eb8d44f70e76be0451a45c703290",
+        "pageCount": 2,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\.somniq\\artifacts\\docx\\run-UyJsZA\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\evaluation\\page-001.png",
+          "revision": "sha256:53a774edcee492879906f0473cc0861a6f3b53a8aaaf20c83d55fec0c80544d8",
+          "text": "存 点明库 盘 细\n库存编码 物品名称 数量 存放位置\nINV-001 办公物品 001 2 A 区 2 架\nINV-002 办公物品 002 3 A 区 3 架\nINV-003 办公物品 003 4 A 区 4 架\nINV-004 办公物品 004 5 A 区 5 架\nINV-005 办公物品 005 6 A 区 1 架\nINV-006 办公物品 006 7 A 区 2 架\nINV-007 办公物品 007 8 A 区 3 架\nINV-008 办公物品 008 9 A 区 4 架\nINV-009 办公物品 009 1 A 区 5 架\nINV-010 办公物品 010 2 A 区 1 架\nINV-011 办公物品 011 3 A 区 2 架\nINV-012 办公物品 012 4 A 区 3 架\nINV-013 办公物品 013 5 A 区 4 架\nINV-014 办公物品 014 6 A 区 5 架\nINV-015 办公物品 015 7 A 区 1 架\nINV-016 办公物品 016 8 A 区 2 架\nINV-017 办公物品 017 9 A 区 3 架\nINV-018 办公物品 018 1 A 区 4 架\nINV-019 办公物品 019 2 A 区 5 架\nINV-020 办公物品 020 3 A 区 1 架\nINV-021 办公物品 021 4 A 区 2 架\nINV-022 办公物品 022 5 A 区 3 架\nINV-023 办公物品 023 6 A 区 4 架\nINV-024 办公物品 024 7 A 区 5 架\nINV-025 办公物品 025 8 A 区 1 架\nINV-026 办公物品 026 9 A 区 2 架\nINV-027 办公物品 027 1 A 区 3 架\nINV-028 办公物品 028 2 A 区 4 架\nINV-029 办公物品 029 3 A 区 5 架\nINV-030 办公物品 030 4 A 区 1 架\nINV-031 办公物品 031 5 A 区 2 架\nINV-032 办公物品 032 6 A 区 3 架\nINV-033 办公物品 033 7 A 区 4 架",
+          "footerNumbers": [
+            {
+              "value": "031",
+              "x": 224.95,
+              "y": 114.339
+            },
+            {
+              "value": "5",
+              "x": 297.75,
+              "y": 118.039
+            },
+            {
+              "value": "2",
+              "x": 433.75,
+              "y": 114.339
+            },
+            {
+              "value": "032",
+              "x": 224.95,
+              "y": 94.589
+            },
+            {
+              "value": "6",
+              "x": 297.75,
+              "y": 98.289
+            },
+            {
+              "value": "3",
+              "x": 433.75,
+              "y": 94.589
+            },
+            {
+              "value": "033",
+              "x": 224.95,
+              "y": 74.839
+            },
+            {
+              "value": "7",
+              "x": 297.75,
+              "y": 78.539
+            },
+            {
+              "value": "4",
+              "x": 433.75,
+              "y": 74.839
+            }
+          ]
+        },
+        {
+          "page": 2,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\long_table_header\\evaluation\\page-002.png",
+          "revision": "sha256:9b2f96f4ce33825b639b9ae7efc050c3fbe99a234d2247c27a361c95160c905c",
+          "text": "库存编码 物品名称 数量 存放位置\nINV-034 办公物品 034 8 A 区 5 架\nINV-035 办公物品 035 9 A 区 1 架\nINV-036 办公物品 036 1 A 区 2 架\nINV-037 办公物品 037 2 A 区 3 架\nINV-038 办公物品 038 3 A 区 4 架\nINV-039 办公物品 039 4 A 区 5 架\nINV-040 办公物品 040 5 A 区 1 架\nINV-041 办公物品 041 6 A 区 2 架\nINV-042 办公物品 042 7 A 区 3 架\nINV-043 办公物品 043 8 A 区 4 架\nINV-044 办公物品 044 9 A 区 5 架\nINV-045 办公物品 045 1 A 区 1 架\nINV-046 办公物品 046 2 A 区 2 架\nINV-047 办公物品 047 3 A 区 3 架\nINV-048 办公物品 048 4 A 区 4 架\nINV-049 办公物品 049 5 A 区 5 架\nINV-050 办公物品 050 6 A 区 1 架\nINV-051 办公物品 051 7 A 区 2 架\nINV-052 办公物品 052 8 A 区 3 架\nINV-053 办公物品 053 9 A 区 4 架\nINV-054 办公物品 054 1 A 区 5 架\nINV-055 办公物品 055 2 A 区 1 架\nINV-056 办公物品 056 3 A 区 2 架\nINV-057 办公物品 057 4 A 区 3 架\nINV-058 办公物品 058 5 A 区 4 架\nINV-059 办公物品 059 6 A 区 5 架\nINV-060 办公物品 060 7 A 区 1 架",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "60 条库存表跨页重复表头",
+      "audit": {
+        "id": "long_table_header",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 9,
+        "executedCallErrors": 0,
+        "attemptedCalls": 11,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:8a0d8ba9c3a81b4183e05648f65528d05ebe9142a05e6271b99ed874306be729",
+        "toolCallsRevision": "sha256:0a235cc898e3ad6a7bdb4166d0a38b34d5322e6bbdc0460c9fd6354853a77878"
+      }
+    },
+    {
+      "id": "landscape_appendix",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix",
+        "request": "请处理工作目录中的 input.docx：封面保持纵向，仅第二节宽表附件改为横向，保留全部表格内容与分节。 保留原文件，修改后的文件另存为 result.docx。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\input.docx",
+      "sourceRevision": "sha256:3f8b6ffb93bac14cedcf149ca257cf79cdf99505c7872c61bc221d8b3f4eec70",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "two sections with only second landscape",
+          "passed": true
+        },
+        {
+          "label": "original text retained",
+          "passed": true
+        },
+        {
+          "label": "actual PDF has portrait cover and landscape appendix",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\agent-evidence\\summary.json",
+      "toolCalls": 13,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\result.docx",
+      "candidateRevision": "sha256:17fd9a72a1b2a9322777627455e6c100342c6a79f046408f79cf5817977836ca",
+      "evidence": {
+        "documentRevision": "sha256:17fd9a72a1b2a9322777627455e6c100342c6a79f046408f79cf5817977836ca",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\.somniq\\artifacts\\docx\\run-gMVhix\\document.pdf",
+        "pdfRevision": "sha256:411743c1777cb02150ed5fb8949c87f2f7a3b0ec91cf1ab4b44a6eb4c3805954",
+        "pageCount": 2,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\.somniq\\artifacts\\docx\\run-gMVhix\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\evaluation\\page-001.png",
+          "revision": "sha256:3f074fd1ce585cc80c467c76327c0944120f9f9fc682ec8a415e86adbc8b50b9",
+          "text": "存分析 告库 报\n本页为纵向封面，附件从下一节开始。",
+          "footerNumbers": []
+        },
+        {
+          "page": 2,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-b\\landscape_appendix\\evaluation\\page-002.png",
+          "revision": "sha256:daa26d56603ebaadf6364c804b3e7837dbf11c8f99b8bf3883b2526e11359bfe",
+          "text": "附  存 表录 库 汇总\n字段 1 字段 2 字段 3 字段 4 字段 5 字段 6 字段 7 字段 8 字段 9 字段\n10\n1-1 1-2 1-3 1-4 1-5 1-6 1-7 1-8 1-9 1-10\n2-1 2-2 2-3 2-4 2-5 2-6 2-7 2-8 2-9 2-10\n3-1 3-2 3-3 3-4 3-5 3-6 3-7 3-8 3-9 3-10\n4-1 4-2 4-3 4-4 4-5 4-6 4-7 4-8 4-9 4-10",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "harnessId": "v1-single-turn",
+      "label": "仅第二节宽表附件横向",
+      "audit": {
+        "id": "landscape_appendix",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 13,
+        "executedCallErrors": 0,
+        "attemptedCalls": 16,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:80bd14c6e423ec5d6be4a66510d6252d79a18f1141a30cd70322272486765162",
+        "toolCallsRevision": "sha256:384add0e726ece38c2d1fa416416388791bff203e123e5dacdec48811b76bbbf"
+      }
+    },
+    {
+      "id": "only_text",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-c\\only_text",
+        "request": "读取 notes.txt，把它整理成简洁的办公通知。只在聊天中回复文字，不要创建或修改任何文件。"
+      },
+      "source": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-c\\only_text\\notes.txt",
+      "sourceRevision": "sha256:a53b5e74ef2ad8cc33215791a37d79ffe322cf88867e6c6762d9ab56d63045e1",
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "original input unchanged",
+          "passed": true
+        },
+        {
+          "label": "Agent read the source itself",
+          "passed": true
+        },
+        {
+          "label": "only chat text; no files created or modified",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "backendRequirement": "REQ-07",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\group-c\\only_text\\agent-evidence\\summary.json",
+      "toolCalls": 1,
+      "toolErrors": 0,
+      "harnessId": "v1-single-turn",
+      "label": "只回复通知文字，零文件写入",
+      "audit": {
+        "id": "only_text",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 1,
+        "executedCallErrors": 0,
+        "attemptedCalls": 1,
+        "sessionErrors": 0,
+        "shellApprovalRejections": 0,
+        "imageReads": [],
+        "agentRenderedFinalRevision": null,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:f58b19b1eec87e8360be0d43c05dc232839cf133c84ab9a462128bba2f675650",
+        "toolCallsRevision": "sha256:d55942deed1738393d63cc280fb17ead3b7e337522450ff3024c822536b2d1c2"
+      }
+    },
+    {
+      "id": "latest_no_tables",
+      "request": {
+        "workspace": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\workspaces\\case-010",
+        "turns": [
+          "为办公项目组制作一份人员方案 result.docx，8人由统筹1人、联络1人和执行6人组成。请用表格呈现。",
+          "改成总共7个人，统筹和联络各1人不变，其余为执行人员。不用做表格，改为正文段落，更新同一份 result.docx。"
+        ],
+        "evidence_directory": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\evidence\\latest_no_tables\\agent",
+        "snapshot_artifacts": [
+          "result.docx"
+        ]
+      },
+      "source": null,
+      "sourceRevision": null,
+      "checks": [
+        {
+          "label": "model conversation completed",
+          "passed": true
+        },
+        {
+          "label": "Agent rendered the final document revision",
+          "passed": true
+        },
+        {
+          "label": "first turn actually produced eight people and a native table",
+          "passed": true
+        },
+        {
+          "label": "second turn snapshot is the delivered final document",
+          "passed": true
+        },
+        {
+          "label": "latest instruction yields seven people and no tables",
+          "passed": true
+        },
+        {
+          "label": "no additional Open XML schema errors",
+          "passed": true
+        },
+        {
+          "label": "both turns retain one coordinator and one liaison",
+          "passed": true
+        }
+      ],
+      "status": "automated_pass",
+      "backendRequirement": "REQ-08",
+      "model": "deepseek-v4.1-flash",
+      "provider": "openai",
+      "agentSummary": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\evidence\\latest_no_tables\\agent\\summary.json",
+      "toolCalls": 16,
+      "toolErrors": 0,
+      "candidate": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\workspaces\\case-010\\result.docx",
+      "candidateRevision": "sha256:51ee831d2c4399da526e2090131d4b1b5182daf7d9f3b9fca19d0390f47f120a",
+      "evidence": {
+        "documentRevision": "sha256:51ee831d2c4399da526e2090131d4b1b5182daf7d9f3b9fca19d0390f47f120a",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\workspaces\\case-010\\.somniq\\artifacts\\docx\\run-VcDhHt\\document.pdf",
+        "pdfRevision": "sha256:df1c6cc187855b4a428826925e497f6dc00e0b045c3518bf14f3a87a5df1df90",
+        "pageCount": 1,
+        "evidencePath": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\workspaces\\case-010\\.somniq\\artifacts\\docx\\run-VcDhHt\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\evidence\\latest_no_tables\\evaluation\\page-001.png",
+          "revision": "sha256:37ee4b2339126fd826415a426bae9bdd234c0bb63acca91434ff39d7bfbb5875",
+          "text": "办公项目组人员方案\n办公项目组共 7 人，由统筹 1 人、联络 1 人和执行 5 人组成。三类岗位分工明确、\n逐级衔接：统筹负责整体安排，联络负责信息贯通，执行负责具体落地。\n统筹 1 人，负责项目组整体计划制定、任务分派、进度管控与成果验收，统筹调配人\n力及其他资源，并对重要事项作出决定。项目推进中的任务调整与优先级变更，统一\n由该岗位确认。\n联络 1 人，负责项目组内外的信息传递与对接，汇总各方需求与反馈，安排会议并跟\n踪议定事项的落实。该岗位既是项目组对内的协调口，也是对外的统一接口，避免多\n头对接造成信息偏差。\n执行 5 人，按统筹分派的任务承担具体实施工作，包括资料整理、文稿编制、事务办\n理及现场保障等。5 人按任务模块分组推进，具体到人的分工由统筹确认后细化。\n上述岗位配置共 7 人，在保证决策、协调与实施三个环节均有专人负责的前提下控制\n用人规模。各岗位职责不交叉、不重叠，需要临时增援时由统筹在组内统一调配。",
+          "footerNumbers": []
+        }
+      ],
+      "agentRenderedFinalRevision": true,
+      "firstTurnSnapshot": "\\\\?\\C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2\\clean\\evidence\\latest_no_tables\\agent\\turn-1\\1-result.docx",
+      "firstTurnRevision": "sha256:96dfe48c2fd954b7b2975469a060eb1fa4d189f4442816bc82850c036d623e4c",
+      "harnessId": "v2-causal-multiturn",
+      "label": "两轮对话改为七人且不使用表格",
+      "audit": {
+        "id": "latest_no_tables",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": null,
+        "executedCalls": 16,
+        "executedCallErrors": 0,
+        "attemptedCalls": 18,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:8535ffdf22be05528a84949e32d4cde41eee733c4ea60a3fe053ac4a95d56f01",
+        "toolCallsRevision": "sha256:bc5801c46bc0b403d21f243d6a3e50b0f62dc2d12fadecf0753c0342934200ac"
+      }
+    }
+  ],
+  "integrityAudit": {
+    "run": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-office-agent-20261111-r2",
+    "runState": "complete",
+    "resultsRevision": "sha256:8243ac0d57c47a4a17dc13a4168cae59f375561f67e80ed3b7a4f88096667cb3",
+    "completedCases": 10,
+    "cases": [
+      {
+        "id": "quotation_table",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 11,
+        "executedCallErrors": 1,
+        "attemptedCalls": 13,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:dfcc517186244a2e703746120e567a9b28973367337d779d0c737029310de890",
+        "toolCallsRevision": "sha256:fcf034c12bf2b689a706a882d88200fe2d9c05dc4e0c98628d6833db7657d17e"
+      },
+      {
+        "id": "cover_page_numbering",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 10,
+        "executedCallErrors": 0,
+        "attemptedCalls": 13,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:d7fbed645ff9f64f93f10db0c1e4b3f56c4c0616c910a119b07871443785f45f",
+        "toolCallsRevision": "sha256:2046131f0c819b01502653f2edc7d7466a8a69f1deb33cf2b4f163011a7fb766"
+      },
+      {
+        "id": "external_redaction",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 11,
+        "executedCallErrors": 0,
+        "attemptedCalls": 13,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:3a768c054fa98710cf01f9d9c35ae3d537555778e6ba758048d7c15df579cadd",
+        "toolCallsRevision": "sha256:f997b259621d45bf552d9df26dbbe81f6641f9cd0f6ebf08894d33d49dd56f15"
+      },
+      {
+        "id": "automatic_contents",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 8,
+        "executedCallErrors": 0,
+        "attemptedCalls": 11,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:52957b0a175c8957f712ec78f4f4e576f54c023688ceac4e0f07c362e2271a54",
+        "toolCallsRevision": "sha256:8af56be18d281461d937b0daef6357196e262ea733a74d8f1d61293510227bab"
+      },
+      {
+        "id": "fillable_controls",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 6,
+        "executedCallErrors": 0,
+        "attemptedCalls": 8,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:100c2757f9bacdb7951094e4dc234c45e4bbcdc25e153493a59775b79c2166aa",
+        "toolCallsRevision": "sha256:966539b5b58a99a1badcf4c3f7438741396daf7417b0f0cc335d105ad3e240d9"
+      },
+      {
+        "id": "accept_revisions",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 8,
+        "executedCallErrors": 0,
+        "attemptedCalls": 10,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:065fa703bbe72ec6b14fe29f989904458dbc9ddeaeb1dbca6ce57b77306785b2",
+        "toolCallsRevision": "sha256:1edc830a39e22aef70bc301d0a5aa7f2cc19c98cd40741503c20411186b42c2e"
+      },
+      {
+        "id": "long_table_header",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 9,
+        "executedCallErrors": 0,
+        "attemptedCalls": 11,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:8a0d8ba9c3a81b4183e05648f65528d05ebe9142a05e6271b99ed874306be729",
+        "toolCallsRevision": "sha256:0a235cc898e3ad6a7bdb4166d0a38b34d5322e6bbdc0460c9fd6354853a77878"
+      },
+      {
+        "id": "landscape_appendix",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 13,
+        "executedCallErrors": 0,
+        "attemptedCalls": 16,
+        "sessionErrors": 3,
+        "shellApprovalRejections": 3,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:80bd14c6e423ec5d6be4a66510d6252d79a18f1141a30cd70322272486765162",
+        "toolCallsRevision": "sha256:384add0e726ece38c2d1fa416416388791bff203e123e5dacdec48811b76bbbf"
+      },
+      {
+        "id": "only_text",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": true,
+        "executedCalls": 1,
+        "executedCallErrors": 0,
+        "attemptedCalls": 1,
+        "sessionErrors": 0,
+        "shellApprovalRejections": 0,
+        "imageReads": [],
+        "agentRenderedFinalRevision": null,
+        "assistantReportedVisualLimit": false,
+        "sessionRevision": "sha256:f58b19b1eec87e8360be0d43c05dc232839cf133c84ab9a462128bba2f675650",
+        "toolCallsRevision": "sha256:d55942deed1738393d63cc280fb17ead3b7e337522450ff3024c822536b2d1c2"
+      },
+      {
+        "id": "latest_no_tables",
+        "status": "automated_pass",
+        "model": "deepseek-v4.1-flash",
+        "successfulRevisionBoundSourceRead": null,
+        "executedCalls": 16,
+        "executedCallErrors": 0,
+        "attemptedCalls": 18,
+        "sessionErrors": 2,
+        "shellApprovalRejections": 2,
+        "imageReads": [],
+        "agentRenderedFinalRevision": true,
+        "assistantReportedVisualLimit": true,
+        "sessionRevision": "sha256:8535ffdf22be05528a84949e32d4cde41eee733c4ea60a3fe053ac4a95d56f01",
+        "toolCallsRevision": "sha256:bc5801c46bc0b403d21f243d6a3e50b0f62dc2d12fadecf0753c0342934200ac"
+      }
+    ],
+    "allIntegrityChecksPassedForCompletedCases": true,
+    "sourceBindings": [
+      {
+        "source": "crates/runtime/src/document_export.rs",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\src\\document_export.rs",
+        "revision": "sha256:6142c9c3b3d61c4372f85453e221fbad9e66bf17cc29097fccca1aa09a9b3eaa"
+      },
+      {
+        "source": "crates/runtime/src/docx.rs",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\src\\docx.rs",
+        "revision": "sha256:eb9d4987681e611780cbe40f954f31171dbfea97777ba236c7552f0a5ede07ec"
+      },
+      {
+        "source": "crates/runtime/assets/docx/format_docx.py",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\docx\\format_docx.py",
+        "revision": "sha256:94d0434379c941612eed0a6145f157a65e13e704b16f461cc895e18df2d4c173"
+      },
+      {
+        "source": "crates/runtime/assets/docx/structure_docx.py",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\docx\\structure_docx.py",
+        "revision": "sha256:6c24b579ae7e18730b25894e1a5ca22a6373ca15d777f072e218aad985bcc379"
+      },
+      {
+        "source": "crates/runtime/assets/docx/format_odt.py",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\docx\\format_odt.py",
+        "revision": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e"
+      },
+      {
+        "source": "crates/tools/src/lib.rs",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\tools\\src\\lib.rs",
+        "revision": "sha256:bc3bbc42afb0847fa613a622091a53614162e096e11355ac9bcbd2bee8eafb90"
+      },
+      {
+        "source": "crates/runtime/assets/docx/office_docx.py",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\docx\\office_docx.py",
+        "revision": "sha256:d129875baea7cde2d24092f5af0cd30b6e4d1da400801ef78a3ab5b8fd94e841"
+      },
+      {
+        "source": "crates/runtime/assets/docx/toc_index.py",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\docx\\toc_index.py",
+        "revision": "sha256:0a373af7eb9a9b92b5e2313a44b5cab4f352b46e6895e3d3c54cd8ba68d02030"
+      },
+      {
+        "source": "crates/chat/src/lib.rs",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\chat\\src\\lib.rs",
+        "revision": "sha256:cc52cb37b617f06503101a7214332a0e0f4c1548e77e65cc9b745809b2e1dd54"
+      },
+      {
+        "source": "crates/runtime/assets/prompts/system.md",
+        "verifiedPath": "F:\\Agent\\Aris\\crates\\runtime\\assets\\prompts\\system.md",
+        "revision": "sha256:7d3ff8d2b1f4e9cdde03846e610bfdf5b228f5af214ef559cf8bf45465f93e02"
+      },
+      {
+        "source": "tools/docx/run_office_acceptance.py",
+        "verifiedPath": "F:\\Agent\\Aris\\tools\\docx\\run_office_acceptance.py",
+        "revision": "sha256:e877caed44728505c67c610e46698301d1c323fecfbc1ecb710ccc1adaf0cce4"
+      },
+      {
+        "source": "tools/docx/office_fixtures.py",
+        "verifiedPath": "F:\\Agent\\Aris\\tools\\docx\\office_fixtures.py",
+        "revision": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab"
+      },
+      {
+        "source": "tools/docx/office_cases.json",
+        "verifiedPath": "F:\\Agent\\Aris\\tools\\docx\\office_cases.json",
+        "revision": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3"
+      },
+      {
+        "source": "desktop/src-tauri/examples/office_agent_acceptance.rs",
+        "verifiedPath": "F:\\Agent\\Aris\\desktop\\src-tauri\\examples\\office_agent_acceptance.rs",
+        "revision": "sha256:c6e79820e477d79132def3eed3e36a65dbde61fbc2a914d191b8b8efb28f031e"
+      },
+      {
+        "source": "tools/docx/run_agent_acceptance.py",
+        "verifiedPath": "F:\\Agent\\Aris\\tools\\docx\\run_agent_acceptance.py",
+        "revision": "sha256:00fdf5bb5e3a0cac03406d58c7cb1aa05a52c0866e149be0e37704816409a72c"
+      }
+    ],
+    "excludedInvalidMultiturn": false,
+    "scope": "Recorded production shared Chat calls and exact file evidence. Executed-call logs exclude permission-denied attempts; actual session events are included separately.",
+    "independentReviewer": "not_run",
+    "wordWpsVerification": "not_run",
+    "uiAutomation": false
+  },
+  "acceptanceInterpretation": "Automated document and behavioral assertions, not a desktop UI, product-model visual, independent Reviewer, or Word/WPS acceptance rate.",
+  "visualObservationPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\agent-page-observations.json",
+  "history": {
+    "ignoredWorkspaceSmokeRun": {
+      "state": "interrupted_by_executor",
+      "includedInCounts": false,
+      "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\agent-run-1",
+      "reason": "Ignored .somniq workspace hid discovery results and inherited an unrelated ancestor Git diff."
+    },
+    "invalidatedMultiturn": {
+      "case": "latest_no_tables",
+      "harnessVersion": "v1",
+      "acceptanceStatus": "invalid_due_to_future_turn_exposure",
+      "includedInFinalAcceptanceCounts": false,
+      "evidence": "Before completing turn one, the model read request.json containing both future turns and wrote a seven-person paragraph plan instead of the requested eight-person table.",
+      "cause": "The evaluator saved the full future-turn request inside the model workspace; the example also saved it inside a visible agent-evidence directory. The final-only assertion could not prove the first instruction had ever been fulfilled.",
+      "repair": "Keep harness logs outside the model workspace, do not persist unpresented turn text before presenting it, snapshot the result after each completed turn, and require eight people plus a native table at turn one followed by seven people, five executors and zero tables at turn two.",
+      "scope": "A harness validity issue. Do not count the contaminated case as conversational instruction-following success. Preserve completed single-turn cases separately."
+    }
+  },
+  "limitations": [
+    "Loads actual Desktop configured connection, assembled product prompt and production shared Chat/runtime/tool routing; does not operate the desktop UI.",
+    "Local file/document/audit execution allowlist. Shell calls still require product permission escalation and are not auto-approved by this headless runner. Session events record denied attempts separately from executed-tool logs.",
+    "The model has no native PDF-to-page-image tool in this tested path. Reading PDF text or render metadata is not visual inspection; development Codex page observations are separate.",
+    "Inputs are authored anonymous fixtures and two previously verified backend-request derivatives. They are not original customer files, and results do not establish a population task success rate.",
+    "REQ-08 derivative verifies later-instruction handling and disjoint role arithmetic, not the original four-source merge or shared-personnel deduplication.",
+    "The final multi-turn assistant explanation contains an inconsistent paragraph-count breakdown. Automated document assertions do not certify all narrative claims; this remains an Agent reporting defect.",
+    "Independent Reviewer, Word/WPS and legacy binary .doc not run. No change to installed binaries, release upload, or new release implied."
+  ]
+}

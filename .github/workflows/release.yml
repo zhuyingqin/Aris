@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag matching the desktop version (for example v0.4.87)
+        description: Release tag matching the desktop version (for example v0.4.88)
         required: true
         type: string
       draft:
