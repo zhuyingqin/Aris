@@ -20,6 +20,13 @@ SomniQ Studio 是一个以桌面端为核心的自主研究工作空间。它把
 - **修订形成闭环**：审查意见会回到执行阶段，直到达到明确的质量标准，而不是在第一版答案处停止。
 - **研究者保留方向权**：AI 推进过程，研究者决定问题、边界、关键判断和最终接受标准。
 
+## 下载与使用
+
+- **下载**：在 [GitHub Releases](https://github.com/zhuyingqin/Aris/releases/latest) 下载最新版本。Windows 10/11 x64 用 `SomniQ.Studio_<版本号>_x64-setup.exe`，macOS 12+ 用 `SomniQ.Studio_<版本号>_universal.dmg`。
+- **[安装教程](docs/user-guide/installation.md)**：系统要求、Windows / macOS 安装、首次启动的安全提示、更新与卸载。
+- **[快速上手](docs/user-guide/quick-start.md)**：10 分钟完成登录、添加项目和第一次对话。
+- **[用户手册](docs/user-guide/README.md)**：对话、文献、LaTeX、科研绘图、代码、研究流程、插件与设置的完整说明，以及 [常见问题](docs/user-guide/faq.md)。
+
 ## 一个持续运行的科研系统
 
 ![SomniQ Studio 自主科研工作台](figures/somniq-studio-autonomous-research.png)
