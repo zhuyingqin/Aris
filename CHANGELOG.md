@@ -22,8 +22,10 @@
   and legacy binary .doc remain unverified. Known input-glyph and Agent narrative
   counting defects are retained in the acceptance reports.
 - **Windows release** — manifests and lockfiles target 0.4.88. The locally built
-  x64 installer is provided with SHA-256 checksums; this local asset has no updater
-  signature and is intended for manual installation.
+  x64 installer is provided with SHA-256 checksums. The November 13 updater repair
+  adds a verified signature and latest.json to the unchanged installer, promotes
+  0.4.88 to GitHub Latest and synchronizes the signed Windows update to the China
+  mirror.
 
 ## v0.4.87 (2026-11-10)
 

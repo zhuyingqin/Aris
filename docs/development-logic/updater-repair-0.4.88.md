@@ -8,7 +8,25 @@ and SHA256SUMS remain valid. Unreleased Excel changes are outside this repair.
 
 ## Signing an existing installer
 
-Dispatch the existing Release workflow from the repair branch:
+With a local backup of the original private key, the repair can run locally.
+Keep the key outside Git and pass its path only to the official signer:
+
+```powershell
+$env:RELEASE_TAG = 'v0.4.88'
+$env:EXPECTED_INSTALLER_SHA256 = '5a757207c92fc59a0493c35b0b8d7a78c8ec647c597ee0ba44a77840aac13d32'
+$env:UPDATER_REPAIR_DIR = Join-Path (Get-Location) '.somniq/research/updater-repair-0.4.88/github'
+node desktop/scripts/repair-updater-release.cjs prepare
+node desktop/node_modules/@tauri-apps/cli/tauri.js signer sign --private-key-path 'D:\secure-backup\updater.key' --password '' "$env:UPDATER_REPAIR_DIR/SomniQ.Studio_0.4.88_x64-setup.exe"
+node desktop/scripts/repair-updater-release.cjs verify
+node desktop/scripts/repair-updater-release.cjs publish
+```
+
+The sample key path must refer to the existing original key, whose public half
+is shipped in the app. A newly generated key would fail old-client verification.
+Use the CLI version installed by the desktop lockfile. If the existing key has a
+password, supply it securely rather than recording it in shell history.
+
+Alternatively, dispatch the existing Release workflow from the repair branch:
 
 ```powershell
 gh workflow run release.yml -R zhuyingqin/Aris --ref codex/repair-updater-0.4.88 -f release_tag=v0.4.88 -F repair_updater_only=true -f expected_installer_sha256=5a757207c92fc59a0493c35b0b8d7a78c8ec647c597ee0ba44a77840aac13d32
@@ -52,7 +70,7 @@ deployment host. Version files can be staged under the sibling `.deploy` folder
 while signing is blocked. Leave existing update manifests in place until all
 signature checks pass.
 
-## Current external blocker
+## Completed local repair
 
 The repository has `TAURI_SIGNING_PRIVATE_KEY`. The dedicated repair run
 [43478470136](https://github.com/zhuyingqin/Aris/actions/runs/43478470136)
@@ -60,17 +78,40 @@ was also rejected before any signing step started:
 
 > The job was not started because your account is locked due to a billing issue.
 
-GitHub cannot return the secret's plaintext through its API. The account billing
-restriction must be removed before a hosted runner can use this key. A GitHub
-membership subscription is not itself required for this repair.
+GitHub cannot return the secret's plaintext through its API. A subsequent search
+found a local backup of the original private key. The official Tauri 2.11.2 CLI
+signed the already published installer locally, so the hosted billing lock did
+not block the release repair. The private key was not exported from GitHub,
+logged, uploaded or committed.
 
 Local validation passed all nine script tests, including an official Tauri
 2.11.2 signature fixture and payload/comment/key rejection cases. The workflow
 passes actionlint. The prepare command downloaded the actual 0.4.88 release
 installer and verified its GitHub digest, build manifest, tag commit and tagged
-public key. Production signing and update-channel acceptance remain pending.
+public key. Production signatures were verified locally with Node Ed25519 and
+independently on the mirror host with Python cryptography, including rejection
+of a modified payload and verification of the minisign trusted comment.
 
-The installer, original BUILD-MANIFEST and SHA256SUMS are staged at
-`/opt/somniq-remote/nginx/.deploy/updater-repair-0.4.88`. All three file sizes and
-SHA-256 hashes were verified on the mirror host. The public update entry points
-remain unchanged: GitHub Latest is 0.4.86 and the mirror manifest is 0.4.84.
+The release has six assets: the unchanged installer, BUILD-MANIFEST and
+SHA256SUMS, plus `.exe.sig`, `latest.json` and `UPDATER-VERIFICATION.json`. The
+original provenance remains unchanged; its unsigned-build status records the
+initial build, while the additive verification report records the later repair.
+
+GitHub Latest is now 0.4.88. The mirror's public latest.json and both manifest
+aliases return 0.4.88, and its Windows installer alias points to the signed
+0.4.88 asset. The previous mirror manifest was backed up before atomic
+replacement. Version files are published at
+`/opt/somniq-remote/nginx/releases/v0.4.88`.
+
+The 0.4.86 app's tagged public key matches this signature's key, and its two
+configured update endpoints are the verified GitHub and China mirror URLs.
+The updater manifest lists Windows x64 only because no 0.4.88 macOS asset exists.
+
+The public mirror's complete 131,754,807-byte installer was downloaded over
+HTTPS and matched the original SHA-256. The downloaded bytes also passed
+signature verification; the public `.sig` matched GitHub's asset. The latest
+Windows download alias returned the expected file size and byte range.
+[The publication report](updater-repair-0.4.88.json) records asset digests and
+the public endpoint results. These checks cover metadata, file integrity and
+client-key compatibility; the installed application's update UI and installer
+execution were not exercised.

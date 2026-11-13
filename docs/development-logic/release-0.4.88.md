@@ -38,8 +38,12 @@ environment variables documented in the tool README; automatic TOC calculation
 also requires a Python runtime with LibreOffice UNO. The installer includes the
 adapters and reference data, not those engine executables.
 
-This Windows asset is a manual installer without an updater signature. No macOS
-asset is built by this Windows host. Desktop UI, Word/WPS, independent visual
+The November 13 [updater repair](updater-repair-0.4.88.md) signed the unchanged
+Windows installer with the original updater key and added a verified signature
+and latest.json. GitHub Latest and the China mirror now advertise 0.4.88 for
+Windows x64. The original build manifest records the initial unsigned build;
+the additive UPDATER-VERIFICATION.json records the later signature verification.
+No macOS asset is built by this Windows host. Desktop UI, Word/WPS, independent visual
 Reviewer and binary `.doc` are not established by these document tests. An input
 title glyph defect and a model explanation's inconsistent paragraph count remain
 recorded. Concurrent task-plan and plugin-continuation edits in the source
