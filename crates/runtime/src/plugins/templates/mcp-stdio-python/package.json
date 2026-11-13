@@ -1,0 +1,6 @@
+{
+  "name": "@local/research-tools",
+  "version": "0.1.0",
+  "description": "Project tools the agent can call through MCP.",
+  "dsh": { "manifestVersion": 1, "bundle": { "patch": "./cordis.patch.yml" } }
+}

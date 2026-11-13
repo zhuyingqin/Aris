@@ -1,0 +1,13 @@
+# Starts server.py as a stdio MCP server. Arguments starting with ./ resolve
+# inside the installed snapshot, not the draft directory; the server's working
+# directory is the project.
+- insert:
+    - id: mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        transport: stdio
+        serverName: example
+        command: __PYTHON__
+        args:
+          - ./server.py
+        toolCallTimeoutMs: 60000

@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.86"
+version = "0.4.88"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -30,6 +30,15 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Scheduled tasks: explicit IANA zones (chrono-tz), RFC 5545 recurrence (rrule,
+# which is built on chrono-tz and resolves DST gaps/folds the RFC way), and
+# five-field Vixie Cron with documented DST behaviour (croner). iana-time-zone
+# was already in the lock file through chrono's clock feature; it names the
+# system zone that legacy tasks, which predate explicit zones, are read in.
+chrono-tz = "0.10"
+rrule = "0.14"
+croner = { version = "4", default-features = false, features = ["chrono"] }
+iana-time-zone = "0.1"
 semver = "1"
 toml = "0.8"
 encoding_rs = "0.8"
@@ -103,6 +112,8 @@ windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Secur
 # Hosts the AppCtx-ported commands over loopback HTTP for browser-based
 # debugging. Never enabled by `cargo tauri build`.
 devserver = ["dep:axum"]
+# One-shot model calls for the memory-L1 evaluation harness (examples only).
+memory-eval = []
 
 [[bin]]
 name = "aris-desktop"
@@ -111,6 +122,14 @@ path = "src/main.rs"
 [[example]]
 name = "devserver"
 required-features = ["devserver"]
+
+[[example]]
+name = "memory_eval_bridge"
+required-features = ["memory-eval"]
+
+[[example]]
+name = "office_agent_acceptance"
+required-features = ["memory-eval"]
 
 [dev-dependencies]
 tempfile = "3.27"

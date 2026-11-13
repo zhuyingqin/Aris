@@ -129,11 +129,11 @@ describe("ModelWaitIndicator", () => {
     act(() => { vi.advanceTimersByTime(4_000); });
     expect(screen.getByText(/Waiting for the model/)).toBeTruthy();
     expect(screen.getByText("0:04")).toBeTruthy();
-    expect(screen.queryByText(/this is not a hang/)).toBeNull();
+    expect(screen.queryByText(/Deep reasoning may take a few minutes/)).toBeNull();
 
     act(() => { vi.advanceTimersByTime(147_000); });
     expect(screen.getByText("2:31")).toBeTruthy();
-    expect(screen.getByText(/this is not a hang/)).toBeTruthy();
+    expect(screen.getByText(/Deep reasoning may take a few minutes/)).toBeTruthy();
   });
 
   it("keeps the real elapsed time across an unmount, e.g. virtualized scrolling", () => {
@@ -154,7 +154,7 @@ describe("ModelWaitIndicator", () => {
     useStore.setState({ language: "cn" });
     renderTurn(streamingTurn([], Date.now()));
     act(() => { vi.advanceTimersByTime(5_000); });
-    expect(screen.getByText("等待模型响应 · 已")).toBeTruthy();
+    expect(screen.getByText("等待模型响应 ·")).toBeTruthy();
     expect(screen.getByText("0:05")).toBeTruthy();
   });
 

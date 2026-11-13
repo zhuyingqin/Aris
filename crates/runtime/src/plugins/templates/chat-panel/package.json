@@ -1,0 +1,6 @@
+{
+  "name": "@local/research-panel",
+  "version": "0.1.0",
+  "description": "A Chat sidebar panel for next steps and notes.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

@@ -72,10 +72,14 @@ describe("Typeset LaTeX editor theme", () => {
   });
 
   it("defines a complete light canvas and Light+ token palette", () => {
-    const lightRule = typesetCss.match(
-      /:root\[data-theme="light"\] \.typeset-editor-body \.code-editor\.typeset-latex-vscode\s*{([^}]*)}/s,
-    )?.[1];
-    expect(lightRule).toBeDefined();
+    // The token palette is shared with the visual editor through a grouped
+    // selector, so collect every rule whose selector list names the source canvas.
+    const selector = ':root[data-theme="light"] .typeset-editor-body .code-editor.typeset-latex-vscode';
+    const lightRule = [...typesetCss.matchAll(/([^{}]+){([^}]*)}/g)]
+      .filter(([, selectors]) => selectors.split(",").some((item) => item.trim() === selector))
+      .map(([, , body]) => body)
+      .join("\n");
+    expect(lightRule).not.toBe("");
     expect(lightRule).toContain("--typeset-code-bg: #ffffff");
     expect(lightRule).toContain("--typeset-code-fg: #1f1f1f");
     expect(lightRule).toContain("--typeset-code-gutter-bg: #f7f7f7");

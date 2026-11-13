@@ -1,5 +1,6 @@
 import Chat from "../chat/Chat";
 import { useStore } from "../store";
+import { TYPESET_EDITOR_COPY } from "./i18n";
 
 /**
  * Typeset's assistant is the same Chat surface used by the writing companion.
@@ -15,6 +16,7 @@ export interface TypesetAiPanelProps {
 
 export default function TypesetAiPanel({ visible = true, prepareEditorContext }: TypesetAiPanelProps = {}) {
   const tab = useStore((state) => state.tab);
+  const language = useStore((state) => state.language);
 
   if (tab !== "typeset") {
     return null;
@@ -24,7 +26,7 @@ export default function TypesetAiPanel({ visible = true, prepareEditorContext }:
     <div
       className="typeset-ai-panel typeset-ai-chat-host"
       role="region"
-      aria-label="AI assistant"
+      aria-label={TYPESET_EDITOR_COPY[language].workbench.aiTitle}
       aria-hidden={visible ? undefined : true}
       hidden={!visible}
       style={visible ? undefined : { display: "none" }}

@@ -93,6 +93,14 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
         "read_file",
         "read_docx",
         "edit_docx",
+        "export_docx",
+        "format_docx",
+        "render_docx",
+        "delete_docx_paragraphs",
+        "export_docx_pdf",
+        "edit_docx_structure",
+        "read_odt",
+        "remove_odt_highlight",
         "read_files",
         "glob_search",
         "grep_search",
@@ -138,17 +146,100 @@ fn desktop_like_catalog() -> Vec<ChatToolSpec> {
 #[test]
 fn word_requests_route_native_docx_tools_without_using_partial_keywords() {
     let specs = desktop_like_catalog();
-    for request in ["修改论文.docx 中这段正文", "编辑 Word 文档并保留公式", "开始修改doc准确的问题", "Review a WORD file"] {
+    for request in [
+        "修改论文.docx 中这段正文",
+        "编辑 Word 文档并保留公式",
+        "开始修改doc准确的问题",
+        "Review a WORD file",
+        "把文件夹中的文件按照公文格式全部重新整理",
+        "文档最终调整改为2页，文字内容不变",
+    ] {
         let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
-        for name in ["read_docx", "edit_docx"] {
+        for name in [
+            "read_docx",
+            "edit_docx",
+            "export_docx",
+            "format_docx",
+            "render_docx",
+            "delete_docx_paragraphs",
+            "export_docx_pdf",
+            "edit_docx_structure",
+        ] {
             assert!(plan.active_names.contains(name), "{request}: {plan:?}");
-            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+            if name != "edit_docx_structure" {
+                assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+            }
         }
         assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
     }
-    for request in ["Explain word embeddings", "Review the document routing code", "Check keyword matching"] {
+    for request in [
+        "删除材料.odt 中的所有高亮并保留格式",
+        "Remove highlighting from my ODT file",
+    ] {
         let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
-        assert!(!plan.active_names.contains("edit_docx"), "{request}: {plan:?}");
+        for name in ["read_odt", "remove_odt_highlight"] {
+            assert!(plan.active_names.contains(name), "{request}: {plan:?}");
+            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+        }
+    }
+    for request in [
+        "Explain word embeddings",
+        "Review the document routing code",
+        "Check keyword matching",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(
+            !plan.active_names.contains("edit_docx"),
+            "{request}: {plan:?}"
+        );
+    }
+}
+
+#[test]
+fn plugin_panel_requests_pin_the_panel_tool_but_panel_data_does_not() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("PluginManager"), routing_spec("PluginPanel")]);
+    for request in [
+        "把最新的实验结果更新到实验看板",
+        "Refresh the dashboard from results/",
+        "update every widget of the Experiment board panel with PluginPanel",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(
+            plan.pinned_names.contains("PluginPanel"),
+            "{request}: {plan:?}"
+        );
+    }
+    let plan = route_chat_tools("用面板数据做固定效应回归", &specs, ToolRoutingMode::Active);
+    assert!(!plan.active_names.contains("PluginPanel"), "{plan:?}");
+}
+
+#[test]
+fn plugin_requests_pin_the_plugin_manager_with_a_file_writer() {
+    let mut specs = desktop_like_catalog();
+    specs.push(routing_spec("PluginManager"));
+    for request in [
+        "做一个记录实验假设的侧栏面板插件",
+        "把 scripts/fetch_doi.py 包成工具",
+        "Build a SomniQ plugin with a sidebar panel",
+        "wrap this script as an MCP server",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        for name in ["PluginManager", "write_file"] {
+            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+        }
+        assert!(plan.profile.contains("plugins"), "{request}: {plan:?}");
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
+    }
+    for request in [
+        "修复论文第三节的公式",
+        "Summarize this paper's related work",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(
+            !plan.active_names.contains("PluginManager"),
+            "{request}: {plan:?}"
+        );
     }
 }
 
@@ -163,15 +254,25 @@ fn drawing_router_pins_api_for_gpt_requests_and_honors_explicit_webpage_requests
         "Create an illustration using GPT",
     ] {
         let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
-        assert!(plan.pinned_names.contains("SomniImage"), "{prompt}: {plan:?}");
+        assert!(
+            plan.pinned_names.contains("SomniImage"),
+            "{prompt}: {plan:?}"
+        );
         assert!(!plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
     }
-    for prompt in ["用 Oracle 网页生成图片", "Create an image with Image Assist"] {
+    for prompt in [
+        "用 Oracle 网页生成图片",
+        "Create an image with Image Assist",
+    ] {
         let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
         assert!(plan.pinned_names.contains("ChatGptWebImage"), "{prompt}");
         assert!(!plan.pinned_names.contains("SomniImage"), "{prompt}");
     }
-    let read = route_chat_tools("Analyze this attached image", &specs, ToolRoutingMode::Active);
+    let read = route_chat_tools(
+        "Analyze this attached image",
+        &specs,
+        ToolRoutingMode::Active,
+    );
     assert!(!read.pinned_names.contains("SomniImage"));
     specs.retain(|spec| spec.name != "SomniImage");
     let unavailable = route_chat_tools("使用API生成图", &specs, ToolRoutingMode::Active);
@@ -223,16 +324,23 @@ fn dynamic_tool_router_serves_a_multi_file_investigation() {
 
 #[test]
 fn collaboration_and_recovered_child_continuation_keep_all_six_actions_visible() {
-    let mut catalog=desktop_like_catalog();
+    let mut catalog = desktop_like_catalog();
     catalog.extend(crate::chat_tool_specs(tools::collaboration::tool_specs()));
-    for prompt in ["检查后端恢复与前端状态同步", "继续子任务 /root/backend，在原有子会话中续派", "Investigate two independent modules in parallel"] {
-        let plan=route_chat_tools(prompt,&catalog,ToolRoutingMode::Active);
+    for prompt in [
+        "检查后端恢复与前端状态同步",
+        "继续子任务 /root/backend，在原有子会话中续派",
+        "Investigate two independent modules in parallel",
+    ] {
+        let plan = route_chat_tools(prompt, &catalog, ToolRoutingMode::Active);
         for name in tools::collaboration::ACTIONS {
-            assert!(plan.active_names.contains(name),"{prompt}: missing {name}: {plan:?}");
+            assert!(
+                plan.active_names.contains(name),
+                "{prompt}: missing {name}: {plan:?}"
+            );
         }
-        assert!(plan.active_names.len()<=MAX_ROUTED_TOOLS);
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
     }
-    let simple=route_chat_tools("解释这个函数",&catalog,ToolRoutingMode::Active);
+    let simple = route_chat_tools("解释这个函数", &catalog, ToolRoutingMode::Active);
     assert!(!simple.active_names.contains("spawn_agent"));
 }
 
@@ -632,7 +740,10 @@ fn dynamic_tool_router_routes_llm_review_only_for_an_independent_review() {
         "run a cross-model review of the proof",
     ] {
         let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
-        assert!(plan.pinned_names.contains("LlmReview"), "{prompt}: {plan:?}");
+        assert!(
+            plan.pinned_names.contains("LlmReview"),
+            "{prompt}: {plan:?}"
+        );
         assert!(plan.profile.contains("review"), "{prompt}: {plan:?}");
     }
     for prompt in [
@@ -641,7 +752,10 @@ fn dynamic_tool_router_routes_llm_review_only_for_an_independent_review() {
         "preview the page",
     ] {
         let plan = route_chat_tools(prompt, &specs, ToolRoutingMode::Active);
-        assert!(!plan.active_names.contains("LlmReview"), "{prompt}: {plan:?}");
+        assert!(
+            !plan.active_names.contains("LlmReview"),
+            "{prompt}: {plan:?}"
+        );
     }
 }
 
@@ -1164,7 +1278,9 @@ fn llm_review_is_the_default_reviewer_backend() {
     assert!(section.contains("`LlmReview` is SomniQ's reviewer backend"));
     assert!(section.contains("reviewer the user configured in SomniQ settings"));
     assert!(section.contains("call `LlmReview` instead"));
-    assert!(section.contains("single-shot with no conversation continuation"));
+    assert!(section.contains("fresh, isolated Reviewer sub-agent for each call"));
+    assert!(section.contains("no caller-visible conversation continuation"));
+    assert!(section.contains("include the material inline when project tools are unavailable"));
 }
 
 #[test]
@@ -1305,7 +1421,10 @@ fn opencode_settings_route_by_endpoint_without_model_name_rules() {
         });
         let (_, _, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
         match config {
-            ChatExecutorConfig::OpenAiCompatible { send_routing_session_header, .. } => assert!(send_routing_session_header),
+            ChatExecutorConfig::OpenAiCompatible {
+                send_routing_session_header,
+                ..
+            } => assert!(send_routing_session_header),
             _ => panic!("expected OpenAI-compatible config"),
         }
     }
@@ -1313,28 +1432,34 @@ fn opencode_settings_route_by_endpoint_without_model_name_rules() {
 
 #[test]
 fn managed_gateway_propagates_session_without_reclassifying_models() {
-    for model in ["MiniMax-M3", "deepseek-v4.1-flash", "gpt-5.5", "unknown-alias"] {
-    let obj = json!({
-        "executor_provider": "openai",
-        "executor_model": model,
-        "executor_api_key": "sk-test",
-        "executor_base_url": "https://gateway.test/v1/",
-        "newapi_executor_base_url": "https://gateway.test/v1"
-    })
-    .as_object()
-    .cloned()
-    .expect("object");
+    for model in [
+        "MiniMax-M3",
+        "deepseek-v4.1-flash",
+        "gpt-5.5",
+        "unknown-alias",
+    ] {
+        let obj = json!({
+            "executor_provider": "openai",
+            "executor_model": model,
+            "executor_api_key": "sk-test",
+            "executor_base_url": "https://gateway.test/v1/",
+            "newapi_executor_base_url": "https://gateway.test/v1"
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
 
-    let (resolved_model, provider, config) = resolve_settings_executor_config(&obj).expect("config");
-    assert_eq!(resolved_model, model);
-    assert_eq!(provider, "openai");
-    match config {
-        ChatExecutorConfig::OpenAiCompatible {
-            send_routing_session_header,
-            ..
-        } => assert!(send_routing_session_header),
-        ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
-    }
+        let (resolved_model, provider, config) =
+            resolve_settings_executor_config(&obj).expect("config");
+        assert_eq!(resolved_model, model);
+        assert_eq!(provider, "openai");
+        match config {
+            ChatExecutorConfig::OpenAiCompatible {
+                send_routing_session_header,
+                ..
+            } => assert!(send_routing_session_header),
+            ChatExecutorConfig::Anthropic { .. } => panic!("expected OpenAI-compatible config"),
+        }
     }
 }
 
@@ -1345,9 +1470,16 @@ fn explicit_opencode_settings_identify_the_connection_without_model_rules() {
             "executor_provider": "opencode", "executor_model": model,
             "executor_api_key": "own-key", "executor_base_url": "https://fixed-channel.test/v1"
         });
-        let (_, provider, config) = resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
+        let (_, provider, config) =
+            resolve_settings_executor_config(obj.as_object().unwrap()).unwrap();
         assert_eq!(provider, "opencode");
-        assert!(matches!(config, ChatExecutorConfig::OpenAiCompatible { send_routing_session_header: true, .. }));
+        assert!(matches!(
+            config,
+            ChatExecutorConfig::OpenAiCompatible {
+                send_routing_session_header: true,
+                ..
+            }
+        ));
     }
     let missing_endpoint = json!({"executor_provider": "opencode", "executor_api_key": "own-key"});
     assert!(resolve_settings_executor_config(missing_endpoint.as_object().unwrap()).is_err());

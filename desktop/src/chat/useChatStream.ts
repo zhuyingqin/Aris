@@ -18,6 +18,7 @@ import {
   onChatToolResult,
 } from "../api/tauri";
 import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
+import type { PluginApprovalCard } from "../api/plugins";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
@@ -47,8 +48,8 @@ function formatTokenCount(tokens: number): string {
 
 /** Build the auto-compaction notice. When both the pre- and post-compaction
  * token counts are known (and the context actually shrank), annotate it with
- * how much was freed: " - 45.0k -> 12.0k tokens (-73%)". Falls back to the
- * bare message otherwise so callers without token data get a stable string. */
+ * how much was freed: " - 45.0k -> 12.0k tokens (-73%)". Otherwise report the
+ * post-compaction count when available, or just the summary without it. */
 function compactionNoticeMessage(
   removedMessageCount: number,
   before: number | null,
@@ -60,6 +61,9 @@ function compactionNoticeMessage(
   if (before != null && after != null && before > after) {
     const pct = Math.round((1 - after / before) * 100);
     return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
+  }
+  if (after != null) {
+    return `${base} Backend context is now ${formatTokenCount(after)} tokens.`;
   }
   return base;
 }
@@ -550,15 +554,21 @@ export function appendToolOutput(
 
 export function upsertToolCall(
   blocks: ChatBlock[],
-  tool: { id?: string; name: string; input: string; ready?: boolean },
+  tool: { id?: string; name: string; input: string; ready?: boolean; pluginApproval?: PluginApprovalCard },
 ): ChatBlock[] {
+  // Only the backend's waiting announcement carries these; a later streamed
+  // copy of the same call must not erase them.
+  const waiting = {
+    ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+    ...(tool.pluginApproval === undefined ? {} : { pluginApproval: tool.pluginApproval }),
+  };
   if (!tool.id) {
     return [...blocks, {
       kind: "tool",
       id: tool.id,
       name: tool.name,
       input: tool.input,
-      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+      ...waiting,
     }];
   }
   const index = blocks.findIndex((block) => (
@@ -572,7 +582,7 @@ export function upsertToolCall(
       id: tool.id,
       name: tool.name,
       input: tool.input,
-      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+      ...waiting,
     }];
   }
   const copy = blocks.slice();
@@ -581,7 +591,7 @@ export function upsertToolCall(
     copy[index] = {
       ...existing,
       input: tool.input,
-      ...(tool.ready === undefined ? {} : { ready: tool.ready }),
+      ...waiting,
     };
   }
   return copy;

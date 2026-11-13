@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Project tasks: list, board, calendar and timeline views of one task list.
+  The same tasks show in the Chat's project summary (glance.html), and the
+  agent reads and writes them with PluginPanel (panel "tasks", widget "tasks").
+  The task model and copy live in model.mjs; this page's code in app.mjs.
+-->
+<link rel="stylesheet" href="todo.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="rail">
+    <div class="brand">
+      <span class="brand-ring" id="ring"></span>
+      <div><h1 id="title"></h1><p id="summary"></p></div>
+    </div>
+    <nav class="views" id="views" aria-label="Views"></nav>
+    <p class="rail-label" id="filterLabel"></p>
+    <nav class="filters" id="filters"></nav>
+    <p class="rail-label" id="tagLabel"></p>
+    <nav class="tags" id="tags"></nav>
+    <div class="rail-foot"><button type="button" class="plan" id="plan"></button></div>
+  </aside>
+  <main class="main">
+    <header class="top">
+      <form class="quick" id="quick">
+        <span class="quick-mark" aria-hidden="true"></span>
+        <input id="quickInput" autocomplete="off" maxlength="300">
+        <kbd>↵</kbd>
+      </form>
+      <p class="hint" id="hint"></p>
+    </header>
+    <section class="content" id="content"></section>
+  </main>
+  <aside class="drawer" id="drawer" hidden></aside>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

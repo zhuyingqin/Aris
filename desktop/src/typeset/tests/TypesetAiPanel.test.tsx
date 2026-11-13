@@ -17,7 +17,7 @@ vi.mock("../../chat/Chat", () => ({
 
 describe("TypesetAiPanel", () => {
   beforeEach(() => {
-    useStore.setState({ tab: "typeset" });
+    useStore.setState({ tab: "typeset", language: "en" });
   });
 
   afterEach(() => {

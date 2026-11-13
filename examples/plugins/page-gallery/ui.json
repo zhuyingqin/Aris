@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "timeline",
+      "slot": "nav.page",
+      "title": { "en": "Research roadmap", "cn": "研究路线图" },
+      "icon": "clock",
+      "order": 10,
+      "scope": "project",
+      "page": "./timeline/index.html",
+      "widgets": [{ "id": "milestones", "type": "json", "title": { "en": "Milestones", "cn": "里程碑" } }]
+    },
+    {
+      "id": "canvas",
+      "slot": "nav.page",
+      "title": { "en": "Idea canvas", "cn": "想法画布" },
+      "icon": "graph",
+      "order": 20,
+      "scope": "project",
+      "page": "./canvas/index.html",
+      "widgets": [{ "id": "board", "type": "json", "title": { "en": "Notes and links", "cn": "便签与连线" } }]
+    },
+    {
+      "id": "cockpit",
+      "slot": "nav.page",
+      "title": { "en": "Experiment cockpit", "cn": "实验驾驶舱" },
+      "icon": "lineChart",
+      "order": 30,
+      "scope": "project",
+      "page": "./cockpit/index.html",
+      "widgets": [{ "id": "runs", "type": "json", "title": { "en": "Runs", "cn": "实验记录" } }]
+    }
+  ]
+}

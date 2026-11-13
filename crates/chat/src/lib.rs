@@ -196,7 +196,7 @@ fn language_preference_section(language: &str) -> String {
 
 #[must_use]
 fn llm_review_override_section() -> String {
-    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. `LlmReview` is single-shot with no conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
+    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. Desktop Chat prefers a fresh, isolated Reviewer sub-agent for each call, with read-only project file, search and listing tools. It is separate from the Chat's automatic Reviewer and has no caller-visible conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Include project-relative evidence paths, review questions and the requested output format. Web reviewers, explicit oneshot mode and hosts without a Chat agent tree use a single request; include the material inline when project tools are unavailable. Never replace independent review with your own judgement after a review failure. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
         .to_string()
 }
 
@@ -812,7 +812,24 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     let terms = lowered
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .collect::<Vec<_>>();
+    if terms.contains(&"odt") {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "ODT document intent",
+            required: resolve_named(catalog, &["read_odt", "remove_odt_highlight"]),
+            optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
     let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))
+        || contains_any(
+            lowered,
+            &["公文格式", "word排版", "word 排版", "文档格式", "文档排版",
+              "重复表头", "跨页表头", "自动目录", "接受修订", "内容控件", "隐藏作者",
+              "文档脱敏", "封面页码", "封面不编号", "正文从1", "正文从 1",
+              "报价单", "报销单", "会议纪要", "合同价款"],
+        )
+        || (lowered.contains("文档")
+            && contains_any(lowered, &["字体", "行距", "段落", "两页", "2页"]))
         || (terms.contains(&"word")
             && contains_any(
                 lowered,
@@ -826,7 +843,19 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         groups.push(ToolGroup {
             profile: "documents",
             reason: "Word document intent",
-            required: resolve_named(catalog, &["read_docx", "edit_docx"]),
+            required: resolve_named(
+                catalog,
+                &[
+                    "read_docx",
+                    "edit_docx",
+                    "export_docx",
+                    "format_docx",
+                    "render_docx",
+                    "delete_docx_paragraphs",
+                    "export_docx_pdf",
+                    "edit_docx_structure",
+                ],
+            ),
             optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
         });
     }
@@ -835,10 +864,21 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         &["draw", "paint", "生成图", "绘图", "画图", "画一", "画个"],
     ) || (contains_any(
         lowered,
-        &["image", "illustration", "picture", "图片", "图像", "插画", "的图", "张图"],
+        &[
+            "image",
+            "illustration",
+            "picture",
+            "图片",
+            "图像",
+            "插画",
+            "的图",
+            "张图",
+        ],
     ) && contains_any(
         lowered,
-        &["generate", "create", "edit", "生成", "画", "绘", "修改", "编辑"],
+        &[
+            "generate", "create", "edit", "生成", "画", "绘", "修改", "编辑",
+        ],
     ));
     if drawing_intent {
         // Prefer the configured API before generic file creation/media extras.
@@ -854,6 +894,53 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             reason: "image intent with configured drawing tool",
             required: preferred,
             optional: resolve_named(catalog, &["ReadMediaFile"]),
+        });
+    }
+    // Writing a SomniQ plugin is preview-driven: without `PluginManager` the
+    // model can write a package but never learn whether it would load.
+    if contains_any(
+        lowered,
+        &[
+            "plugin",
+            "插件",
+            "sidebar panel",
+            "侧栏面板",
+            "mcp tool",
+            "mcp server",
+            "mcp 工具",
+            "包成工具",
+            "包装成工具",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugins",
+            reason: "plugin authoring intent",
+            required: resolve_named(catalog, &["PluginManager", "write_file"]),
+            optional: resolve_named(catalog, &["read_file", "edit_file", "PluginPanel"]),
+        });
+    }
+    // A plugin panel shows what the agent writes to it; its buttons and forms
+    // send prompts that name the tool. ("面板" alone is also panel data.)
+    if contains_any(
+        lowered,
+        &[
+            "pluginpanel",
+            "sidebar panel",
+            "plugin panel",
+            "dashboard",
+            "侧栏面板",
+            "插件面板",
+            "看板",
+            "更新面板",
+            "刷新面板",
+            "面板里",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugin-panels",
+            reason: "plugin panel data intent",
+            required: resolve_named(catalog, &["PluginPanel"]),
+            optional: vec![],
         });
     }
     if contains_any(
@@ -1212,7 +1299,22 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
     }
     if contains_any(
         lowered,
-        &["agent", "delegate", "parallel", "subtask", "collaboration", "智能体", "委派", "并行", "子任务", "续派", "协作", "跨模块", "后端恢复", "前端状态同步"],
+        &[
+            "agent",
+            "delegate",
+            "parallel",
+            "subtask",
+            "collaboration",
+            "智能体",
+            "委派",
+            "并行",
+            "子任务",
+            "续派",
+            "协作",
+            "跨模块",
+            "后端恢复",
+            "前端状态同步",
+        ],
     ) {
         groups.push(ToolGroup {
             profile: "delegation",
@@ -1222,7 +1324,12 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
         });
     }
     if contains_any(lowered, &["skill", "技能"]) {
-        groups.push(ToolGroup {profile:"skills",reason:"skill intent",required:Vec::new(),optional:resolve_named(catalog,&["Skill"])});
+        groups.push(ToolGroup {
+            profile: "skills",
+            reason: "skill intent",
+            required: Vec::new(),
+            optional: resolve_named(catalog, &["Skill"]),
+        });
     }
     if contains_any(
         lowered,
@@ -2372,12 +2479,14 @@ pub fn resolve_settings_executor_config(
                 )
             })?;
             let base_url = if provider == "opencode" {
-                get("executor_base_url").ok_or("Set the endpoint of this fixed OpenCode connection")?
+                get("executor_base_url")
+                    .ok_or("Set the endpoint of this fixed OpenCode connection")?
             } else {
                 get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
             };
             let send_routing_session_header = api::connection_uses_routing_session_header(
-                &provider, &base_url,
+                &provider,
+                &base_url,
                 obj.get("newapi_executor_base_url").and_then(Value::as_str),
             );
             // Absent/unknown → `Auto`, i.e. the historical behaviour. A

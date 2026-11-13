@@ -853,6 +853,15 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
         }
     }
 
+    // Approved project plugins come last: they add skills and never replace
+    // a local, user, bundled or compatibility skill of the same name.
+    for root in crate::plugins::PluginStore::for_execution(cwd)
+        .active_skill_roots()
+        .unwrap_or_default()
+    {
+        collect_skill_root("Plugin", &root, &mut seen, &mut entries);
+    }
+
     if entries.is_empty() {
         return None;
     }
@@ -944,7 +953,8 @@ fn skill_scope_rank(scope: &str) -> usize {
         "User" => 1,
         "Bundled" => 2,
         "Legacy" => 3,
-        _ => 4,
+        "Plugin" => 4,
+        _ => 5,
     }
 }
 

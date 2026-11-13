@@ -388,6 +388,12 @@ interface AppState {
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
 
+  /** One-shot request for a new chat whose composer starts with this draft.
+   * Nothing is sent: the user reviews and sends it (e.g. Plugins → "Ask AI
+   * to create a plugin"). */
+  pendingNewChatDraft: string | null;
+  setPendingNewChatDraft: (value: string | null) => void;
+
   /** Attachments queued for the composer from outside Chat — currently the
    * global-hotkey region screenshot, which can land while any tab is open. */
   pendingChatAttachments: ChatAttachment[];
@@ -640,6 +646,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),
+  pendingNewChatDraft: null,
+  setPendingNewChatDraft: (value) => set({ pendingNewChatDraft: value }),
 
   pendingChatAttachments: [],
   addPendingChatAttachment: (attachment) =>

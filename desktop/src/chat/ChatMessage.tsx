@@ -1,6 +1,8 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn, NoticeRetryState } from "../types";
 import { chatChangeRevert } from "../api/tauri";
+import { chatPluginApprovalRespond, type PluginApprovalCard } from "../api/plugins";
+import PluginUpgradeReview from "../extensions/PluginUpgradeReview";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import ChatImageReference from "./ChatImageReference";
@@ -196,6 +198,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
   const previews = useMemo(() => imagePreviews ?? { paths: imagePathsFromTool(block, change), references: [] }, [block, change, imagePreviews]);
   const openChatFile = useOpenChatFile();
   const language = useStore((state) => state.language);
+  const toolCopy = CHAT_COPY[language];
   const running = block.output === undefined;
   const evidenceCount = evidenceSearch?.items.length ?? 0;
   const status = somniImage
@@ -253,12 +256,12 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
               ? `Completed · ${webSearch.coverage.unique}`
               : `Partial · ${webSearch.coverage.unique}`
         : running
-          ? "Running"
+          ? toolCopy.toolRunning
           : refusal
             ? language === "cn"
               ? `已拒绝 · ${refusal.code}`
               : `Refused · ${refusal.code}`
-            : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
+            : block.isError ? toolCopy.toolFailed : change ? toolCopy.toolModified : toolCopy.toolSucceeded;
   // A refusal outranks the generic error styling: the call never ran, and the
   // amber state says "precondition unmet, reissue it" where red would say
   // "this broke". It stays ahead of `isError` because refusals now carry it.
@@ -284,6 +287,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
         role="button"
         tabIndex={running ? -1 : 0}
         aria-disabled={running}
+        aria-expanded={open}
         onClick={toggle}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -695,23 +699,26 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
  * into one card with a `current/total` progress counter. Expanding it reveals
  * the individual calls, each still independently expandable.
  */
-function ToolGroup({ blocks, imagePreviews }: { blocks: Extract<ChatBlock, { kind: "tool" }>[]; imagePreviews: ToolImagePreviews[] }) {
-  const [open, setOpen] = useDisclosure(blocks[0]?.id && `tool-group:${blocks[0].id}`);
+function ToolGroup({ blocks, imagePreviews, compact = false }: { blocks: Extract<ChatBlock, { kind: "tool" }>[]; imagePreviews: ToolImagePreviews[]; compact?: boolean }) {
+  const [open, setOpen] = useDisclosure(blocks[0]?.id && `${compact ? "inspection" : "tool-group"}:${blocks[0].id}`);
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const total = blocks.length;
   const done = blocks.filter((b) => b.output !== undefined).length;
   const running = done < total;
   const anyError = blocks.some((b) => b.isError);
-  const status = running ? "Running" : anyError ? "Failed" : "Succeeded";
+  const status = running ? copy.toolRunning : anyError ? copy.toolFailed : copy.toolSucceeded;
   const className = running ? "tool-running" : anyError ? "tool-error" : "tool-done";
   // While running, point at the call in flight (done + 1); when finished, total.
   const current = running ? Math.min(done + 1, total) : total;
   const toggle = () => setOpen((value) => !value);
   return (
-    <div className={`chat-tool chat-tool-group ${className}`}>
+    <div className={`chat-tool chat-tool-group ${className}${compact ? " chat-tool-activity" : ""}`}>
       <div
         className="chat-tool-header"
         role="button"
         tabIndex={0}
+        aria-expanded={open}
         onClick={toggle}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -721,11 +728,20 @@ function ToolGroup({ blocks, imagePreviews }: { blocks: Extract<ChatBlock, { kin
         }}
       >
         <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : anyError ? <SvgIcon name="error" size={11} /> : <SvgIcon name="check" size={11} />}</span>
-        <span className="tool-status-label">{status}</span>
-        <span className="tool-name">{blocks[0].name}</span>
-        <span className="tool-group-count" title={`${current} / ${total}`}>
-          {current}/{total}
-        </span>
+        {compact ? (
+          <>
+            <span className="tool-activity-summary">{copy.inspectedFiles(total)}</span>
+            <span className="tool-activity-hint">{copy.inspectionDetails}</span>
+          </>
+        ) : (
+          <>
+            <span className="tool-status-label">{status}</span>
+            <span className="tool-name">{blocks[0].name}</span>
+            <span className="tool-group-count" title={`${current} / ${total}`}>
+              {current}/{total}
+            </span>
+          </>
+        )}
         <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>
       </div>
       {/* The first preview must remain visible even when the tool group is collapsed. */}
@@ -978,6 +994,222 @@ function QuestionCall({
   );
 }
 
+const PLUGIN_APPROVAL_COPY = {
+  cn: {
+    title: { enable: "启用插件", upgrade: "升级插件", remove: "移除插件" },
+    approve: { enable: "批准并启用", upgrade: "批准升级", remove: "移除" },
+    reject: { enable: "拒绝", upgrade: "拒绝", remove: "保留" },
+    waiting: "等待你的决定",
+    preparing: "准备中",
+    stale: "这个请求已不再等待你的决定。",
+    sending: "提交中…",
+    approved: { enable: "已批准，下一回合起可用", upgrade: "已批准，下一回合起用新版本", remove: "已移除，下一回合起不再运行" },
+    rejected: { enable: "你拒绝了启用", upgrade: "你拒绝了升级，旧版本照常运行", remove: "你选择了保留" },
+    failed: "没有完成",
+    skills: "Skill",
+    panels: "侧栏面板",
+    ownPage: "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
+    commands: "会在这台电脑上运行的命令",
+    envKeys: "环境变量（只列名称）",
+    upgradeFrom: (version: string) => `从 ${version} 升级`,
+    executionUnchanged: "运行的命令和环境变量都没有变化",
+    added: "新增",
+    removedItems: "去掉",
+    digest: "摘要",
+    nothing: "这个插件不提供 Skill、面板或命令。",
+    submitFailed: "没有提交成功，请重试。",
+  },
+  en: {
+    title: { enable: "Enable plugin", upgrade: "Upgrade plugin", remove: "Remove plugin" },
+    approve: { enable: "Approve and enable", upgrade: "Approve upgrade", remove: "Remove" },
+    reject: { enable: "Decline", upgrade: "Decline", remove: "Keep" },
+    waiting: "Waiting for your decision",
+    preparing: "Preparing",
+    stale: "This request is no longer waiting for your decision.",
+    sending: "Sending…",
+    approved: { enable: "Approved; available from the next turn", upgrade: "Approved; the new version runs from the next turn", remove: "Removed; it stops from the next turn" },
+    rejected: { enable: "You declined enabling it", upgrade: "You declined; the current version keeps running", remove: "You kept it" },
+    failed: "Not completed",
+    skills: "Skills",
+    panels: "Sidebar panels",
+    ownPage: " (own page: runs the package's page code, sandboxed, no network)",
+    commands: "Commands this computer will run",
+    envKeys: "Environment variables (names only)",
+    upgradeFrom: (version: string) => `Upgrade from ${version}`,
+    executionUnchanged: "No command or environment variable changes",
+    added: "Added",
+    removedItems: "Removed",
+    digest: "Digest",
+    nothing: "This plugin contributes no skills, panels or commands.",
+    submitFailed: "That did not go through. Please try again.",
+  },
+} as const;
+
+/** The decision a finished `PluginManager` call reports, from its JSON result. */
+function pluginApprovalApplication(output: string | undefined): string | null {
+  if (!output) return null;
+  try {
+    const value = JSON.parse(output) as { application?: unknown };
+    return typeof value.application === "string" ? value.application : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A `PluginManager` call waiting on the user: the package exactly as the
+ * backend will apply it (commands, environment key names, the diff on an
+ * upgrade) and the only buttons that can let it run. The click goes straight
+ * to `chat_plugin_approval_respond`, which accepts this window only and only
+ * for the digest shown here.
+ */
+function PluginApprovalCall({
+  block,
+  active,
+}: {
+  block: ChatToolBlock & { pluginApproval: PluginApprovalCard };
+  active: boolean;
+}) {
+  const language = useStore((state) => state.language);
+  const projectPath = useStore((state) => state.currentProject?.path);
+  const copy = PLUGIN_APPROVAL_COPY[language === "cn" ? "cn" : "en"];
+  const card = block.pluginApproval;
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const submittingRef = useRef(false);
+
+  const resolved = block.output !== undefined;
+  const waitingForBackend = !resolved && block.ready !== true;
+  const interactive = !resolved && active && !waitingForBackend && Boolean(block.id);
+  const locked = !interactive || submitting;
+  const application = resolved && !block.isError ? pluginApprovalApplication(block.output) : null;
+  const approved = application === "next-turn";
+  const respond = async (approve: boolean) => {
+    if (locked || submittingRef.current || !block.id) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    setSubmitError("");
+    try {
+      await chatPluginApprovalRespond(block.id, card.digest, approve);
+    } catch (error) {
+      // An approval that could not be applied also ends the tool call, which
+      // then shows the reason; a rejected answer leaves the card open.
+      submittingRef.current = false;
+      setSubmitting(false);
+      setSubmitError(error ? String(error) : copy.submitFailed);
+    }
+  };
+
+  const statusClass = approved ? "tool-done" : !resolved && (interactive || waitingForBackend) ? "tool-running" : resolved && application === "rejected" ? "tool-done" : "tool-error";
+  const statusIcon = approved || application === "rejected"
+    ? <SvgIcon name="check" size={11} />
+    : !resolved && (interactive || waitingForBackend)
+      ? <SvgIcon name="pending" size={11} />
+      : <SvgIcon name="warning" size={11} />;
+  const statusLabel = resolved
+    ? approved
+      ? copy.approved[card.kind]
+      : application === "rejected"
+        ? copy.rejected[card.kind]
+        : copy.failed
+    : interactive
+      ? copy.waiting
+      : waitingForBackend
+        ? copy.preparing
+        : copy.failed;
+  const { skills, uiPanels, mcpServers } = card.capabilities;
+  const diff = card.kind === "upgrade" ? card.diff : null;
+  const listChange = (label: string, change: { added: string[]; removed: string[] } | undefined) =>
+    change && (change.added.length > 0 || change.removed.length > 0) ? (
+      <div className="chat-plugin-approval-change">
+        <span className="chat-plugin-approval-label">{label}</span>
+        {change.added.map((item) => <code key={`+${item}`}>+ {item}</code>)}
+        {change.removed.map((item) => <code key={`-${item}`}>− {item}</code>)}
+      </div>
+    ) : null;
+
+  return (
+    <div className={`chat-tool chat-plugin-approval-card ${statusClass}`} data-kind={card.kind}>
+      <div className="chat-tool-header">
+        <span className="tool-status-icon">{statusIcon}</span>
+        <span className="tool-status-label">{statusLabel}</span>
+        <span className="tool-name">{copy.title[card.kind]}</span>
+      </div>
+      <div className="chat-plugin-approval-body">
+        <p className="chat-plugin-approval-name">
+          <strong>{card.name}</strong> <span>{card.version}</span>
+          {card.kind === "upgrade" && card.currentVersion && (
+            <span className="chat-plugin-approval-muted"> · {copy.upgradeFrom(card.currentVersion)}</span>
+          )}
+        </p>
+        {card.description && <p className="chat-plugin-approval-muted">{card.description}</p>}
+        {diff ? (
+          card.executionUnchanged ? (
+            <p className="chat-plugin-approval-muted">{copy.executionUnchanged}</p>
+          ) : (
+            <>
+              {listChange(copy.commands, diff.commands)}
+              {listChange(copy.envKeys, diff.envKeys)}
+            </>
+          )
+        ) : null}
+        {diff ? (
+          <>
+            {listChange(copy.skills, diff.skills)}
+            {listChange(copy.panels, diff.uiPanels)}
+          </>
+        ) : card.kind !== "remove" && (
+          skills.length === 0 && uiPanels.length === 0 && mcpServers.length === 0 ? (
+            <p className="chat-plugin-approval-muted">{copy.nothing}</p>
+          ) : (
+            <dl className="chat-plugin-approval-capabilities">
+              {skills.length > 0 && <><dt>{copy.skills}</dt><dd>{skills.join(", ")}</dd></>}
+              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => (typeof panel.title === "string" ? panel.title : panel.title[language]) + (panel.page ? copy.ownPage : "")).join(", ")}</dd></>}
+              {mcpServers.length > 0 && (
+                <>
+                  <dt>{copy.commands}</dt>
+                  <dd>{mcpServers.map((server) => <code key={server.name}>{[server.command, ...server.args].join(" ")}</code>)}</dd>
+                </>
+              )}
+              {mcpServers.some((server) => server.envKeys.length > 0) && (
+                <>
+                  <dt>{copy.envKeys}</dt>
+                  <dd>{mcpServers.flatMap((server) => server.envKeys).join(", ")}</dd>
+                </>
+              )}
+            </dl>
+          )
+        )}
+        {/* Try the new pages and read every changed file while the decision is open. */}
+        {card.kind === "upgrade" && !resolved && projectPath && (
+          <PluginUpgradeReview card={card} projectPath={projectPath} language={language === "cn" ? "cn" : "en"} />
+        )}
+        <p className="chat-plugin-approval-muted chat-plugin-approval-digest" title={card.digest}>
+          {copy.digest} {card.digest.slice(0, 19)}
+        </p>
+        {resolved ? (
+          block.isError && block.output ? <p className="chat-question-stale">{block.output}</p> : null
+        ) : interactive ? (
+          <div className="chat-permission-actions chat-plugin-approval-actions">
+            <button type="button" className="is-primary" disabled={locked} onClick={() => void respond(true)}>
+              {submitting ? copy.sending : copy.approve[card.kind]}
+            </button>
+            <button type="button" disabled={locked} onClick={() => void respond(false)}>
+              {copy.reject[card.kind]}
+            </button>
+          </div>
+        ) : (
+          <p className="chat-question-stale">{waitingForBackend ? copy.preparing : copy.stale}</p>
+        )}
+        {submitError && <p className="chat-question-stale">{submitError}</p>}
+      </div>
+    </div>
+  );
+}
+
+const hasPluginApproval = (block: ChatBlock): block is ChatToolBlock & { pluginApproval: PluginApprovalCard } =>
+  block.kind === "tool" && block.name === "PluginManager" && block.pluginApproval !== undefined;
+
 interface TurnImagePreviewPlan {
   tools: Map<ChatToolBlock, ToolImagePreviews>;
   markdown: Map<number, ImagePreviewScope>;
@@ -1078,6 +1310,9 @@ function renderSingleBlock(
   }
   // TodoWrite plans are surfaced by the floating workflow box, not inline.
   if (block.kind === "tool" && block.name === "TodoWrite") return null;
+  if (hasPluginApproval(block)) {
+    return <PluginApprovalCall key={block.id ?? index} block={block} active={Boolean(turn.streaming)} />;
+  }
   if (block.kind === "tool" && block.name === "AskUserQuestion") {
     return (
       <QuestionCall
@@ -1138,12 +1373,15 @@ function renderAssistantTextRun(
  * Renders a turn's blocks, collapsing runs of ≥2 consecutive calls to the same
  * tool into a single {@link ToolGroup}. Other blocks render individually.
  */
+const INSPECTION_TOOLS = new Set(["read_file", "grep_search", "glob_search", "list_dir"]);
+
 function renderBlocks(
   turn: ChatTurn,
   imagePreviews: TurnImagePreviewPlan,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>,
   onOpenIndependentReview: () => void,
+  compactTools: boolean,
 ) {
   const blocks = turn.blocks;
   const evidenceSources = blocks
@@ -1163,6 +1401,25 @@ function renderBlocks(
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    // Keep writes, errors, pending calls and image output on their own surface.
+    // Only routine successful inspection calls share the quieter disclosure.
+    if (compactTools && block.kind === "tool" && INSPECTION_TOOLS.has(block.name)) {
+      const canCompact = (candidate: ChatBlock): candidate is ChatToolBlock => {
+        if (candidate.kind !== "tool" || !INSPECTION_TOOLS.has(candidate.name)
+          || candidate.output === undefined || candidate.isError || guardRefusalFromTool(candidate)) return false;
+        const previews = imagePreviews.tools.get(candidate);
+        return !previews?.paths.length && !previews?.references.length;
+      };
+      let j = i;
+      while (j < blocks.length && canCompact(blocks[j])) j += 1;
+      if (j - i > 1) {
+        const run = blocks.slice(i, j) as ChatToolBlock[];
+        out.push(<ToolGroup key={block.id ?? `inspection-${i}`} blocks={run} compact
+          imagePreviews={run.map(() => NO_TOOL_IMAGE_PREVIEWS)} />);
+        i = j;
+        continue;
+      }
+    }
     if (block.kind === "tool" && isAgentSpawn(block)) {
       let j = i + 1;
       while (j < blocks.length && isAgentSpawn(blocks[j])) j += 1;
@@ -1192,6 +1449,8 @@ function renderBlocks(
     // AskUserQuestion is interactive and rendered individually, never collapsed.
     if (
       block.kind === "tool"
+      && !(compactTools && INSPECTION_TOOLS.has(block.name))
+      && !hasPluginApproval(block)
       && block.name !== "TodoWrite"
       && block.name !== "AskUserQuestion"
       && block.name !== "ProjectEvidenceSearch"
@@ -1200,7 +1459,7 @@ function renderBlocks(
       let j = i + 1;
       while (j < blocks.length) {
         const next = blocks[j];
-        if (next.kind !== "tool" || next.name !== block.name) break;
+        if (next.kind !== "tool" || next.name !== block.name || hasPluginApproval(next)) break;
         j += 1;
       }
       if (j - i > 1) {
@@ -1281,6 +1540,7 @@ function ChatMessage({
   const projectPath = useStore((state) => state.currentProject?.path ?? null);
   const imagePreviews = useMemo(() => imagePreviewsForTurn(turn, projectPath), [turn.blocks, turn.role, projectPath]);
   const copy = CHAT_COPY[language];
+  const compactTools = useStore((state) => state.tab === "typeset");
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   const blockNodes = renderBlocks(
@@ -1289,7 +1549,17 @@ function ChatMessage({
     onPermissionRespond,
     onQuestionRespond,
     onOpenIndependentReview,
+    compactTools,
   );
+  // The app, not the user, started this turn: show it as a marker.
+  if (turn.role === "user" && turn.origin) {
+    return (
+      <article className="chat-turn chat-system-marker" role="note" data-origin={turn.origin}>
+        <SvgIcon name="sparkle" size={13} />
+        <span>{text}</span>
+      </article>
+    );
+  }
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (

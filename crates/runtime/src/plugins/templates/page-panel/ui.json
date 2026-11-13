@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "focus-board",
+      "slot": "nav.page",
+      "title": { "en": "Focus board", "cn": "专注看板" },
+      "icon": "collection",
+      "order": 10,
+      "scope": "project",
+      "page": "./page.html",
+      "widgets": [
+        { "id": "cards", "type": "json", "title": { "en": "Board cards", "cn": "看板卡片" } }
+      ]
+    }
+  ]
+}

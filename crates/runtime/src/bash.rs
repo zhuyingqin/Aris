@@ -515,7 +515,11 @@ fn set_test_foreground_shell_timeout_ms(timeout_ms: u64) {
 ///
 /// A value the caller set explicitly always wins: a command that opts into a
 /// legacy encoding on purpose must keep it.
-fn apply_windows_utf8_env(prepared: &mut Command) {
+///
+/// Every tool that can start Python on Windows needs this, not only bash:
+/// the PowerShell and REPL tools hit the same `'gbk' codec` failures until
+/// they applied it too.
+pub fn apply_windows_utf8_env(prepared: &mut Command) {
     for (key, value) in [("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")] {
         if env::var_os(key).is_none() {
             prepared.env(key, value);

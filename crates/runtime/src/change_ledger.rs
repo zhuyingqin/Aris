@@ -14,7 +14,7 @@ const CHANGE_LEDGER_DIR_NAME: &str = "changes";
 const LEDGER_FILE_NAME: &str = "ledger.jsonl";
 const BLOBS_DIR_NAME: &str = "blobs";
 const DEFAULT_SESSION_ID: &str = "local";
-const MAX_REVERT_BLOB_BYTES: usize = 2_000_000;
+pub(crate) const MAX_REVERT_BLOB_BYTES: usize = 2_000_000;
 const MAX_LEDGER_PATCH_LINES: usize = 400;
 const MAX_LEDGER_PATCH_LINE_CHARS: usize = 1_000;
 const MAX_LEDGER_DIFF_CHARS: usize = 64_000;
@@ -229,16 +229,29 @@ pub fn record_binary_file_change(
     unified_diff: String,
     reverts: Option<String>,
 ) -> io::Result<Option<FileChangeRecord>> {
+    record_binary_file_write(context, path, Some(before), Some(after), unified_diff, reverts)
+}
+
+pub(crate) fn record_binary_file_write(
+    context: &FileMutationContext,
+    path: &Path,
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+    unified_diff: String,
+    reverts: Option<String>,
+) -> io::Result<Option<FileChangeRecord>> {
     record_file_change_bytes(
         context,
         path,
         if reverts.is_some() {
             FileChangeOperation::Revert
+        } else if before.is_none() {
+            FileChangeOperation::Create
         } else {
             FileChangeOperation::Update
         },
-        Some(before),
-        Some(after),
+        before,
+        after,
         false,
         Vec::new(),
         compact_ledger_diff(&unified_diff),
@@ -813,8 +826,10 @@ fn revert_binary_change(
     context: &FileMutationContext,
 ) -> io::Result<FileChangeRevertOutput> {
     let path = PathBuf::from(&record.canonical_path);
-    let before = load_snapshot_bytes(ledger_root, &record.session_id, &record.before)?
-        .ok_or_else(|| io::Error::other("binary pre-change snapshot is missing"))?;
+    let before = load_snapshot_bytes(ledger_root, &record.session_id, &record.before)?;
+    if record.before.exists && before.is_none() {
+        return Err(io::Error::other("binary pre-change snapshot is missing"));
+    }
     let mut revert_context = context.clone();
     revert_context.session_id = Some(record.session_id.clone());
     let application = crate::atomic_file::with_path_lock(&path, || {
@@ -834,7 +849,10 @@ fn revert_binary_change(
                 "current file hash {actual} does not match recorded after hash {expected}"
             )));
         }
-        crate::atomic_file::write_replace_unlocked(&path, &before)?;
+        match &before {
+            Some(bytes) => crate::atomic_file::write_replace_unlocked(&path, bytes)?,
+            None => fs::remove_file(&path)?,
+        }
         Ok::<_, io::Error>(BinaryRevertApplication::Applied(current))
     })?;
     let current = match application {
@@ -850,15 +868,29 @@ fn revert_binary_change(
         }
         BinaryRevertApplication::Applied(current) => current,
     };
-    let revert = record_binary_file_change(
+    let revert = record_binary_file_write(
         &revert_context,
         &path,
-        &current,
-        &before,
+        Some(&current),
+        before.as_deref(),
         format!("Restored binary DOCX bytes for {}", record.path),
         Some(record.change_id.clone()),
     )
-    .map_err(|error| binary_audit_rollback_error(&path, &before, &current, error))?;
+    .map_err(|error| {
+        if let Some(before) = &before {
+            binary_audit_rollback_error(&path, before, &current, error)
+        } else {
+            let rollback = crate::atomic_file::with_path_lock(&path, || {
+                if path.exists() {
+                    return Err(io::Error::other("file recreated before audit rollback"));
+                }
+                crate::atomic_file::write_replace_unlocked(&path, &current)
+            });
+            io::Error::other(format!(
+                "could not record binary deletion: {error}; rollback: {rollback:?}"
+            ))
+        }
+    })?;
     Ok(FileChangeRevertOutput {
         change_id: record.change_id,
         file_path: record.path,

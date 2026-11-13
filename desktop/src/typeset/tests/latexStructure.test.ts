@@ -45,6 +45,46 @@ describe("scanLatexStructure", () => {
     expect(structure.environmentAt(innerItem.from, lists)?.name).toBe("enumerate");
   });
 
+  it("treats inline verbatim and its literal delimiters as raw text", () => {
+    const source = [
+      "\\verb|\\begin{fake}|",
+      "\\verb*|\\end{fake}|",
+      "\\verb%$ \\section{Example} \\begin{fake}% \\begin{equation}",
+      "x = y",
+      "\\end{equation}",
+    ].join("\n");
+    const structure = scanLatexStructure(source);
+
+    expect(structure.environments.map((environment) => environment.name)).toEqual(["equation"]);
+    expect(structure.headings).toEqual([]);
+    expect(structure.isRaw(source.indexOf("\\begin{fake}"))).toBe(true);
+    expect(structure.isRaw(source.indexOf("$"))).toBe(true);
+    expect(structure.isMath(source.indexOf("x = y"))).toBe(true);
+    expect(structure.comments).toEqual([]);
+  });
+
+  it("bounds an unfinished inline verbatim at the line end", () => {
+    const source = "\\verb|\\begin{fake}\n\\begin{equation}\nx = y\n\\end{equation}";
+    const structure = scanLatexStructure(source);
+    expect(structure.environments.map((environment) => [environment.name, environment.closed]))
+      .toEqual([["equation", true]]);
+    expect(structure.isRaw(source.indexOf("\\begin{equation}"))).toBe(false);
+  });
+
+  it("rescans edits to arbitrary inline verbatim delimiters and line breaks", () => {
+    const source = "\\verb|Example| \\begin{equation}\nx = y\n\\end{equation}";
+    const previous = scanLatexStructure(source);
+    const doc = Text.of(source.split("\n"));
+    for (const edit of [
+      { from: source.indexOf("Example") + 3, insert: "|" },
+      { from: source.indexOf("| "), to: source.indexOf("| ") + 1 },
+      { from: source.indexOf("Example") + 3, insert: "\n" },
+    ]) {
+      const changes = ChangeSet.of(edit, source.length);
+      expect(updateLatexStructure(previous, changes.apply(doc).toString(), changes)).toBeNull();
+    }
+  });
+
   it("canonicalizes an escaped star in math environment names", () => {
     const source = [
       "\\begin{document}",

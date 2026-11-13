@@ -8,32 +8,48 @@ export interface AppNavigationItem {
   icon: ReactNode;
 }
 
+/** A page an enabled plugin adds. Its id is the panel's key, not a `Tab`. */
+export interface AppNavigationPluginItem {
+  id: string;
+  label: string;
+  icon: ReactNode;
+}
+
 interface Props {
   label: string;
   moreLabel: string;
   items: AppNavigationItem[];
   moreItems: AppNavigationItem[];
   activeTab: Tab;
+  /** Plugin pages: the first few get a button, the rest are listed under More. */
+  pluginItems?: AppNavigationPluginItem[];
+  pluginRailCount?: number;
+  /** The plugin page on screen, if any; no module is current while one is. */
+  activePlugin?: string | null;
+  onSelectPlugin?: (id: string) => void;
   update?: ReactNode;
   account: ReactNode;
   onSelect: (tab: Tab) => void;
   onPreload: (tab: Tab) => void;
 }
 
-export default function AppNavigationRail({ label, moreLabel, items, moreItems, activeTab, update, account, onSelect, onPreload }: Props) {
+export default function AppNavigationRail({ label, moreLabel, items, moreItems, activeTab: currentTab, pluginItems = [], pluginRailCount = 3, activePlugin = null, onSelectPlugin, update, account, onSelect, onPreload }: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const moreRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const moreActive = moreItems.some((item) => item.id === activeTab);
+  const activeTab = activePlugin ? null : currentTab;
+  const railPlugins = pluginItems.slice(0, pluginRailCount);
+  const morePlugins = pluginItems.slice(pluginRailCount);
+  const moreActive = moreItems.some((item) => item.id === activeTab) || morePlugins.some((item) => item.id === activePlugin);
 
   const closeAndFocus = () => {
     setMoreOpen(false);
     triggerRef.current?.focus();
   };
 
-  useEffect(() => setMoreOpen(false), [activeTab]);
+  useEffect(() => setMoreOpen(false), [activeTab, activePlugin]);
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -107,6 +123,21 @@ export default function AppNavigationRail({ label, moreLabel, items, moreItems, 
             <span className="app-rail-tooltip" aria-hidden="true">{item.label}</span>
           </button>
         ))}
+        {railPlugins.length > 0 && <span className="app-rail-divider" aria-hidden="true" />}
+        {railPlugins.map((item) => (
+          <button
+            key={item.id}
+            className={`app-rail-button${activePlugin === item.id ? " active" : ""}`}
+            type="button"
+            aria-label={item.label}
+            aria-current={activePlugin === item.id ? "page" : undefined}
+            data-plugin-page={item.id}
+            onClick={() => { setMoreOpen(false); onSelectPlugin?.(item.id); }}
+          >
+            <span className="app-rail-icon" aria-hidden="true">{item.icon}</span>
+            <span className="app-rail-tooltip" aria-hidden="true">{item.label}</span>
+          </button>
+        ))}
         {moreItems.length > 0 && (
           <div className="app-rail-more" ref={moreRef}>
             <button
@@ -141,6 +172,21 @@ export default function AppNavigationRail({ label, moreLabel, items, moreItems, 
                     <span className="app-rail-menu-icon" aria-hidden="true">{item.icon}</span>
                     <span>{item.label}</span>
                     {activeTab === item.id && <SvgIcon name="check" size={14} />}
+                  </button>
+                ))}
+                {morePlugins.length > 0 && <div className="app-rail-menu-divider" role="separator" />}
+                {morePlugins.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={activePlugin === item.id}
+                    data-plugin-page={item.id}
+                    onClick={() => { closeAndFocus(); onSelectPlugin?.(item.id); }}
+                  >
+                    <span className="app-rail-menu-icon" aria-hidden="true">{item.icon}</span>
+                    <span>{item.label}</span>
+                    {activePlugin === item.id && <SvgIcon name="check" size={14} />}
                   </button>
                 ))}
               </div>

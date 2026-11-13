@@ -620,7 +620,6 @@ export interface SettingsNavCopy {
     memory: string;
     mail: string;
     remote: string;
-    extensions: string;
     environment: string;
     about: string;
     update: string;
@@ -1308,7 +1307,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         memory: "智能记忆",
         mail: "邮箱",
         remote: "远程控制",
-        extensions: "插件",
         environment: "环境",
         about: "关于与环境",
         update: "更新",
@@ -1979,7 +1977,6 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         memory: "Smart memory",
         mail: "Mail",
         remote: "Remote control",
-        extensions: "Plugins",
         environment: "Environment",
         about: "About & Environment",
         update: "Update",

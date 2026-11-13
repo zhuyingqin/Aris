@@ -1,0 +1,6 @@
+{
+  "name": "@local/project-tasks",
+  "version": "0.1.0",
+  "description": "Project tasks with list, board, calendar and timeline views on a page of their own, and a glance in the Chat's project summary. The user and the agent edit the same tasks.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

@@ -288,6 +288,7 @@ const PERMISSION_OPTIONS = [
 ];
 
 function ContextRing({ used, max }: { used: number; max: number }) {
+  const language = useStore((state) => state.language);
   const rawPct = max > 0 ? used / max : 0;
   const pct = Math.min(1, Math.max(0, rawPct));
   const radius = 9;
@@ -298,7 +299,7 @@ function ContextRing({ used, max }: { used: number; max: number }) {
   const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
   const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
   return (
-    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens)`}>
+    <div className="ctx-ring" title={language === "cn" ? `上下文已用 ${label}（${usedK} / ${maxK} tokens）` : `Context window: ${label} used (${usedK} / ${maxK} tokens)`}>
       <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
         <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
         {pct > 0 && (
@@ -1185,7 +1186,7 @@ function ChatComposer({
                   }}
                   disabled={modelBusy || reasoningBusy || (!canChooseModel && (!canAdjustReasoning || busy))}
                   title={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}${activePrice ? `\n${activePrice.title}` : ""}`}
-                  aria-label={reasoningSupported ? `${modelName ?? (language === "cn" ? "模型" : "Model")} · ${reasoningLabel}` : undefined}
+                  aria-label={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}`}
                   aria-description={activePrice?.title}
                   aria-haspopup="dialog"
                   aria-expanded={modelMenuOpen}

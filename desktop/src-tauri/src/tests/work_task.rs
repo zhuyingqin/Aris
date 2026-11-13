@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::{
     artifact_export_core, cancel_core, create_core, delete_core, list_core, pause_core,
     queue_scheduled_run, reply_core, return_to_todo_core, snapshot_core, start_core, update_core,
+    ScheduledRunOutcome, ScheduledRunRequest,
 };
 use crate::work_task::engine;
 use crate::work_task::model::{
@@ -133,25 +134,148 @@ fn a_task_needs_a_title() {
     assert_eq!(task.status, WorkTaskStatus::Todo);
 }
 
-/// A project with no repository has nowhere to isolate the work. Refusing at
-/// queue time rather than at launch keeps the card where the user can see why.
+/// A plain folder used to be refused ("work tasks need a Git repository"),
+/// which is what made every scheduled run in a research folder fail. It now
+/// queues like any project; what is still refused up front is a folder that
+/// is not there, and the refusal leaves the card where the user can see why.
 #[test]
-fn starting_a_task_outside_a_repository_is_refused_before_the_card_moves() {
+fn a_plain_folder_can_start_a_task_but_a_missing_one_is_refused() {
     let fixture = fixture("no-repo");
-    let bare = fixture._temp.path().join("not-a-repo");
-    std::fs::create_dir_all(&bare).expect("dir");
+    let plain = fixture._temp.path().join("not-a-repo");
+    std::fs::create_dir_all(&plain).expect("dir");
     let task =
         create_core(&fixture.project_id, "Task".into(), String::new(), None).expect("create");
+    let queued = start_core(&fixture.project_id, &plain, &task.id).expect("plain folders queue");
+    assert_eq!(queued.status, WorkTaskStatus::Queued);
 
-    let error = start_core(&fixture.project_id, &bare, &task.id).expect_err("must refuse");
-    assert!(error.contains("Git repository"), "unhelpful error: {error}");
+    let other =
+        create_core(&fixture.project_id, "Other".into(), String::new(), None).expect("create");
+    let missing = fixture._temp.path().join("moved-away");
+    let error = start_core(&fixture.project_id, &missing, &other.id).expect_err("must refuse");
+    assert!(error.contains("does not exist"), "unhelpful error: {error}");
     assert_eq!(
-        store::get(&fixture.project_id, &task.id)
+        store::get(&fixture.project_id, &other.id)
             .expect("task")
             .status,
         WorkTaskStatus::Todo,
         "a refused start must leave the card in todo"
     );
+}
+
+/// A plain folder: everything a task does happens in a checkout cut from a
+/// snapshot of the folder, and accepting writes exactly the task's changes
+/// back — keeping what the user edited in the folder meanwhile, never
+/// creating a `.git` in it.
+#[test]
+fn accepting_a_task_in_a_plain_folder_writes_its_changes_back() {
+    let fixture = fixture("plain-accept");
+    let folder = fixture._temp.path().join("research folder");
+    std::fs::create_dir_all(folder.join("chapters")).expect("dirs");
+    std::fs::write(folder.join("chapters/intro.md"), "draft\r\n").expect("seed");
+    std::fs::write(folder.join("obsolete.md"), "old\n").expect("seed");
+    std::fs::write(folder.join("todo.md"), "user list\n").expect("seed");
+
+    let task = create_core(&fixture.project_id, "Edit".into(), "edit it".into(), None)
+        .expect("create");
+    let tree = worktree::create(&folder, &fixture.project_id, &task.id).expect("checkout");
+    assert!(tree.shadow_git_dir.is_some(), "a plain folder is recorded as such");
+    assert!(!folder.join(".git").exists());
+    let checkout = Path::new(&tree.path);
+    assert_eq!(
+        std::fs::read(checkout.join("chapters/intro.md")).expect("copied"),
+        b"draft\r\n",
+        "the checkout is a faithful copy"
+    );
+
+    // The task's work.
+    std::fs::write(checkout.join("chapters/intro.md"), "revised\r\n").expect("edit");
+    std::fs::write(checkout.join("summary.md"), "new\n").expect("add");
+    std::fs::remove_file(checkout.join("obsolete.md")).expect("delete");
+    std::fs::create_dir_all(checkout.join(".somniq/sessions")).expect("runtime");
+    std::fs::write(checkout.join(".somniq/sessions/s.json"), "{}").expect("runtime");
+    assert!(worktree::commit_all(checkout, "task: edit", &tree.base_sha).expect("commit"));
+    let snapshot = engine::capture_snapshot(checkout, &tree.base_sha).expect("review");
+    let mut changed = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    changed.sort();
+    assert_eq!(
+        changed,
+        vec!["chapters/intro.md", "obsolete.md", "summary.md"],
+        "runtime scaffolding stays out of the reviewed diff"
+    );
+    store::update(&fixture.project_id, &task.id, |row| {
+        row.worktree = Some(tree.clone());
+        row.status = WorkTaskStatus::Review;
+        row.review_snapshot = Some(snapshot.clone());
+        Ok(())
+    })
+    .expect("stage review");
+
+    // Meanwhile the user keeps working in the folder.
+    std::fs::write(folder.join("todo.md"), "user list, updated\n").expect("user edit");
+
+    let done = engine::accept(&fixture.project_id, &folder, &task.id).expect("accept");
+    assert_eq!(done.status, WorkTaskStatus::Done);
+    assert_eq!(
+        std::fs::read(folder.join("chapters/intro.md")).expect("landed"),
+        b"revised\r\n"
+    );
+    assert_eq!(std::fs::read_to_string(folder.join("summary.md")).expect("added"), "new\n");
+    assert!(!folder.join("obsolete.md").exists(), "the task's delete lands too");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("todo.md")).expect("kept"),
+        "user list, updated\n",
+        "the user's own edit survives the accept"
+    );
+    assert!(!folder.join(".somniq/sessions/s.json").exists());
+    assert!(!folder.join(".git").exists(), "still a plain folder");
+    assert!(!checkout.exists(), "the checkout is tidied up");
+}
+
+/// A file the snapshot left out is one the accept must never replace: Git
+/// stops the merge instead, the folder keeps its bytes, and the card goes
+/// back to review with the reason.
+#[test]
+fn accepting_never_overwrites_a_file_the_snapshot_left_out() {
+    let fixture = fixture("plain-collide");
+    let folder = fixture._temp.path().join("data folder");
+    std::fs::create_dir_all(folder.join("data")).expect("dirs");
+    std::fs::write(folder.join("readme.md"), "seed\n").expect("seed");
+    let big = std::fs::File::create(folder.join("data/raw.bin")).expect("big");
+    big.set_len(crate::work_task::shadow::MAX_FILE_BYTES + 1)
+        .expect("size");
+    drop(big);
+
+    let task = create_core(&fixture.project_id, "Data".into(), String::new(), None)
+        .expect("create");
+    let tree = worktree::create(&folder, &fixture.project_id, &task.id).expect("checkout");
+    let checkout = Path::new(&tree.path);
+    assert!(!checkout.join("data/raw.bin").exists(), "too large to copy");
+    // Not knowing it exists, the task writes a file at the same path.
+    std::fs::create_dir_all(checkout.join("data")).expect("dir");
+    std::fs::write(checkout.join("data/raw.bin"), "placeholder").expect("write");
+    worktree::commit_all(checkout, "task: data", &tree.base_sha).expect("commit");
+    store::update(&fixture.project_id, &task.id, |row| {
+        row.worktree = Some(tree.clone());
+        row.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("stage review");
+
+    let error = engine::accept(&fixture.project_id, &folder, &task.id)
+        .expect_err("the merge must refuse");
+    assert!(error.contains("raw.bin"), "the refusal names the file: {error}");
+    assert_eq!(
+        std::fs::metadata(folder.join("data/raw.bin")).expect("kept").len(),
+        crate::work_task::shadow::MAX_FILE_BYTES + 1,
+        "the user's file is untouched"
+    );
+    let row = store::get(&fixture.project_id, &task.id).expect("task");
+    assert_eq!(row.status, WorkTaskStatus::Review);
+    assert!(row.last_error.is_some());
 }
 
 /// The prompt is replayed at launch, so a running task's instruction must not
@@ -377,7 +501,7 @@ fn a_merge_that_cannot_run_returns_the_card_to_review_with_the_reason() {
 
     // The failure is recoverable, so the card must not be marked unmergeable:
     // the user switches back and accepts again.
-    let listed = list_core(&fixture.project_id, &fixture.project_path);
+    let listed = list_core(&fixture.project_id);
     let card = listed.iter().find(|task| task.id == task_id).expect("card");
     assert!(
         !card.worktree_missing,
@@ -485,7 +609,7 @@ fn a_vanished_worktree_is_reported_on_the_card_and_by_the_diff() {
     // Removed outside Git, the way a user cleaning up temp files would.
     std::fs::remove_dir_all(&tree.path).expect("remove worktree");
 
-    let listed = list_core(&fixture.project_id, &fixture.project_path);
+    let listed = list_core(&fixture.project_id);
     let card = listed.iter().find(|task| task.id == task_id).expect("card");
     assert!(
         card.worktree_missing,
@@ -809,13 +933,13 @@ fn cancelling_still_discards_the_checkout_that_a_pause_would_keep() {
 #[test]
 fn the_snapshot_revision_advances_with_every_write() {
     let fixture = fixture("revision");
-    let empty = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let empty = snapshot_core(&fixture.project_id);
     assert_eq!(empty.revision, 0);
     assert!(empty.tasks.is_empty());
 
     let task =
         create_core(&fixture.project_id, "One".into(), String::new(), None).expect("create");
-    let after_create = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_create = snapshot_core(&fixture.project_id);
     assert_eq!(after_create.revision, 1);
     assert_eq!(after_create.tasks.len(), 1);
 
@@ -827,11 +951,11 @@ fn the_snapshot_revision_advances_with_every_write() {
         None,
     )
     .expect("rename");
-    let after_update = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_update = snapshot_core(&fixture.project_id);
     assert_eq!(after_update.revision, 2);
 
     delete_core(&fixture.project_id, &fixture.project_path, &task.id).expect("delete");
-    let after_delete = snapshot_core(&fixture.project_id, &fixture.project_path);
+    let after_delete = snapshot_core(&fixture.project_id);
     assert_eq!(after_delete.revision, 3);
     assert!(after_delete.tasks.is_empty());
 
@@ -1026,64 +1150,155 @@ fn restarting_a_task_drops_the_previous_attempts_result() {
 #[test]
 fn a_scheduled_firing_becomes_an_ordinary_queued_task() {
     let fixture = fixture("scheduled");
-    let queued = queue_scheduled_run(
+    let request = |automation: &str, key: &str| ScheduledRunRequest {
+        scheduled_task_id: automation.to_string(),
+        occurrence_key: key.to_string(),
+        title: "Nightly literature sweep".into(),
+        prompt: "Update the library.".into(),
+        model: None,
+        target_session_id: None,
+    };
+    let queued = match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-1", "automation-1:at:1"),
     )
-    .expect("queue");
+    .expect("queue")
+    {
+        ScheduledRunOutcome::Queued(task) => task,
+        other => panic!("expected a new card, got {other:?}"),
+    };
 
     assert_eq!(queued.status, WorkTaskStatus::Queued);
     assert_eq!(queued.title, "Nightly literature sweep");
     assert_eq!(queued.scheduled_task_id.as_deref(), Some("automation-1"));
+    assert_eq!(
+        queued.scheduled_occurrence_key.as_deref(),
+        Some("automation-1:at:1")
+    );
 
-    // A second firing while the first is still going is skipped, not stacked:
-    // two runs editing the same branch is the failure a short interval would
-    // otherwise produce every night.
+    // The same occurrence again — a restart that lost the receipt, a second
+    // tick — finds the card instead of queuing a twin.
+    match queue_scheduled_run(
+        &fixture.project_id,
+        &fixture.project_path,
+        request("automation-1", "automation-1:at:1"),
+    )
+    .expect("re-queue")
+    {
+        ScheduledRunOutcome::AlreadyQueued(task) => assert_eq!(task.id, queued.id),
+        other => panic!("expected the existing card, got {other:?}"),
+    }
+
+    // A later occurrence while the first is still going is held, not
+    // stacked: two runs against the same base branch is the failure a short
+    // interval would otherwise produce every night.
     store::update(&fixture.project_id, &queued.id, |task| {
         task.status = WorkTaskStatus::Running;
         Ok(())
     })
     .expect("stage running");
-    let error = queue_scheduled_run(
+    match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-1", "automation-1:at:2"),
     )
-    .expect_err("must skip");
-    assert!(error.contains("still running"), "unhelpful error: {error}");
+    .expect("busy is an outcome, not an error")
+    {
+        ScheduledRunOutcome::Busy { task_id, status } => {
+            assert_eq!(task_id, queued.id);
+            assert_eq!(status, WorkTaskStatus::Running);
+        }
+        other => panic!("expected busy, got {other:?}"),
+    }
 
     // A different automation is unaffected, and so is the same one once its
     // previous run has settled.
-    queue_scheduled_run(
-        &fixture.project_id,
-        &fixture.project_path,
-        "automation-2",
-        "Other".into(),
-        "Do the other thing.".into(),
-        None,
-    )
-    .expect("a different automation may run");
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-2", "automation-2:at:1"),
+        )
+        .expect("a different automation may run"),
+        ScheduledRunOutcome::Queued(_)
+    ));
     store::update(&fixture.project_id, &queued.id, |task| {
         task.status = WorkTaskStatus::Review;
         Ok(())
     })
     .expect("settle");
-    queue_scheduled_run(
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-1", "automation-1:at:2"),
+        )
+        .expect("the next firing runs once the previous one has settled"),
+        ScheduledRunOutcome::Queued(_)
+    ));
+    let cards = store::list(&fixture.project_id)
+        .into_iter()
+        .filter(|task| task.scheduled_task_id.as_deref() == Some("automation-1"))
+        .count();
+    assert_eq!(cards, 2, "one card per occurrence, no twins");
+}
+
+/// A conversation carries one turn at a time, and a run waiting on the user's
+/// answer resumes in it. A second automation aimed at the same conversation is
+/// held until both are clear, rather than interleaving two briefs.
+#[test]
+fn a_shared_conversation_holds_runs_from_other_automations() {
+    let fixture = fixture("scheduled-shared");
+    let request = |automation: &str, key: &str| ScheduledRunRequest {
+        scheduled_task_id: automation.to_string(),
+        occurrence_key: key.to_string(),
+        title: "Digest".into(),
+        prompt: "Write the digest.".into(),
+        model: None,
+        target_session_id: Some("chat-shared".to_string()),
+    };
+    let first = match queue_scheduled_run(
         &fixture.project_id,
         &fixture.project_path,
-        "automation-1",
-        "Nightly literature sweep".into(),
-        "Update the library.".into(),
-        None,
+        request("automation-a", "automation-a:at:1"),
     )
-    .expect("the next firing runs once the previous one has settled");
+    .expect("queue")
+    {
+        ScheduledRunOutcome::Queued(task) => task,
+        other => panic!("expected a new card, got {other:?}"),
+    };
+    assert_eq!(first.target_session_id.as_deref(), Some("chat-shared"));
+    store::update(&fixture.project_id, &first.id, |task| {
+        task.status = WorkTaskStatus::AwaitingInput;
+        task.session_id = Some("chat-shared".to_string());
+        Ok(())
+    })
+    .expect("stage awaiting input");
+
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-b", "automation-b:at:1"),
+        )
+        .expect("busy is an outcome"),
+        ScheduledRunOutcome::Busy { .. }
+    ));
+    store::update(&fixture.project_id, &first.id, |task| {
+        task.status = WorkTaskStatus::Review;
+        Ok(())
+    })
+    .expect("settle");
+    assert!(matches!(
+        queue_scheduled_run(
+            &fixture.project_id,
+            &fixture.project_path,
+            request("automation-b", "automation-b:at:1"),
+        )
+        .expect("queue once clear"),
+        ScheduledRunOutcome::Queued(_)
+    ));
 }
 
 /// A rename is not a delete plus an add, and a reviewer told it was would
@@ -1353,4 +1568,40 @@ fn seed_reviewable_with(fixture: &Fixture, title: &str, file_name: &str) -> Stri
     })
     .expect("stage review");
     task.id
+}
+
+/// The task row is the run's audit trail: it keeps the plugin set the run
+/// froze, tagged with the run, and rows written before it existed still load.
+#[test]
+fn a_task_row_records_the_plugin_set_its_run_froze() {
+    let mut task =
+        crate::work_task::model::WorkTask::new("t1".into(), "Title".into(), "Prompt".into(), 1);
+    assert!(serde_json::to_value(&task)
+        .unwrap()
+        .get("pluginSet")
+        .is_none());
+    task.plugin_set = Some(crate::work_task::model::WorkTaskPluginSet {
+        run_seq: 3,
+        set: runtime::plugins::PluginSet {
+            project: "F:/project".into(),
+            plugins: vec![runtime::plugins::FrozenPlugin {
+                name: "@lab/evidence".into(),
+                version: "1.2.3".into(),
+                digest: "a".repeat(64),
+            }],
+            fingerprint: "f".repeat(64),
+            frozen_at_ms: 7,
+            error: None,
+        },
+    });
+    let value = serde_json::to_value(&task).unwrap();
+    assert_eq!(value["pluginSet"]["runSeq"], 3);
+    assert_eq!(value["pluginSet"]["plugins"][0]["name"], "@lab/evidence");
+    assert_eq!(value["pluginSet"]["plugins"][0]["digest"], "a".repeat(64));
+    let back: crate::work_task::model::WorkTask = serde_json::from_value(value).unwrap();
+    assert_eq!(back, task);
+    let mut old = serde_json::to_value(&task).unwrap();
+    old.as_object_mut().unwrap().remove("pluginSet");
+    let old: crate::work_task::model::WorkTask = serde_json::from_value(old).unwrap();
+    assert_eq!(old.plugin_set, None);
 }

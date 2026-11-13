@@ -6,6 +6,7 @@ import { SvgIcon } from "../SvgIcon";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
+import { isUserQuestion } from "./pluginContinuation";
 import {
   currentMessageColumns,
   estimateTurnSize,
@@ -161,7 +162,8 @@ export function questionPreviewFromTurn(turn: ChatTurn): string {
 export function questionMarkersFromTurns(turns: ChatTurn[]): QuestionMarker[] {
   const markers: QuestionMarker[] = [];
   turns.forEach((turn, turnIndex) => {
-    if (turn.role !== "user") return;
+    // A turn the app inserted (plugin verification) is not a question.
+    if (!isUserQuestion(turn)) return;
     markers.push({
       id: turn.id,
       turnIndex,

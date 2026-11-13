@@ -13,6 +13,7 @@ mod compact;
 mod config;
 mod conversation;
 pub mod docx;
+pub mod document_export;
 pub mod document_safety;
 pub mod event_sink;
 mod evidence_ledger;
@@ -31,11 +32,13 @@ pub mod paper_guide;
 mod managed_job;
 mod mcp;
 mod mcp_client;
+mod mcp_health;
 mod mcp_stdio;
 mod oauth;
 mod paths;
 mod pdf_text;
 mod permissions;
+pub mod plugins;
 mod process;
 mod process_registry;
 mod project_activity;
@@ -53,6 +56,7 @@ pub mod sandbox;
 mod session;
 mod session_index;
 pub mod skill_registry;
+mod task_plan;
 mod tool_outcome;
 mod tool_recovery;
 mod tool_output_artifact;
@@ -64,7 +68,8 @@ pub use pdf_text::{
     PdfTextExtraction, PdfTextQuality,
 };
 pub use bash::{
-    adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
+    adopted_background_note, apply_windows_utf8_env, background_pipe_note, execute_bash,
+    execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };
@@ -168,6 +173,7 @@ pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
     scoped_mcp_config_hash, unwrap_ccr_proxy_url,
 };
+pub use mcp_health::{mcp_server_health, record_mcp_server_health, McpServerHealth};
 pub use mcp_client::{
     McpClaudeAiProxyTransport, McpClientAuth, McpClientBootstrap, McpClientTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,

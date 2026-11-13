@@ -4,10 +4,11 @@
  * without importing the workbench.
  */
 
-export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "presentation" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode" | "more" | "ai"; className?: string }) {
+export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "presentation" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode" | "more" | "ai" | "focus"; className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
       {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
+      {name === "focus" && <path d="M6 2.8H2.8V6M10 2.8h3.2V6M13.2 10v3.2H10M6 13.2H2.8V10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "save" && (
         <path d="M3 3h8.5L13 4.5V13H3zM5 3v3.2h5.2V3M5.2 10.2h5.6" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
       )}

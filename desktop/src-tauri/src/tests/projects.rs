@@ -425,3 +425,178 @@ fn remove_from_registry_resets_current_to_default_when_active_project_is_removed
     assert_eq!(registry.projects.len(), 1);
     assert_eq!(registry.current_project_id, "default");
 }
+
+/// A work task runs in its own worktree, but its plugins are the registered
+/// project's. The turn's context names that project, so the task loads the
+/// same approved set as Chat, and the approved plugin's reviewed snapshot —
+/// outside every workspace — is readable from the turn but not writable.
+#[test]
+fn a_worktree_turn_uses_its_registered_projects_plugins() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRootGuard::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktrees").join("task-1");
+    std::fs::create_dir_all(&project).unwrap();
+    let id = project_id(&project);
+    let mut registry = super::default_registry();
+    registry.projects.push(DesktopProject {
+        id: id.clone(),
+        name: "Project".to_string(),
+        path: project.to_string_lossy().into_owned(),
+        added_at: 1,
+        last_opened_at: 1,
+    });
+    super::save_registry(&registry).unwrap();
+
+    let source = temp.path().join("package");
+    let skill = source.join("skills").join("plugin-notes");
+    std::fs::create_dir_all(skill.join("references")).unwrap();
+    std::fs::write(source.join("package.json"), r#"{"name":"notes-plugin","version":"1.0.0","dsh":{"bundle":{"patch":"cordis.patch.yml"}}}"#).unwrap();
+    std::fs::write(source.join("cordis.patch.yml"), "- insert:
+  - name: '@deepseek-ai/dsh-skill-filesystem'
+    config:
+      includeDefaultRoots: false
+      customSkillDirs: ['./skills']
+").unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---
+name: plugin-notes
+description: Keep notes
+---
+Read references/guide.md
+").unwrap();
+    std::fs::write(skill.join("references").join("guide.md"), "Cite primary evidence").unwrap();
+    let store = runtime::plugins::PluginStore::for_workspace(&project);
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("notes-plugin", true).unwrap();
+
+    let context = crate::state::project_execution_context(&worktree, &id).unwrap();
+    runtime::with_project_execution_context(&context, || {
+        let roots = runtime::plugins::PluginStore::for_execution(&worktree)
+            .active_skill_roots()
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        let guide = roots[0].join("plugin-notes").join("references").join("guide.md");
+        assert!(!guide.starts_with(&worktree) && !guide.starts_with(&project));
+        let read = runtime::read_file(&guide.to_string_lossy(), None, None)
+            .expect("an approved plugin's own files are readable");
+        assert!(read.file.content.contains("Cite primary evidence"));
+        let error = runtime::write_file(&guide.to_string_lossy(), "tampered")
+            .expect_err("the reviewed snapshot is read-only");
+        assert!(
+            error.to_string().contains("outside the isolated workspace"),
+            "{error}"
+        );
+    });
+}
+
+/// A run freezes its plugin set when it starts. Turning the plugin off on the
+/// plugin page mid-run changes neither what the run resolves nor its
+/// read-only roots; the next run gets the change, and the process-wide
+/// context (applied when the visible project changes) never carries a run.
+#[test]
+fn a_runs_frozen_plugins_outlive_a_toggle_on_the_plugin_page() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRootGuard::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktrees").join("task-2");
+    std::fs::create_dir_all(&project).unwrap();
+    let id = project_id(&project);
+    let mut registry = super::default_registry();
+    registry.projects.push(DesktopProject {
+        id: id.clone(),
+        name: "Project".to_string(),
+        path: project.to_string_lossy().into_owned(),
+        added_at: 1,
+        last_opened_at: 1,
+    });
+    super::save_registry(&registry).unwrap();
+    let source = temp.path().join("package");
+    let skill = source.join("skills").join("plugin-notes");
+    std::fs::create_dir_all(skill.join("references")).unwrap();
+    std::fs::write(source.join("package.json"), r#"{"name":"notes-plugin","version":"1.0.0","dsh":{"bundle":{"patch":"cordis.patch.yml"}}}"#).unwrap();
+    std::fs::write(
+        source.join("cordis.patch.yml"),
+        "- insert:\n  - name: '@deepseek-ai/dsh-skill-filesystem'\n    config:\n      includeDefaultRoots: false\n      customSkillDirs: ['./skills']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: plugin-notes\ndescription: Keep notes\n---\nRead references/guide.md\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join("references").join("guide.md"),
+        "Cite primary evidence",
+    )
+    .unwrap();
+    let store = runtime::plugins::PluginStore::for_workspace(&project);
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled("notes-plugin", true).unwrap();
+
+    let run = crate::state::begin_plugin_run(&worktree, &id, "work-task test");
+    assert_eq!(run.set().plugins.len(), 1);
+    assert_eq!(run.set().plugins[0].digest, preview.digest);
+    let frozen = crate::state::project_run_execution_context(&worktree, &id, &run).unwrap();
+    // The plugin page turns it off while the run is in flight.
+    store.set_enabled("notes-plugin", false).unwrap();
+    let lifecycle = store.list().unwrap().remove(0).lifecycle;
+    assert_eq!(lifecycle.state, runtime::plugins::PluginState::NeedsRestart);
+    runtime::with_project_execution_context(&frozen, || {
+        let roots = runtime::plugins::PluginStore::for_execution(&worktree)
+            .active_skill_roots()
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        let guide = roots[0]
+            .join("plugin-notes")
+            .join("references")
+            .join("guide.md");
+        let read = runtime::read_file(&guide.to_string_lossy(), None, None)
+            .expect("the frozen plugin's snapshot stays readable for the whole run");
+        assert!(read.file.content.contains("Cite primary evidence"));
+        // A Desktop tool call re-binds the project for its own work; it stays
+        // in the run, with the run's plugins and read-only roots.
+        let tool_call = crate::state::project_execution_context(&worktree, &id).unwrap();
+        runtime::with_project_execution_context(&tool_call, || {
+            assert_eq!(
+                runtime::plugins::PluginStore::for_execution(&worktree)
+                    .active_skill_roots()
+                    .unwrap(),
+                roots
+            );
+            assert!(runtime::read_file(&guide.to_string_lossy(), None, None).is_ok());
+        });
+    });
+
+    // The next run, and the process-wide context, see the plugin page's change.
+    let next = crate::state::project_execution_context(&worktree, &id).unwrap();
+    runtime::with_project_execution_context(&next, || {
+        assert!(runtime::plugins::PluginStore::for_execution(&worktree)
+            .active_skill_roots()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            runtime::execution_env_var_os(runtime::plugins::ARIS_PLUGIN_RUN_ENV),
+            None
+        );
+    });
+    let after = crate::state::begin_plugin_run(&worktree, &id, "next run");
+    assert!(after.set().plugins.is_empty());
+
+    // A context that outlives its run resolves nothing, never the live set.
+    drop(run);
+    store.set_enabled("notes-plugin", true).unwrap();
+    runtime::with_project_execution_context(&frozen, || {
+        assert!(runtime::plugins::PluginStore::for_execution(&worktree)
+            .active_skill_roots()
+            .unwrap()
+            .is_empty());
+    });
+}
