@@ -69,3 +69,8 @@ Local validation passed all nine script tests, including an official Tauri
 passes actionlint. The prepare command downloaded the actual 0.4.88 release
 installer and verified its GitHub digest, build manifest, tag commit and tagged
 public key. Production signing and update-channel acceptance remain pending.
+
+The installer, original BUILD-MANIFEST and SHA256SUMS are staged at
+`/opt/somniq-remote/nginx/.deploy/updater-repair-0.4.88`. All three file sizes and
+SHA-256 hashes were verified on the mirror host. The public update entry points
+remain unchanged: GitHub Latest is 0.4.86 and the mirror manifest is 0.4.84.
