@@ -41,8 +41,9 @@ After a successful signing run:
 4. Copy the unchanged EXE, signature, provenance and a manifest whose URLs point
    to `https://somni.ensuanx.com/releases/v0.4.88/` into the mirror version directory.
    Verify hashes and signatures there before atomically replacing the public
-   `/releases/latest.json`. Check the mirror's `/releases/latest/download/` alias
-   as well, if it is maintained separately.
+   `/releases/latest.json`. The mirror's `/releases/latest/latest.json` and
+   `/releases/latest/download/latest.json` are symlinks to that file. Update the
+   `latest/SomniQ.Studio_latest_x64-setup.exe` link to the 0.4.88 installer too.
 5. Fetch both public manifests and the mirrored installer over HTTPS. They must
    report 0.4.88, contain the same signature and deliver the exact installer hash.
 
@@ -53,12 +54,18 @@ signature checks pass.
 
 ## Current external blocker
 
-The repository has `TAURI_SIGNING_PRIVATE_KEY`. The existing Release run
-[43151874090, attempt 2](https://github.com/zhuyingqin/Aris/actions/runs/43151874090)
-was rejected before any signing step started:
+The repository has `TAURI_SIGNING_PRIVATE_KEY`. The dedicated repair run
+[43478470136](https://github.com/zhuyingqin/Aris/actions/runs/43478470136)
+was also rejected before any signing step started:
 
 > The job was not started because your account is locked due to a billing issue.
 
 GitHub cannot return the secret's plaintext through its API. The account billing
 restriction must be removed before a hosted runner can use this key. A GitHub
 membership subscription is not itself required for this repair.
+
+Local validation passed all nine script tests, including an official Tauri
+2.11.2 signature fixture and payload/comment/key rejection cases. The workflow
+passes actionlint. The prepare command downloaded the actual 0.4.88 release
+installer and verified its GitHub digest, build manifest, tag commit and tagged
+public key. Production signing and update-channel acceptance remain pending.
