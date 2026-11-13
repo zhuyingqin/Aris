@@ -1243,7 +1243,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TodoWrite",
-            description: "Update the structured task list for the current session. Keep todos at phase/milestone level rather than creating one item per file edit or tool call. Update only when a phase changes status or the plan materially changes; do not resend an unchanged list.",
+            description: "Update the structured task list for the current session. Keep todos at phase/milestone level rather than creating one item per file edit or tool call. Update only when a phase changes status or the plan materially changes; do not resend an unchanged list. After creating an execution plan, continue the authorized work through its remaining steps before ending the turn. Mark a step completed only after doing and verifying it. If blocked, waiting for user input/permission, or delivering a planning-only request, keep unfinished steps open and explain why execution is paused.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1271,13 +1271,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LlmReview",
-            description: "Send content to an external LLM reviewer for independent critical review. Supports OpenAI, Gemini, GLM, MiniMax, Kimi, and Anthropic-compatible endpoints. Routes by model name. Prefer omitting `model` and letting SomniQ use the user's configured reviewer.",
+            description: "Request independent critical review using the user's configured Reviewer. Desktop Chat prefers a fresh, isolated, read-only Reviewer sub-agent that can inspect project files. Web reviewers, explicit oneshot mode and hosts without a Chat agent tree use a single request. Each call is self-contained; include the review questions, evidence and requested output format. Prefer omitting `model`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "The full content to review, including context and specific review instructions."
+                        "description": "A self-contained review request with context, review questions, requested output format and project-relative evidence paths. Include the material inline when project read tools are unavailable."
                     },
                     "model": {
                         "type": "string",
@@ -3589,6 +3589,53 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// Roots of the approved plugins for this run, searched after every other
+/// root AND after the skills compiled into the binary. A plugin adds skills;
+/// it never replaces a local, user, compatibility or built-in one.
+fn plugin_skill_roots() -> Vec<std::path::PathBuf> {
+    runtime::execution_current_dir()
+        .ok()
+        .map(|cwd| {
+            runtime::plugins::PluginStore::for_execution(cwd)
+                .active_skill_roots()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+fn is_bundled_skill(name: &str) -> bool {
+    BUNDLED_SKILLS
+        .iter()
+        .any(|(bundled, _)| bundled.eq_ignore_ascii_case(name))
+}
+
+/// `root/<skill>/SKILL.md`, matching the directory name case-insensitively and
+/// never through a symlink.
+fn find_skill_in_root(root: &std::path::Path, requested: &str) -> Option<std::path::PathBuf> {
+    let direct = root.join(requested).join("SKILL.md");
+    if direct.exists() && !is_symlink(&direct) {
+        return Some(direct);
+    }
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        // Reject symlinks to prevent directory traversal
+        if is_symlink(&entry.path()) {
+            continue;
+        }
+        let path = entry.path().join("SKILL.md");
+        if !path.exists() || is_symlink(&path) {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(requested)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
     if requested.is_empty() {
@@ -3603,32 +3650,20 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
         return Err(format!("invalid skill name: {requested}"));
     }
 
-    for root in skill_search_roots() {
-        // Direct match: root/<skill>/SKILL.md
-        let direct = root.join(requested).join("SKILL.md");
-        if direct.exists() && !is_symlink(&direct) {
-            return Ok(direct);
-        }
-
-        // Case-insensitive scan
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                // Reject symlinks to prevent directory traversal
-                if is_symlink(&entry.path()) {
-                    continue;
-                }
-                let path = entry.path().join("SKILL.md");
-                if !path.exists() || is_symlink(&path) {
-                    continue;
-                }
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(requested)
-                {
-                    return Ok(path);
-                }
-            }
+    if let Some(path) = skill_search_roots()
+        .iter()
+        .find_map(|root| find_skill_in_root(root, requested))
+    {
+        return Ok(path);
+    }
+    // Callers fall back to the compiled copy of a built-in, which must win
+    // over any plugin, so plugin roots are not even consulted for its name.
+    if !is_bundled_skill(requested) {
+        if let Some(path) = plugin_skill_roots()
+            .iter()
+            .find_map(|root| find_skill_in_root(root, requested))
+        {
+            return Ok(path);
         }
     }
 
@@ -3654,10 +3689,12 @@ pub fn discover_skills() -> Vec<SkillMeta> {
     // a display label and is allowed to disagree.
     let mut skills: Vec<(String, SkillMeta)> = Vec::new();
 
-    for root in skill_search_roots() {
-        let entries = match std::fs::read_dir(&root) {
-            Ok(e) => e,
-            Err(_) => continue,
+    let collect = |root: &std::path::Path,
+                       seen: &mut std::collections::HashSet<String>,
+                       skills: &mut Vec<(String, SkillMeta)>,
+                       plugin: bool| {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
         };
         for entry in entries.flatten() {
             // Reject symlinks to prevent directory traversal
@@ -3669,8 +3706,9 @@ pub fn discover_skills() -> Vec<SkillMeta> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // First-found wins (ARIS user > ARIS project > explicit compat > bundled)
-            if seen.contains(&name) {
+            // First-found wins (ARIS user > ARIS project > explicit compat >
+            // bundled > plugin); a plugin never lists under a built-in's name.
+            if seen.contains(&name) || (plugin && is_bundled_skill(&name)) {
                 continue;
             }
             seen.insert(name.clone());
@@ -3679,9 +3717,13 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             let meta = parse_skill_frontmatter(&name, &content, skill_md);
             skills.push((name, meta));
         }
+    };
+
+    for root in skill_search_roots() {
+        collect(&root, &mut seen, &mut skills, false);
     }
 
-    // Bundled skills as final fallback (user overrides already took priority above)
+    // Bundled skills as fallback (user overrides already took priority above)
     for (name, content) in BUNDLED_SKILLS {
         if seen.contains(*name) {
             continue;
@@ -3693,6 +3735,10 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             std::path::PathBuf::from(format!("<bundled:{name}>")),
         );
         skills.push(((*name).to_string(), meta));
+    }
+
+    for root in plugin_skill_roots() {
+        collect(&root, &mut seen, &mut skills, true);
     }
 
     project_activated_aliases(&mut skills);
@@ -4539,6 +4585,7 @@ fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<Re
     let started = Instant::now();
     let mut command = runtime::hidden_command(runtime.program);
     command.args(runtime.args).arg(&input.code);
+    apply_child_utf8_env(&mut command);
     let output = runtime::run_managed_command_with_cancel(
         &mut command,
         format!(
@@ -6614,6 +6661,7 @@ fn execute_shell_command(
             .arg("-Command")
             .arg(&command_arg)
             .stdin(std::process::Stdio::null());
+        apply_child_utf8_env(&mut process);
         let log = runtime::background_log::create(&cwd, command);
         match &log {
             Some(log) => {
@@ -6662,6 +6710,7 @@ fn execute_shell_command(
     process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    apply_child_utf8_env(&mut process);
 
     let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(timeout);
     let output = runtime::run_managed_command_with_cancel_and_progress(
@@ -6746,6 +6795,17 @@ fn execute_shell_command(
         persisted_output_size: None,
         sandbox_status: None,
     })
+}
+
+/// PowerShell already reads native output as UTF-8 (see
+/// [`powershell_command_arg`]), but a Python child still wrote in the console
+/// code page: characters outside GBK raised `UnicodeEncodeError`, and the GBK
+/// bytes that did get through were decoded as UTF-8 into `�`. The REPL had
+/// the same failure. Both now get the bash tool's UTF-8 child environment.
+fn apply_child_utf8_env(process: &mut std::process::Command) {
+    if cfg!(windows) {
+        runtime::apply_windows_utf8_env(process);
+    }
 }
 
 fn powershell_command_arg(command: &str) -> String {

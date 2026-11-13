@@ -9,6 +9,7 @@ import type {
   ProjectIntentObservation,
 } from "../../api/tauri";
 import type { AgentTaskCard } from "../../api/agentTasks";
+import type { ActiveUiPanel } from "../../api/plugins";
 import type {
   ChatReasoningEffortView,
   ChatTodoItem,
@@ -33,6 +34,8 @@ const apiMocks = vi.hoisted(() => ({
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   gitStatus: vi.fn(() => Promise.resolve({ isRepository: false })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  projectSetCurrent: vi.fn<(id: string) => Promise<{ projects: DesktopProject[]; currentProject: DesktopProject }>>(),
+  stateDir: vi.fn(() => Promise.resolve("F:/SomniQState")),
   backgroundProcessesList: vi.fn(() => Promise.resolve([])),
   projectBriefReview: vi.fn(() => Promise.resolve({ mission: "Test project mission", activity: null, goal: null })),
   projectIntentObserve: vi.fn<(
@@ -133,6 +136,18 @@ const agentMocks = vi.hoisted(() => ({
   onChatAgentActivity: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
+const pluginMocks = vi.hoisted(() => ({
+  usePanels: vi.fn<() => { panels: ActiveUiPanel[]; loaded: boolean; error: string; refresh: () => Promise<void> }>(),
+  stateGet: vi.fn(() => Promise.resolve({ revision: 0, todoLists: {}, notes: {} })),
+}));
+vi.mock("../../extensions/useChatPluginPanels", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../extensions/useChatPluginPanels")>(),
+  useChatPluginPanels: pluginMocks.usePanels,
+}));
+vi.mock("../../api/plugins", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../api/plugins")>(),
+  pluginsUiStateGet: pluginMocks.stateGet,
+}));
 vi.mock("../../api/tauri", () => apiMocks);
 vi.mock("../../api/agentTasks", () => agentMocks);
 vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
@@ -172,7 +187,7 @@ vi.mock("../ChatThread", () => ({
         }}
       />
       {turns.map((turn) => (
-        <article key={turn.id} data-role={turn.role}>
+        <article key={turn.id} data-role={turn.role} data-origin={turn.origin}>
           {turn.blocks.map((block, index) => (
             block.kind === "text"
               ? <div key={index}>{block.text}</div>
@@ -380,6 +395,7 @@ describe("Chat export action", () => {
     portal.id = "app-chat-actions-portal";
     document.body.appendChild(portal);
     vi.clearAllMocks();
+    pluginMocks.usePanels.mockReturnValue({ panels: [], loaded: true, error: "", refresh: async () => {} });
     apiMocks.isTauri.mockReturnValue(true);
     agentMocks.chatAgentList.mockResolvedValue([]);
     apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000 });
@@ -392,6 +408,12 @@ describe("Chat export action", () => {
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
+    apiMocks.projectSetCurrent.mockImplementation(async (id) => {
+      const projects = useStore.getState().projects;
+      const currentProject = projects.find((project) => project.id === id);
+      if (!currentProject) throw new Error(`Unknown project: ${id}`);
+      return { projects, currentProject };
+    });
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.chatEventsRead.mockResolvedValue([]);
     apiMocks.reviewWorkflowsList.mockResolvedValue([]);
@@ -441,6 +463,28 @@ describe("Chat export action", () => {
     expect(clampSidePanelWidth(1_400, 1_150)).toBe(730);
     expect(clampSidePanelWidth(200, 1_150)).toBe(320);
     expect(clampSidePanelWidth(900, 600)).toBe(320);
+  });
+
+  it("opens a user plugin in the existing sidebar and unloads it after disable", async () => {
+    apiMocks.isTauri.mockReturnValue(false);
+    const session = seedChatWithTurns();
+    const contribution: ActiveUiPanel = {
+      pluginName: "@lab/custom-desk", packageDigest: "abc", id: "desk", slot: "chat.sidebar", order: 0,
+      title: { en: "My research desk", cn: "我的研究台" },
+      widgets: [{ id: "todo", type: "todo-list", title: "Custom checklist" }],
+    };
+    pluginMocks.usePanels.mockReturnValue({ panels: [contribution], loaded: true, error: "", refresh: async () => {} });
+    const view = render(<Chat />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open plugin panel" }));
+    await screen.findByRole("tab", { name: "My research desk" });
+    await screen.findByRole("region", { name: "Custom checklist" });
+    expect(pluginMocks.stateGet).toHaveBeenCalledWith(defaultProject.path, "@lab/custom-desk", "desk", session.id);
+    fireEvent.click(screen.getByRole("button", { name: "Open plugin panel" }));
+    expect(screen.getAllByRole("tab", { name: "My research desk" })).toHaveLength(1);
+    pluginMocks.usePanels.mockReturnValue({ panels: [], loaded: true, error: "", refresh: async () => {} });
+    view.rerender(<Chat />);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Custom checklist" })).toBeNull());
+    expect(screen.queryByRole("tab", { name: "My research desk" })).toBeNull();
   });
 
   it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
@@ -635,7 +679,27 @@ describe("Chat export action", () => {
     await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
     const workflow = await screen.findByTitle("Repairing task persistence");
     await userEvent.click(workflow);
-    expect(screen.getByText("Repairing task persistence")).toBeTruthy();
+    expect(screen.getByRole("list").textContent).toContain("Repairing task persistence");
+  });
+
+  it("does not restore a stale persisted plan after a successful clear in the transcript", async () => {
+    const session = makeSession("default");
+    session.id = "session-cleared-tasks";
+    session.title = "Cleared task recovery";
+    session.turns = [{
+      id: "clear-plan", role: "assistant", blocks: [{
+        kind: "tool", name: "TodoWrite", input: JSON.stringify({ todos: [] }), output: JSON.stringify({ newTodos: [] }),
+      }],
+    }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatTasksGet.mockResolvedValue([{
+      content: "Old incomplete step", activeForm: "Running old incomplete step", status: "in_progress",
+    }]);
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await waitFor(() => expect(apiMocks.chatTasksGet).toHaveBeenCalledWith(session.id, session.projectId));
+    expect(screen.queryByTitle("Running old incomplete step")).toBeNull();
   });
 
   it("asks the backend to review project activity after a completed user question", async () => {
@@ -1194,6 +1258,133 @@ describe("Chat export action", () => {
     expect(request.text).toContain("Do not repeat the completed portion");
   });
 
+  it("runs one verification turn after a plugin approval, shown as the app's marker", async () => {
+    const session = makeSession("default");
+    session.id = "session-plugin";
+    session.title = "Plugin task";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    let toolHandler: ((event: unknown) => void) | undefined;
+    let resultHandler: ((event: unknown) => void) | undefined;
+    (apiMocks.onChatTool as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      toolHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    (apiMocks.onChatToolResult as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      resultHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const card = {
+      kind: "enable", name: "@local/notes", version: "0.1.0", description: "", digest: "sha256:a", source: "x",
+      capabilities: { skills: [], uiPanels: [], mcpServers: [] }, approveOn: "desktop",
+    };
+    (apiMocks.chatSend as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async (sessionId: string) => {
+        toolHandler?.({ sessionId, id: "pm-1", name: "PluginManager", input: "{}", ready: true, pluginApproval: card });
+        resultHandler?.({
+          sessionId, id: "pm-1", name: "PluginManager", isError: false,
+          output: JSON.stringify({ action: "request_enable", application: "next-turn" }),
+        });
+        return "Approved; it applies from the next turn.";
+      })
+      .mockResolvedValue("Verified the plugin.");
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Plugin task" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Make a notes panel plugin");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    const followUp = apiMocks.chatSend.mock.calls[1][1] as { text: string };
+    expect(followUp.text).toContain("approved the plugin change");
+    expect(followUp.text).toContain("PluginManager list");
+    // The app's turn is a marker, not a user message the user could edit.
+    const marker = (await screen.findByText("Plugin enabled · verifying it")).closest("article");
+    expect(marker?.getAttribute("data-origin")).toBe("plugin-continuation");
+    // The app's turn is not read as the user's question.
+    expect(apiMocks.projectIntentObserve).not.toHaveBeenCalledWith(
+      "default",
+      session.id,
+      [expect.objectContaining({ text: "Plugin enabled · verifying it" })],
+    );
+    await screen.findByText("Verified the plugin.");
+    // One follow-up per approval: the verification turn starts no other.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a new chat with a draft handed over from another view, without sending it", async () => {
+    const session = makeSession("default");
+    session.id = "session-existing";
+    session.title = "Existing chat";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    session.draft = "my unsent words";
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Existing chat" }));
+    act(() => useStore.setState({ pendingNewChatDraft: "Use the somniq-plugin-development skill to build me a plugin" }));
+
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value)
+      .toBe("Use the somniq-plugin-development skill to build me a plugin"));
+    expect(useStore.getState().pendingNewChatDraft).toBeNull();
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
+    // The existing chat keeps its own draft: the hand-off opened a new one.
+    expect(screen.queryByText("Earlier question")).toBeNull();
+  });
+
+  it("does not follow up a turn whose plugin card was declined", async () => {
+    const session = makeSession("default");
+    session.id = "session-plugin-declined";
+    session.title = "Declined plugin";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Earlier question" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "Earlier answer" }] },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    let toolHandler: ((event: unknown) => void) | undefined;
+    let resultHandler: ((event: unknown) => void) | undefined;
+    (apiMocks.onChatTool as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      toolHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    (apiMocks.onChatToolResult as ReturnType<typeof vi.fn>).mockImplementation((handler: (event: unknown) => void) => {
+      resultHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const card = {
+      kind: "enable", name: "@local/notes", version: "0.1.0", description: "", digest: "sha256:a", source: "x",
+      capabilities: { skills: [], uiPanels: [], mcpServers: [] }, approveOn: "desktop",
+    };
+    (apiMocks.chatSend as ReturnType<typeof vi.fn>).mockImplementationOnce(async (sessionId: string) => {
+      toolHandler?.({ sessionId, id: "pm-1", name: "PluginManager", input: "{}", ready: true, pluginApproval: card });
+      resultHandler?.({
+        sessionId, id: "pm-1", name: "PluginManager", isError: false,
+        output: JSON.stringify({ action: "request_enable", application: "rejected" }),
+      });
+      return "You declined.";
+    });
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Declined plugin" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Make a notes panel plugin");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await screen.findByText("You declined.");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[data-origin]")).toBeNull();
+  });
+
   it("resumes a failed turn from the preserved backend session instead of discarding its work", async () => {
     const session = makeSession("default");
     session.id = "session-retry";
@@ -1272,6 +1463,205 @@ describe("Chat export action", () => {
       session.id,
       expect.objectContaining({ text: expect.stringContaining("# Notes"), projectId: session.projectId }),
     ));
+  });
+
+  it("sends a second new chat in the same project while the first new chat is still running", async () => {
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First new chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const firstId = apiMocks.chatSend.mock.calls[0][0];
+    expect(firstId).not.toBe("chat-home");
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second new chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+
+    const secondId = apiMocks.chatSend.mock.calls[1][0];
+    expect(secondId).not.toBe("chat-home");
+    expect(secondId).not.toBe(firstId);
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(1, firstId, expect.objectContaining({
+      text: "First new chat question", projectId: defaultProject.id,
+    }));
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(2, secondId, expect.objectContaining({
+      text: "Second new chat question", projectId: defaultProject.id,
+    }));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First new chat answer"));
+    expect(screen.queryByText("First new chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+    await act(async () => finishSecond?.("Second new chat answer"));
+    expect(await screen.findByText("Second new chat answer")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+  });
+
+  it("keeps two existing chats in the same project sending and completing independently", async () => {
+    const first = {
+      ...makeSession(defaultProject.id),
+      id: "chat-same-project-first",
+      title: "First research chat",
+      titleSource: "user" as const,
+      model: "MiniMax-M3",
+    };
+    const second = {
+      ...makeSession(defaultProject.id),
+      id: "chat-same-project-second",
+      title: "Second research chat",
+      titleSource: "user" as const,
+      model: "gpt-6.1-sol",
+    };
+    first.turns = [{ id: "first-history", role: "assistant", blocks: [{ kind: "text", text: "First chat history" }] }];
+    second.turns = [{ id: "second-history", role: "assistant", blocks: [{ kind: "text", text: "Second chat history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([first, second]));
+    localStorage.setItem(CURRENT_KEY, first.id);
+
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: first.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      first.id,
+      expect.objectContaining({ text: "First chat question", projectId: defaultProject.id, model: first.model }),
+    ));
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: second.title }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      second.id,
+      expect.objectContaining({ text: "Second chat question", projectId: defaultProject.id, model: second.model }),
+    ));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First chat answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        projectId: defaultProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First chat answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    // A first-chat completion must not release the second chat's send lock.
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Wait for second answer");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(2);
+
+    await act(async () => finishSecond?.("Second chat answer"));
+    expect(await screen.findByText("Second chat answer")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.click(screen.getByRole("button", { name: first.title }));
+    expect(await screen.findByText("First chat answer")).toBeTruthy();
+    expect(screen.queryByText("Second chat answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false");
+    expect(useStore.getState().currentProject?.id).toBe(defaultProject.id);
+  });
+
+  it("sends new home chats concurrently across project switches and preserves their owning projects", async () => {
+    const firstProject = { ...defaultProject, id: "project-aaaaaaaaaaaaaaaa", name: "First", path: "F:/First" };
+    const secondProject = { ...defaultProject, id: "project-bbbbbbbbbbbbbbbb", name: "Second", path: "F:/Second" };
+    useStore.setState({ projects: [firstProject, secondProject], currentProject: firstProject });
+    mockModelPreference();
+    apiMocks.chatSuggestTitle
+      .mockResolvedValueOnce("First new project chat")
+      .mockResolvedValueOnce("Second new project chat");
+    let finishFirst: ((reply: string) => void) | undefined;
+    let finishSecond: ((reply: string) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishSecond = resolve; }));
+
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First project home question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const firstId = apiMocks.chatSend.mock.calls[0][0];
+
+    // Exercise the real store action used by the app's project switcher.
+    // Switching to an empty project reuses chat-home, unlike the sidebar's
+    // project-specific New action, which directly creates a real session.
+    await act(async () => useStore.getState().switchProject(secondProject.id));
+    expect(apiMocks.projectSetCurrent).toHaveBeenCalledWith(secondProject.id);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" }));
+    await waitFor(() => expect(screen.getByText("Model: gpt-6.1-sol")).toBeTruthy());
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Second project home question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    const secondId = apiMocks.chatSend.mock.calls[1][0];
+    expect(firstId).not.toBe("chat-home");
+    expect(secondId).not.toBe("chat-home");
+    expect(secondId).not.toBe(firstId);
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(1, firstId, expect.objectContaining({
+      text: "First project home question", projectId: firstProject.id, model: CONFIGURED_EXECUTOR_MODEL,
+    }));
+    expect(apiMocks.chatSend).toHaveBeenNthCalledWith(2, secondId, expect.objectContaining({
+      text: "Second project home question", projectId: secondProject.id, model: "gpt-6.1-sol",
+    }));
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
+
+    await act(async () => finishFirst?.("First project home answer"));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: firstId,
+        projectId: firstProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "First project home answer" }]),
+        })]),
+      }),
+    ));
+    expect(screen.queryByText("First project home answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("true");
+
+    await act(async () => finishSecond?.("Second project home answer"));
+    expect(await screen.findByText("Second project home answer")).toBeTruthy();
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: secondId,
+        projectId: secondProject.id,
+        turns: expect.arrayContaining([expect.objectContaining({
+          role: "assistant",
+          blocks: expect.arrayContaining([{ kind: "text", text: "Second project home answer" }]),
+        })]),
+      }),
+    ));
+    await userEvent.click(await screen.findByRole("button", { name: "First new project chat" }));
+    expect(apiMocks.projectSetCurrent).toHaveBeenLastCalledWith(firstProject.id);
+    expect(useStore.getState().currentProject?.id).toBe(firstProject.id);
+    expect(await screen.findByText("First project home answer")).toBeTruthy();
+    expect(screen.queryByText("Second project home answer")).toBeNull();
+    expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false");
+    expect(apiMocks.chatCancel).not.toHaveBeenCalled();
   });
 
   it("keeps concurrent chats and completed replies in their independent projects", async () => {

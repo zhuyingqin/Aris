@@ -224,16 +224,23 @@ export function textRunsFromPdfContent(
   const content = (textContent ?? {}) as { items?: unknown[]; styles?: Record<string, PdfTextStyleLike> };
   const items = Array.isArray(content.items) ? content.items : [];
   const styles = content.styles ?? {};
-  return items.flatMap((item, index) => {
-    if (!item || typeof item !== "object") return [];
+  const runs: PdfTextRun[] = [];
+  items.forEach((item, index) => {
+    if (!item || typeof item !== "object") return;
     const textItem = item as { str?: unknown; fontName?: unknown; hasEOL?: unknown } & PdfTextItemLike;
     const raw = pdfTextLayerText(typeof textItem.str === "string" ? textItem.str : "");
     const text = raw.trim();
-    if (!text) return [];
+    // PDF.js emits spaces and line endings as separate items, especially
+    // around inline math. Dropping them leaves holes in selection/copy and
+    // joins adjacent words. An empty EOL item belongs to the preceding run.
+    if (!raw) {
+      if (textItem.hasEOL === true && runs.length > 0) runs[runs.length - 1].endsLine = true;
+      return;
+    }
     const style = typeof textItem.fontName === "string" ? styles[textItem.fontName] : undefined;
-    const box = pdfTextRunBox(textItem, style, viewportTransform, zoom, text.length);
-    if (!box) return [];
-    return [{
+    const box = pdfTextRunBox(textItem, style, viewportTransform, zoom, raw.length);
+    if (!box) return;
+    runs.push({
       id: `${index}:${text}`,
       itemIndex: index,
       text,
@@ -247,8 +254,9 @@ export function textRunsFromPdfContent(
       scaleX: textRunScaleX(raw, box.fontSize, box.width),
       color: "#1f2937",
       backgroundColor: "#ffffff",
-    }];
+    });
   });
+  return runs;
 }
 export function samplePdfTextColors(
   canvas: HTMLCanvasElement,

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "llm_review_tool.rs"]
+mod llm_review_tool;
+
 struct MultiWorkspaceFixture {
     _temp: tempfile::TempDir,
     first: PathBuf,
@@ -1781,6 +1784,7 @@ fn work_task_runtime_streams_into_an_open_read_only_transcript() {
         binding: crate::engine::WorkTaskTurnBinding {
             task_id: "t1".to_string(),
             run_seq: 1,
+            plugin_run: None,
         },
     });
 
@@ -2374,45 +2378,50 @@ fn desktop_chat_registers_local_project_evidence_search_as_read_only() {
 }
 
 #[test]
-fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
-    assert!(
-        validate_question_input(r#"{"question":"Pick one","options":[{"label":"A"}]}"#).is_ok()
+fn ask_user_question_cards_render_the_question_the_executor_asks() {
+    // The card parses only the strict flat shape. A payload carrying the
+    // closers of a `{"questions": [...]}` wrapper is asked, so its card must
+    // receive the canonical form rather than fall back to a raw tool card.
+    let trailing_wrapper_closers =
+        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
+    let card: Value = serde_json::from_str(&tool_input_for_ui(
+        ASK_USER_QUESTION_TOOL,
+        trailing_wrapper_closers,
+    ))
+    .expect("card input is strict JSON");
+    assert_eq!(
+        card,
+        json!({"question": "Pick one", "options": [{"label": "A"}, {"label": "B"}]})
     );
 
-    assert!(validate_question_input(r#"{"question":"Pick one"}"#)
-        .expect_err("missing options should fail")
-        .to_string()
-        .contains("options"));
-    assert!(
-        validate_question_input(r#"{"question":"Pick one","options":[{"label":"  "}]}"#)
-            .expect_err("blank labels should fail")
-            .to_string()
-            .contains("label")
+    // Input with no recoverable question keeps its raw text for the fallback
+    // tool card, and other tools are untouched.
+    let truncated = r#"{"question":"Pick one","options":[{"label":"A"#;
+    assert_eq!(
+        tool_input_for_ui(ASK_USER_QUESTION_TOOL, truncated),
+        truncated
     );
-    assert!(validate_question_input(r#"{"options":[{"label":"A"}]}"#)
-        .expect_err("missing question should fail")
-        .to_string()
-        .contains("question"));
+    assert_eq!(
+        tool_input_for_ui("read_file", trailing_wrapper_closers),
+        trailing_wrapper_closers
+    );
 }
 
 #[test]
-fn ask_user_question_parse_failure_names_the_expected_shape() {
-    // A flat payload that ends with the closing punctuation of a
-    // `{"questions": [...]}` wrapper: the retry has to drop the stray closers,
-    // so the error must rule out adding the wrapper instead.
-    let trailing_wrapper_closers =
-        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
-    let message = validate_question_input(trailing_wrapper_closers)
-        .expect_err("trailing closers should fail")
-        .to_string();
-    assert!(
-        message.contains("trailing characters"),
-        "parse position should survive into the message: {message}"
-    );
-    assert!(
-        message.contains("not an array of questions"),
-        "message should rule out the wrapper shape: {message}"
-    );
+fn ask_user_question_reports_the_questions_a_card_did_not_show() {
+    let read = question_input::read_question_input(
+        r#"{"questions":[{"question":"First?","options":[{"label":"A"}]},{"question":"Second?","options":[{"label":"B"}]}]}"#,
+    )
+    .expect("a questions array is readable");
+    let result = read.tool_result("A".to_string());
+    assert!(result.starts_with("A\n\n"), "{result}");
+    assert!(result.contains("one question per call"), "{result}");
+    assert!(result.contains("- Second?"), "{result}");
+
+    let single =
+        question_input::read_question_input(r#"{"question":"Only?","options":[{"label":"A"}]}"#)
+            .unwrap();
+    assert_eq!(single.tool_result("A".to_string()), "A");
 }
 
 #[test]

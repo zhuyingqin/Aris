@@ -13,6 +13,9 @@ mod config;
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
 #[cfg(feature = "devserver")]
 pub mod devserver;
+/// One-shot model calls for the memory-L1 evaluation harness.
+#[cfg(feature = "memory-eval")]
+pub mod memory_eval_bridge;
 mod engine;
 mod env;
 mod files;
@@ -31,6 +34,7 @@ mod memory;
 mod newapi;
 mod oracle_web;
 mod platform;
+mod plugins;
 mod playwright_pdf;
 mod ppt_master;
 mod process;
@@ -991,7 +995,24 @@ pub fn run() {
             scheduled::scheduled_task_update,
             scheduled::scheduled_task_set_status,
             scheduled::scheduled_task_delete,
+            scheduled::scheduled_task_preview,
+            scheduled::scheduled_task_history,
+            scheduled::scheduled_task_run_now,
             mcp::mcp_config_get,
+            plugins::plugins_list,
+            plugins::plugins_preview,
+            plugins::plugins_install,
+            plugins::plugins_set_enabled,
+            plugins::plugins_upgrade,
+            plugins::plugins_rollback,
+            plugins::plugins_draft_changes,
+            plugins::plugins_draft_page,
+            plugins::plugins_check_mcp,
+            plugins::plugins_remove,
+            plugins::plugins_ui_list,
+            plugins::plugins_ui_state_get,
+            plugins::plugins_ui_state_update,
+            plugins::plugins_ui_page,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
             oracle_web::oracle_web_status,
@@ -1112,6 +1133,7 @@ pub fn run() {
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,
+            plugins::chat_plugin_approval_respond,
             engine::chat_command_specs,
             engine::chat_run_command,
             engine::chat_send_rich,

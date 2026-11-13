@@ -292,6 +292,16 @@ impl ConfigLoader {
             loaded_entries.push(entry);
         }
 
+        // Explicitly installed project capability packages augment MCP only.
+        // Existing user/application declarations retain precedence and policy.
+        // A corrupt package registry fails closed without breaking ordinary chat.
+        // A work task's worktree resolves to its registered project.
+        if let Ok(servers) = crate::plugins::PluginStore::for_execution(&self.cwd).active_mcp_servers() {
+            for (name, server) in servers {
+                mcp_servers.entry(name).or_insert(server);
+            }
+        }
+
         let merged_value = JsonValue::Object(merged.clone());
 
         let feature_config = RuntimeFeatureConfig {

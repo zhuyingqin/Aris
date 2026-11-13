@@ -36,7 +36,12 @@ use runtime::{
 };
 use serde_json::json;
 
-fn env_lock() -> &'static Mutex<()> {
+/// The crate's only lock for tests that change process-wide state (env vars,
+/// the current directory). Every test module takes this one; a module-local
+/// lock serializes nothing against the rest. The notebook tests once had
+/// their own and set `ARIS_WORKSPACE_ROOT` while a REPL write was between its
+/// audit record and its revert, so the revert read another ledger.
+pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }

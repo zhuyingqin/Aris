@@ -298,14 +298,18 @@ struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
     process: Option<McpStdioProcess>,
     initialized: bool,
+    /// [`crate::scoped_mcp_config_hash`] of the configuration, so a discovery
+    /// result is recorded against exactly the command line that produced it.
+    config_hash: String,
 }
 
 impl ManagedMcpServer {
-    fn new(bootstrap: McpClientBootstrap) -> Self {
+    fn new(bootstrap: McpClientBootstrap, config_hash: String) -> Self {
         Self {
             bootstrap,
             process: None,
             initialized: false,
+            config_hash,
         }
     }
 }
@@ -332,7 +336,13 @@ impl McpServerManager {
         for (server_name, server_config) in servers {
             if server_config.transport() == McpTransport::Stdio {
                 let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
-                managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
+                managed_servers.insert(
+                    server_name.clone(),
+                    ManagedMcpServer::new(
+                        bootstrap,
+                        crate::mcp::scoped_mcp_config_hash(server_config),
+                    ),
+                );
             } else {
                 unsupported_servers.push(UnsupportedMcpServer {
                     server_name: server_name.clone(),
@@ -402,10 +412,10 @@ impl McpServerManager {
                         Ok(result) => result,
                         Err(_) => {
                             self.terminate_server(&server_name).await;
-                            failures.push((
-                                server_name,
-                                format!("tool discovery exceeded {}s", timeout.as_secs_f64()),
-                            ));
+                            let message =
+                                format!("tool discovery exceeded {}s", timeout.as_secs_f64());
+                            self.record_health(&server_name, Err(message.clone()));
+                            failures.push((server_name, message));
                             continue;
                         }
                     }
@@ -413,12 +423,26 @@ impl McpServerManager {
                 None => self.discover_server_tools(&server_name).await,
             };
             match result {
-                Ok(tools) => discovered_tools.extend(tools),
-                Err(error) => failures.push((server_name, error.to_string())),
+                Ok(tools) => {
+                    self.record_health(&server_name, Ok(tools.len()));
+                    discovered_tools.extend(tools);
+                }
+                Err(error) => {
+                    self.record_health(&server_name, Err(error.to_string()));
+                    failures.push((server_name, error.to_string()));
+                }
             }
         }
 
         (discovered_tools, failures)
+    }
+
+    /// Let the plugin page (and anything else that asks) see what this
+    /// discovery actually observed for `server_name`.
+    fn record_health(&self, server_name: &str, outcome: Result<usize, String>) {
+        if let Some(server) = self.servers.get(server_name) {
+            crate::mcp_health::record_mcp_server_health(server_name, &server.config_hash, outcome);
+        }
     }
 
     /// Restore routes from a prior discovery without starting MCP processes.

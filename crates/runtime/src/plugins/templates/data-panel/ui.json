@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 2,
+  "panels": [
+    {
+      "id": "experiment-board",
+      "slot": "chat.sidebar",
+      "title": { "en": "Experiment board", "cn": "实验看板" },
+      "order": 10,
+      "scope": "project",
+      "widgets": [
+        { "id": "summary", "type": "metrics", "title": { "en": "Summary", "cn": "概览" } },
+        { "id": "progress", "type": "progress", "title": { "en": "Progress", "cn": "进度" } },
+        {
+          "id": "runs",
+          "type": "table",
+          "title": { "en": "Runs", "cn": "实验记录" },
+          "columns": [
+            { "key": "name", "title": { "en": "Run", "cn": "实验" } },
+            { "key": "setting", "title": { "en": "Setting", "cn": "设置" } },
+            { "key": "metric", "title": { "en": "Metric", "cn": "指标" } },
+            { "key": "status", "title": { "en": "Status", "cn": "状态" } }
+          ]
+        },
+        { "id": "trend", "type": "chart", "title": { "en": "Trend", "cn": "趋势" }, "chart": "line" },
+        { "id": "findings", "type": "markdown", "title": { "en": "Findings", "cn": "结论" } },
+        { "id": "evidence", "type": "list", "title": { "en": "Evidence files", "cn": "证据文件" } },
+        {
+          "id": "new-run",
+          "type": "form",
+          "title": { "en": "Plan a run", "cn": "安排一次实验" },
+          "fields": [
+            { "key": "question", "label": { "en": "Question", "cn": "要回答的问题" }, "input": "textarea" },
+            {
+              "key": "budget",
+              "label": { "en": "Budget", "cn": "预算" },
+              "input": "select",
+              "options": ["quick check", "full run"]
+            }
+          ],
+          "submit": {
+            "label": { "en": "Hand to the agent", "cn": "交给 AI" },
+            "action": {
+              "type": "prompt",
+              "text": "Plan and run one experiment for this question: {{question}}\nBudget: {{budget}}\nWhen it finishes, update the Experiment board panel with PluginPanel."
+            }
+          }
+        },
+        {
+          "id": "refresh",
+          "type": "button",
+          "label": { "en": "Refresh from results", "cn": "按最新结果刷新" },
+          "action": {
+            "type": "prompt",
+            "text": "Read the latest experiment results in this project and update every widget of the Experiment board panel with PluginPanel."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+/* Plugin glances in the Chat's project summary card. */
+.project-brief-glances { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 2px; min-width: 0; }
+.project-brief-glance {
+  min-width: 0; border-radius: 11px; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: var(--bg-2);
+}
+.project-brief-glance-head { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 2px; min-width: 0; }
+.project-brief-glance.is-folded .project-brief-glance-head { padding-block: 3px; }
+.project-brief-glance-toggle,
+.project-brief-glance-open {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 6px; border: 0; border-radius: 7px; background: none;
+  color: var(--text-dim); font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.project-brief-glance-toggle { flex: 1; justify-content: flex-start; color: var(--text); font-weight: 600; }
+.project-brief-glance-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-brief-glance-toggle > svg:last-child { margin-left: auto; color: var(--text-dim); opacity: 0; transition: opacity .12s ease; }
+.project-brief-glance-head:hover .project-brief-glance-toggle > svg:last-child,
+.project-brief-glance-toggle:focus-visible > svg:last-child,
+.project-brief-glance.is-folded .project-brief-glance-toggle > svg:last-child { opacity: 1; }
+.project-brief-glance-open { flex: none; gap: 2px; }
+.project-brief-glance-toggle:hover, .project-brief-glance-open:hover { background: var(--bg-3); color: var(--text); }
+.project-brief-glance-toggle:focus-visible, .project-brief-glance-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.project-brief-glance-frame { display: flex; min-width: 0; transition: height .18s ease; }
+.project-brief-glance-frame .plugin-page-frame { flex: 1; width: 100%; height: 100%; border: 0; display: block; background: transparent; }
+.project-brief-glance-frame .plugin-page-frame-status { margin: 8px 10px; font-size: 11.5px; }
+.project-brief-glance .chat-plugin-panel.is-compact { height: auto; background: transparent; }
+.project-brief-glance .chat-plugin-panel.is-compact .chat-plugin-panel-content { padding: 0 10px 8px; overflow: visible; }
+@media (prefers-reduced-motion: reduce) { .project-brief-glance-frame { transition: none; } }

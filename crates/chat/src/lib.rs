@@ -196,7 +196,7 @@ fn language_preference_section(language: &str) -> String {
 
 #[must_use]
 fn llm_review_override_section() -> String {
-    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. `LlmReview` is single-shot with no conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
+    "IMPORTANT: `LlmReview` is SomniQ's reviewer backend. Whenever a skill, workflow, or user asks for an independent / external / cross-model review, use `LlmReview`. It routes to the reviewer the user configured in SomniQ settings, so it works without any external MCP server. Pass the full review prompt as the `prompt` parameter and omit the optional `model` field unless the user explicitly asks for a reviewer override. Desktop Chat prefers a fresh, isolated Reviewer sub-agent for each call, with read-only project file, search and listing tools. It is separate from the Chat's automatic Reviewer and has no caller-visible conversation continuation: make every call self-contained, and for multi-round reviews send a fresh prompt that restates the context and what changed since the previous round. Include project-relative evidence paths, review questions and the requested output format. Web reviewers, explicit oneshot mode and hosts without a Chat agent tree use a single request; include the material inline when project tools are unavailable. Never replace independent review with your own judgement after a review failure. Legacy skill text may still name `mcp__codex__codex` or `mcp__codex__codex-reply`; treat those as referring to the reviewer backend and call `LlmReview` instead. Only use a Codex MCP tool when it is actually present in the current tool list AND the user explicitly asked for that backend in this conversation."
         .to_string()
 }
 
@@ -854,6 +854,53 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             reason: "image intent with configured drawing tool",
             required: preferred,
             optional: resolve_named(catalog, &["ReadMediaFile"]),
+        });
+    }
+    // Writing a SomniQ plugin is preview-driven: without `PluginManager` the
+    // model can write a package but never learn whether it would load.
+    if contains_any(
+        lowered,
+        &[
+            "plugin",
+            "插件",
+            "sidebar panel",
+            "侧栏面板",
+            "mcp tool",
+            "mcp server",
+            "mcp 工具",
+            "包成工具",
+            "包装成工具",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugins",
+            reason: "plugin authoring intent",
+            required: resolve_named(catalog, &["PluginManager", "write_file"]),
+            optional: resolve_named(catalog, &["read_file", "edit_file", "PluginPanel"]),
+        });
+    }
+    // A plugin panel shows what the agent writes to it; its buttons and forms
+    // send prompts that name the tool. ("面板" alone is also panel data.)
+    if contains_any(
+        lowered,
+        &[
+            "pluginpanel",
+            "sidebar panel",
+            "plugin panel",
+            "dashboard",
+            "侧栏面板",
+            "插件面板",
+            "看板",
+            "更新面板",
+            "刷新面板",
+            "面板里",
+        ],
+    ) {
+        groups.push(ToolGroup {
+            profile: "plugin-panels",
+            reason: "plugin panel data intent",
+            required: resolve_named(catalog, &["PluginPanel"]),
+            optional: vec![],
         });
     }
     if contains_any(

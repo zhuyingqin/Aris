@@ -54,6 +54,14 @@ export const CHAT_COPY: Record<Language, {
   emptyResponse: string;
   waitingForModel: string;
   modelWaitHint: string;
+  toolRunning: string;
+  toolFailed: string;
+  toolSucceeded: string;
+  toolModified: string;
+  inspectedFiles: (count: number) => string;
+  inspectionDetails: string;
+  thinking: string;
+  thought: string;
   responseStopped: string;
   stoppedByUser: string;
   responseFailed: string;
@@ -124,8 +132,16 @@ export const CHAT_COPY: Record<Language, {
     previewCommandReply: "桌面斜杠命令需要在 Tauri 应用内运行。",
     previewResponse: "浏览器预览回复。运行 Tauri 应用可使用实时对话。",
     emptyResponse: "模型返回了空回复。",
-    waitingForModel: "等待模型响应 · 已",
-    modelWaitHint: "深度推理时模型可能要几分钟才开始输出，这不是卡死；可随时点击停止。",
+    waitingForModel: "等待模型响应 ·",
+    modelWaitHint: "深度推理可能需要几分钟，可随时停止。",
+    toolRunning: "运行中",
+    toolFailed: "失败",
+    toolSucceeded: "已完成",
+    toolModified: "已修改文件",
+    inspectedFiles: (count) => `已完成 ${count} 次读取与搜索`,
+    inspectionDetails: "展开查看记录",
+    thinking: "正在思考",
+    thought: "已思考",
     responseStopped: "回复已停止",
     stoppedByUser: "已由用户停止。",
     responseFailed: "回复失败",
@@ -197,7 +213,15 @@ export const CHAT_COPY: Record<Language, {
     previewResponse: "Browser preview response. Run the Tauri app for live Chat.",
     emptyResponse: "Model returned an empty response.",
     waitingForModel: "Waiting for the model ·",
-    modelWaitHint: "Deep reasoning can take several minutes before output starts — this is not a hang. You can stop at any time.",
+    modelWaitHint: "Deep reasoning may take a few minutes. You can stop at any time.",
+    toolRunning: "Running",
+    toolFailed: "Failed",
+    toolSucceeded: "Succeeded",
+    toolModified: "Modified file",
+    inspectedFiles: (count) => `${count} read and search operations complete`,
+    inspectionDetails: "Show activity details",
+    thinking: "Thinking",
+    thought: "Thought",
     responseStopped: "Response stopped",
     stoppedByUser: "Stopped by user.",
     responseFailed: "Response failed",

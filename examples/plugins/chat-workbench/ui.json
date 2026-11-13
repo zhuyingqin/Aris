@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "panels": [
+    {
+      "id": "research-desk",
+      "slot": "chat.sidebar",
+      "title": { "cn": "研究清单", "en": "Research checklist" },
+      "order": 10,
+      "widgets": [
+        {
+          "id": "intro",
+          "type": "text",
+          "text": { "cn": "把下一步和随手想到的线索留在这里，继续研究时随时回来。", "en": "Keep your next steps and research leads here, ready when you return." }
+        },
+        { "id": "todos", "type": "todo-list", "title": { "cn": "我的待办", "en": "My todos" } },
+        { "id": "notes", "type": "notes", "title": { "cn": "研究笔记", "en": "Research notes" } },
+        { "id": "plan", "type": "agent-plan", "title": { "cn": "当前执行进度", "en": "Current execution progress" } }
+      ]
+    },
+    {
+      "id": "evidence-desk",
+      "slot": "chat.sidebar",
+      "title": { "cn": "证据备忘", "en": "Evidence notes" },
+      "order": 20,
+      "widgets": [
+        { "id": "leads", "type": "notes", "title": { "cn": "来源与待核对的问题", "en": "Sources and open questions" } },
+        { "id": "checks", "type": "todo-list", "title": { "cn": "待核对", "en": "To check" } }
+      ]
+    }
+  ]
+}

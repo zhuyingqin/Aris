@@ -92,16 +92,27 @@ fn chat_upload_names_are_path_safe_and_bounded() {
     assert!(sanitize_chat_upload_name("...").is_err());
 }
 
+/// Holds the crate's env lock for as long as the variable is changed: without
+/// it another test's `ARIS_WORKSPACE_ROOT` could land mid-read and confine
+/// `file_read` to that test's workspace.
 struct EnvGuard {
     key: &'static str,
     previous: Option<OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl EnvGuard {
     fn unset(key: &'static str) -> Self {
+        let lock = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(key);
         std::env::remove_var(key);
-        Self { key, previous }
+        Self {
+            key,
+            previous,
+            _lock: lock,
+        }
     }
 }
 

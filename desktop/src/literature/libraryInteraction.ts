@@ -65,6 +65,7 @@ const LAYOUT_STORAGE_KEY = "somniq-literature-layout-v1";
  * value falls back to the responsive defaults. */
 export interface LibraryLayoutPrefs {
   navigationOpen?: boolean;
+  pdfToolbarCollapsed?: boolean;
   /** The user hid the docked details panel (not the narrow drawer). */
   detailsHidden?: boolean;
   sidebarWidth?: number;

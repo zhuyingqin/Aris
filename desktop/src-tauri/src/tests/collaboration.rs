@@ -312,6 +312,7 @@ fn scripted_parent(
         KernelToolExecutor {
             session_id: f.host.parent.clone(),
             turn_id: f.host.parent_turn.clone(),
+            turn_agent: None,
             extra_blocked_tools: &[],
             cancelled: Some(f.host.parent_cancel.clone()),
             progress_sink: None,
@@ -544,6 +545,7 @@ fn prerequisites_roles_capacity_and_child_tool_permissions_are_runtime_constrain
         inner: KernelToolExecutor {
             session_id: "child".into(),
             turn_id: "turn".into(),
+            turn_agent: None,
             extra_blocked_tools: &[],
             cancelled: None,
             progress_sink: None,
@@ -864,6 +866,7 @@ fn child_coordination_reaches_only_its_parent_without_starting_a_new_turn() {
         inner: KernelToolExecutor {
             session_id: child.session_id.clone(),
             turn_id: "coordinate-turn".into(),
+            turn_agent: None,
             extra_blocked_tools: &[],
             cancelled: Some(handle.cancel.clone()),
             progress_sink: None,
@@ -975,6 +978,7 @@ impl LiveFixture {
         let executor = KernelToolExecutor {
             session_id: self.host.parent.clone(),
             turn_id: self.host.parent_turn.clone(),
+            turn_agent: None,
             extra_blocked_tools: &[],
             cancelled: Some(self.host.parent_cancel.clone()),
             progress_sink: None,

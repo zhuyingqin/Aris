@@ -1,0 +1,10 @@
+{
+  "name": "@somniq/research-continuity",
+  "version": "0.1.0",
+  "description": "Preserve the research goal, evidence and independent review handoff.",
+  "private": true,
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

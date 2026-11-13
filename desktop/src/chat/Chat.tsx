@@ -64,7 +64,7 @@ import { CHAT_COPY } from "./i18n";
 import {
   fileChangePathMatches,
   latestFileChangesFromTurns,
-  latestTodosFromTurns,
+  latestTodoSnapshotFromTurns,
   makeId,
   makeSession,
   migrateTurn,
@@ -72,6 +72,10 @@ import {
 } from "./model";
 import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
+import ChatPluginPanel from "../extensions/ChatPluginPanel";
+import ChatBriefGlances from "../extensions/ChatBriefGlances";
+import { PLUGIN_PAGE_ACTION_EVENT, uiPanelIcon, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "../extensions/useChatPluginPanels";
+import type { ActiveUiPanel } from "../api/plugins";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
@@ -208,6 +212,7 @@ type SidePanelTab =
   | { kind: "reviewer"; id: string; projectId: string; title: string; handoff: null }
   | { kind: "review"; id: string; projectId: string; title: string; handoff: null }
   | { kind: "image-workflow"; id: string; projectId: string; title: string; handoff: null }
+  | { kind: "plugin"; id: string; projectId: string; title: string; handoff: null; pluginName: string; panelId: string }
   | {
       kind: "file";
       id: string;
@@ -241,6 +246,8 @@ function isStoredSidePanelTab(value: unknown, projectId: string, sessionId: stri
   if (tab.kind === "task" || tab.kind === "reviewer" || tab.kind === "review" || tab.kind === "image-workflow") return true;
   if (tab.kind === "agent") return tab.rootSessionId === sessionId && typeof tab.childSessionId === "string" && tab.childSessionId.length > 0;
   if (tab.kind === "agents") return tab.rootSessionId === sessionId;
+  if (tab.kind === "plugin") return typeof tab.pluginName === "string" && typeof tab.panelId === "string"
+    && tab.id === uiPanelKey({ pluginName: tab.pluginName, id: tab.panelId });
   return tab.kind === "file" && typeof (tab as { path?: unknown }).path === "string";
 }
 
@@ -504,6 +511,10 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     () => imageAssistActivitySnapshot(),
   );
   const independentReview = useIndependentReview(currentSession?.id ?? "", currentSession?.projectId);
+  const pluginProjectPath = currentSession && currentSession.projectId === currentProject?.id && !currentSession.remoteAgent
+    ? currentProject.path : undefined;
+  const pluginPanels = useChatPluginPanels(pluginProjectPath);
+  const briefGlances = useChatPluginPanels(pluginProjectPath, "chat.brief");
   const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
@@ -791,6 +802,33 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   }, [currentProject, restoreSession, setCurrentId, setTab]);
 
   /**
+   * Bring a scheduled task's conversation into view. A fixed-session target is
+   * an ordinary chat already in the sidebar; a reserved or per-delivery one
+   * exists only as the work task's transcript, so it is restored the way the
+   * task board restores a card's session.
+   */
+  const openScheduledSession = useCallback((sessionId: string, title: string) => {
+    if (!currentProject) return;
+    setCurrentId(sessionId);
+    if (!allSessions.some((session) => session.id === sessionId)) {
+      const now = Date.now();
+      restoreSession({
+        id: sessionId,
+        projectId: currentProject.id,
+        title,
+        ownerKind: "work_task",
+        turns: [],
+        draft: "",
+        draftAttachments: [],
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    setTab("chat");
+  }, [allSessions, currentProject, restoreSession, setCurrentId, setTab]);
+
+  /**
    * Bring the session the user just picked into view.
    *
    * From the standalone Chat tab that means switching to it. Embedded in
@@ -992,6 +1030,17 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     }
   }, [currentProject?.path, openSideFile, setError]);
 
+  const openPluginPanel = useCallback((panel: ActiveUiPanel) => {
+    if (!currentProject || !pluginProjectPath) return;
+    const id = uiPanelKey(panel);
+    setSideTaskTabs((current) => current.some((item) => item.id === id) ? current : [...current, {
+      kind: "plugin", id, projectId: currentProject.id, title: uiText(panel.title, language),
+      handoff: null, pluginName: panel.pluginName, panelId: panel.id,
+    }]);
+    setActiveSideTaskId(id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, pluginProjectPath, language]);
+
   const closeSideTask = useCallback((taskId: string) => {
     const closingTask = sideTaskTabs.find((task) => task.id === taskId);
     if (closingTask?.kind === "task") clearStoredSideTaskState(closingTask.projectId, closingTask.id);
@@ -1100,6 +1149,20 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     setSideTaskPaneOpen(restored.open);
     setHydratedSidePanelKey(sidePanelStorageKey);
   }, [currentProjectId, currentId, sidePanelStorageKey]);
+
+  // Disabled/removed packages release their UI contribution. Keep state files
+  // so re-enabling the package can restore the user's session checklist.
+  useEffect(() => {
+    if (!pluginPanels.loaded || pluginPanels.error || hydratedSidePanelKey !== sidePanelStorageKey) return;
+    const allowed = new Set(pluginPanels.panels.map(uiPanelKey));
+    const next = sideTaskTabs.filter((item) => item.kind !== "plugin" || allowed.has(item.id));
+    if (next.length === sideTaskTabs.length) return;
+    setSideTaskTabs(next);
+    if (!next.some((item) => item.id === activeSideTaskId)) {
+      setActiveSideTaskId(next.at(-1)?.id ?? null);
+      if (next.length === 0) setSideTaskPaneOpen(false);
+    }
+  }, [pluginPanels.loaded, pluginPanels.error, pluginPanels.panels, hydratedSidePanelKey, sidePanelStorageKey, sideTaskTabs, activeSideTaskId]);
 
   useEffect(() => {
     if (!sidePanelStorageKey || hydratedSidePanelKey !== sidePanelStorageKey) return;
@@ -1223,7 +1286,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   }, [currentSessionRef, currentChatBusy, language, run.acquireSendLock, run.beginRun, run.releaseSendLock]);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
-  const turnTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const turnTodos = useMemo(() => latestTodoSnapshotFromTurns(turns), [turns]);
   useEffect(() => {
     if (!isTauri() || !currentSession || currentSession.remoteAgent) return;
     let active = true;
@@ -1238,9 +1301,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       active = false;
     };
   }, [currentSession?.id, currentSession?.remoteAgent]);
-  const workflowTodos = turnTodos.length > 0
-    ? turnTodos
-    : persistedTodos[currentId] ?? [];
+  const workflowTodos = turnTodos ?? persistedTodos[currentId] ?? [];
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],
@@ -1313,7 +1374,8 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
     sideTaskTabs.map((sideTask) => {
       const agent = sideTask.kind === "agent" ? agentTasks.agents.find(item => item.sessionId === sideTask.childSessionId) : undefined;
-      const title = sideTask.kind === "agents" ? (language === "cn" ? "子智能体" : "Agents")
+      const contribution = sideTask.kind === "plugin" ? pluginPanels.panels.find((panel) => uiPanelKey(panel) === sideTask.id) : undefined;
+      const title = contribution ? uiText(contribution.title, language) : sideTask.kind === "agents" ? (language === "cn" ? "子智能体" : "Agents")
         : agent ? agentTaskDisplayName(agent, language) : sideTask.title;
       return {
         id: sideTask.id,
@@ -1324,14 +1386,14 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             sideTask.kind === "file" ? "document"
               : sideTask.kind === "agents" ? "branch"
                 : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
-                  : sideTask.kind === "image-workflow" ? "graph" : "sparkle"
+                  : sideTask.kind === "image-workflow" ? "graph" : sideTask.kind === "plugin" ? (contribution ? uiPanelIcon(contribution) : "grid") : "sparkle"
           } size={13} />,
         title: sideTask.kind === "file" ? sideTask.path : agent ? `${title} · ${agent.path}` : title,
         closable: true,
         closeLabel: `${navigationCopy.close}: ${title}`,
       };
     })
-  ), [navigationCopy.close, sideTaskTabs, agentTasks.agents, language]);
+  ), [navigationCopy.close, sideTaskTabs, agentTasks.agents, language, pluginPanels.panels]);
   const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
 
   const sendHandoffToMain = useCallback((content: string) => {
@@ -1352,13 +1414,23 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         : "Remote Agent chat does not support attachments yet. Remove them before sending.");
       return;
     }
-    const sessionId = currentSession.id;
-    const sendLock = run.acquireSendLock(sessionId);
+    let sessionId = currentSession.id;
+    let sendLock = run.acquireSendLock(sessionId);
     if (sendLock == null) return;
     try {
       if (!status?.ready && !currentSession.remoteAgent && (!composer.input.trim().startsWith("/") || composer.attachments.length > 0)) return;
       const session = materializeCurrentSession();
       if (!session) return;
+      // The home draft is shared by every new chat. Once it becomes a real
+      // session, keep its send lock on that session so another new chat can
+      // send while this turn is still preparing or running.
+      if (session.id !== sessionId) {
+        const materializedLock = run.acquireSendLock(session.id);
+        run.releaseSendLock(sessionId, sendLock);
+        if (materializedLock == null) return;
+        sessionId = session.id;
+        sendLock = materializedLock;
+      }
       if (await commands.runSlashCommand(session, composer.input, composer.attachments)) return;
       if (editingTurnId) {
         const index = session.turns.findIndex((turn) => turn.id === editingTurnId);
@@ -1405,6 +1477,43 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     setEditingTurnId(turn.id);
     focusComposer();
   }, [focusComposer, language, run.runningSessionIdsRef, setDraft, setEditingTurnId, setError, updateSession]);
+
+  // A plugin panel's button or form: the text goes through the composer, so
+  // what it asks for runs as an ordinary turn of the user's. `send` only sends
+  // when the composer held nothing else; otherwise the user reviews and sends.
+  const [panelSend, setPanelSend] = useState<{ sessionId: string; text: string } | null>(null);
+  const runPanelPrompt = useCallback((prompt: string, sendNow: boolean) => {
+    const session = currentSessionRef.current;
+    if (!session || !prompt) return;
+    const draft = session.draft.trim();
+    setDraft(session.id, draft ? `${draft}\n\n${prompt}` : prompt);
+    focusComposer();
+    if (sendNow && !draft) setPanelSend({ sessionId: session.id, text: prompt });
+  }, [currentSessionRef, focusComposer, setDraft]);
+  useEffect(() => {
+    if (!panelSend) return;
+    setPanelSend(null);
+    // Send only the text the click put there, in the conversation it was
+    // clicked in. A busy chat keeps it in the composer instead.
+    if (currentSession?.id === panelSend.sessionId && composer.input === panelSend.text && composer.attachments.length === 0) void sendRef.current();
+  }, [panelSend, currentSession?.id, composer.input, composer.attachments.length]);
+
+  // The backend only accepts project-relative panel paths; the viewer reads absolute ones.
+  const openPanelFile = useCallback((path: string) => {
+    const root = currentProject?.path.replace(/[\\/]+$/, "");
+    if (root) openSideFile(`${root}${root.includes("\\") ? "\\" : "/"}${root.includes("\\") ? path.replace(/\//g, "\\") : path}`);
+  }, [currentProject?.path, openSideFile]);
+  // A plugin page in the navigation rail hands its clicks here. Only a
+  // conversation of the page's own project is sent to without a second look.
+  useEffect(() => {
+    const act = (event: Event) => {
+      const action = (event as CustomEvent<PluginPageAction>).detail;
+      if (action.type === "prompt") runPanelPrompt(action.text, action.send && Boolean(pluginProjectPath));
+      else if (action.type === "open-file") openPanelFile(action.path);
+    };
+    window.addEventListener(PLUGIN_PAGE_ACTION_EVENT, act);
+    return () => window.removeEventListener(PLUGIN_PAGE_ACTION_EVENT, act);
+  }, [runPanelPrompt, openPanelFile, pluginProjectPath]);
 
   const startFromPrompt = useCallback((prompt: string) => {
     const session = currentSessionRef.current;
@@ -1499,7 +1608,8 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     || background.processes.length > 0
     || agentTasks.agents.length > 0
     || Boolean(agentTasks.error)
-    || imageAssistActivity !== null;
+    || imageAssistActivity !== null
+    || briefGlances.panels.length > 0;
   const runningTaskCount = background.processes.length + agentTasks.agents.filter(isAgentTaskActive).length;
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
@@ -1678,6 +1788,13 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             </div>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
             <div className="chat-head-actions-group">
+              {(pluginPanels.panels.length > 0 || pluginPanels.error) && (
+                <button type="button" className="chat-export-btn" aria-label={language === "cn" ? "打开插件面板" : "Open plugin panel"}
+                  title={pluginPanels.error || (language === "cn" ? "打开插件面板" : "Open plugin panel")}
+                  onClick={() => { const panel = pluginPanels.panels[0]; if (panel) openPluginPanel(panel); else void pluginPanels.refresh(); }}>
+                  <SvgIcon name="grid" size={16} />
+                </button>
+              )}
               {projectBriefAvailable && (
                 <button
                   type="button"
@@ -1732,7 +1849,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           document.getElementById("app-chat-actions-portal")!
         )}
         {tab === "scheduled" ? (
-          <ScheduledTasks />
+          <ScheduledTasks onOpenSession={openScheduledSession} />
         ) : tab === "tasks" ? (
           <Suspense fallback={<div className="tasks-empty"><span className="app-loading-spinner" /></div>}>
             <Tasks onOpenSession={openWorkTaskSession} />
@@ -1895,6 +2012,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
               { id: "review", label: navigationCopy.addReview, hint: navigationCopy.addReviewHint, icon: <SvgIcon name="target" size={13} />, onSelect: addCodeReview },
               { id: "image-workflow", label: navigationCopy.addImage, hint: navigationCopy.addImageHint, icon: <SvgIcon name="graph" size={13} />, onSelect: addImageWorkflow },
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
+              ...pluginPanels.panels.map((panel) => ({ id: uiPanelKey(panel), label: uiText(panel.title, language), hint: panel.pluginName, icon: <SvgIcon name={uiPanelIcon(panel)} size={13} />, onSelect: () => openPluginPanel(panel) })),
             ]}
             action={activeSideTask?.handoff
               ? {
@@ -1921,7 +2039,14 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                 aria-label={sideTask.title}
                 hidden={activeSideTaskId !== sideTask.id}
               >
-                {sideTask.kind === "file" ? (
+                {sideTask.kind === "plugin" ? (
+                  (() => {
+                    const panel = pluginPanels.panels.find((item) => uiPanelKey(item) === sideTask.id);
+                    return panel && pluginProjectPath
+                      ? <ChatPluginPanel panel={panel} projectPath={pluginProjectPath} sessionId={currentId} language={language} agentTodos={workflowTodos} onPrompt={runPanelPrompt} onOpenFile={openPanelFile} />
+                      : <div className="chat-plugin-panel"><p role={pluginPanels.error ? "alert" : "status"}>{pluginPanels.error || (language === "cn" ? "正在读取插件面板…" : "Loading plugin panel…")}</p><button type="button" className="chat-plugin-button" onClick={() => void pluginPanels.refresh()}>{language === "cn" ? "重新加载" : "Reload"}</button></div>;
+                  })()
+                ) : sideTask.kind === "file" ? (
                   <SideFileViewer
                     key={`${sideTask.id}::${sideFileReloadGenerations[sideTask.id] ?? 0}`}
                     tabId={sideTask.id}
@@ -2004,6 +2129,9 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             reviewError={projectBrief.reviewError}
             onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
             agentTasks={<AgentTaskCards agents={agentTasks.agents} error={agentTasks.error} language={language} onOpenList={openAgentList} />}
+            glances={pluginProjectPath && briefGlances.panels.length > 0
+              ? <ChatBriefGlances panels={briefGlances.panels} all={briefGlances.all} projectPath={pluginProjectPath} language={language} onPrompt={runPanelPrompt} onOpenFile={openPanelFile} />
+              : undefined}
             backgroundProcesses={background.processes}
             stoppingBackgroundPids={background.stopping}
             onStopBackgroundProcess={(pid) => void background.stop(pid)}

@@ -10,11 +10,13 @@ use flate2::{write::ZlibEncoder, Compression};
 use super::{
     abort_large_write, append_file, append_write_chunk, begin_large_write,
     cleanup_stale_large_writes_at, commit_large_write, content_revision, display_path, edit_file,
-    edit_file_with_context_expected, glob_search, grep_search, multi_edit_file, read_file,
-    read_file_with_images, recover_pending_batch_writes_at, write_file, BatchWriteJournal,
-    BatchWriteJournalEntry, FileChange, FileRevisionConflictError, GrepSearchInput,
-    MultiEditOperation, MultiEditValidationError, ReadFileResult, BATCH_WRITE_JOURNAL_DIR_NAME,
-    MAX_READ_FILE_CONTENT_CHARS, MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
+    edit_file_with_context_expected, glob_search, grep_search, multi_edit_file,
+    multi_edit_file_with_context_expected, read_file, read_file_with_images,
+    recover_pending_batch_writes_at, write_file, write_files_with_context_expected,
+    BatchWriteJournal, BatchWriteJournalEntry, BatchWriteRequest, FileChange,
+    FileRevisionConflictError, GrepSearchInput, MultiEditOperation, MultiEditValidationError,
+    ReadFileResult, BATCH_WRITE_JOURNAL_DIR_NAME, MAX_READ_FILE_CONTENT_CHARS,
+    MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
 };
 use crate::FileMutationContext;
 
@@ -667,6 +669,93 @@ fn multi_edit_validates_the_whole_batch_before_one_write() {
 }
 
 #[test]
+fn multi_edit_audit_failure_keeps_published_update_and_reports_the_failed_stage() {
+    let _lock = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", root.path());
+    let path = root.path().join("main.tex");
+    let original = "old text\r\n";
+    let updated = "new text\r\n";
+    fs::write(&path, original).expect("seed source");
+    let ledger_path = root
+        .path()
+        .join(".somniq/changes/audit-session/ledger.jsonl");
+    // A directory at the append destination reliably rejects the audit write
+    // on every platform, after the target replacement has already succeeded.
+    fs::create_dir_all(&ledger_path).expect("block ledger append");
+    let context = FileMutationContext {
+        session_id: Some("audit-session".to_string()),
+        tool_name: "multi_edit".to_string(),
+        ..FileMutationContext::default()
+    };
+    let error = multi_edit_file_with_context_expected(
+        path.to_str().expect("UTF-8 source path"),
+        &[MultiEditOperation {
+            old_string: "old text".to_string(),
+            new_string: "new text".to_string(),
+            replace_all: false,
+        }],
+        Some(&content_revision(original.as_bytes())),
+        &context,
+    )
+    .expect_err("audit append must fail");
+
+    assert_eq!(
+        fs::read(&path).expect("read published source"),
+        updated.as_bytes()
+    );
+    let report: serde_json::Value = serde_json::from_str(&error.to_string())
+        .expect("audit failure must identify its stage and resulting source state");
+    assert_eq!(report["code"], "multi_edit_audit_failed");
+    assert_eq!(report["stage"], "audit");
+    assert_eq!(
+        report["filePath"],
+        display_path(&crate::canonicalize(&path).unwrap())
+    );
+    assert_eq!(report["published"], true);
+    assert_eq!(report["auditState"], "unconfirmed");
+    assert_eq!(report["fileState"], "attempted_update");
+    assert_eq!(
+        report["currentRevision"],
+        content_revision(updated.as_bytes())
+    );
+    assert!(report["auditError"]["message"]
+        .as_str()
+        .is_some_and(|message| !message.is_empty()));
+}
+
+#[test]
+fn multi_edit_audit_failure_does_not_clobber_a_later_file_update() {
+    let _lock = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", root.path());
+    let path = root.path().join("main.tex");
+    let original = "original text\n";
+    let attempted = "attempted edit\n";
+    fs::write(&path, attempted).expect("publish attempted edit");
+    // The later writer may even publish non-UTF-8 bytes. The audit error must
+    // describe their exact revision without replacing them with an old snapshot.
+    let later = b"later external update \xff\n";
+    fs::write(&path, later).expect("publish later external edit");
+
+    let error = super::multi_edit_audit_failure(
+        &path,
+        original,
+        attempted,
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "ledger append denied"),
+    );
+
+    assert_eq!(fs::read(&path).expect("read later bytes"), later);
+    let report: serde_json::Value = serde_json::from_str(&error.to_string()).expect("audit report");
+    assert_eq!(report["code"], "multi_edit_audit_failed");
+    assert_eq!(report["published"], true);
+    assert_eq!(report["auditState"], "unconfirmed");
+    assert_eq!(report["fileState"], "changed_since_write");
+    assert_eq!(report["currentRevision"], content_revision(later));
+    assert_eq!(report["auditError"]["message"], "ledger append denied");
+}
+
+#[test]
 fn multi_edit_rejects_lossy_unicode_without_touching_the_file() {
     let _lock = crate::test_env_lock();
     let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
@@ -903,6 +992,200 @@ fn stale_open_staged_write_is_cleaned_without_touching_destination() {
 
     std::env::set_current_dir(original).expect("restore cwd");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn batch_write_audits_sources_whose_lock_stripes_collide_with_the_ledger() {
+    let _guard = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let canonical_root = crate::canonicalize(root.path()).expect("canonical workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &canonical_root);
+    let ledger = canonical_root.join(".somniq/changes/batch-collision/ledger.jsonl");
+    let colliding = (0..20_000)
+        .map(|index| canonical_root.join(format!("collision-{index}.txt")))
+        .filter(|path| crate::atomic_file::path_locks_collide(path, &ledger))
+        .take(2)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colliding.len(),
+        2,
+        "construct both source/ledger collisions"
+    );
+    fs::write(&colliding[0], "old first\n").expect("seed existing source");
+    let context = FileMutationContext {
+        session_id: Some("batch-collision".to_string()),
+        tool_name: "write_files".to_string(),
+        ..FileMutationContext::default()
+    };
+    // This regression must only run after releasing source locks around the
+    // audit phase; the former nested stripe acquisition would deadlock here.
+    let output = write_files_with_context_expected(
+        &[
+            BatchWriteRequest {
+                path: display_path(&colliding[0]),
+                content: "new first\n".to_string(),
+                expected_revision: content_revision(b"old first\n"),
+            },
+            BatchWriteRequest {
+                path: display_path(&colliding[1]),
+                content: "new second\n".to_string(),
+                expected_revision: "absent".to_string(),
+            },
+        ],
+        &context,
+    )
+    .expect("colliding source/ledger stripes must not deadlock auditing");
+    assert_eq!(output.files.len(), 2);
+    assert!(output.files.iter().all(|file| file.change_id.is_some()));
+    assert_eq!(fs::read_to_string(&colliding[0]).unwrap(), "new first\n");
+    assert_eq!(fs::read_to_string(&colliding[1]).unwrap(), "new second\n");
+    assert_eq!(fs::read_to_string(&ledger).unwrap().lines().count(), 2);
+    assert_eq!(
+        recover_pending_batch_writes_at(&canonical_root)
+            .unwrap()
+            .scanned,
+        0
+    );
+}
+
+#[test]
+fn batch_write_audit_failure_keeps_all_published_files_without_a_recovery_journal() {
+    let _guard = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", root.path());
+    let first = root.path().join("first.txt");
+    let second = root.path().join("second.txt");
+    fs::write(&first, "original\n").expect("seed source");
+    fs::create_dir_all(root.path().join(".somniq/changes/batch-audit/ledger.jsonl"))
+        .expect("block audit append");
+    let error = write_files_with_context_expected(
+        &[
+            BatchWriteRequest {
+                path: display_path(&first),
+                content: "updated\n".to_string(),
+                expected_revision: content_revision(b"original\n"),
+            },
+            BatchWriteRequest {
+                path: display_path(&second),
+                content: "created\n".to_string(),
+                expected_revision: "absent".to_string(),
+            },
+        ],
+        &FileMutationContext {
+            session_id: Some("batch-audit".to_string()),
+            tool_name: "write_files".to_string(),
+            ..FileMutationContext::default()
+        },
+    )
+    .expect_err("audit must fail after all source publications");
+    let report: serde_json::Value =
+        serde_json::from_str(&error.to_string()).expect("batch diagnostic");
+    assert_eq!(report["code"], "batch_write_audit_failed");
+    assert_eq!(report["published"], 2);
+    assert_eq!(report["audited"], 0);
+    assert_eq!(report["auditState"], "unconfirmed");
+    assert_eq!(report["journalState"], "removed");
+    assert_eq!(fs::read_to_string(&first).unwrap(), "updated\n");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "created\n");
+    assert_eq!(
+        recover_pending_batch_writes_at(root.path())
+            .unwrap()
+            .scanned,
+        0
+    );
+    assert_eq!(fs::read_to_string(&first).unwrap(), "updated\n");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "created\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn batch_write_preserves_external_saves_during_a_locked_publication_and_rollback() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let _guard = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", root.path());
+    let first_dir = root.path().join("first");
+    let second_dir = root.path().join("second");
+    fs::create_dir_all(&first_dir).expect("first source directory");
+    fs::create_dir_all(&second_dir).expect("second source directory");
+    let first = first_dir.join("main.tex");
+    let second = second_dir.join("main.tex");
+    fs::write(&first, "old first\n").expect("seed first");
+    fs::write(&second, "old second\n").expect("seed second");
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2) // readers and external saves allowed, DELETE denied
+        .open(&second)
+        .expect("block only second source replacement");
+    let requests = vec![
+        BatchWriteRequest {
+            path: display_path(&first),
+            content: "batch first\n".to_string(),
+            expected_revision: content_revision(b"old first\n"),
+        },
+        BatchWriteRequest {
+            path: display_path(&second),
+            content: "batch second\n".to_string(),
+            expected_revision: content_revision(b"old second\n"),
+        },
+    ];
+    let writer = std::thread::spawn(move || {
+        write_files_with_context_expected(
+            &requests,
+            &FileMutationContext {
+                session_id: Some("batch-external-save".to_string()),
+                tool_name: "write_files".to_string(),
+                ..FileMutationContext::default()
+            },
+        )
+    });
+
+    // A sibling temporary in the separate second directory means preflight and
+    // the first publication completed; the second publish is now blocked by held.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let observed_second_temporary = loop {
+        let has_temporary = fs::read_dir(&second_dir)
+            .expect("list second source directory")
+            .filter_map(Result::ok)
+            .any(|entry| entry.path() != second);
+        if has_temporary {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let first_published = fs::read(&first).expect("read first publication");
+    if observed_second_temporary {
+        fs::write(&first, "later first\n").expect("external save of published first");
+        fs::write(&second, "later second\n").expect("external save while second is locked");
+    }
+    drop(held);
+    let result = writer.join().expect("batch writer thread");
+    assert!(
+        observed_second_temporary,
+        "observe second publication before external saves"
+    );
+    assert_eq!(first_published, b"batch first\n");
+    let error = result.expect_err("second revision drift must reject the batch");
+    assert!(error.to_string().contains("revision_conflict"), "{error}");
+    assert!(error.to_string().contains("rollback errors"), "{error}");
+    assert_eq!(fs::read_to_string(&first).unwrap(), "later first\n");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "later second\n");
+    let recovery = recover_pending_batch_writes_at(root.path()).expect("inspect pending journal");
+    assert_eq!(recovery.scanned, 1);
+    assert_eq!(recovery.conflicts, 1);
+    assert_eq!(recovery.recovered, 0);
+    assert!(recovery.errors.is_empty());
+    assert_eq!(fs::read_to_string(&first).unwrap(), "later first\n");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "later second\n");
+    let journal_root =
+        crate::somniq_project_tmp_dir(root.path()).join(BATCH_WRITE_JOURNAL_DIR_NAME);
+    assert_eq!(fs::read_dir(journal_root).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&first_dir).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&second_dir).unwrap().count(), 1);
 }
 
 #[test]

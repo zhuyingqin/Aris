@@ -52,6 +52,13 @@ import { formatUserFacingError } from "../errorMessage";
 import { onChatModelsUpdated } from "../modelEvents";
 import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
+  isUserQuestion,
+  needsPluginContinuation,
+  PLUGIN_CONTINUATION_ORIGIN,
+  pluginContinuationLabel,
+  pluginContinuationPrompt,
+} from "./pluginContinuation";
+import {
   assistantTurn,
   completedAssistantBlocks,
   continueStoppedPrompt,
@@ -84,12 +91,15 @@ const MAX_TITLE_ATTEMPTS = 4;
 const MAX_TITLE_REQUEST_TEXT = 4000;
 const MAX_TITLE_ANSWER_TEXT = 1500;
 const MAX_TITLE_FOLLOW_UPS = 4;
+/** 100 ms apart: how long a plugin follow-up waits for the finished run to
+ * release the session before giving up. */
+const PLUGIN_CONTINUATION_ATTEMPTS = 100;
 
 /** Assemble the evidence the backend titles a conversation from: the anchor
  * request with its attachments, the answer to it, and the later questions that
  * show where a long conversation actually went. */
 function titleRequestFromTurns(turns: ChatTurn[]): ChatTitleRequest | null {
-  const userTurns = turns.filter((turn) => turn.role === "user");
+  const userTurns = turns.filter(isUserQuestion);
   const first = userTurns[0];
   if (!first) return null;
   const user = textFromTurn(first).trim().slice(0, MAX_TITLE_REQUEST_TEXT);
@@ -179,6 +189,8 @@ export function useChatRun({
   const activityReviewRequests = useRef(new Set<string>());
   const compactedActivitySessions = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
+  // Assigned below `beginRun`, which `onComplete` cannot depend on directly.
+  const pluginContinuation = useRef<(sessionId: string) => void>(() => undefined);
   // Context repair can await while the user presses Stop. A monotonically
   // increasing token lets Stop release the composer without an old send's
   // finally block deleting a newer send's lock later.
@@ -278,7 +290,7 @@ export function useChatRun({
     // A long conversation loads only its recent turns, so the visible user
     // turns undercount the questions asked. The refresh gate needs the real one.
     const questionCount = (session.questionCountBeforeLoadedTurns ?? 0)
-      + nextTurns.filter((turn) => turn.role === "user").length;
+      + nextTurns.filter(isUserQuestion).length;
     if (!shouldRequestChatTitle(session, questionCount)) return;
     // Generation can fail for reasons that outlive one turn (provider outage,
     // an interrupted background turn). Retrying every turn forever would just
@@ -312,7 +324,7 @@ export function useChatRun({
     const session = allSessionsRef.current.find((item) => item.id === sessionId);
     const projectId = session?.projectId;
     if (!projectId || session.remoteAgent) return;
-    const userTurns = nextTurns.filter((turn) => turn.role === "user");
+    const userTurns = nextTurns.filter(isUserQuestion);
     const latestUser = userTurns[userTurns.length - 1];
     const newestObservation = latestUser
       ? { id: latestUser.id, text: textFromTurn(latestUser).trim() }
@@ -367,6 +379,7 @@ export function useChatRun({
         markBackendContextSynced(sessionId, nextTurns);
         suggestTitle(sessionId, nextTurns);
         syncProjectContinuity(sessionId, nextTurns);
+        if (needsPluginContinuation(nextTurns)) pluginContinuation.current(sessionId);
       },
     );
   }, [markBackendContextSynced, patchAssistant, suggestTitle, syncProjectContinuity]);
@@ -433,13 +446,9 @@ export function useChatRun({
   const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
     compactedActivitySessions.current.add(sessionId);
     applyContextTokens(sessionId, tokensAfter);
-    setContextNotice({
-      kind: "compacted",
-      sessionId,
-      message: "Context was compacted automatically.",
-      detail: `Earlier messages were summarized; backend context is now ${formatCompactTokens(tokensAfter)} tokens.`,
-      createdAt: Date.now(),
-    });
+    // useChatStream already records the compaction in the conversation.
+    // Clear the resolved warning instead of showing a duplicate popup.
+    setContextNotice((notice) => notice?.sessionId === sessionId ? null : notice);
   }, [applyContextTokens]);
 
   const handleContextWarning = useCallback((event: {
@@ -807,13 +816,14 @@ export function useChatRun({
     resetContext = false,
     promptOverride?: string | ChatSendRequest,
     rewindFromUser?: ChatTurn,
+    origin?: ChatTurn["origin"],
   ) => {
     // Render the submitted turn before *any* asynchronous preparation. Reading
     // a path attachment and rebuilding an edited/retried backend context can
     // both take noticeable time; holding this patch until they finish makes a
     // send look like it was ignored. The streaming assistant placeholder also
     // makes the composer enter its busy/Stop state immediately.
-    patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
+    patchTurns(session.id, () => [...prefix, userTurn(text, attached, origin), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
 
@@ -984,6 +994,36 @@ export function useChatRun({
     const session = currentSessionRef.current;
     if (session) await resumeSession(session);
   }, [resumeSession, currentSessionRef]);
+
+  // One verification turn after a plugin approval. `onComplete` fires while
+  // the finished run still holds its send lock, so wait for it to release;
+  // give up if the user starts something else first.
+  pluginContinuation.current = (sessionId: string) => {
+    const finishedTurnCount = allSessionsRef.current.find((item) => item.id === sessionId)?.turns.length;
+    let attempts = 0;
+    const attempt = () => {
+      const session = allSessionsRef.current.find((item) => item.id === sessionId);
+      if (!session || session.turns.length !== finishedTurnCount) return;
+      if (runningSessionIdsRef.current.has(sessionId) || sendLocks.current.has(sessionId)) {
+        if (++attempts < PLUGIN_CONTINUATION_ATTEMPTS) window.setTimeout(attempt, 100);
+        return;
+      }
+      if (!needsPluginContinuation(session.turns)) return;
+      const sendLock = acquireSendLock(sessionId);
+      if (sendLock == null) return;
+      void beginRun(
+        session,
+        session.turns,
+        pluginContinuationLabel(language),
+        [],
+        false,
+        pluginContinuationPrompt(),
+        undefined,
+        PLUGIN_CONTINUATION_ORIGIN,
+      ).finally(() => releaseSendLock(sessionId, sendLock));
+    };
+    window.setTimeout(attempt, 0);
+  };
 
   return {
     // stream

@@ -1851,7 +1851,7 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
     const rail = screen.getByRole("tablist", { name: "论文详情导航" });
     // A cold suite must also load the reader chunk before its toolbar appears.
-    const toggle = await screen.findByRole("button", { name: "论文讲解" }, { timeout: 5000 });
+    const toggle = await screen.findByRole("button", { name: "论文讲解" }, { timeout: 15_000 });
     const pdf = document.querySelector(".lit-pdf-reader");
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
@@ -1884,7 +1884,11 @@ describe("Literature library", () => {
     await user.click(within(rail).getByRole("tab", { name: "相关" }));
     await user.click(screen.getByRole("button", { name: "返回" }));
     expect(within(screen.getByRole("region", { name: "文献详情" })).getByRole("tab", { name: "相关" }).getAttribute("aria-selected")).toBe("true");
-  });
+    // Loading the reader chunk on a cold, busy suite can take longer than the
+    // 5 s default for the whole test: the PDF toolbar work in 0.4.87 took
+    // this test from just under 5 s to about 6 s on an idle machine. The wait
+    // above and this budget leave room for it.
+  }, 30_000);
 
   it("opens the guide directly and restores focus when guide and detail panels close with Escape", async () => {
     const user = userEvent.setup();

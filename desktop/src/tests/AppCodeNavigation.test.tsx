@@ -110,6 +110,20 @@ describe("Code module navigation in the app shell", () => {
     expect(view.container.querySelector(".app-navigation-shell")).not.toBeNull();
   });
 
+  it("puts Plugins on the rail after the work modules and keeps the rail on its page", async () => {
+    const user = userEvent.setup();
+    useStore.setState({ tab: "chat" });
+    const view = render(<App />);
+    const navigation = screen.getByRole("navigation", { name: "SomniQ 功能" });
+    const plugins = within(navigation).getByRole("button", { name: "插件" });
+    expect(within(navigation).getByRole("button", { name: "文献" }).nextElementSibling).toBe(plugins);
+    await user.click(plugins);
+    await waitFor(() => expect(plugins.getAttribute("aria-current")).toBe("page"));
+    expect(view.container.querySelector(".app-navigation-shell")).not.toBeNull();
+    await user.click(within(navigation).getByRole("button", { name: "更多功能" }));
+    expect(screen.queryByRole("menuitemradio", { name: "插件" })).toBeNull();
+  });
+
   it("keeps an open account menu visible when the native controls reconnect", async () => {
     const user = userEvent.setup();
     const view = await readyApp();

@@ -245,6 +245,346 @@ fn mail_texts(messages: &[ConversationMessage]) -> Vec<String> {
         .collect()
 }
 
+// ---- self-contained LlmReview calls --------------------------------------------------------
+
+fn tool_review(
+    chat: &Chat,
+    backend: &FakeBackend,
+    prompt: &str,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<RoundOutput, RoundError> {
+    run_tool_review(
+        backend,
+        &chat.agent,
+        cancelled,
+        &ToolReviewRequest {
+            prompt,
+            tool_use_id: "skill-review-call",
+            workspace: &chat.workspace,
+            provider: "test",
+            model: "independent-reviewer",
+        },
+    )
+}
+
+#[test]
+fn llm_review_reads_project_evidence_and_returns_the_requested_report() {
+    let chat = chat("llm-review-evidence");
+    let report = r#"{"findings":[{"file":"notes.md","line":2,"issue":"second line"}]}"#;
+    let backend = FakeBackend::new(
+        "reviewer-connection",
+        vec![
+            Step::Tool(TOOL_READ, r#"{"path":"notes.md"}"#.into()),
+            Step::Say(report.into()),
+        ],
+    );
+    let output = tool_review(
+        &chat,
+        &backend,
+        "Read notes.md and return findings JSON.",
+        &Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+
+    assert_eq!(output.text, report, "a skill's JSON schema is preserved");
+    assert_eq!(output.usages.len(), 1);
+    assert_eq!(output.tool_calls.len(), 1);
+    assert!(output.tool_calls[0].ok);
+    assert_eq!(
+        backend.tools_offered(),
+        vec![REVIEWER_TOOLS.map(String::from).to_vec()]
+    );
+    let requests = backend.requests();
+    assert!(mail_texts(&requests[0])
+        .join("\n")
+        .contains("Read notes.md and return findings JSON."));
+    assert!(
+        requests[1]
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .any(|block| {
+                matches!(block, ContentBlock::ToolResult { output, is_error: false, .. }
+            if output.contains("     2| second line"))
+            }),
+        "the Reviewer receives real numbered file evidence"
+    );
+    assert_eq!(
+        chat.agent.control().pending_mail(chat.agent.session_id()),
+        0,
+        "the report is returned once, as the tool result"
+    );
+    assert_eq!(
+        chat.agent.control().status(&output.reviewer_session_id),
+        AgentStatus::Shutdown
+    );
+    assert_eq!(
+        chat.agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap()
+            .len(),
+        1,
+        "completed reviews release child capacity"
+    );
+}
+
+#[test]
+fn llm_review_is_fresh_each_time_and_does_not_contaminate_the_resident_reviewer() {
+    let chat = chat("llm-review-isolation");
+    let formal = FakeBackend::new("reviewer-connection", vec![Step::Say(verdict("revise"))]);
+    let first = round(&chat, &formal, 1, "FORMAL-REVIEW-ONLY", "DELTA").unwrap();
+    let backend = FakeBackend::new("reviewer-connection", vec![]);
+    for index in 0..8 {
+        backend.push(vec![Step::Say(format!("REPORT-{index}"))]);
+        let output = tool_review(
+            &chat,
+            &backend,
+            &format!("TOOL-REQUEST-{index}-ONLY"),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(output.text, format!("REPORT-{index}"));
+        assert_ne!(output.reviewer_session_id, first.reviewer_session_id);
+        let request = format!("{:?}", backend.requests().last().unwrap());
+        assert!(request.contains(&format!("TOOL-REQUEST-{index}-ONLY")));
+        assert!(!request.contains("FORMAL-REVIEW-ONLY"));
+        if index > 0 {
+            assert!(!request.contains(&format!("TOOL-REQUEST-{}-ONLY", index - 1)));
+            assert!(!request.contains(&format!("REPORT-{}", index - 1)));
+        }
+    }
+    formal.push(vec![Step::Say(verdict("pass"))]);
+    let second = round(&chat, &formal, 2, "FORMAL-REVIEW-ONLY", "FORMAL-DELTA").unwrap();
+    assert_eq!(second.reviewer_session_id, first.reviewer_session_id);
+    assert!(second.incremental);
+    assert_eq!(second.round, 2);
+    let resident_request = format!("{:?}", formal.requests().last().unwrap());
+    assert!(!resident_request.contains("TOOL-REQUEST-") && !resident_request.contains("REPORT-"));
+}
+
+#[test]
+fn llm_review_releases_the_child_after_model_or_setup_failure() {
+    let mut chat = chat("llm-review-failures");
+    let backend = FakeBackend::new(
+        "reviewer-connection",
+        vec![Step::Fail("review unavailable".into())],
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    assert!(matches!(
+        tool_review(&chat, &backend, "REVIEW", &cancelled),
+        Err(RoundError::Failed(_))
+    ));
+    assert_eq!(
+        chat.agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let valid_workspace = chat.workspace.clone();
+    chat.workspace = chat.workspace.join("missing-workspace");
+    let requests_before = backend.requests().len();
+    assert!(matches!(
+        tool_review(&chat, &backend, "REVIEW", &cancelled),
+        Err(RoundError::Failed(_))
+    ));
+    assert_eq!(
+        backend.requests().len(),
+        requests_before,
+        "setup failed before a model request"
+    );
+    assert_eq!(
+        chat.agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    chat.workspace = valid_workspace;
+    backend.push(vec![Step::Say("recovered".into())]);
+    assert_eq!(
+        tool_review(&chat, &backend, "REVIEW", &cancelled)
+            .unwrap()
+            .text,
+        "recovered"
+    );
+}
+
+#[test]
+fn llm_review_honors_stop_and_can_coexist_with_a_starting_resident() {
+    for (label, stop_tree) in [
+        ("llm-review-stop-tree", true),
+        ("llm-review-stop-turn", false),
+    ] {
+        let chat = chat(label);
+        let backend = Arc::new(FakeBackend::new("reviewer-connection", vec![Step::Hang]));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let backend = Arc::clone(&backend);
+            let agent = chat.agent.clone();
+            let workspace = chat.workspace.clone();
+            let cancelled = Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                run_tool_review(
+                    &*backend,
+                    &agent,
+                    &cancelled,
+                    &ToolReviewRequest {
+                        prompt: "REVIEW-IN-FLIGHT",
+                        tool_use_id: "skill-review-call",
+                        workspace: &workspace,
+                        provider: "test",
+                        model: "independent-reviewer",
+                    },
+                )
+            })
+        };
+        wait_until("the LlmReview request to be in flight", || {
+            !backend.requests().is_empty()
+        });
+        // Starting a resident used to retire all reserved children. It must
+        // leave this separate tool review running.
+        let formal = FakeBackend::new("reviewer-connection", vec![Step::Say(verdict("pass"))]);
+        round(&chat, &formal, 1, "FORMAL", "DELTA").unwrap();
+        let children = chat
+            .agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap();
+        assert!(children
+            .iter()
+            .any(|agent| agent.path.name().starts_with("~llm_review_")));
+        if stop_tree {
+            cancel_session_tree(chat.agent.session_id());
+        } else {
+            cancelled.store(true, Ordering::SeqCst);
+        }
+        assert!(matches!(worker.join().unwrap(), Err(RoundError::Cancelled)));
+        assert!(chat
+            .agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap()
+            .iter()
+            .all(|agent| !agent.path.name().starts_with("~llm_review_")));
+    }
+}
+
+#[test]
+fn llm_review_does_not_spawn_for_a_stale_or_cancelled_turn() {
+    let chat = chat("llm-review-stale");
+    let backend = FakeBackend::new("reviewer-connection", vec![]);
+    assert!(matches!(
+        tool_review(&chat, &backend, "REVIEW", &Arc::new(AtomicBool::new(true))),
+        Err(RoundError::Cancelled)
+    ));
+    chat.agent
+        .control()
+        .begin_turn(chat.agent.session_id(), "new-root-turn")
+        .unwrap();
+    assert!(matches!(
+        tool_review(&chat, &backend, "REVIEW", &Arc::new(AtomicBool::new(false))),
+        Err(RoundError::Cancelled)
+    ));
+    assert!(backend.requests().is_empty());
+    assert_eq!(
+        chat.agent
+            .control()
+            .list_all(chat.agent.session_id())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn interrupted_llm_reviews_from_a_previous_process_do_not_hold_review_capacity() {
+    use runtime::agent_control::AgentTask;
+    for first_is_tool in [true, false] {
+        let Chat {
+            agent,
+            workspace,
+            _bound,
+            project,
+        } = chat(&format!("llm-review-restart-{first_is_tool}"));
+        let abandoned = agent
+            .control()
+            .spawn(SpawnRequest {
+                parent_session_id: agent.session_id().into(),
+                name: "~llm_review_1".into(),
+                role: REVIEWER_ROLE.into(),
+                origin: SpawnOrigin::Controller,
+                spawn_ref: Some("old-tool-call".into()),
+                parent_turn_id: Some(agent.turn_id().into()),
+            })
+            .unwrap();
+        agent
+            .control()
+            .set_task(
+                &abandoned.session_id,
+                AgentTask {
+                    reason: "old review".into(),
+                    task: "OLD-UNFINISHED-REVIEW".into(),
+                    inputs: "project".into(),
+                    deliverable: "report".into(),
+                    stop_condition: "done".into(),
+                    model: "reviewer".into(),
+                    connection: "test".into(),
+                    permission: "read-only".into(),
+                    workspace: workspace.display().to_string(),
+                    max_iterations: 14,
+                    max_seconds: 600,
+                },
+            )
+            .unwrap();
+        let root = agent.session_id().to_string();
+        drop(agent);
+        crate::agent_threads::evict_control(&project.sessions_dir());
+        let agent = TurnAgent::register(
+            &project.sessions_dir(),
+            &root,
+            "after-restart",
+            Some("project-1"),
+        )
+        .unwrap();
+        assert!(agent
+            .control()
+            .recovered_agents()
+            .iter()
+            .any(|agent| agent.lineage.session_id == abandoned.session_id));
+        let chat = Chat {
+            agent,
+            workspace,
+            _bound,
+            project,
+        };
+        let backend = FakeBackend::new("reviewer-connection", vec![Step::Say(verdict("pass"))]);
+        if first_is_tool {
+            tool_review(
+                &chat,
+                &backend,
+                "NEW-REVIEW",
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        } else {
+            round(&chat, &backend, 1, "NEW-REVIEW", "DELTA").unwrap();
+        }
+        assert_eq!(
+            chat.agent.control().status(&abandoned.session_id),
+            AgentStatus::Shutdown
+        );
+        assert!(backend
+            .requests()
+            .iter()
+            .all(|request| !format!("{request:?}").contains("OLD-UNFINISHED-REVIEW")));
+    }
+}
+
 fn wait_until(what: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !condition() {

@@ -22,6 +22,7 @@ import {
   pptMasterFixLabel,
 } from "./i18n";
 import PptMasterPreview from "./PptMasterPreview";
+import PluginPackages from "./PluginPackages";
 import type {
   McpConfigView,
   ManagedMcpServerSummary,
@@ -121,7 +122,7 @@ function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
   ];
 }
 
-export default function Extensions({ embedded = false }: { embedded?: boolean } = {}) {
+export default function Extensions() {
   const setError = useStore((state) => state.setError);
   const currentProject = useStore((state) => state.currentProject);
   const language = useStore((state) => state.language);
@@ -411,10 +412,10 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
     <div className="ext-page">
       <header className="ext-head">
         <div className="ext-head-inner">
-          {!embedded && <div className="ext-headline">
+          <div className="ext-headline">
             <h1>{copy.title}</h1>
             <p>{copy.subtitle}</p>
-          </div>}
+          </div>
           <div className="ext-head-controls">
             <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
               <button
@@ -452,6 +453,15 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
       </header>
 
       <div className="ext-scroll">
+        {extTab === "plugins" && <PluginPackages
+          projectPath={currentProject?.path}
+          language={language}
+          onChanged={() => {
+            skillsList().then(setSkills).catch((error) => setError(String(error)));
+            mcpConfigGet().then(setView).catch((error) => setError(String(error)));
+            setTestResult(null);
+          }}
+        />}
         {extTab === "plugins" ? (
           !view ? (
             <div className="ext-empty">{copy.loadingMcp}</div>

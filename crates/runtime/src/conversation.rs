@@ -24,6 +24,7 @@ use crate::retrieval_guard::{
     RetrievalAnswerGate, RetrievalGuard, RetrievalGuardCheckpoint, RetrievalPreflight,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use crate::task_plan::TaskPlanCompletion;
 use crate::usage::{TokenUsage, UsageTracker};
 use sha2::{Digest, Sha256};
 
@@ -1266,6 +1267,7 @@ where
         let mut context_overflow_retries = 0;
         let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
+        let mut task_plan_completion = TaskPlanCompletion::default();
         let mut auto_compaction = None;
         let mut turn_tool_calls = 0_usize;
         let mut last_soft_checkpoint_tool_calls = 0_usize;
@@ -1513,6 +1515,15 @@ where
                         blank_response_continuation_prompt(),
                     ));
                     continue;
+                }
+                if !delivery_checkpoint_active {
+                    if let Some(check) = task_plan_completion.next_check() {
+                        self.session.messages.push(ConversationMessage::user_text(format!(
+                            "{CONTINUATION_PROMPT_PREFIX} (incomplete_task_plan).\n{check}",
+                        )));
+                        accepts_turn_input = true;
+                        continue;
+                    }
                 }
                 let answer_text = assistant_message_text(
                     assistant_messages
@@ -1857,6 +1868,9 @@ where
                 }
             }
             if !turn_tool_results.is_empty() {
+                for block in &turn_tool_results {
+                    task_plan_completion.observe(block);
+                }
                 // Carried on the last tool result rather than as its own
                 // message: a `Tool` message converts to an Anthropic `user`
                 // message, so a separate user message here would send two in a

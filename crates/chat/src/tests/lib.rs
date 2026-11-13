@@ -153,6 +153,45 @@ fn word_requests_route_native_docx_tools_without_using_partial_keywords() {
 }
 
 #[test]
+fn plugin_panel_requests_pin_the_panel_tool_but_panel_data_does_not() {
+    let mut specs = desktop_like_catalog();
+    specs.extend([routing_spec("PluginManager"), routing_spec("PluginPanel")]);
+    for request in [
+        "把最新的实验结果更新到实验看板",
+        "Refresh the dashboard from results/",
+        "update every widget of the Experiment board panel with PluginPanel",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(plan.pinned_names.contains("PluginPanel"), "{request}: {plan:?}");
+    }
+    let plan = route_chat_tools("用面板数据做固定效应回归", &specs, ToolRoutingMode::Active);
+    assert!(!plan.active_names.contains("PluginPanel"), "{plan:?}");
+}
+
+#[test]
+fn plugin_requests_pin_the_plugin_manager_with_a_file_writer() {
+    let mut specs = desktop_like_catalog();
+    specs.push(routing_spec("PluginManager"));
+    for request in [
+        "做一个记录实验假设的侧栏面板插件",
+        "把 scripts/fetch_doi.py 包成工具",
+        "Build a SomniQ plugin with a sidebar panel",
+        "wrap this script as an MCP server",
+    ] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        for name in ["PluginManager", "write_file"] {
+            assert!(plan.pinned_names.contains(name), "{request}: {plan:?}");
+        }
+        assert!(plan.profile.contains("plugins"), "{request}: {plan:?}");
+        assert!(plan.active_names.len() <= MAX_ROUTED_TOOLS);
+    }
+    for request in ["修复论文第三节的公式", "Summarize this paper's related work"] {
+        let plan = route_chat_tools(request, &specs, ToolRoutingMode::Active);
+        assert!(!plan.active_names.contains("PluginManager"), "{request}: {plan:?}");
+    }
+}
+
+#[test]
 fn drawing_router_pins_api_for_gpt_requests_and_honors_explicit_webpage_requests() {
     let mut specs = desktop_like_catalog();
     specs.extend([routing_spec("SomniImage"), routing_spec("ChatGptWebImage")]);
@@ -1164,7 +1203,9 @@ fn llm_review_is_the_default_reviewer_backend() {
     assert!(section.contains("`LlmReview` is SomniQ's reviewer backend"));
     assert!(section.contains("reviewer the user configured in SomniQ settings"));
     assert!(section.contains("call `LlmReview` instead"));
-    assert!(section.contains("single-shot with no conversation continuation"));
+    assert!(section.contains("fresh, isolated Reviewer sub-agent for each call"));
+    assert!(section.contains("no caller-visible conversation continuation"));
+    assert!(section.contains("include the material inline when project tools are unavailable"));
 }
 
 #[test]

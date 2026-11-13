@@ -197,6 +197,15 @@ pub struct WorkTaskWorktree {
     /// Commit the worktree was created at. The merge reads this to tell "the
     /// base moved" from "the task changed nothing".
     pub base_sha: String,
+    /// Set when the project is a plain folder rather than a Git checkout: the
+    /// private repository SomniQ keeps for it outside the folder (see
+    /// [`super::shadow`]). Every project-side Git command for this task — the
+    /// merge, the recovery check, the cleanup — runs against it, with the
+    /// folder as its working tree. Recorded rather than re-derived, so a
+    /// `git init` in the folder while a card is in review cannot redirect the
+    /// merge into a repository that has never heard of the task's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_git_dir: Option<String>,
 }
 
 /// A merge that was started and may not have finished.
@@ -457,6 +466,15 @@ impl WorkTaskReviewSnapshot {
     }
 }
 
+/// A run's frozen plugin set, tagged with the run it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTaskPluginSet {
+    pub run_seq: u32,
+    #[serde(flatten)]
+    pub set: runtime::plugins::PluginSet,
+}
+
 /// One task on the board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,6 +523,11 @@ pub struct WorkTask {
     /// What the independent Reviewer concluded, and after how many rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<WorkTaskReviewState>,
+    /// The plugins (name and digest) the latest run froze when it started.
+    /// Every executor, revision and review step of that run used exactly
+    /// these, whatever the plugin page changed while it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_set: Option<WorkTaskPluginSet>,
     /// Why the task failed. Present only on `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
@@ -526,6 +549,22 @@ pub struct WorkTask {
     /// can point at the cards it actually produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task_id: Option<String>,
+    /// The one occurrence of that automation this card was queued for.
+    ///
+    /// The dedupe key for scheduled dispatch: the scheduler looks it up under
+    /// the store lock before inserting, so a restart or a second tick that
+    /// re-derives the same occurrence finds this card instead of queuing a
+    /// twin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_occurrence_key: Option<String>,
+    /// Chat session the run must use, chosen by the automation's target mode
+    /// (its fixed conversation, the one it reserved, or one per delivery).
+    ///
+    /// `None` lets the engine mint a session per run, as it does for a card
+    /// made on the board. Only where the turns run changes; the independent
+    /// review still runs on its own packet, outside any conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_id: Option<String>,
     /// What the run is doing right now, in one phrase. Coarse by design — it is
     /// set at the phase boundaries the engine actually knows about, so it never
     /// claims progress the engine cannot vouch for.
@@ -573,11 +612,14 @@ impl WorkTask {
             changes: None,
             review_snapshot: None,
             review_state: None,
+            plugin_set: None,
             last_error: None,
             merge_commit: None,
             merge_intent: None,
             model: None,
             scheduled_task_id: None,
+            scheduled_occurrence_key: None,
+            target_session_id: None,
             progress_message: None,
             last_heartbeat_at: None,
             pending_action: None,
@@ -843,6 +885,7 @@ mod tests {
             branch: "somniq/task/t1".into(),
             base_branch: "main".into(),
             base_sha: "aaa".into(),
+            ..Default::default()
         });
         task.session_id = Some("work-task-t1-1".into());
         task.last_error = Some("tectonic exited with status 1".into());

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "panels": [
+    {
+      "id": "research-panel",
+      "slot": "chat.sidebar",
+      "title": { "en": "Research panel", "cn": "研究面板" },
+      "order": 10,
+      "widgets": [
+        {
+          "id": "intro",
+          "type": "text",
+          "text": {
+            "en": "Replace this with one or two sentences on what the panel is for.",
+            "cn": "把这里改成一两句话，说明这个面板的用途。"
+          }
+        },
+        { "id": "next-steps", "type": "todo-list", "title": { "en": "Next steps", "cn": "下一步" } },
+        { "id": "notes", "type": "notes", "title": { "en": "Notes", "cn": "笔记" } },
+        { "id": "plan", "type": "agent-plan", "title": { "en": "Agent plan", "cn": "执行进度" } }
+      ]
+    }
+  ]
+}

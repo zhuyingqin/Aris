@@ -65,6 +65,7 @@ import PdfReader, {
 import { useStore } from "../../store";
 
 beforeEach(() => {
+  localStorage.removeItem("somniq-literature-layout-v1");
   useStore.setState({ language: "cn", languagePreferenceSet: true });
   readerMocks.isTauri.mockReset().mockReturnValue(false);
   readerMocks.chatModelOptions.mockReset().mockResolvedValue({
@@ -455,6 +456,87 @@ describe("PdfReader annotation interactions", () => {
     expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe(zoom);
     expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1);
     expect(readerMocks.document.destroy).not.toHaveBeenCalled();
+  });
+
+  it("collapses the PDF toolbar without losing the page, manual zoom or moved position", async () => {
+    readerMocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(globalThis, "DOMMatrix", { configurable: true, value: class DOMMatrix {} });
+    renderReader({ initialPage: 2, readOnly: true });
+    await waitFor(() => expect(document.querySelectorAll(".lit-pdf-page-slot")).toHaveLength(3));
+    const firstPage = document.querySelector(".lit-pdf-page-slot");
+    const reader = document.querySelector<HTMLElement>(".lit-pdf-reader")!;
+    const scroll = document.querySelector<HTMLElement>(".lit-pdf-scroll")!;
+    const toolbar = screen.getByRole("toolbar", { name: "PDF 悬浮工具栏" });
+    const rect = (left: number, top: number, width: number, height: number) => ({
+      left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => ({}),
+    });
+    vi.spyOn(reader, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 800));
+    vi.spyOn(scroll, "getBoundingClientRect").mockReturnValue(rect(0, 0, 800, 800));
+    vi.spyOn(toolbar, "getBoundingClientRect").mockImplementation(() =>
+      rect(parseFloat(toolbar.style.left), parseFloat(toolbar.style.top), 60, 430),
+    );
+    const handle = screen.getByRole("button", { name: "移动 PDF 工具栏" });
+    fireEvent.keyDown(handle, { key: "ArrowRight", shiftKey: true });
+    fireEvent.keyDown(handle, { key: "ArrowDown", shiftKey: true });
+    const position = { left: toolbar.style.left, top: toolbar.style.top };
+    expect(position.left).not.toBe("12px");
+    expect(position.top).not.toBe("12px");
+
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    const moreTools = screen.getByRole("button", { name: "更多 PDF 工具" });
+    fireEvent.click(moreTools);
+    expect(screen.getByRole("dialog", { name: "更多 PDF 工具" })).toBeTruthy();
+    const zoom = document.querySelector(".lit-pdf-zoom-value")?.textContent;
+    expect(zoom).toMatch(/^\d+%$/);
+    const collapse = screen.getByRole("button", { name: "收起 PDF 工具" });
+    fireEvent.click(collapse);
+
+    const expand = screen.getByRole("button", { name: "展开 PDF 工具" });
+    expect(document.activeElement).toBe(expand);
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    expect(toolbar.hidden).toBe(true);
+    expect(screen.queryByRole("toolbar", { name: "PDF 悬浮工具栏" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "放大" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "更多 PDF 工具" })).toBeNull();
+    expect(screen.queryByRole("spinbutton", { name: "PDF 页码" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "更多 PDF 工具" })).toBeNull();
+    expect(moreTools.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector(".lit-pdf-page-slot")).toBe(firstPage);
+
+    fireEvent.click(expand);
+    expect(document.activeElement).toBe(collapse);
+    expect(toolbar.hidden).toBe(false);
+    expect(screen.queryByRole("button", { name: "展开 PDF 工具" })).toBeNull();
+    expect(screen.getByRole("button", { name: "放大" })).toBeTruthy();
+    expect((screen.getByRole("spinbutton", { name: "PDF 页码" }) as HTMLInputElement).value).toBe("2");
+    expect({ left: toolbar.style.left, top: toolbar.style.top }).toEqual(position);
+    expect(screen.queryByRole("dialog", { name: "更多 PDF 工具" })).toBeNull();
+    fireEvent.click(moreTools);
+    expect(document.querySelector(".lit-pdf-zoom-value")?.textContent).toBe(zoom);
+    expect(readerMocks.openPdfDocumentFromPath).toHaveBeenCalledTimes(1);
+    expect(readerMocks.document.destroy).not.toHaveBeenCalled();
+  });
+
+  it("remembers toolbar collapse and expansion across reader mounts", () => {
+    const storageKey = "somniq-literature-layout-v1";
+    const existingPreferences = { navigationOpen: false, sidebarWidth: 300 };
+    localStorage.setItem(storageKey, JSON.stringify(existingPreferences));
+    const firstReader = renderReader({ readOnly: true });
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(existingPreferences);
+    fireEvent.click(screen.getByRole("button", { name: "收起 PDF 工具" }));
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ ...existingPreferences, pdfToolbarCollapsed: true });
+    firstReader.unmount();
+
+    const secondReader = renderReader({ readOnly: true });
+    expect(screen.queryByRole("toolbar", { name: "PDF 悬浮工具栏" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PDF 工具" }));
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ ...existingPreferences, pdfToolbarCollapsed: false });
+    secondReader.unmount();
+
+    renderReader({ readOnly: true });
+    expect(screen.getByRole("toolbar", { name: "PDF 悬浮工具栏" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起 PDF 工具" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开 PDF 工具" })).toBeNull();
   });
 
   it("opens more tools on the free side of a rail moved to the viewport edge", () => {

@@ -356,6 +356,7 @@ export default function ProjectBriefCard({
   reviewError,
   onReviewEnabledChange,
   agentTasks,
+  glances,
   backgroundProcesses = [],
   stoppingBackgroundPids = [],
   onStopBackgroundProcess,
@@ -374,6 +375,8 @@ export default function ProjectBriefCard({
   reviewError?: string | null;
   onReviewEnabledChange: (enabled: boolean) => void;
   agentTasks?: ReactNode;
+  /** Plugin glances (the `chat.brief` slot). */
+  glances?: ReactNode;
   backgroundProcesses?: BackgroundProcessView[];
   stoppingBackgroundPids?: number[];
   onStopBackgroundProcess?: (pid: number) => void;
@@ -451,6 +454,7 @@ export default function ProjectBriefCard({
           <span>{reviewSaving ? "…" : reviewEnabled ? copy.reviewOn : copy.reviewOff}</span>
         </button>
       </div>
+      {glances}
       <div className="project-brief-body">
         {agentTasks}
         {imageAssistActivity && (

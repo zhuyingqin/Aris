@@ -138,25 +138,6 @@
 .sp-settings-shell .settings-page-remote .sp-remote-tab { min-height: 30px; padding: 5px 12px; border: 1px solid transparent; border-radius: 5px; font-size: 12px; }
 .sp-settings-shell .settings-page-remote .sp-remote-tab.active { border-color: var(--border); background: var(--bg-1); box-shadow: 0 1px 2px #0000000a; }
 
-/* Embedded extensions use the outer settings scroller; drawers retain viewport positioning. */
-.sp-settings-shell .settings-page .sp-extensions-embed { flex: 0 0 auto; min-height: 0; }
-.sp-settings-shell .settings-page-extensions .ext-page { height: auto; min-height: 0; overflow: visible; background: transparent; }
-.sp-settings-shell .settings-page-extensions :is(.ext-head, .ext-head-inner, .ext-scroll) { padding: 0; width: 100%; max-width: none; height: auto; overflow: visible; background: transparent; border: 0; }
-.sp-settings-shell .settings-page-extensions .ext-head-inner { display: block; }
-.sp-settings-shell .settings-page-extensions .ext-head-controls { justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-.sp-settings-shell .settings-page-extensions .ext-scroll { margin-top: 28px; }
-.sp-settings-shell .settings-page-extensions .ext-section { margin-bottom: 32px; }
-.sp-settings-shell .settings-page-extensions .ext-section-head h2 { font-size: 15px; line-height: 1.5; font-weight: 600; }
-.sp-settings-shell .settings-page-extensions .ext-catalog { grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
-.sp-settings-shell .settings-page-extensions .ext-card { background: var(--bg-1); }
-.sp-settings-shell .settings-page-extensions .ext-server-list { border: 1px solid var(--border); border-radius: var(--appearance-radius, 16px); background: var(--bg-1); }
-/* The embedded skills page flows in Settings instead of reserving a viewport. */
-.sp-settings-shell .settings-page-extensions .ext-skills-layout { height: auto; min-height: 0; align-items: start; }
-.sp-settings-shell .settings-page-extensions :is(.ext-skills-sidebar, .ext-skill-detail, .ext-skill-placeholder) { height: auto; }
-.sp-settings-shell .settings-page-extensions .ext-skills-list { max-height: min(60vh, 560px); overflow-y: auto; }
-.sp-settings-shell .settings-page-extensions .ext-skill-content { flex: 0 1 auto; min-height: 0; max-height: 60vh; }
-.sp-settings-shell .settings-page-extensions .ext-skill-placeholder { min-height: 200px; }
-
 @media (max-width: 1100px) {
   .sp-settings-shell .settings-page :is(.st-row, .sp-model-select-row, .sp-env-python-config, .mail-settings-detail .sp-field) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .sp-settings-shell .settings-page .st-row-control { max-width: 100%; }
