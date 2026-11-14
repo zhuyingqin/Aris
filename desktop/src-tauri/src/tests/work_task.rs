@@ -1592,6 +1592,7 @@ fn a_task_row_records_the_plugin_set_its_run_froze() {
             fingerprint: "f".repeat(64),
             frozen_at_ms: 7,
             error: None,
+            builtin_disabled: Vec::new(),
         },
     });
     let value = serde_json::to_value(&task).unwrap();

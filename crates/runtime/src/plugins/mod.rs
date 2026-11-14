@@ -17,6 +17,7 @@
 //! ([`upgrade`]) replace an installed version as one transaction.
 
 mod authoring;
+mod builtin;
 mod dsh;
 mod lifecycle;
 mod ui;
@@ -24,6 +25,7 @@ mod upgrade;
 mod versions;
 
 pub use authoring::*;
+pub use builtin::*;
 pub use lifecycle::*;
 pub use ui::*;
 pub use upgrade::*;

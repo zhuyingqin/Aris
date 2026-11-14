@@ -1343,6 +1343,9 @@ impl ToolExecutor for KernelToolExecutor {
         if let Some(message) = crate::membership::denied_tool_message(tool_name) {
             return Err(ToolError::new(message));
         }
+        if !crate::official_plugins::tool_allowed_in(&self.project_execution_context, tool_name) {
+            return Err(ToolError::new(crate::official_plugins::disabled_tool_message(tool_name)));
+        }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
@@ -3006,7 +3009,20 @@ pub struct BuiltinToolAvailability {
     pub reason: String,
 }
 
+/// Every tool with every official plugin on: what a turn offers when all
+/// switches are on, and what tests that do not exercise switches read.
+#[cfg(test)]
 fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
+    all_tool_specs_with(extra_blocked_tools, |_| true)
+}
+
+/// The tool registry, minus tools whose official plugin `enabled` says is off.
+/// Plugin-owned tools are dropped as one block each, so switching a plugin
+/// off never reorders the tools that stay.
+fn all_tool_specs_with(
+    extra_blocked_tools: &'static [&'static str],
+    enabled: impl Fn(&str) -> bool,
+) -> Vec<tools::ToolSpec> {
     let mut specs = tools::mvp_tool_specs()
         .into_iter()
         .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
@@ -3014,7 +3030,8 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     specs.extend(
         crate::mail::mail_tool_specs()
             .into_iter()
-            .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools)),
+            .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
+            .filter(|spec| crate::official_plugins::tool_allowed(spec.name, &enabled)),
     );
     // Desktop-only: the interactive surface can pause a turn to ask the user a
     // question. Never registered for autonomous runs (no user to answer).
@@ -3088,8 +3105,11 @@ pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvai
     .map_err(|error| format!("research provider availability check failed: {error}"))
 }
 
-fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
-    all_tool_specs_for(extra_blocked_tools)
+fn tool_specs_for(
+    extra_blocked_tools: &'static [&'static str],
+    plugins: &runtime::plugins::PluginSet,
+) -> Vec<tools::ToolSpec> {
+    all_tool_specs_with(extra_blocked_tools, |id| plugins.builtin_enabled(id))
 }
 
 fn review_workflow_state_tool_spec() -> tools::ToolSpec {
@@ -9337,7 +9357,7 @@ async fn run_chat_turn_with_context(
         let tool_specs = if worker_paper_reading.is_some() { Vec::new() } else { match worker_workflow.as_ref().filter(|_| autonomous_workflow) {
             Some(workflow) => aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id)),
             None => {
-                let mut specs = tool_specs_for(extra_blocked_tools);
+                let mut specs = tool_specs_for(extra_blocked_tools, worker_plugin_run.set());
                 if worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize {
                     specs.retain(|spec| spec.name == "RetrievalLedger");
                 }

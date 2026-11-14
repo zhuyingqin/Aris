@@ -17,6 +17,7 @@ import { clientRunningConversationCount } from "./chat/chatActivity";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import PluginPage from "./extensions/PluginPage";
+import { useOfficialPluginsSync } from "./extensions/useOfficialPluginsSync";
 import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, pluginPageIcon, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
@@ -450,6 +451,7 @@ export default function App() {
   const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
   const setChatSidebarCollapsed = useStore((s) => s.setChatSidebarCollapsed);
   const sidebarIsOverlay = useSidebarIsOverlay();
+  useOfficialPluginsSync();
   const hideMail = useStore((s) => s.hideMail);
   const hideWorkflows = useStore((s) => s.hideWorkflows);
   const logout = useStore((s) => s.logout);

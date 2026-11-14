@@ -22,6 +22,7 @@ import {
   pptMasterFixLabel,
 } from "./i18n";
 import PptMasterPreview from "./PptMasterPreview";
+import OfficialPluginsSection from "./OfficialPluginsSection";
 import PluginPackages from "./PluginPackages";
 import type {
   McpConfigView,
@@ -453,6 +454,7 @@ export default function Extensions() {
       </header>
 
       <div className="ext-scroll">
+        {extTab === "plugins" && <OfficialPluginsSection language={language} />}
         {extTab === "plugins" && <PluginPackages
           projectPath={currentProject?.path}
           language={language}

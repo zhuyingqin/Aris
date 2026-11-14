@@ -1435,6 +1435,11 @@ pub struct MailTriggerContext {
 /// the same dispatch as a clock occurrence, keyed by the message, so the same
 /// mail announced twice (a watcher restart) queues one run.
 pub fn on_new_mail(app: AppHandle, ctx: MailTriggerContext) {
+    // Watchers stop when the official Mail plugin is switched off; a message
+    // announced while it was switching must not start a task either.
+    if !crate::official_plugins::mail_services_enabled() {
+        return;
+    }
     let matches: Vec<ArisScheduledRecord> = all_records()
         .into_iter()
         .filter(|record| {

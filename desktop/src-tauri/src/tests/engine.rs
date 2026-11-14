@@ -2316,7 +2316,7 @@ fn live_chat_titles_are_labels_rather_than_request_slices() {
 
 #[test]
 fn desktop_chat_lets_permission_mode_gate_bash() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     assert!(specs.iter().any(|spec| spec.name == "bash"));
     assert!(specs.iter().any(|spec| spec.name == "Agent"));
 
@@ -2335,7 +2335,7 @@ fn desktop_chat_lets_permission_mode_gate_bash() {
 
 #[test]
 fn desktop_chat_registers_ask_user_question_gated_read_only() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     let spec = specs
         .iter()
         .find(|spec| spec.name == ASK_USER_QUESTION_TOOL)
@@ -2357,7 +2357,7 @@ fn desktop_chat_registers_ask_user_question_gated_read_only() {
 
 #[test]
 fn desktop_chat_registers_local_project_evidence_search_as_read_only() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     let spec = specs
         .iter()
         .find(|spec| spec.name == PROJECT_EVIDENCE_SEARCH_TOOL)
@@ -3547,4 +3547,68 @@ fn pdf_download_fallback_does_not_open_a_browser_after_cancellation() {
     )
     .expect_err("cancelled before the browser starts");
     assert_eq!(error, direct);
+}
+
+
+fn frozen_set_with_disabled(disabled: &[&str]) -> runtime::plugins::PluginSet {
+    runtime::plugins::PluginSet {
+        project: "F:/project".into(),
+        plugins: Vec::new(),
+        fingerprint: "0".repeat(64),
+        frozen_at_ms: 1,
+        error: None,
+        builtin_disabled: disabled.iter().map(|id| (*id).to_string()).collect(),
+    }
+}
+
+fn spec_names(specs: &[tools::ToolSpec]) -> Vec<&'static str> {
+    specs.iter().map(|spec| spec.name).collect()
+}
+
+/// Official plugins on: the turn offers the registry it always offered.
+#[test]
+fn a_set_with_every_official_plugin_on_offers_the_whole_registry() {
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let frozen = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&[]),
+    ));
+    assert_eq!(frozen, all);
+}
+
+/// Switching mail off drops its eight tools as one block and leaves every
+/// other tool where it was, so the prompt prefix before it stays cacheable.
+#[test]
+fn switching_mail_off_drops_exactly_the_mail_tools_in_place() {
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["mail"]),
+    ));
+    let mail = all
+        .iter()
+        .copied()
+        .filter(|name| crate::mail::is_mail_tool(name))
+        .collect::<Vec<_>>();
+    assert_eq!(mail.len(), 8);
+    let expected = all
+        .iter()
+        .copied()
+        .filter(|name| !crate::mail::is_mail_tool(name))
+        .collect::<Vec<_>>();
+    assert_eq!(off, expected);
+}
+
+#[test]
+fn a_mail_tool_that_searches_papers_also_needs_literature() {
+    let names = spec_names(&all_tool_specs_with(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, |id| {
+        id != "literature"
+    }));
+    assert!(!names.contains(&"mail_literature_catch_up"));
+    assert!(names.contains(&"mail_search"));
+    assert!(names.contains(&"LiteratureSearch"), "core tools are not plugin-owned yet");
+    assert!(crate::official_plugins::tool_allowed("bash", |_| false));
+    assert!(!crate::official_plugins::tool_allowed("mail_send", |id| id != "mail"));
+    assert!(crate::official_plugins::disabled_tool_message("mail_literature_catch_up")
+        .contains("`mail`, `literature`"));
 }

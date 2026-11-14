@@ -1,3 +1,4 @@
+import { officialPluginEnabled } from "../extensions/officialPlugins";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   chatModelOptions,
@@ -596,6 +597,8 @@ export default function ScheduledTasks({
   const setError = useStore((s) => s.setError);
   const currentProject = useStore((s) => s.currentProject);
   const language = useStore((s) => s.language);
+  // Known only once the backend answered; the browser preview never shows it.
+  const mailPluginOff = useStore((s) => officialPluginEnabled(s.officialPlugins, "mail") === false);
   const copy = SCHEDULED_TASKS_COPY[language];
   const projectId = currentProject?.id;
   const inBrowser = !isTauri();
@@ -1470,6 +1473,7 @@ export default function ScheduledTasks({
                   </>
                 ) : (
                   <>
+                    {mailPluginOff && <p className="sched-preview-error" role="status">{copy.mailPluginOff}</p>}
                     <DetailRow label={copy.triggerAccountLabel}>
                       <select
                         className="sched-select-control"

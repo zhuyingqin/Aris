@@ -38,6 +38,7 @@ export const SCHEDULED_TASKS_COPY: Record<Language, {
   nextRunAt: (time: string) => string;
   waitingFirstRun: string;
   mailTrigger: string;
+  mailPluginOff: string;
   intervalTrigger: string;
   sessionFallbackTitle: (id: string) => string;
   unboundSession: string;
@@ -227,6 +228,7 @@ export const SCHEDULED_TASKS_COPY: Record<Language, {
     nextRunAt: (time) => `下次 ${time}`,
     waitingFirstRun: "等待首次执行",
     mailTrigger: "邮件触发",
+    mailPluginOff: "官方插件“邮箱”已关闭，新邮件不会触发这个任务。到“插件”页面打开后恢复。",
     intervalTrigger: "时间规则",
     sessionFallbackTitle: (id) => `对话 ${id}`,
     unboundSession: "未绑定对话",
@@ -451,6 +453,7 @@ export const SCHEDULED_TASKS_COPY: Record<Language, {
     nextRunAt: (time) => `Next run ${time}`,
     waitingFirstRun: "Waiting for first run",
     mailTrigger: "Mail Trigger",
+    mailPluginOff: "The official Mail plugin is off, so new mail will not start this task. Turn it on in Plugins to resume.",
     intervalTrigger: "Time rule",
     sessionFallbackTitle: (id) => `Chat ${id}`,
     unboundSession: "Unbound Chat",

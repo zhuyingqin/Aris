@@ -58,6 +58,11 @@ pub struct PluginSet {
     /// plugins rather than whatever the registry says later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Official plugins switched off for this run (see [`super::builtin`]),
+    /// in registry order. Empty, the default for sets recorded before
+    /// switches existed, means every official plugin is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_disabled: Vec<String>,
 }
 
 fn now_ms() -> u64 {
@@ -69,7 +74,12 @@ fn now_ms() -> u64 {
 }
 
 impl PluginSet {
-    fn new(project: String, mut plugins: Vec<FrozenPlugin>, error: Option<String>) -> Self {
+    fn new(
+        project: String,
+        mut plugins: Vec<FrozenPlugin>,
+        error: Option<String>,
+        builtin_disabled: Vec<String>,
+    ) -> Self {
         plugins.sort_by(|a, b| a.name.cmp(&b.name));
         let mut hash = Sha256::new();
         for plugin in &plugins {
@@ -78,13 +88,27 @@ impl PluginSet {
             hash.update(plugin.digest.as_bytes());
             hash.update(b"\n");
         }
+        // Only switched-off official plugins enter the hash, so a set with
+        // every official plugin on keeps the fingerprint it always had.
+        for id in &builtin_disabled {
+            hash.update(b"builtin-off:");
+            hash.update(id.as_bytes());
+            hash.update(b"\n");
+        }
         Self {
             project,
             plugins,
             fingerprint: format!("{:x}", hash.finalize()),
             frozen_at_ms: now_ms(),
             error,
+            builtin_disabled,
         }
+    }
+
+    /// Whether the official plugin `id` is on for this run.
+    #[must_use]
+    pub fn builtin_enabled(&self, id: &str) -> bool {
+        super::builtin_manifest(id).is_some() && !self.builtin_disabled.iter().any(|off| off == id)
     }
 
     #[must_use]
@@ -118,7 +142,12 @@ impl PluginStore {
                     digest: plugin.package.digest,
                 })
                 .collect();
-            Ok(PluginSet::new(self.project_key(), plugins, None))
+            Ok(PluginSet::new(
+                self.project_key(),
+                plugins,
+                None,
+                self.builtin_disabled_now(),
+            ))
         })
     }
 }
@@ -184,7 +213,16 @@ impl PluginRun {
     pub fn begin(store: &PluginStore, label: impl Into<String>) -> Self {
         let set = store
             .freeze()
-            .unwrap_or_else(|error| PluginSet::new(store.project_key(), Vec::new(), Some(error)));
+            .unwrap_or_else(|error| {
+                // An unreadable registry runs no packages, but the official
+                // switches live elsewhere and still apply.
+                PluginSet::new(
+                    store.project_key(),
+                    Vec::new(),
+                    Some(error),
+                    store.builtin_disabled_now(),
+                )
+            });
         let snapshot_dirs: Arc<[PathBuf]> = set
             .plugins
             .iter()
@@ -296,6 +334,7 @@ impl Drop for PluginRun {
 
 /// A run's frozen set, or an empty one when the token is unknown here (never
 /// issued, or its run ended) or names another project's run.
+/// Like its packages, every official plugin that can be off is off for it.
 pub(super) fn resolve_run(token: &str, project: &str) -> Arc<PluginSet> {
     let found = lock_runs().get(token).map(|entry| entry.set.clone());
     match found {
@@ -304,11 +343,13 @@ pub(super) fn resolve_run(token: &str, project: &str) -> Arc<PluginSet> {
             project.to_string(),
             Vec::new(),
             Some("This run's plugin set belongs to another project".into()),
+            super::builtin::toggleable_ids(),
         )),
         None => Arc::new(PluginSet::new(
             project.to_string(),
             Vec::new(),
             Some("This run's plugin set is no longer registered".into()),
+            super::builtin::toggleable_ids(),
         )),
     }
 }

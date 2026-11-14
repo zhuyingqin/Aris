@@ -32,6 +32,7 @@ mod mcp;
 mod membership;
 mod memory;
 mod newapi;
+mod official_plugins;
 mod oracle_web;
 mod platform;
 mod plugins;
@@ -806,7 +807,7 @@ pub fn run() {
             }
             watcher::spawn_event_watcher(app.handle().clone());
             watcher::spawn_workspace_file_watcher(app.handle().clone());
-            mail::spawn_event_watchers(app.handle().clone());
+            official_plugins::start_services(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
             work_task::engine::start_runner(app.handle().clone());
             spawn_autorun_prompt(app.handle());
@@ -999,6 +1000,8 @@ pub fn run() {
             scheduled::scheduled_task_history,
             scheduled::scheduled_task_run_now,
             mcp::mcp_config_get,
+            official_plugins::official_plugins_list,
+            official_plugins::official_plugins_set,
             plugins::plugins_list,
             plugins::plugins_preview,
             plugins::plugins_install,
