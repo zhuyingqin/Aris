@@ -25,7 +25,8 @@
   x64 installer is provided with SHA-256 checksums. The November 13 updater repair
   adds a verified signature and latest.json to the unchanged installer, promotes
   0.4.88 to GitHub Latest and synchronizes the signed Windows update to the China
-  mirror.
+  mirror. The manifest retains the installer's original build timestamp so an
+  installed 0.4.88 does not repeatedly offer the identical installer.
 
 ## v0.4.87 (2026-11-10)
 

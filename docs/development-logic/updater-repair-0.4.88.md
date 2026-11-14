@@ -39,6 +39,14 @@ from that tagged app configuration. The official Tauri CLI, at the repository's
 lockfile version, signs the file with `TAURI_SIGNING_PRIVATE_KEY` supplied only
 to the signing step. The private key is never exported from GitHub Secrets.
 
+The updater's `pub_date` must retain the original installer's `builtAt` from the
+verified BUILD-MANIFEST. Released clients compare this value with their embedded
+build timestamp for equal versions. Using the later release publication or
+signing time would offer the same installer again after every installation.
+Verification derives the timestamp from provenance again, so an old cached
+repair-state cannot restore the incorrect publication time. Missing or invalid
+original build timestamps stop the repair.
+
 Node's built-in Ed25519 implementation independently verifies both the payload
 and minisign trusted comment. Only then are the detached `.exe.sig`, `latest.json`
 and an additive `UPDATER-VERIFICATION.json` uploaded. The existing EXE and original
@@ -84,7 +92,7 @@ signed the already published installer locally, so the hosted billing lock did
 not block the release repair. The private key was not exported from GitHub,
 logged, uploaded or committed.
 
-Local validation passed all nine script tests, including an official Tauri
+Local validation passed all eleven script tests, including an official Tauri
 2.11.2 signature fixture and payload/comment/key rejection cases. The workflow
 passes actionlint. The prepare command downloaded the actual 0.4.88 release
 installer and verified its GitHub digest, build manifest, tag commit and tagged
@@ -115,3 +123,24 @@ Windows download alias returned the expected file size and byte range.
 the public endpoint results. These checks cover metadata, file integrity and
 client-key compatibility; the installed application's update UI and installer
 execution were not exercised.
+
+## Same-version prompt correction
+
+The user's installed 0.4.88 screenshot exposed a metadata error in the initial
+repair: `pub_date` was set to the release's `2026-11-12T04:00:26Z` publication
+time, 2,022 seconds after the unchanged installer's embedded
+`2026-11-12T03:26:44Z` build time. The existing client deliberately recognizes
+later builds of the same version, so it repeatedly offered these identical bytes.
+
+Both GitHub and the China mirror now use the original build timestamp. The
+installer and its detached signature are unchanged. Installed 0.4.88 clients can
+refresh their update check without reinstalling; 0.4.86 clients still see 0.4.88
+as newer. All four public manifest routes were fetched over HTTPS and matched
+the corrected timestamp and signature.
+
+The real desktop comparator regression reproduces the old timestamp false
+positive, rejects the corrected 0.4.88 update and preserves the 0.4.86 upgrade.
+All four focused Rust comparator tests passed. The CLI integration test starts
+with the actual later publication time in cached repair-state and confirms that
+verification generates the original build time while preserving the signed
+payload. Together with signature/provenance cases, all eleven script tests pass.

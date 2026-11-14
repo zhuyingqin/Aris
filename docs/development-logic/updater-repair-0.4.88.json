@@ -1,7 +1,7 @@
 {
   "version": "0.4.88",
   "status": "complete",
-  "checkedAt": "2026-11-13T22:35:01.809Z",
+  "checkedAt": "2026-11-14T00:25:17.765266+00:00",
   "release": "https://github.com/zhuyingqin/Aris/releases/tag/v0.4.88",
   "sourceCommit": "31511e6e7194b4d81ce0ff9522ddbf4907d4880b",
   "signing": {
@@ -22,7 +22,7 @@
     },
     "latest.json": {
       "bytes": 1315,
-      "sha256": "ead217a77453eeee4bf0cd58704f16fe4f662d311f03d8580366a2c64ad410ea"
+      "sha256": "9c0ecb8883e94c88e75c8fbddc1ba1190ac3799e8353538e4aa722446d0abaea"
     },
     "SHA256SUMS.txt": {
       "bytes": 189,
@@ -37,8 +37,8 @@
       "sha256": "cdb8b6eac38ba71f84a682036d983e485bf3f963fb2b838a534b889300f67fa8"
     },
     "UPDATER-VERIFICATION.json": {
-      "bytes": 985,
-      "sha256": "8e3c27a9b251a58218e7bab06ba232e448b4d1a7c4093aeec83b9645e8402dbc"
+      "bytes": 1035,
+      "sha256": "0c841dbde3c1c6b16faf979fb8a91ec81a95870bc91f8c5bb3c7f06ccd87f136"
     }
   },
   "publicEndpoints": {
@@ -46,49 +46,61 @@
       "url": "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json",
       "version": "0.4.88",
       "contentType": "application/octet-stream",
-      "sha256": "ead217a77453eeee4bf0cd58704f16fe4f662d311f03d8580366a2c64ad410ea",
+      "sha256": "9c0ecb8883e94c88e75c8fbddc1ba1190ac3799e8353538e4aa722446d0abaea",
       "signatureMatches": true,
       "platforms": [
         "windows-x86_64",
         "windows-x86_64-msvc"
       ],
-      "redirectHost": "release-assets.githubusercontent.com"
+      "redirectHost": "release-assets.githubusercontent.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
     },
     "mirrorLatest": {
       "url": "https://somni.ensuanx.com/releases/latest.json",
       "version": "0.4.88",
       "contentType": "application/json",
-      "sha256": "de4686b71c909c00a541537b50e0d747d292716ed1e14edb88ba6bd242e0952e",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
       "signatureMatches": true,
       "platforms": [
         "windows-x86_64",
         "windows-x86_64-msvc"
       ],
-      "redirectHost": "somni.ensuanx.com"
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
     },
     "mirrorLatestDownloadAlias": {
       "url": "https://somni.ensuanx.com/releases/latest/download/latest.json",
       "version": "0.4.88",
       "contentType": "application/json",
-      "sha256": "de4686b71c909c00a541537b50e0d747d292716ed1e14edb88ba6bd242e0952e",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
       "signatureMatches": true,
       "platforms": [
         "windows-x86_64",
         "windows-x86_64-msvc"
       ],
-      "redirectHost": "somni.ensuanx.com"
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
     },
     "mirrorLatestAlias": {
       "url": "https://somni.ensuanx.com/releases/latest/latest.json",
       "version": "0.4.88",
       "contentType": "application/json",
-      "sha256": "de4686b71c909c00a541537b50e0d747d292716ed1e14edb88ba6bd242e0952e",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
       "signatureMatches": true,
       "platforms": [
         "windows-x86_64",
         "windows-x86_64-msvc"
       ],
-      "redirectHost": "somni.ensuanx.com"
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
     }
   },
   "mirrorInstaller": {
@@ -123,6 +135,27 @@
     "failedRun": "https://github.com/zhuyingqin/Aris/actions/runs/43478470136",
     "notRequiredForCompletedLocalRepair": true
   },
-  "scriptTestsPassed": 9,
-  "actionlint": "passed"
+  "scriptTestsPassed": 11,
+  "actionlint": "passed",
+  "originalFullDownloadVerificationAt": "2026-11-13T22:35:01.809Z",
+  "nativeUpdaterComparatorTestsPassed": 4,
+  "updaterTimestampCorrection": {
+    "reason": "The initial signing repair incorrectly used release publication time for unchanged installer bytes. Shipped clients treat a later pub_date as a new build even at the same version.",
+    "originalIncorrectPubDate": "2026-11-12T04:00:26.000Z",
+    "correctPubDate": "2026-11-12T03:26:44.000Z",
+    "embeddedBuildUnixTimestamp": 1794454004,
+    "source": "Original BUILD-MANIFEST.json builtAt, corroborated by the retained local build-time.json",
+    "alreadyInstalled088OffersUpdate": false,
+    "installed086Offers088": true,
+    "installerAndSignatureUnchanged": true,
+    "publicEndpointsVerified": [
+      "githubLatest",
+      "mirrorLatest",
+      "mirrorLatestAlias",
+      "mirrorLatestDownloadAlias"
+    ],
+    "mirrorMetadataBackedUp": true,
+    "repairStatePublicationDateIgnored": true,
+    "missingBuildTimestampRejected": true
+  }
 }

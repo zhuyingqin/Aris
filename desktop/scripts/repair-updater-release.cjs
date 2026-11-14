@@ -62,6 +62,17 @@ function validateInstaller(payload, { sha256, asset, manifest, commit, tag, vers
   assert.equal(manifest.installer.sha256, sha256, "Build manifest digest differs");
 }
 
+function updaterPubDate(buildManifest) {
+  // Released clients compare pub_date with the timestamp embedded at build
+  // time when versions are equal. Re-signing or publishing unchanged bytes
+  // must not advance this timestamp and offer the same installer forever.
+  assert.equal(typeof buildManifest.builtAt, "string", "Build manifest must include the original installer builtAt");
+  assert.match(buildManifest.builtAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/, "Invalid installer builtAt timestamp");
+  const timestamp = Date.parse(buildManifest.builtAt);
+  assert.ok(Number.isFinite(timestamp), "Invalid installer builtAt timestamp");
+  return new Date(timestamp).toISOString();
+}
+
 function tagCommit(tag) {
   let object = api(`git/ref/tags/${encodeURIComponent(tag)}`).object;
   // Accept both lightweight and annotated tags, but require a commit target.
@@ -97,11 +108,13 @@ function prepare() {
   const buildPayload = fs.readFileSync(path.join(directory, "BUILD-MANIFEST.json"));
   assert.equal(buildAsset.digest, `sha256:${digest(buildPayload)}`, "Build manifest differs from GitHub");
   const payload = fs.readFileSync(path.join(directory, installerName));
-  validateInstaller(payload, { sha256, asset, manifest: JSON.parse(buildPayload), commit, tag, version });
+  const buildManifest = JSON.parse(buildPayload);
+  validateInstaller(payload, { sha256, asset, manifest: buildManifest, commit, tag, version });
   writeJson(path.join(directory, "repair-state.json"), {
     version, tag, commit, repository, installerName, sha256, asset,
     buildManifestSha256: digest(buildPayload),
-    pubDate: release.published_at,
+    pubDate: updaterPubDate(buildManifest),
+    releasePublishedAt: release.published_at,
     publicKey: config.plugins.updater.pubkey,
   });
   console.log(`Verified unchanged installer ${installerName}: ${sha256}`);
@@ -115,14 +128,18 @@ function verify() {
   const payload = fs.readFileSync(path.join(directory, state.installerName));
   const buildPayload = fs.readFileSync(path.join(directory, "BUILD-MANIFEST.json"));
   assert.equal(digest(buildPayload), state.buildManifestSha256);
-  validateInstaller(payload, { ...state, manifest: JSON.parse(buildPayload) });
+  const buildManifest = JSON.parse(buildPayload);
+  validateInstaller(payload, { ...state, manifest: buildManifest });
+  // Derive this again from verified build provenance; a cached repair-state
+  // from an earlier signing run may still contain the later publication time.
+  const pubDate = updaterPubDate(buildManifest);
   const signatureFile = `${state.installerName}.sig`;
   const signaturePayload = fs.readFileSync(path.join(directory, signatureFile));
   const signature = signaturePayload.toString("utf8").trim();
   verifySignature(payload, state.publicKey, signature);
   execFileSync(process.execPath, [path.join(__dirname, "generate-updater-json.cjs"),
     "--bundle-dir", directory, "--version", state.version, "--platform", "windows",
-    "--pub-date", state.pubDate, "--asset-name", state.installerName,
+    "--pub-date", pubDate, "--asset-name", state.installerName,
   ], { stdio: "inherit", env: {
     ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF_NAME: state.tag,
     ARIS_UPDATE_BASE_URL: `https://github.com/${repository}/releases/download/${state.tag}`,
@@ -130,6 +147,7 @@ function verify() {
   const manifestPayload = fs.readFileSync(path.join(directory, "latest.json"));
   const manifest = JSON.parse(manifestPayload);
   assert.equal(manifest.version, state.version);
+  assert.equal(manifest.pub_date, pubDate);
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["windows-x86_64", "windows-x86_64-msvc"]);
   for (const value of Object.values(manifest.platforms)) {
     assert.equal(value.signature, signature);
@@ -142,6 +160,7 @@ function verify() {
   writeJson(path.join(directory, "UPDATER-VERIFICATION.json"), {
     version: state.version, tag: state.tag, commit: state.commit,
     installer: { name: state.installerName, bytes: payload.length, sha256: state.sha256 },
+    installerBuiltAt: pubDate,
     buildManifestSha256: state.buildManifestSha256,
     publicKeySha256: digest(Buffer.from(state.publicKey)),
     payloadSignatureVerified: true, trustedCommentSignatureVerified: true,
@@ -174,7 +193,7 @@ function publish() {
   console.log(`Published verified updater metadata for ${state.tag}. Latest promotion and mirror synchronization remain separate.`);
 }
 
-module.exports = { verifySignature, validateInstaller };
+module.exports = { verifySignature, validateInstaller, updaterPubDate };
 if (require.main === module) {
   const command = process.argv[2];
   assert.ok(["prepare", "verify", "publish"].includes(command), "Use prepare, verify or publish");
