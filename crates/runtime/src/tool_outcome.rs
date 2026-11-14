@@ -43,13 +43,20 @@ pub fn classifies_failures(tool_name: &str) -> bool {
 }
 
 fn classifier(tool_name: &str) -> Option<fn(&str) -> bool> {
+    // Module tools declare how their output reports failure in their
+    // official plugin's manifest.
+    if let Some((_, tool)) = crate::plugins::builtin_tool(tool_name) {
+        return tool.output_failure.map(|kind| match kind {
+            crate::plugins::OutputFailureKind::Shell => shell_output_reports_failure as fn(&str) -> bool,
+            crate::plugins::OutputFailureKind::LiteratureSearch => {
+                literature_search_output_reports_failure
+            }
+        });
+    }
     Some(match tool_name {
-        "bash" | "PowerShell" | "LaTeXCompile" => shell_output_reports_failure,
+        "bash" | "PowerShell" => shell_output_reports_failure,
         "REPL" => repl_output_reports_failure,
         "NotebookExecute" | "NotebookRun" | "NotebookSweep" => notebook_output_reports_failure,
-        "LiteratureSearch" | "LiteratureSearchExecute" | "LiteratureCitations" => {
-            literature_search_output_reports_failure
-        }
         "WebSearch" => web_search_output_reports_failure,
         "read_files" => batch_read_output_reports_failure,
         "export_docx"

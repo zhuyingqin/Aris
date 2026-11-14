@@ -3,7 +3,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatError, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
-import { figuresRunningCount, onFigureUpdated } from "./figures/figureApi";
 import { useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import { useAccountRefresh } from "./useAccountRefresh";
@@ -18,6 +17,7 @@ import LiteratureViewTabs, { type LiteraturePageView } from "./literature/Litera
 import Extensions from "./extensions/Extensions";
 import PluginPage from "./extensions/PluginPage";
 import { useOfficialPluginsSync } from "./extensions/useOfficialPluginsSync";
+import { officialPluginCloseHazards, officialPluginsHaveUnsavedWork, projectSwitchBlocker, startOfficialPluginWatchers } from "./extensions/officialPluginGuards";
 import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./extensions/officialPluginNav";
 import { officialTabHidden } from "./extensions/officialPlugins";
 import { ModuleIcon } from "./ModuleIcon";
@@ -419,7 +419,6 @@ export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const typesetDirty = useStore((s) => s.typesetDirty);
-  const figureDirty = useStore((s) => s.figureDirty);
   const chatSidebarOpen = useStore((s) => s.chatSidebarOpen);
   const setChatSidebarOpen = useStore((s) => s.setChatSidebarOpen);
   const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
@@ -477,7 +476,6 @@ export default function App() {
   // ref keeps the latest backend-wide count available in the close callback,
   // including turns started from the Writing Companion window.
   const runningConversationCountRef = useRef(0);
-  const runningFigureCountRef = useRef(0);
 
   // Pages that enabled plugins add to the rail. One is shown in the Plugins
   // module's place, so it needs no module of its own.
@@ -517,7 +515,8 @@ export default function App() {
   }, []);
 
   const chooseProject = async () => {
-    if (figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
+    const blocked = projectSwitchBlocker(language);
+    if (blocked) { setError(blocked); return; }
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
@@ -537,7 +536,8 @@ export default function App() {
   };
 
   const selectProject = (id: string) => {
-    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
+    const blocked = id !== currentProject?.id ? projectSwitchBlocker(language) : null;
+    if (blocked) { setError(blocked); return; }
     setProjectMenuOpen(false);
     if (
       id !== currentProject?.id
@@ -654,7 +654,7 @@ export default function App() {
   }, [tab]);
   useEffect(() => installBrowserUnsavedChangesGuard(
     isTauri(),
-    () => useStore.getState().typesetDirty || useStore.getState().figureDirty,
+    () => useStore.getState().typesetDirty || officialPluginsHaveUnsavedWork(),
   ), []);
   useEffect(() => {
     if (!isTauri()) return;
@@ -681,10 +681,10 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void getCurrentWindow().onCloseRequested((event) => {
+      const plugins = officialPluginCloseHazards();
       const hazards = {
-        hasUnsavedChanges: useStore.getState().typesetDirty || useStore.getState().figureDirty,
-        hasUnsavedFigureChanges: useStore.getState().figureDirty,
-        runningFigureCount: runningFigureCountRef.current,
+        hasUnsavedChanges: useStore.getState().typesetDirty || plugins.hasUnsavedFigureChanges,
+        ...plugins,
         runningConversationCount: Math.max(
           runningConversationCountRef.current,
           clientRunningConversationCount(),
@@ -706,11 +706,7 @@ export default function App() {
   }, [language]);
   useEffect(() => {
     if (!isTauri()) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void figuresRunningCount().then((count) => { if (!disposed) runningFigureCountRef.current = count; }).catch(() => undefined);
-    void onFigureUpdated((next) => { if (!disposed) runningFigureCountRef.current = next.activeCount ?? 0; }).then((fn) => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); };
+    return startOfficialPluginWatchers();
   }, []);
   useEffect(() => {
     let disposed = false;

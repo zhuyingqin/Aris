@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChangeSet, Text } from "@codemirror/state";
-import { clearLatexStructureCache, scanLatexStructure, updateLatexStructure } from "../latexStructure";
+import { clearLatexStructureCache, scanLatexStructure, updateLatexStructure } from "../../editor/latex/latexStructure";
 import { beamerSlidesForDocument, scanOutlineNodes } from "../outlineModel";
 
 beforeEach(() => clearLatexStructureCache());

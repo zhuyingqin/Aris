@@ -13,7 +13,7 @@
  * Pure functions only — no CodeMirror, no DOM.
  */
 
-import { matchBraceEnd as matchBrace } from "./latexStructure";
+import { matchBraceEnd as matchBrace } from "../editor/latex/latexStructure";
 
 export type TableColumnAlign = "l" | "c" | "r" | "other";
 

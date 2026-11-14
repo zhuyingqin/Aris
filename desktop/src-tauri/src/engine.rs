@@ -3026,6 +3026,7 @@ fn all_tool_specs_with(
     let mut specs = tools::mvp_tool_specs()
         .into_iter()
         .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
+        .filter(|spec| crate::official_plugins::tool_allowed(spec.name, &enabled))
         .collect::<Vec<_>>();
     specs.extend(
         crate::mail::mail_tool_specs()

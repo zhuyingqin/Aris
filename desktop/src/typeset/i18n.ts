@@ -1,3 +1,4 @@
+import { LATEX_REFERENCE_TOOLTIP_COPY } from "../editor/latex/latexCopy";
 import type { Language } from "../store";
 
 /**
@@ -563,10 +564,7 @@ const EN_COPY = {
     indentMarkersHint: "Vertical rules down each indentation level in Code mode.",
     scopeNote: "These apply to every editor in the app. Font size also scales the Visual page.",
   },
-  referenceTooltip: {
-    undefinedLabel: "No \label with this key in this file.",
-    definedOnLine: (line: number): string => `Defined on line ${line}`,
-  },
+  referenceTooltip: LATEX_REFERENCE_TOOLTIP_COPY.en,
   figureDialog: {
     title: "Insert figure",
     imageFile: "Image file",
@@ -1210,10 +1208,7 @@ const CN_COPY: typeof EN_COPY = {
     indentMarkersHint: "在 Code 模式下为每级缩进画一条竖线。",
     scopeNote: "设置对应用内所有编辑器生效；字号同时缩放 Visual 页面。",
   },
-  referenceTooltip: {
-    undefinedLabel: "本文件中没有这个 \label。",
-    definedOnLine: (line) => `定义在第 ${line} 行`,
-  },
+  referenceTooltip: LATEX_REFERENCE_TOOLTIP_COPY.cn,
   figureDialog: {
     title: "插入图片",
     imageFile: "图片文件",

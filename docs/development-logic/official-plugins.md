@@ -1,6 +1,8 @@
 # 官方插件化：把内置模块接到同一套贡献点上
 
-状态：P0 + P1 已实现、未提交（2026-11-13，分支 `codex/release-0.4.89`），实现记录见文末；P2 起待做。基于工作区 `codex/docx-upstream-acceptance`
+状态：P0–P4 已实现（2026-11-13～14，分支 `codex/release-0.4.89`：fb6a8cdc P0+P1、f4d8f105 P0 欠账、
+第三批 P2/P4/P3），实现记录见文末。剩余：PdfReader 搬到 `pdf/`、Figures 页面贡献化、附件命名模板入口待定、P5。
+基于工作区 `codex/docx-upstream-acceptance`
 （e80513eb）和尚未提交的插件工作（AI 自建插件 M1–M3、DIY 第一层与第三层）。
 相关文档：[插件包与信任锚](deepseek-plugin-packages.md)、
 [Chat UI 插件](chat-ui-plugins.md)、[Agent 自建插件](agent-authored-plugins.md)、
@@ -274,9 +276,9 @@ pub static BUILTIN_PLUGINS: &[&dyn BuiltinPlugin] = &[&MAIL, &FIGURES, &LITERATU
 
 - 邮箱令牌以明文 JSON 存在 `<config>/mail/accounts.json`（`mail/store.rs:1-4`），
   没有用钥匙串。托管 key 已经走钥匙串，邮箱可以照做。
-- `settings/LiteratureSettings.tsx` 只被测试引用，用户进不去这个设置页（P3 一并处理）。
-- `ARIS_ALLOWED_TOOLS` 由 Desktop 设置（`state.rs:230`），但没有非测试代码读取它。
-  可以删掉，也可以在 P0 里作为冻结集的环境表示复用。
+- `settings/LiteratureSettings.tsx` 只被测试引用，用户进不去这个设置页。P3 核实为 0.4.62 有意移除，
+  附件命名模板因此没有入口，是否恢复待用户决定。
+- ~~`ARIS_ALLOWED_TOOLS` 由 Desktop 设置，但没有非测试代码读取它。~~ 2026-11-14 复核：主代码里已经没有它了。
 
 ## P0 + P1 实现记录（2026-11-13）
 
@@ -375,4 +377,72 @@ D1–D6 按建议值实现，用户已于 2026-11-13 确认。D4 的实际做法
   - 点开关：写入的是本机项目覆盖（project=true），"更多模块"出现 Mail。
   - 改回"跟随全局"：又变回 Off。
   - 截图在 `E:/tmp/official-plugins/`（project-request-off.png、project-on-more.png）。
+
+## P2 / P4 / P3 实现记录（2026-11-13，第三批，在 f4d8f105 之后）
+
+做的顺序是 P2 → P4 → P3：P4 比 P3 小，P3 碰证据链，放在最后。四个官方插件现在都可以关闭。
+
+### P2 Figures
+
+- 改为可关闭，范围是项目。关掉后，四个会花钱的命令（`figures_start`、`figures_review`、`figures_edit_image`、`figures_edit_svg`）用 `official_plugins::require_in` 拒绝。`somniq-figure` 协议仍在启动时注册，当前项目关闭 Figures 时返回 404。
+- `guards` 贡献点落在 `extensions/officialPluginGuards.ts`：
+  - `projectSwitchBlocker`、`officialPluginsHaveUnsavedWork`、`officialPluginCloseHazards`；
+  - `startOfficialPluginWatchers`：跟踪运行中的绘图任务数，并在计费请求结束时发 `somniq:billed-request-finished`。
+  - `App.tsx` 不再引用 `figureDirty`、`figuresRunningCount`、`onFigureUpdated`。`useAccountRefresh` 改为监听这个通用事件。
+- 没做：Figures 页面的懒加载和挂载仍在 `App.tsx`（`renderedTab` 里按模块写的 props），还没变成"页面贡献"。
+
+### P4 LaTeX
+
+- 改为可关闭。
+- `LaTeXCompile`、`LaTeXRender` 归 latex 插件。
+  - 共享工具表 `mvp_tool_specs` 现在也按插件过滤。上一批只过滤了 Desktop 追加的邮件工具，这个遗漏是写测试时发现的。
+- 新增 LaTeX 工具路由分组（chat crate 的 `profile: "latex"`）。插件关闭时工具不在目录里，也就不会形成这个分组。
+- 关闭时 `system.md` 的 "Explanatory diagrams" 段换成不含 LaTeX 的版本：`SystemPromptBuilder::without_latex_guidance`，由 `load_system_prompt` 按执行上下文冻结的插件集决定。前后各段逐字节不变，有测试。
+- LaTeX 语言能力搬到核心：
+  - `typeset/latexStructure.ts` → `editor/latex/latexStructure.ts`；
+  - `typeset/externalChangeDiff.ts` → `diff/externalChangeDiff.ts`；
+  - 引用提示的文案 → `editor/latex/latexCopy.ts`。
+  - 结果：`editor/`、`extensions/` 不再依赖 `typeset/`。
+- 关闭时 `.tex` 改在 Code 页打开（`workspaceFileOpenTarget(path, { latexWorkspace })`）。Chat 打开文件、文件路径菜单、侧栏查看器都走这条规则。
+
+### P3 文献库
+
+- 改为可关闭。工具按"外部检索/获取"与"本地证据"划界：
+  - 插件（8 个）：`LiteratureSearch`、`LiteratureCitations`、检索协议三件套、`LiteratureLibraryUpsert`、`LiteraturePdfDownload`、`LiteratureBrowserDownloadTask`。
+  - 核心：`LibraryRetrieve`、`Retrieval*`、`ProjectEvidenceSearch`、`Knowledge*`。
+  - 有测试钉住这条界线，并且文献插件关闭后，邮箱的 `mail_literature_catch_up` 也跟着消失。
+- **工具声明进清单。** `BuiltinManifest.tools` 为每个工具声明 `retrieval`（Discovery/Verification）、`output_failure`（Shell/LiteratureSearch）和 `requires`。
+  - `retrieval_guard::retrieval_role` 和 `tool_outcome::classifier` 先查清单，runtime 里不再写死文献和 LaTeX 工具名。
+  - 只剩内核工具（WebSearch、bash 等）还在原来的 match 里。
+  - Desktop 的 `tool_owner` / `tool_requires` 也改为读清单；另有测试防止清单里的邮件工具和邮件模块自己的列表脱节。
+- **`LiteratureSource` 契约**（`tools/src/literature.rs`）。
+  - 每个来源提供：`id`、`aliases`、`label`、`availability`，以及一次有界、可取消的分页检索 `search(client, &SourceRequest)`，返回带审计材料的 `AdapterSearchOutcome`。
+  - 排序、去重、预算和 `MAX_PAPERS` 都由调用方统一负责。
+  - 内置的 Scopus、OpenAlex、Semantic Scholar、Crossref、arXiv 通过 `Engine` 实现这个契约。单源检索、`search_remote` 和可用性判断都改为经过 `literature_sources()` 注册表。行为不变，原有文献测试全部通过。
+- **证据检索提示词片段改回核心。** 上一批把 `local_evidence_retrieval` 归给了文献插件，但它讲的是 `ProjectEvidenceSearch`（核心），所以现在始终保留。
+- 外部操作在插件关闭时拒绝：
+  - `literature_add_identifier`、`literature_search_protocol_execute`；
+  - `review_workflow_create`（综述流程），拒绝并提示先打开文献插件。
+  - 自主工作流的阶段工具表本来就和冻结集取交集。
+- **没做：**
+  - PdfReader 没搬到 `pdf/`。它有 2471 行，还依赖 PaperReadingPanel、文献文案、libraryInteraction 和 `Literature.css`；拆 CSS 会碰到 styles 级联陷阱。插件关闭不会删代码，Chat 侧栏照样能看 PDF，所以这一步只是代码组织，需要另开一个任务。
+  - `LiteratureSettings.tsx` 没有重新挂上。它是 0.4.62（05ca631c）有意从设置页拿掉的，引用样式已经由文献页里的 `CitationStyleManager` 管理。是否恢复（附件命名模板目前没有入口）需要用户决定。
+  - P5（经 MCP 注册用户检索源）未开始。
+
+### 第三批验证与实测中修正的问题
+
+- 全套：
+  - runtime 979/979；tools 338/338；chat 68/68；
+  - 前端 2362/2362；构建、debug exe 通过；
+  - desktop 1063/1064，唯一失败仍是 31511e6e 的 `the_completion_contract_only_promises_a_reviewer_that_will_run`。
+- 应用内（隔离实例）：
+  - 依次关掉 Figures、LaTeX、Literature，导航栏对应少掉 Figures → LaTeX → Literature，其余模块往前补位。
+  - 插件关闭时直接调用后端：`figures_start` 和 `literature_add_identifier` 都返回"官方插件已关闭"的拒绝。
+  - `somniq-figure` 关闭后返回 404 这一点没能在应用内验证：页面里的跨源 fetch 被拦了。
+    改为把判断提成 `official_plugins::figure_scheme_response`，由单测
+    `the_figure_scheme_serves_nothing_while_figures_is_off` 钉住：关闭时 404、空正文、不读资源；打开或没有项目时照常返回。
+- **实测发现并修正的两个问题：**
+  - 项目范围插件的主开关原本写的是全局，在一个项目关 Figures 会关掉所有项目。现在 `switchTarget` 对 `scope: "project"` 的插件一律写项目覆盖，只有用户范围的 Mail 默认写全局。
+  - "跟随全局（…）"原来是用当前生效状态猜的。现在后端直接返回 `globalEnabled`（全局的选择或默认值）。
+  - 修正后重测：关 Figures 只写 `projects.<本项目>.figures=false`，全局保持未设置，选择框显示"本项目关闭"。
 

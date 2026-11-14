@@ -6,9 +6,7 @@
 //! list a turn offers and the tools it may execute both come from that set,
 //! so a click on the plugins page changes the next turn, never the current one.
 
-use runtime::plugins::{
-    BuiltinState, BuiltinTarget, PluginStore, BUILTIN_LITERATURE, BUILTIN_MAIL,
-};
+use runtime::plugins::{builtin_tool, BuiltinState, BuiltinTarget, PluginStore, BUILTIN_MAIL};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::blocking::off_main_thread;
@@ -17,20 +15,15 @@ use crate::projects::{current_project_path, ProjectState};
 pub(crate) const OFFICIAL_PLUGINS_CHANGED_EVENT: &str = "official-plugins-changed";
 const MAIN_WINDOW_LABEL: &str = "main";
 
-/// The official plugin that owns a host tool, if any. Tools not listed here
-/// are core and always offered.
+/// The official plugin that owns a tool, from the plugins' manifests
+/// (`runtime::plugins::builtin`). Tools no manifest lists are core.
 pub(crate) fn tool_owner(tool_name: &str) -> Option<&'static str> {
-    crate::mail::is_mail_tool(tool_name).then_some(BUILTIN_MAIL)
+    builtin_tool(tool_name).map(|(manifest, _)| manifest.id)
 }
 
-/// Other official plugins a host tool needs besides its owner.
+/// Other official plugins a tool needs besides its owner.
 fn tool_requires(tool_name: &str) -> &'static [&'static str] {
-    match tool_name {
-        // Catching up on paper alerts searches and downloads through the
-        // literature tools (`mail/auto_literature.rs`).
-        "mail_literature_catch_up" => &[BUILTIN_LITERATURE],
-        _ => &[],
-    }
+    builtin_tool(tool_name).map_or(&[], |(_, tool)| tool.requires)
 }
 
 /// Whether `tool_name` is usable when `enabled` says which official plugins
@@ -73,6 +66,49 @@ pub(crate) fn disabled_tool_message(tool_name: &str) -> String {
         "`{tool_name}` is unavailable: it needs the official plugin(s) {needs}, and one of them \
          is turned off for this turn. The user can turn it on in Plugins; do not retry this tool now."
     )
+}
+
+/// Refuse a module action in `workspace` while its official plugin is off
+/// there. The page is hidden then; this keeps a stale page or a scripted call
+/// from spending the user's credits anyway.
+pub(crate) fn require_in(workspace: &std::path::Path, id: &str) -> Result<(), String> {
+    if PluginStore::for_workspace(workspace).builtin_enabled(id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The official `{id}` plugin is turned off for this project. Turn it on in Plugins to continue."
+        ))
+    }
+}
+
+/// Whether `id` is on for the project the app currently shows.
+pub(crate) fn enabled_for_current_project(app: &AppHandle, id: &str) -> bool {
+    use tauri::Manager;
+    enabled_in_project(current_project_path(&app.state::<ProjectState>()).ok().as_deref(), id)
+}
+
+/// Whether `id` is on for `project`; with no project open nothing is switched off.
+pub(crate) fn enabled_in_project(project: Option<&std::path::Path>, id: &str) -> bool {
+    project
+        .map(|path| PluginStore::for_workspace(path).builtin_enabled(id))
+        .unwrap_or(true)
+}
+
+/// The `somniq-figure` scheme: serve the asset only while Figures is on for
+/// `project`, else a bare 404 without touching the asset at all.
+pub(crate) fn figure_scheme_response(
+    project: Option<&std::path::Path>,
+    serve: impl FnOnce() -> tauri::http::Response<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    if enabled_in_project(project, runtime::plugins::BUILTIN_FIGURES) {
+        serve()
+    } else {
+        tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Type", "text/plain")
+            .body(Vec::new())
+            .unwrap_or_default()
+    }
 }
 
 /// A store for switches that belong to no project (the global ones). The

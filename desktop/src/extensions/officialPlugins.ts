@@ -15,6 +15,8 @@ export interface OfficialPluginState {
   /** What a turn starting now in this project gets. */
   enabled: boolean;
   global: boolean | null;
+  /** What following the global switch gives (its choice or the default). */
+  globalEnabled: boolean;
   /** This computer's override for the current project. */
   project: boolean | null;
   /** The project's own `.somniq/plugins/official.json` asks for it off. */
@@ -22,12 +24,13 @@ export interface OfficialPluginState {
 }
 
 /**
- * Where a plain on/off click should write so that it takes effect here: the
- * project override when one exists or the project asks for the plugin off
- * (the global switch would be outranked), the global switch otherwise.
+ * Where a plain on/off click should write. A project-scoped plugin (Figures,
+ * LaTeX, Literature) is switched for this project only. A user-scoped one
+ * (Mail) is switched globally, unless this project has its own setting or
+ * asks for it off, where the global switch would be outranked.
  */
 export const switchTarget = (state: OfficialPluginState): "global" | "project" =>
-  state.project !== null || state.workspaceOff ? "project" : "global";
+  state.scope === "project" || state.project !== null || state.workspaceOff ? "project" : "global";
 
 export const OFFICIAL_PLUGINS_CHANGED_EVENT = "official-plugins-changed";
 
@@ -43,6 +46,10 @@ export const officialPluginsSet = (
 
 export const officialPluginEnabled = (states: OfficialPluginState[] | null, id: OfficialPluginId): boolean | null =>
   states?.find((state) => state.id === id)?.enabled ?? null;
+
+/** Whether `.tex` files open in the LaTeX workspace (unknown counts as yes). */
+export const latexWorkspaceOn = (states: OfficialPluginState[] | null): boolean =>
+  officialPluginEnabled(states, "latex") !== false;
 
 /** The page each official plugin contributes to the navigation. */
 export const OFFICIAL_PLUGIN_TABS: Record<OfficialPluginId, Tab> = {

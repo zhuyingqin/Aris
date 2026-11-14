@@ -84,7 +84,7 @@ import {
   sameWorkspacePath,
   wordCountFor,
 } from "./latexText";
-import { LATEX_ANALYSIS_IDLE_MS, scanLatexStructure } from "./latexStructure";
+import { LATEX_ANALYSIS_IDLE_MS, scanLatexStructure } from "../editor/latex/latexStructure";
 import CodeEditor, {
   type CodeDiffLine,
   type CodeReviewConfig,
@@ -159,7 +159,7 @@ import {
   resolveExternalDiff,
   threeWayExternalProposalReliable,
   type ExternalTextDiff,
-} from "./externalChangeDiff";
+} from "../diff/externalChangeDiff";
 import {
   BUILD_ARTIFACT_SUFFIXES,
   isTypesetImagePath,

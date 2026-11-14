@@ -1346,6 +1346,22 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
                 .collect(),
         });
     }
+    // LaTeX work: the compile and render tools of the official LaTeX plugin.
+    // When the plugin is off they are not in the catalog and no group forms.
+    if contains_any(
+        lowered,
+        &["latex", "tikz", "beamer", "overleaf", "xelatex", "pdflatex", ".tex", "编译论文", "论文编译", "排版"],
+    ) {
+        let latex = resolve_named(catalog, &["LaTeXCompile", "LaTeXRender"]);
+        if !latex.is_empty() {
+            groups.push(ToolGroup {
+                profile: "latex",
+                reason: "LaTeX intent",
+                required: Vec::new(),
+                optional: latex,
+            });
+        }
+    }
     if contains_any(lowered, &["chatgpt", "oracle", "咨询", "网页账号"]) {
         groups.push(ToolGroup {
             profile: "oracle",

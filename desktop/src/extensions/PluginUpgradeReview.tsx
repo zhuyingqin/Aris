@@ -6,7 +6,7 @@ import { useState } from "react";
 import { pluginsDraftChanges, type ActiveUiPanel, type PackageFileChange, type PluginApprovalCard } from "../api/plugins";
 import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
-import { externalTextDiff } from "../typeset/externalChangeDiff";
+import { externalTextDiff } from "../diff/externalChangeDiff";
 import PluginPageFrame, { GLANCE_HEIGHT } from "./PluginPageFrame";
 import { uiText } from "./useChatPluginPanels";
 import "./PluginUpgradeReview.css";

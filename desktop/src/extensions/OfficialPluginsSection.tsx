@@ -21,9 +21,9 @@ const COPY = {
     projectOverride: "本项目使用单独的设置。",
     names: { literature: "文献库", latex: "LaTeX", figures: "Figures", mail: "邮箱" },
     descriptions: {
-      literature: "文献检索、文献库页面和证据检索工具。",
-      latex: "Typeset 编辑器，以及 LaTeX 编译与渲染工具。",
-      figures: "论文插图的生成与编辑。",
+      literature: "外部文献检索、检索协议、PDF 获取和文献库页面。本地证据检索（项目文献、PDF、已确认知识）属于核心功能，关掉也保留；综述流程需要它。",
+      latex: "Typeset 编辑器、LaTeX 编译与渲染工具和 TikZ 绘图指引。关闭后 .tex 文件改在 Code 页打开。",
+      figures: "科研绘图页面：论文插图的生成、审阅与编辑。关闭后不能在本项目发起新的绘图请求。",
       mail: "连接 Gmail、Outlook 或 IMAP 邮箱。包括邮件工具、新邮件监听和定时任务的“新邮件”触发；关闭后这些会一起停用，邮箱账号保留。新邮件监听只看全局开关。",
     },
   },
@@ -42,9 +42,9 @@ const COPY = {
     projectOverride: "This project uses its own setting.",
     names: { literature: "Literature", latex: "LaTeX", figures: "Figures", mail: "Mail" },
     descriptions: {
-      literature: "Literature search, the library page and evidence retrieval tools.",
-      latex: "The Typeset editor and the LaTeX compile and render tools.",
-      figures: "Generating and editing paper figures.",
+      literature: "External literature search, search protocols, PDF acquisition and the library page. Local evidence retrieval (project papers, PDFs, confirmed knowledge) is core and stays when this is off; literature reviews need it.",
+      latex: "The Typeset editor, the LaTeX compile and render tools and TikZ diagram guidance. When it is off, .tex files open in Code.",
+      figures: "The Figures page: generating, reviewing and editing paper figures. When it is off, this project cannot start new figure requests.",
       mail: "Connect Gmail, Outlook or IMAP mailboxes: the mail tools, new-mail watching and the scheduled tasks' new-mail trigger. Turning it off stops all of them; your accounts are kept. New-mail watching follows the global switch only.",
     },
   },
@@ -108,7 +108,7 @@ export default function OfficialPluginsSection({ language }: { language: Languag
         {states.map((item) => {
           const name = copy.names[item.id];
           const label = !item.toggleable ? copy.alwaysOn : item.enabled ? copy.on : copy.off;
-          const globalOn = item.global ?? item.enabled;
+          const globalOn = item.globalEnabled;
           return <article key={item.id} aria-label={name}
             className={`plugin-card is-${item.enabled ? "enabled" : "disabled"}`}>
             <div className="plugin-card-main">

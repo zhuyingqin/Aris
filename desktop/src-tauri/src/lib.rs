@@ -660,7 +660,15 @@ pub fn run() {
     hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
-        .register_uri_scheme_protocol("somniq-figure", |context, request| figures::editor_asset(context.app_handle(), &request))
+        // The scheme is registered at build time whatever the switches say; with
+        // the Figures plugin off for the current project it serves nothing.
+        .register_uri_scheme_protocol("somniq-figure", |context, request| {
+            let app = context.app_handle();
+            let project = crate::projects::current_project_path(&app.state::<crate::projects::ProjectState>()).ok();
+            official_plugins::figure_scheme_response(project.as_deref(), || {
+                figures::editor_asset(app, &request)
+            })
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())

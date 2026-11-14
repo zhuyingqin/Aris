@@ -6,8 +6,9 @@ import * as transport from "../api/transport";
 import { useStore } from "../store";
 import OfficialPluginsSection from "./OfficialPluginsSection";
 import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./officialPluginNav";
+import { workspaceFileOpenTarget } from "../editor/workspaceFiles";
 import {
-  LEGACY_HIDE_MAIL_KEY, OFFICIAL_PLUGIN_TABS, migrateMailVisibility, officialTabHidden, switchTarget,
+  LEGACY_HIDE_MAIL_KEY, OFFICIAL_PLUGIN_TABS, latexWorkspaceOn, migrateMailVisibility, officialTabHidden, switchTarget,
   type OfficialPluginState,
 } from "./officialPlugins";
 
@@ -18,10 +19,10 @@ vi.mock("../api/transport", async (importOriginal) => ({
 
 const projectPath = "F:/project";
 const states = (mail: boolean): OfficialPluginState[] => [
-  { id: "literature", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
-  { id: "latex", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
-  { id: "figures", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
-  { id: "mail", scope: "user", toggleable: true, enabled: mail, global: mail, project: null, workspaceOff: false },
+  { id: "literature", scope: "project", toggleable: false, enabled: true, global: null, globalEnabled: true, project: null, workspaceOff: false },
+  { id: "latex", scope: "project", toggleable: false, enabled: true, global: null, globalEnabled: true, project: null, workspaceOff: false },
+  { id: "figures", scope: "project", toggleable: false, enabled: true, global: null, globalEnabled: true, project: null, workspaceOff: false },
+  { id: "mail", scope: "user", toggleable: true, enabled: mail, global: mail, globalEnabled: mail, project: null, workspaceOff: false },
 ];
 
 const realSetHideMail = useStore.getState().setHideMail;
@@ -104,6 +105,9 @@ describe("per-project switches", () => {
     expect(switchTarget(mail({ project: false }))).toBe("project");
     // The project asks for it off: a global "on" would be outranked.
     expect(switchTarget(mail({ workspaceOff: true }))).toBe("project");
+    // Project-scoped plugins never flip every project at once.
+    const figures = states(true).find((state) => state.id === "figures")!;
+    expect(switchTarget(figures)).toBe("project");
   });
 
   it("turns mail on for this project when the project asked for it off", async () => {
@@ -122,7 +126,7 @@ describe("per-project switches", () => {
   it("offers follow / on / off for this project and explains a project request", async () => {
     useStore.setState({
       currentProject: { id: "p", name: "Project", path: projectPath } as never,
-      officialPlugins: mailWith({ workspaceOff: true, global: true }),
+      officialPlugins: mailWith({ workspaceOff: true, global: true, globalEnabled: true }),
     });
     vi.mocked(transport.invoke).mockResolvedValue(mailWith({ project: false }));
     render(<OfficialPluginsSection language="cn" />);
@@ -141,5 +145,17 @@ describe("official plugin navigation", () => {
     expect(officialTabHidden("figures", null, false)).toBe(false);
     expect(officialTabHidden("lab", figuresOff, true)).toBe(false);
     expect(officialTabHidden("mail", states(true), true)).toBe(true);
+  });
+});
+
+describe("the LaTeX plugin", () => {
+  it("hides the LaTeX page and opens .tex in Code while it is off", () => {
+    const latexOff = states(true).map((state) => state.id === "latex" ? { ...state, toggleable: true, enabled: false } : state);
+    expect(officialTabHidden("typeset", latexOff, false)).toBe(true);
+    expect(latexWorkspaceOn(latexOff)).toBe(false);
+    expect(latexWorkspaceOn(null)).toBe(true);
+    expect(workspaceFileOpenTarget("paper/main.tex")).toBe("latex");
+    expect(workspaceFileOpenTarget("paper/main.tex", { latexWorkspace: false })).toBe("code");
+    expect(workspaceFileOpenTarget("figs/plot.pdf", { latexWorkspace: false })).toBe("pdf");
   });
 });

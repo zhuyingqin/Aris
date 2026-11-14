@@ -8726,7 +8726,14 @@ struct AdapterAvailability {
     quota_policy: &'static str,
 }
 
+/// Whether the source called `source` can run here, through its registered
+/// [`LiteratureSource`]; an unregistered name is a recorded coverage gap.
 fn adapter_availability(source: &str) -> AdapterAvailability {
+    literature_source(source).map_or_else(|| builtin_availability(source), |found| found.availability())
+}
+
+/// The built-in indexes' availability (the [`Engine`] side of the contract).
+fn builtin_availability(source: &str) -> AdapterAvailability {
     match source.trim().to_ascii_lowercase().as_str() {
         "scopus" => scopus_availability(scopus_api_key().is_ok(), school_route_signed_in()),
         "openalex" => AdapterAvailability {
@@ -9307,6 +9314,120 @@ impl Engine {
     }
 }
 
+/// What one literature index must provide to sit behind the official
+/// Literature plugin's search tools (`LiteratureSearch`, the protocol run):
+/// a stable id, whether this computer can reach it, and one bounded,
+/// cancellable page of normalized records with the audit material a durable
+/// `SearchRun` keeps. Ranking, dedupe, budgets and `MAX_PAPERS` stay with the
+/// caller, so every source is held to the same rules and the model still sees
+/// one search tool however many sources exist.
+///
+/// The built-in indexes implement it through [`Engine`]; every dispatch goes
+/// through [`literature_sources`], which is where another source registers.
+trait LiteratureSource: Sync {
+    /// The id used in protocols and in a tool's `sources` argument.
+    fn id(&self) -> &'static str;
+    /// Other spellings of [`Self::id`] that callers may use.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// The provider's own spelling, for caller-facing warnings.
+    fn label(&self) -> &'static str;
+    /// Whether this computer can query it now, and how a gap is recorded.
+    fn availability(&self) -> AdapterAvailability;
+    /// One bounded page of results.
+    fn search(
+        &self,
+        client: &reqwest::blocking::Client,
+        request: &SourceRequest<'_>,
+    ) -> Result<AdapterSearchOutcome, String>;
+}
+
+/// One page request to a [`LiteratureSource`].
+struct SourceRequest<'a> {
+    query: &'a str,
+    limit: usize,
+    time_window: Option<&'a ParsedTimeWindow>,
+    /// Honoured by sources that sort server-side (Scopus); others ignore it.
+    sort_order: &'a str,
+    cursor: Option<&'a str>,
+    should_cancel: &'a dyn Fn() -> bool,
+}
+
+impl LiteratureSource for Engine {
+    fn id(&self) -> &'static str {
+        self.source_name()
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        match self {
+            Self::SemanticScholar => &["semantic_scholar", "semanticscholar"],
+            _ => &[],
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.display_name()
+    }
+
+    fn availability(&self) -> AdapterAvailability {
+        builtin_availability(self.source_name())
+    }
+
+    fn search(
+        &self,
+        client: &reqwest::blocking::Client,
+        request: &SourceRequest<'_>,
+    ) -> Result<AdapterSearchOutcome, String> {
+        let SourceRequest {
+            query,
+            limit,
+            time_window,
+            sort_order,
+            cursor,
+            should_cancel,
+        } = *request;
+        match self {
+            Self::Scopus => search_scopus(
+                client,
+                query,
+                limit,
+                time_window,
+                sort_order,
+                cursor,
+                should_cancel,
+            ),
+            Self::OpenAlex => search_openalex(client, query, limit, time_window, cursor, should_cancel),
+            Self::SemanticScholar => {
+                search_semantic_scholar(client, query, limit, time_window, cursor, should_cancel)
+            }
+            Self::Crossref => search_crossref(client, query, limit, time_window, cursor, should_cancel),
+            Self::Arxiv => search_arxiv(client, query, limit, time_window, cursor, should_cancel),
+        }
+    }
+}
+
+/// Every registered literature source, in canonical priority order: dedupe
+/// keeps the first record, so published-venue indexes come before preprints.
+fn literature_sources() -> &'static [&'static dyn LiteratureSource] {
+    &[
+        &Engine::Scopus,
+        &Engine::OpenAlex,
+        &Engine::SemanticScholar,
+        &Engine::Crossref,
+        &Engine::Arxiv,
+    ]
+}
+
+/// The registered source called `name` (its id or an alias, any case).
+fn literature_source(name: &str) -> Option<&'static dyn LiteratureSource> {
+    let name = name.trim();
+    literature_sources().iter().copied().find(|source| {
+        source.id().eq_ignore_ascii_case(name)
+            || source.aliases().iter().any(|alias| alias.eq_ignore_ascii_case(name))
+    })
+}
+
 /// Resolve which engines to run, always in priority order regardless of the
 /// order `sources` lists them. Empty `sources` means the full default set,
 /// which always includes Scopus: with neither `SCOPUS_API_KEY` nor a signed-in
@@ -9375,7 +9496,7 @@ pub fn search_remote(
         // A source whose credential is not configured is a recorded coverage
         // gap, not three doomed requests. The protocol path already gates on
         // this; this path was still paying for the attempt.
-        let availability = adapter_availability(engine.source_name());
+        let availability = engine.availability();
         if availability.status != "available" {
             run(
                 engine.display_name(),
@@ -9383,36 +9504,15 @@ pub fn search_remote(
             );
             continue;
         }
-        match engine {
-            Engine::Scopus => run(
-                "Scopus",
-                search_scopus(
-                    &client,
-                    query,
-                    limit,
-                    None,
-                    "relevance",
-                    None,
-                    &never_cancel,
-                ),
-            ),
-            Engine::OpenAlex => run(
-                "OpenAlex",
-                search_openalex(&client, query, limit, None, None, &never_cancel),
-            ),
-            Engine::SemanticScholar => run(
-                "Semantic Scholar",
-                search_semantic_scholar(&client, query, limit, None, None, &never_cancel),
-            ),
-            Engine::Crossref => run(
-                "Crossref",
-                search_crossref(&client, query, limit, None, None, &never_cancel),
-            ),
-            Engine::Arxiv => run(
-                "arXiv",
-                search_arxiv(&client, query, limit, None, None, &never_cancel),
-            ),
-        }
+        let request = SourceRequest {
+            query,
+            limit,
+            time_window: None,
+            sort_order: "relevance",
+            cursor: None,
+            should_cancel: &never_cancel,
+        };
+        run(engine.label(), engine.search(&client, &request));
     }
     if papers.is_empty() && !warnings.is_empty() {
         return Err(warnings.join("; "));
@@ -9949,25 +10049,21 @@ fn search_single_source_with_audit(
     if query.is_empty() {
         return Err("search query is empty".to_string());
     }
+    let Some(adapter) = literature_source(source) else {
+        return Err(format!("source adapter is not implemented: {source}"));
+    };
     let client = http_client()?;
-    match source.trim().to_ascii_lowercase().as_str() {
-        "scopus" => search_scopus(
-            &client,
+    adapter.search(
+        &client,
+        &SourceRequest {
             query,
             limit,
             time_window,
             sort_order,
             cursor,
             should_cancel,
-        ),
-        "openalex" => search_openalex(&client, query, limit, time_window, cursor, should_cancel),
-        "semantic-scholar" | "semantic_scholar" | "semanticscholar" => {
-            search_semantic_scholar(&client, query, limit, time_window, cursor, should_cancel)
-        }
-        "crossref" => search_crossref(&client, query, limit, time_window, cursor, should_cancel),
-        "arxiv" => search_arxiv(&client, query, limit, time_window, cursor, should_cancel),
-        _ => Err(format!("source adapter is not implemented: {source}")),
-    }
+        },
+    )
 }
 
 /// A provider page is the smallest unit a run can stop between: the request

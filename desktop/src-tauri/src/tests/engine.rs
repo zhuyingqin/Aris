@@ -3606,7 +3606,8 @@ fn a_mail_tool_that_searches_papers_also_needs_literature() {
     }));
     assert!(!names.contains(&"mail_literature_catch_up"));
     assert!(names.contains(&"mail_search"));
-    assert!(names.contains(&"LiteratureSearch"), "core tools are not plugin-owned yet");
+    assert!(!names.contains(&"LiteratureSearch"), "external search belongs to Literature");
+    assert!(names.contains(&"LibraryRetrieve"), "local evidence is core");
     assert!(crate::official_plugins::tool_allowed("bash", |_| false));
     assert!(!crate::official_plugins::tool_allowed("mail_send", |id| id != "mail"));
     assert!(crate::official_plugins::disabled_tool_message("mail_literature_catch_up")
@@ -3627,4 +3628,101 @@ fn switching_official_plugins_off_never_changes_the_reviewers_tools() {
         .map(|spec| spec.name)
         .collect::<Vec<_>>();
     assert_eq!(names, crate::review_thread::REVIEWER_TOOLS.map(String::from).to_vec());
+}
+
+
+/// The manifest's mail tools and the mail module's own list must not drift.
+#[test]
+fn the_mail_manifest_lists_exactly_the_mail_modules_tools() {
+    let declared = runtime::plugins::builtin_manifest("mail")
+        .unwrap()
+        .tools
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    let module = crate::mail::mail_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    assert_eq!(declared, module);
+}
+
+/// Literature off removes external search and acquisition; local evidence
+/// (the core retrieval tools) stays.
+#[test]
+fn switching_literature_off_keeps_local_evidence_tools() {
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["literature"]),
+    ));
+    for gone in ["LiteratureSearch", "LiteratureCitations", "LiteratureSearchExecute", "LiteraturePdfDownload", "mail_literature_catch_up"] {
+        assert!(!off.contains(&gone), "{gone}");
+    }
+    for kept in ["LibraryRetrieve", "RetrievalPlan", "RetrievalLedger", "ProjectEvidenceSearch", "mail_search"] {
+        assert!(off.contains(&kept), "{kept}");
+    }
+}
+
+#[test]
+fn switching_latex_off_drops_its_compile_and_render_tools_in_place() {
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["latex"]),
+    ));
+    assert!(all.contains(&"LaTeXCompile") && all.contains(&"LaTeXRender"));
+    let expected = all
+        .iter()
+        .copied()
+        .filter(|name| !matches!(*name, "LaTeXCompile" | "LaTeXRender"))
+        .collect::<Vec<_>>();
+    assert_eq!(off, expected);
+}
+
+/// With Figures off for the project the scheme answers 404 and never reads
+/// the asset; with it on, or with no project open, the asset is served.
+#[test]
+fn the_figure_scheme_serves_nothing_while_figures_is_off() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let previous = std::env::var_os("ARIS_CONFIG_ROOT");
+    std::env::set_var("ARIS_CONFIG_ROOT", &config);
+    let served = |status: u16| {
+        move || {
+            tauri::http::Response::builder()
+                .status(status)
+                .body(b"asset".to_vec())
+                .unwrap()
+        }
+    };
+
+    let on = crate::official_plugins::figure_scheme_response(Some(&project), served(200));
+    runtime::plugins::PluginStore::for_workspace(&project)
+        .set_builtin(
+            runtime::plugins::BUILTIN_FIGURES,
+            runtime::plugins::BuiltinTarget::Project,
+            Some(false),
+        )
+        .unwrap();
+    let mut touched = false;
+    let off = crate::official_plugins::figure_scheme_response(Some(&project), || {
+        touched = true;
+        served(200)()
+    });
+    let no_project = crate::official_plugins::figure_scheme_response(None, served(200));
+
+    match previous {
+        Some(value) => std::env::set_var("ARIS_CONFIG_ROOT", value),
+        None => std::env::remove_var("ARIS_CONFIG_ROOT"),
+    }
+    assert_eq!(on.status(), 200);
+    assert_eq!(off.status(), 404);
+    assert!(off.body().is_empty());
+    assert!(!touched, "the asset must not be read while Figures is off");
+    assert_eq!(no_project.status(), 200);
 }

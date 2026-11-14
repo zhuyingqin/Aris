@@ -2511,11 +2511,16 @@ enum RetrievalKind {
 /// descriptor for the desktop to run; none of them opens a connection, so none
 /// of them should consume a retrieval budget or be deduplicated.
 fn retrieval_role(tool_name: &str) -> Option<RetrievalRole> {
+    // Module tools declare their role in their official plugin's manifest.
+    if let Some((_, tool)) = crate::plugins::builtin_tool(tool_name) {
+        return tool.retrieval.map(|role| match role {
+            crate::plugins::ToolRetrievalRole::Discovery => RetrievalRole::Discovery,
+            crate::plugins::ToolRetrievalRole::Verification => RetrievalRole::Verification,
+        });
+    }
     Some(match tool_name {
-        "WebSearch" | "LiteratureSearch" | "LiteratureCitations" | "LiteratureSearchExecute" => {
-            RetrievalRole::Discovery
-        }
-        "WebFetch" | "LiteraturePdfDownload" => RetrievalRole::Verification,
+        "WebSearch" => RetrievalRole::Discovery,
+        "WebFetch" => RetrievalRole::Verification,
         "bash" | "PowerShell" | "REPL" | "NotebookExecute" => RetrievalRole::NetworkDependent,
         _ => return None,
     })

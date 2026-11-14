@@ -34,7 +34,7 @@ import type { SectionNumberingPrefix } from "./outlineModel";
 import type { TheoremDefinition } from "./theoremEnvironments";
 import type { VisualCompiledDocument } from "./compiledDiagramPreview";
 import type { VisualPdfCursor } from "./visualModel";
-import { scanLatexStructure } from "./latexStructure";
+import { scanLatexStructure } from "../editor/latex/latexStructure";
 import { latexHtmlPaste, latexImagePaste } from "./latexHtmlPaste";
 
 declare global {

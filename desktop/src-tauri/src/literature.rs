@@ -1288,6 +1288,7 @@ pub async fn literature_add_identifier(
         return Err("enter a DOI beginning with 10. or a 10/13-digit ISBN".to_string());
     }
     let base = project_base(&projects_state)?;
+    crate::official_plugins::require_in(&base, runtime::plugins::BUILTIN_LITERATURE)?;
     tauri::async_runtime::spawn_blocking(move || {
         tools::literature::literature_search_ad_hoc_at(
             &base,
@@ -1976,6 +1977,7 @@ pub async fn literature_search_protocol_execute(
         return Err(message);
     }
     let base = project_base(&projects_state)?;
+    crate::official_plugins::require_in(&base, runtime::plugins::BUILTIN_LITERATURE)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // A protocol run is minutes of provider paging on a blocking thread that

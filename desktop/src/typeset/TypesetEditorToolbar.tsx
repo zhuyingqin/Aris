@@ -28,7 +28,7 @@ import TypesetSymbolPalette from "./TypesetSymbolPalette";
 import TypesetFigureDialog from "./TypesetFigureDialog";
 import { figureIncludeCommand, figureSnippet, includeGraphicsAt, type FigureDraft } from "./latexFigure";
 import { symbolInsertion, symbolSelectionRange, type LatexSymbolEntry } from "./symbolPalette";
-import { scanLatexStructure } from "./latexStructure";
+import { scanLatexStructure } from "../editor/latex/latexStructure";
 
 function VisualToolbarMenu({
   label,

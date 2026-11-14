@@ -7,7 +7,7 @@
  */
 
 import { dirname, normalizePath, sameWorkspacePath, stripInlineMarkup } from "./latexText";
-import { scanLatexStructure, type LatexEnvironment, type LatexStructureIndex } from "./latexStructure";
+import { scanLatexStructure, type LatexEnvironment, type LatexStructureIndex } from "../editor/latex/latexStructure";
 import {
   SECNUMDEPTH_CHAPTERED,
   SECNUMDEPTH_FLAT,

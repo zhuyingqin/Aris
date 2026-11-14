@@ -1930,3 +1930,18 @@ fn mcp_multimodal_content_stays_out_of_text_json() {
     assert!(output.text.contains("1440"));
     assert!(!output.text.contains("aGVsbG8="));
 }
+
+#[test]
+fn latex_requests_route_the_latex_tools_only_while_they_are_offered() {
+    let with_latex: BTreeSet<String> = ["read_file", "edit_file", "bash", "LaTeXCompile", "LaTeXRender"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let groups = super::intent_tool_groups("把 main.tex 用 xelatex 编译一下", &with_latex);
+    let latex = groups.iter().find(|group| group.profile == "latex").expect("latex group");
+    assert_eq!(latex.optional, vec!["LaTeXCompile".to_string(), "LaTeXRender".to_string()]);
+
+    let without: BTreeSet<String> = ["read_file", "edit_file", "bash"].into_iter().map(String::from).collect();
+    let groups = super::intent_tool_groups("把 main.tex 用 xelatex 编译一下", &without);
+    assert!(groups.iter().all(|group| group.profile != "latex"));
+}

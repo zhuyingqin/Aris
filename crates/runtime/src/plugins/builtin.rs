@@ -45,6 +45,110 @@ pub struct BuiltinManifest {
     pub toggleable: bool,
     /// The state when nothing has been chosen.
     pub default_enabled: bool,
+    /// The agent tools this plugin contributes, with what the runtime needs
+    /// to know about them. The runtime reads these declarations instead of
+    /// keeping its own lists of module tool names.
+    pub tools: &'static [BuiltinTool],
+}
+
+/// How a tool takes part in external retrieval (`retrieval_guard`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRetrievalRole {
+    /// Finds candidate sources.
+    Discovery,
+    /// Opens a specific source to check it.
+    Verification,
+}
+
+/// How a successful call's output can still report a failure (`tool_outcome`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFailureKind {
+    /// A command's exit status line.
+    Shell,
+    /// A literature run where every source failed.
+    LiteratureSearch,
+}
+
+/// One agent tool an official plugin contributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinTool {
+    pub name: &'static str,
+    pub retrieval: Option<ToolRetrievalRole>,
+    pub output_failure: Option<OutputFailureKind>,
+    /// Other official plugins the tool needs besides its own.
+    pub requires: &'static [&'static str],
+}
+
+const fn tool(name: &'static str) -> BuiltinTool {
+    BuiltinTool {
+        name,
+        retrieval: None,
+        output_failure: None,
+        requires: &[],
+    }
+}
+
+const fn search_tool(name: &'static str) -> BuiltinTool {
+    BuiltinTool {
+        name,
+        retrieval: Some(ToolRetrievalRole::Discovery),
+        output_failure: Some(OutputFailureKind::LiteratureSearch),
+        requires: &[],
+    }
+}
+
+/// The Literature plugin's tools: external search, protocol runs and PDF
+/// acquisition. Local evidence (`LibraryRetrieve`, `Retrieval*`,
+/// `ProjectEvidenceSearch`, knowledge) is core and is not listed here. The
+/// protocol writer and preview, library upsert and the browser download task
+/// open no connection, so they have no retrieval role.
+const LITERATURE_TOOLS: &[BuiltinTool] = &[
+    search_tool("LiteratureSearch"),
+    search_tool("LiteratureCitations"),
+    tool("LiteratureSearchProtocolCreate"),
+    tool("LiteratureSearchPreview"),
+    search_tool("LiteratureSearchExecute"),
+    tool("LiteratureLibraryUpsert"),
+    BuiltinTool {
+        retrieval: Some(ToolRetrievalRole::Verification),
+        ..tool("LiteraturePdfDownload")
+    },
+    tool("LiteratureBrowserDownloadTask"),
+];
+
+const LATEX_TOOLS: &[BuiltinTool] = &[
+    BuiltinTool {
+        output_failure: Some(OutputFailureKind::Shell),
+        ..tool("LaTeXCompile")
+    },
+    tool("LaTeXRender"),
+];
+
+const MAIL_TOOLS: &[BuiltinTool] = &[
+    tool("mail_accounts"),
+    tool("mail_folders"),
+    tool("mail_search"),
+    tool("mail_read"),
+    tool("mail_send"),
+    tool("mail_mark"),
+    tool("mail_move"),
+    // Catching up on paper alerts searches and downloads through Literature.
+    BuiltinTool {
+        requires: &[BUILTIN_LITERATURE],
+        ..tool("mail_literature_catch_up")
+    },
+];
+
+/// The official plugin that contributes `tool_name`, and its declaration.
+#[must_use]
+pub fn builtin_tool(tool_name: &str) -> Option<(&'static BuiltinManifest, &'static BuiltinTool)> {
+    BUILTIN_PLUGINS.iter().find_map(|manifest| {
+        manifest
+            .tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .map(|tool| (manifest, tool))
+    })
 }
 
 /// Every official plugin, in the order their tools and prompt sections are
@@ -53,20 +157,23 @@ pub const BUILTIN_PLUGINS: &[BuiltinManifest] = &[
     BuiltinManifest {
         id: BUILTIN_LITERATURE,
         scope: BuiltinScope::Project,
-        toggleable: false,
+        toggleable: true,
         default_enabled: true,
+        tools: LITERATURE_TOOLS,
     },
     BuiltinManifest {
         id: BUILTIN_LATEX,
         scope: BuiltinScope::Project,
-        toggleable: false,
+        toggleable: true,
         default_enabled: true,
+        tools: LATEX_TOOLS,
     },
     BuiltinManifest {
         id: BUILTIN_FIGURES,
         scope: BuiltinScope::Project,
-        toggleable: false,
+        toggleable: true,
         default_enabled: true,
+        tools: &[],
     },
     BuiltinManifest {
         id: BUILTIN_MAIL,
@@ -75,6 +182,7 @@ pub const BUILTIN_PLUGINS: &[BuiltinManifest] = &[
         // A fresh profile has no mailbox; the desktop seeds the first value
         // from the accounts it finds (`seed_builtin_global`).
         default_enabled: false,
+        tools: MAIL_TOOLS,
     },
 ];
 
@@ -126,6 +234,8 @@ pub struct BuiltinState {
     pub enabled: bool,
     /// The global choice, if one was made.
     pub global: Option<bool>,
+    /// What following the global switch gives: its choice or the default.
+    pub global_enabled: bool,
     /// This project's override on this computer, if one was made.
     pub project: Option<bool>,
     /// The project itself asks for this plugin to be off
@@ -326,6 +436,12 @@ impl PluginStore {
                 enabled: toggles.effective(manifest, &project, &workspace_off),
                 workspace_off: workspace_off.iter().any(|id| id == manifest.id),
                 global: toggles.global.get(manifest.id).copied(),
+                global_enabled: !manifest.toggleable
+                    || toggles
+                        .global
+                        .get(manifest.id)
+                        .copied()
+                        .unwrap_or(manifest.default_enabled),
                 project: toggles
                     .projects
                     .get(&project)
@@ -449,7 +565,8 @@ mod tests {
         )
         .unwrap();
         assert!(!store.builtin_enabled(BUILTIN_MAIL));
-        assert!(store.builtin_enabled(BUILTIN_LITERATURE), "not switchable yet");
+        assert!(!store.builtin_enabled(BUILTIN_LITERATURE), "any switchable plugin can be asked off");
+        assert!(store.builtin_enabled(BUILTIN_LATEX), "only the plugins it names");
         let mail = store
             .builtin_states()
             .unwrap()
@@ -479,14 +596,38 @@ mod tests {
     }
 
     #[test]
-    fn modules_not_yet_behind_the_registry_cannot_be_turned_off() {
+    fn every_official_plugin_can_now_be_switched_off() {
         let (_dir, store) = store();
-        for id in [BUILTIN_LITERATURE, BUILTIN_LATEX, BUILTIN_FIGURES] {
-            assert!(store
-                .set_builtin(id, BuiltinTarget::Global, Some(false))
-                .is_err());
-            assert!(store.builtin_enabled(id));
+        for manifest in BUILTIN_PLUGINS {
+            assert!(manifest.toggleable, "{}", manifest.id);
+            store
+                .set_builtin(manifest.id, BuiltinTarget::Project, Some(false))
+                .unwrap();
+            assert!(!store.builtin_enabled(manifest.id), "{}", manifest.id);
         }
+        assert!(store
+            .set_builtin("no-such-plugin", BuiltinTarget::Global, Some(false))
+            .is_err());
+    }
+
+    #[test]
+    fn module_tools_are_declared_once_and_local_evidence_stays_core() {
+        let mut seen = std::collections::BTreeSet::new();
+        for manifest in BUILTIN_PLUGINS {
+            for tool in manifest.tools {
+                assert!(seen.insert(tool.name), "{} is declared twice", tool.name);
+                for needed in tool.requires {
+                    assert!(builtin_manifest(needed).is_some(), "{} needs unknown {needed}", tool.name);
+                }
+            }
+        }
+        for core in ["LibraryRetrieve", "RetrievalPlan", "RetrievalEvidence", "RetrievalLedger", "RetrievalCorpusSeal", "ProjectEvidenceSearch", "KnowledgeSearch", "WebSearch", "bash"] {
+            assert!(builtin_tool(core).is_none(), "{core} must stay core");
+        }
+        let (plugin, search) = builtin_tool("LiteratureSearch").unwrap();
+        assert_eq!(plugin.id, BUILTIN_LITERATURE);
+        assert_eq!(search.retrieval, Some(ToolRetrievalRole::Discovery));
+        assert_eq!(builtin_tool("LaTeXCompile").unwrap().1.output_failure, Some(OutputFailureKind::Shell));
     }
 
     #[test]
@@ -516,6 +657,20 @@ mod tests {
         assert!(!store.builtin_enabled(BUILTIN_MAIL));
         let next = super::super::PluginRun::begin(&store, "next run");
         assert!(!next.set().builtin_enabled(BUILTIN_MAIL));
+    }
+
+    #[test]
+    fn figures_is_on_by_default_and_switches_per_project() {
+        let (dir, store) = store();
+        assert!(store.builtin_enabled(BUILTIN_FIGURES));
+        store
+            .set_builtin(BUILTIN_FIGURES, BuiltinTarget::Project, Some(false))
+            .unwrap();
+        assert!(!store.builtin_enabled(BUILTIN_FIGURES));
+        let other = dir.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        let other = PluginStore::with_user_root(&other, dir.path().join("user"));
+        assert!(other.builtin_enabled(BUILTIN_FIGURES), "an override stays in its project");
     }
 
     #[test]

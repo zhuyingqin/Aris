@@ -4851,3 +4851,18 @@ fn school_route_body_without_entries_is_an_error_not_an_empty_result() {
         .expect_err("no entries list");
     assert!(error.contains("`entries`"), "{error}");
 }
+
+
+/// Every built-in index is a registered `LiteratureSource`, in the order the
+/// default plan runs them, and names resolve through the registry alone.
+#[test]
+fn every_builtin_index_is_a_registered_literature_source_in_priority_order() {
+    let ids = literature_sources().iter().map(|source| source.id()).collect::<Vec<_>>();
+    let planned = planned_engines(&[]).into_iter().map(Engine::source_name).collect::<Vec<_>>();
+    assert_eq!(ids, planned);
+    assert_eq!(literature_source("Semantic_Scholar").map(|source| source.id()), Some("semantic-scholar"));
+    assert_eq!(literature_source(" OpenAlex ").map(|source| source.label()), Some("OpenAlex"));
+    assert!(literature_source("cnki").is_none());
+    assert_eq!(adapter_availability("cnki").status, "not_implemented");
+    assert_eq!(adapter_availability("crossref").status, "available");
+}

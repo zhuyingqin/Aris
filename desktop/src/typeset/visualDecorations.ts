@@ -26,7 +26,7 @@ import {
   type LatexArgument,
   type LatexCommand,
   type LatexHeading,
-} from "./latexStructure";
+} from "../editor/latex/latexStructure";
 import type { SectionNumberingPrefix } from "./outlineModel";
 import {
   SECNUMDEPTH_CHAPTERED,

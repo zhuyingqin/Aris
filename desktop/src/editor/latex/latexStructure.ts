@@ -8,7 +8,7 @@
  * decorations, editing commands, outlines, and paste/keyboard behaviour.
  */
 
-import { canonicalMathEnvironmentName } from "../math/latexMath";
+import { canonicalMathEnvironmentName } from "../../math/latexMath";
 
 export type LatexRange = { from: number; to: number };
 

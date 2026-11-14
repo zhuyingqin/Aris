@@ -1,6 +1,6 @@
 import { foldService } from "@codemirror/language";
 import type { Text } from "@codemirror/state";
-import { scanLatexStructure, type LatexRange } from "../typeset/latexStructure";
+import { scanLatexStructure, type LatexRange } from "./latex/latexStructure";
 
 // Gutter queries run once per visible line. Reuse the index for the immutable
 // document so moving the selection or scrolling never rescans the source.

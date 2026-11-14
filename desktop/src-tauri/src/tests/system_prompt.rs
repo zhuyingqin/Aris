@@ -236,8 +236,9 @@ fn official_plugins_that_are_off_leave_only_their_own_prompt_sections() {
     let toolchain = latex_toolchain_prompt_section(None, None);
     assert!(all_on.contains(evidence) && all_on.contains(tikz) && all_on.contains(&toolchain));
 
+    // Local evidence is core: switching Literature off keeps its routing.
     let no_literature = prompt(&["literature"]);
-    assert!(!no_literature.contains(evidence));
+    assert!(no_literature.contains(evidence));
     assert!(no_literature.contains(tikz) && no_literature.contains(&toolchain));
 
     let no_latex = prompt(&["latex"]);
