@@ -1,0 +1,6 @@
+{
+  "source": "Official @tauri-apps/cli 2.11.2 signer; disposable test key deleted after fixture generation.",
+  "payloadUtf8": "SomniQ updater repair signature verification fixture.\n",
+  "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ4RThGOEVCODJEREJDMkYKUldRdnZOMkM2L2pvMkdxVXUwa0h4VnBQTzBCRzNESWFWMUdTbytOcHl3ZDVNSU5VSEUxbDh5OHcK",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRdnZOMkM2L2pvMk1iZUpzTFpWNi85K3dxY1FaL09XTWZqQU92NThzdW44RVViSVVjYm1CTkp1VmN3Z01yVEhWM0lMT3NFcmt0SDJZejUzNzJSUDMrNzRUSXM5TVpzWHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTkyNDg4CWZpbGU6cGF5bG9hZC50eHQKVlNVMlNLMHVEMXBaVWhSdFR0T084OGJCSy93WXYrbWZ4QWN3cFJDS0V0SlR0dy9lT1pEdTJpeTd1SFZJd2VJQ1Z6THBrVzAyOVpSamZtVStLQXZlQ2c9PQo="
+}

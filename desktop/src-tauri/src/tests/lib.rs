@@ -50,6 +50,35 @@ fn updater_accepts_a_newer_upload_of_the_same_version() {
 }
 
 #[test]
+fn updater_does_not_reoffer_the_same_signed_0_4_88_installer() {
+    let current = Version::parse("0.4.88").unwrap();
+    // The unchanged installer embeds 2026-11-12T03:26:44Z. Its updater
+    // manifest must keep that time after the later signature repair.
+    let built_at = 1_794_454_004;
+    let published_at = 1_794_456_026;
+    assert!(should_offer_update(
+        &current,
+        &current,
+        Some(built_at),
+        Some(published_at),
+    ));
+    for _ in 0..3 {
+        assert!(!should_offer_update(
+            &current,
+            &current,
+            Some(built_at),
+            Some(built_at),
+        ));
+    }
+    assert!(should_offer_update(
+        &Version::parse("0.4.86").unwrap(),
+        &current,
+        Some(published_at),
+        Some(built_at),
+    ));
+}
+
+#[test]
 fn updater_rejects_older_versions_and_non_newer_same_version_uploads() {
     let current = Version::parse("0.4.33").unwrap();
 
