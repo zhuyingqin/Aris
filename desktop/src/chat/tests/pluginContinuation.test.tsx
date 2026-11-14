@@ -12,6 +12,7 @@ import { migrateTurn } from "../model";
 import {
   isUserQuestion,
   needsPluginContinuation,
+  openPlanSteps,
   PLUGIN_CONTINUATION_ORIGIN,
   pluginContinuationLabel,
   pluginContinuationPrompt,
@@ -105,6 +106,42 @@ describe("plugin follow-up turn", () => {
     expect(prompt).toContain("mcp__");
     // Verification goes through the tool, not through SomniQ's own files.
     expect(prompt).toContain("do not read SomniQ's configuration, plugin store or session files");
+    // No plan to carry: the prompt does not ask for a TodoWrite.
+    expect(prompt).not.toContain("TodoWrite");
+  });
+
+  it("carries the open steps of the interrupted plan into the verification turn", () => {
+    const todoWrite = (todos: { content: string; status: string }[]): ChatBlock => ({
+      kind: "tool",
+      id: `todo-${todos.map((todo) => todo.status).join("-")}`,
+      name: "TodoWrite",
+      input: JSON.stringify({ todos }),
+      output: JSON.stringify({ newTodos: todos.map((todo) => ({ ...todo, activeForm: todo.content })) }),
+    });
+    const turns = exchange([
+      todoWrite([
+        { content: "Inspect the project", status: "in_progress" },
+        { content: "Build and install the plugin", status: "pending" },
+        { content: "Verify the panel", status: "pending" },
+      ]),
+      todoWrite([
+        { content: "Inspect the project", status: "completed" },
+        { content: "Build and install the plugin", status: "in_progress" },
+        { content: "Verify the panel", status: "pending" },
+      ]),
+      managerCall("next-turn"),
+    ]);
+
+    const open = openPlanSteps(turns);
+    expect(open.map((todo) => todo.content)).toEqual(["Build and install the plugin", "Verify the panel"]);
+    const prompt = pluginContinuationPrompt(open);
+    expect(prompt).toContain("2 open step(s)");
+    expect(prompt).toContain('"content":"Build and install the plugin"');
+    expect(prompt).not.toContain("Inspect the project");
+    expect(prompt).toContain("Call TodoWrite with the full plan");
+
+    const finished = exchange([todoWrite([{ content: "Verify the panel", status: "completed" }])]);
+    expect(openPlanSteps(finished)).toEqual([]);
   });
 
   it("renders the app's turn as a marker without user actions", () => {

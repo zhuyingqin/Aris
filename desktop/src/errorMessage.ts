@@ -14,6 +14,9 @@ type ErrorCopy = {
   modelUnavailable: string;
   serviceUnavailable: string;
   localFile: string;
+  localFileMissing: string;
+  localFilePermission: string;
+  localFileBusy: string;
   unexpected: string;
 };
 
@@ -30,6 +33,9 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     modelUnavailable: "所选模型当前不可用，请在设置中更换模型后重试。",
     serviceUnavailable: "服务暂时不可用，请稍后重试。",
     localFile: "无法访问本地文件，请检查文件是否存在及访问权限。",
+    localFileMissing: "本地文件或目录不存在，可能已被移动或删除，请重新选择后重试。",
+    localFilePermission: "没有访问该本地文件或目录的权限，请检查权限或选择可访问的位置。",
+    localFileBusy: "本地文件正被其他程序占用，请关闭占用它的程序后重试。",
     unexpected: "操作未完成，请稍后重试。",
   },
   en: {
@@ -44,6 +50,9 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     modelUnavailable: "The selected model is unavailable. Choose another model in Settings and try again.",
     serviceUnavailable: "The service is temporarily unavailable. Please try again later.",
     localFile: "The local file could not be accessed. Check that it exists and that you have permission to use it.",
+    localFileMissing: "The local file or folder was not found. It may have been moved or deleted; select it again and retry.",
+    localFilePermission: "You do not have permission to access this local file or folder. Check its permissions or select an accessible location.",
+    localFileBusy: "The local file is in use by another program. Close that program and retry.",
     unexpected: "The operation could not be completed. Please try again.",
   },
 };
@@ -55,9 +64,18 @@ export const AUTH_TOKEN_INVALID_NEEDLES = ["invalid access token", "invalid toke
 const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>]+/i;
 const IP_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/;
 const HOST_PATTERN = /\b(?:localhost|(?:[a-z0-9-]+\.)+(?:com|net|org|io|ai|cn|dev|app|cloud|local|internal|test|co|uk|us|de|jp|info|online|me|xyz))(?::\d{1,5})?(?:\/[^\s"']*)?/i;
-const WINDOWS_PATH_PATTERN = /(?:[a-z]:\\|\\\\)[^\r\n"']+/i;
+const WINDOWS_PATH_PATTERN = /(?:\b[a-z]:[\\/]|\\\\)[^\r\n"']+/i;
 const UNIX_PATH_PATTERN = /(?:^|[\s"'(])\/(?:[^\s"')]+\/)+[^\s"')]+/;
 const SECRET_PATTERN = /(?:\bbearer\s+[a-z0-9._~-]+|\b(?:authorization|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)\b\s*[:=]\s*[^\s,;]+)/i;
+
+// A provider may quote tool inputs, its own filesystem, or a stack trace.
+// Those paths do not establish that the user's local file could not be read.
+const SERVICE_FAILURE_PATTERN = /\b(?:http(?:\/\d(?:\.\d)?)?\s+[45]\d{2}|(?:openai|anthropic|gemini)\s+(?:api error|request failed|stream\b)|upstream_error|invalid_request_error)\b/i;
+const FILE_MISSING_PATTERN = /\b(?:enoent|enotdir|no such file or directory)\b|\bos error [23]\b|\b(?:file|directory|path) (?:does not exist|not found)\b|系统找不到指定的(?:文件|路径)/i;
+const FILE_BUSY_PATTERN = /\b(?:ebusy|etxtbsy|sharing violation|being used by another process)\b|\bos error (?:32|33)\b|另一个程序正在使用此文件|文件正由另一进程使用/i;
+const FILE_PERMISSION_CODE_PATTERN = /\b(?:eacces|eperm)\b|\bos error 5\b/i;
+const FILE_PERMISSION_PATTERN = /\b(?:permission denied|access (?:is )?denied)\b|拒绝访问|权限不足/i;
+const FILE_OPERATION_FAILURE_PATTERN = /\b(?:(?:failed|unable) to|could not|cannot)\s+(?:read|write|open|save|create|copy|move|rename|delete|remove|access|canonicalize)\s+(?:(?:(?:the|a|an|selected|local|source|target)\s+)*(?:file|directory|folder|path)\b|[`"'(<]*(?:[a-z]:[\\/]|\\\\|\/))/i;
 
 function rawErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -177,20 +195,31 @@ export function formatUserFacingError(
     return copy.connection;
   }
 
-  if (/\b(?:http\s*)?5\d\d\b/.test(lower) || lower.includes("internal server error")) {
+  if (
+    SERVICE_FAILURE_PATTERN.test(message)
+    || /\b(?:http\s*)?5\d\d\b/.test(lower)
+    || lower.includes("internal server error")
+  ) {
     return copy.serviceUnavailable;
   }
 
-  if (hasLocalPath(message)) return copy.localFile;
+  if (FILE_MISSING_PATTERN.test(message)) return copy.localFileMissing;
+  if (FILE_BUSY_PATTERN.test(message)) return copy.localFileBusy;
+  const localPath = hasLocalPath(message);
+  if (FILE_PERMISSION_CODE_PATTERN.test(message) || (localPath && FILE_PERMISSION_PATTERN.test(message))) {
+    return copy.localFilePermission;
+  }
+  if (localPath && FILE_OPERATION_FAILURE_PATTERN.test(message)) return copy.localFile;
 
   // Any remaining endpoint or credential-shaped detail is not suitable for a
   // user-facing surface. Keep the failure actionable without naming the host.
   if (hasPrivateDetail(message)) return copy.serviceUnavailable;
 
-  // Server response dumps, stack traces, and long exception chains are neither
-  // useful nor safe to show in a toast or chat card.
+  // An unexplained path is private detail, not proof of a file access failure.
+  // Server dumps, stack traces, and long exception chains also stay out of UI.
   if (
-    message.length > 280
+    localPath
+    || message.length > 280
     || lower.includes("stack trace")
     || lower.includes("failed to execute")
     || lower.includes("panic")

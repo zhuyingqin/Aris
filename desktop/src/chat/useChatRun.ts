@@ -54,6 +54,7 @@ import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   isUserQuestion,
   needsPluginContinuation,
+  openPlanSteps,
   PLUGIN_CONTINUATION_ORIGIN,
   pluginContinuationLabel,
   pluginContinuationPrompt,
@@ -1017,7 +1018,7 @@ export function useChatRun({
         pluginContinuationLabel(language),
         [],
         false,
-        pluginContinuationPrompt(),
+        pluginContinuationPrompt(openPlanSteps(session.turns)),
         undefined,
         PLUGIN_CONTINUATION_ORIGIN,
       ).finally(() => releaseSendLock(sessionId, sendLock));

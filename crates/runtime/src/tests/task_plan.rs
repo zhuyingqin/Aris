@@ -1,4 +1,4 @@
-use super::{TaskPlanCompletion, MAX_PLAN_CONTINUATIONS};
+use super::{is_plan_continuation_request, TaskPlanCompletion, MAX_PLAN_CONTINUATIONS};
 use crate::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
     EvidenceGuardMode, PermissionMode, PermissionPolicy, RuntimeError, Session, StaticToolExecutor,
@@ -374,5 +374,113 @@ fn task_plan_reopened_step_rearms_even_when_it_matches_an_earlier_snapshot() {
     assert!(completion.next_check().is_none());
     completion.observe(&plan_result("pending"));
     assert!(completion.next_check().is_some());
+    assert!(completion.next_check().is_none());
+}
+
+#[test]
+fn task_plan_bare_continue_requests_are_recognised_and_new_work_is_not() {
+    for text in [
+        "继续",
+        "继续吧",
+        "好的，继续吧！",
+        "那就继续做完",
+        "请继续完成剩下的任务",
+        "接着来",
+        "OK 继续",
+        "continue",
+        "Continue.",
+        "ok, go on please",
+        "Keep going",
+        "continue with the rest please",
+        "Continue from where the previous turn left off.\nYour partial response is above.",
+    ] {
+        assert!(
+            is_plan_continuation_request(&ConversationMessage::user_text(text)),
+            "{text:?} should continue the plan"
+        );
+    }
+    for text in [
+        "继续优化界面",
+        "继续写第三章，并加一张图",
+        "接下来",
+        "解释一下这个公式",
+        "continue the refactor in another module",
+        "Explain this formula",
+        "",
+    ] {
+        assert!(
+            !is_plan_continuation_request(&ConversationMessage::user_text(text)),
+            "{text:?} should not continue the plan"
+        );
+    }
+    let mut not_user = ConversationMessage::user_text("继续");
+    not_user.role = crate::session::MessageRole::Assistant;
+    assert!(!is_plan_continuation_request(&not_user));
+}
+
+#[test]
+fn task_plan_bare_continue_carries_the_earlier_unfinished_plan_into_the_turn() {
+    let (mut runtime, requests) = scripted_runtime(vec![
+        tool("TodoWrite", json!({"todos": plan("pending")})),
+        answer("Waiting for approval before verifying."),
+        answer("Approval is needed to continue."),
+        // Second turn: the user says "继续". The executor finishes the work
+        // but answers without updating the plan it inherited.
+        tool("read_file", json!({"path": "main.tex"})),
+        answer("Verification complete."),
+        tool("TodoWrite", json!({"todos": plan("completed")})),
+        answer("Verification complete; the plan is closed."),
+    ]);
+    runtime.run_turn("Verify the file", None).unwrap();
+    runtime.run_turn("好的，继续", None).unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    let check = requests[5].messages.last().unwrap();
+    assert!(is_plan_check(check));
+    assert!(check.blocks.iter().any(|block| matches!(
+        block,
+        ContentBlock::Text { text } if text.contains("The user asked to continue the earlier task")
+            && text.contains("Verify the revised file")
+    )));
+}
+
+#[test]
+fn task_plan_bare_continue_does_not_carry_a_finished_or_absent_plan() {
+    let (mut runtime, requests) = scripted_runtime(vec![
+        tool("TodoWrite", json!({"todos": plan("completed")})),
+        answer("Verified."),
+        answer("Nothing is left to do."),
+        answer("There is no earlier plan."),
+    ]);
+    runtime.run_turn("Verify the file", None).unwrap();
+    runtime.run_turn("继续", None).unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 3);
+
+    assert!(TaskPlanCompletion::carried_from(&[]).next_check().is_none());
+    let (mut fresh, fresh_requests) = scripted_runtime(vec![answer("There is no earlier plan.")]);
+    fresh.run_turn("continue", None).unwrap();
+    assert_eq!(fresh_requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn task_plan_carried_plan_yields_to_the_plan_written_in_this_turn() {
+    let mut history = Session::new();
+    history
+        .messages
+        .push(ConversationMessage::user_text("Verify the file"));
+    history.messages.push(ConversationMessage {
+        role: crate::session::MessageRole::Tool,
+        blocks: vec![plan_result("pending")],
+        usage: None,
+    });
+    let mut completion = TaskPlanCompletion::carried_from(&history.messages);
+    assert!(completion
+        .next_check()
+        .unwrap()
+        .contains("The user asked to continue the earlier task"));
+    completion.observe(&plan_result("in_progress"));
+    let check = completion.next_check().unwrap();
+    assert!(check.contains("The successful TodoWrite snapshot for this user turn"));
+    completion.observe(&plan_result("completed"));
     assert!(completion.next_check().is_none());
 }

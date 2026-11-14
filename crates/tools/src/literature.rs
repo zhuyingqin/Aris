@@ -13,8 +13,9 @@
 //!   peer-reviewed record and only borrows arXiv's open PDF link. Scopus goes
 //!   to Elsevier directly with `SCOPUS_API_KEY` (desktop Settings exports it)
 //!   and otherwise — or once Elsevier refuses the key off campus — through the
-//!   SomniQ school route for the signed-in account. OpenAlex uses the built-in
-//!   SomniQ research gateway, so its provider key never enters desktop settings.
+//!   SomniQ school route, billed to the signed-in account. OpenAlex uses the
+//!   built-in SomniQ research gateway, so its provider key never enters
+//!   desktop settings.
 //! - `LiteratureLibraryUpsert` — compatibility projection refresh for records
 //!   that are already canonical. It cannot ingest untracked search results.
 //! - `LiteraturePdfDownload` — fetch a PDF into `papers/` and, when a paper
@@ -8788,7 +8789,7 @@ fn scopus_availability(has_key: bool, signed_in: bool) -> AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
             coverage_note: "Searches Elsevier directly with SCOPUS_API_KEY, COMPLETE first. A 401/403 response (Elsevier refuses the key outside a subscribing network) is preserved and the rest of the search uses the SomniQ school route.",
-            quota_policy: "Uses SCOPUS_API_KEY and captures exposed Elsevier rate-limit headers; school-route pages spend the shared institutional allowance.",
+            quota_policy: "Uses SCOPUS_API_KEY and captures exposed Elsevier rate-limit headers; each school-route page costs the SomniQ account 1 credit.",
         },
         (true, false) => AdapterAvailability {
             status: "available",
@@ -8800,7 +8801,7 @@ fn scopus_availability(has_key: bool, signed_in: bool) -> AdapterAvailability {
             status: "available",
             execution_mode: "confirmed_network_search",
             coverage_note: "Searches Scopus through the SomniQ school route with the signed-in account: STANDARD metadata without abstracts; the same record from another source supplies its abstract.",
-            quota_policy: "Each page of up to 200 records spends one request of the shared institutional allowance; the school's remaining allowance is recorded per page.",
+            quota_policy: "Each page of up to 200 records costs the SomniQ account 1 credit (Go, Plus, Pro or 千研; monthly allowance first, then balance); refused or failed pages are refunded.",
         },
         (false, false) => AdapterAvailability {
             status: "missing_credentials",
@@ -8823,15 +8824,16 @@ fn scopus_request_preview(has_key: bool, query: &str, limit: usize) -> Value {
     } else {
         json!({
             "method": "POST",
-            "url": scopus_school_url(),
+            "url": SCOPUS_SCHOOL_URL,
             "body": {
+                "model": SCOPUS_SCHOOL_MODEL,
                 "query": scopus_query(query),
                 "view": "STANDARD",
                 "count": limit.min(SCOPUS_SCHOOL_PAGE_MAX),
                 "cursor": "*",
                 "include_abstracts": false
             },
-            "authentication": "SomniQ account session (redacted)"
+            "authentication": "SomniQ API key (redacted)"
         })
     }
 }
@@ -9056,6 +9058,25 @@ fn capture_provider_response(
 
 fn send_provider_request(
     provider: &str,
+    build: impl FnMut() -> reqwest::blocking::RequestBuilder,
+) -> Result<ProviderResponse, String> {
+    send_provider_request_with(provider, |_| true, build)
+}
+
+/// A request that spends account credits. The gateway refunds every non-2xx
+/// answer, so 429/5xx answers are retried as usual; a transport failure is
+/// retried only when the connection never opened, since a request that may
+/// have been delivered could otherwise be charged twice.
+fn send_billed_provider_request(
+    provider: &str,
+    build: impl FnMut() -> reqwest::blocking::RequestBuilder,
+) -> Result<ProviderResponse, String> {
+    send_provider_request_with(provider, reqwest::Error::is_connect, build)
+}
+
+fn send_provider_request_with(
+    provider: &str,
+    retry_transport: impl Fn(&reqwest::Error) -> bool,
     mut build: impl FnMut() -> reqwest::blocking::RequestBuilder,
 ) -> Result<ProviderResponse, String> {
     let mut last_error = None;
@@ -9088,6 +9109,11 @@ fn send_provider_request(
                 std::thread::sleep(delay);
             }
             Err(error) => {
+                if !retry_transport(&error) {
+                    return Err(format!(
+                        "{provider} request failed and was not retried, as it may already have been delivered: {error}"
+                    ));
+                }
                 last_error = Some(error.to_string());
                 if attempt + 1 < MAX_HTTP_ATTEMPTS {
                     std::thread::sleep(Duration::from_millis(
@@ -11593,19 +11619,17 @@ const SCOPUS_SCHOOL_PAGE_MAX: usize = 200;
 /// as an unauthorised attempt rather than a provider failure.
 const SCOPUS_NO_ROUTE_MESSAGE: &str = "Scopus needs an Elsevier API key (SCOPUS_API_KEY) or a signed-in SomniQ account for the school route; sign in to SomniQ or configure the key in Settings";
 
-/// Header naming the account whose `Authorization` bearer token is presented,
-/// as the account service's own user API expects it.
-const SCOPUS_SCHOOL_USER_HEADER: &str = "New-Api-User";
-
-/// The school's Scopus search, relayed by the SomniQ research gateway. The
+/// The school's Scopus search, billed through the SomniQ account gateway. The
 /// school holds the Elsevier entitlement and calls from its campus network, so
-/// this route works wherever the desktop is.
-fn scopus_school_url() -> String {
-    format!(
-        "{}/scopus/search",
-        crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL
-    )
-}
+/// this route works wherever the desktop is. New API checks that the account's
+/// tier includes `scopus-search`, charges its credits (refunding any non-2xx
+/// answer) and relays to the research gateway, which calls the school. The
+/// gateway's own `/research/scopus/search` answers every public caller 401.
+const SCOPUS_SCHOOL_URL: &str = "https://somni.ensuanx.com/v1/alpha/search";
+
+/// New API billing model of the school's Scopus channel. The channel strips it
+/// before forwarding the rest of the body to the school.
+const SCOPUS_SCHOOL_MODEL: &str = "scopus-search";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopusRoute {
@@ -11629,40 +11653,79 @@ impl ScopusRoute {
     }
 }
 
-type ScopusAccountLookup<'a> =
-    &'a dyn Fn() -> Result<Option<research_account::ResearchAccountCredential>, String>;
+type ScopusCredentialLookup<'a> =
+    &'a dyn Fn() -> Result<Option<research_account::ResearchApiCredential>, String>;
 
 /// Where one Scopus search may be sent, and with what.
 struct ScopusAccess<'a> {
     elsevier_url: String,
     school_url: String,
     api_key: Option<String>,
-    /// The signed-in account the school route presents; `Ok(None)` when
-    /// signed out. Asked per request so a long search renews its session.
-    account: ScopusAccountLookup<'a>,
+    /// The signed-in account's API token the school route is billed to;
+    /// `Ok(None)` when signed out. Asked per request so a token rotated during
+    /// a long search is picked up.
+    credential: ScopusCredentialLookup<'a>,
 }
 
-/// The signed-in account, if its session was issued by the research gateway's
-/// own host. A token from any other account service is never sent there.
-fn school_route_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
+/// The signed-in account's API token, if it was issued by the account gateway
+/// that bills the school route. A token from any other service is never sent.
+fn school_route_credential() -> Result<Option<research_account::ResearchApiCredential>, String> {
     let Some(provider) = research_account::current_provider() else {
         return Ok(None);
     };
-    Ok(provider.credential()?.filter(|credential| {
-        research_account::same_origin(
-            &credential.issuer,
-            crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL,
-        )
+    Ok(provider.api_credential()?.filter(|credential| {
+        !credential.api_key.trim().is_empty()
+            && research_account::same_origin(&credential.issuer, SCOPUS_SCHOOL_URL)
     }))
 }
 
-/// Whether the school route has an account to present, from local state only.
+/// Whether the school route has an account to bill, from local state only.
 fn school_route_signed_in() -> bool {
     research_account::current_provider()
         .and_then(|provider| provider.session_issuer())
-        .is_some_and(|issuer| {
-            research_account::same_origin(&issuer, crate::web::SOMNIQ_RESEARCH_GATEWAY_BASE_URL)
+        .is_some_and(|issuer| research_account::same_origin(&issuer, SCOPUS_SCHOOL_URL))
+}
+
+/// Explains a school-route refusal. New API answers OpenAI-shaped errors for
+/// the account (tier, credits, token) and relays the research channel's own;
+/// every non-2xx answer is refunded, so none of them cost a credit.
+fn scopus_school_refusal(response: &ProviderResponse, body: Option<&Value>) -> Option<String> {
+    let status = response.status;
+    let message = body
+        .and_then(|body| {
+            body["error"]["message"]
+                .as_str()
+                .or_else(|| body["error"].as_str())
+                .or_else(|| body["message"].as_str())
         })
+        .unwrap_or_default()
+        .chars()
+        .take(240)
+        .collect::<String>();
+    let lower = message.to_ascii_lowercase();
+    let out_of_credits = ["insufficient", "quota", "额度不足", "余额不足"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    let no_channel = lower.contains("no available channel") || message.contains("无可用渠道");
+    let explanation = match status {
+        401 => "the SomniQ API key was rejected; sign in to SomniQ again".to_string(),
+        402 | 403 if out_of_credits => {
+            "the SomniQ account has no credits or balance left for Scopus search".to_string()
+        }
+        403 => format!(
+            "this SomniQ API key may not use {SCOPUS_SCHOOL_MODEL}; Scopus needs a Go, Plus, Pro or 千研 membership"
+        ),
+        503 if no_channel => format!(
+            "this SomniQ API key's group has no {SCOPUS_SCHOOL_MODEL} channel; Scopus needs a Go, Plus, Pro or 千研 membership"
+        ),
+        429 => "the school's Scopus quota is busy; retry later".to_string(),
+        _ => return None,
+    };
+    Some(if message.is_empty() {
+        format!("Scopus school route HTTP {status}: {explanation}")
+    } else {
+        format!("Scopus school route HTTP {status}: {explanation} ({message})")
+    })
 }
 
 fn search_scopus(
@@ -11676,9 +11739,9 @@ fn search_scopus(
 ) -> Result<AdapterSearchOutcome, String> {
     let access = ScopusAccess {
         elsevier_url: SCOPUS_ELSEVIER_URL.to_string(),
-        school_url: scopus_school_url(),
+        school_url: SCOPUS_SCHOOL_URL.to_string(),
         api_key: scopus_api_key().ok(),
-        account: &school_route_account,
+        credential: &school_route_credential,
     };
     search_scopus_with(
         client,
@@ -11807,7 +11870,7 @@ fn search_scopus_with(
                     // Off campus Elsevier refuses the key whatever the view,
                     // so the school route is preferred over a STANDARD retry
                     // that would be refused the same way on every page.
-                    match (access.account)() {
+                    match (access.credential)() {
                         Ok(Some(_)) => {
                             warnings.push(format!(
                                 "Elsevier refused SCOPUS_API_KEY (HTTP {}), as it does outside a subscribing network; the provider response is retained and the rest of this search uses the SomniQ school route.",
@@ -11862,8 +11925,8 @@ fn search_scopus_with(
                 }
             }
             ScopusRoute::School => {
-                let account = match (access.account)() {
-                    Ok(Some(account)) => account,
+                let credential = match (access.credential)() {
+                    Ok(Some(credential)) => credential,
                     Ok(None) => return Err(SCOPUS_NO_ROUTE_MESSAGE.to_string()),
                     Err(error) => {
                         return Err(format!(
@@ -11872,20 +11935,21 @@ fn search_scopus_with(
                     }
                 };
                 let mut payload = json!({
+                    "model": SCOPUS_SCHOOL_MODEL,
                     "query": query,
                     "view": "STANDARD",
                     "count": count,
                     "cursor": page_cursor,
+                    // Abstract enrichment costs five credits a page instead of one.
                     "include_abstracts": false,
                 });
                 if let Some(provider_sort) = provider_sort {
                     payload["sort"] = json!(provider_sort);
                 }
-                let response = send_provider_request("Scopus", || {
+                let response = send_billed_provider_request("Scopus", || {
                     client
                         .post(&access.school_url)
-                        .bearer_auth(&account.access_token)
-                        .header(SCOPUS_SCHOOL_USER_HEADER, account.user_id.to_string())
+                        .bearer_auth(credential.api_key.trim())
                         .header("Accept", "application/json")
                         .json(&payload)
                 })?;
@@ -11896,7 +11960,7 @@ fn search_scopus_with(
                     "url": access.school_url,
                     "route": ScopusRoute::School.label(),
                     "body": recorded_body,
-                    "authentication": "SomniQ account session (redacted)",
+                    "authentication": "SomniQ API key (redacted)",
                 }));
                 raw_artifacts.push(provider_artifact(
                     "provider-response",
@@ -11909,11 +11973,10 @@ fn search_scopus_with(
                     "headers": response.headers,
                     "school": body.as_ref().and_then(|body| body.get("quota")).cloned(),
                 }));
-                if matches!(response.status, 401 | 403) {
-                    return Err(format!(
-                        "Scopus school route HTTP {}: the gateway did not accept the SomniQ account session; sign in to SomniQ again",
-                        response.status
-                    ));
+                if !(200..300).contains(&response.status) {
+                    if let Some(refusal) = scopus_school_refusal(&response, body.as_ref()) {
+                        return Err(refusal);
+                    }
                 }
                 require_success(&response, "Scopus school route")?;
                 let body = body.ok_or_else(|| {

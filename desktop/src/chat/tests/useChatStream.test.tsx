@@ -868,6 +868,45 @@ describe("useChatStream concurrent sessions", () => {
     );
   });
 
+  it.each([
+    [
+      'OpenAI API error 400 Bad Request: {"error":{"message":"Invalid tool arguments for /tmp/reports/main.tex"}}',
+      "服务暂时不可用，请稍后重试。",
+    ],
+    [
+      "file does not exist: F:/Research/report.docx",
+      "本地文件或目录不存在，可能已被移动或删除，请重新选择后重试。",
+    ],
+    [
+      "TypeError: Cannot read properties of undefined\n    at F:/app/chat.ts:42:7",
+      "操作未完成，请稍后重试。",
+    ],
+  ])("classifies both chat failure signals without inferring file permissions: %s", async (message, expected) => {
+    let errorHandler: ((event: { sessionId: string; message: string; sessionPreserved: boolean }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatSend.mockRejectedValue(new Error(message));
+    const onError = vi.fn();
+    const onComplete = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(), onComplete, onError, language: "cn",
+    }));
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-path-error", message, sessionPreserved: true });
+    });
+    await act(async () => {
+      expect(await result.current.run("chat-path-error", "continue")).toBe(false);
+    });
+
+    expect(onError).toHaveBeenNthCalledWith(1, "chat-path-error", expected, false, true);
+    expect(onError).toHaveBeenNthCalledWith(2, "chat-path-error", expected, false);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(result.current.isRunning("chat-path-error")).toBe(false);
+  });
+
   it("forwards an unpreserved-session marker from a backend error", async () => {
     let errorHandler:
       | ((event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void)

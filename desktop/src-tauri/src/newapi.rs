@@ -1422,8 +1422,6 @@ async fn refresh_browser_session(
 /// against new-api's `/v1/user/self` and never the rotating refresh cookie,
 /// which must not leave the OS credential store.
 pub(crate) struct AccountOwnershipCredential {
-    /// The account service that issued `access_token`.
-    pub(crate) base_url: String,
     pub(crate) user_id: i64,
     pub(crate) access_token: String,
 }
@@ -1440,13 +1438,12 @@ pub(crate) async fn account_ownership_credential(
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (base_url, session) = authenticated_stored_session(&client).await?;
+    let (_base_url, session) = authenticated_stored_session(&client).await?;
     let access_token = session
         .user_token
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
     Ok(Some(AccountOwnershipCredential {
-        base_url,
         user_id: session.user_id,
         access_token,
     }))
@@ -1465,8 +1462,8 @@ pub(crate) fn signed_in_base_url() -> Option<String> {
     approved_managed_base(base).ok()
 }
 
-/// The signed-in account as literature adapters see it: the research gateway's
-/// school Scopus route identifies the caller with it.
+/// The signed-in account as account-billed tools see it: DeepSeek search and
+/// the school Scopus route are charged to its downstream API token.
 pub(crate) struct ResearchAccount;
 
 fn research_api_credential(
@@ -1498,28 +1495,6 @@ impl tools::research_account::ResearchAccountProvider for ResearchAccount {
         // load_object overlays the OS-held downstream API key. The dashboard
         // access token and refresh cookie are never used by paid tool routes.
         Ok(research_api_credential(&base, &config::load_object()))
-    }
-
-    fn credential(
-        &self,
-    ) -> Result<Option<tools::research_account::ResearchAccountCredential>, String> {
-        // Adapters block, on a runtime's blocking pool or a plain thread, while
-        // renewal is async. A private current-thread runtime on its own thread
-        // serves both without ever nesting one `block_on` inside another.
-        let credential = std::thread::spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("账号凭证查询失败: {error}"))?
-                .block_on(account_ownership_credential())
-        })
-        .join()
-        .map_err(|_| "账号凭证查询失败".to_string())??;
-        Ok(credential.map(|credential| tools::research_account::ResearchAccountCredential {
-            issuer: credential.base_url,
-            user_id: credential.user_id,
-            access_token: credential.access_token,
-        }))
     }
 }
 

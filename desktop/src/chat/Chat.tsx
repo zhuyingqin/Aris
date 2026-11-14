@@ -538,12 +538,12 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   useEffect(() => {
     const onActivity = (event: Event) => {
       const activity = (event as CustomEvent<ImageAssistActivity | null>).detail;
+      // Record the activity for the summary, but leave opening it to the user.
       setImageAssistActivity(activity);
-      if (activity) projectBrief.setHidden(false);
     };
     window.addEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
     return () => window.removeEventListener(IMAGE_ASSIST_ACTIVITY_EVENT, onActivity);
-  }, [projectBrief.setHidden]);
+  }, []);
 
   const refreshAgentPeers = useCallback(async () => {
     if (!isTauri() || agentPeerRefreshRunningRef.current) return;

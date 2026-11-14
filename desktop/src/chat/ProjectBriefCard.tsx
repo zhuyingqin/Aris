@@ -28,18 +28,21 @@ interface ProjectBriefPreference {
   hidden: boolean;
 }
 
+// v2: the summary starts collapsed and opens only when the user clicks the
+// toggle. Bumping the key drops v1 records, which were mostly the old
+// open-by-default state rather than a deliberate choice.
 function preferenceKey(projectId: string) {
-  return `somniq-project-brief-v1:${projectId}`;
+  return `somniq-project-brief-v2:${projectId}`;
 }
 
 function loadPreference(projectId: string): ProjectBriefPreference {
   try {
     const raw = localStorage.getItem(preferenceKey(projectId));
-    if (!raw) return { hidden: false };
+    if (!raw) return { hidden: true };
     const parsed = JSON.parse(raw) as Partial<ProjectBriefPreference>;
-    return { hidden: Boolean(parsed.hidden) };
+    return { hidden: parsed.hidden !== false };
   } catch {
-    return { hidden: false };
+    return { hidden: true };
   }
 }
 

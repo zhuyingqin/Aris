@@ -24,7 +24,7 @@ use crate::retrieval_guard::{
     RetrievalAnswerGate, RetrievalGuard, RetrievalGuardCheckpoint, RetrievalPreflight,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
-use crate::task_plan::TaskPlanCompletion;
+use crate::task_plan::{is_plan_continuation_request, TaskPlanCompletion};
 use crate::usage::{TokenUsage, UsageTracker};
 use sha2::{Digest, Sha256};
 
@@ -1230,6 +1230,14 @@ where
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // A bare "continue" resumes the earlier task, so its unfinished plan
+        // is this turn's plan until the executor writes a new one. Read the
+        // history before this message joins it.
+        let carried_plan = if is_plan_continuation_request(&user_message) {
+            TaskPlanCompletion::carried_from(&self.session.messages)
+        } else {
+            TaskPlanCompletion::default()
+        };
         self.session.messages.push(user_message);
 
         if self.resume_retrieval_on_next_user_message {
@@ -1267,7 +1275,7 @@ where
         let mut context_overflow_retries = 0;
         let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
-        let mut task_plan_completion = TaskPlanCompletion::default();
+        let mut task_plan_completion = carried_plan;
         let mut auto_compaction = None;
         let mut turn_tool_calls = 0_usize;
         let mut last_soft_checkpoint_tool_calls = 0_usize;

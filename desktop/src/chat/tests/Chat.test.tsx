@@ -490,6 +490,8 @@ describe("Chat export action", () => {
   it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
     render(<Chat />);
 
+    // The summary starts collapsed; only the user's click opens it.
+    await userEvent.click(await screen.findByRole("button", { name: "Show project summary" }));
     await waitFor(() => {
       expect(document.querySelector(".chat-project-brief-sidebar .project-brief-card")).toBeTruthy();
     });
@@ -503,6 +505,20 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("keeps the project summary collapsed until the user opens it, then remembers the choice", async () => {
+    const first = render(<Chat />);
+    const toggle = await screen.findByRole("button", { name: "Show project summary" });
+    expect(document.getElementById("project-brief-popover")).toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+
+    await userEvent.click(toggle);
+    await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
+    first.unmount();
+
+    render(<Chat />);
+    await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
   });
 
   it("launches agent conversations from the summary, reuses tabs, and restores them without running a new chat", async () => {
@@ -522,6 +538,7 @@ describe("Chat export action", () => {
     agentMocks.chatAgentList.mockImplementation(async (id) => id === session.id ? [agent] : []);
     const first = render(<Chat />);
     await userEvent.click(await screen.findByRole("button", { name: session.title }));
+    await userEvent.click(await screen.findByRole("button", { name: "Show project summary" }));
     const summary = within(document.getElementById("project-brief-popover")!);
     const launchList = await summary.findByRole("button", { name: "View agents" });
     expect(document.querySelector(".project-brief-body")?.contains(launchList)).toBe(true);
@@ -957,6 +974,7 @@ describe("Chat export action", () => {
   it("persists the automatic review toggle from the project summary", async () => {
     render(<Chat />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Show project summary" }));
     const toggle = await screen.findByRole("switch", { name: "Toggle automatic review" });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
 
@@ -975,6 +993,7 @@ describe("Chat export action", () => {
     expect(screen.queryByRole("tab", { name: "Image workflow" })).toBeNull();
     expect(document.querySelector(".image-workflow-panel")).toBeNull();
 
+    await userEvent.click(await screen.findByRole("button", { name: "Show project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
     await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
 
