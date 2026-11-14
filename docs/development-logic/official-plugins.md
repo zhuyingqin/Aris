@@ -338,3 +338,41 @@ D1–D6 按建议值实现，用户已于 2026-11-13 确认。D4 的实际做法
   - 真模型回合里工具表确实少了邮箱工具（需要登录；只有单测覆盖）；
   - IMAP 监听启停（隔离配置里没有邮箱账号）。
 
+## P0 欠账补完（2026-11-13，第二批，在 fb6a8cdc 之后）
+
+- **导航从清单生成。** 官方模块的导航项（图标、顺序）搬进 `extensions/officialPluginNav.tsx`；`App.tsx` 只保留核心模块（chat、lab、extensions、workflows），两张表按 `order` 合并，顺序与之前完全一样。关掉的官方插件在切分导航栏之前就被滤掉，后面的模块会顶上来。当前页属于被关插件时自动回到 Chat。`ModuleIcon` 移到 `ModuleIcon.tsx`。
+- **提示词片段条件化。** `SystemPromptCacheKey` 新增 `builtin_disabled`，取当前执行上下文冻结的集合。
+  - `local_evidence_retrieval` 归 literature。
+  - `latex_toolchain` 归 latex。
+  - `diagram_output` 在 LaTeX 关闭时换成一段写明的、不含 TikZ 的版本。
+  - 全开时提示词逐字节不变：改动前后两种审阅模式下的长度和哈希都一致（40201/39667 字节）。
+  - 测试钉住"关掉谁只少谁的片段；关 mail 提示词不变"。
+  - `system.md` 自带的 "Explanatory diagrams" 段仍然无条件，留给 P4。
+- **工作流工具表。** 自主工作流的阶段允许清单再与冻结集取交集。
+- **内置 Skill 依赖。**
+  - `bundled_skill_plugin`：literature-search/screen/evidence → literature；latex-diagrams、paper-compile → latex。
+  - 插件关闭时，这些 Skill 既不出现在提示词的 Skill 列表里，`Skill` 工具也拒绝加载。用户自己的同名 Skill 不受影响。
+  - 有测试防止映射里的名字和内置 Skill 脱节。
+  - 目前这两个插件还不能关，所以这部分实际上处于休眠状态。
+- **Reviewer 工具不变。** 测试钉住 `REVIEWER_TOOLS`（Read/Grep/Glob）不归属任何插件、也不依赖任何插件，所有插件都关掉时仍然全部可用。
+- **按项目开关。** 插件页可关闭的插件下面加了"在本项目"选择：跟随全局 / 本项目开启 / 本项目关闭。普通的开关点击写到"能生效的那一层"（`switchTarget`）：已有项目覆盖、或项目自己要求关闭时写项目覆盖，否则写全局。设置页的邮箱开关也走这条路，并补了说明文字。
+- **工作区请求关闭。** 项目可以在 `.somniq/plugins/official.json` 写 `{"disable": ["mail"]}`。
+  - 生效优先级：本机项目覆盖 > 项目请求关闭 > 全局 > 默认。
+  - 这个文件只能关、不能开；文件损坏、是符号链接、或写了未知 id，一律忽略。
+  - 插件页会提示"这个项目要求关闭"。
+  - 新邮件监听仍然只看全局开关，因为邮箱账号是用户级的。
+
+验证（第二批）：
+- 全套：
+  - runtime 976/976；
+  - tools 337/337；
+  - 前端 2359/2359；
+  - 构建、debug exe 通过；
+  - desktop 1060/1061，唯一失败仍是 31511e6e 引入的 `the_completion_contract_only_promises_a_reviewer_that_will_run`。
+- 应用内实测（隔离实例）：
+  - 全局打开邮箱。
+  - 再放入 `{"disable":["mail"]}`：卡片变为 Off，并显示项目请求的说明。
+  - 点开关：写入的是本机项目覆盖（project=true），"更多模块"出现 Mail。
+  - 改回"跟随全局"：又变回 Off。
+  - 截图在 `E:/tmp/official-plugins/`（project-request-off.png、project-on-more.png）。
+

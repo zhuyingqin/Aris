@@ -264,3 +264,10 @@
 .plugin-history-row code { color: var(--text-dim); font-size: 11px; }
 .plugin-history-btn { margin-left: auto; padding: 3px 9px; font-size: 12px; }
 .plugin-history .plugin-confirm { margin-top: 6px; }
+
+/* Official plugins: the per-project choice under a switchable plugin. */
+.official-plugin-scope { display: inline-flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: 12px; }
+.official-plugin-scope select {
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 12px;
+}

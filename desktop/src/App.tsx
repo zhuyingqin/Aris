@@ -18,6 +18,9 @@ import LiteratureViewTabs, { type LiteraturePageView } from "./literature/Litera
 import Extensions from "./extensions/Extensions";
 import PluginPage from "./extensions/PluginPage";
 import { useOfficialPluginsSync } from "./extensions/useOfficialPluginsSync";
+import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./extensions/officialPluginNav";
+import { officialTabHidden } from "./extensions/officialPlugins";
+import { ModuleIcon } from "./ModuleIcon";
 import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, pluginPageIcon, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
@@ -229,6 +232,8 @@ interface NavItem {
   icon: ReactNode;
 }
 
+type OrderedNavItem = NavItem & { order: number };
+
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -236,13 +241,6 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 // Settings also resolves legacy category links to their current sidebar page.
 type RequestedSettingsTab = SettingsTabRequest;
 
-const ModuleIcon = ({ children }: { children: ReactNode }) => (
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-    aria-hidden="true">
-    {children}
-  </svg>
-);
 
 // Titlebar glyphs. All share an 18px box with 1.5 strokes and round caps so the
 // left cluster reads as one row of evenly weighted icons.
@@ -283,66 +281,42 @@ const GearIcon = () => (
   </svg>
 );
 
-const PRIMARY_NAV_ITEMS: NavItem[] = [
+/** Core modules: always present. Official plugins add theirs from
+ * `extensions/officialPluginNav.tsx`; `order` merges the two lists. */
+const CORE_NAV_ITEMS: OrderedNavItem[] = [
   {
-    id: "chat", label: "Chat",
+    id: "chat", order: 10, label: "Chat",
     icon: <ModuleIcon>
       <path d="M5 3.5h14a2.5 2.5 0 0 1 2.5 2.5v9a2.5 2.5 0 0 1-2.5 2.5h-6.5L7 21v-3.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5Z" />
       <path d="M7 8.5h10M7 12.5h6" />
     </ModuleIcon>,
   },
   {
-    id: "figures", label: "Figures",
-    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
-  },
-  {
-    id: "typeset", label: "LaTeX",
-    icon: <ModuleIcon>
-      {/* TeX's lowered E makes the editor recognizable without relying on a font. */}
-      <g fill="currentColor" stroke="none">
-        <path d="M.8 4.5h8.5v3.2H8V6H5.9v10.2h1.5v1.4H2.8v-1.4h1.5V6H2.1v1.7H.8Z" />
-        <path d="M8 7.5h7v2.8h-1.2V9h-3.3v3.9h2.6v-1.2h1.1v3.8h-1.1v-1.2h-2.6v4.3h3.3v-1.4H15V20H8v-1.4h1V9H8Z" />
-        <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
-      </g>
-    </ModuleIcon>,
-  },
-  {
-    id: "lab", label: "Code",
+    id: "lab", order: 40, label: "Code",
     icon: <ModuleIcon>
       <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
       <path d="m6.5 8.5 3.5 3.5-3.5 3.5M13 15.5h4.5" />
     </ModuleIcon>,
   },
   {
-    id: "literature", label: "Literature",
-    icon: <ModuleIcon>
-      <path d="M12 5.5C9.5 3.5 5.5 3.2 2.5 4.3v15C6 18.1 9.5 18.5 12 20.5c2.5-2 6-2.4 9.5-1.2v-15C18.5 3.2 14.5 3.5 12 5.5Zm0 0v15" />
-      <path d="m5.5 8 3.5.7M15 8.7l3.5-.7" />
-    </ModuleIcon>,
-  },
-  {
-    id: "extensions", label: "Plugins",
+    id: "extensions", order: 60, label: "Plugins",
     icon: <ModuleIcon>
       {/* A puzzle piece: one tab on top, one on the right. */}
       <path d="M4 6.5h5a2 2 0 1 1 4 0h5V11a2 2 0 1 1 0 4v4.5H4Z" />
     </ModuleIcon>,
   },
   {
-    id: "workflows", label: "Workflows",
+    id: "workflows", order: 70, label: "Workflows",
     icon: <ModuleIcon>
       <rect x="3" y="3" width="6" height="6" rx="1.5" />
       <rect x="15" y="15" width="6" height="6" rx="1.5" />
       <path d="M9 6h5a4 4 0 0 1 4 4v5M6 9v5a4 4 0 0 0 4 4h5" />
     </ModuleIcon>,
   },
-  {
-    id: "mail", label: "Mail",
-    icon: <ModuleIcon>
-      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
-      <path d="m3.5 6 8.5 6.5L20.5 6" />
-    </ModuleIcon>,
-  },
 ];
+
+const PRIMARY_NAV_ITEMS: OrderedNavItem[] = [...CORE_NAV_ITEMS, ...OFFICIAL_PLUGIN_NAV_ITEMS]
+  .sort((left, right) => left.order - right.order);
 
 /** How many of `PRIMARY_NAV_ITEMS` get their own rail button; the rest go
  * under "More". */
@@ -453,6 +427,7 @@ export default function App() {
   const sidebarIsOverlay = useSidebarIsOverlay();
   useOfficialPluginsSync();
   const hideMail = useStore((s) => s.hideMail);
+  const officialPlugins = useStore((s) => s.officialPlugins);
   const hideWorkflows = useStore((s) => s.hideWorkflows);
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
@@ -954,9 +929,12 @@ export default function App() {
     setUserMenuOpen(false);
     userMenuTriggerRef.current?.focus();
   });
-  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, RAIL_PRIMARY_COUNT).map((item) => ({ ...item, label: copy.nav[item.id] }));
-  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(RAIL_PRIMARY_COUNT), ...UTILITY_NAV_ITEMS]
-    .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
+  // A switched-off official plugin leaves the rail before it is split, so
+  // the next module moves up instead of leaving a gap.
+  const visiblePrimaryItems = PRIMARY_NAV_ITEMS.filter((item) =>
+    !officialTabHidden(item.id, officialPlugins, hideMail) && (item.id !== "workflows" || !hideWorkflows));
+  const navigationItems = visiblePrimaryItems.slice(0, RAIL_PRIMARY_COUNT).map((item) => ({ ...item, label: copy.nav[item.id] }));
+  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...visiblePrimaryItems.slice(RAIL_PRIMARY_COUNT), ...UTILITY_NAV_ITEMS]
     .map((item) => ({ ...item, label: copy.nav[item.id] }));
 
   // Disabling the plugin, or switching project, takes the page away with it.

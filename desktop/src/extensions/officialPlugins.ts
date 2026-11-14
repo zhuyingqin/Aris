@@ -3,6 +3,7 @@
 // Backend: runtime::plugins::builtin + desktop official_plugins.rs. Design:
 // docs/development-logic/official-plugins.md.
 import { invoke } from "../api/transport";
+import type { Tab } from "../store";
 
 export type OfficialPluginId = "literature" | "latex" | "figures" | "mail";
 
@@ -14,8 +15,19 @@ export interface OfficialPluginState {
   /** What a turn starting now in this project gets. */
   enabled: boolean;
   global: boolean | null;
+  /** This computer's override for the current project. */
   project: boolean | null;
+  /** The project's own `.somniq/plugins/official.json` asks for it off. */
+  workspaceOff: boolean;
 }
+
+/**
+ * Where a plain on/off click should write so that it takes effect here: the
+ * project override when one exists or the project asks for the plugin off
+ * (the global switch would be outranked), the global switch otherwise.
+ */
+export const switchTarget = (state: OfficialPluginState): "global" | "project" =>
+  state.project !== null || state.workspaceOff ? "project" : "global";
 
 export const OFFICIAL_PLUGINS_CHANGED_EVENT = "official-plugins-changed";
 
@@ -31,6 +43,26 @@ export const officialPluginsSet = (
 
 export const officialPluginEnabled = (states: OfficialPluginState[] | null, id: OfficialPluginId): boolean | null =>
   states?.find((state) => state.id === id)?.enabled ?? null;
+
+/** The page each official plugin contributes to the navigation. */
+export const OFFICIAL_PLUGIN_TABS: Record<OfficialPluginId, Tab> = {
+  literature: "literature", latex: "typeset", figures: "figures", mail: "mail",
+};
+
+export const officialTabPlugin = (tab: Tab): OfficialPluginId | null =>
+  (Object.keys(OFFICIAL_PLUGIN_TABS) as OfficialPluginId[]).find((id) => OFFICIAL_PLUGIN_TABS[id] === tab) ?? null;
+
+/**
+ * Whether `tab` belongs to an official plugin that is off. Mail also answers
+ * to `hideMail`, which mirrors its switch in the app and is a local
+ * preference in the browser preview, where switches are unknown.
+ */
+export function officialTabHidden(tab: Tab, states: OfficialPluginState[] | null, hideMail: boolean): boolean {
+  const plugin = officialTabPlugin(tab);
+  if (!plugin) return false;
+  if (plugin === "mail") return hideMail;
+  return officialPluginEnabled(states, plugin) === false;
+}
 
 /** The navigation-visibility key mail used before it was a plugin. */
 export const LEGACY_HIDE_MAIL_KEY = "somniq-hide-mail";

@@ -19,6 +19,7 @@ fn prompt_cache_key_for_test(review_enabled: bool) -> SystemPromptCacheKey {
         project_goal: String::new(),
         instruction_fingerprint: String::new(),
         review_enabled,
+        builtin_disabled: Vec::new(),
     }
 }
 
@@ -217,4 +218,36 @@ fn workflow_system_prompt_states_the_right_tool_boundary_per_lane() {
     assert!(!discussion.contains("fixed explicit allow-list"));
     assert!(discussion.contains("ordinary desktop tool registry"));
     assert!(discussion.contains("Shared-context notice"));
+}
+
+/// An official plugin switched off takes its prompt sections with its tools,
+/// and nothing else: the remaining sections are unchanged.
+#[test]
+fn official_plugins_that_are_off_leave_only_their_own_prompt_sections() {
+    let prompt = |disabled: &[&str]| {
+        let mut key = prompt_cache_key_for_test(false);
+        key.builtin_disabled = disabled.iter().map(|id| (*id).to_string()).collect();
+        build_system_prompt_uncached(&key).join("
+")
+    };
+    let all_on = prompt(&[]);
+    let evidence = "Local literature evidence routing";
+    let tikz = "use the `latex-diagrams` skill and native TikZ";
+    let toolchain = latex_toolchain_prompt_section(None, None);
+    assert!(all_on.contains(evidence) && all_on.contains(tikz) && all_on.contains(&toolchain));
+
+    let no_literature = prompt(&["literature"]);
+    assert!(!no_literature.contains(evidence));
+    assert!(no_literature.contains(tikz) && no_literature.contains(&toolchain));
+
+    let no_latex = prompt(&["latex"]);
+    // system.md's own "Explanatory diagrams" paragraph still names the skill;
+    // making the shared runtime prompt conditional is P4 of official-plugins.md.
+    assert!(!no_latex.contains(tikz));
+    assert!(!no_latex.contains(&toolchain));
+    assert!(no_latex.contains("Diagram output: for a quick workflow") && no_latex.contains("mermaid-diagram"));
+    assert!(no_latex.contains(evidence));
+
+    // Mail has no prompt section: switching it off changes nothing.
+    assert_eq!(prompt(&["mail"]), all_on);
 }

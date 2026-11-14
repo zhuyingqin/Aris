@@ -34,7 +34,7 @@ import {
   type UiFontMode,
 } from "./uiTypography";
 import { applyUiColor, parseUiColor, readUiColor, saveUiColor, type UiColor } from "./uiColors";
-import { officialPluginEnabled, officialPluginsSet, type OfficialPluginState } from "./extensions/officialPlugins";
+import { officialPluginEnabled, officialPluginsSet, officialTabHidden, switchTarget, type OfficialPluginState } from "./extensions/officialPlugins";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -638,7 +638,9 @@ export const useStore = create<AppState>((set, get) => ({
     if (isTauri() && projectPath && get().officialPlugins) {
       // The switch is the backend's; the local key only caches it for the
       // first paint. A failed write rejects so the settings row reports it.
-      return officialPluginsSet(projectPath, "mail", "global", !hide).then((states) => get().applyOfficialPlugins(states));
+      const mail = get().officialPlugins?.find((state) => state.id === "mail");
+      const target = mail ? switchTarget(mail) : "global";
+      return officialPluginsSet(projectPath, "mail", target, !hide).then((states) => get().applyOfficialPlugins(states));
     }
     if (options?.requirePersistence) persistPreference(HIDE_MAIL_STORAGE_KEY, String(hide), true);
     else applyHideMail(hide);
@@ -656,7 +658,8 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       officialPlugins: states,
       hideMail: hide,
-      tab: hide && state.tab === "mail" ? "chat" : state.tab,
+      // A page whose plugin went off goes with it.
+      tab: officialTabHidden(state.tab, states, hide) ? "chat" : state.tab,
     }));
   },
 

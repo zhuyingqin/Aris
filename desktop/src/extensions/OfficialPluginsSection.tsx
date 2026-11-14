@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { useStore, type Language } from "../store";
-import type { OfficialPluginId, OfficialPluginState } from "./officialPlugins";
+import { officialPluginsSet, switchTarget, type OfficialPluginId, type OfficialPluginState } from "./officialPlugins";
 import "./PluginPackages.css";
 
 const COPY = {
@@ -14,12 +14,17 @@ const COPY = {
     enable: "启用", disable: "关闭",
     nextRun: "开关从下一轮对话起生效，正在进行的对话不受影响。",
     loading: "正在读取官方插件…",
+    thisProject: "在本项目",
+    followGlobal: (on: boolean) => `跟随全局（${on ? "开启" : "关闭"}）`,
+    projectOn: "本项目开启", projectOff: "本项目关闭",
+    workspaceOff: "这个项目的 .somniq/plugins/official.json 要求关闭；在本项目单独开启可以覆盖。",
+    projectOverride: "本项目使用单独的设置。",
     names: { literature: "文献库", latex: "LaTeX", figures: "Figures", mail: "邮箱" },
     descriptions: {
       literature: "文献检索、文献库页面和证据检索工具。",
       latex: "Typeset 编辑器，以及 LaTeX 编译与渲染工具。",
       figures: "论文插图的生成与编辑。",
-      mail: "连接 Gmail、Outlook 或 IMAP 邮箱。包括邮件工具、新邮件监听和定时任务的“新邮件”触发；关闭后这些会一起停用，邮箱账号保留。",
+      mail: "连接 Gmail、Outlook 或 IMAP 邮箱。包括邮件工具、新邮件监听和定时任务的“新邮件”触发；关闭后这些会一起停用，邮箱账号保留。新邮件监听只看全局开关。",
     },
   },
   en: {
@@ -30,12 +35,17 @@ const COPY = {
     enable: "Turn on", disable: "Turn off",
     nextRun: "A switch takes effect from the next turn; a turn in progress keeps what it started with.",
     loading: "Loading official plugins…",
+    thisProject: "In this project",
+    followGlobal: (on: boolean) => `Follow global (${on ? "on" : "off"})`,
+    projectOn: "On in this project", projectOff: "Off in this project",
+    workspaceOff: "This project's .somniq/plugins/official.json asks for it off; turning it on for this project overrides that.",
+    projectOverride: "This project uses its own setting.",
     names: { literature: "Literature", latex: "LaTeX", figures: "Figures", mail: "Mail" },
     descriptions: {
       literature: "Literature search, the library page and evidence retrieval tools.",
       latex: "The Typeset editor and the LaTeX compile and render tools.",
       figures: "Generating and editing paper figures.",
-      mail: "Connect Gmail, Outlook or IMAP mailboxes: the mail tools, new-mail watching and the scheduled tasks' new-mail trigger. Turning it off stops all of them; your accounts are kept.",
+      mail: "Connect Gmail, Outlook or IMAP mailboxes: the mail tools, new-mail watching and the scheduled tasks' new-mail trigger. Turning it off stops all of them; your accounts are kept. New-mail watching follows the global switch only.",
     },
   },
 } as const;
@@ -44,25 +54,46 @@ const ICONS: Record<OfficialPluginId, SvgIconName> = {
   literature: "library", latex: "document", figures: "image", mail: "inbox",
 };
 
+type ProjectChoice = "follow" | "on" | "off";
+const projectChoice = (state: OfficialPluginState): ProjectChoice =>
+  state.project === null ? "follow" : state.project ? "on" : "off";
+
 /** The official plugins on the Plugins page: same card as a package, no approval. */
 export default function OfficialPluginsSection({ language }: { language: Language }) {
   const copy = COPY[language];
   const states = useStore((state) => state.officialPlugins);
+  const projectPath = useStore((state) => state.currentProject?.path);
+  const apply = useStore((state) => state.applyOfficialPlugins);
   const setHideMail = useStore((state) => state.setHideMail);
   const setError = useStore((state) => state.setError);
   const [busy, setBusy] = useState(false);
 
-  const toggle = async (item: OfficialPluginState) => {
-    if (item.id !== "mail") return;
+  const run = async (work: () => Promise<void>) => {
     setBusy(true);
     try {
-      await setHideMail(item.enabled);
+      await work();
     } catch (error) {
       setError(String(error));
     } finally {
       setBusy(false);
     }
   };
+
+  // Mail's switch goes through the store, which also keeps `hideMail` (the
+  // navigation and settings view of it) in step.
+  const toggle = (item: OfficialPluginState) => run(async () => {
+    if (item.id === "mail") {
+      await setHideMail(item.enabled);
+    } else if (projectPath) {
+      apply(await officialPluginsSet(projectPath, item.id, switchTarget(item), !item.enabled));
+    }
+  });
+
+  const chooseForProject = (item: OfficialPluginState, choice: ProjectChoice) => run(async () => {
+    if (!projectPath) return;
+    const value = choice === "follow" ? null : choice === "on";
+    apply(await officialPluginsSet(projectPath, item.id, "project", value));
+  });
 
   return <section className="ext-section plugin-packages official-plugins" aria-label={copy.title} aria-busy={busy}>
     <div className="ext-section-head">
@@ -77,6 +108,7 @@ export default function OfficialPluginsSection({ language }: { language: Languag
         {states.map((item) => {
           const name = copy.names[item.id];
           const label = !item.toggleable ? copy.alwaysOn : item.enabled ? copy.on : copy.off;
+          const globalOn = item.global ?? item.enabled;
           return <article key={item.id} aria-label={name}
             className={`plugin-card is-${item.enabled ? "enabled" : "disabled"}`}>
             <div className="plugin-card-main">
@@ -88,6 +120,20 @@ export default function OfficialPluginsSection({ language }: { language: Languag
                 </div>
                 <p className="plugin-card-desc">{copy.descriptions[item.id]}</p>
                 {!item.toggleable && <p className="plugin-card-desc">{copy.alwaysOnHint}</p>}
+                {item.toggleable && <div className="plugin-card-meta">
+                  <label className="official-plugin-scope">
+                    <span>{copy.thisProject}</span>
+                    <select value={projectChoice(item)} disabled={busy || !projectPath}
+                      onChange={(event) => void chooseForProject(item, event.target.value as ProjectChoice)}>
+                      <option value="follow">{copy.followGlobal(globalOn)}</option>
+                      <option value="on">{copy.projectOn}</option>
+                      <option value="off">{copy.projectOff}</option>
+                    </select>
+                  </label>
+                </div>}
+                {item.toggleable && item.workspaceOff && item.project === null
+                  && <p className="plugin-card-desc">{copy.workspaceOff}</p>}
+                {item.toggleable && item.project !== null && <p className="plugin-card-desc">{copy.projectOverride}</p>}
               </div>
               <div className="plugin-card-controls">
                 <span className="plugin-state">{label}</span>

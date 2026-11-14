@@ -36,6 +36,9 @@ pub(crate) struct SystemPromptCacheKey {
     /// promising a Reviewer that is switched off leaves only the pressure not to
     /// declare anything finished, with nothing to actually catch a mistake.
     review_enabled: bool,
+    /// Official plugins switched off for this turn (`PluginSet::builtin_disabled`).
+    /// Their prompt sections leave with their tools; empty keeps every section.
+    builtin_disabled: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -156,6 +159,7 @@ pub(crate) fn build_system_prompt_inner_with_memory(
         project_goal,
         instruction_fingerprint,
         review_enabled: crate::config::review_enabled_readonly(),
+        builtin_disabled: crate::official_plugins::disabled_in_current_execution(),
     };
 
     if let Ok(cache) = system_prompt_cache().lock() {
@@ -219,7 +223,17 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
     // model has any reason to call WorkspaceLayout.
     let artifact_layout = "Project output paths: preserve and edit an existing or user-specified path in place. Put project-owned source, modules, components, stylesheets, tests, build/config files, and project documentation in the visible project tree at their conventional paths. For a new standalone paper, report, slide deck, poster, export, or other user-facing deliverable, use the visible destination the user supplied; in interactive chat, ask where to export it if neither a destination nor a clear project convention exists. Never default user-facing output to `.somniq/`. That hidden directory is reserved for application-owned indexes, library attachments, execution records, caches, and temporary intermediates. A work-task prompt may separately authorize `.somniq/task-output/` as temporary staging that the runtime imports into its managed library. Lab may manage its own notebooks under `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
-    let diagram_output = "Diagram output: for a quick workflow, process, architecture, state machine, dependency graph, or decision tree in a chat answer, prefer a fenced `mermaid` code block over ASCII art. For exact flows, branches and mathematical diagrams embedded in LaTeX papers or Beamer slides, use the `latex-diagrams` skill and native TikZ. For conceptual illustrations, physical scenes or spatial explanations, use existing SomniImage generation when available and appropriate to the request, optionally with native TikZ/LaTeX labels and arrows; the same skill documents this route. Respect explicit pure-TikZ or local-only requests and existing external-action permissions. Preserve generation records and use real data for measured results. Compile the containing document and inspect the actual image and final PDF render. Keep diagrams compact, use semantic node ids, short readable labels, meaningful edge labels, and a layout suited to the explanation. For standalone Mermaid files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
+    let latex_on = !key.builtin_disabled.iter().any(|id| id == runtime::plugins::BUILTIN_LATEX);
+    let literature_on =
+        !key.builtin_disabled.iter().any(|id| id == runtime::plugins::BUILTIN_LITERATURE);
+    let diagram_output_full = "Diagram output: for a quick workflow, process, architecture, state machine, dependency graph, or decision tree in a chat answer, prefer a fenced `mermaid` code block over ASCII art. For exact flows, branches and mathematical diagrams embedded in LaTeX papers or Beamer slides, use the `latex-diagrams` skill and native TikZ. For conceptual illustrations, physical scenes or spatial explanations, use existing SomniImage generation when available and appropriate to the request, optionally with native TikZ/LaTeX labels and arrows; the same skill documents this route. Respect explicit pure-TikZ or local-only requests and existing external-action permissions. Preserve generation records and use real data for measured results. Compile the containing document and inspect the actual image and final PDF render. Keep diagrams compact, use semantic node ids, short readable labels, meaningful edge labels, and a layout suited to the explanation. For standalone Mermaid files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
+    // Without the LaTeX plugin the TikZ route is gone; the rest of the advice
+    // stands. With it on the text is byte-for-byte what it always was.
+    let diagram_output = if latex_on {
+        diagram_output_full
+    } else {
+        "Diagram output: for a quick workflow, process, architecture, state machine, dependency graph, or decision tree in a chat answer, prefer a fenced `mermaid` code block over ASCII art. For conceptual illustrations, physical scenes or spatial explanations, use existing SomniImage generation when available and appropriate to the request. Respect explicit local-only requests and existing external-action permissions. Preserve generation records and use real data for measured results, and inspect the actual generated image. Keep diagrams compact, use semantic node ids, short readable labels, meaningful edge labels, and a layout suited to the explanation. For standalone Mermaid files, use the `mermaid-diagram` skill and verify the rendered output.".to_string()
+    };
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     // The chunked-append flow is right for prose artifacts and wrong for code,
     // and the difference is not a matter of taste. A half-appended Beamer
@@ -231,11 +245,11 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
     let long_file_generation = "File generation: use write_file for one complete file and write_files when several independent complete files are already known. A complete valid payload is accepted up to the file tool's byte safety limit; do not reject it merely because an estimated token count exceeds 9000. When model or proxy output limits prevent one complete call, the atomic staged protocol is available for estimated final UTF-8 sizes of at least 8 KiB: begin_large_write with estimated_bytes and expected_revision=`absent` for a new path or the revision returned by read_file, append_write_chunk in sequence starting at 0, then commit_large_write. The 8 KiB threshold is a model-output safeguard, not a filesystem limit. Chunks modify only SomniQ temporary state; the final destination stays unchanged until commit validates every chunk, rechecks the destination revision, and publishes the complete UTF-8 file once. Retrying an identical accepted sequence is safe. Use abort_large_write to discard a failed transaction. Do not assemble long output by repeatedly appending to its final path, because interruption exposes a partial artifact or broken source file. After commit, verify line counts, tests, or compilation as appropriate.".to_string();
     let latex_toolchain =
         latex_toolchain_prompt_section(key.texlive.as_deref(), key.tectonic.as_deref());
-    let mut extra_sections = vec![
-        access.clone(),
-        file_links,
-        readable_answers,
-        local_evidence_retrieval,
+    let mut extra_sections = vec![access.clone(), file_links, readable_answers];
+    if literature_on {
+        extra_sections.push(local_evidence_retrieval);
+    }
+    extra_sections.extend([
         key.project_goal.clone(),
         complex_task_contract,
         claim_ceiling,
@@ -244,8 +258,10 @@ pub(crate) fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<St
         diagram_output,
         long_document_reading,
         long_file_generation,
-    ];
-    extra_sections.push(latex_toolchain);
+    ]);
+    if latex_on {
+        extra_sections.push(latex_toolchain);
+    }
     if key.include_builtin_memory {
         extra_sections.push(key.hot_memory.clone());
         extra_sections.push(key.knowledge_memory.clone());

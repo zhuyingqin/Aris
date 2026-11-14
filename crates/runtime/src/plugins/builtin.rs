@@ -83,6 +83,20 @@ pub fn builtin_manifest(id: &str) -> Option<&'static BuiltinManifest> {
     BUILTIN_PLUGINS.iter().find(|manifest| manifest.id == id)
 }
 
+/// The official plugin a skill compiled into the app works through, if any.
+/// The skill is listed and invocable only while that plugin is on; a user's
+/// own skill of the same name is theirs and is never hidden.
+#[must_use]
+pub fn bundled_skill_plugin(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "literature-search" | "literature-screen" | "literature-evidence" => {
+            Some(BUILTIN_LITERATURE)
+        }
+        "latex-diagrams" | "paper-compile" => Some(BUILTIN_LATEX),
+        _ => None,
+    }
+}
+
 /// Every official plugin that can be switched off, in registry order: what an
 /// unknown run token resolves to, failing closed like its packages do.
 pub(super) fn toggleable_ids() -> Vec<String> {
@@ -112,8 +126,19 @@ pub struct BuiltinState {
     pub enabled: bool,
     /// The global choice, if one was made.
     pub global: Option<bool>,
-    /// This project's override, if one was made.
+    /// This project's override on this computer, if one was made.
     pub project: Option<bool>,
+    /// The project itself asks for this plugin to be off
+    /// (`.somniq/plugins/official.json`). A local project override still wins.
+    pub workspace_off: bool,
+}
+
+/// What a project may say about official plugins in its own `.somniq`: only
+/// that it does not need some. Project content can never turn one on.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkspaceRequest {
+    #[serde(default)]
+    disable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,14 +159,24 @@ impl BuiltinToggles {
         }
     }
 
-    fn effective(&self, manifest: &BuiltinManifest, project: &str) -> bool {
+    /// This computer's project override, then the project's own request to
+    /// switch it off, then the global choice, then the default.
+    fn effective(&self, manifest: &BuiltinManifest, project: &str, workspace_off: &[String]) -> bool {
         if !manifest.toggleable {
             return true;
         }
-        self.projects
+        if let Some(local) = self
+            .projects
             .get(project)
             .and_then(|overrides| overrides.get(manifest.id))
-            .or_else(|| self.global.get(manifest.id))
+        {
+            return *local;
+        }
+        if workspace_off.iter().any(|id| id == manifest.id) {
+            return false;
+        }
+        self.global
+            .get(manifest.id)
             .copied()
             .unwrap_or(manifest.default_enabled)
     }
@@ -150,6 +185,29 @@ impl BuiltinToggles {
 impl PluginStore {
     fn builtin_path(&self) -> PathBuf {
         self.user_root.join("builtin.json")
+    }
+
+    /// Official plugins this project asks to have off. A missing, unreadable
+    /// or symlinked request is no request: it could only ever switch things off.
+    fn workspace_builtin_off(&self) -> Vec<String> {
+        let path = self.root.join("official.json");
+        if Self::reject_symlinks([self.root.clone(), path.clone()]).is_err() {
+            return Vec::new();
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            return Vec::new();
+        };
+        match serde_json::from_slice::<WorkspaceRequest>(&bytes) {
+            Ok(request) => request
+                .disable
+                .into_iter()
+                .filter(|id| builtin_manifest(id).is_some_and(|manifest| manifest.toggleable))
+                .collect(),
+            Err(error) => {
+                eprintln!("SomniQ plugins: ignoring {}: {error}", path.display());
+                Vec::new()
+            }
+        }
     }
 
     fn builtin_toggles(&self) -> Result<BuiltinToggles, String> {
@@ -206,11 +264,22 @@ impl PluginStore {
             BuiltinToggles::empty()
         });
         let project = self.project_key();
+        let workspace_off = self.workspace_builtin_off();
         BUILTIN_PLUGINS
             .iter()
-            .filter(|manifest| !toggles.effective(manifest, &project))
+            .filter(|manifest| !toggles.effective(manifest, &project, &workspace_off))
             .map(|manifest| manifest.id.to_string())
             .collect()
+    }
+
+    /// The official plugins that are off here: inside a run, as the run froze
+    /// them; otherwise as a run starting now would get them.
+    #[must_use]
+    pub fn builtin_disabled(&self) -> Vec<String> {
+        match &self.frozen {
+            Some(set) => set.builtin_disabled.clone(),
+            None => self.builtin_disabled_now(),
+        }
     }
 
     /// Whether `id` is on here: inside a run, as the run froze it; otherwise
@@ -247,13 +316,15 @@ impl PluginStore {
     pub fn builtin_states(&self) -> Result<Vec<BuiltinState>, String> {
         let toggles = self.builtin_toggles()?;
         let project = self.project_key();
+        let workspace_off = self.workspace_builtin_off();
         Ok(BUILTIN_PLUGINS
             .iter()
             .map(|manifest| BuiltinState {
                 id: manifest.id.to_string(),
                 scope: manifest.scope,
                 toggleable: manifest.toggleable,
-                enabled: toggles.effective(manifest, &project),
+                enabled: toggles.effective(manifest, &project, &workspace_off),
+                workspace_off: workspace_off.iter().any(|id| id == manifest.id),
                 global: toggles.global.get(manifest.id).copied(),
                 project: toggles
                     .projects
@@ -365,6 +436,49 @@ mod tests {
     }
 
     #[test]
+    fn a_project_can_ask_for_mail_off_but_never_on_and_the_user_has_the_last_word() {
+        let (dir, store) = store();
+        store
+            .set_builtin(BUILTIN_MAIL, BuiltinTarget::Global, Some(true))
+            .unwrap();
+        let request = dir.path().join("project").join(".somniq").join("plugins");
+        fs::create_dir_all(&request).unwrap();
+        fs::write(
+            request.join("official.json"),
+            br#"{"disable": ["mail", "literature", "nonsense"]}"#,
+        )
+        .unwrap();
+        assert!(!store.builtin_enabled(BUILTIN_MAIL));
+        assert!(store.builtin_enabled(BUILTIN_LITERATURE), "not switchable yet");
+        let mail = store
+            .builtin_states()
+            .unwrap()
+            .into_iter()
+            .find(|state| state.id == BUILTIN_MAIL)
+            .unwrap();
+        assert!(mail.workspace_off && !mail.enabled);
+
+        // A local override for this project beats the project's request.
+        store
+            .set_builtin(BUILTIN_MAIL, BuiltinTarget::Project, Some(true))
+            .unwrap();
+        assert!(store.builtin_enabled(BUILTIN_MAIL));
+
+        // A request can only switch off: an "enable" list does not exist, and
+        // a broken file is ignored.
+        store
+            .set_builtin(BUILTIN_MAIL, BuiltinTarget::Project, None)
+            .unwrap();
+        store
+            .set_builtin(BUILTIN_MAIL, BuiltinTarget::Global, Some(false))
+            .unwrap();
+        fs::write(request.join("official.json"), br#"{"enable": ["mail"]}"#).unwrap();
+        assert!(!store.builtin_enabled(BUILTIN_MAIL));
+        fs::write(request.join("official.json"), b"{broken").unwrap();
+        assert!(!store.builtin_enabled(BUILTIN_MAIL));
+    }
+
+    #[test]
     fn modules_not_yet_behind_the_registry_cannot_be_turned_off() {
         let (_dir, store) = store();
         for id in [BUILTIN_LITERATURE, BUILTIN_LATEX, BUILTIN_FIGURES] {
@@ -423,5 +537,19 @@ mod tests {
         let off = store.freeze().unwrap();
         assert_ne!(off.fingerprint, set.fingerprint);
         assert_eq!(off.builtin_disabled, vec![BUILTIN_MAIL.to_string()]);
+    }
+
+    #[test]
+    fn every_skill_tied_to_an_official_plugin_is_actually_bundled() {
+        let tied = ["literature-search", "literature-screen", "literature-evidence", "latex-diagrams", "paper-compile"];
+        for name in tied {
+            assert!(bundled_skill_plugin(name).is_some(), "{name}");
+            assert!(
+                crate::BUNDLED_SKILLS.iter().any(|(bundled, _)| bundled.eq_ignore_ascii_case(name)),
+                "{name} is mapped to an official plugin but is not a bundled skill"
+            );
+        }
+        assert_eq!(bundled_skill_plugin("Literature-Search"), Some(BUILTIN_LITERATURE));
+        assert_eq!(bundled_skill_plugin("mermaid-diagram"), None);
     }
 }

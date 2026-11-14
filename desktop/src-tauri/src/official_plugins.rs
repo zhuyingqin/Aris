@@ -54,6 +54,14 @@ pub(crate) fn tool_allowed_in(context: &runtime::ProjectExecutionContext, tool_n
     })
 }
 
+/// The official plugins that are off where this call runs: the frozen set
+/// inside a run, the live switches outside one.
+pub(crate) fn disabled_in_current_execution() -> Vec<String> {
+    runtime::execution_current_dir()
+        .map(|cwd| PluginStore::for_execution(cwd).builtin_disabled())
+        .unwrap_or_default()
+}
+
 pub(crate) fn disabled_tool_message(tool_name: &str) -> String {
     let needs = tool_owner(tool_name)
         .into_iter()

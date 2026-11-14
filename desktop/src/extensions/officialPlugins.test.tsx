@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as transport from "../api/transport";
 import { useStore } from "../store";
 import OfficialPluginsSection from "./OfficialPluginsSection";
-import { LEGACY_HIDE_MAIL_KEY, migrateMailVisibility, type OfficialPluginState } from "./officialPlugins";
+import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./officialPluginNav";
+import {
+  LEGACY_HIDE_MAIL_KEY, OFFICIAL_PLUGIN_TABS, migrateMailVisibility, officialTabHidden, switchTarget,
+  type OfficialPluginState,
+} from "./officialPlugins";
 
 vi.mock("../api/transport", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/transport")>()),
@@ -14,16 +18,18 @@ vi.mock("../api/transport", async (importOriginal) => ({
 
 const projectPath = "F:/project";
 const states = (mail: boolean): OfficialPluginState[] => [
-  { id: "literature", scope: "project", toggleable: false, enabled: true, global: null, project: null },
-  { id: "latex", scope: "project", toggleable: false, enabled: true, global: null, project: null },
-  { id: "figures", scope: "project", toggleable: false, enabled: true, global: null, project: null },
-  { id: "mail", scope: "user", toggleable: true, enabled: mail, global: mail, project: null },
+  { id: "literature", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
+  { id: "latex", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
+  { id: "figures", scope: "project", toggleable: false, enabled: true, global: null, project: null, workspaceOff: false },
+  { id: "mail", scope: "user", toggleable: true, enabled: mail, global: mail, project: null, workspaceOff: false },
 ];
+
+const realSetHideMail = useStore.getState().setHideMail;
 
 beforeEach(() => {
   localStorage.clear();
   vi.mocked(transport.invoke).mockReset();
-  useStore.setState({ officialPlugins: null, hideMail: true, tab: "chat", language: "cn" });
+  useStore.setState({ officialPlugins: null, hideMail: true, tab: "chat", language: "cn", setHideMail: realSetHideMail });
 });
 afterEach(() => {
   cleanup();
@@ -85,5 +91,55 @@ describe("OfficialPluginsSection", () => {
     expect(switches.filter((item) => !(item as HTMLButtonElement).disabled)).toHaveLength(1);
     fireEvent.click(screen.getByRole("switch", { name: "关闭 邮箱" }));
     await waitFor(() => expect(setHideMail).toHaveBeenCalledWith(true));
+  });
+});
+
+describe("per-project switches", () => {
+  const mailWith = (extra: Partial<OfficialPluginState>) =>
+    states(false).map((state) => state.id === "mail" ? { ...state, ...extra } : state);
+
+  it("writes where a click takes effect", () => {
+    const mail = (extra: Partial<OfficialPluginState>) => mailWith(extra).find((state) => state.id === "mail")!;
+    expect(switchTarget(mail({}))).toBe("global");
+    expect(switchTarget(mail({ project: false }))).toBe("project");
+    // The project asks for it off: a global "on" would be outranked.
+    expect(switchTarget(mail({ workspaceOff: true }))).toBe("project");
+  });
+
+  it("turns mail on for this project when the project asked for it off", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    useStore.setState({
+      currentProject: { id: "p", name: "Project", path: projectPath } as never,
+      officialPlugins: mailWith({ workspaceOff: true }),
+      hideMail: true,
+    });
+    vi.mocked(transport.invoke).mockResolvedValue(mailWith({ enabled: true, project: true, workspaceOff: true }));
+    await useStore.getState().setHideMail(false);
+    expect(transport.invoke).toHaveBeenCalledWith("official_plugins_set", { projectPath, id: "mail", target: "project", value: true });
+    expect(useStore.getState().hideMail).toBe(false);
+  });
+
+  it("offers follow / on / off for this project and explains a project request", async () => {
+    useStore.setState({
+      currentProject: { id: "p", name: "Project", path: projectPath } as never,
+      officialPlugins: mailWith({ workspaceOff: true, global: true }),
+    });
+    vi.mocked(transport.invoke).mockResolvedValue(mailWith({ project: false }));
+    render(<OfficialPluginsSection language="cn" />);
+    expect(screen.getByText(/official\.json 要求关闭/)).toBeTruthy();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "off" } });
+    await waitFor(() => expect(transport.invoke).toHaveBeenCalledWith(
+      "official_plugins_set", { projectPath, id: "mail", target: "project", value: false }));
+  });
+});
+
+describe("official plugin navigation", () => {
+  it("each nav entry is the page its plugin owns, and hides with it", () => {
+    for (const item of OFFICIAL_PLUGIN_NAV_ITEMS) expect(item.id).toBe(OFFICIAL_PLUGIN_TABS[item.plugin]);
+    const figuresOff = states(true).map((state) => state.id === "figures" ? { ...state, enabled: false } : state);
+    expect(officialTabHidden("figures", figuresOff, false)).toBe(true);
+    expect(officialTabHidden("figures", null, false)).toBe(false);
+    expect(officialTabHidden("lab", figuresOff, true)).toBe(false);
+    expect(officialTabHidden("mail", states(true), true)).toBe(true);
   });
 });

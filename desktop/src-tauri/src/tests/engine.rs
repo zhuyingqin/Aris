@@ -3612,3 +3612,19 @@ fn a_mail_tool_that_searches_papers_also_needs_literature() {
     assert!(crate::official_plugins::disabled_tool_message("mail_literature_catch_up")
         .contains("`mail`, `literature`"));
 }
+
+
+/// The independent Reviewer must not lose a tool when the user switches an
+/// official plugin off: its tools belong to no plugin and need none.
+#[test]
+fn switching_official_plugins_off_never_changes_the_reviewers_tools() {
+    for tool in crate::review_thread::REVIEWER_TOOLS {
+        assert!(crate::official_plugins::tool_owner(tool).is_none(), "{tool}");
+        assert!(crate::official_plugins::tool_allowed(tool, |_| false), "{tool}");
+    }
+    let names = crate::review_thread::reviewer_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, crate::review_thread::REVIEWER_TOOLS.map(String::from).to_vec());
+}

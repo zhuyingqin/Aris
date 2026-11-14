@@ -3480,6 +3480,13 @@ fn execute_todo_write(
     })
 }
 
+/// Whether the official plugin a bundled skill needs is on for this run.
+fn bundled_skill_plugin_enabled(plugin: &str) -> bool {
+    runtime::execution_current_dir()
+        .map(|cwd| runtime::plugins::PluginStore::for_execution(cwd).builtin_enabled(plugin))
+        .unwrap_or(true)
+}
+
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let requested = input
         .skill
@@ -3527,6 +3534,14 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     // surface a per-skill slice of the report so the model knows where helpers live.
     for (name, content) in BUNDLED_SKILLS {
         if name.eq_ignore_ascii_case(resolved) {
+            if let Some(plugin) = runtime::plugins::bundled_skill_plugin(name)
+                .filter(|plugin| !bundled_skill_plugin_enabled(plugin))
+            {
+                return Err(format!(
+                    "Skill `{name}` belongs to the official `{plugin}` plugin, which is turned off \
+                     for this turn. The user can turn it on in Plugins."
+                ));
+            }
             let content = with_activated_skill_profile((*content).to_string(), resolution.as_ref());
             let description = parse_skill_description(&content);
             let helper_report = build_helper_report(name);

@@ -832,7 +832,13 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
         collect_skill_root(scope, &root, &mut seen, &mut entries);
     }
 
+    let plugins = crate::plugins::PluginStore::for_execution(cwd);
     for (name, content) in crate::BUNDLED_SKILLS {
+        // A bundled skill of a switched-off official plugin is not offered.
+        if crate::plugins::bundled_skill_plugin(name).is_some_and(|id| !plugins.builtin_enabled(id))
+        {
+            continue;
+        }
         if !seen.insert((*name).to_string()) {
             continue;
         }
@@ -855,7 +861,7 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
 
     // Approved project plugins come last: they add skills and never replace
     // a local, user, bundled or compatibility skill of the same name.
-    for root in crate::plugins::PluginStore::for_execution(cwd)
+    for root in plugins
         .active_skill_roots()
         .unwrap_or_default()
     {

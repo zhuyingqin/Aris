@@ -9355,7 +9355,18 @@ async fn run_chat_turn_with_context(
         }
         };
         let tool_specs = if worker_paper_reading.is_some() { Vec::new() } else { match worker_workflow.as_ref().filter(|_| autonomous_workflow) {
-            Some(workflow) => aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id)),
+            // A stage allow-list may name a tool whose official plugin is off
+            // for this run; the frozen set wins over the list.
+            Some(workflow) => aris_chat::chat_tool_specs(
+                workflow_tool_specs(&workflow.stage_id)
+                    .into_iter()
+                    .filter(|spec| {
+                        crate::official_plugins::tool_allowed(spec.name, |id| {
+                            worker_plugin_run.set().builtin_enabled(id)
+                        })
+                    })
+                    .collect(),
+            ),
             None => {
                 let mut specs = tool_specs_for(extra_blocked_tools, worker_plugin_run.set());
                 if worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize {
