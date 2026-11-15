@@ -380,6 +380,7 @@ pub async fn figures_start(
     expected_source_index: Option<usize>,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &project_id)?;
+    crate::official_plugins::require_in(&workspace, runtime::plugins::BUILTIN_FIGURES)?;
     let mut jobs = active_runs().lock().map_err(|e| e.to_string())?;
     let key = (project_id.clone(), id.clone());
     if jobs.contains_key(&key) {
@@ -1235,6 +1236,7 @@ pub async fn figures_review(
     id: String,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &project_id)?;
+    crate::official_plugins::require_in(&workspace, runtime::plugins::BUILTIN_FIGURES)?;
     let mut jobs = active_runs().lock().map_err(|e| e.to_string())?;
     let key = (project_id.clone(), id.clone());
     if jobs.contains_key(&key) {

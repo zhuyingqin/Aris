@@ -249,6 +249,19 @@ export function useChatCommands({
     }
   }, [debugExporting, exporting, patchTurns, setError, currentSessionRef]);
 
+  // One-shot "start a new chat with this draft" hand-off (e.g. Plugins). The
+  // draft is only placed in the composer; the user decides to send it.
+  const pendingNewChatDraft = useStore((state) => state.pendingNewChatDraft);
+  const setPendingNewChatDraft = useStore((state) => state.setPendingNewChatDraft);
+  useEffect(() => {
+    const text = pendingNewChatDraft?.trim();
+    if (!text) return;
+    setPendingNewChatDraft(null);
+    const session = createSession();
+    updateSession(session.id, (item) => ({ ...item, draft: text }));
+    focusComposer();
+  }, [createSession, focusComposer, pendingNewChatDraft, setPendingNewChatDraft, updateSession]);
+
   // One-shot "run this input" hand-off from other views (e.g. Literature).
   const pendingChatRunInput = useStore((state) => state.pendingChatRunInput);
   const setPendingChatRunInput = useStore((state) => state.setPendingChatRunInput);

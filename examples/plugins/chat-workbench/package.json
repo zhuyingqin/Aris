@@ -1,0 +1,9 @@
+{
+  "name": "@somniq/chat-workbench",
+  "version": "0.1.0",
+  "description": "A personal research checklist, session notes and live agent plan beside Chat.",
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json"
+  }
+}

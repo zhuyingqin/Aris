@@ -176,6 +176,16 @@ pub fn start_for_account(app: AppHandle, account: &MailAccount) {
     });
 }
 
+/// Stop every watcher: the official Mail plugin was switched off.
+pub fn stop_all() {
+    let Ok(mut watchers) = registry().lock() else {
+        return;
+    };
+    for (_, flag) in watchers.drain() {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
 pub fn stop_for_account(account_id: &str) {
     let Ok(mut watchers) = registry().lock() else {
         return;

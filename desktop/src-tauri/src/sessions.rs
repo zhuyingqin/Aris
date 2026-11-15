@@ -1274,6 +1274,33 @@ fn bounded_remote_chat_limit(limit: u16, maximum: usize, label: &str) -> Result<
     Ok(usize::from(limit).min(maximum))
 }
 
+/// The project a Chat UI conversation belongs to, or `None` when there is no
+/// such conversation.
+///
+/// Reads the summary index first — it is what the sidebar reads, so it is
+/// cheap — and falls back to the conversation's own file, because a chat with
+/// no turns yet is deliberately left out of the index.
+///
+/// Exists for `scheduled.rs`, which used to look sessions up in the legacy
+/// monolithic `chat-ui-sessions.json`. That file is renamed to `.bak` by the
+/// per-session migration, after which every lookup missed and every scheduled
+/// run was dispatched to the `default` project.
+pub(crate) fn chat_ui_session_project(session_id: &str) -> Option<String> {
+    validate_chat_ui_session_id(session_id).ok()?;
+    if let Ok(index) = read_chat_ui_index() {
+        if let Some(entry) = index
+            .iter()
+            .find(|entry| chat_ui_session_id(entry) == Some(session_id))
+        {
+            return Some(chat_ui_session_project_id(entry).to_string());
+        }
+    }
+    read_chat_ui_session_file(session_id)
+        .ok()
+        .flatten()
+        .map(|session| chat_ui_session_project_id(&session).to_string())
+}
+
 fn chat_ui_session_project_id(session: &Value) -> &str {
     session
         .get("projectId")

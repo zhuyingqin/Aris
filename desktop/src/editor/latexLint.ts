@@ -2,7 +2,7 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { latexProjectSymbols, type LatexSymbol } from "./latexComplete";
-import { scanLatexStructure, updateLatexStructure, type LatexCommand, type LatexStructureIndex } from "../typeset/latexStructure";
+import { scanLatexStructure, updateLatexStructure, type LatexCommand, type LatexStructureIndex } from "./latex/latexStructure";
 
 /**
  * Two kinds of marker on a LaTeX source, both surfaced through CodeMirror's

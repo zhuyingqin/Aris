@@ -1,0 +1,8 @@
+.plugin-edit-button {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 4px 9px; border-radius: 7px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; cursor: pointer;
+}
+.plugin-edit-button:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.plugin-edit-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.plugin-edit-button.is-compact { padding: 4px 5px; border-color: transparent; }

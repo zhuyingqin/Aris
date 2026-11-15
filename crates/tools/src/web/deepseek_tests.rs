@@ -253,9 +253,6 @@ impl research_account::ResearchAccountProvider for Account {
     fn session_issuer(&self) -> Option<String> {
         Some(self.issuer.to_string())
     }
-    fn credential(&self) -> Result<Option<research_account::ResearchAccountCredential>, String> {
-        panic!("paid tools must never request the dashboard JWT");
-    }
     fn api_credential(&self) -> Result<Option<ResearchApiCredential>, String> {
         Ok(self.key.map(|key| ResearchApiCredential {
             issuer: self.issuer.to_string(),

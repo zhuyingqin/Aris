@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { fileOpen } from "../api/tauri";
 import { resolveWorkspaceFilePath, workspaceFileOpenTarget } from "../editor/workspaceFiles";
+import { latexWorkspaceOn } from "../extensions/officialPlugins";
 import { useStore } from "../store";
 
 export interface ChatEvidenceReference {
@@ -30,7 +31,7 @@ export function useOpenChatFile(): (path: string) => void {
   const setError = useStore((state) => state.setError);
 
   return useCallback((path: string) => {
-    const target = workspaceFileOpenTarget(path);
+    const target = workspaceFileOpenTarget(path, { latexWorkspace: latexWorkspaceOn(useStore.getState().officialPlugins) });
     if (target === "code") {
       // Code may not have mounted yet. Its pane delivers this request once
       // the workbench is ready instead of dropping a premature bridge command.

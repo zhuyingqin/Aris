@@ -138,6 +138,57 @@ fn powershell_runs_via_system_shell() {
     assert_eq!(background_output["assistantAutoBackgrounded"], false);
 }
 
+/// On a Chinese Windows the console code page is GBK. Python started by the
+/// PowerShell or REPL tool printed in that code page, so `✓`, `−`, `•` or a
+/// non-breaking space raised `UnicodeEncodeError: 'gbk' codec`, and GBK bytes
+/// that did get through were decoded as UTF-8 into `�` (17 historical
+/// failures). The bash tool already gave its children UTF-8; now all three do.
+#[cfg(windows)]
+#[test]
+fn python_started_by_powershell_and_repl_prints_text_outside_gbk() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !runtime::command_exists("python") {
+        return;
+    }
+    let expected = "\u{2713} \u{2212} \u{2022} \u{a0}caf\u{e9} \u{4e2d}\u{6587}";
+    let code = r"print('✓ − • \xa0caf\xe9 中文')";
+
+    let repl = execute_tool(
+        "REPL",
+        &json!({"language": "python", "code": code, "timeout_ms": 30_000}),
+    )
+    .expect("REPL should run");
+    let repl: serde_json::Value = serde_json::from_str(&repl).expect("json");
+    assert_eq!(repl["exitCode"], 0, "{repl}");
+    assert!(
+        repl["stdout"].as_str().expect("stdout").contains(expected),
+        "{repl}"
+    );
+
+    let powershell = execute_tool(
+        "PowerShell",
+        &json!({"command": format!("python -c \"{code}\""), "timeout": 30_000}),
+    )
+    .expect("PowerShell should run");
+    let powershell: serde_json::Value = serde_json::from_str(&powershell).expect("json");
+    assert!(
+        powershell["stdout"]
+            .as_str()
+            .expect("stdout")
+            .contains(expected),
+        "{powershell}"
+    );
+    assert!(
+        !powershell["stderr"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("UnicodeEncodeError"),
+        "{powershell}"
+    );
+}
+
 #[test]
 fn powershell_errors_when_shell_is_missing() {
     let _guard = env_lock()

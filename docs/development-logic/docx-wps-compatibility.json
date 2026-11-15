@@ -1,0 +1,339 @@
+{
+  "schemaVersion": 2,
+  "assessmentDate": "2026-11-11",
+  "scope": "Native gaps repaired; direct PDF inspection only; no new target-editor operations",
+  "nativeGaps": {
+    "remaining": 0,
+    "closed": 13,
+    "cases": [
+      {
+        "id": "0a0faba3-5580-44df-965d-f562a99b291c",
+        "label": "制表位左右对齐",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/0a0faba3-5580-44df-965d-f562a99b291c.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-3",
+        "documentRevision": "sha256:727e2341dda4fef86bc386536f41d90b330853d2629f7f2166228dc116b95540",
+        "pdfRevision": "sha256:ddfa8ad7f1a6fd0373c9a06a13034d90a35ba08423f56a7d029a01929a3a62bd",
+        "pageCount": 1,
+        "executorObservation": "十行均以前三个词左对齐，原生制表位之后的内容右对齐；文字保留，单页无裁切。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "0b17a146-2934-46c7-8727-73ff6b6483e8",
+        "label": "H2O 数字下标",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/0b17a146-2934-46c7-8727-73ff6b6483e8.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:900904d95233aa413b42e699c5ec1d310bece83ac0287dcc13129adb8856ce6d",
+        "pdfRevision": "sha256:defb9a3b78f3263236acc9f18893bc93372a8ecabc467682ae17e81d33bc9ce2",
+        "pageCount": 1,
+        "executorObservation": "H₂O 的 2 下降为下标，H/O 与其他正文样式保留；一页无裁切。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "0e47de2a-32e0-456c-a366-8c607ef7a9d2",
+        "label": "每页左下角页码",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/0e47de2a-32e0-456c-a366-8c607ef7a9d2.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-3",
+        "documentRevision": "sha256:82b7cff91311a83f9f8798b0b37bf99efaa472fb88029a037f2641ce0e96566b",
+        "pdfRevision": "sha256:9f368c930560ee3f95b52f0f945486a69dbfadff041d5b3e7d6b9e6842fcebf5",
+        "pageCount": 9,
+        "executorObservation": "九页每页左下角依次显示1至9；封面、正文、截图和超链接保留，页脚与正文无重叠，无空白页。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "66399b0d-8fda-4618-95c4-bfc6191617e9",
+        "label": "插入 7 列 5 行空表",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/66399b0d-8fda-4618-95c4-bfc6191617e9.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-4",
+        "documentRevision": "sha256:7acc282735e91423360e3d6e392fe67b138150343f015600dbc736ea8f8408ec",
+        "pdfRevision": "sha256:811b5de8f32d63e9758dd466dfd6d0ad2ada19b156b175bce90974d65d0dea3e",
+        "pageCount": 2,
+        "executorObservation": "明确压缩三个末尾空段后，新增5×7空表紧接原表，完整显示在第二页，未跨页；原表内容/窄列换行保持，第一页面说明保留。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "6a33f9b9-0a56-4844-9c3f-96ec3ffb3ba2",
+        "label": "删除 ODT 高亮",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/6a33f9b9-0a56-4844-9c3f-96ec3ffb3ba2.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:1b7ae27747a895c1141117e27ec6145f4e98170ccb4ba7ea23d4f43a685e5679",
+        "pdfRevision": "sha256:fb053e95ea58927f5803797fc5532f046bf9ae6933b4955fdfa48946248ebc97",
+        "pageCount": 2,
+        "executorObservation": "招募电话脚本两页所有黄色高亮消除；粗体、斜体、超链接及正文保持可读，无裁切或空白页。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "6ada715d-3aae-4a32-a6a7-429b2e43fb93",
+        "label": "在光标处插入图片",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/6ada715d-3aae-4a32-a6a7-429b2e43fb93.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:b394f5cf93a7dd2e7de91945ddee2424591c8375bc70c47b8c1280ef0c1813e8",
+        "pdfRevision": "sha256:cd37855f10229e6597159383208f14f5d58f3f52fab56c6ac762ec2a95294998",
+        "pageCount": 3,
+        "executorObservation": "指定PNG位于Figure 1之前，三页正文、原图和说明保留。提供的PNG本身在BIOL420底部截断，候选忠实保留该输入内容；未见新增图片裁切或文字重叠。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "72b810ef-4156-4d09-8f08-a0cf57e7cefe",
+        "label": "末段添加删除线",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/72b810ef-4156-4d09-8f08-a0cf57e7cefe.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:9d87c1285da28f0007b470c94d464180b91464c5bfcc066a2302cb93abb908a6",
+        "pdfRevision": "sha256:217a3cdcd94be3f0256e3ec6ff59f52a3bf4703f7f54fb850784ecef1469d489",
+        "pageCount": 1,
+        "executorObservation": "仅最后正文段落显示删除线，前两段正常；一页无裁切、溢出或空白尾页。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "8472fece-c7dd-4241-8d65-9b3cd1a0b568",
+        "label": "词表按元音分类着色",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/8472fece-c7dd-4241-8d65-9b3cd1a0b568.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:bfb68abf542ba5757d04ebb7706509362402df0d9487f871972bf291c1103f6b",
+        "pdfRevision": "sha256:e1ef736dcac20d745cf483e211e3efd53945f490c334b8d828f3e958bdb6b73f",
+        "pageCount": 1,
+        "executorObservation": "52个词在原表格内显示元音首字母红色、其他蓝色，标题正文未着色；单页布局无裁切。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "88fe4b2d-3040-4c70-9a70-546a47764b48",
+        "label": "每句后加入空行",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/88fe4b2d-3040-4c70-9a70-546a47764b48.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-6",
+        "documentRevision": "sha256:9ea8654235ec88723ac7de2c00f1a41eb8cfa7376a4c01e3b4e20ff6bd965a9a",
+        "pdfRevision": "sha256:1649b248d3018a1152222eea227bbd58f01fd71b550bb022eec820d32e136030",
+        "pageCount": 3,
+        "executorObservation": "首段七句各自后有空行，三页原文字、表格及列表保留，无新增裁切、丢字或白尾页。加空行使原表重新分页，第3条最后一行在第2页续排；保留原表允许拆行的设置。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "936321ce-5236-426a-9a20-e0e3c5dc536f",
+        "label": "逗号文本转换为表格",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/936321ce-5236-426a-9a20-e0e3c5dc536f.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:ce3f973d2594ea1d8adaa420a92bac3df52f647dc5139e3c2b6ab393f6a1003f",
+        "pdfRevision": "sha256:75302733b867bc3e8d2feb78c7b6abba9707b937b788b7413c540069d80fdd57",
+        "pageCount": 4,
+        "executorObservation": "首页逗号文本转为5×4原生表格，文字完整可读；后续三页原彩色音标表、页眉和图标保留，无新增裁切或空白页。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "adf5e2c3-64c7-4644-b7b6-d2f0167927e7",
+        "label": "文献及原生交叉引用",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/adf5e2c3-64c7-4644-b7b6-d2f0167927e7.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-4",
+        "documentRevision": "sha256:628e0f723d7a0df67e2d9664224bb50ab589f93a15f2bd8794de2a6f52db3dcf",
+        "pdfRevision": "sha256:1e39125d1bef31e9b6337e9a19b4ce11d405241f5fc5d62d3b3225b3c3449b35",
+        "pageCount": 4,
+        "executorObservation": "第2页原生REF显示14，第4页新增条目编号为[14]且Arial字体与原列表一致；原文、旧引用/超链接和页脚保留，四页无引用错误、裁切或空白尾页。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "e246f6d8-78d7-44ac-b668-fcf47946cb50",
+        "label": "仅斜体词改 14 磅",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/e246f6d8-78d7-44ac-b668-fcf47946cb50.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-2",
+        "documentRevision": "sha256:0e85f36965ecc5437a9c99c6acb38b700b0f183082b1e9169c885e28f309858a",
+        "pdfRevision": "sha256:1f79b28cd9d14a80fd0e4163a7a25d1634f88eafe7499df8dcd123d60fd4b9ef",
+        "pageCount": 2,
+        "executorObservation": "仅斜体内容放大到14pt，普通正文12pt、题目和列表保留。两页无内容丢失或白尾页；原文已有英文词内换行，字体变化后换行位置随之改变，未擅自修改其语言/兼容设置。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      },
+      {
+        "id": "ecc2413d-8a48-416e-a3a2-d30106ca36cb",
+        "label": "插入空白页",
+        "taskUrl": "https://github.com/xlang-ai/OSWorld/blob/9466ba2c7e19ad6dea076ad9cf27a2eca6f11336/evaluation_examples/examples/libreoffice_writer/ecc2413d-8a48-416e-a3a2-d30106ca36cb.json",
+        "status": "closed_in_native_tool_acceptance",
+        "executionRun": "run-6",
+        "documentRevision": "sha256:5f61c626b9f7823fc13ed6e1fff6a1362d82e3699823fe4d8764ae4a5b12e368",
+        "pdfRevision": "sha256:738fc96b35e940cfa7d00ce629920466b8b6315094d004e802ccff404c61b7d2",
+        "pageCount": 8,
+        "executorObservation": "封面标题、版权及完整免责声明保持在第1页，第2页为纯白；第3至5页声明正文/表格，第6至8页原EXHIBIT A/B/C均保留，无新增裁切或重叠。原表在第4/5页的跨页行和末页原项目符号保持；移除新增空白段后，原XML节点经规范化比较一致，其他包部件原字节不变。",
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run_after_repairs"
+      }
+    ],
+    "evidence": {
+      "path": ".somniq/research/docx-native-repair-20261111/final-public-evidence.json",
+      "sha256": "d27d639c91f58cd6e9ec1f8daca91538519e3a3af01e7a56d1a4ed13c19fe703"
+    },
+    "wordWpsApproval": false
+  },
+  "wps": {
+    "versionPreviouslyObserved": "12.1.0.29690",
+    "overallCompatibility": "not_established",
+    "afterRepairs": "not_run",
+    "historicalFontPagination": "failed_extra_blank_page_4",
+    "closeReopen": "not_completed",
+    "nativeEquationEditability": "not_tested"
+  },
+  "verification": {
+    "newWpsPagesViewed": 0,
+    "currentPublicLibreOfficePagesViewed": 59,
+    "independentReviewer": "not_run",
+    "fullConversationReplay": "not_run",
+    "productionCodeChanged": true,
+    "workspaceTests": {
+      "workspaceCommand": "cargo test --workspace -- --test-threads=1",
+      "workspacePassed": 1614,
+      "workspaceFailed": 0,
+      "workspaceIgnored": 7,
+      "workspaceLog": ".somniq\\research\\docx-native-repair-20261111\\workspace-tests-complete.log",
+      "workspaceLogSha256": "819fb558d83467ad7cca43a29031c2d84b985193dc6c3f7db9ac95267cb5a27c",
+      "pythonTestsPassed": 16,
+      "pythonLog": ".somniq\\research\\docx-native-repair-20261111\\python-tests-final.log",
+      "pythonLogSha256": "c6a28bb1ab85e788d878ad505deba86f38292d7240c68988069014fb8432f982",
+      "requestDerivedAndEngineeringGroupsPassed": 9,
+      "requestRegressionResultsSha256": "21090c1081726bd46e69e13827b0588c82153d3ac7dbfa10b6884005deb37840",
+      "requestRenderedPagesObserved": 6,
+      "requestObservationSha256": "793f4646da005290c39a21c811a02b5ca6e76c1c05bab1e41e91e5165bfad4dc",
+      "schemaCandidates": 19,
+      "schemaNewErrors": 0
+    }
+  },
+  "historicalTargetEditorInspection": {
+    "wps": {
+      "version": "12.1.0.29690",
+      "testedFormat": "docx",
+      "overallCompatibility": "not_established",
+      "fontPagination": "failed_extra_blank_page_4",
+      "openSave": "font_case_only_observed_successfully",
+      "closeReopen": "not_completed",
+      "nativeEquationEditability": "not_tested"
+    },
+    "verification": {
+      "pdfPageScreenshotsViewed": 12,
+      "wpsPagesViewed": 4,
+      "libreOfficePagesViewed": 8,
+      "rasterizer": "pypdfium2 5.14.0",
+      "allFiveSourceDocumentsUnchanged": true,
+      "independentReviewer": "not_run",
+      "fullConversationReplay": "not_run",
+      "productionCodeChangedInThisVerification": false,
+      "workspaceTests": "not_repeated_documentation_and_read_only_inspection_only"
+    },
+    "cases": [
+      {
+        "case": "font",
+        "docxSha256": "ee6753888eff2363bfedca92bdd7a088ed6395c2870ff5002ae8a6c65c44fd4f",
+        "libreOfficePages": 3,
+        "libreOfficePdfSha256": "a34462a9b63cb2800ed1b3cf967c393217a3680f4c6b4e193122dee257018666",
+        "wpsStatus": "opened_saved_exported_reopen_not_observed",
+        "wpsSavedDocxSha256": "a70acce9a3cb2ea3d97dbae40690941443c88791934a3a88f8ce943f45cd6da2",
+        "wpsPdfSha256": "ab1dffc6cd696d4258acc60938e3f31a01d71b7b9b47d845bef78e8ac23f0239",
+        "wpsPages": 4,
+        "wpsBlankPages": [
+          4
+        ],
+        "structureComparison": {
+          "paragraphTextsExact": true,
+          "nonWhitespaceTextEqual": true,
+          "tablesExact": true,
+          "nativeEquationTextsEqual": true,
+          "mediaHashesEqual": true,
+          "pageBreakCountEqual": true
+        },
+        "pdfComparison": {
+          "pageCountsEqual": false,
+          "nonWhitespaceTextEqual": true
+        },
+        "wpsLayoutAcceptance": "failed"
+      },
+      {
+        "case": "dedup",
+        "docxSha256": "ff9b7d379bafb29d02d560b7db710350653741802658f37f430ce686aa2b90c6",
+        "libreOfficePages": 1,
+        "libreOfficePdfSha256": "c9fe99a9382aefbdd0158f28514788314501ed8208cb0a06b5f7fb0fa11202bc",
+        "wpsStatus": "not_completed"
+      },
+      {
+        "case": "math",
+        "docxSha256": "b2dba9ebad6c84cfa79e99719556973c9f39c1b253ed59f7f140a93c308c974f",
+        "libreOfficePages": 1,
+        "libreOfficePdfSha256": "5291410f7531ea6b922c188437830c44a125f003e001de926bfd7a6f10f4e43d",
+        "wpsStatus": "not_completed"
+      },
+      {
+        "case": "two-pages",
+        "docxSha256": "e8a6096aceafd096a317cbadee2bc0c81c7c91280c10101d46d1a0491797b5f7",
+        "libreOfficePages": 2,
+        "libreOfficePdfSha256": "a4eeab2659be347c48d596b4f3ef13d7b2f0ffa9cb7e6d6df97345443c459cb2",
+        "wpsStatus": "not_completed"
+      },
+      {
+        "case": "image",
+        "docxSha256": "5272614e35b0e2bfc31c1797ea36c17debc63c0d290151816aca41a17d6f0ec6",
+        "libreOfficePages": 1,
+        "libreOfficePdfSha256": "1b5b6c47b6056d2ec8512d257fcca4069da90515f4380df85b5639e1d25463fc",
+        "wpsStatus": "not_completed"
+      }
+    ],
+    "evidence": [
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/inputs.json",
+        "sha256": "874836ef651bbf957306a7c51c9b491dbeb9c5b41e961e02350b33ba20ad2f0c"
+      },
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/gap-probes/results.json",
+        "sha256": "b3cfcdcffd8acd062d84be02ea347770f9e1d091175a52c9e53b9521e7bcb464"
+      },
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/gap-probes/tool-calls.json",
+        "sha256": "caa4ee618abbb98988cdc66e38daf88e3f0a53372367a480e5a280398df9e04c"
+      },
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/pdf-inspection.json",
+        "sha256": "f1b1d03ef4f7499b549f6786f0e2377e0a17e7054794925be21cd493c4d0363a"
+      },
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/page-observations.json",
+        "sha256": "64dd97e778a01b006c982dcb5364c90fedf1f2bae2b7fe40d4589861eab5e2ee"
+      },
+      {
+        "path": ".somniq/research/wps-compatibility-20261111/font-page-comparison.png",
+        "sha256": "c3dd074ebab713a61258b59b9fe8723297f7864382524f10ad780e9b291cf073"
+      }
+    ]
+  },
+  "previousGapProbes": {
+    "scope": "historical unsupported probes before repairs",
+    "remainingAtThatTime": 13,
+    "snapshot": {
+      "path": ".somniq/research/docx-native-repair-20261111/report-history/docx-wps-compatibility.json",
+      "sha256": "106f778886096c542d9e6bf4edbece61cfea3b5703de65dbaab05019c53bf630"
+    }
+  },
+  "newEvidence": [
+    {
+      "path": ".somniq/research/docx-native-repair-20261111/page-observations.json",
+      "sha256": "2b92770ffd3ec1b8711034bfa2b4272cf41f96e9168e6e94e0c88a755f8957c1"
+    },
+    {
+      "path": ".somniq/research/docx-native-repair-20261111/schema-validation-final.json",
+      "sha256": "0a16dd22d2fb147218db881b4395076aa631e5b17efb1c41ec5032c6a64a3dc8"
+    }
+  ]
+}

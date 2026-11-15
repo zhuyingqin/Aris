@@ -138,6 +138,32 @@ describe("oracleWebSummaryFromTool", () => {
 });
 
 describe("imagePathsFromTool", () => {
+  it.each(["read_file", "read_files", "read_docx", "grep_search", "glob_search", "list_dir"])(
+    "does not preview incidental image references from %s",
+    (name) => {
+      const output = {
+        type: "text",
+        file: { filePath: "chapters/method.tex", content: "\\begin{figure}\n\\includegraphics[width=0.92\\linewidth]{img/ch2_incomplete_records.png}\n\\end{figure}" },
+        matches: [{ path: "chapters/method.tex", line: "\\includegraphics{img/ch2_incomplete_records.png}" }],
+      };
+      expect(imagePathsFromTool(tool(name, {}, output), null)).toEqual([]);
+    },
+  );
+
+  it.each(["read_file", "ReadMediaFile"])("keeps an actual image read from %s visible", (name) => {
+    expect(imagePathsFromTool(tool(name, {}, {
+      type: "image", filePath: "figures/actual image.png", mediaType: "image/png", base64: "ZmFrZQ==",
+    }), null)).toEqual(["figures/actual image.png"]);
+  });
+
+  it("previews successful image reads in a batch without mining source or failed reads", () => {
+    expect(imagePathsFromTool(tool("read_files", {}, { results: [
+      { ok: true, result: { type: "text", file: { content: "\\includegraphics{figures/reference.png}" } } },
+      { ok: true, result: { type: "image", filePath: "figures/result.png" } },
+      { ok: false, error: "Cannot read figures/missing.png" },
+    ] }), null)).toEqual(["figures/result.png"]);
+  });
+
   it("projects only the canonical artifact for oracle image output", () => {
     const paths = imagePathsFromTool(
       tool("ChatGptWebImage", {}, { images: [{ path: "figures/out.png" }, "figures/out.png"] }),

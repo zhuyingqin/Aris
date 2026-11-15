@@ -1188,6 +1188,12 @@ pub fn review_workflow_create(
     if let Some(message) = crate::membership::external_literature_denial() {
         return Err(message);
     }
+    if !crate::official_plugins::enabled_for_current_project(&app, runtime::plugins::BUILTIN_LITERATURE) {
+        return Err(
+            "A literature review needs the official Literature plugin, which is turned off for this project. Turn it on in Plugins first."
+                .into(),
+        );
+    }
     create_workflow(&TauriCtx::new(app), input)
 }
 

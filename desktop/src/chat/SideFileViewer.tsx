@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { fileAssetUrl, fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
 import { SharedEditor } from "../editor/SharedEditor";
 import { basename, languageForPath, workspaceFileOpenTarget } from "../editor/workspaceFiles";
+import { latexWorkspaceOn } from "../extensions/officialPlugins";
 import { useStore, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { PdfAnnotation } from "../literature/literatureTypes";
@@ -20,7 +21,7 @@ import "./SideFileViewer.css";
 /** PDF support (reader + literature stylesheet) is only paid for on first use. */
 const PdfReader = lazy(async () => {
   await import("../literature/Literature.css");
-  return import("../literature/PdfReader");
+  return import("../pdf/PdfReader");
 });
 
 const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];
@@ -111,7 +112,8 @@ export default function SideFileViewer({
   const currentProject = useStore((state) => state.currentProject);
   const copy = VIEWER_COPY[language];
   const kind = useMemo(() => sideFileKind(path), [path]);
-  const workspaceTarget = useMemo(() => workspaceFileOpenTarget(path), [path]);
+  const latexWorkspace = useStore((state) => latexWorkspaceOn(state.officialPlugins));
+  const workspaceTarget = useMemo(() => workspaceFileOpenTarget(path, { latexWorkspace }), [path, latexWorkspace]);
   const fileLocation = useMemo(() => {
     const parent = fileParent(path);
     if (!currentProject) return parent || copy.projectRoot;

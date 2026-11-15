@@ -46,6 +46,32 @@ afterEach(() => {
 });
 
 describe("ChatMessage rendering", () => {
+  it("summarizes successful inspection in Typeset while keeping failures, live tools and findings visible", async () => {
+    useStore.setState({ tab: "typeset" });
+    const user = userEvent.setup();
+    const { container } = render(<ChatMessage
+      turn={{ id: "typeset-activity", role: "assistant", streaming: true, blocks: [
+        { kind: "tool", id: "compact-read", name: "read_file", input: "{}", output: "chapter content" },
+        { kind: "tool", id: "compact-search", name: "grep_search", input: "{}", output: "matching lines" },
+        { kind: "tool", id: "failed-read", name: "read_file", input: "{}", output: "missing file", isError: true },
+        { kind: "tool", id: "pending-read", name: "read_file", input: "{}" },
+        { kind: "text", text: "Final finding: verify the figure caption." },
+      ] }}
+      canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined}
+    />);
+    const activity = screen.getByRole("button", { name: /2 read and search operations complete/ });
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".tool-error")).toHaveLength(1);
+    expect(container.querySelectorAll(".tool-running")).toHaveLength(1);
+    expect(screen.getByText("Final finding: verify the figure caption.")).toBeTruthy();
+    expect(screen.queryByText("matching lines")).toBeNull();
+    await user.click(activity);
+    expect(activity.getAttribute("aria-expanded")).toBe("true");
+    const child = container.querySelector(".chat-tool-activity .chat-tool-group-body .chat-tool-header")!;
+    fireEvent.click(child);
+    expect(screen.getByText("chapter content")).toBeTruthy();
+  });
+
   it("keeps live LaTeX output in one stable viewport and follows it only from the end", () => {
     const message = (stdoutTail: string, stderrTail: string | null = null) => (
       <ChatMessage

@@ -550,7 +550,12 @@ fn every_tool_has_a_failure_classification_decision() {
     // already sees) or only read and write local state.
     const NO_PAYLOAD_FAILURE: &[&str] = &[
         // Controller operations report errors as Err; list/wait describe state.
-        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "list_agents",
+        "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",
@@ -598,6 +603,8 @@ fn every_tool_has_a_failure_classification_decision() {
         "multi_edit",
         "read_file",
         "read_docx",
+        // ODT reads return Err on any failed parse; Ok is a completed snapshot.
+        "read_odt",
         "ReadMediaFile",
         "session_search",
         "write_file",
@@ -713,7 +720,12 @@ fn every_tool_is_triaged_for_external_retrieval() {
     const NO_RETRIEVAL: &[&str] = &[
         // These operate on local sessions/mailboxes. Child retrieval is metered
         // in that child's own runtime, not at the delegation operation.
-        "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "list_agents",
+        "interrupt_agent",
         "Agent",
         "Config",
         "KnowledgeSearch",
@@ -753,6 +765,16 @@ fn every_tool_is_triaged_for_external_retrieval() {
         "edit_file",
         // DOCX tools only read or mutate a local OOXML package.
         "edit_docx",
+        // Generation embeds authorised local images; rendering rejects linked
+        // external content. Neither operation retrieves external evidence.
+        "export_docx",
+        "format_docx",
+        "render_docx",
+        "delete_docx_paragraphs",
+        "export_docx_pdf",
+        "edit_docx_structure",
+        "remove_odt_highlight",
+        "read_odt",
         "glob_search",
         "grep_search",
         "memory",

@@ -17,9 +17,9 @@ interface Props {
   onOpenFile?: (path: string) => void;
 }
 
-function stepIcon(status: ChatTodoItem["status"], index: number) {
+function stepIcon(status: ChatTodoItem["status"], index: number, active: boolean) {
   if (status === "completed") return <SvgIcon name="check" size={12} />;
-  if (status === "in_progress") return <SvgIcon name="spinner" size={12} />;
+  if (status === "in_progress") return <SvgIcon name={active ? "spinner" : "clock"} size={12} />;
   return index + 1;
 }
 
@@ -68,6 +68,7 @@ export default function WorkflowFlow({
   const hasTodos = total > 0;
   const completedCount = todos.filter((todo) => todo.status === "completed").length;
   const allDone = total > 0 && todos.every((todo) => todo.status === "completed");
+  const paused = hasTodos && !allDone && !active;
   const index = hasTodos ? currentIndex(todos) : -1;
   const current = index >= 0 ? todos[index] : null;
   const stepNo = index + 1;
@@ -96,7 +97,7 @@ export default function WorkflowFlow({
   const stepLabel = current
     ? allDone
       ? (isChinese ? `已完成 ${total} 步` : `${total} ${total === 1 ? "step" : "steps"} complete`)
-      : (isChinese ? `第 ${stepNo} / ${total} 步` : `Step ${stepNo} / ${total}`)
+      : `${isChinese ? `第 ${stepNo} / ${total} 步` : `Step ${stepNo} / ${total}`}${paused ? (isChinese ? " · 待继续" : " · Paused") : ""}`
     : "";
   const fileLabel = isChinese ? `${fileCount} 个文件` : `${fileCount} ${fileCount === 1 ? "file" : "files"}`;
   const label = stepLabel
@@ -109,12 +110,12 @@ export default function WorkflowFlow({
   const title = current
     ? current.status === "in_progress" ? current.activeForm : current.content
     : titlePaths.join("\n");
-  const chipIcon: SvgIconName = hasTodos ? (allDone ? "check" : "spinner") : "modified";
+  const chipIcon: SvgIconName = hasTodos ? (allDone ? "check" : paused ? "clock" : "spinner") : "modified";
 
   return (
     <div
       ref={rootRef}
-      className={`chat-workflow${open ? " open" : ""}${allDone ? " done" : ""}${active ? " active" : ""}`}
+      className={`chat-workflow${open ? " open" : ""}${allDone ? " done" : ""}${active ? " active" : ""}${paused ? " paused" : ""}`}
       style={{ bottom: `${bottomOffset}px`, maxHeight: `calc(100% - ${bottomOffset + 16}px)` }}
     >
       {open && (
@@ -135,7 +136,7 @@ export default function WorkflowFlow({
                     aria-current={i === index && !allDone ? "step" : undefined}
                     className={`chat-workflow-step status-${todo.status}${i === index && !allDone ? " current" : ""}`}
                   >
-                    <span className="chat-workflow-step-icon" aria-hidden="true">{stepIcon(todo.status, i)}</span>
+                    <span className="chat-workflow-step-icon" aria-hidden="true">{stepIcon(todo.status, i, active)}</span>
                     <span className="chat-workflow-step-text">
                       {todo.status === "in_progress" ? todo.activeForm : todo.content}
                     </span>
@@ -186,7 +187,7 @@ export default function WorkflowFlow({
         className="chat-workflow-chip"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={label}
+        aria-label={current && !allDone ? `${label} · ${title}` : label}
         onClick={() => setOpen((value) => !value)}
         title={title}
       >
@@ -194,6 +195,7 @@ export default function WorkflowFlow({
           <SvgIcon name={chipIcon} size={13} />
         </span>
         <span className="chat-workflow-chip-label">{stepLabel || label}</span>
+        {current && !allDone && <span className="chat-workflow-chip-task">{title}</span>}
         {stepLabel && fileCount > 0 && <span className="chat-workflow-chip-files">· {fileLabel}</span>}
         <span className="chat-workflow-chip-caret"><SvgIcon name={open ? "chevronDown" : "chevronUp"} size={11} /></span>
       </button>

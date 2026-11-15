@@ -33,8 +33,8 @@ fn new_task_id(now: u64) -> String {
 
 #[tauri::command]
 pub async fn work_task_list(projects_state: State<'_, ProjectState>) -> Result<Vec<WorkTask>, String> {
-    let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || Ok(list_core(&project_id, &project_path))).await
+    let (project_id, _) = binding(&projects_state)?;
+    crate::blocking::off_main_thread(move || Ok(list_core(&project_id))).await
 }
 
 /// The board's load: the same rows as [`work_task_list`], plus the store
@@ -47,15 +47,15 @@ pub async fn work_task_list(projects_state: State<'_, ProjectState>) -> Result<V
 pub async fn work_task_snapshot(
     projects_state: State<'_, ProjectState>,
 ) -> Result<WorkTaskSnapshot, String> {
-    let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || Ok(snapshot_core(&project_id, &project_path))).await
+    let (project_id, _) = binding(&projects_state)?;
+    crate::blocking::off_main_thread(move || Ok(snapshot_core(&project_id))).await
 }
 
-pub(crate) fn snapshot_core(project_id: &str, project_path: &Path) -> WorkTaskSnapshot {
+pub(crate) fn snapshot_core(project_id: &str) -> WorkTaskSnapshot {
     let snapshot = store::snapshot(project_id);
     WorkTaskSnapshot {
         revision: snapshot.revision,
-        tasks: stamp_derived(project_path, snapshot.tasks),
+        tasks: stamp_derived(snapshot.tasks),
     }
 }
 
@@ -70,18 +70,16 @@ pub(crate) fn snapshot_core(project_id: &str, project_path: &Path) -> WorkTaskSn
 /// board treats the two differently: this one withdraws Accept, while
 /// `last_error` — for instance the reason a merge did not go through — leaves
 /// it offered so the user can fix the cause and try again.
-pub(crate) fn list_core(project_id: &str, project_path: &Path) -> Vec<WorkTask> {
-    stamp_derived(project_path, store::list(project_id))
+pub(crate) fn list_core(project_id: &str) -> Vec<WorkTask> {
+    stamp_derived(store::list(project_id))
 }
 
-fn stamp_derived(project_path: &Path, tasks: Vec<WorkTask>) -> Vec<WorkTask> {
-    let repository = worktree::is_git_repository(project_path);
+fn stamp_derived(tasks: Vec<WorkTask>) -> Vec<WorkTask> {
+    // Not gated on the project being a repository any more: a plain folder's
+    // tasks have checkouts too, and theirs can vanish the same way.
     tasks
         .into_iter()
         .map(|mut task| {
-            if !repository {
-                return task;
-            }
             if let Some(tree) = task.worktree.as_ref() {
                 task.worktree_missing = !Path::new(&tree.path).is_dir();
             }
@@ -123,7 +121,7 @@ pub(crate) fn create_core(
 /// `todo` until a second click is a step nobody wants: a user who describes a
 /// task means it to run. Saving without starting is still offered, explicitly.
 ///
-/// Atomic from the user's side: the repository check that would refuse the
+/// Atomic from the user's side: the host check that would refuse the
 /// launch runs *before* the row is written, so a project that cannot host a
 /// task never produces a card that silently refuses to start.
 #[tauri::command]
@@ -139,9 +137,7 @@ pub async fn work_task_create_and_start(
         let project_id = project_id.clone();
         let project_path = project_path.clone();
         move || {
-            if !worktree::is_git_repository(&project_path) {
-                return Err(NOT_A_REPOSITORY.to_string());
-            }
+            worktree::ensure_can_host_tasks(&project_path)?;
             let created = create_core(&project_id, title, prompt, model)?;
             start_core(&project_id, &project_path, &created.id)
         }
@@ -152,43 +148,100 @@ pub async fn work_task_create_and_start(
     Ok(queued)
 }
 
-/// Create and queue the work task for one firing of a scheduled automation.
+/// One occurrence of a scheduled automation, as the scheduler hands it over.
+pub(crate) struct ScheduledRunRequest {
+    pub scheduled_task_id: String,
+    /// Identity of the occurrence. A card carrying it already means this
+    /// occurrence was delivered, whatever the scheduler's own records say.
+    pub occurrence_key: String,
+    pub title: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    /// Conversation the run must use; `None` lets the engine mint one.
+    pub target_session_id: Option<String>,
+}
+
+/// What became of a [`ScheduledRunRequest`].
+#[derive(Debug)]
+pub(crate) enum ScheduledRunOutcome {
+    /// A new card was queued for the occurrence.
+    Queued(WorkTask),
+    /// A card for this occurrence already exists — the queue write of an
+    /// earlier attempt landed (a restart, a second tick). Nothing was added.
+    AlreadyQueued(WorkTask),
+    /// Not queued: an earlier run still holds this automation, or the
+    /// conversation it must run in. The occurrence is still owed.
+    Busy { task_id: String, status: WorkTaskStatus },
+}
+
+/// Create and queue the work task for one occurrence of a scheduled automation.
 ///
 /// Not a Tauri command: the caller is `scheduled.rs`, not the UI. It exists so
 /// an automation and a hand-made task are the same kind of thing from here on
-/// — same worktree, same review, same recovery — rather than a second runner
-/// with its own idea of what "running" and "finished" mean.
+/// — same worktree, same independent review, same recovery — rather than a
+/// second runner with its own idea of what "running" and "finished" mean.
 ///
-/// Refuses if the automation already has a run in flight. A schedule whose
-/// interval is shorter than its work would otherwise stack up runs that all
-/// edit the same branch.
+/// Idempotent per `occurrence_key`, and atomic: the lookup and the insert
+/// happen under one store lock, so two callers for the same occurrence get one
+/// card between them.
+///
+/// Reports `Busy` rather than queuing when
+/// - the automation already has a run queued or holding a slot — a schedule
+///   whose interval is shorter than its work would otherwise stack up runs
+///   against the same base branch; or
+/// - the target conversation is carrying another run's turn, or a run waiting
+///   on the user's answer. A conversation holds one turn at a time, and an
+///   answered question resumes in it; a second run there would interleave two
+///   briefs in one history.
 pub(crate) fn queue_scheduled_run(
     project_id: &str,
     project_path: &Path,
-    scheduled_task_id: &str,
-    title: String,
-    prompt: String,
-    model: Option<String>,
-) -> Result<WorkTask, String> {
-    if !worktree::is_git_repository(project_path) {
-        return Err(NOT_A_REPOSITORY.to_string());
+    request: ScheduledRunRequest,
+) -> Result<ScheduledRunOutcome, String> {
+    worktree::ensure_can_host_tasks(project_path)?;
+    let title = request.title.trim().to_string();
+    if title.is_empty() {
+        return Err("a work task needs a title".to_string());
     }
-    if let Some(existing) = store::list(project_id).into_iter().find(|task| {
-        task.scheduled_task_id.as_deref() == Some(scheduled_task_id)
-            && (task.status.holds_a_slot() || task.status == WorkTaskStatus::Queued)
-    }) {
-        return Err(format!(
-            "the previous run of this automation is still {} — skipping this firing rather than \
-             starting a second run against the same branch",
-            existing.status.as_str()
-        ));
-    }
-    let created = create_core(project_id, title, prompt, model)?;
-    store::update(project_id, &created.id, |task| {
-        task.scheduled_task_id = Some(scheduled_task_id.to_string());
-        Ok(())
+    let now = store::now_ms();
+    let mut task = WorkTask::new(new_task_id(now), title, request.prompt.trim().to_string(), now);
+    task.model = request.model.filter(|value| !value.trim().is_empty());
+    task.scheduled_task_id = Some(request.scheduled_task_id.clone());
+    task.scheduled_occurrence_key = Some(request.occurrence_key.clone());
+    task.target_session_id = request.target_session_id.clone();
+    // Equivalent to create + start for a fresh card: nothing of a previous
+    // run to clear, and one write instead of three.
+    task.status = WorkTaskStatus::Queued;
+
+    let inserted = store::insert_unless(project_id, task, |existing| {
+        if let Some(card) = existing
+            .iter()
+            .find(|card| card.scheduled_occurrence_key.as_deref() == Some(&request.occurrence_key))
+        {
+            return Some(ScheduledRunOutcome::AlreadyQueued(card.clone()));
+        }
+        existing
+            .iter()
+            .find(|card| {
+                let in_flight = card.status.holds_a_slot() || card.status == WorkTaskStatus::Queued;
+                let same_automation =
+                    card.scheduled_task_id.as_deref() == Some(&request.scheduled_task_id);
+                let same_conversation = request.target_session_id.is_some()
+                    && (card.target_session_id == request.target_session_id
+                        || card.session_id == request.target_session_id);
+                (same_automation && in_flight)
+                    || (same_conversation
+                        && (in_flight || card.status == WorkTaskStatus::AwaitingInput))
+            })
+            .map(|card| ScheduledRunOutcome::Busy {
+                task_id: card.id.clone(),
+                status: card.status,
+            })
     })?;
-    start_core(project_id, project_path, &created.id)
+    Ok(match inserted {
+        Ok(task) => ScheduledRunOutcome::Queued(task),
+        Err(outcome) => outcome,
+    })
 }
 
 #[tauri::command]
@@ -295,19 +348,16 @@ pub async fn work_task_start(
 }
 
 /// Queue a task, refusing up front what the engine would only discover at
-/// launch — a project that is not a repository has nowhere to isolate the work,
-/// and finding that out after the card has moved is worse than not moving it.
-pub(crate) const NOT_A_REPOSITORY: &str =
-    "work tasks need a Git repository: this project is not one, so there is no branch to isolate the work on";
-
+/// launch. Any folder can host a task (a plain folder gets a private
+/// repository, see `shadow`), but not without Git installed or a folder that
+/// is gone — and finding that out after the card has moved is worse than not
+/// moving it.
 pub(crate) fn start_core(
     project_id: &str,
     project_path: &Path,
     task_id: &str,
 ) -> Result<WorkTask, String> {
-    if !worktree::is_git_repository(project_path) {
-        return Err(NOT_A_REPOSITORY.to_string());
-    }
+    worktree::ensure_can_host_tasks(project_path)?;
     store::update(project_id, task_id, |task| {
         match task.status {
             status

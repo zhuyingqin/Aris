@@ -1,0 +1,6 @@
+{
+  "name": "@local/research-skills",
+  "version": "0.1.0",
+  "description": "Skills for this project's research workflow.",
+  "dsh": { "manifestVersion": 1, "bundle": { "patch": "./cordis.patch.yml" } }
+}

@@ -110,7 +110,7 @@ const PANEL_LIMITS = {
 } as const;
 type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
 
-const PdfReader = lazy(() => import("./PdfReader"));
+const PdfReader = lazy(() => import("../pdf/PdfReader"));
 
 const AUTO_RETRIEVAL_CARDS_STORAGE_KEY = "somniq-literature-auto-retrieval-cards-v1";
 const DISCOVER_MODE_STORAGE_KEY = "somniq-literature-discover-mode-v1";

@@ -1,17 +1,16 @@
 //! The signed-in SomniQ account, as the shared research gateway sees it.
 //!
-//! Gateway routes that spend a shared institutional allowance (the school's
-//! Scopus route) identify the caller by this desktop's account session. The
-//! session lives in the desktop's credential store and renews asynchronously,
-//! so `tools` cannot read it directly: the desktop registers a provider at
-//! startup. Without one (tests, headless callers) nobody is signed in.
-//! Account-billed tools such as DeepSeek search use the provider's separate
-//! downstream API credential; the dashboard session is never substituted.
+//! Account-billed tools (DeepSeek search, the school's Scopus route) present
+//! the account's downstream API token to the account gateway, which checks the
+//! tier and charges credits. The token lives in the desktop's credential
+//! store, so `tools` cannot read it directly: the desktop registers a provider
+//! at startup. Without one (tests, headless callers) nobody is signed in. The
+//! dashboard session is never handed to tools.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-/// The account's downstream API token, used for account-billed tools. This is
-/// distinct from the dashboard access token used by institutional routes.
+/// The account's downstream API token, used for account-billed tools. It is
+/// only ever presented to a gateway on the same host as `issuer`.
 #[derive(Clone)]
 pub struct ResearchApiCredential {
     pub issuer: String,
@@ -27,34 +26,10 @@ impl std::fmt::Debug for ResearchApiCredential {
     }
 }
 
-/// A currently valid account credential.
-#[derive(Clone)]
-pub struct ResearchAccountCredential {
-    /// Base URL of the account service that issued `access_token`. The token
-    /// is only ever presented to a gateway on this same host.
-    pub issuer: String,
-    pub user_id: i64,
-    pub access_token: String,
-}
-
-impl std::fmt::Debug for ResearchAccountCredential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResearchAccountCredential")
-            .field("issuer", &self.issuer)
-            .field("user_id", &self.user_id)
-            .field("access_token", &"<redacted>")
-            .finish()
-    }
-}
-
 pub trait ResearchAccountProvider: Send + Sync {
     /// Issuer of the stored session, read from local state only: no network
     /// request and no renewal. `None` when this desktop is signed out.
     fn session_issuer(&self) -> Option<String>;
-
-    /// A currently valid credential, renewing it when needed. Blocks; call it
-    /// from a blocking context. `Ok(None)` means signed out.
-    fn credential(&self) -> Result<Option<ResearchAccountCredential>, String>;
 
     /// The signed-in account's model API token. Never substitute a dashboard
     /// JWT or refresh cookie. Headless callers without an account return None.

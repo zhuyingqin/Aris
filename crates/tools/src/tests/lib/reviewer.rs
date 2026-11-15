@@ -2,12 +2,15 @@ use super::*;
 
 // ─── LlmReview routing + fallback tests ──────────────────────────────
 //
-// These tests serialize around ENV_LOCK_REVIEWER because resolve_reviewer_model
-// reads real env vars (to check whether the requested model's key is set).
+// These tests serialize on the crate's one env lock because
+// resolve_reviewer_model reads real env vars (to check whether the requested
+// model's key is set). A second lock here would not exclude the other tests
+// that set the same process-wide variables.
 
-fn env_lock_reviewer() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock_reviewer() -> std::sync::MutexGuard<'static, ()> {
+    env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 const REVIEWER_KEY_ENVS: &[&str] = &[
@@ -55,7 +58,7 @@ impl Drop for ReviewerEnvSnapshot {
 
 #[test]
 fn managed_reviewer_session_policy_follows_endpoint_not_model() {
-    let _guard = env_lock_reviewer().lock().unwrap();
+    let _guard = env_lock_reviewer();
     let _snapshot = ReviewerEnvSnapshot::capture_and_clear();
     std::env::set_var("ARIS_REVIEWER_PROVIDER", "custom");
     std::env::set_var(
@@ -90,7 +93,7 @@ fn managed_reviewer_session_policy_follows_endpoint_not_model() {
 
 #[test]
 fn explicit_opencode_reviewer_uses_its_connection_for_any_model_alias() {
-    let _guard = env_lock_reviewer().lock().unwrap();
+    let _guard = env_lock_reviewer();
     let _snapshot = ReviewerEnvSnapshot::capture_and_clear();
     std::env::set_var("ARIS_REVIEWER_PROVIDER", "opencode");
     std::env::set_var("ARIS_REVIEWER_MODEL", "claude-custom-alias");
@@ -109,7 +112,7 @@ fn explicit_opencode_reviewer_uses_its_connection_for_any_model_alias() {
 
 #[test]
 fn route_openai_compat_model_picks_provider_from_name() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
 
     assert_eq!(route_openai_compat_model("gpt-5.5").0, "OPENAI_API_KEY");
@@ -145,7 +148,7 @@ fn route_openai_compat_model_picks_provider_from_name() {
 
 #[test]
 fn resolve_reviewer_model_returns_configured_when_input_absent() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
 
     let model = resolve_reviewer_model(None, "kimi-k2.5");
@@ -154,7 +157,7 @@ fn resolve_reviewer_model_returns_configured_when_input_absent() {
 
 #[test]
 fn resolve_reviewer_model_returns_configured_when_input_empty_string() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
 
     let model = resolve_reviewer_model(Some(""), "kimi-k2.5");
@@ -163,7 +166,7 @@ fn resolve_reviewer_model_returns_configured_when_input_empty_string() {
 
 #[test]
 fn resolve_reviewer_model_falls_back_when_requested_key_missing() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
     std::env::set_var("KIMI_API_KEY", "sk-kimi");
     // Executor requested gpt-4o but only KIMI_API_KEY is set — fall back.
@@ -173,7 +176,7 @@ fn resolve_reviewer_model_falls_back_when_requested_key_missing() {
 
 #[test]
 fn resolve_reviewer_model_falls_back_on_provider_mismatch() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
     // Both keys set, but configured reviewer is MiniMax — executor asking
     // for gpt-4o must NOT silently route to the stray OPENAI_API_KEY.
@@ -188,7 +191,7 @@ fn resolve_reviewer_model_falls_back_on_provider_mismatch() {
 
 #[test]
 fn resolve_reviewer_model_honors_matching_override() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
     // Configured reviewer is OpenAI (gpt-5.5); executor asks for gpt-5.5-mini.
     std::env::set_var("OPENAI_API_KEY", "sk-openai");
@@ -224,7 +227,7 @@ fn resolve_anthropic_compat_reviewer_model_honors_deepseek_override() {
 
 #[test]
 fn llm_review_disabled_reviewer_does_not_fall_back_to_gpt() {
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
     std::env::set_var("ARIS_REVIEWER_PROVIDER", "none");
 
@@ -254,7 +257,7 @@ fn resolve_reviewer_model_after_slash_reviewer_switch() {
     // ARIS_REVIEWER_MODEL but leaves ARIS_REVIEWER_PROVIDER stale as "gemini".
     // Executor now asks for gpt-5.5-mini — this MUST be honored since the
     // user's real intent (per ARIS_REVIEWER_MODEL) is OpenAI.
-    let _g = env_lock_reviewer().lock().unwrap();
+    let _g = env_lock_reviewer();
     let _snap = ReviewerEnvSnapshot::capture_and_clear();
     std::env::set_var("OPENAI_API_KEY", "sk-openai");
     // Stale provider env var from earlier /setup — deliberately wrong.

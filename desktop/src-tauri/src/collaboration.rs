@@ -447,6 +447,7 @@ impl Host {
             inner: KernelToolExecutor {
                 session_id: handle.session_id.clone(),
                 turn_id: turn.into(),
+                turn_agent: None,
                 extra_blocked_tools: &[],
                 cancelled: Some(cancel.clone()),
                 progress_sink: None,

@@ -47,6 +47,7 @@ describe("WorkflowFlow", () => {
     // Collapsed chip shows current step (the in-progress one is step 2 of 4).
     const chip = screen.getByRole("button", { expanded: false });
     expect(chip.textContent).toContain("Step 2 / 4");
+    expect(chip.textContent).toContain("正在实现 Rust IMAP/SMTP");
 
     // Panel is hidden until clicked.
     expect(screen.queryByRole("list")).toBeNull();
@@ -60,6 +61,26 @@ describe("WorkflowFlow", () => {
     const done = SAMPLE.map((t) => ({ ...t, status: "completed" as const }));
     render(<WorkflowFlow todos={done} fileChanges={[]} bottomOffset={120} active={false} />);
     expect(screen.getByRole("button").textContent).toContain("4 steps complete");
+  });
+
+  it("labels unfinished idle steps as paused and restores their active state when resumed", async () => {
+    const { container, rerender } = render(<WorkflowFlow todos={SAMPLE} fileChanges={[]} bottomOffset={120} active={false} />);
+    expect(screen.getByRole("button").textContent).toContain("Step 2 / 4 · Paused");
+    expect(container.querySelector(".chat-workflow.paused")).toBeTruthy();
+    expect(container.querySelector(".chat-workflow-chip-icon.spin")).toBeNull();
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByRole("list").textContent).toContain("正在实现 Rust IMAP/SMTP");
+    expect(screen.getByText("1 / 4 complete")).toBeTruthy();
+    rerender(<WorkflowFlow todos={SAMPLE} fileChanges={[]} bottomOffset={120} active />);
+    expect(screen.getByRole("button", { name: /Step 2 \/ 4/ }).textContent).not.toContain("Paused");
+    expect(container.querySelector(".chat-workflow-chip-icon.spin")).toBeTruthy();
+  });
+
+  it("localizes the paused state without marking remaining steps complete", () => {
+    useStore.setState({ language: "cn" });
+    render(<WorkflowFlow todos={SAMPLE} fileChanges={[]} bottomOffset={120} active={false} />);
+    expect(screen.getByRole("button").textContent).toContain("第 2 / 4 步 · 待继续");
+    expect(screen.queryByText("已完成 4 步")).toBeNull();
   });
 
   it("renders file changes without todos", async () => {
@@ -213,7 +234,7 @@ describe("WorkflowFlow", () => {
       <WorkflowFlow todos={SAMPLE} fileChanges={[{ path, status: "added" }]} bottomOffset={120} active onOpenFile={onOpenFile} />,
     );
 
-    const chip = screen.getByRole("button", { name: "第 2 / 4 步 · 1 个文件" });
+    const chip = screen.getByRole("button", { name: "第 2 / 4 步 · 1 个文件 · 正在实现 Rust IMAP/SMTP" });
     await user.click(chip);
     expect(screen.getByRole("region", { name: "流程与文件" })).toBeTruthy();
     expect(screen.getByText("已完成 1 / 4 步")).toBeTruthy();

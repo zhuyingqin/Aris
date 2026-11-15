@@ -234,6 +234,7 @@ pub async fn figures_edit_image(
     input: EditImageInput,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &input.project_id)?;
+    crate::official_plugins::require_in(&workspace, runtime::plugins::BUILTIN_FIGURES)?;
     if input.prompt.trim().is_empty() || input.prompt.len() > 4000 {
         return Err("请填写修改要求，最多 4000 字节。".into());
     }

@@ -7,6 +7,47 @@ import { useTypesetPanels } from "../useTypesetPanels";
 afterEach(cleanup);
 
 describe("Typeset Chat panel width", () => {
+  it("starts resizing at the rendered width when the responsive default differs from the stored width", () => {
+    const { result } = renderHook(() => useTypesetPanels(true));
+    const panel = document.createElement("div");
+    const divider = document.createElement("div");
+    const host = document.createElement("div");
+    host.append(panel, divider);
+    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 310, 500));
+    vi.spyOn(divider, "getBoundingClientRect").mockReturnValue(new DOMRect(310, 0, 6, 500));
+    expect(result.current.chatPanelResized).toBe(false);
+    act(() => result.current.beginPanelResizeFromPointer("project", {
+      pointerType: "mouse", button: 0, clientX: 310, clientY: 0, currentTarget: divider,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    } as unknown as PointerEvent<HTMLDivElement>));
+    act(() => window.dispatchEvent(new MouseEvent("mousemove", { clientX: 330 })));
+    act(() => window.dispatchEvent(new MouseEvent("mouseup")));
+    expect(result.current.projectPanelWidth).toBe(330);
+    expect(result.current.chatPanelResized).toBe(true);
+  });
+
+  it("restores the user's layout after focus and lets a rail action leave focus", () => {
+    const { result } = renderHook(() => useTypesetPanels(true));
+    act(() => {
+      result.current.setPdfPanelVisible(false);
+      result.current.handlePanelResizeKey("project", {
+        key: "ArrowRight", shiftKey: true, preventDefault: vi.fn(),
+      } as unknown as KeyboardEvent<HTMLDivElement>);
+    });
+    const width = result.current.projectPanelWidth;
+    act(() => result.current.toggleEditorFocus());
+    expect(result.current.editorFocused).toBe(true);
+    act(() => result.current.toggleEditorFocus());
+    expect(result.current.projectPanelVisible).toBe(true);
+    expect(result.current.pdfPanelVisible).toBe(false);
+    expect(result.current.projectPanelWidth).toBe(width);
+
+    act(() => result.current.toggleEditorFocus());
+    act(() => result.current.setPdfPanelVisible(true));
+    expect(result.current.editorFocused).toBe(false);
+    expect(result.current.pdfPanelVisible).toBe(true);
+  });
+
   it("keeps file and Chat widths independent through keyboard and pointer resizing", () => {
     const { result, rerender } = renderHook(({ chat }) => useTypesetPanels(chat), {
       initialProps: { chat: false },

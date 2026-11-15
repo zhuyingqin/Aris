@@ -1,6 +1,6 @@
 # 智能记忆 L1 设计稿：可追溯笔记 + 可靠历史检索 + 有限次数补录
 
-状态：设计稿，未实现。日期：2026-10-20；修订 1：见 §0.1；修订 2：见 §0.2；修订 3：按当前 Rust 存储与模型接口修复协议，见 §0.3；修订 4（2026-10-21）：补录的成本、活性与触发，冻结落点、评估设计与中文检索，见 §0.4。
+状态：设计稿，未实现。日期：2026-10-20；修订 1：见 §0.1；修订 2：见 §0.2；修订 3：按当前 Rust 存储与模型接口修复协议，见 §0.3；修订 4（2026-10-21）：补录的成本、活性与触发，冻结落点、评估设计与中文检索，见 §0.4；第 0 步实测与二元组影子列，见 §0.5；修订 5：去掉 CLI 字样、改正路径作用域、收窄未审笔记的注入面，见 §0.6。
 前置阅读：`memory-l1-notes-plan.md`（论证与外部证据）、`memory-quality-review-2026-09-06.md`（v2 缺陷清单）。
 本文件只描述目标实现；附录 A 是已踩过的坑编号表（P1–P30），正文用 `[避 Pn]` 标注每条设计避开了哪个坑。
 
@@ -49,10 +49,43 @@
 | R4-3 | T1 只挂在 Desktop 回合前压缩；runtime 内部的 soft checkpoint、超窗压缩、回合末压缩三条路径绕过它，压缩槽位计数也会对不上 | `conversation.rs:1368`、`:1375`、`:1912`；归档原文见 `restore_pristine_archive` | 取消压缩触发：压缩不销毁源回合（`messages_for_turn` 可从归档读回；只瘦身未压缩时的就地截断与压缩无关），补录不必抢在压缩前；§20.5 的回合等待随之消失 | §5.3 §20 |
 | R4-4 | 后台额度 B=1 是会话终身总额，T3（切换/退出，≥1 回合）与 T2 共用，第一次切会话就会用光；退出时被杀的请求同样算已用；修订 3 写的 "`MemoryState` 空闲定时器"不存在 | `desktop/src-tauri/src/memory.rs` 只有 `spawn_v2_outbox_drain`，没有空闲检查 | 配额按已结束回合发放：`⌈ended_turns/10⌉`；触发改为批满（≥10 回合）、按会话计的空闲（≥3 回合、10 分钟，不论是否在前台）和启动补扫；切换/退出不发请求 | §5.3 §10 |
 | R4-5 | 对比实验测不出笔记的价值：标注题取自过去 30 天与 v2 捕获，新笔记只在灰度那一周才有，legacy 导出又排在切默认之后，评估时 X2≈X1；token 与"旧结论误用"需要真实跑模型，`memory_eval` 只跑检索 | §18 与 §19 阶段表 | 题集分 A 组（灰度期，测笔记增益）与 B 组（历史与迁移）；评估前在临时配置根和独立索引里先跑导出；评估分检索层（无模型）和端到端层（有模型），各自定义 X0 的命中 | §18 §19 |
-| R4-6 | "会话内冻结"没有落点：提示词构建函数不接收会话，缓存是进程内单槽，重启会重新取快照；目标 3 声称"记忆块会话内逐字不变"，但 MEMORY/USER 每回合都会重新渲染 | `build_system_prompt_inner_with_memory(model, full_tool_registry, include_builtin_memory)`；`system_prompt.rs:46`；缓存键含 `hot_memory`、`current_date` | 快照随会话持久化，按"会话 × 本地日"滚动（与已在键里的 `current_date` 同步）；由 engine 传入构建函数；承诺收窄到 RECENT NOTES 块，本期不冻结 MEMORY/USER | §1 §8 |
-| R4-7 | 中文关键词多为两字词，LIKE 是主路径而非退路；两字 LIKE 用不上 trigram 索引，在 207 会话的项目上每次都是全表扫描、结果无序；覆盖率按三元组计会惩罚长查询，工具描述却让模型写整句 | `session_index.rs` 的 `search_like`；§7.1 原描述 | 工具描述改为空格分隔的 2–5 个关键词；覆盖率按查询词计；`session_chunks` 的 LIKE 限时间窗与扫描上限、带截断标记；p95 ≤300 ms 作为验收，不达标先上 CJK 二元组影子列 | §7.1 §7.3 §14 |
+| R4-6 | "会话内冻结"没有落点：提示词构建函数不接收会话，缓存是进程内单槽，重启会重新取快照；目标 3 声称"记忆块会话内逐字不变"，但 MEMORY/USER 每回合都会重新渲染 | `build_system_prompt_inner_with_memory(model, full_tool_registry, include_builtin_memory)`；`system_prompt.rs:47`；缓存键含 `hot_memory`、`current_date` | 快照随会话持久化，按"会话 × 本地日"滚动（与已在键里的 `current_date` 同步）；由 engine 传入构建函数；承诺收窄到 RECENT NOTES 块，本期不冻结 MEMORY/USER | §1 §8 |
+| R4-7 | 中文关键词多为两字词，LIKE 是主路径而非退路；两字 LIKE 用不上 trigram 索引，在 207 会话的项目上每次都是全表扫描、结果无序；覆盖率按三元组计会惩罚长查询，工具描述却让模型写整句 | `session_index.rs` 的 `search_like`；§7.1 原描述 | 工具描述改为空格分隔的 2–5 个关键词；覆盖率按查询词计；`session_chunks` 的 LIKE 限时间窗与扫描上限、带截断标记；p95 ≤300 ms 作为验收，不达标先上 CJK 二元组影子列。LIKE 部分已由 §0.5 改为二元组 | §7.1 §7.3 §14 |
 
 修订 4 只修正文档，未新增生产实现。修订 3 的回合归属、规范事件、`NoteId`、provider 终态归一与"请求前预留、失败计次"仍然有效；被取代的只有：压缩槽位、后台总额 B、T1/T2/T3 触发、`flush_turn_too_large`、`max_tokens=600`、按三元组计的覆盖率，以及修订 1 的单组题集。
+
+### 0.5 第 0 步实测与二元组影子列 [2026-10-21]
+
+在最大的项目（`desktop-runtime/projects/project-30f13e9270ca81ec`，207 个会话）上只读会话文件测量。用的是 Python 自带的 SQLite 3.45.3；产品打包的是 3.46，FTS5 实现基本一致。数据库刚建好、文件在系统缓存里，属热缓存数字。切块按 §6.2：只取用户与助手文本，约 400 token 一块、重叠 80。
+
+| 项 | 实测 |
+|---|---|
+| 会话目录体积 | 3,051 MB，大部分是 `.wire.jsonl` 原始请求日志；规范事件日志 458 MB |
+| 可索引文本 | 383 万字（约 150 万估算 token），5,526 块；是第二大项目的 9 倍 |
+| trigram 索引 | 15 MB，构建 1.2 秒（另需 3.4 秒解析事件） |
+| CJK 二元组影子列（contentless，`unicode61`） | 2.1 MB，构建 0.5 秒 |
+| trigram MATCH（三字以上的词） | p95 0.6 ms |
+| 两字词 LIKE，1 个词 / 3 个词 | p95 15 / 38 ms；命中中位数达到 50 条的上限，没有 bm25，只能按时间排 |
+| 两字词二元组 MATCH，1 个词 / 3 个词 | p95 1.1 / 2.4 ms，有 bm25 |
+| 典型查询（1 个长词 + 2 个两字词，LIKE 版） | p95 33 ms |
+| 修订 4 的 LIKE 范围限制 | 90 天窗口覆盖 5,127/5,526 块，2 万块上限碰不到，实际不起作用 |
+
+结论与改动：
+
+1. 性能不构成问题。LIKE 版的典型查询也只有 33 ms；按线性外推，文本量再大约 8 倍才接近 300 ms。
+2. 两字词的问题在排序：LIKE 命中多、没有 bm25。二元组影子列只要 2.1 MB、半秒构建，所以**会话切块上的短词改走二元组表 MATCH**（§6.1、§7.2、§7.3）；LIKE 只留给规模很小的笔记表。原 §14 的"阶 0.5"并入阶 0。
+3. 修订 4 为 LIKE 加的范围限制（90 天、2 万块、截断标记）随之删除。
+4. 更正：此前说的"207 个会话共 3 GB"指整个会话目录，检索语料只有 383 万字。§6.2 的切块理由仍成立：带文本的消息有 2,131 条，平均一千多字，整条返回放不进 700 字符。
+
+测量的局限：有 3 个会话没有规范事件，被跳过；会话重写时事件时间会刷新，所以"90 天内的块数"偏多；以后若把工具输出纳入索引，需要重测。脚本见 `%LOCALAPPDATA%\Temp\l1-perf\scripts\perf.py`，实现 `memory_eval` 时并入仓库。
+
+### 0.6 修订 5：一致性与注入面 [2026-10-21]
+
+| # | 问题 | 依据 | 修复约定 | 节 |
+|---|---|---|---|---|
+| R5-1 | 文中多处按"Desktop 与 CLI 共用"来写 | 终端外壳 `aris-cli` 已于 2026-08-08 删除，仓库已无 `crates/cli`，Desktop 是唯一前端 | 去掉 CLI 字样；跨进程写锁保留，理由改为防止 devserver 等第二个进程同时写 | §4.3 §5.2 |
+| R5-2 | §16 要求路径留在"当前项目根目录"内，但笔记在配置目录下，会话也不在工作区 | 会话目录是 `state::sessions_dir_for_project(project_id)`，即 `<config>/desktop-runtime/projects/<project_id>/sessions`；Desktop 为每个项目设置 `ARIS_DESKTOP_PROJECT_ID` | 作用域改为"当前项目的笔记目录与会话目录"，两者以同一个 `project_id` 关联；回退到 `project_scope()` 时去掉 `project:` 前缀 | §4.1 §16 |
+| R5-3 | 未经审查、由模型写下的笔记会进入下一会话的系统提示；若写笔记的回合读过网页、文献或邮件，外部内容可借笔记获得系统提示的位置。导出日当天，legacy 导出文件也会整份挤进注入块 | §8 原规则只看日期 | 代码按回合标记 `input:external`（补录按整批）：回合内只要有工具调用读入外部内容即标记，判定函数与 `retrieval_guard.rs` 的检索工具名单放在一起，并有工具清点测试。注入块只收带 `turn:` 来源、且没有 `input:external` 的行；被排除的行照常可搜 | §4.2 §5 §8 §16 §17 |
 
 ---
 
@@ -105,7 +138,7 @@ L2/L3 的写入路径本期不动；从 L1 到 L2/L3 的晋升规则见 §5.6。
                                                      SessionIndexer（已有，加切块 + turn_id）► session_chunks(_fts)
                                                                                    │
 系统提示 ◄── MEMORY.md + USER.md + 本会话当日的今昨笔记快照（≤1,500 字，去来源）    │
-模型 ──► memory_search(query, days?, kind?, scope?) ──► 两表各自 bm25 → RRF → 衰减/kind 权重 → 修正投影 → MMR → top 6
+模型 ──► memory_search(query, days?, kind?, scope?) ──► 长词/短词分列表（trigram、二元组、笔记 LIKE）各自排名 → RRF → 衰减/kind 权重 → 修正投影 → MMR → top 6
 模型 ──► memory_get(path, lines?) / session_search(turn_id | query)
 ```
 
@@ -123,13 +156,13 @@ L2/L3 的写入路径本期不动；从 L1 到 L2/L3 的晋升规则见 §5.6。
 ```
 
 - `<somniq_config_dir>` = `runtime::somniq_config_dir_from_env()`（`~/.config/SomniQ`，可由 `ARIS_CONFIG_ROOT` 覆盖）。测试通过这个环境变量指向临时目录。[避 P28]
-- `<project_id>` 取自 `ARIS_DESKTOP_PROJECT_ID`（`project_scope()` 已用同一来源）；无桌面项目时用 `project_scope()` 的 16 位 hash。
+- `<project_id>` 取自 `ARIS_DESKTOP_PROJECT_ID`。Desktop 为每个项目设置它，未绑定项目时为 `default`；会话目录用的也是这个值（§16）。只有测试等未设置该变量的场合才回退到 `project_scope()` 的 16 位 hash，目录名去掉 `project:` 前缀（冒号在 Windows 路径里非法）。[修订 5]
 - **文件名日期 = 记录日期**（这一行写进文件的本地日期）。事件发生时间若不同，放 `observed` 字段（§4.2）。两者分开，回填不会改写任何一个。[避 P15]
 
 ### 4.2 行格式
 
 ```
-- HH:MM [kind] 陈述 ← turn:<audit_turn_id>[ tool:<tool_use_id>] ^<note_id>[ replaces:<note_id>][ observed:YYYY-MM-DD]
+- HH:MM [kind] 陈述 ← turn:<audit_turn_id>[ tool:<tool_use_id>] ^<note_id>[ replaces:<note_id>][ observed:YYYY-MM-DD][ input:external]
 ```
 
 示例：
@@ -150,13 +183,13 @@ statement = 1*( any char except newline and "←" ) ;          (* 6 ≤ chars �
 source    = "turn:" turn-id [ " tool:" tool-use-id ] | "legacy:" session-id "#" index "/" atom-id ;
 note-id   = "n_" 10( base32-char ) ;                           (* 写入时生成，50 bit *)
 base32-char = "a"…"z" | "2"…"7" ;                           (* RFC 4648 base32，小写 *)
-attr      = "replaces:" note-id | "observed:" DATE ;
+attr      = "replaces:" note-id | "observed:" DATE | "input:external" ;
 ```
 
 解析正则：
 
 ```
-^- (\d{2}:\d{2}) \[([a-z_]+)\] (.+?) (?:←|<-) (turn:\S+(?: tool:\S+)?|legacy:\S+) \^(n_[a-z2-7]{10})((?: (?:replaces:n_[a-z2-7]{10}|observed:\d{4}-\d{2}-\d{2}))*)$
+^- (\d{2}:\d{2}) \[([a-z_]+)\] (.+?) (?:←|<-) (turn:\S+(?: tool:\S+)?|legacy:\S+) \^(n_[a-z2-7]{10})((?: (?:replaces:n_[a-z2-7]{10}|observed:\d{4}-\d{2}-\d{2}|input:external))*)$
 ```
 
 `NoteId::generate/parse/display` 共用上述格式；行解析、工具参数、flush 的 `replaces` 与索引导入都调用它，不再各写一套长度规则。当前 L1 尚未部署，旧稿的短 ID 只是示例，不设兼容分支。
@@ -170,6 +203,7 @@ attr      = "replaces:" note-id | "observed:" DATE ;
 | `note_id` | 写入时生成，之后不变；格式 `n_[a-z2-7]{10}`，**项目内唯一**；项目级写锁内查权威目录的所有合法行（含 legacy 导出文件），撞则重生；索引仅可加速、不可缩小检查范围 | `replaces` 不带日期也无歧义 | — |
 | `replaces` | 可选，指向被修正的旧行的 `note_id`；旧行**不改**；可链式、可多分支；读时投影规则见 §7.4 | 纠正关系可识别，而不靠时间衰减猜 | P13 |
 | `observed` | 可选，事件发生日期；缺省 = 文件日期 | 记录日期与事件日期分离 | P15 |
+| `input:external` | 由代码写入，模型不能填也不能去掉：来源回合内只要有一次工具调用读入外部内容就加（§5.7）。带它的行不进注入块，搜索结果里标 `"input": "external"` | 让外部内容无法借笔记进入系统提示 | 修订 5 |
 | 不解析的行 | 原样保留、不进索引；标题/注释忽略，形似笔记却格式错误的行在状态页报告文件与行号，不静默吞掉 | 人可以手写标题或注释，也能发现导入错误 | — |
 
 ### 4.3 追加写与修正
@@ -179,7 +213,7 @@ attr      = "replaces:" note-id | "observed:" DATE ;
 - **共享引用校验。** 工具与 flush 都用 `resolve_note_id(project_id, NoteId)`，在当前项目的全部合法 Markdown 笔记中定位。索引缺失/过期时直接扫描权威目录，不扩大到其他项目。目标不存在返回 `note_reference_not_found`；多个目标同 ID 返回 `note_id_ambiguous`；该行不写，也不偷偷删除 `replaces`。自指拒绝；旧文件中已有的环在读时截断（§7.4）。
 - **精确去重。** 归一化（trim、连续空白折一、去末尾句号/分号）后，与今昨笔记的 `(statement, replaces)` 相同则不写，返回 `duplicate` 与已有 `note_id`。修正不同目标的行不互相吞掉。flush 另以 `(source_turn, normalized_statement, replaces)` 在项目全量笔记中判重，保证跨日期重跑时已落盘的完整行幂等；语义去重交给 MMR。
 - **每日上限 200 行 / 64 KB。** 超出返回 `notes_day_full`。flush 最多写 8 行，先写先得。
-- **原子性。** 复用 `atomic_file.rs` 做单文件原子替换；引用校验、全项目 ID 查重、内容去重与追加都放在同一项目级写锁内。Desktop/CLI 共用入口；跨进程访问同目录时持有同一锁文件的排他锁，不能只靠进程内 mutex。
+- **原子性。** 复用 `atomic_file.rs` 做单文件原子替换；引用校验、全项目 ID 查重、内容去重与追加都放在同一项目级写锁内。所有写入走 runtime 的同一个入口；Desktop 是唯一前端，但调试用的 devserver 或意外的第二个进程也可能访问同一目录，所以仍须持有同一锁文件的排他锁，不能只靠进程内 mutex。[修订 5]
 - **手改冲突。** 索引保留重复 ID 的全部物理行并报告 `id_conflict`，不任意保留第一条。歧义 ID 不参加修正链解析；用户仍可按文件/行号查看并修正。
 - **编码与过滤。** `canonicalize_research_memory_text()` 做路径归一；`hot_memory::validate_content()` 做注入短语过滤；`redact_secrets()` 剥密钥样式。
 
@@ -204,11 +238,12 @@ attr      = "replaces:" note-id | "observed:" DATE ;
 - `action=add, target=note` → `runtime::append_note(project_id, kind, content, Source{turn_id, tool_use_id}, replaces, observed=None)`。`replace`/`remove` 对 `note` 返回 `notes_are_append_only`。
 - `turn_id` 来自 `ToolRunContext`（§5.2），不由模型填写；`evidence` 由模型可选填写，代码校验它属于该回合，否则剥掉并返回诊断（不丢弃笔记）。`replaces` 经 §4.3 的项目全量解析器校验。
 - 不走 `memory_write_approval`：note 是低信任日志（§5.6）。`memory`/`user` 目标照旧审批。
+- `input:external` 由 `ToolRunContext.turn_ingested_external` 决定（§5.7），模型无法通过参数改变它。[修订 5]
 - 返回 `{"status":"added","path":"2026-10-20.md","line":15,"note_id":"n_ak2df6m7qp"}` 或 `{"status":"duplicate","note_id":"n_ak2df6m7qp"}`。
 
 ### 5.2 回合归属与 Session 持久化 [修订 3]
 
-`ToolRunContext.session_id` / `turn_id` 已存在，Desktop 也已填入，无须重复新增。CLI 走同一 shared runtime 传递回合身份；缺少项目/会话/回合身份的 note 写入应显式报错，不编造来源。`project_id` 继续使用现有项目作用域。
+`ToolRunContext.session_id` / `turn_id` 已存在，Desktop 也已填入，无须重复新增。回合身份经共享 runtime 传递；以后若有调用方没接入回合身份，缺少项目/会话/回合身份的 note 写入应显式报错，不编造来源。`project_id` 继续使用现有项目作用域。[修订 5]
 
 **消息归属**：`ConversationMessage` 加一个字段，示意如下；当前类型走手写 JSON，并未 derive serde：
 
@@ -379,6 +414,28 @@ pub struct FlushModelResult {
 **产品的独立审查原则保留在晋升处，但本期不宣称已实现。** L1 行进入 L2/L3 时，提示词要求 agent 先 `session_search(turn_id)` 核对证据、只晋升用户采纳的内容；这是行为建议，不产生 `reviewed` 标签。[避 P30] 带凭证的独立审查（Reviewer 产出审查记录，条目引用它）与自动晋升一起留到下一期。
 召回结果和注入块按上表标注。
 
+### 5.7 外部输入标记 [修订 5]
+
+**为什么**：笔记由模型写、不经审查，却会进入下一会话的系统提示。如果写笔记的回合读过网页、文献或邮件，其中的指令文字可能被模型转述成一条"笔记"，从而在之后的会话里占据系统提示的位置。`validate_content()` 只过滤已知的注入短语，挡不住改写过的内容。
+
+**判定函数**：在 `crates/runtime/src/retrieval_guard.rs` 的 `retrieval_role` 旁新增 `pub fn ingests_external_content(tool_name, input) -> bool`，二者放在一起维护。判为外部输入的有：
+
+- `retrieval_kind(tool_name, input)` 非空的调用：`WebSearch`、`WebFetch`、`LiteratureSearch`、`LiteratureCitations`、`LiteratureSearchExecute`、`LiteraturePdfDownload`；`bash` / `PowerShell` / `REPL` / `NotebookExecute` 只在该次调用确实访问网络时算；
+- 返回此前取回的外部文本的工具：`LibraryRetrieve`（文献全文）、`mail_search`、`mail_read`；
+- 所有 MCP 工具（`mcp__*`，含浏览器）。
+
+照 `performs_retrieval` 的做法加一个工具清点测试：每个注册工具都必须明确归类，新工具漏归类时测试失败。
+
+**粒度是回合，不是单次工具调用**：模型读过外部内容后，即使笔记引用的是一次本地工具调用，转述的内容也可能来自外部，所以按整个回合判定，宁可多标。
+
+| 写入路径 | 标记怎么来 |
+|---|---|
+| (a) `memory` 工具 | 共享 runtime 在本回合每次执行工具调用时更新 `turn_ingested_external`，经 `ToolRunContext` 传给 `memory` 工具；同一批并行调用里只要有外部输入就算 |
+| (b) 补录 | **按整批判定**：本批只要有一个源回合读过外部内容，本批写出的所有行都标记。补录模型同时看到整批回合，回合 A 读进的外部内容可能被写成引用回合 B 的笔记。补录模型看不到也改不了这个标记 |
+| (c) 工具 episode | 同 (a)，按 episode 所在回合判定 |
+
+带标记的行照常写入、照常可搜，只是不进注入块（§8）。剩余风险：用 `read_file` 等读取本地文件不算外部输入，用户放进工作区的外部文档仍可能经此进入笔记；这部分只靠 `validate_content()` 与"不可信数据"框架缓解。
+
 ---
 
 ## 6. 索引设计
@@ -418,11 +475,16 @@ CREATE TABLE IF NOT EXISTS session_chunks(
 CREATE INDEX IF NOT EXISTS session_chunks_turn ON session_chunks(turn_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS session_chunks_fts USING fts5(
   content, content='session_chunks', content_rowid='id', tokenize='trigram');
+-- 二元组影子列 [§0.5]：只存索引、不存原文；rowid = session_chunks.id。
+-- 写入文本 = bigram_expand(content)：每个 CJK 连续段展开成重叠二元组、空格分隔，其余字符原样。
+CREATE VIRTUAL TABLE IF NOT EXISTS session_chunks_bigram_fts USING fts5(
+  content, content='', contentless_delete=1, tokenize='unicode61');
 ```
 
 - `trigram`：bundled SQLite 3.46 自带。它只做匹配，不抽主题。[避 P17 P18]
 - `turn_id` 列只用于把搜索命中标到回合（结果里的 `source` 带 `turn:`），不是证据源；`turn:` 经 `Session::load_from_path` 恢复后解析（§5.2、§7.5）。规范事件及归档是原文，索引删了重建不影响证据。[修订 3]
 - 现有 `messages_fts`（unicode61）保留给 `session_search` 的英文路径。
+- 二元组影子列 [§0.5]：`bigram_expand` 是纯函数，写入和查询共用，不存第二份原文。`contentless_delete=1`（SQLite 3.43 起支持，打包的 3.46 可用）让它能按 rowid 删除，与 `session_chunks` 在同一事务里增删。§0.5 用不带此选项的 contentless 表测得 2.1 MB。笔记表规模小，不建二元组表。
 
 ### 6.2 切块
 
@@ -430,7 +492,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_chunks_fts USING fts5(
 
 ### 6.3 增量同步
 
-笔记按 `(mtime, size)` 增量；每次 `memory_search` 前与每次 `append_note` 后由工作线程同步少量变化。Session 走 `index_session()` 已有挂点，从恢复后的 `logical_messages()` 生成 chunks 与 `turn_id`，覆盖压缩归档。schema 升级/全量重建仍走显式 repair，不能藏在状态查询里。
+笔记按 `(mtime, size)` 增量；每次 `memory_search` 前与每次 `append_note` 后由工作线程同步少量变化。Session 走 `index_session()` 已有挂点，从恢复后的 `logical_messages()` 生成 chunks 与 `turn_id`，覆盖压缩归档；`session_chunks_bigram_fts` 与 `session_chunks` 同事务增删。schema 升级/全量重建仍走显式 repair，不能藏在状态查询里。
 
 ### 6.4 线程约束
 
@@ -476,12 +538,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_chunks_fts USING fts5(
 
 ### 7.2 排序 [修订 1]
 
-两张 FTS 表的 `bm25()` 不可比（语料长度、文档数不同），所以**各自排名后用 RRF 融合**，而不是比分数：
+各张表的 `bm25()` 不可比（语料长度、文档数、分词方式都不同），所以**各自排名后用 RRF 融合**，而不是比分数。长词（≥3 字）与短词（<3 字）分开查，每张表最多两个列表 [§0.5]：
 
 ```
-notes_list    = notes_fts     MATCH q ORDER BY bm25 LIMIT 50     → rank_n(i)
-sessions_list = session_chunks_fts MATCH q ORDER BY bm25 LIMIT 50 → rank_s(i)
-rrf(i)        = w_list / (60 + rank(i))         # w_notes = 1.0, w_sessions = 0.9（复用 merge_ranked_lists）
+notes_list          = notes_fts                 MATCH q_long  ORDER BY bm25 LIMIT 50 → rank(i)
+notes_short_list    = notes_lines  LIKE 各短词，按命中短词数、再按时间排序 LIMIT 50   → rank(i)
+sessions_list       = session_chunks_fts        MATCH q_long  ORDER BY bm25 LIMIT 50 → rank(i)
+sessions_short_list = session_chunks_bigram_fts MATCH q_short ORDER BY bm25 LIMIT 50 → rank(i)
+rrf(i)        = Σ_lists w_list / (60 + rank_list(i))   # w_notes = 1.0, w_sessions = 0.9，短词列表再乘 0.8（复用 merge_ranked_lists）
 decay(i)      = max(0.1, 0.5 ^ (age_days(observed) / 30))
 kind_w        = {decision/lesson/constraint: 1.2, finding: 1.0, tool: 0.8, task/progress/todo/status: 0.5, history: 1.0}
 replace_w     = 1.15 若该行 replaces 了某条命中行；0.7 若该行被某条 replaces（投影见 §7.4）
@@ -499,13 +563,13 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 |---|---|
 | 裸字符串 `项目采用什么数据库` 作为 MATCH 是整句短语匹配，对 `项目采用 SQLite` 零命中 | CJK 连续段拆成**所有字符三元组**，每个加引号，用 `OR` 连接：`"项目采" OR "目采用" OR … OR "数据库"`。bm25 按命中三元组数与 IDF 排序，`用什么` 这类高频三元组自然低权 |
 | `main.aux` 未加引号 → `fts5: syntax error near "."` | **每个词项一律加双引号**，内部 `"` 转义为 `""`；ASCII 词项按空白/标点切分后各自引号；不把用户输入直接拼进 MATCH |
-| 两字词 `RC`、`上抬` trigram 零命中 | 词项 < 3 字符时走 `LIKE '%term%'`（复用 `search_like`），结果以 rank 并入 RRF（权重 0.8） |
+| 两字词 `RC`、`上抬` trigram 零命中 | 词项 < 3 字符时：会话切块走二元组表 MATCH（`上抬` 是二元组词元；ASCII 短词用前缀查询 `"rc"*`），有 bm25 排序；笔记表规模小，走 `LIKE '%term%'`（复用 `search_like`）。两路各成一个排名列表，以权重 0.8 并入 RRF。单个汉字只查笔记表 [§0.5] |
 
-**LIKE 是中文的常走路径 [修订 4]**：中文关键词多为两字词（数据、编译、论文），模型按 §7.1 写关键词时，LIKE 会是常走的路径，而不只是退路。少于 3 个字符的 LIKE 用不上 trigram 索引，只能逐行扫描，而且没有 bm25 排序。约束如下：
+**两字词走二元组表 [修订 4，§0.5 改]**：中文关键词多为两字词（数据、编译、论文），模型按 §7.1 写关键词时，短词查询是常态而不是边角。少于 3 字的词用不上 trigram 索引；§0.5 实测 LIKE 不慢（典型查询 p95 33 ms），但命中常超过 50 条、没有 bm25，只能按时间排。因此：
 
+- `session_chunks`：短词走 `session_chunks_bigram_fts` 的 MATCH，有 bm25（实测 p95 1.1–2.4 ms）。修订 4 的 LIKE 范围限制（90 天、2 万块、`like_scan_truncated`）删除。
 - `notes_lines`：全表 LIKE（规模小）。
-- `session_chunks`：只扫 `recorded_at` 落在 `days` 内（缺省 90 天）的块，按 id 倒序最多扫 `LIKE_SCAN_MAX_CHUNKS`（20,000）块；命中按匹配到的短词个数排序、再按时间排序，以 rank 并入 RRF。触顶时结果带 `like_scan_truncated: true`。
-- 验收：在 207 会话、3 GB 的论文项目上，`memory_search` 含 LIKE 路径的 p95 ≤300 ms。不达标时先上 §14 阶 0.5（CJK 二元组影子列），再考虑分词。
+- 验收：在 §0.5 的项目上，`memory_search` 整体 p95 ≤300 ms（实测远低于此）。
 
 补充：
 
@@ -549,12 +613,14 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 - 14:32 [lesson] …
 - 14:40 [decision] …（取代 n_dm7c2q5v6z）
 （来源与 note_id 剥掉，仅保留"取代 …"提示；超预算从最旧的行丢；[tool] 行最先丢）
+（另有 N 条来自读过外部内容的回合，可用 memory_search 查到，此处不显示）
 # SomniQ Memory Policy
 ```
 
 - **快照随会话持久化，按本地日滚动 [修订 1，修订 4]**：`Session.recent_notes_snapshot = {date, text, hash}`，经 `session_memory_state` 事件保存（§5.2）。会话在本地日期 D 的第一个回合开始时，若没有快照或快照的 date ≠ D，就取 D 与 D−1 的笔记生成新快照，先落盘再构建提示词；同日的后续回合和重启后都复用已存的快照，逐字相同。缓存键里已有 `current_date`，提示词本来就在日界变化，快照随之滚动，不额外打断缓存。同一会话同一天内新写的笔记不进入注入块，只对 `memory_search` 可见。
-- **构建函数要接收快照 [修订 4]**：`build_system_prompt_inner_with_memory(model, full_tool_registry, include_builtin_memory)` 目前不接收会话，进程内缓存只有一个槽位（`system_prompt.rs:46`），只靠它做不到"按会话冻结"。改为由 engine 读出本会话的快照文本作为参数传入，`SystemPromptCacheKey` 加 `notes_snapshot_hash`。单槽缓存只省本地拼接，多个会话交替时重建即可；provider 前缀缓存看的是字节是否一致，这由持久快照保证。
+- **构建函数要接收快照 [修订 4]**：`build_system_prompt_inner_with_memory(model, full_tool_registry, include_builtin_memory)` 目前不接收会话，进程内缓存只有一个槽位（`system_prompt.rs:47`），只靠它做不到"按会话冻结"。改为由 engine 读出本会话的快照文本作为参数传入，`SystemPromptCacheKey` 加 `notes_snapshot_hash`。单槽缓存只省本地拼接，多个会话交替时重建即可；provider 前缀缓存看的是字节是否一致，这由持久快照保证。
 - **范围 [修订 4]**：MEMORY.md/USER.md 每回合仍按当前内容渲染（`hot_memory` 已在缓存键里），经审批写入后下一回合即生效、提示词随之变化。本期不冻结 L2/L3（写入路径不动，§2），只承诺 RECENT NOTES 块在同一会话、同一本地日内不变。跨会话的缓存收益不在设计里承诺，由 §18 用 usage 数据验证；因 hot memory 变化导致的提示词变化次数只报告。
+- **哪些行能进注入块 [修订 5]**：只收带 `turn:` 来源、且没有 `input:external` 的行。`legacy:` 导出行不进：来源未知，而且导出文件以导出日命名，当天会整份挤进注入块。被排除的行照常可搜，块尾用一行说明被排除的条数，提示模型需要时去搜。
 - `memory_recall_block: "legacy_v2" | "notes" | "off"`。**阶段 A/B 默认仍为 `legacy_v2`**（即现在的 6,000 字符块照旧）；`notes` 只在 §18 对比通过后切为默认。[修订 1，避 P21]
 - 切为 `notes` 后：删除 `builtin_research_recall_prompt` 调用与 `render_builtin_research_recall`；R0 的 session hits 不再注入。
 
@@ -566,15 +632,16 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 |---|---|---|
 | `crates/runtime/src/memory_notes.rs` | 新 | `NoteId`、`NoteLine` 解析/序列化、`resolve_note_id`、统一 `append_note`、全项目幂等检查、冲突诊断、近期快照、项目级进程内/跨进程写锁 |
 | `crates/runtime/src/memory_notes_index.rs` | 新 | `sync_notes`、查询构造（§7.3）、`search_notes`、RRF/衰减/修正投影/MMR |
+| `crates/runtime/src/retrieval_guard.rs` | 改 | `ingests_external_content` 与工具清点测试 [修订 5] |
 | `crates/runtime/src/session.rs` | 改 | `ConversationMessage.turn_id`、`Session.turns/memory_flush` 的手写序列化与旧版默认；两类规范事件的追加/回放/清理/reset；仅元数据保存与预留的落盘确认；`messages_for_turn` |
-| `crates/runtime/src/conversation.rs` | 改 | 共享回合上下文在消息创建与首次保存前绑定 ID；记录回合开始/终态，合成续接消息不带用户回合归属 |
-| `crates/runtime/src/session_index.rs` | 改 | schema v3、`session_chunks*`（含 `turn_id` 标注列） |
+| `crates/runtime/src/conversation.rs` | 改 | 共享回合上下文在消息创建与首次保存前绑定 ID；记录回合开始/终态，合成续接消息不带用户回合归属；执行工具时更新本回合的 `turn_ingested_external` [修订 5] |
+| `crates/runtime/src/session_index.rs` | 改 | schema v3、`session_chunks*`（含 `turn_id` 标注列）、二元组影子列与 `bigram_expand` [§0.5] |
 | `crates/runtime/src/memory_flush.rs` | 新 | 持久游标/请求预留/按回合配额、触发判定、有界回合渲染、回合表、逐行解析、provider 中立结果类型、推进与活性规则（§5.3）、诊断；网络回调经 `crates/chat` 接入当前 executor [修订 4] |
 | `crates/executor/src/openai.rs` 及其他已支持适配器、`crates/chat/src/lib.rs` | 改 | 暴露可证实的完成/截断/失败/未知与 usage；补录单次请求关闭隐式重试/续写，不复用仅有文本的审查接口 |
 | `crates/runtime/src/research_memory_v2.rs` | 改 | `tool_episodes_for_turn` 加目标资源约束与 `tool_use_id`；`tool_output_digest` 改为 crate 内共享；`export_active_atoms_as_notes`（可指定输出根，供 §18 评估副本使用） |
 | `crates/runtime/assets/prompts/memory-policy.md`、`memory-flush.md` | 新 | 附录 C |
 | `crates/runtime/src/hot_memory.rs` | 改 | RECENT NOTES 段、信任标注、新 policy |
-| `crates/tools/src/lib.rs` | 改 | `memory` 工具 note 目标，共享引用校验；`memory_search` / `memory_get`；`session_search(turn_id, session_id?)`；沿用已有 `ToolRunContext` 身份字段 |
+| `crates/tools/src/lib.rs` | 改 | `memory` 工具 note 目标，共享引用校验；`memory_search` / `memory_get`；`session_search(turn_id, session_id?)`；沿用已有 `ToolRunContext` 身份字段，新增 `turn_ingested_external` [修订 5] |
 | `desktop/src-tauri/src/memory.rs` | 改 | flush 调度与状态：F1 交后台线程、新增 F2 空闲周期检查、F3 启动补扫；`enqueue_turn` → `append_tool_episodes`；新命令 [修订 4] |
 | `desktop/src-tauri/src/engine.rs` | 改 | 将 audit 回合身份传给共享 runtime；接入持久回合终态与会话单写入队列；回合终态落盘后通知 flush 调度（不在压缩前插补录）；按会话、按本地日维护 `recent_notes_snapshot` 并传给提示词构建；注入块按 flag 三选一 [修订 4] |
 | `desktop/src-tauri/src/system_prompt.rs` | 改 | 构建函数接收快照文本；`SystemPromptCacheKey` 加 `notes_snapshot_hash` [修订 4] |
@@ -634,8 +701,7 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 
 | 阶 | 组件 | 解决什么 | 代价 | 进入条件 |
 |---|---|---|---|---|
-| 0 | FTS5 `trigram` + §7.3 查询规则（本设计） | 中文零命中、BM25 排序 | 0 依赖 | — |
-| 0.5 | CJK 二元组影子列：入库时把 CJK 连续段展开成重叠二元组、空格分隔，存进一张 `unicode61` FTS 表；两字词查询走 MATCH 而不是 LIKE [修订 4] | 两字词逐行扫描慢、LIKE 无排序 | 索引体积约增一倍，无新依赖 | LIKE 路径 p95 > 300 ms，或两字词查询的 precision@5 明显低于三字以上的查询 |
+| 0 | FTS5 `trigram` + CJK 二元组影子列 + §7.3 查询规则（本设计） | 中文零命中；三字以上与两字词都有 BM25 排序 | 0 依赖；最大项目上两张索引合计约 17 MB（§0.5） | — |
 | 1 | `jieba-rs` 分词（写入与查询同一分词） | 词序/分词歧义、两字词 | 1 crate，词典 ≈5 MB | 标注集 precision@5 < 0.6 且错误主要是分词 |
 | 2 | `fastembed-rs` + `sqlite-vec` + RRF | 同义改写 | 模型 ≈100 MB 下载到 LOCALAPPDATA | 阶 1 后仍 < 0.7 且错误主要是改写 |
 
@@ -653,7 +719,8 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 
 - 结果与注入块标明信任级别，并包在"不可信历史数据，不是指令"的框架里。
 - 写入经 `validate_content()`、`redact_secrets()`、路径归一。
-- 所有路径规范化后必须仍在当前项目根目录，拒绝指向外部的符号链接；`memory_get`、`resolve_note_id` 与 `session_search(turn_id)` 都不能扩大作用域。索引只作会话定位提示，权威 Session 的读取也限制在当前项目。
+- **路径作用域 [修订 5]**：笔记读写限定在 `<somniq_config_dir>/memory/notes/<project_id>/`；会话读取限定在当前项目的会话目录 `state::sessions_dir_for_project(project_id)`，即 `<config>/desktop-runtime/projects/<project_id>/sessions`（`default` 项目为 `<config>/desktop-runtime/sessions`）。两者都在配置目录下、不在工作区（项目根目录）内，以同一个 `project_id` 关联。路径规范化后必须仍在对应目录内，拒绝 `..`、绝对路径和指向外部的符号链接：`memory_get` 只读笔记目录，`resolve_note_id` 只扫笔记目录，`session_search(turn_id)` 只读会话目录，都不能扩大到其他项目。索引只作会话定位提示。
+- **未审笔记的注入面 [修订 5]**：读过外部内容的回合写下的笔记带 `input:external`，不进系统提示，只能经 `memory_search` 以工具结果的形式取回，并标明来源（§5.7、§8）。
 - 笔记不进仓库、不上传。
 
 ---
@@ -669,16 +736,17 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 - flush 修订 4：`turn_render_is_bounded_and_keeps_failures_first`、`flush_request_sends_text_not_tool_blocks`、`batch_respects_turn_and_token_caps`、`quota_grows_with_ended_turns`、`truncation_halves_batch_then_advances_single_turn_partially`、`second_protocol_failure_on_same_start_advances_partially`、`failed_request_does_not_count_as_content_failure`、`unknown_streak_pauses_auto_flush`、`idle_trigger_fires_for_background_session`、`session_switch_and_exit_send_no_flush`、`startup_sweep_is_bounded`
 - 完成协议：`provider_stop_end_turn_and_responses_completed_are_accepted`、`missing_terminal_or_truncation_keeps_cursor`、`all_duplicate_output_can_advance_cursor`、`note_write_failure_keeps_cursor`、`partial_flush_retry_is_idempotent_across_days`
 - episode：`tool_episode_requires_same_target_resource`、`tool_episode_records_failed_tool_use_id`
-- 查询（§7.3 的复现句子）：`bare_phrase_query_is_expanded_to_trigram_or`、`dotted_token_is_quoted_not_syntax_error`、`two_char_term_falls_back_to_like`、`coverage_counts_terms_not_trigrams`、`long_cjk_term_needs_quarter_of_its_trigrams`、`like_scan_on_session_chunks_is_bounded_and_flagged`
+- 查询（§7.3 的复现句子）：`bare_phrase_query_is_expanded_to_trigram_or`、`dotted_token_is_quoted_not_syntax_error`、`short_terms_use_bigram_table_for_sessions_and_like_for_notes`、`bigram_expand_is_shared_by_index_and_query`、`bigram_rows_follow_chunk_inserts_and_deletes`、`coverage_counts_terms_not_trigrams`、`long_cjk_term_needs_quarter_of_its_trigrams`
 - 排序：`notes_and_sessions_are_fused_by_rrf_not_raw_bm25`、`relevance_is_normalised_before_mmr`、`old_lesson_keeps_floor_weight`、`superseded_hit_lists_all_terminal_corrections`、`replace_cycle_is_cut_and_flagged`、`correction_outranks_the_note_it_replaces`、`mmr_collapses_near_duplicates`、`empty_result_is_empty`
 - ID 与引用：`generated_note_id_round_trips_with_replaces`、`collision_check_covers_all_project_files`、`duplicate_ids_keep_all_rows_and_report_ambiguity`、`old_note_can_be_replaced_without_index`、`inline_and_flush_share_reference_validation`
 - 证据：`messages_for_turn_includes_compacted_originals_and_tool_blocks`、`turn_lookup_uses_canonical_session_without_index`
 - Session：`session_chunks_split_with_overlap`、`turn_metadata_round_trips_through_reset_and_compaction`、`metadata_only_flush_state_save_survives_restart`、`checkpoint_keeps_turn_and_memory_state_events`、`turn_order_survives_process_counter_restart`
 - 迁移：`export_sets_observed_from_atom_occurred_at`、`export_is_idempotent_by_atom_id`
-- `memory_get_rejects_paths_outside_notes_dir`
+- 注入面（修订 5）：`every_tool_is_triaged_for_external_content`、`network_bash_counts_but_local_bash_does_not`、`external_turn_marks_inline_and_episode_notes`、`one_external_turn_marks_whole_flush_batch`、`model_cannot_set_or_clear_input_external`、`snapshot_excludes_external_and_legacy_lines`、`excluded_lines_remain_searchable_and_are_labelled`
+- `memory_get_rejects_paths_outside_notes_dir`、`session_lookup_stays_in_project_sessions_dir`
 
 实施时先跑受影响 crate 的聚焦测试；跨 runtime/executor/chat/tools 后跑 `cargo test --workspace`。`crates/tools` 覆盖工具 schema、执行与上下文传递；Desktop UI/Tauri API 改动跑聚焦 Vitest 与 `npm run build`。本次仅修订设计，不将这些列为已运行。
-评估跑同一份 Rust 逻辑（`cargo run --example memory_eval`）。[避 P19] LIKE 路径的 p95 与覆盖率除数不是单测断言，在 §18 的检索层评估里量。
+评估跑同一份 Rust 逻辑（`cargo run --example memory_eval`）。[避 P19] 检索延迟的 p95 与覆盖率除数不是单测断言，在 §18 的检索层评估里量。
 
 ---
 
@@ -705,7 +773,7 @@ rel(i)        = score(i) / max_j score(j)        # 归一到 (0,1]，与 Jaccard
 
 | 层 | 怎么跑 | 量什么 | X0 的命中怎么算 |
 |---|---|---|---|
-| 检索层 | `cargo run --example memory_eval`，无模型、确定性，以题面关键词为查询 | recall@5、precision@5；证据正确（命中项的 `turn:`/`tool:` 或 legacy 来源指向标注回合）；`memory_search` 延迟 p95（含 LIKE 路径）；选定 §7.3 的覆盖率除数 | 以题面为查询调用 `ResearchMemoryV2::recall_local`，标注答案出现在其返回集合中即算命中。渲染器还会按 6,000 字符截断，所以这是 X0 的上限 |
+| 检索层 | `cargo run --example memory_eval`，无模型、确定性，以题面关键词为查询 | recall@5、precision@5；证据正确（命中项的 `turn:`/`tool:` 或 legacy 来源指向标注回合）；`memory_search` 延迟 p95；选定 §7.3 的覆盖率除数；两字词查询的二元组与 LIKE 排序对照（precision@5），确认 §0.5 的选择 | 以题面为查询调用 `ResearchMemoryV2::recall_local`，标注答案出现在其返回集合中即算命中。渲染器还会按 6,000 字符截断，所以这是 X0 的上限 |
 | 端到端层 | 每题每方案开一个新会话直接提问，共 150 次；记录答案、工具调用与 usage | 答案正确（对照标注要点；人工判，或 judge 模型判后人工抽检 20%）；旧结论误用（采纳了被 `replaces` 的旧结论）；每题总 token（取 `usage-log.jsonl`） | 与 X1/X2 相同，按答案判 |
 
 **切默认的条件**：

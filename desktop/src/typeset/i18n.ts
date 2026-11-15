@@ -1,3 +1,4 @@
+import { LATEX_REFERENCE_TOOLTIP_COPY } from "../editor/latex/latexCopy";
 import type { Language } from "../store";
 
 /**
@@ -170,6 +171,11 @@ const EN_COPY = {
     compileOptions: "Compile options",
     compileOptionsMenu: "Compile options menu",
     compileLog: "Compile log",
+    diagnosticsSummary: (errors: number, warnings: number, other: number) => [
+      errors ? `${errors} ${errors === 1 ? "error" : "errors"}` : "",
+      warnings ? `${warnings} ${warnings === 1 ? "warning" : "warnings"}` : "",
+      other ? `${other} ${other === 1 ? "message" : "messages"}` : "",
+    ].filter(Boolean).join(" · "),
     showingLastVerified: "Showing last verified PDF",
     noPdfProduced: "No PDF was produced by this build",
     pdfPageNavigationLabel: "PDF page navigation",
@@ -351,6 +357,8 @@ const EN_COPY = {
     slidesCountLabel: (count: number) => `${count} slides`,
     nextSlide: "Next slide",
     editorModeLabel: "Editor mode",
+    focusEditor: "Focus editor",
+    restorePanels: "Restore panels",
     code: "Code",
     visual: "Visual",
   },
@@ -359,6 +367,8 @@ const EN_COPY = {
     sampleDataOnly: "Sample data only",
     desktopModeHint: "Desktop mode uses local files and local compilation.",
     typesetSectionsLabel: "Typeset sections",
+    collapseSidePanel: "Collapse side panel",
+    expandSidePanel: "Expand side panel",
     hideProjectFiles: "Hide Project files",
     showProjectFiles: "Show Project files",
     hideReviewPanel: "Hide Review panel",
@@ -507,6 +517,11 @@ const EN_COPY = {
     pdfSaved: (destination: string) => `PDF saved to ${destination}`,
     mainDocumentSet: (name: string) => `${name} is now the document TeX compiles.`,
   },
+  diagram: {
+    loading: "Loading compiled drawing…",
+    compileToPreview: "Save and compile to preview this drawing. Double-click to edit its source.",
+    previewLabel: "Compiled drawing preview",
+  },
   pageBreak: {
     label: (command: string) => `Page break (\\${command})`,
     short: "Page break",
@@ -549,10 +564,7 @@ const EN_COPY = {
     indentMarkersHint: "Vertical rules down each indentation level in Code mode.",
     scopeNote: "These apply to every editor in the app. Font size also scales the Visual page.",
   },
-  referenceTooltip: {
-    undefinedLabel: "No \label with this key in this file.",
-    definedOnLine: (line: number): string => `Defined on line ${line}`,
-  },
+  referenceTooltip: LATEX_REFERENCE_TOOLTIP_COPY.en,
   figureDialog: {
     title: "Insert figure",
     imageFile: "Image file",
@@ -814,6 +826,11 @@ const CN_COPY: typeof EN_COPY = {
     compileOptions: "编译选项",
     compileOptionsMenu: "编译选项菜单",
     compileLog: "编译日志",
+    diagnosticsSummary: (errors: number, warnings: number, other: number) => [
+      errors ? `${errors} 个错误` : "",
+      warnings ? `${warnings} 个警告` : "",
+      other ? `${other} 条消息` : "",
+    ].filter(Boolean).join(" · "),
     showingLastVerified: "显示最后一次验证通过的 PDF",
     noPdfProduced: "本次编译未生成 PDF",
     pdfPageNavigationLabel: "PDF 页面导航",
@@ -995,6 +1012,8 @@ const CN_COPY: typeof EN_COPY = {
     slidesCountLabel: (count) => `共 ${count} 张幻灯片`,
     nextSlide: "下一张幻灯片",
     editorModeLabel: "编辑器模式",
+    focusEditor: "专注编辑",
+    restorePanels: "恢复分栏",
     code: "代码",
     visual: "可视化",
   },
@@ -1003,6 +1022,8 @@ const CN_COPY: typeof EN_COPY = {
     sampleDataOnly: "仅示例数据",
     desktopModeHint: "桌面模式使用本地文件和本地编译。",
     typesetSectionsLabel: "排版分区",
+    collapseSidePanel: "收起侧栏",
+    expandSidePanel: "展开侧栏",
     hideProjectFiles: "隐藏项目文件",
     showProjectFiles: "显示项目文件",
     hideReviewPanel: "隐藏审阅面板",
@@ -1149,6 +1170,11 @@ const CN_COPY: typeof EN_COPY = {
     pdfSaved: (destination) => `PDF 已保存到 ${destination}`,
     mainDocumentSet: (name) => `TeX 现在编译 ${name}。`,
   },
+  diagram: {
+    loading: "正在加载编译后的图形…",
+    compileToPreview: "保存并编译以预览此图，双击可编辑源码。",
+    previewLabel: "编译后的图形预览",
+  },
   pageBreak: {
     label: (command) => `分页符（\\${command}）`,
     short: "分页符",
@@ -1182,10 +1208,7 @@ const CN_COPY: typeof EN_COPY = {
     indentMarkersHint: "在 Code 模式下为每级缩进画一条竖线。",
     scopeNote: "设置对应用内所有编辑器生效；字号同时缩放 Visual 页面。",
   },
-  referenceTooltip: {
-    undefinedLabel: "本文件中没有这个 \label。",
-    definedOnLine: (line) => `定义在第 ${line} 行`,
-  },
+  referenceTooltip: LATEX_REFERENCE_TOOLTIP_COPY.cn,
   figureDialog: {
     title: "插入图片",
     imageFile: "图片文件",

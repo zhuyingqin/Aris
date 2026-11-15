@@ -1,0 +1,8 @@
+# Existing-document edits use upstream APIs, not a document layout engine.
+python-docx==1.2.0
+lxml==6.1.1
+odfpy==1.4.1
+# Evidence rasterisation/inspection (not required by the native edit adapter).
+pypdf==6.21.4
+pypdfium2==5.14.0
+Pillow==13.0.0

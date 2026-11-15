@@ -4,6 +4,7 @@ import { SvgIcon } from "../SvgIcon";
 import { workspaceFileOpenTarget } from "../editor/workspaceFiles";
 import { isImagePath } from "../imageFiles";
 import { copyImageToClipboard } from "../imageClipboard";
+import { latexWorkspaceOn } from "../extensions/officialPlugins";
 import { useStore } from "../store";
 
 interface Props {
@@ -47,7 +48,8 @@ export default function FilePathMenu({
     : path.includes("\\")
       ? path.substring(0, path.lastIndexOf("\\"))
       : ".";
-  const workspaceTarget = workspaceFileOpenTarget(path);
+  const latexWorkspace = useStore((state) => latexWorkspaceOn(state.officialPlugins));
+  const workspaceTarget = workspaceFileOpenTarget(path, { latexWorkspace });
   // PDFs are covered by the side-panel reader below, so only editable sources
   // offer a workspace tab here.
   const workspaceOpenLabel = workspaceTarget === "code" ? "在 Code 页面打开" : "在 LaTeX 页面打开";

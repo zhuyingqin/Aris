@@ -4288,7 +4288,7 @@ const SCHOOL_SCOPUS_FIXTURE: &str = r#"{"query":"TITLE-ABS-KEY(neural network)",
 
 const ELSEVIER_SCOPUS_FIXTURE: &str = r#"{"search-results":{"opensearch:totalResults":"1","cursor":{"@next":"elsevier-next"},"entry":[{"dc:identifier":"SCOPUS_ID:85190000001","dc:title":"Direct campus record","prism:doi":"10.1000/direct","prism:coverDate":"2025-01-01"}]}}"#;
 
-const TEST_ACCESS_TOKEN: &str = "account-access-token-sentinel";
+const TEST_ACCOUNT_API_KEY: &str = "sk-account-api-key-sentinel";
 const TEST_ELSEVIER_KEY: &str = "elsevier-key-sentinel";
 
 #[derive(Debug)]
@@ -4431,28 +4431,27 @@ fn fixture_client() -> reqwest::blocking::Client {
         .expect("fixture client")
 }
 
-fn signed_in_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
-    Ok(Some(research_account::ResearchAccountCredential {
+fn signed_in_account() -> Result<Option<research_account::ResearchApiCredential>, String> {
+    Ok(Some(research_account::ResearchApiCredential {
         issuer: "https://somni.ensuanx.com".to_string(),
-        user_id: 7,
-        access_token: TEST_ACCESS_TOKEN.to_string(),
+        api_key: TEST_ACCOUNT_API_KEY.to_string(),
     }))
 }
 
-fn signed_out_account() -> Result<Option<research_account::ResearchAccountCredential>, String> {
+fn signed_out_account() -> Result<Option<research_account::ResearchApiCredential>, String> {
     Ok(None)
 }
 
 fn fixture_access<'a>(
     server: &ScopusFixtureServer,
     api_key: Option<&str>,
-    account: ScopusAccountLookup<'a>,
+    credential: ScopusCredentialLookup<'a>,
 ) -> ScopusAccess<'a> {
     ScopusAccess {
         elsevier_url: server.url("/content/search/scopus"),
-        school_url: server.url("/research/scopus/search"),
+        school_url: server.url("/v1/alpha/search"),
         api_key: api_key.map(str::to_string),
-        account,
+        credential,
     }
 }
 
@@ -4538,17 +4537,12 @@ fn scopus_request_preview_names_the_route_it_will_take() {
 
     let school = scopus_request_preview(false, "semantic communication", 500);
     assert_eq!(school["method"], "POST");
-    assert_eq!(
-        school["url"],
-        "https://somni.ensuanx.com/research/scopus/search"
-    );
+    assert_eq!(school["url"], "https://somni.ensuanx.com/v1/alpha/search");
+    assert_eq!(school["body"]["model"], "scopus-search");
     assert_eq!(school["body"]["view"], "STANDARD");
     assert_eq!(school["body"]["count"], 200);
     assert_eq!(school["body"]["include_abstracts"], false);
-    assert_eq!(
-        school["authentication"],
-        "SomniQ account session (redacted)"
-    );
+    assert_eq!(school["authentication"], "SomniQ API key (redacted)");
 }
 
 #[test]
@@ -4578,7 +4572,7 @@ fn research_account_tokens_only_go_to_their_own_origin() {
 }
 
 #[test]
-fn scopus_without_a_key_posts_the_school_request_with_the_account_session() {
+fn scopus_without_a_key_posts_the_billed_school_request_with_the_account_api_key() {
     let server = ScopusFixtureServer::spawn(vec![(200, SCHOOL_SCOPUS_FIXTURE)]);
     let outcome =
         run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30).expect("search");
@@ -4587,20 +4581,22 @@ fn scopus_without_a_key_posts_the_school_request_with_the_account_session() {
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request.method, "POST");
-    assert_eq!(request.path(), "/research/scopus/search");
+    assert_eq!(request.path(), "/v1/alpha/search");
     assert_eq!(
         request.header("authorization"),
-        Some(format!("Bearer {TEST_ACCESS_TOKEN}").as_str())
+        Some(format!("Bearer {TEST_ACCOUNT_API_KEY}").as_str())
     );
-    assert_eq!(request.header("new-api-user"), Some("7"));
+    // New API identifies the account by its API key alone.
+    assert_eq!(request.header("new-api-user"), None);
     assert_eq!(request.header("x-els-apikey"), None);
     let body = request.json();
+    assert_eq!(body["model"], "scopus-search");
     assert_eq!(body["query"], "TITLE-ABS-KEY(neural network)");
     assert_eq!(body["view"], "STANDARD");
     assert_eq!(body["count"], 30);
     assert_eq!(body["cursor"], "*");
     assert_eq!(body["include_abstracts"], false);
-    // The gateway rejects unknown fields before calling the school.
+    // The channel strips `model`, then rejects any other unknown field.
     let mut fields = body
         .as_object()
         .expect("object")
@@ -4610,7 +4606,14 @@ fn scopus_without_a_key_posts_the_school_request_with_the_account_session() {
     fields.sort();
     assert_eq!(
         fields,
-        ["count", "cursor", "include_abstracts", "query", "view"]
+        [
+            "count",
+            "cursor",
+            "include_abstracts",
+            "model",
+            "query",
+            "view"
+        ]
     );
 
     assert_eq!(outcome.papers.len(), 1);
@@ -4622,7 +4625,7 @@ fn scopus_without_a_key_posts_the_school_request_with_the_account_session() {
     // A short page ends the search; the cursor is still recorded for audit.
     assert!(outcome.coverage.exhausted);
     let recorded = outcome.request.to_string();
-    assert!(!recorded.contains(TEST_ACCESS_TOKEN), "{recorded}");
+    assert!(!recorded.contains(TEST_ACCOUNT_API_KEY), "{recorded}");
     assert!(outcome
         .coverage_note
         .as_deref()
@@ -4683,7 +4686,7 @@ fn elsevier_refusal_moves_the_rest_of_the_search_to_the_school_route() {
     assert_eq!(requests[0].header("x-els-apikey"), Some(TEST_ELSEVIER_KEY));
     assert!(requests[0].target.contains("view=COMPLETE"));
     assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path(), "/research/scopus/search");
+    assert_eq!(requests[1].path(), "/v1/alpha/search");
     assert_eq!(requests[1].header("x-els-apikey"), None);
     // The page is re-asked with the school route's own page size.
     assert_eq!(requests[1].json()["count"], 30);
@@ -4697,7 +4700,7 @@ fn elsevier_refusal_moves_the_rest_of_the_search_to_the_school_route() {
     // Both provider answers are kept as evidence.
     assert_eq!(outcome.raw_artifacts.len(), 2);
     let recorded = outcome.request.to_string();
-    assert!(!recorded.contains(TEST_ELSEVIER_KEY) && !recorded.contains(TEST_ACCESS_TOKEN));
+    assert!(!recorded.contains(TEST_ELSEVIER_KEY) && !recorded.contains(TEST_ACCOUNT_API_KEY));
 }
 
 #[test]
@@ -4752,7 +4755,7 @@ fn scopus_with_neither_key_nor_account_is_an_unauthorised_attempt_without_a_requ
     );
     assert!(server.requests().is_empty());
 
-    let failing = || -> Result<Option<research_account::ResearchAccountCredential>, String> {
+    let failing = || -> Result<Option<research_account::ResearchApiCredential>, String> {
         Err("登录已过期，请重新登录".to_string())
     };
     let error = run_fixture_search(&fixture_access(&server, None, &failing), 30)
@@ -4767,16 +4770,77 @@ fn scopus_with_neither_key_nor_account_is_an_unauthorised_attempt_without_a_requ
 
 #[test]
 fn school_route_rejection_of_the_account_asks_for_sign_in() {
-    let server = ScopusFixtureServer::spawn(vec![(401, r#"{"error":"请先登录 SomniQ 账号。"}"#)]);
+    let server = ScopusFixtureServer::spawn(vec![(
+        401,
+        r#"{"error":{"code":"","message":"Invalid token (request id: 1)","type":"new_api_error"}}"#,
+    )]);
     let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
-        .expect_err("rejected session");
+        .expect_err("rejected API key");
     assert!(
-        error.contains("HTTP 401") && error.contains("sign in"),
+        error.contains("HTTP 401") && error.contains("sign in") && error.contains("Invalid token"),
         "{error}"
     );
     assert_eq!(
         source_failure_status(&error),
         runtime::SourceAttemptStatus::Unauthorised
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn school_route_explains_the_account_gateway_refusals() {
+    // New API's own answers for an account outside the Scopus tiers or out of
+    // credits. Every refusal is refunded, so none of them costs a credit.
+    let cases = [
+        (
+            503,
+            r#"{"error":{"code":"","message":"No available channel for model scopus-search under group default (distributor)","type":"new_api_error"}}"#,
+            "Go, Plus, Pro or 千研",
+        ),
+        (
+            403,
+            r#"{"error":{"code":"","message":"Insufficient user quota, remaining quota: $0.000000","type":"new_api_error"}}"#,
+            "no credits or balance",
+        ),
+        (
+            403,
+            r#"{"error":{"code":"","message":"该令牌无权访问模型 scopus-search","type":"new_api_error"}}"#,
+            "Go, Plus, Pro or 千研",
+        ),
+    ];
+    for (status, body, expected) in cases {
+        let server = ScopusFixtureServer::spawn(vec![(status, body); 3]);
+        let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+            .expect_err("refused");
+        assert!(
+            error.contains(&format!("HTTP {status}")) && error.contains(expected),
+            "{error}"
+        );
+        assert_eq!(
+            source_failure_status(&error),
+            runtime::SourceAttemptStatus::Unauthorised,
+            "{error}"
+        );
+        assert!(!error.contains(TEST_ACCOUNT_API_KEY));
+    }
+}
+
+#[test]
+fn school_route_upstream_failure_keeps_the_channel_message() {
+    // The research channel's own answer when the school fails. New API refunds
+    // it, so the generic provider retries stay free.
+    let failure = r#"{"error":{"message":"The school Scopus API failed (HTTP 500)","type":"somniq_research_error","code":"scopus_upstream_error"}}"#;
+    let server = ScopusFixtureServer::spawn(vec![(502, failure); 3]);
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+        .expect_err("school down");
+    assert!(
+        error.contains("Scopus school route HTTP 502")
+            && error.contains("school Scopus API failed"),
+        "{error}"
+    );
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Failed
     );
 }
 
@@ -4786,4 +4850,19 @@ fn school_route_body_without_entries_is_an_error_not_an_empty_result() {
     let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
         .expect_err("no entries list");
     assert!(error.contains("`entries`"), "{error}");
+}
+
+
+/// Every built-in index is a registered `LiteratureSource`, in the order the
+/// default plan runs them, and names resolve through the registry alone.
+#[test]
+fn every_builtin_index_is_a_registered_literature_source_in_priority_order() {
+    let ids = literature_sources().iter().map(|source| source.id()).collect::<Vec<_>>();
+    let planned = planned_engines(&[]).into_iter().map(Engine::source_name).collect::<Vec<_>>();
+    assert_eq!(ids, planned);
+    assert_eq!(literature_source("Semantic_Scholar").map(|source| source.id()), Some("semantic-scholar"));
+    assert_eq!(literature_source(" OpenAlex ").map(|source| source.label()), Some("OpenAlex"));
+    assert!(literature_source("cnki").is_none());
+    assert_eq!(adapter_availability("cnki").status, "not_implemented");
+    assert_eq!(adapter_availability("crossref").status, "available");
 }

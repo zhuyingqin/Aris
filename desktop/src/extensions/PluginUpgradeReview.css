@@ -1,0 +1,43 @@
+/* The part of an upgrade card that lets the user try and read the change. */
+.plugin-review { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px; min-width: 0; }
+.plugin-review-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.plugin-review-button {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-2); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+}
+.plugin-review-button:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.plugin-review-button.is-active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-2)); }
+.plugin-review-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.plugin-review-note { margin: 0; color: var(--text-dim); font-size: 11.5px; }
+.plugin-review-note.is-error { color: var(--danger, #e5534b); }
+.plugin-review-preview { display: flex; flex-direction: column; gap: 6px; }
+.plugin-review-frame { display: flex; overflow: hidden; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border)); background: var(--bg-1); }
+.plugin-review-frame.is-nav-page { height: 480px; }
+.plugin-review-frame.is-chat-sidebar { height: 460px; width: min(380px, 100%); }
+.plugin-review-frame.is-chat-brief { width: min(320px, 100%); background: var(--bg-2); transition: height .18s ease; }
+.plugin-review-frame .plugin-page-frame { flex: 1; width: 100%; height: 100%; border: 0; display: block; background: transparent; }
+.plugin-review-frame .plugin-page-frame-status { margin: 12px; font-size: 12px; }
+.plugin-review-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.plugin-review-file { display: flex; flex-direction: column; min-width: 0; font-size: 12px; }
+.plugin-review-file > .plugin-review-badge, .plugin-review-file > code, .plugin-review-file > small { display: inline; }
+.plugin-review-file:has(> .plugin-review-badge) { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 6px; }
+.plugin-review-file-head {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 6px; border: 0; border-radius: 6px;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.plugin-review-file-head:hover { background: var(--bg-2); }
+.plugin-review-file code { overflow-wrap: anywhere; }
+.plugin-review-file small { margin-left: auto; color: var(--text-dim); white-space: nowrap; }
+.plugin-review-file .is-add { color: #3fb27f; } .plugin-review-file .is-del { color: #e5534b; }
+.plugin-review-badge { flex: none; padding: 0 6px; border-radius: 5px; font-size: 11px; background: var(--bg-3); color: var(--text-dim); }
+.plugin-review-badge.is-added { color: #3fb27f; background: color-mix(in srgb, #3fb27f 14%, transparent); }
+.plugin-review-badge.is-removed { color: #e5534b; background: color-mix(in srgb, #e5534b 14%, transparent); }
+.plugin-review-diff {
+  margin: 4px 0 6px; max-height: 360px; overflow: auto; padding: 6px 0; border-radius: 8px;
+  background: var(--bg-1); border: 1px solid var(--border); font: 11.5px/1.5 var(--font-mono, ui-monospace, monospace);
+}
+.plugin-review-hunk + .plugin-review-hunk { margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.plugin-review-hunk-head { display: block; padding: 0 10px; color: var(--text-dim); }
+.plugin-review-line { display: block; padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-review-line.is-added { background: color-mix(in srgb, #3fb27f 14%, transparent); }
+.plugin-review-line.is-removed { background: color-mix(in srgb, #e5534b 14%, transparent); }

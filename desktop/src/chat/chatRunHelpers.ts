@@ -340,12 +340,14 @@ export function needsBackendContextReset(
   return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }
 
-export function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn {
+export function userTurn(text: string, attachments: ChatAttachment[], origin?: ChatTurn["origin"]): ChatTurn {
   return {
     id: makeId("turn"),
     role: "user",
     blocks: [{ kind: "text", text: text.trim() || "Attached context" }],
     attachments,
+    // An app-inserted turn is a marker, not something the user can edit.
+    ...(origin ? { origin, readOnly: true } : {}),
   };
 }
 

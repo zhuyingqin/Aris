@@ -568,6 +568,22 @@ describe("Typeset start page", () => {
     expect(await screen.findByRole("button", { name: "Home" })).toBeTruthy();
   });
 
+  it("keeps the source and PDF preview mounted while focusing and restoring the editor", async () => {
+    useStore.setState({ pendingTypesetFilePath: "sections/local.tex" });
+    const { container } = render(<Typeset />);
+    await waitForSourceOpen(container, "sections/local.tex");
+    const source = typesetCodeView();
+    const preview = container.querySelector(".typeset-preview-stack");
+    expect(preview).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Focus editor" }));
+    expect(preview?.hasAttribute("hidden")).toBe(true);
+    expect(typesetCodeView()).toBe(source);
+    fireEvent.click(screen.getByRole("button", { name: "Restore panels" }));
+    expect(preview?.hasAttribute("hidden")).toBe(false);
+    expect(container.querySelector(".typeset-preview-stack")).toBe(preview);
+    expect(typesetCodeView()).toBe(source);
+  });
+
   it("resolves the root document before showing a directly opened child source", async () => {
     useStore.setState({ pendingTypesetFilePath: "chapters/body.tex" });
     const child = "\\section{Body}\nChild text";
@@ -3504,7 +3520,7 @@ describe("Typeset start page", () => {
     expect(log.querySelectorAll(".typeset-diagnostic-card")).toHaveLength(1);
     expect(within(log).getByText("Overfull \\hbox (12pt too wide)")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Compile log" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Compile log/ }));
     expect(container.querySelector('section[aria-label="Compile log"]')).toBeNull();
   });
 
@@ -3842,7 +3858,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByText("paper.tex"));
     await waitForSourceOpen(container, "paper.tex");
     // The log no longer auto-opens while compiling, so open it to watch progress.
-    fireEvent.click(screen.getByRole("button", { name: "Compile log" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Compile log/ }));
     await recompileOpenSource();
 
     expect(await screen.findByText("Latexmk: processing paper.tex")).toBeTruthy();
@@ -6966,12 +6982,12 @@ describe("Typeset start page", () => {
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const divider = screen.getByRole("separator", { name: "Resize PDF preview" });
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 900, clientY: 0 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 852 });
 
-    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("808px"));
+    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("688px"));
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 852 });
   });
@@ -7008,12 +7024,12 @@ describe("Typeset start page", () => {
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const preview = container.querySelector<HTMLElement>(".typeset-preview-stack");
     expect(preview).toBeTruthy();
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(preview!, { button: 0, pointerType: "mouse", clientX: 958, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 902, clientY: 200 });
 
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 902, clientY: 200 });
   });
@@ -7041,12 +7057,12 @@ describe("Typeset start page", () => {
       toJSON: () => ({}),
     } as DOMRect);
     expect(editor).toBeTruthy();
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(editor!, { button: 0, pointerType: "mouse", clientX: 918, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 862, clientY: 200 });
 
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
   });
 
   it("restores the PDF preview after hiding it", async () => {

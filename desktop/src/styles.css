@@ -5829,6 +5829,225 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   opacity: 0.4;
 }
 
+/* Calendar rules: zone, live preview of the next occurrences. */
+.sched-zone-control,
+.sched-upcoming,
+.sched-history {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  max-width: 480px;
+  min-width: 0;
+}
+
+.sched-mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+textarea.sched-text-control {
+  height: auto;
+  min-height: 58px;
+  padding: 8px 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.sched-upcoming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: sched-upcoming;
+}
+
+.sched-upcoming-list li {
+  counter-increment: sched-upcoming;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-upcoming-list li::before {
+  content: counter(sched-upcoming);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.sched-preview-note,
+.sched-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sched-card-body > .sched-note {
+  padding-top: 2px;
+}
+
+.sched-preview-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Delivery records next to the work-task outcome they produced. */
+.sched-history {
+  max-width: none;
+}
+
+.sched-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sched-history-item {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(0, 2fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.sched-history-when {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sched-history-time {
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-history-trigger,
+.sched-history-label,
+.sched-history-meta {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.sched-history-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.sched-history-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sched-history-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.sched-history-pill.delivery-queued,
+.sched-history-pill.outcome-done,
+.sched-history-pill.verdict-pass {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+}
+
+.sched-history-pill.delivery-failed,
+.sched-history-pill.outcome-failed,
+.sched-history-pill.verdict-revise {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+}
+
+.sched-history-pill.outcome-review,
+.sched-history-pill.outcome-reviewing,
+.sched-history-pill.outcome-revising,
+.sched-history-pill.outcome-running,
+.sched-history-pill.verdict-needs_user {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.sched-history-error {
+  max-width: 100%;
+  color: var(--red);
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+
+.sched-history-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sched-history-open:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sched-history-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+@media (max-width: 1100px) {
+  .sched-history-item {
+    grid-template-columns: 1fr;
+  }
+}
+
 .sched-status-switch {
   display: inline-flex;
   gap: 4px;
@@ -10449,6 +10668,113 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-permission-actions button {
   min-height: 28px;
   padding: 4px 10px;
+}
+
+/* PluginManager approval — the only place a plugin gets permission to run. */
+.chat-plugin-approval-card .chat-tool-header {
+  cursor: default;
+}
+
+.chat-plugin-approval-card.tool-running {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-1));
+}
+
+.chat-plugin-approval-card.tool-running .tool-status-icon {
+  color: var(--accent);
+  animation: none;
+}
+
+.chat-plugin-approval-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 10px 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.chat-plugin-approval-body p {
+  margin: 0;
+}
+
+.chat-plugin-approval-muted {
+  color: var(--text-dim);
+}
+
+.chat-plugin-approval-digest {
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.chat-plugin-approval-capabilities {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.chat-plugin-approval-capabilities dt {
+  color: var(--text-dim);
+}
+
+.chat-plugin-approval-capabilities dd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-plugin-approval-change {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.chat-plugin-approval-label {
+  color: var(--text-dim);
+}
+
+.chat-plugin-approval-body code {
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.chat-plugin-approval-actions {
+  padding: 4px 0 0;
+}
+
+.chat-plugin-approval-actions button.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+/* A turn the app started (plugin verification), shown instead of a user bubble. */
+.chat-turn.chat-system-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 4px auto;
+  padding: 4px 12px;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.chat-turn.chat-system-marker svg {
+  color: var(--accent);
+  flex: none;
 }
 
 /* AskUserQuestion — interactive prompt the model uses to ask the user. */
@@ -19315,6 +19641,15 @@ body.somniq-resizing-col {
   white-space: nowrap;
 }
 
+.chat-workflow-chip-task {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-workflow-chip-files {
   flex-shrink: 0;
   color: var(--text-dim);
@@ -19446,6 +19781,11 @@ body.somniq-resizing-col {
   border-color: transparent;
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-1));
   color: var(--accent);
+}
+
+.chat-workflow.paused .chat-workflow-chip-icon,
+.chat-workflow.paused .chat-workflow-step.status-in_progress .chat-workflow-step-icon {
+  color: var(--text-dim);
 }
 
 .chat-workflow-step-text {
@@ -22568,11 +22908,6 @@ body.chat-companion-window {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-/* Extensions owns its header and scroll region, but both use the same centered
-   content column as the other Settings pages. */
-.sp-settings-content-flush { padding: 0; gap: 0; scrollbar-gutter: auto; }
-.sp-settings-content-flush > * { width: 100%; }
-
 /* Remote control keeps its inner scroll region while inheriting the regular
    Settings content gutter and column width. */
 .sp-settings-content-remote {
@@ -22581,13 +22916,6 @@ body.chat-companion-window {
   scrollbar-gutter: stable both-edges;
 }
 .sp-settings-content-remote > * { width: 100%; }
-.sp-extensions-embed {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
 .sp-mail-page {
   width: min(100%, var(--settings-content-max-width));
   margin-left: auto;

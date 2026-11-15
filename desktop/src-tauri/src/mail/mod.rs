@@ -48,6 +48,16 @@ pub fn spawn_event_watchers(app: tauri::AppHandle) {
     events::start_connected_account_watchers(app)
 }
 
+pub fn stop_event_watchers() {
+    events::stop_all()
+}
+
+/// Whether any mailbox was ever connected: what the official Mail plugin
+/// starts as on a profile that never chose.
+pub fn has_accounts() -> bool {
+    !store::list_accounts().is_empty()
+}
+
 async fn offload<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,

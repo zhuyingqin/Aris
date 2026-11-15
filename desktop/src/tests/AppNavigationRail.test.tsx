@@ -102,4 +102,29 @@ describe("AppNavigationRail", () => {
     view.rerender(rail({ moreItems: [] }));
     expect(screen.queryByRole("button", { name: "更多功能" })).toBeNull();
   });
+
+  it("gives plugin pages their own buttons, with the overflow under More", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onSelectPlugin = vi.fn();
+    const pluginItems = ["Board", "Reading", "Budget", "Fourth"].map((label) => ({ id: `plugin:${label}`, label, icon: <span /> }));
+    const view = render(rail({ onSelect, onSelectPlugin, pluginItems, pluginRailCount: 3 }));
+    // No plugin page is open: the module stays current.
+    expect(screen.getByRole("button", { name: "对话" }).getAttribute("aria-current")).toBe("page");
+    await user.click(screen.getByRole("button", { name: "Reading" }));
+    expect(onSelectPlugin).toHaveBeenLastCalledWith("plugin:Reading");
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Fourth" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "更多功能" }));
+    await user.click(within(screen.getByRole("menu")).getByRole("menuitemradio", { name: "Fourth" }));
+    expect(onSelectPlugin).toHaveBeenLastCalledWith("plugin:Fourth");
+
+    // While a plugin page is on screen it is the current page, and no module is.
+    view.rerender(rail({ onSelect, onSelectPlugin, pluginItems, pluginRailCount: 3, activeTab: "extensions", activePlugin: "plugin:Board" }));
+    expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "对话" }).getAttribute("aria-current")).toBeNull();
+    // Without plugin pages the rail is what it was.
+    view.rerender(rail());
+    expect(document.querySelector(".app-rail-divider")).toBeNull();
+  });
 });

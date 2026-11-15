@@ -15,6 +15,7 @@ pub struct EditSvgInput {
 #[tauri::command]
 pub async fn figures_edit_svg(app: AppHandle, input: EditSvgInput) -> Result<FigureView, String> {
     let workspace = project(&app, &input.project_id)?;
+    crate::official_plugins::require_in(&workspace, runtime::plugins::BUILTIN_FIGURES)?;
     let key = (input.project_id.clone(), input.id.clone());
     let mut jobs = active_runs().lock().map_err(|e| e.to_string())?;
     let run = store::load(&workspace, &input.id)?;

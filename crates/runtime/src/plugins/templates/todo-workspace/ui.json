@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "tasks",
+      "slot": "nav.page",
+      "title": { "en": "Tasks", "cn": "任务" },
+      "icon": "check",
+      "order": 10,
+      "scope": "project",
+      "page": "./todo/index.html",
+      "widgets": [
+        { "id": "tasks", "type": "json", "title": { "en": "Tasks", "cn": "任务" } },
+        { "id": "view", "type": "json", "title": { "en": "View settings", "cn": "视图设置" } }
+      ]
+    },
+    {
+      "id": "glance",
+      "slot": "chat.brief",
+      "title": { "en": "Tasks", "cn": "任务" },
+      "order": 10,
+      "scope": "project",
+      "page": "./todo/glance.html",
+      "dataPanel": "tasks"
+    }
+  ]
+}

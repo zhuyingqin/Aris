@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { newapiBootstrap, onChatDone, onChatError } from "./api/tauri";
 import { hasNativeBackend } from "./api/transport";
 import { getAccountSessionRevision, readCachedAccount, subscribeCachedAccount, writeCachedAccount } from "./accountCache";
-import { onFigureUpdated } from "./figures/figureApi";
+import { BILLED_REQUEST_FINISHED_EVENT } from "./extensions/officialPluginGuards";
 import { isManagedAuthInvalidError, useStore } from "./store";
 
 const REFRESH_INTERVAL_MS = 60_000;
@@ -107,9 +107,9 @@ export function useAccountRefresh(menuOpen: boolean) {
     };
     void onChatDone(refreshAfterUsage).then(retain).catch(() => {});
     void onChatError(refreshAfterUsage).then(retain).catch(() => {});
-    void onFigureUpdated(({ active, run }) => {
-      if (!active && run.requests.some((request) => request.finishedAt)) refreshAfterUsage();
-    }).then(retain).catch(() => {});
+    // Modules that bill outside a chat turn (Figures) announce it here.
+    window.addEventListener(BILLED_REQUEST_FINISHED_EVENT, refreshAfterUsage);
+    retain(() => window.removeEventListener(BILLED_REQUEST_FINISHED_EVENT, refreshAfterUsage));
     return () => {
       disposed = true;
       window.clearInterval(timer);

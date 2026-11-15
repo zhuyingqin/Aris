@@ -8,7 +8,7 @@ import {
   getEditorSettings,
   subscribeEditorSettings,
 } from "./editorSettings";
-import type { EditorLanguage, SharedEditorHandle, SharedEditorOptions } from "./editorTypes";
+import type { EditorLanguage, EditorSurface, SharedEditorHandle, SharedEditorOptions } from "./editorTypes";
 
 const languageRequestIds = new WeakMap<EditorView, number>();
 
@@ -45,7 +45,7 @@ export function createSharedEditorView(host: HTMLElement, options: SharedEditorO
     state: EditorState.create({ doc: options.doc, extensions }),
   });
 
-  reconfigureLanguage(view, options.language);
+  reconfigureLanguage(view, options.language, options.surface);
 
   // Every live surface follows the user's editor settings without its own
   // wiring: one subscription per view, dropped when the view is destroyed.
@@ -99,10 +99,10 @@ export function reconfigureReadOnly(view: EditorView, readOnly: boolean): void {
   view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)) });
 }
 
-export function reconfigureLanguage(view: EditorView, language: EditorLanguage): void {
+export function reconfigureLanguage(view: EditorView, language: EditorLanguage, surface: EditorSurface = "code"): void {
   const requestId = (languageRequestIds.get(view) ?? 0) + 1;
   languageRequestIds.set(view, requestId);
-  void loadLanguageExtension(language).then((extension) => {
+  void loadLanguageExtension(language, surface).then((extension) => {
     if (view.dom.isConnected && languageRequestIds.get(view) === requestId) {
       view.dispatch({ effects: languageCompartment.reconfigure(extension) });
     }

@@ -109,6 +109,9 @@ pub struct SystemPromptBuilder {
     append_sections: Vec<String>,
     project_context: Option<ProjectContext>,
     config: Option<RuntimeConfig>,
+    /// The official LaTeX plugin is off: the template's diagram guidance
+    /// loses its TikZ / `latex-diagrams` / `LaTeXCompile` route.
+    omit_latex_guidance: bool,
 }
 
 impl SystemPromptBuilder {
@@ -150,6 +153,12 @@ impl SystemPromptBuilder {
     }
 
     #[must_use]
+    pub fn without_latex_guidance(mut self, omit: bool) -> Self {
+        self.omit_latex_guidance = omit;
+        self
+    }
+
+    #[must_use]
     pub fn append_section(mut self, section: impl Into<String>) -> Self {
         self.append_sections.push(section.into());
         self
@@ -158,9 +167,12 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn build(&self) -> Vec<String> {
         let mut sections = Vec::new();
-        sections.push(render_system_prompt_template(
-            self.output_style_name.is_some(),
-        ));
+        let template = render_system_prompt_template(self.output_style_name.is_some());
+        sections.push(if self.omit_latex_guidance {
+            without_latex_diagram_guidance(&template)
+        } else {
+            template
+        });
         if let (Some(name), Some(prompt)) = (&self.output_style_name, &self.output_style_prompt) {
             sections.push(format!("# Output Style: {name}\n{prompt}"));
         }
@@ -221,6 +233,29 @@ impl SystemPromptBuilder {
 #[must_use]
 pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
     items.into_iter().map(|item| format!(" - {item}")).collect()
+}
+
+/// The "Explanatory diagrams" section with only the routes that need no
+/// LaTeX: SomniImage, Mermaid and editable SVG. Everything else is unchanged.
+fn without_latex_diagram_guidance(template: &str) -> String {
+    const HEADING: &str = "# Explanatory diagrams";
+    let Some(start) = template.find(HEADING) else {
+        return template.to_string();
+    };
+    let end = template[start + HEADING.len()..]
+        .find("\n# ")
+        .map_or(template.len(), |offset| start + HEADING.len() + offset + 1);
+    let nl = if template.contains("\r\n") { "\r\n" } else { "\n" };
+    let section = [
+        HEADING,
+        "",
+        "- For a conceptual illustration, physical scene or spatial explanation, use the existing `SomniImage` tool when available and appropriate to the request. Preserve image-generation provenance, inspect the actual image, and keep measured results tied to real data. Respect explicit local-only requests and existing external-action permissions.",
+        "- For a quick diagram in a chat answer, Mermaid remains suitable; for a requested editable SVG, use the existing vector-diagram workflow. Respect the requested output format.",
+        "",
+        "",
+    ]
+    .join(nl);
+    format!("{}{}{}", &template[..start], section, &template[end..])
 }
 
 fn render_system_prompt_template(has_output_style: bool) -> String {
@@ -800,10 +835,13 @@ pub fn load_system_prompt(
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git(&cwd, current_date.into())?;
     let config = ConfigLoader::default_for(&cwd).load()?;
+    let latex_off = !crate::plugins::PluginStore::for_execution(&cwd)
+        .builtin_enabled(crate::plugins::BUILTIN_LATEX);
     let mut builder = SystemPromptBuilder::new()
         .with_os(os_name, os_version)
         .with_project_context(project_context)
-        .with_runtime_config(config);
+        .with_runtime_config(config)
+        .without_latex_guidance(latex_off);
     if let Some(model) = model_id {
         builder = builder.with_model(model);
     }
@@ -832,7 +870,13 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
         collect_skill_root(scope, &root, &mut seen, &mut entries);
     }
 
+    let plugins = crate::plugins::PluginStore::for_execution(cwd);
     for (name, content) in crate::BUNDLED_SKILLS {
+        // A bundled skill of a switched-off official plugin is not offered.
+        if crate::plugins::bundled_skill_plugin(name).is_some_and(|id| !plugins.builtin_enabled(id))
+        {
+            continue;
+        }
         if !seen.insert((*name).to_string()) {
             continue;
         }
@@ -851,6 +895,15 @@ fn render_available_skills(cwd: &Path) -> Option<String> {
         for root in legacy_claude_skill_roots(cwd) {
             collect_skill_root("Legacy", &root, &mut seen, &mut entries);
         }
+    }
+
+    // Approved project plugins come last: they add skills and never replace
+    // a local, user, bundled or compatibility skill of the same name.
+    for root in plugins
+        .active_skill_roots()
+        .unwrap_or_default()
+    {
+        collect_skill_root("Plugin", &root, &mut seen, &mut entries);
     }
 
     if entries.is_empty() {
@@ -944,7 +997,8 @@ fn skill_scope_rank(scope: &str) -> usize {
         "User" => 1,
         "Bundled" => 2,
         "Legacy" => 3,
-        _ => 4,
+        "Plugin" => 4,
+        _ => 5,
     }
 }
 

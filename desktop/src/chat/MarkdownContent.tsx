@@ -12,6 +12,8 @@ import {
   wrapBareDisplayMathEnvironments,
 } from "../math/latexMath";
 import { SvgIcon } from "../SvgIcon";
+import { useStore } from "../store";
+import { CHAT_COPY } from "./i18n";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import {
   useOpenChatEvidence,
@@ -600,6 +602,8 @@ export const ThinkBlock = memo(function ThinkBlock({
   revealWhileTurnStreaming?: boolean;
 }) {
   const autoOpen = streaming || revealWhileTurnStreaming;
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const [open, setOpen] = useState(autoOpen);
   const [elapsedSec, setElapsedSec] = useState(0);
   const startRef = useRef<number | null>(null);
@@ -643,16 +647,17 @@ export const ThinkBlock = memo(function ThinkBlock({
     }
   }, [content, streaming, open]);
 
-  const preview = content.slice(0, 80).replace(/\s+/g, " ");
-  const label = streaming
-    ? `正在思考${elapsedSec > 0 ? ` · ${elapsedSec}s` : ""}`
-    : elapsedSec > 0
-      ? `已处理 ${elapsedSec}s`
-      : "已思考";
+  const previewText = content.slice(0, 320)
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(^|\n)\s*#{1,6}\s+/g, "$1")
+    .replace(/\*\*|__|~~|`/g, "")
+    .replace(/\s+/g, " ").trim();
+  const preview = previewText.slice(0, 80);
+  const label = `${streaming ? copy.thinking : copy.thought}${elapsedSec > 0 ? ` · ${elapsedSec}s` : ""}`;
 
   return (
     <div className={`md-think${streaming ? " md-think-active" : ""}`}>
-      <button className="md-think-toggle" onClick={() => {
+      <button type="button" className="md-think-toggle" aria-expanded={open} onClick={() => {
         followingBodyRef.current = true;
         setOpen((value) => !value);
       }}>
@@ -660,7 +665,7 @@ export const ThinkBlock = memo(function ThinkBlock({
         {streaming && <span className="md-think-spinner" aria-hidden="true" />}
         <span className="md-think-label">{label}</span>
         {!streaming && !open && content && (
-          <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>
+          <span className="md-think-preview">{preview}{previewText.length > 80 ? "…" : ""}</span>
         )}
       </button>
       {open && (

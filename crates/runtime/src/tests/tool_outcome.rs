@@ -211,3 +211,36 @@ fn a_web_search_that_reached_any_provider_is_not_a_failed_call() {
         &payload(json!({ "status": "completed", "sourceAttempts": [] }))
     ));
 }
+#[test]
+fn docx_candidates_preserve_render_failure_signals_without_treating_pending_review_as_failure() {
+    for tool in [
+        "export_docx",
+        "format_docx",
+        "render_docx",
+        "delete_docx_paragraphs",
+        "export_docx_pdf",
+        "edit_docx_structure",
+        "remove_odt_highlight",
+    ] {
+        assert!(crate::classifies_failures(tool));
+        for state in ["failed", "unavailable", "cancelled"] {
+            let payload =
+                serde_json::json!({"filePath":"candidate.docx", "evidence":{"state":state}});
+            assert!(crate::tool_output_reports_failure(
+                tool,
+                &payload.to_string()
+            ));
+            assert!(crate::tool_output_reports_failure(
+                tool,
+                &serde_json::json!({"state":state}).to_string()
+            ));
+        }
+        for state in ["rendered", "not_requested"] {
+            let payload = serde_json::json!({"evidence":{"state":state,"visualReview":"pending","targetEditorVerification":"unverified"}});
+            assert!(!crate::tool_output_reports_failure(
+                tool,
+                &payload.to_string()
+            ));
+        }
+    }
+}

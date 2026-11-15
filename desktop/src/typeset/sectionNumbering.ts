@@ -14,7 +14,7 @@
  * Pure functions only: no CodeMirror, no React, no file access.
  */
 
-import type { LatexCommand } from "./latexStructure";
+import type { LatexCommand } from "../editor/latex/latexStructure";
 
 /** Absolute LaTeX sectioning depth — `\\part` is shallowest. Counters are
  * indexed by this rank, so `counters[SECTION_RANKS.chapter]` reads directly. */

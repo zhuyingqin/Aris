@@ -145,7 +145,7 @@ export default function GeneralSettings({
 
       <AppearanceSettings language={language} preferences={preferences} section="chat" />
       <SettingsSection title={pageCopy.workspace}>
-        <SettingRow title={pageCopy.mail} feedback={feedback("mail")}>
+        <SettingRow title={pageCopy.mail} description={pageCopy.mailDescription} feedback={feedback("mail")}>
           <button type="button" className="settings-switch" role="switch" aria-label={copy.moduleMailTitle}
             aria-checked={!hideMail} onClick={() => void preferences.save("mail", () => setHideMail(!hideMail, { requirePersistence: true }))}><span /></button>
         </SettingRow>
