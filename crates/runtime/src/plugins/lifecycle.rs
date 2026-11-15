@@ -133,8 +133,10 @@ impl PluginStore {
             return Ok((**set).clone());
         }
         crate::with_path_lock(&self.registry_path(), || {
+            // One reading of the switches for both the packages and the set.
+            let disabled = self.builtin_disabled_now();
             let plugins = self
-                .running()?
+                .running_given(&disabled)?
                 .into_iter()
                 .map(|plugin| FrozenPlugin {
                     name: plugin.package.name,
@@ -142,12 +144,7 @@ impl PluginStore {
                     digest: plugin.package.digest,
                 })
                 .collect();
-            Ok(PluginSet::new(
-                self.project_key(),
-                plugins,
-                None,
-                self.builtin_disabled_now(),
-            ))
+            Ok(PluginSet::new(self.project_key(), plugins, None, disabled))
         })
     }
 }
@@ -398,6 +395,8 @@ pub enum PluginState {
     Running,
     Failed,
     NeedsRestart,
+    /// Enabled, but an official plugin it requires is off for this project.
+    NeedsOfficialPlugin,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,13 +432,20 @@ pub struct PluginLifecycle {
     /// In-flight runs whose frozen copy differs from what the next run gets.
     pub stale_runs: usize,
     pub mcp_servers: Vec<PluginMcpStatus>,
+    /// Required official plugins that are off here (`NeedsOfficialPlugin`).
+    pub missing_official: Vec<String>,
 }
 
 /// Where `view` stands given this project's in-flight `runs`.
-pub(super) fn assess(view: &InstalledPlugin, runs: &[Arc<PluginSet>]) -> PluginLifecycle {
+pub(super) fn assess(
+    view: &InstalledPlugin,
+    runs: &[Arc<PluginSet>],
+    disabled: &[String],
+) -> PluginLifecycle {
     let name = &view.package.name;
     let digest = &view.package.digest;
-    let runs_next = view.enabled && view.package.can_enable;
+    let missing_official = super::missing_official(&view.package.capabilities, disabled);
+    let runs_next = view.enabled && view.package.can_enable && missing_official.is_empty();
     let active_runs = runs.iter().filter(|set| set.get(name).is_some()).count();
     let stale_runs = if runs_next {
         runs.iter()
@@ -471,6 +477,8 @@ pub(super) fn assess(view: &InstalledPlugin, runs: &[Arc<PluginSet>]) -> PluginL
         .collect();
     let state = if !view.package.can_enable {
         PluginState::Blocked
+    } else if view.enabled && !missing_official.is_empty() {
+        PluginState::NeedsOfficialPlugin
     } else if !runs_next {
         if stale_runs > 0 {
             PluginState::NeedsRestart
@@ -497,6 +505,7 @@ pub(super) fn assess(view: &InstalledPlugin, runs: &[Arc<PluginSet>]) -> PluginL
         PluginState::Enabled
     };
     PluginLifecycle {
+        missing_official,
         state,
         active_runs,
         stale_runs,

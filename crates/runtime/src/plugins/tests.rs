@@ -2034,3 +2034,141 @@ fn an_upgrade_card_shows_every_changed_file_and_the_drafts_own_page() {
     assert!(store.draft_page(&draft, &next.digest, "canvas").unwrap_err().contains("changed after"));
     assert!(store.draft_changes(&draft, &next.digest).is_err());
 }
+
+
+/// Adds `somniq.requires` to a fixture's package.json.
+fn require_official(source: &Path, requires: &[&str]) {
+    let path = source.join("package.json");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let somniq = manifest
+        .as_object_mut()
+        .unwrap()
+        .entry("somniq")
+        .or_insert_with(|| serde_json::json!({ "manifestVersion": 1 }));
+    somniq["requires"] = serde_json::json!(requires);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+/// A package that needs Literature does not run while Literature is off for
+/// the project: no skills, no MCP servers, not in the frozen set, and the
+/// Plugins page says why instead of showing it as merely installed.
+#[test]
+fn a_package_that_requires_an_official_plugin_waits_for_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/lit-tracker");
+    require_official(&source, &["literature"]);
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    assert_eq!(preview.capabilities.requires, ["literature"]);
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled(&preview.name, true).unwrap();
+    assert_eq!(store.active_skill_roots().unwrap().len(), 1);
+    assert!(store.list().unwrap()[0].lifecycle.missing_official.is_empty());
+
+    store
+        .set_builtin(BUILTIN_LITERATURE, BuiltinTarget::Project, Some(false))
+        .unwrap();
+    assert!(store.active_skill_roots().unwrap().is_empty());
+    assert!(store.active_mcp_servers().unwrap().is_empty());
+    let set = store.freeze().unwrap();
+    assert!(set.plugins.is_empty());
+    assert!(set.builtin_disabled.iter().any(|id| id == "literature"));
+    let view = &store.list().unwrap()[0];
+    assert!(view.enabled, "the user's choice is kept");
+    assert_eq!(view.lifecycle.state, PluginState::NeedsOfficialPlugin);
+    assert_eq!(view.lifecycle.missing_official, ["literature"]);
+
+    // Another official plugin being off does not matter to it.
+    store
+        .set_builtin(BUILTIN_LITERATURE, BuiltinTarget::Project, None)
+        .unwrap();
+    store
+        .set_builtin(BUILTIN_LATEX, BuiltinTarget::Project, Some(false))
+        .unwrap();
+    assert_eq!(store.active_skill_roots().unwrap().len(), 1);
+    assert_eq!(store.freeze().unwrap().plugins.len(), 1);
+    assert_ne!(store.list().unwrap()[0].lifecycle.state, PluginState::NeedsOfficialPlugin);
+}
+
+#[test]
+fn a_panel_package_that_requires_an_official_plugin_hides_its_panels_while_it_is_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = ui_fixture(temp.path(), "@test/reading-desk");
+    require_official(&source, &["literature"]);
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    store.install(&source, &preview.digest).unwrap();
+    store.set_enabled(&preview.name, true).unwrap();
+    assert_eq!(store.active_ui_panels().unwrap().len(), 1);
+    store
+        .set_builtin(BUILTIN_LITERATURE, BuiltinTarget::Project, Some(false))
+        .unwrap();
+    assert!(store.active_ui_panels().unwrap().is_empty());
+}
+
+#[test]
+fn requires_names_only_known_official_plugins() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/typo");
+    require_official(&source, &["literature", "zotero"]);
+    let preview = store.preview(&source).unwrap();
+    assert!(!preview.can_enable);
+    let diagnostic = preview
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "requires")
+        .expect("requires diagnostic");
+    assert!(diagnostic.message.contains("`zotero`"), "{}", diagnostic.message);
+    assert!(diagnostic.message.contains("literature, latex, figures, mail"), "{}", diagnostic.message);
+}
+
+#[test]
+fn the_plugin_store_guard_matches_the_store_and_nothing_else() {
+    let workspace = Path::new("/work/project");
+    for inside in [
+        "/work/project/.somniq/plugins",
+        "/work/project/.somniq/plugins/official.json",
+        "/work/project/.somniq/plugins/ui-state/x.json",
+    ] {
+        assert!(is_plugin_store_path(Path::new(inside), workspace), "{inside}");
+    }
+    for outside in [
+        "/work/project/.somniq/plugin-drafts/demo/package.json",
+        "/work/project/.somniq/project-goal.json",
+        "/work/project/plugins/official.json",
+        "/work/other/.somniq/plugins/official.json",
+    ] {
+        assert!(!is_plugin_store_path(Path::new(outside), workspace), "{outside}");
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        assert!(is_plugin_store_path(
+            Path::new("/work/project/.SOMNIQ/Plugins/official.json"),
+            workspace
+        ));
+    }
+
+    for command in [
+        "echo '{\"disable\":[\"literature\"]}' > .somniq/plugins/official.json",
+        "Set-Content .somniq\\plugins\\official.json '{}'",
+        "cat .SOMNIQ/PLUGINS/registry.json",
+        "rm -rf .somniq/plugins",
+    ] {
+        assert!(command_names_plugin_store(command), "{command}");
+    }
+    for command in [
+        "ls .somniq/plugin-drafts",
+        "cat .somniq/plugins-backup/notes.txt",
+        "python build.py",
+    ] {
+        assert!(!command_names_plugin_store(command), "{command}");
+    }
+}

@@ -4432,6 +4432,7 @@ pub(crate) fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let canonical = canonicalize_with_hint(&candidate)?;
     if let Some(root) = root.as_ref() {
         ensure_within_workspace(&canonical, root)?;
+        ensure_outside_plugin_store(&canonical, root)?;
     }
     Ok(canonical)
 }
@@ -4465,6 +4466,7 @@ pub(crate) fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
     let canonical = canonicalize_allow_missing(&candidate)?;
     if let Some(root) = root.as_ref() {
         ensure_within_workspace(&canonical, root)?;
+        ensure_outside_plugin_store(&canonical, root)?;
     }
     Ok(canonical)
 }
@@ -4515,6 +4517,18 @@ fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathB
         Some(root) => Ok(root.join(path)),
         None => Ok(crate::execution_current_dir()?.join(path)),
     }
+}
+
+/// Both normalizers above serve only the model's mutating file tools, so the
+/// project's plugin store is refused here once for all of them.
+fn ensure_outside_plugin_store(path: &Path, root: &Path) -> io::Result<()> {
+    if crate::plugins::is_plugin_store_path(path, root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::plugins::PLUGIN_STORE_REFUSAL,
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_within_workspace(path: &Path, root: &Path) -> io::Result<()> {

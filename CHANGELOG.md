@@ -1,5 +1,29 @@
 # ARIS-Code Changelog
 
+## v0.4.89 (2026-11-14)
+
+- **Official plugins** — Literature, LaTeX, Figures and Mail are switchable
+  official plugins. A global switch and a per-project override decide whether
+  each one's page, tools, skills, settings and background work load; a project
+  file may only ask for one to be off. Mail is off by default. Each run keeps
+  the switch state it started with.
+- **Settings and pages** — Literature settings have their own Settings page,
+  hidden while the plugin is off. Typeset, Figures and Mail mount as official
+  plugin page contributions; the PDF reader moved to a shared `pdf/` module
+  that the Chat side viewer and the library both use.
+- **User plugins and official plugins** — a user package can declare
+  `somniq.requires`; it does not run while a required official plugin is off,
+  and the Plugins page and approval card say which one it waits for. The
+  model's file tools refuse the project plugin store, and shell, PowerShell and
+  REPL commands that name it are refused before they run.
+- **Research workflow fixes** — the Scopus school route is billed through the
+  managed gateway, "continue" keeps the active task plan, plugin continuation
+  carries the plan, the brief starts collapsed and local file errors are
+  classified.
+- **Windows release** — manifests and lockfiles target 0.4.89. GitHub-hosted
+  Actions remain blocked by the account billing lock, so the Windows x64
+  installer is built locally.
+
 ## v0.4.88 (2026-11-11)
 
 - **Native Word work in Chat** — generate new DOCX files with local Pandoc,

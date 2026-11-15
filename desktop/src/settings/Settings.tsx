@@ -13,6 +13,8 @@ import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
 import MemorySettings from "./MemorySettings";
+import LiteratureSettings from "./LiteratureSettings";
+import { officialPluginEnabled } from "../extensions/officialPlugins";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
@@ -63,6 +65,8 @@ export default function Settings() {
   const language = useStore((state) => state.language);
   const logout = useStore((state) => state.logout);
   const hideMail = useStore((state) => state.hideMail);
+  // The Literature plugin owns this page; it goes with the plugin.
+  const hideLiterature = useStore((state) => officialPluginEnabled(state.officialPlugins, "literature") === false);
   const currentProjectId = useStore((state) => state.currentProject?.id);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
@@ -207,16 +211,17 @@ export default function Settings() {
       ...group,
       items: group.items.filter((item) => {
         if (item.id === "mail" && hideMail) return false;
+        if (item.id === "literature" && hideLiterature) return false;
         return true;
       }),
     })).filter((group) => group.items.length > 0);
-  }, [hideMail]);
+  }, [hideMail, hideLiterature]);
 
   useEffect(() => {
-    if (hideMail && activeSettingsTab === "mail") {
+    if ((hideMail && activeSettingsTab === "mail") || (hideLiterature && activeSettingsTab === "literature")) {
       setActiveSettingsTab("general");
     }
-  }, [hideMail, activeSettingsTab]);
+  }, [hideMail, hideLiterature, activeSettingsTab]);
 
   const navLabels = SETTINGS_NAV_LABELS[language];
   const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
@@ -291,6 +296,10 @@ export default function Settings() {
         <SettingsPage kind="mail" title={layoutCopy.mail} hidden={activeSettingsTab !== "mail"}><div className="sp-mail-page">
           <MailSettingsDetail />
         </div></SettingsPage>
+      )}
+
+      {activeSettingsTab === "literature" && !hideLiterature && (
+        <SettingsPage kind="literature" title={layoutCopy.literature}><LiteratureSettings key={currentProjectId} language={language} /></SettingsPage>
       )}
 
       {(activeSettingsTab === "memory" || visitedTabs.has("memory")) && (

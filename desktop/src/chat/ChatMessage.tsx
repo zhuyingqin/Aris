@@ -3,6 +3,7 @@ import type { ChatBlock, ChatTurn, NoticeRetryState } from "../types";
 import { chatChangeRevert } from "../api/tauri";
 import { chatPluginApprovalRespond, type PluginApprovalCard } from "../api/plugins";
 import PluginUpgradeReview from "../extensions/PluginUpgradeReview";
+import { officialPluginName } from "../extensions/officialPlugins";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import ChatImageReference from "./ChatImageReference";
@@ -1011,6 +1012,7 @@ const PLUGIN_APPROVAL_COPY = {
     ownPage: "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
     commands: "会在这台电脑上运行的命令",
     envKeys: "环境变量（只列名称）",
+    requires: "依赖的官方插件（关闭时它不运行）",
     upgradeFrom: (version: string) => `从 ${version} 升级`,
     executionUnchanged: "运行的命令和环境变量都没有变化",
     added: "新增",
@@ -1035,6 +1037,7 @@ const PLUGIN_APPROVAL_COPY = {
     ownPage: " (own page: runs the package's page code, sandboxed, no network)",
     commands: "Commands this computer will run",
     envKeys: "Environment variables (names only)",
+    requires: "Official plugins it needs (it does not run while one is off)",
     upgradeFrom: (version: string) => `Upgrade from ${version}`,
     executionUnchanged: "No command or environment variable changes",
     added: "Added",
@@ -1175,6 +1178,12 @@ function PluginApprovalCall({
                 <>
                   <dt>{copy.envKeys}</dt>
                   <dd>{mcpServers.flatMap((server) => server.envKeys).join(", ")}</dd>
+                </>
+              )}
+              {(card.capabilities.requires?.length ?? 0) > 0 && (
+                <>
+                  <dt>{copy.requires}</dt>
+                  <dd>{card.capabilities.requires!.map((id) => officialPluginName(id, language === "cn" ? "cn" : "en")).join(", ")}</dd>
                 </>
               )}
             </dl>

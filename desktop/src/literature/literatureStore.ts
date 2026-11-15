@@ -67,7 +67,7 @@ import {
   type PdfExtraction,
   type PdfPageExtraction,
   type PdfPageImage,
-} from "./pdfExtraction";
+} from "../pdf/pdfExtraction";
 import { describeSearchConditions, normalizeSearchConditions } from "./advancedSearch";
 
 const MAX_ACTIVITY_ENTRIES = 200;

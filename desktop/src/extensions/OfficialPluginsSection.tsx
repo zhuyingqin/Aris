@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { useStore, type Language } from "../store";
-import { officialPluginsSet, switchTarget, type OfficialPluginId, type OfficialPluginState } from "./officialPlugins";
+import { OFFICIAL_PLUGIN_NAMES, officialPluginsSet, switchTarget, type OfficialPluginId, type OfficialPluginState } from "./officialPlugins";
 import "./PluginPackages.css";
 
 const COPY = {
@@ -19,7 +19,7 @@ const COPY = {
     projectOn: "本项目开启", projectOff: "本项目关闭",
     workspaceOff: "这个项目的 .somniq/plugins/official.json 要求关闭；在本项目单独开启可以覆盖。",
     projectOverride: "本项目使用单独的设置。",
-    names: { literature: "文献库", latex: "LaTeX", figures: "Figures", mail: "邮箱" },
+    names: OFFICIAL_PLUGIN_NAMES.cn,
     descriptions: {
       literature: "外部文献检索、检索协议、PDF 获取和文献库页面。本地证据检索（项目文献、PDF、已确认知识）属于核心功能，关掉也保留；综述流程需要它。",
       latex: "Typeset 编辑器、LaTeX 编译与渲染工具和 TikZ 绘图指引。关闭后 .tex 文件改在 Code 页打开。",
@@ -40,7 +40,7 @@ const COPY = {
     projectOn: "On in this project", projectOff: "Off in this project",
     workspaceOff: "This project's .somniq/plugins/official.json asks for it off; turning it on for this project overrides that.",
     projectOverride: "This project uses its own setting.",
-    names: { literature: "Literature", latex: "LaTeX", figures: "Figures", mail: "Mail" },
+    names: OFFICIAL_PLUGIN_NAMES.en,
     descriptions: {
       literature: "External literature search, search protocols, PDF acquisition and the library page. Local evidence retrieval (project papers, PDFs, confirmed knowledge) is core and stays when this is off; literature reviews need it.",
       latex: "The Typeset editor, the LaTeX compile and render tools and TikZ diagram guidance. When it is off, .tex files open in Code.",

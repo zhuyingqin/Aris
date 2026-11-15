@@ -20,6 +20,7 @@ mod authoring;
 mod builtin;
 mod dsh;
 mod lifecycle;
+mod store_guard;
 mod ui;
 mod upgrade;
 mod versions;
@@ -27,6 +28,7 @@ mod versions;
 pub use authoring::*;
 pub use builtin::*;
 pub use lifecycle::*;
+pub use store_guard::*;
 pub use ui::*;
 pub use upgrade::*;
 pub use versions::*;
@@ -99,6 +101,20 @@ pub struct PluginCapabilities {
     pub mcp_servers: Vec<PluginMcp>,
     #[serde(default)]
     pub ui_panels: Vec<UiPanel>,
+    /// Official plugins the package needs (`somniq.requires`), known ids only.
+    #[serde(default)]
+    pub requires: Vec<String>,
+}
+
+/// The official plugins `capabilities` needs that `disabled` switches off.
+#[must_use]
+pub fn missing_official(capabilities: &PluginCapabilities, disabled: &[String]) -> Vec<String> {
+    capabilities
+        .requires
+        .iter()
+        .filter(|id| disabled.contains(id))
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,22 +845,32 @@ impl PluginStore {
     /// Every installed package with its configuration AND lifecycle state.
     pub fn list(&self) -> Result<Vec<InstalledPlugin>, String> {
         let runs = lifecycle::project_runs(&self.project_key());
+        let disabled = self.builtin_disabled();
         Ok(self
             .registry()?
             .packages
             .values()
-            .map(|record| self.assessed(record, &runs))
+            .map(|record| self.assessed(record, &runs, &disabled))
             .collect())
     }
 
     /// One package as the plugin page shows it.
     fn view(&self, record: &Record) -> InstalledPlugin {
-        self.assessed(record, &lifecycle::project_runs(&self.project_key()))
+        self.assessed(
+            record,
+            &lifecycle::project_runs(&self.project_key()),
+            &self.builtin_disabled(),
+        )
     }
 
-    fn assessed(&self, record: &Record, runs: &[Arc<PluginSet>]) -> InstalledPlugin {
+    fn assessed(
+        &self,
+        record: &Record,
+        runs: &[Arc<PluginSet>],
+        disabled: &[String],
+    ) -> InstalledPlugin {
         let mut view = self.inspect_record(record);
-        view.lifecycle = lifecycle::assess(&view, runs);
+        view.lifecycle = lifecycle::assess(&view, runs, disabled);
         view
     }
 
@@ -964,21 +990,32 @@ impl PluginStore {
     /// otherwise what the registry and this computer's approvals allow now.
     /// Snapshot integrity is checked either way.
     fn running(&self) -> Result<Vec<InstalledPlugin>, String> {
-        match &self.frozen {
-            Some(set) => Ok(set
+        self.running_given(&self.builtin_disabled())
+    }
+
+    /// [`Self::running`] with the official plugins that are off already known.
+    /// A package whose required official plugin is off does not run at all:
+    /// no skills, no MCP servers, no panels.
+    pub(super) fn running_given(&self, disabled: &[String]) -> Result<Vec<InstalledPlugin>, String> {
+        let plugins: Vec<_> = match &self.frozen {
+            Some(set) => set
                 .plugins
                 .iter()
                 .map(|plugin| self.inspect_frozen(plugin))
                 .filter(|p| p.package.can_enable)
-                .collect()),
-            None => Ok(self
+                .collect(),
+            None => self
                 .registry()?
                 .packages
                 .values()
                 .map(|record| self.inspect_record(record))
                 .filter(|p| p.enabled && p.package.can_enable)
-                .collect()),
-        }
+                .collect(),
+        };
+        Ok(plugins
+            .into_iter()
+            .filter(|p| missing_official(&p.package.capabilities, disabled).is_empty())
+            .collect())
     }
 
     fn inspect_frozen(&self, plugin: &FrozenPlugin) -> InstalledPlugin {

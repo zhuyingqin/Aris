@@ -3568,6 +3568,11 @@ fn spec_names(specs: &[tools::ToolSpec]) -> Vec<&'static str> {
 /// Official plugins on: the turn offers the registry it always offered.
 #[test]
 fn a_set_with_every_official_plugin_on_offers_the_whole_registry() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
     let frozen = spec_names(&tool_specs_for(
         DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
@@ -3580,6 +3585,11 @@ fn a_set_with_every_official_plugin_on_offers_the_whole_registry() {
 /// other tool where it was, so the prompt prefix before it stays cacheable.
 #[test]
 fn switching_mail_off_drops_exactly_the_mail_tools_in_place() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
     let off = spec_names(&tool_specs_for(
         DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
@@ -3651,6 +3661,11 @@ fn the_mail_manifest_lists_exactly_the_mail_modules_tools() {
 /// (the core retrieval tools) stays.
 #[test]
 fn switching_literature_off_keeps_local_evidence_tools() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let off = spec_names(&tool_specs_for(
         DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
         &frozen_set_with_disabled(&["literature"]),
@@ -3665,6 +3680,11 @@ fn switching_literature_off_keeps_local_evidence_tools() {
 
 #[test]
 fn switching_latex_off_drops_its_compile_and_render_tools_in_place() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
     let off = spec_names(&tool_specs_for(
         DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,

@@ -168,6 +168,20 @@ describe("Plugin packages", () => {
     expect(within(card).queryByText("Needs DeepSeek host capabilities")).toBeNull();
     expect(within(card).getByText(/cannot be replaced by a plugin/)).toBeTruthy();
   });
+  it("says which official plugin a waiting package needs instead of calling it disabled", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([{
+      ...enabled, capabilities: { ...pkg.capabilities, requires: ["literature"] },
+      lifecycle: lifecycle("needs-official-plugin", { missingOfficial: ["literature"] }),
+    }]);
+    render(<PluginPackages projectPath={projectPath} language="cn" onChanged={onChanged} />);
+    const card = await screen.findByRole("article", { name: "@lab/evidence" });
+    expect(within(card).getByText("缺官方插件")).toBeTruthy();
+    expect(within(card).getByText(/官方插件「文献库」在本项目已关闭/)).toBeTruthy();
+    expect(within(card).queryByText("已停用")).toBeNull();
+    fireEvent.click(within(card).getByRole("button", { name: /详情/ }));
+    expect(within(card).getByText("依赖官方插件")).toBeTruthy();
+  });
+
   it("keeps running, failed and restart-needed apart and shows each MCP server's real health", async () => {
     vi.mocked(api.pluginsList).mockResolvedValue([
       { ...enabled, name: "@lab/running", lifecycle: lifecycle("running", { activeRuns: 2, mcpServers: [mcp("connected", { toolCount: 3, checkedAtMs: 1 })] }) },

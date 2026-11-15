@@ -165,3 +165,5 @@
   .sp-settings-shell .settings-page .sp-remote-tab { flex: 1; }
   .sp-settings-shell .settings-page .settings-actions-note { flex-basis: 100%; }
 }
+/* The Literature plugin's settings page: its cards fill the column like every other page. */
+.sp-settings-shell .settings-page-literature .sp-literature-page > .sp-update-section { width: 100%; box-sizing: border-box; margin-inline: 0; }

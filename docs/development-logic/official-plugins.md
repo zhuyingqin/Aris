@@ -1,7 +1,7 @@
 # 官方插件化：把内置模块接到同一套贡献点上
 
 状态：P0–P4 已实现（2026-11-13～14，分支 `codex/release-0.4.89`：fb6a8cdc P0+P1、f4d8f105 P0 欠账、
-第三批 P2/P4/P3），实现记录见文末。剩余：PdfReader 搬到 `pdf/`、Figures 页面贡献化、附件命名模板入口待定、P5。
+3d14d249 P2/P4/P3、第四批收尾），实现记录见文末。剩余：P5（另写设计稿）。
 基于工作区 `codex/docx-upstream-acceptance`
 （e80513eb）和尚未提交的插件工作（AI 自建插件 M1–M3、DIY 第一层与第三层）。
 相关文档：[插件包与信任锚](deepseek-plugin-packages.md)、
@@ -446,3 +446,61 @@ D1–D6 按建议值实现，用户已于 2026-11-13 确认。D4 的实际做法
   - "跟随全局（…）"原来是用当前生效状态猜的。现在后端直接返回 `globalEnabled`（全局的选择或默认值）。
   - 修正后重测：关 Figures 只写 `projects.<本项目>.figures=false`，全局保持未设置，选择框显示"本项目关闭"。
 
+## 第四批：P3/P2 收尾（2026-11-14，在 3d14d249 之后）
+
+### 附件命名模板：放回设置页，归文献插件
+
+- 查证：文献页侧栏的"设置"按钮一直在请求设置页的 `literature` 分类，但 0.4.62 重做设置侧栏时这个分类被拿掉了，按钮实际是坏的；附件命名模板（含"重命名已有附件"）和快速复制样式因此都没有入口。后端 `literature_preferences`、`literature_rename_attachments` 一直在用。
+- 决定：把 `LiteratureSettings` 作为文献插件的设置页挂回"集成"分组（在邮箱之后）。文献插件在本项目关闭时，这一项和邮箱一样从侧栏消失，已打开时退回"常规"。不另做文献页内的弹窗：设置页现成、已有测试，且和 `settings` 贡献点的方向一致。
+- 测试：`settings/LiteratureSettingsEntry.test.tsx`（文献页请求时打开附件命名；插件关闭时没有这一项）。
+
+### PdfReader 一组搬到 `pdf/`
+
+- 搬的不只是 PdfReader：伴读面板、导读视图、导读图示、伴读接口、`pdfExtraction`/`pdfEvidence` 和它们的样式、测试是一组（约 4100 行），对文献库只有三处依赖，一起搬走：
+  - 阅读器文案 → `pdf/i18n.ts`（`PDF_READER_COPY`），`LITERATURE_COPY.*.pdfReader` 改为引用它；原来借用的 `workspaceHeader.tabGuide` 改为阅读器自己的 `guideTab`。
+  - 批注类型和 `EvidenceSource` → `pdf/annotationTypes.ts`，`literatureTypes.ts` 原名重新导出，文献侧代码不用改。
+  - 布局偏好读写和 `isEditableTarget` → `pdf/readerPrefs.ts`，仍用原来的本地存储键，用户已有的"工具栏收起"选择不丢；`libraryInteraction.ts` 委托给它。
+- 依赖方向：文献库依赖 `pdf/`，`pdf/` 不依赖文献库。`pdf/tests/boundary.test.ts` 钉住：`pdf/` 下的源码不得引用 `../literature/`。
+- 没搬：`.lit-pdf*` 样式仍在 `Literature.css` 原位（约 200 条规则，分散在 7 段）。两个使用方（文献页、Chat 侧栏）本来就加载这份样式，挪动会改变它们与其余规则的先后次序，踩 styles 级联陷阱，收益只是代码组织。以后要拆，按段整体移动并逐段截图对比。
+
+### 官方插件页面贡献
+
+- 新增 `extensions/officialPluginPages.tsx`：每个页面声明所属插件、tab、`load`（懒加载，也用于悬停预加载）、挂载方式（`keep` 首次打开后隐藏不卸载，保住草稿和在跑的任务；`visible` 只在显示时挂载）、外层 class、是否在导航外壳里绘制。
+- LaTeX（`typeset`）、Figures、邮箱改由 `App.tsx` 遍历这份声明挂载，`App.tsx` 不再按模块各写 mounted 状态、懒加载和预加载分支。
+- 文献页不在里面：它的 `pageView` 和顶栏工具栏槽位共用，是外壳状态，留在 `App.tsx` 直接挂载。
+- 测试：`extensions/officialPluginPages.test.ts`（页面与插件 tab、导航项一致；Figures/LaTeX 保持挂载；文献与核心 tab 不在声明里）。
+
+### 第四批验证
+
+- 前端全套 2390/2393：3 个失败都在 `.audit/literature-20260926.test.tsx`（9 月的现状复现测试，找不到"新建条目"按钮、"外部发现"标签，与本批无关）；`scripts/tests/*.cjs` 是 node:test 脚本，vitest 报"没有测试套件"。类型检查、`npm run build` 通过。
+- 浏览器预览（`vite preview`，dev server 冷启动挂起）：
+  - 先开 Figures 再开 LaTeX：两个页面都按声明包在 `app-figures-pane`/`app-typeset-pane` 里，切回 Chat 后两者都隐藏而不卸载。
+  - 文献页侧栏"设置"按钮落到新的"文献库"设置页。原样式下三张卡片宽度不一（359/477/651px），补了 `SettingsLayout.css` 一条作用域规则，改后都是 651px。
+- 没验证到：PDF 阅读器从新位置打开本地 PDF。浏览器预览没有桌面后端，示例文献打不开 PDF；由类型检查、构建、搬过去的 PdfReader 测试和 Chat 侧栏测试覆盖。
+
+## 与 Chat 里定制插件的交叉核对（2026-11-14）
+
+逐项核对过、不冲突的：开关与审批分文件存放（`builtin.json` / `approvals.json` / `packages/`）；项目侧 `registry.json` 与 `official.json` 互不扫描；用户插件工具名带 `mcp__<服务>__` 前缀，不会被 `builtin_tool` 认成官方工具；用户插件不能占用内置技能名（安装期报错，与官方开关无关，关掉官方插件也顶替不了）；"需要重启"按名字和摘要逐个比，官方开关改变指纹但不会把用户插件判为过期；"改这个界面"只挂在用户插件面板上，官方插件不是安装包，`checkout` 取不到。
+
+补上的两处缺口：
+
+### 模型不能写项目的插件存储
+
+- `plugins/store_guard.rs`：`is_plugin_store_path`（`<project>/.somniq/plugins` 及其下，NTFS/APFS 上不分大小写）和 `command_names_plugin_store`。
+- 文件工具：`file_ops` 的两个写路径规范化函数（write_file、write_files、edit、multi_edit、append、大文件写、DOCX 编辑都经过它们）在工作区边界检查之后再拒绝插件存储，错误为 `PermissionDenied` 并指向 PluginManager、插件页和 `.somniq/plugin-drafts`。读取不受影响。
+- bash、PowerShell、REPL：命令文本提到 `.somniq/plugins`（任一种斜杠、不分大小写，`plugin-drafts`/`plugins-backup` 不算）就在执行前拒绝。这是文本检查，拦的是走错路的智能体，拦不住刻意拼接路径的命令；信任仍靠项目外的审批记录。NotebookExecute 执行的是笔记本里的代码，没有加这道检查。
+- 插件开发技能写明：这条路径会被拒；官方插件开关归用户。
+- 测试：`file_tools_refuse_the_project_plugin_store`（runtime）、`shell_tools_refuse_commands_that_name_the_plugin_store`（tools）、`the_plugin_store_guard_matches_the_store_and_nothing_else`。
+
+### 用户插件声明依赖官方插件（`somniq.requires`）
+
+- 清单：`package.json` 的 `"somniq": { "manifestVersion": 1, "requires": ["literature"] }`；有面板时 `ui` 照写，只声明依赖时 `ui` 可省略。未知 id 报 `requires` 诊断（阻止启用），`PluginManager inspect` 的规则里有说明，诊断有修复提示。
+- 生效：`running_given` 过滤掉依赖未满足的包，所以它的 Skills、MCP 服务、面板都不加载，也不进回合冻结集；`freeze` 只读一次开关，包过滤和 `builtin_disabled` 用同一份。这与 `mail_literature_catch_up` 依赖文献库时整块剔除的做法一致。
+- 展示：新生命周期状态 `needs-official-plugin`（"缺官方插件"）和 `missingOfficial`，插件页写明缺哪个、去哪里打开；详情和 Chat 批准卡片都列出"依赖的官方插件"。用户的启用选择保留，官方插件打开后下一次运行自动恢复。
+- 测试：`a_package_that_requires_an_official_plugin_waits_for_it`、`a_panel_package_that_requires_an_official_plugin_hides_its_panels_while_it_is_off`、`requires_names_only_known_official_plugins`；前端 `PluginPackages.test.tsx` 新增等待状态用例。
+- 这是 P5"`requires` 开放给用户插件"的一部分；P5 其余（检索源经 MCP、声明式设置页、只读预览页）仍待设计稿。
+
+### 验证
+
+- runtime 984、tools 339、chat 68、前端 2386 全过，构建通过；desktop 1064/1065，唯一失败仍是 31511e6e 的 `the_completion_contract_only_promises_a_reviewer_that_will_run`。
+- 全套并行时发现官方插件工具表测试偶发失败：它们两次读取工具注册表，中间若有别的测试改了环境变量（3d14d249 新增的 Figures 404 测试会改 `ARIS_CONFIG_ROOT`），两份列表就不一致。现在凡两次读注册表的测试都持有 crate 唯一的 `test_env_lock`。

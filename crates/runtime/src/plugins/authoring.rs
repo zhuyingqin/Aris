@@ -31,6 +31,7 @@ const DIAGNOSTIC_HINTS: &[(&str, &str)] = &[
     ("group", "A group row's config must be an array of rows."),
     ("capability", "Only @deepseek-ai/dsh-skill-filesystem and @deepseek-ai/dsh-mcp-client rows are supported; PluginManager inspect lists the config fields each accepts."),
     ("ui", "Check ui.json against PluginManager inspect: a supported slot, known widget types with only their own fields, unique ids, and text within the limits."),
+    ("requires", "List only official plugin ids in somniq.requires (literature, latex, figures, mail), and only the ones the package cannot work without."),
     ("duplicate-capability", "Give every skill and every MCP serverName in the package a different name."),
     ("empty", "Add at least one skill (dsh-skill-filesystem row), MCP server (dsh-mcp-client row) or somniq.ui panel."),
     ("skill-alias", "Rename the skill: its name is reserved by a SomniQ skill alias."),
@@ -252,6 +253,7 @@ pub fn authoring_contract() -> AuthoringContract {
                 "package.json scripts never run; there is no npm install or build step.",
                 "Every file is hashed. The installed snapshot of those bytes is what runs, so editing the draft afterwards changes nothing until it is upgraded.",
                 "A package may combine skills, MCP servers and somniq.ui panels.",
+                "If the package cannot work without one of SomniQ's official plugins (literature, latex, figures, mail), list it in package.json `somniq.requires`, for example { \"manifestVersion\": 1, \"requires\": [\"literature\"] } (\"ui\" is then optional). While a required official plugin is off for the project the package does not run at all, and the Plugins page says which one it is waiting for. Tools of an official plugin that is off are not available, so a skill that calls LiteratureSearch, LaTeXCompile or the mail tools needs this.",
             ],
         },
         dsh: DshRules {

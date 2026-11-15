@@ -159,8 +159,18 @@ You write, check and install the package. **Only the user approves it**: a
 package runs only after they click approve on the card `request_enable`
 shows. Nothing you write in the workspace makes a package run, and you cannot
 approve one. Never write into `.somniq/plugins/` or the SomniQ config
-directory, never try to install by other means than `PluginManager`, and never
-tell the user a plugin is enabled until a tool result says so.
+directory (the file tools and shell commands refuse that path), never try to
+install by other means than `PluginManager`, and never tell the user a plugin is
+enabled until a tool result says so. Official plugins (literature, latex,
+figures, mail) are the user's to switch in the Plugins page; do not try to turn
+them on or off.
+
+If the package relies on an official plugin's tools (LiteratureSearch,
+LaTeXCompile, the mail tools, ...), declare it in `package.json`:
+`"somniq": { "manifestVersion": 1, "requires": ["literature"] }` (keep `"ui"`
+there when the package has panels). The package then does not run while that
+official plugin is off for the project, and the Plugins page tells the user
+why. `PluginManager inspect` lists the accepted ids.
 
 Every change-making result has an `application` field. Act on it, not on
 guesses: `none` changed nothing that runs; `next-turn` means approved (or

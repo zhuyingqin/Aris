@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
-import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { renderPdfPageToCanvas } from "./canvas";
 import type { FollowUpMode, GuideLesson, GuideLessonEntry, PaperFollowUp, PaperGuide, TopicLevel } from "./paperReadingApi";
 import { currentLesson, finalReview } from "./paperGuideModel";
 import PaperReadingContent from "./PaperReadingContent";

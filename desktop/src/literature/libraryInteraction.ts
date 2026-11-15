@@ -1,3 +1,4 @@
+import { readLayoutPrefs as readSharedLayout, writeLayoutPrefs as writeSharedLayout } from "../pdf/readerPrefs";
 import { useEffect, useState, type RefObject } from "react";
 
 /** Inclusive run of ids between `from` and `to` in list order. An anchor that
@@ -27,11 +28,7 @@ export function nextAfterRemoval(
   return null;
 }
 
-/** Keyboard shortcuts must never fire while the user is typing. */
-export function isEditableTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement
-    && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
-}
+export { isEditableTarget } from "../pdf/readerPrefs";
 
 /** Row keys may contain characters that need escaping in a selector, so the
  * rendered rows are compared directly. */
@@ -59,8 +56,6 @@ export function useNarrowerThan(ref: RefObject<HTMLElement>, width: number): boo
   return narrow;
 }
 
-const LAYOUT_STORAGE_KEY = "somniq-literature-layout-v1";
-
 /** Per-viewer layout choices. Stored locally only; a missing or unreadable
  * value falls back to the responsive defaults. */
 export interface LibraryLayoutPrefs {
@@ -75,23 +70,9 @@ export interface LibraryLayoutPrefs {
   sortReversed?: boolean;
 }
 
-export function readLayoutPrefs(): LibraryLayoutPrefs {
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(LAYOUT_STORAGE_KEY) ?? "{}");
-    return parsed && typeof parsed === "object" ? parsed as LibraryLayoutPrefs : {};
-  } catch {
-    return {};
-  }
-}
-
-export function writeLayoutPrefs(patch: LibraryLayoutPrefs) {
-  try {
-    window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ ...readLayoutPrefs(), ...patch }));
-  } catch {
-    // Storage can be unavailable (private mode, blocked site data); layout
-    // then simply resets next time.
-  }
-}
+/** The record is shared with the PDF reader, which owns its storage. */
+export const readLayoutPrefs = (): LibraryLayoutPrefs => readSharedLayout<LibraryLayoutPrefs>();
+export const writeLayoutPrefs = (patch: LibraryLayoutPrefs) => writeSharedLayout(patch);
 
 /** A stored width, if it is a number inside the allowed range. */
 export function storedWidth(value: unknown, min: number, max: number, fallback: number): number {

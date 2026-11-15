@@ -1,5 +1,5 @@
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
-import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { renderPdfPageToCanvas } from "./canvas";
 
 export const normalizeText = (text: string) =>
   text

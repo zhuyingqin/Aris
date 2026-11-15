@@ -619,6 +619,7 @@ export interface SettingsNavCopy {
     models: string;
     memory: string;
     mail: string;
+    literature: string;
     remote: string;
     environment: string;
     about: string;
@@ -1306,6 +1307,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         models: "模型服务",
         memory: "智能记忆",
         mail: "邮箱",
+        literature: "文献库",
         remote: "远程控制",
         environment: "环境",
         about: "关于与环境",
@@ -1976,6 +1978,7 @@ export const SETTINGS_COPY: Record<Language, SettingsCopy> = {
         models: "Model service",
         memory: "Smart memory",
         mail: "Mail",
+        literature: "Literature",
         remote: "Remote control",
         environment: "Environment",
         about: "About & Environment",

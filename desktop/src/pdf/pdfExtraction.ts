@@ -1,9 +1,9 @@
 import { literatureImageOcr, literaturePdfBytes } from "../api/tauri";
 import type { PDFPageProxy } from "pdfjs-dist";
-import { renderPdfPageToCanvas } from "../pdf/canvas";
-import { openPdfDocument } from "../pdf/runtime";
+import { renderPdfPageToCanvas } from "./canvas";
+import { openPdfDocument } from "./runtime";
 import { useStore } from "../store";
-import { LITERATURE_COPY } from "./i18n";
+import { PDF_COPY } from "./i18n";
 import { bytesToBase64, fingerprintBytes, normalizeText, pageEmbeddedText, renderPageJpeg } from "./pdfEvidence";
 export { paperDocumentRevision, preparePaperPageEvidence } from "./pdfEvidence";
 
@@ -125,7 +125,7 @@ export const extractPdfTextByPage = async (relativePath: string): Promise<PdfExt
           pages.push({ page: pageNumber, text: "", source: "empty" });
         }
       } catch (error) {
-        const copy = LITERATURE_COPY[useStore.getState().language].pdfReader;
+        const copy = PDF_COPY[useStore.getState().language].pdfReader;
         warnings.push(copy.ocrFailed(pageNumber, String(error)));
         pages.push({ page: pageNumber, text: "", source: "empty" });
       }
@@ -140,7 +140,7 @@ export const extractPdfTextByPage = async (relativePath: string): Promise<PdfExt
     .map((page) => `[[PAGE ${page.page}]]\n${page.text}`)
     .join("\n\n");
   if (!text) {
-    const copy = LITERATURE_COPY[useStore.getState().language].pdfReader;
+    const copy = PDF_COPY[useStore.getState().language].pdfReader;
     throw new Error(copy.noReadableText(warnings.join(" ")));
   }
   const characters = Array.from(text).length;

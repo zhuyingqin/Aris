@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,6 +19,7 @@ import PluginPage from "./extensions/PluginPage";
 import { useOfficialPluginsSync } from "./extensions/useOfficialPluginsSync";
 import { officialPluginCloseHazards, officialPluginsHaveUnsavedWork, projectSwitchBlocker, startOfficialPluginWatchers } from "./extensions/officialPluginGuards";
 import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./extensions/officialPluginNav";
+import { OFFICIAL_PLUGIN_PAGES, officialPluginPage } from "./extensions/officialPluginPages";
 import { officialTabHidden } from "./extensions/officialPlugins";
 import { ModuleIcon } from "./ModuleIcon";
 import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, pluginPageIcon, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
@@ -46,16 +47,10 @@ import { usePendingScreenshot } from "./screenshot/usePendingScreenshot";
 import "./tasks/Tasks.css";
 
 const loadLiterature = () => import("./literature/Literature");
-const loadMail = () => import("./mail/Mail");
-const loadTypeset = () => import("./typeset/Typeset");
-const loadFigures = () => import("./figures/FigureStudio");
 const loadCode = () => import("./code/CodePane");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
-const Mail = lazy(loadMail);
-const Typeset = lazy(loadTypeset);
-const FigureStudio = lazy(loadFigures);
 const CodePane = lazy(loadCode);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
@@ -201,10 +196,8 @@ function useSidebarIsOverlay(): boolean {
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "workflows") void loadWorkflows();
-  else if (tabId === "mail") void loadMail();
-  else if (tabId === "typeset") void loadTypeset();
-  else if (tabId === "figures") void loadFigures();
   else if (tabId === "lab") void loadCode();
+  else void officialPluginPage(tabId)?.load();
 }
 
 function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
@@ -456,8 +449,8 @@ export default function App() {
   // workbench iframe and restart its extension host on every tab switch.
   const [codeMounted, setCodeMounted] = useState(false);
   const [codeWorkbenchReady, setCodeWorkbenchReady] = useState(false);
-  const [typesetMounted, setTypesetMounted] = useState(false);
-  const [figuresMounted, setFiguresMounted] = useState(false);
+  // Official plugin pages declared `mount: "keep"` that have been opened.
+  const [keptPages, setKeptPages] = useState<ReadonlySet<string>>(() => new Set());
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
@@ -648,8 +641,9 @@ export default function App() {
   useEffect(() => init(), [init]);
   useEffect(() => {
     if (tab === "lab") setCodeMounted(true);
-    if (tab === "typeset") setTypesetMounted(true);
-    if (tab === "figures") setFiguresMounted(true);
+    if (officialPluginPage(tab)?.mount === "keep") {
+      setKeptPages((current) => (current.has(tab) ? current : new Set(current).add(tab)));
+    }
     if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
   useEffect(() => installBrowserUnsavedChangesGuard(
@@ -846,7 +840,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
-  const navigationShell = chatShell || renderedTab === "settings" || renderedTab === "figures" || renderedTab === "extensions";
+  const navigationShell = chatShell || renderedTab === "settings" || officialPluginPage(renderedTab)?.navigationShell === true || renderedTab === "extensions";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
@@ -1157,22 +1151,10 @@ export default function App() {
               </ErrorBoundary>
             </div>
           )}
-          {typesetMounted && (
-            <div className="app-typeset-pane" hidden={renderedTab !== "typeset"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.typeset} />}>
-                <Typeset />
-              </Suspense>
-            </div>
-          )}
           {renderedTab === "literature" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
-          )}
-          {figuresMounted && (
-            <div className="app-figures-pane" hidden={renderedTab !== "figures"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.figures} />}><FigureStudio visible={renderedTab === "figures"} /></Suspense>
-            </div>
           )}
           {workflowsMounted && (
             <div className="app-workflows-pane" hidden={renderedTab !== "workflows"}>
@@ -1181,11 +1163,18 @@ export default function App() {
               </Suspense>
             </div>
           )}
-          {renderedTab === "mail" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.mail} />}>
-              <Mail />
-            </Suspense>
-          )}
+          {OFFICIAL_PLUGIN_PAGES.map(({ tab: pageTab, Component, mount, paneClassName }) => {
+            const visible = renderedTab === pageTab;
+            if (mount === "keep" ? !keptPages.has(pageTab) : !visible) return null;
+            const body = (
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav[pageTab as keyof typeof copy.nav] ?? pageTab} />}>
+                <Component visible={visible} />
+              </Suspense>
+            );
+            return mount === "keep"
+              ? <div key={pageTab} className={paneClassName} hidden={!visible}>{body}</div>
+              : <Fragment key={pageTab}>{body}</Fragment>;
+          })}
           {renderedTab === "extensions" && (pluginPage && currentProject
             ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
             : <Extensions />)}

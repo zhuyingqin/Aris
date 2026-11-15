@@ -6,7 +6,7 @@ import { layeredGuideFixture } from "./paperGuideFixture";
 
 const renderMermaid = vi.fn();
 vi.mock("../../chat/MermaidDiagram", () => ({ renderMermaid: (code: string, theme: string) => renderMermaid(code, theme) }));
-vi.mock("../../pdf/canvas", () => ({ renderPdfPageToCanvas: () => ({ task: { promise: Promise.resolve(), cancel: vi.fn() } }) }));
+vi.mock("../canvas", () => ({ renderPdfPageToCanvas: () => ({ task: { promise: Promise.resolve(), cancel: vi.fn() } }) }));
 import PaperGuideDiagram, { diagramMarkdown, flowToMermaid } from "../PaperGuideDiagram";
 import PaperGuideView from "../PaperGuideView";
 

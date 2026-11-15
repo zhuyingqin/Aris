@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMathClipboard } from "../../math/mathClipboard";
 import { htmlClipboardToLatex } from "../../typeset/latexHtmlPaste";
-import PaperReadingContent from "../../literature/PaperReadingContent";
+import PaperReadingContent from "../../pdf/PaperReadingContent";
 import MathText from "../../literature/MathText";
 import MarkdownContent from "../MarkdownContent";
 

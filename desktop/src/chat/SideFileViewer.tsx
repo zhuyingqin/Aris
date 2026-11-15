@@ -21,7 +21,7 @@ import "./SideFileViewer.css";
 /** PDF support (reader + literature stylesheet) is only paid for on first use. */
 const PdfReader = lazy(async () => {
   await import("../literature/Literature.css");
-  return import("../literature/PdfReader");
+  return import("../pdf/PdfReader");
 });
 
 const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];

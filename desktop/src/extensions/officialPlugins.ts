@@ -3,7 +3,7 @@
 // Backend: runtime::plugins::builtin + desktop official_plugins.rs. Design:
 // docs/development-logic/official-plugins.md.
 import { invoke } from "../api/transport";
-import type { Tab } from "../store";
+import type { Language, Tab } from "../store";
 
 export type OfficialPluginId = "literature" | "latex" | "figures" | "mail";
 
@@ -31,6 +31,15 @@ export interface OfficialPluginState {
  */
 export const switchTarget = (state: OfficialPluginState): "global" | "project" =>
   state.scope === "project" || state.project !== null || state.workspaceOff ? "project" : "global";
+
+/** Display names, shared by the official section and user packages that require one. */
+export const OFFICIAL_PLUGIN_NAMES: Record<Language, Record<OfficialPluginId, string>> = {
+  cn: { literature: "文献库", latex: "LaTeX", figures: "Figures", mail: "邮箱" },
+  en: { literature: "Literature", latex: "LaTeX", figures: "Figures", mail: "Mail" },
+};
+
+export const officialPluginName = (id: string, language: Language): string =>
+  OFFICIAL_PLUGIN_NAMES[language][id as OfficialPluginId] ?? id;
 
 export const OFFICIAL_PLUGINS_CHANGED_EVENT = "official-plugins-changed";
 

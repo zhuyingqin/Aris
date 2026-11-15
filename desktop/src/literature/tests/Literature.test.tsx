@@ -116,7 +116,7 @@ vi.mock("../../api/tauri", () => ({
   stateDir: vi.fn(),
 }));
 
-vi.mock("../pdfExtraction", () => ({
+vi.mock("../../pdf/pdfExtraction", () => ({
   extractPdfTextByPage: mocks.literaturePdfText,
   extractPdfPageImages: mocks.literaturePdfImages,
 }));

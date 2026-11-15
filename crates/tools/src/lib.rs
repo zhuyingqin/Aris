@@ -1951,6 +1951,7 @@ fn run_bash(
     on_progress: &mut dyn FnMut(ToolProgress),
     context: &ToolRunContext,
 ) -> Result<String, String> {
+    refuse_plugin_store_command(&input.command)?;
     run_json_with_workspace_audit("bash", context, || {
         serde_json::to_value(
             runtime::execute_bash_with_cancel_and_progress(input, should_cancel, |progress| {
@@ -2552,11 +2553,23 @@ fn run_latex_render(input: LatexRenderInput, context: &ToolRunContext) -> Result
     })
 }
 
+/// Shell tools cannot be confined by path, so a command that names the
+/// project's plugin store is refused before it runs (see
+/// `runtime::plugins::command_names_plugin_store` for what this does not catch).
+fn refuse_plugin_store_command(command: &str) -> Result<(), String> {
+    if runtime::plugins::command_names_plugin_store(command) {
+        Err(runtime::plugins::PLUGIN_STORE_REFUSAL.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 fn run_repl(
     input: ReplInput,
     should_cancel: &dyn Fn() -> bool,
     context: &ToolRunContext,
 ) -> Result<String, String> {
+    refuse_plugin_store_command(&input.code)?;
     run_json_with_workspace_audit("REPL", context, || {
         serde_json::to_value(execute_repl(input, should_cancel)?).map_err(|error| error.to_string())
     })
@@ -2568,6 +2581,7 @@ fn run_powershell(
     on_progress: &mut dyn FnMut(ToolProgress),
     context: &ToolRunContext,
 ) -> Result<String, String> {
+    refuse_plugin_store_command(&input.command)?;
     run_json_with_workspace_audit("PowerShell", context, || {
         serde_json::to_value(
             execute_powershell_with_cancel(input, should_cancel, on_progress)

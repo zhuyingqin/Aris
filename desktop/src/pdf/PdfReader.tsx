@@ -10,14 +10,14 @@ import {
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { chatModelOptions, isTauri } from "../api/tauri";
 import { onChatModelsUpdated } from "../modelEvents";
-import { renderPdfPageToCanvas } from "../pdf/canvas";
-import { getPdfJs, openPdfDocumentFromPath } from "../pdf/runtime";
+import { renderPdfPageToCanvas } from "./canvas";
+import { getPdfJs, openPdfDocumentFromPath } from "./runtime";
 import { useStore, type Language } from "../store";
 import type { ChatModelOption } from "../types";
 import { SvgIcon } from "../SvgIcon";
-import { LITERATURE_COPY } from "./i18n";
+import { PDF_COPY } from "./i18n";
 import PaperReadingPanel from "./PaperReadingPanel";
-import { isEditableTarget, readLayoutPrefs, writeLayoutPrefs } from "./libraryInteraction";
+import { isEditableTarget, readLayoutPrefs, writeLayoutPrefs } from "./readerPrefs";
 import PaperReadingContent from "./PaperReadingContent";
 import type {
   PdfAnnotation,
@@ -25,7 +25,7 @@ import type {
   PdfAnnotationKind,
   PdfAnnotationRect,
   PdfAnnotationStyle,
-} from "./literatureTypes";
+} from "./annotationTypes";
 
 const ZOOM_MIN = 0.15;
 const ZOOM_MAX = 3;
@@ -102,14 +102,14 @@ export const fitZoomForPage = (
   return clampZoom(Math.min(widthZoom, heightZoom));
 };
 
-const kindLabels = (copy: (typeof LITERATURE_COPY)[Language]): Record<PdfAnnotationKind, string> => ({
+const kindLabels = (copy: (typeof PDF_COPY)[Language]): Record<PdfAnnotationKind, string> => ({
   note: copy.pdfReader.kindNote,
   core: copy.pdfReader.kindCore,
   evidence: copy.pdfReader.kindEvidence,
   "answer-support": copy.pdfReader.kindAnswerSupport,
 });
 const colorSwatches = (
-  copy: (typeof LITERATURE_COPY)[Language],
+  copy: (typeof PDF_COPY)[Language],
 ): { key: PdfAnnotationColor; hex: string; label: string }[] => [
   { key: "yellow", hex: "#ffd54f", label: copy.pdfReader.colorYellow },
   { key: "green", hex: "#81c784", label: copy.pdfReader.colorGreen },
@@ -118,7 +118,7 @@ const colorSwatches = (
   { key: "purple", hex: "#ba68c8", label: copy.pdfReader.colorPurple },
 ];
 const styleOptions = (
-  copy: (typeof LITERATURE_COPY)[Language],
+  copy: (typeof PDF_COPY)[Language],
 ): { key: PdfAnnotationStyle; label: string; glyph: string }[] => [
   { key: "highlight", label: copy.pdfReader.styleHighlight, glyph: "A" },
   { key: "underline", label: copy.pdfReader.styleUnderline, glyph: "A" },
@@ -134,11 +134,11 @@ interface AiAction {
 const aiActions = (language: Language): AiAction[] => [
   {
     key: "translate",
-    label: LITERATURE_COPY[language].pdfReader.translateAction,
+    label: PDF_COPY[language].pdfReader.translateAction,
   },
   {
     key: "explain",
-    label: LITERATURE_COPY[language].pdfReader.explainAction,
+    label: PDF_COPY[language].pdfReader.explainAction,
   },
 ];
 
@@ -445,7 +445,7 @@ function PdfPage({
   onHighlightActivate: (annotationId: string, anchor: HighlightAnchor) => void;
 }) {
   const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
+  const copy = PDF_COPY[language];
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
   const taskRef = useRef<RenderTask | null>(null);
@@ -651,7 +651,7 @@ function QuickSelectionPopup({
   onCancel: () => void;
 }) {
   const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
+  const copy = PDF_COPY[language];
   const kindLabelsForLanguage = kindLabels(copy);
   const colorSwatchesForLanguage = colorSwatches(copy);
   const styleOptionsForLanguage = styleOptions(copy);
@@ -1078,7 +1078,7 @@ function HighlightPopover({
   onClose: () => void;
 }) {
   const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
+  const copy = PDF_COPY[language];
   const width = 240;
   const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width / 2));
   const placeBelow = anchor.y < 140;
@@ -1143,7 +1143,7 @@ function AnnotationEditor({
   onClose: () => void;
 }) {
   const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
+  const copy = PDF_COPY[language];
   const width = 286;
   const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width));
   const top = Math.max(8, Math.min(window.innerHeight - 340, anchor.y));
@@ -1242,7 +1242,7 @@ export default function PdfReader({
   onSaveGuideNote,
 }: PdfReaderProps) {
   const language = useStore((s) => s.language);
-  const copy = LITERATURE_COPY[language];
+  const copy = PDF_COPY[language];
   const viewControlsId = useId();
   const toolbarId = useId();
   const readerRef = useRef<HTMLDivElement | null>(null);
@@ -2200,7 +2200,7 @@ export default function PdfReader({
           </button>
           {paperId && !readOnly && sourceKind === "library" && (
             <button ref={guideToggleRef} type="button" className="lit-pdf-icon-button lit-pdf-guide-toggle"
-              aria-label={copy.workspaceHeader.tabGuide} title={copy.workspaceHeader.tabGuide}
+              aria-label={copy.pdfReader.guideTab} title={copy.pdfReader.guideTab}
               aria-pressed={readingVisible} aria-expanded={readingVisible} aria-controls="paper-guide-panel"
               onClick={() => setReadingVisible(!readingVisible)}>
               <SvgIcon name="bookOpen" size={20} />

@@ -120,3 +120,17 @@ fn the_library_full_text_index_is_reachable_as_a_read_only_tool() {
     );
     assert!(spec.input_schema["properties"]["query"].is_object());
 }
+
+/// Shell tools cannot be confined by path, so a command that names the
+/// project's plugin store is refused before anything runs.
+#[test]
+fn shell_tools_refuse_commands_that_name_the_plugin_store() {
+    for (tool, input) in [
+        ("bash", json!({ "command": "echo '{}' > .somniq/plugins/official.json" })),
+        ("PowerShell", json!({ "command": "Set-Content .somniq/plugins/official.json '{}'" })),
+        ("REPL", json!({ "language": "python", "code": "open('.somniq/plugins/official.json','w').write('{}')" })),
+    ] {
+        let error = execute_tool(tool, &input).expect_err(tool);
+        assert!(error.contains("plugin store"), "{tool}: {error}");
+    }
+}

@@ -260,7 +260,13 @@ impl UiWidget {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UiManifest {
     manifest_version: u32,
-    ui: String,
+    /// The UI document; a package may declare only `requires`.
+    #[serde(default)]
+    ui: Option<String>,
+    /// Official plugins this package needs (`literature`, `latex`, ...). While
+    /// any of them is off for a run, the package does not run at all.
+    #[serde(default)]
+    requires: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -585,7 +591,29 @@ pub(super) fn inspect_ui(
             "/somniq/manifestVersion",
         ));
     }
-    let path = match super::dsh::relative_path(&header.ui) {
+    for (index, id) in header.requires.iter().enumerate() {
+        if super::builtin_manifest(id).is_none() {
+            let known = super::BUILTIN_PLUGINS
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(
+                Diagnostic::error(
+                    "requires",
+                    format!("Unknown official plugin `{id}` in somniq.requires; use one of {known}"),
+                )
+                .in_file("package.json")
+                .at(&format!("/somniq/requires/{index}")),
+            );
+        } else if !capabilities.requires.contains(id) {
+            capabilities.requires.push(id.clone());
+        }
+    }
+    let Some(ui) = header.ui else {
+        return;
+    };
+    let path = match super::dsh::relative_path(&ui) {
         Ok(path) => path,
         Err(error) => return diagnostics.push(in_manifest(error, "/somniq/ui")),
     };
@@ -1056,7 +1084,7 @@ impl PluginStore {
         for plugin in self
             .list()?
             .into_iter()
-            .filter(|p| p.enabled && p.package.can_enable)
+            .filter(|p| p.enabled && p.package.can_enable && p.lifecycle.missing_official.is_empty())
         {
             for panel in plugin.package.capabilities.ui_panels {
                 panels.push(ActiveUiPanel {

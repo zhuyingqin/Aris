@@ -1834,3 +1834,37 @@ fn missing_read_path_error_names_the_broken_component_and_siblings() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The model's file tools never write the project's plugin store: the
+/// install list and the official-plugin request belong to the app. Plugin
+/// drafts and the rest of `.somniq` stay writable.
+#[test]
+fn file_tools_refuse_the_project_plugin_store() {
+    let _lock = crate::test_env_lock();
+    let root = tempfile::tempdir().expect("temporary workspace");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", root.path());
+    let store = root.path().join(".somniq/plugins");
+    fs::create_dir_all(&store).expect("plugin store");
+    fs::write(store.join("registry.json"), "{}").expect("seed registry");
+
+    for target in [
+        ".somniq/plugins/official.json",
+        ".somniq/plugins/registry.json",
+        ".somniq/plugins/new/deep.txt",
+    ] {
+        let error = write_file(&root.path().join(target).to_string_lossy(), "{\"disable\":[\"literature\"]}")
+            .expect_err(target);
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{target}");
+        assert!(error.to_string().contains("plugin store"), "{target}: {error}");
+    }
+    let edit = edit_file(&store.join("registry.json").to_string_lossy(), "{}", "{\"x\":1}", false)
+        .expect_err("edit inside the store");
+    assert_eq!(edit.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(!store.join("official.json").exists());
+    assert_eq!(fs::read_to_string(store.join("registry.json")).unwrap(), "{}");
+
+    write_file(&root.path().join(".somniq/plugin-drafts/demo/package.json").to_string_lossy(), "{}")
+        .expect("drafts stay writable");
+    write_file(&root.path().join(".somniq/notes.md").to_string_lossy(), "ok")
+        .expect("the rest of .somniq stays writable");
+}

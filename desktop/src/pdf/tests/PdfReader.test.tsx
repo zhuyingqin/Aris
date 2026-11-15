@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PdfAnnotation } from "../literatureTypes";
+import type { PdfAnnotation } from "../annotationTypes";
 
 const readerMocks = vi.hoisted(() => {
   const page = {
@@ -44,13 +44,13 @@ vi.mock("../../api/tauri", () => ({
   literaturePdfBytes: readerMocks.literaturePdfBytes,
 }));
 
-vi.mock("../../pdf/runtime", () => ({
+vi.mock("../runtime", () => ({
   getPdfJs: readerMocks.getPdfJs,
   openPdfDocument: readerMocks.openPdfDocument,
   openPdfDocumentFromPath: readerMocks.openPdfDocumentFromPath,
 }));
 
-vi.mock("../../pdf/canvas", () => ({
+vi.mock("../canvas", () => ({
   renderPdfPageToCanvas: readerMocks.renderPdfPageToCanvas,
 }));
 

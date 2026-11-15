@@ -5,7 +5,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { guideFixture, layeredGuideFixture } from "./paperGuideFixture";
 
 const cancel = vi.fn();
-vi.mock("../../pdf/canvas", () => ({ renderPdfPageToCanvas: () => ({ task: { promise: Promise.resolve(), cancel } }) }));
+vi.mock("../canvas", () => ({ renderPdfPageToCanvas: () => ({ task: { promise: Promise.resolve(), cancel } }) }));
 import PaperGuideView from "../PaperGuideView";
 
 afterEach(cleanup);

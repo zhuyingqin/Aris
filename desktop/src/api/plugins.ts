@@ -14,12 +14,15 @@ export interface PluginPreview {
     skillRoots: string[];
     mcpServers: { name: string; command: string; args: string[]; env?: Record<string, string> }[];
     uiPanels: UiPanel[];
+    /** Official plugins the package needs (`somniq.requires`); absent on older backends. */
+    requires?: string[];
   };
 }
 
 /** What a package is doing, not just how it is configured (runtime::plugins::lifecycle). */
 export type PluginState =
-  | "installed" | "approval-required" | "blocked" | "enabled" | "running" | "failed" | "needs-restart";
+  | "installed" | "approval-required" | "blocked" | "enabled" | "running" | "failed" | "needs-restart"
+  | "needs-official-plugin";
 
 export interface PluginMcpStatus {
   /** As the package declares it. */
@@ -40,6 +43,8 @@ export interface PluginLifecycle {
   /** In-flight runs whose frozen copy differs from what the next run gets. */
   staleRuns: number;
   mcpServers: PluginMcpStatus[];
+  /** Required official plugins that are off here (`needs-official-plugin`). */
+  missingOfficial?: string[];
 }
 
 export interface InstalledPlugin extends PluginPreview {
@@ -269,6 +274,8 @@ export interface PluginApprovalCard {
     uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean }[];
     /** Environment variable names only; values never leave the backend. */
     mcpServers: { name: string; command: string; args: string[]; envKeys: string[]; requestTimeoutSecs?: number | null }[];
+    /** Official plugins it needs; it does not run while one is off. */
+    requires?: string[];
   };
   /** Upgrade only: the running version and what changes. */
   currentVersion?: string | null;

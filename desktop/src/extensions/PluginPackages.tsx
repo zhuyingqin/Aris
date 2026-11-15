@@ -11,6 +11,7 @@ import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { useStore, type Language } from "../store";
 import { uiText } from "./useChatPluginPanels";
 import { pluginCreationDraft, pluginNeedsRepair, pluginRepairDraft } from "./pluginAuthoringDrafts";
+import { officialPluginName } from "./officialPlugins";
 import "./PluginPackages.css";
 
 const COPY = {
@@ -30,6 +31,9 @@ const COPY = {
     noCapabilities: "未声明可用能力",
     compatible: "可接入", blocked: "需要适配", enabled: "已启用", disabled: "已停用", cannotEnable: "无法启用",
     approvalPending: "待本机批准", running: "运行中", failed: "MCP 连接失败", needsRestart: "需重新开始",
+    needsOfficial: "缺官方插件",
+    needsOfficialHint: (names: string) => `它依赖的官方插件${names}在本项目已关闭，所以没有运行（Skills、MCP、面板都不加载）。在上方“官方插件”里打开后，下一次运行生效。`,
+    requires: "依赖官方插件",
     enabledHint: "下一次运行开始生效。",
     runningHint: (runs: number) => `${runs} 个正在运行的回合或任务在使用这个版本。`,
     restartHint: (runs: number) => `${runs} 个正在运行的回合或任务仍使用开始时的插件集；改动在它们下一次开始时生效。`,
@@ -77,6 +81,9 @@ const COPY = {
     noCapabilities: "No capabilities declared",
     compatible: "Compatible", blocked: "Needs adaptation", enabled: "Enabled", disabled: "Disabled", cannotEnable: "Can't enable",
     approvalPending: "Needs approval", running: "Running", failed: "MCP failed", needsRestart: "Restart needed",
+    needsOfficial: "Needs an official plugin",
+    needsOfficialHint: (names: string) => `The official plugin it depends on (${names}) is off for this project, so it is not running: no Skills, MCP or panels. Turn it on under Official plugins above; it applies from the next run.`,
+    requires: "Requires official plugins",
     enabledHint: "Applies from the next run.",
     runningHint: (runs: number) => `In use by ${runs} running ${runs === 1 ? "turn or task" : "turns or tasks"}.`,
     restartHint: (runs: number) => `${runs} running ${runs === 1 ? "turn or task still uses" : "turns or tasks still use"} the set it started with; the change applies when ${runs === 1 ? "it next starts" : "they next start"}.`,
@@ -126,14 +133,19 @@ function lifecycleOf(item: InstalledPlugin): PluginLifecycle {
   };
 }
 
-type StateLabel = "disabled" | "approvalPending" | "cannotEnable" | "enabled" | "running" | "failed" | "needsRestart";
+type StateLabel = "disabled" | "approvalPending" | "cannotEnable" | "enabled" | "running" | "failed" | "needsRestart" | "needsOfficial";
 const STATE_LABEL: Record<PluginState, StateLabel> = {
   installed: "disabled", "approval-required": "approvalPending", blocked: "cannotEnable",
   enabled: "enabled", running: "running", failed: "failed", "needs-restart": "needsRestart",
+  "needs-official-plugin": "needsOfficial",
 };
 
-function stateHint(item: InstalledPlugin, lifecycle: PluginLifecycle, copy: Copy): string | null {
+const officialNames = (ids: string[] | undefined, language: Language) =>
+  (ids ?? []).map((id) => (language === "cn" ? `「${officialPluginName(id, language)}」` : officialPluginName(id, language))).join(language === "cn" ? "" : ", ");
+
+function stateHint(item: InstalledPlugin, lifecycle: PluginLifecycle, copy: Copy, language: Language): string | null {
   switch (lifecycle.state) {
+    case "needs-official-plugin": return copy.needsOfficialHint(officialNames(lifecycle.missingOfficial, language));
     case "enabled": return copy.enabledHint;
     case "running": return copy.runningHint(lifecycle.activeRuns);
     case "failed": return copy.failedHint;
@@ -172,13 +184,14 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
     <div><dt>{copy.skills}</dt><dd>{skills.length ? <span className="plugin-tags">{skills.map((skill) => <code key={skill}>{skill}</code>)}</span> : copy.none}</dd></div>
     <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} /> : copy.none}</dd></div>
     <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? (language === "cn" ? "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）" : " (own page: runs the package's page code, sandboxed, no network)") : "")).join("、") : copy.none}</dd></div>
+    {(item.capabilities.requires?.length ?? 0) > 0 && <div><dt>{copy.requires}</dt><dd>{officialNames(item.capabilities.requires, language)}</dd></div>}
     <div><dt>{copy.source}</dt><dd><code className="plugin-path">{item.source}</code></dd></div>
     <div><dt>{copy.snapshot}</dt><dd><code title={item.digest}>{item.digest.slice(0, 16)}</code></dd></div>
   </dl>;
 }
 
 /** Blockers SomniQ itself raises; anything else is a DSH host capability it lacks. */
-const LOCAL_BLOCKERS = new Set(["integrity", "approvals", "skill-builtin", "skill-alias", "duplicate-capability", "empty"]);
+const LOCAL_BLOCKERS = new Set(["integrity", "approvals", "skill-builtin", "skill-alias", "duplicate-capability", "empty", "requires"]);
 
 function Diagnostics({ item, copy }: { item: PluginPreview; copy: Copy }) {
   if (item.canEnable && item.diagnostics.length === 0) return null;
@@ -277,7 +290,7 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
   const blocked = item.status === "blocked";
   const canToggle = item.enabled || item.canEnable;
   const stateLabel = copy[STATE_LABEL[lifecycle.state]];
-  const hint = stateHint(item, lifecycle, copy);
+  const hint = stateHint(item, lifecycle, copy, language);
   const servers = item.capabilities.mcpServers;
   // Enabling a package that declares MCP servers starts local processes outside
   // the sandbox, so the exact commands are shown before the switch flips.

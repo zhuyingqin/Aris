@@ -1121,6 +1121,8 @@ fn capabilities_output(capabilities: &runtime::plugins::PluginCapabilities) -> V
             "envKeys": server.env.keys().collect::<Vec<_>>(),
             "requestTimeoutSecs": server.request_timeout_secs,
         })).collect::<Vec<_>>(),
+        // Official plugins it needs; it does not run while one is off.
+        "requires": capabilities.requires,
     })
 }
 
