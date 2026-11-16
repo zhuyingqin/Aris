@@ -1,6 +1,7 @@
 // What a plugin page sees of the tasks it proposed. Built by the host from the
 // board's own records, never from what the task's model chose to write back,
 // so a page can tell finished from failed from stuck without trusting the task.
+import { rubricCounts } from "../reviewRubrics";
 import type { WorkTask, WorkTaskStatus } from "../types";
 
 /** Where a task stands, in the terms a page needs to draw a row. */
@@ -53,7 +54,9 @@ const MAX_SUMMARY_CHARS = 4000;
 const MAX_FILES = 50;
 const MAX_ISSUES = 12;
 
-const STATE: Record<WorkTaskStatus, PluginTaskState> = {
+/** How each board status reads on a page. Kept consistent with the board's
+ *  own columns by `pluginTaskRecords.test.ts`. */
+export const PLUGIN_TASK_STATE: Record<WorkTaskStatus, PluginTaskState> = {
   todo: "todo",
   queued: "active",
   preparing: "active",
@@ -72,7 +75,7 @@ const STATE: Record<WorkTaskStatus, PluginTaskState> = {
 };
 
 export function pluginTaskRecord(task: WorkTask): PluginTaskRecord {
-  const state = STATE[task.status] ?? "active";
+  const state = PLUGIN_TASK_STATE[task.status] ?? "active";
   const record: PluginTaskRecord = {
     taskId: task.id,
     title: task.title,
@@ -84,7 +87,6 @@ export function pluginTaskRecord(task: WorkTask): PluginTaskRecord {
   if (state === "active" && task.progressMessage) record.phase = task.progressMessage.slice(0, 300);
   const review = task.reviewState;
   if (review) {
-    const checks = review.rubrics?.checks ?? [];
     record.review = {
       verdict: review.verdict,
       summary: review.summary.slice(0, 1000),
@@ -97,9 +99,7 @@ export function pluginTaskRecord(task: WorkTask): PluginTaskRecord {
       })),
       ...(review.rubrics ? {
         rubrics: {
-          sent: checks.length,
-          violated: checks.filter((check) => check.result === "violated").length,
-          unreported: checks.filter((check) => check.result === "unreported").length,
+          ...rubricCounts(review.rubrics),
           omitted: review.rubrics.omitted ?? [],
           corrected: review.rubrics.verdictCorrected === true,
         },

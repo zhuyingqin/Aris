@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { rubricCounts } from "../reviewRubrics";
+
 import {
   workTaskArtifactExport,
   workTaskReviewPatch,
@@ -169,13 +171,10 @@ export default function TaskReviewPanel({ task, language, onError }: TaskReviewP
       {review.rubrics && (
         <div className="tasks-review-rubrics">
           {review.rubrics.verdictCorrected && <p className="tasks-review-exhausted">{copy.rubricsCorrected}</p>}
-          {(review.rubrics.checks ?? []).length > 0 && (
-            <small>{copy.rubrics(
-              (review.rubrics.checks ?? []).length,
-              (review.rubrics.checks ?? []).filter((check) => check.result === "violated").length,
-              (review.rubrics.checks ?? []).filter((check) => check.result === "unreported").length,
-            )}</small>
-          )}
+          {(() => {
+            const counts = rubricCounts(review.rubrics);
+            return counts.sent > 0 && <small>{copy.rubrics(counts.sent, counts.violated, counts.unreported)}</small>;
+          })()}
           {(review.rubrics.omitted ?? []).length > 0 && <small>{copy.rubricsOmitted((review.rubrics.omitted ?? []).join(", "))}</small>}
         </div>
       )}

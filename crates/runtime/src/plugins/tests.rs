@@ -2294,6 +2294,14 @@ fn review_rubrics_come_from_the_frozen_set_and_apply_by_keyword() {
     assert!(section.contains("Statistics / 统计"));
     assert!(section.contains("the Executor was not shown them"));
     assert!(render_review_rubrics(&[]).is_empty());
+    // One entry point for every review path, same result.
+    assert_eq!(rubric_packet_for(&rubrics, "显著").delivered, packet.delivered);
+    // Placed before the answer format when it is there, appended otherwise,
+    // and nothing at all when no rubric applies.
+    let placed = packet.place_in("Question\nReturn exactly one JSON object.".into(), Some("Return exactly one JSON object"));
+    assert!(placed.find("Installed review rubrics").unwrap() < placed.find("Return exactly one JSON object").unwrap());
+    assert!(packet.place_in("Question".into(), Some("absent")).ends_with(packet.section.as_str()));
+    assert_eq!(RubricPacket::default().place_in("Question".into(), None), "Question");
 }
 
 #[test]
@@ -2347,11 +2355,7 @@ fn two_criteria_packet() -> RubricPacket {
 fn an_issue_citing_a_criterion_makes_it_violated_whatever_the_checks_say() {
     let packet = two_criteria_packet();
     let reported = vec![ReportedRubricCheck { criterion: "@lab/review/evidence#numbers".into(), result: "met".into(), note: String::new() }];
-    let issues = vec![
-        RubricIssue { criterion: Some("@lab/review/evidence#numbers".into()), severity: "low".into() },
-        RubricIssue { criterion: Some("@lab/other/x#y".into()), severity: "high".into() },
-        RubricIssue { criterion: None, severity: "medium".into() },
-    ];
+    let issues = [Some("@lab/review/evidence#numbers"), Some("@lab/other/x#y"), None];
     let out = reconcile_rubric_checks(&packet, &reported, &issues);
     assert_eq!(out.checks[0].result, RubricCheckResult::Violated);
     // The other criterion was sent but never reported: unreported, not met.
@@ -2359,6 +2363,7 @@ fn an_issue_citing_a_criterion_makes_it_violated_whatever_the_checks_say() {
     assert_eq!(out.issue_floor, [Some(ReviewSeverity::Critical), None, None]);
     assert_eq!(out.unknown_issue_criteria, [1]);
     assert_eq!(out.critical_violations().len(), 1);
+    assert!(out.forbids_pass());
     assert!(severity_below("low", ReviewSeverity::Critical));
     assert!(!severity_below("critical", ReviewSeverity::Critical));
 }

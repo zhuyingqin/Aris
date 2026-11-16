@@ -174,9 +174,13 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
         setProposal({ pluginName, pageId, panelTitle, title, prompt, report });
       });
     };
+    // A draft being tried, or a page outside the desktop app, has no board.
+    const hasBoard = !draft && hasNativeBackend();
+    // Only a page that may propose tasks is told about them unasked.
+    const followsTasks = () => hasBoard && policy.current.proposeTasks;
     /** The tasks this page proposed, as the board has them. */
     const tasks = async (): Promise<PluginTaskRecord[]> => {
-      if (draft || !hasNativeBackend()) return [];
+      if (!hasBoard) return [];
       return pluginTaskRecords(await workTaskList(), pluginName, pageId);
     };
     const receive = (event: MessageEvent) => {
@@ -216,7 +220,7 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
     let sentTasks = "";
     let live = true;
     const pushTasks = async () => {
-      if (draft || !policy.current.proposeTasks || !hasNativeBackend()) return;
+      if (!followsTasks()) return;
       const mine = channel.current;
       const records = await tasks().catch(() => null);
       if (!live || !records || mine !== channel.current) return;
@@ -225,7 +229,7 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
       sentTasks = text;
       send({ type: "tasks", tasks: records });
     };
-    const unlisten = !draft && policy.current.proposeTasks && hasNativeBackend()
+    const unlisten = followsTasks()
       ? onWorkTaskChanged(() => { void pushTasks(); }).catch(() => () => undefined)
       : null;
     window.addEventListener("message", receive);

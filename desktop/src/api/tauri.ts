@@ -1261,8 +1261,9 @@ export const literatureExportBibliography = <T>(input: {
 }) => invoke<T>("literature_export_bibliography", { input });
 export const literatureWriteBibliographyExport = (destinationPath: string, content: string) =>
   invoke<void>("literature_write_bibliography_export", { destinationPath, content });
-export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: string) =>
-  invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null });
+/** Import a PDF as a record. Pass `requestId` to make it stoppable with `literatureOcrCancel`. */
+export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: string, requestId?: string) =>
+  invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null, requestId: requestId ?? null });
 export const literatureAddIdentifier = <T>(identifier: string) =>
   invoke<T>("literature_add_identifier", { identifier });
 export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
@@ -1450,10 +1451,9 @@ export const literaturePdfBytes = async (relativePath: string): Promise<Uint8Arr
   const raw = await invoke<ArrayBuffer | number[]>("literature_pdf_bytes", { relativePath });
   return Array.isArray(raw) ? Uint8Array.from(raw) : new Uint8Array(raw);
 };
-/** OCR one page image. Pass `requestId` to make it stoppable with `literatureOcrCancel`. */
-export const literatureImageOcr = (image: number[], requestId?: string) =>
-  invoke<string>("literature_image_ocr", { image, requestId: requestId ?? null });
-/** Stop an in-flight OCR or PDF import; `false` when it already finished. */
+export const literatureImageOcr = (image: number[]) =>
+  invoke<string>("literature_image_ocr", { image });
+/** Stop an in-flight PDF import and its OCR; `false` when it already finished. */
 export const literatureOcrCancel = (requestId: string) =>
   invoke<boolean>("literature_ocr_cancel", { requestId });
 export const literaturePdfOpen = (relativePath: string) =>

@@ -246,7 +246,7 @@ pub async fn typeset_export_project(
     crate::blocking::off_main_thread(move || typeset_export_project_blocking(root_path, destination_path)).await
 }
 
-pub(crate) fn typeset_export_project_blocking(
+fn typeset_export_project_blocking(
     root_path: String,
     destination_path: String,
 ) -> Result<String, String> {

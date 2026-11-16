@@ -67,15 +67,9 @@ pub fn write_replace(path: &Path, body: impl AsRef<[u8]>) -> io::Result<()> {
 }
 
 /// [`write_replace`] for a caller that already holds `with_path_lock(path)`
-/// around a whole read-modify-write. Calling `write_replace` there would wait
-/// on the lock the caller holds.
-pub fn write_replace_while_locked(path: &Path, body: impl AsRef<[u8]>) -> io::Result<()> {
-    write_replace_unlocked(path, body.as_ref())
-}
-
-// Call only while holding `with_path_lock(path)` when the surrounding
-// operation must remain serialized across a read/repair/write sequence.
-pub(crate) fn write_replace_unlocked(path: &Path, body: &[u8]) -> io::Result<()> {
+/// around a whole read-modify-write (calling `write_replace` there would wait
+/// on the lock the caller holds).
+pub fn write_replace_unlocked(path: &Path, body: &[u8]) -> io::Result<()> {
     write_replace_unlocked_checked(path, body, || Ok(()))
 }
 

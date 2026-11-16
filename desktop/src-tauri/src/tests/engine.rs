@@ -3752,12 +3752,15 @@ fn the_figure_scheme_serves_nothing_while_figures_is_off() {
 #[test]
 fn review_rubrics_sit_before_the_answer_format_in_both_packets() {
     let workspace = no_git_workspace("rubrics");
-    let section = "Installed review rubrics. RUBRIC-MARKER `@lab/review/evidence#numbers`";
-    let full = with_review_rubrics(
+    let rubrics = runtime::plugins::RubricPacket {
+        section: "Installed review rubrics. RUBRIC-MARKER `@lab/review/evidence#numbers`".into(),
+        ..Default::default()
+    };
+    let full = rubrics.place_in(
         independent_review_prompt("Report the accuracy", "Accuracy is 91%.", "", "", &[], 1, workspace.path(), "openai", "executor-model"),
-        section,
+        Some(REVIEW_ANSWER_FORMAT_MARKER),
     );
-    let increment = with_review_rubrics(
+    let increment = rubrics.place_in(
         incremental_review_packet(&incremental_input(
             IncrementalReviewKind::NewRequest,
             workspace.path(),
@@ -3767,7 +3770,7 @@ fn review_rubrics_sit_before_the_answer_format_in_both_packets() {
             "",
             None,
         )),
-        section,
+        Some(REVIEW_ANSWER_FORMAT_MARKER),
     );
     for packet in [&full, &increment] {
         let rubric = packet.find("RUBRIC-MARKER").expect("the rubric section");
@@ -3777,7 +3780,7 @@ fn review_rubrics_sit_before_the_answer_format_in_both_packets() {
     }
     // Nothing installed: the packet is exactly what it was.
     let plain = independent_review_prompt("Report", "Done.", "", "", &[], 1, workspace.path(), "openai", "m");
-    assert_eq!(with_review_rubrics(plain.clone(), ""), plain);
+    assert_eq!(runtime::plugins::RubricPacket::default().place_in(plain.clone(), Some(REVIEW_ANSWER_FORMAT_MARKER)), plain);
 }
 
 #[test]

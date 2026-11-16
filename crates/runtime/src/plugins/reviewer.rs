@@ -258,10 +258,20 @@ pub fn applicable_review_rubrics<'a>(
     rubrics.iter().filter(|rubric| rubric.applies_to(material)).collect()
 }
 
+/// The packet for one review of `material`: the rubrics that apply, rendered.
+/// Every review path (Chat, work tasks, workflow gates) goes through this.
+#[must_use]
+pub fn rubric_packet_for(rubrics: &[ActiveReviewRubric], material: &str) -> RubricPacket {
+    render_review_rubrics(&applicable_review_rubrics(rubrics, material))
+}
+
+/// The note the controller adds to a summary when a critical criterion was
+/// violated and the review therefore cannot pass.
+pub const CRITICAL_RUBRIC_OVERRIDE_NOTE: &str =
+    "[Controller: a critical review criterion was violated, so this review cannot pass.]";
 
 /// One criterion as the controller put it in a packet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredCriterion {
     /// `<package>/<rubric>#<criterion>`.
     pub key: String,
@@ -285,6 +295,20 @@ impl RubricPacket {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.delivered.is_empty() && self.omitted.is_empty()
+    }
+
+    /// `prompt` with the rubric section placed before the last `before` (the
+    /// answer format, so it stays the last thing the Reviewer reads), or at the
+    /// end when there is no such marker. Unchanged when nothing applies.
+    #[must_use]
+    pub fn place_in(&self, prompt: String, before: Option<&str>) -> String {
+        if self.section.is_empty() {
+            return prompt;
+        }
+        match before.and_then(|marker| prompt.rfind(marker)) {
+            Some(at) => format!("{}{}\n\n{}", &prompt[..at], self.section, &prompt[at..]),
+            None => format!("{prompt}\n\n{}", self.section),
+        }
     }
 
     fn severity_of(&self, key: &str) -> Option<ReviewSeverity> {
@@ -354,7 +378,7 @@ pub fn render_review_rubrics(rubrics: &[&ActiveReviewRubric]) -> RubricPacket {
 }
 
 /// A `rubricChecks` entry as the Reviewer wrote it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedRubricCheck {
     #[serde(default)]
@@ -388,13 +412,6 @@ pub struct RubricCheck {
     pub note: String,
 }
 
-/// An issue as far as the rubric record is concerned.
-#[derive(Debug, Clone)]
-pub struct RubricIssue {
-    pub criterion: Option<String>,
-    pub severity: String,
-}
-
 /// What the controller decided about one review's rubric claims.
 #[derive(Debug, Clone, Default)]
 pub struct RubricReconciliation {
@@ -424,6 +441,30 @@ impl RubricReconciliation {
             })
             .collect()
     }
+
+    /// Whether a pass has to be refused: a delivered critical criterion was
+    /// violated. One rule for Chat verdicts and workflow gates alike.
+    #[must_use]
+    pub fn forbids_pass(&self) -> bool {
+        !self.critical_violations().is_empty()
+    }
+
+    /// The controller's record of this review. `cleared` are criterion keys
+    /// the caller removed from issues because the packet never carried them.
+    #[must_use]
+    pub fn into_record(self, packet: &RubricPacket, cleared: Vec<String>, verdict_corrected: bool) -> ReviewRubricRecord {
+        let mut unknown_criteria = self.unknown_reported;
+        unknown_criteria.extend(cleared);
+        unknown_criteria.sort();
+        unknown_criteria.dedup();
+        ReviewRubricRecord {
+            delivered: packet.delivered.clone(),
+            omitted: packet.omitted.clone(),
+            checks: self.checks,
+            unknown_criteria,
+            verdict_corrected,
+        }
+    }
 }
 
 fn severity_rank(severity: &str) -> u8 {
@@ -451,20 +492,21 @@ fn stated_result(raw: &str) -> RubricCheckResult {
     }
 }
 
-/// Reconcile a review with the packet it answered. An issue citing a
-/// criterion makes that criterion violated whatever the check list says; a
-/// check naming a criterion the packet never carried is dropped; a delivered
-/// criterion the Reviewer left out is `unreported`, never assumed met.
+/// Reconcile a review with the packet it answered. `issue_criteria` is, per
+/// issue, the criterion key it cites, if any. An issue citing a criterion
+/// makes that criterion violated whatever the check list says; a check naming
+/// a criterion the packet never carried is dropped; a delivered criterion the
+/// Reviewer left out is `unreported`, never assumed met.
 #[must_use]
 pub fn reconcile_rubric_checks(
     packet: &RubricPacket,
     reported: &[ReportedRubricCheck],
-    issues: &[RubricIssue],
+    issue_criteria: &[Option<&str>],
 ) -> RubricReconciliation {
     let mut out = RubricReconciliation::default();
     let mut cited = BTreeSet::new();
-    for (index, issue) in issues.iter().enumerate() {
-        let key = issue.criterion.as_deref().map(str::trim).filter(|key| !key.is_empty());
+    for (index, criterion) in issue_criteria.iter().enumerate() {
+        let key = criterion.map(str::trim).filter(|key| !key.is_empty());
         match key.map(|key| (key, packet.severity_of(key))) {
             Some((key, Some(severity))) => {
                 cited.insert(key.to_string());
@@ -575,13 +617,12 @@ pub fn apply_rubrics_to_gate(gate: &mut serde_json::Map<String, serde_json::Valu
         .unwrap_or_default();
     let tagged = issues
         .iter()
-        .map(|issue| RubricIssue {
-            criterion: packet
+        .map(|issue| {
+            packet
                 .criteria
                 .iter()
                 .find(|criterion| issue.contains(&format!("[{}]", criterion.key)))
-                .map(|criterion| criterion.key.clone()),
-            severity: String::new(),
+                .map(|criterion| criterion.key.as_str())
         })
         .collect::<Vec<_>>();
     let reconciled = reconcile_rubric_checks(packet, &reported, &tagged);
@@ -589,24 +630,17 @@ pub fn apply_rubrics_to_gate(gate: &mut serde_json::Map<String, serde_json::Valu
         let note = if check.note.is_empty() { "violated" } else { check.note.as_str() };
         issues.push(format!("[{}] {note}", check.criterion));
     }
-    let critical = reconciled.critical_violations();
-    let withdrawn = gate.get("approved").and_then(Value::as_bool) == Some(true) && !critical.is_empty();
+    let withdrawn = gate.get("approved").and_then(Value::as_bool) == Some(true) && reconciled.forbids_pass();
     if withdrawn {
         gate.insert("approved".into(), Value::Bool(false));
         let summary = gate.get("summary").and_then(Value::as_str).unwrap_or_default().trim().to_string();
         gate.insert(
             "summary".into(),
-            Value::String(format!("{summary} [Controller: approval withdrawn because a critical review criterion was violated.]").trim().to_string()),
+            Value::String(format!("{summary} {CRITICAL_RUBRIC_OVERRIDE_NOTE}").trim().to_string()),
         );
     }
     gate.insert("issues".into(), Value::from(issues));
-    let record = ReviewRubricRecord {
-        delivered: packet.delivered.clone(),
-        omitted: packet.omitted.clone(),
-        checks: reconciled.checks,
-        unknown_criteria: reconciled.unknown_reported,
-        verdict_corrected: withdrawn,
-    };
+    let record = reconciled.into_record(packet, Vec::new(), withdrawn);
     if let Ok(value) = serde_json::to_value(record) {
         gate.insert("rubrics".into(), value);
     }

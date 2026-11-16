@@ -7824,7 +7824,7 @@ fn apply_review_rubric_record(
     review: &mut IndependentReviewResult,
     packet: &runtime::plugins::RubricPacket,
 ) {
-    use runtime::plugins::{reconcile_rubric_checks, severity_below, ReviewRubricRecord, RubricIssue};
+    use runtime::plugins::{reconcile_rubric_checks, severity_below, ReviewRubricRecord, CRITICAL_RUBRIC_OVERRIDE_NOTE};
     let reported = std::mem::take(&mut review.rubric_checks);
     if packet.is_empty() {
         for issue in &mut review.issues {
@@ -7836,18 +7836,13 @@ fn apply_review_rubric_record(
         review.rubrics = Some(ReviewRubricRecord::unanswered(packet));
         return;
     }
-    let issues = review
-        .issues
+    let cited = review.issues.iter().map(|issue| issue.criterion.as_deref()).collect::<Vec<_>>();
+    let reconciled = reconcile_rubric_checks(packet, &reported, &cited);
+    let cleared = reconciled
+        .unknown_issue_criteria
         .iter()
-        .map(|issue| RubricIssue { criterion: issue.criterion.clone(), severity: issue.severity.clone() })
+        .filter_map(|&index| review.issues[index].criterion.take())
         .collect::<Vec<_>>();
-    let reconciled = reconcile_rubric_checks(packet, &reported, &issues);
-    let mut unknown = reconciled.unknown_reported.clone();
-    for &index in &reconciled.unknown_issue_criteria {
-        if let Some(key) = review.issues[index].criterion.take() {
-            unknown.push(key);
-        }
-    }
     for (issue, floor) in review.issues.iter_mut().zip(&reconciled.issue_floor) {
         if let Some(floor) = floor {
             if severity_below(&issue.severity, *floor) {
@@ -7867,41 +7862,22 @@ fn apply_review_rubric_record(
             criterion: Some(check.criterion.clone()),
         });
     }
-    let critical = reconciled.critical_violations();
-    let mut verdict_corrected = false;
-    if review.verdict == IndependentReviewVerdict::Pass && !critical.is_empty() {
+    let verdict_corrected = review.verdict == IndependentReviewVerdict::Pass && reconciled.forbids_pass();
+    if verdict_corrected {
         review.verdict = IndependentReviewVerdict::Revise;
         review.revision_instructions.push(
             "Resolve the critical findings above before this answer can be accepted.".to_string(),
         );
-        review.summary = format!(
-            "{} [Controller: changed pass to revise because a critical review criterion was violated.]",
-            review.summary.trim()
-        )
-        .trim()
-        .to_string();
-        verdict_corrected = true;
+        review.summary = format!("{} {CRITICAL_RUBRIC_OVERRIDE_NOTE}", review.summary.trim())
+            .trim()
+            .to_string();
     }
-    unknown.sort();
-    unknown.dedup();
-    review.rubrics = Some(ReviewRubricRecord {
-        delivered: packet.delivered.clone(),
-        omitted: packet.omitted.clone(),
-        checks: reconciled.checks,
-        unknown_criteria: unknown,
-        verdict_corrected,
-    });
+    review.rubrics = Some(reconciled.into_record(packet, cleared, verdict_corrected));
 }
 
-fn with_review_rubrics(packet: String, section: &str) -> String {
-    if section.is_empty() {
-        return packet;
-    }
-    match packet.rfind("Return exactly one JSON object") {
-        Some(at) => format!("{}{section}\n\n{}", &packet[..at], &packet[at..]),
-        None => format!("{packet}\n\n{section}"),
-    }
-}
+/// Where the rubric section goes in a review packet: before the answer
+/// format, so the format stays the last thing the Reviewer reads.
+const REVIEW_ANSWER_FORMAT_MARKER: &str = "Return exactly one JSON object";
 
 /// Largest incremental review packet, in characters. The first packet of a
 /// Reviewer thread carries the whole case and can run past a hundred thousand;
@@ -9969,16 +9945,14 @@ async fn run_chat_turn_with_context(
                     collaboration::review_evidence(agent, &worker_sessions_dir)).unwrap_or_default();
                 let round_tool_evidence = format!("{}\n\n{}", trace_sections.last().map_or("", String::as_str), delegation_evidence);
                 // Which rubrics apply can change with each revised answer.
-                let applicable_rubrics = runtime::plugins::applicable_review_rubrics(
+                let rubric_packet = runtime::plugins::rubric_packet_for(
                     &review_rubrics,
                     &format!("{worker_user_text}\n{text}"),
                 );
-                let rubric_packet = runtime::plugins::render_review_rubrics(&applicable_rubrics);
-                let rubric_section = rubric_packet.section.clone();
                 // The whole case, as the one-shot path has always sent it. A
                 // Reviewer thread asks for it only on first contact.
                 let full_prompt = || {
-                    with_review_rubrics(independent_review_prompt(
+                    rubric_packet.place_in(independent_review_prompt(
                         &worker_user_text,
                         &text,
                         &format!("{}\n\n{}", cumulative_review_sections(
@@ -9993,7 +9967,7 @@ async fn run_chat_turn_with_context(
                         &worker_workspace,
                         &worker_executor_provider,
                         &worker_executor_model,
-                    ), &rubric_section)
+                    ), Some(REVIEW_ANSWER_FORMAT_MARKER))
                 };
                 // Chat only: a work task's own review of what it committed
                 // stays the one-shot review it has always been.
@@ -10009,7 +9983,7 @@ async fn run_chat_turn_with_context(
                             // Only this round's material: the sections the
                             // Executor produced since the Reviewer last looked.
                             incremental: &|| {
-                                with_review_rubrics(incremental_review_packet(&IncrementalReviewInput {
+                                rubric_packet.place_in(incremental_review_packet(&IncrementalReviewInput {
                                     kind: if review_revision_count == 0 {
                                         IncrementalReviewKind::NewRequest
                                     } else {
@@ -10028,7 +10002,7 @@ async fn run_chat_turn_with_context(
                                     workspace: &worker_workspace,
                                     executor_provider: &worker_executor_provider,
                                     executor_model: &worker_executor_model,
-                                }), &rubric_section)
+                                }), Some(REVIEW_ANSWER_FORMAT_MARKER))
                             },
                         },
                         &worker_workspace,

@@ -143,8 +143,9 @@ pub fn literature_search_cancel(request_id: String) -> bool {
     raise_cancel_flag(search_cancellations(), &request_id)
 }
 
-/// Stops an in-flight OCR or PDF import by its request id: the running tool is
-/// killed and the call fails as canceled. `false` when the id is unknown.
+/// Stops an in-flight PDF import (and the OCR it runs) by its request id: the
+/// running tool is killed and the import fails as canceled. `false` when the
+/// id is unknown.
 #[tauri::command]
 pub fn literature_ocr_cancel(request_id: String) -> bool {
     raise_cancel_flag(ocr_cancellations(), &request_id)
@@ -1229,7 +1230,7 @@ pub async fn literature_import_pdf_as_record(
     off_main_thread(move || {
         let registration = CancelRegistration::in_registry(ocr_cancellations(), request_id.as_deref());
         let cancel = registration.flag();
-        literature_import_pdf_as_record_cancellable(&base, Path::new(&source_path), title.as_deref(), &cancel)
+        literature_import_pdf_as_record_core(&base, Path::new(&source_path), title.as_deref(), &cancel)
     })
     .await
 }
@@ -1241,14 +1242,6 @@ pub async fn literature_import_pdf_as_record(
 /// record is *called*, and getting it wrong is invisible until a library is
 /// full of files named after their download slug.
 pub(crate) fn literature_import_pdf_as_record_core(
-    base: &Path,
-    source: &Path,
-    title: Option<&str>,
-) -> Result<Value, String> {
-    literature_import_pdf_as_record_cancellable(base, source, title, &NEVER_CANCELED)
-}
-
-fn literature_import_pdf_as_record_cancellable(
     base: &Path,
     source: &Path,
     title: Option<&str>,
@@ -1353,13 +1346,9 @@ pub async fn literature_add_identifier(
 /// keeps page rendering self-contained in the desktop bundle and uses the
 /// platform OCR engine (or Tesseract when available) only for image-only pages.
 #[tauri::command]
-pub async fn literature_image_ocr(image: Vec<u8>, request_id: Option<String>) -> Result<String, String> {
-    off_main_thread(move || {
-        let registration = CancelRegistration::in_registry(ocr_cancellations(), request_id.as_deref());
-        let cancel = registration.flag();
-        image_ocr(image, &cancel)
-    })
-    .await
+pub async fn literature_image_ocr(image: Vec<u8>) -> Result<String, String> {
+    // Bounded by the OCR tool timeout; nothing in the reader offers a cancel.
+    off_main_thread(move || image_ocr(image, &NEVER_CANCELED)).await
 }
 
 pub(crate) fn image_ocr(image: Vec<u8>, cancel: &AtomicBool) -> Result<String, String> {
@@ -1377,21 +1366,7 @@ pub(crate) fn image_ocr(image: Vec<u8>, cancel: &AtomicBool) -> Result<String, S
         std::process::id()
     ));
     std::fs::write(&path, image).map_err(|error| error.to_string())?;
-    let result = tesseract_ocr(&path, cancel).or_else(|tesseract_error| {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(tesseract_error);
-        }
-        #[cfg(windows)]
-        {
-            windows_ocr(&path, cancel).map_err(|windows_error| {
-                format!("{tesseract_error}; Windows OCR failed: {windows_error}")
-            })
-        }
-        #[cfg(not(windows))]
-        {
-            Err(tesseract_error)
-        }
-    });
+    let result = ocr_image_file(&path, cancel);
     let _ = std::fs::remove_file(path);
     result
 }
@@ -2530,13 +2505,21 @@ fn ocr_pdf_page(path: &Path, page: usize, cancel: &AtomicBool) -> Result<String,
         ));
     }
 
-    let result = tesseract_ocr(&image, cancel).or_else(|tesseract_error| {
+    let result = ocr_image_file(&image, cancel);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    result
+}
+
+/// OCR one image file: Tesseract when installed, else the Windows OCR engine.
+/// A cancel stops at whichever engine is running and tries no other.
+fn ocr_image_file(image: &Path, cancel: &AtomicBool) -> Result<String, String> {
+    tesseract_ocr(image, cancel).or_else(|tesseract_error| {
         if cancel.load(Ordering::SeqCst) {
             return Err(tesseract_error);
         }
         #[cfg(windows)]
         {
-            windows_ocr(&image, cancel).map_err(|windows_error| {
+            windows_ocr(image, cancel).map_err(|windows_error| {
                 format!("{tesseract_error}; Windows OCR failed: {windows_error}")
             })
         }
@@ -2544,9 +2527,7 @@ fn ocr_pdf_page(path: &Path, page: usize, cancel: &AtomicBool) -> Result<String,
         {
             Err(tesseract_error)
         }
-    });
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    result
+    })
 }
 
 fn tesseract_ocr(image: &Path, cancel: &AtomicBool) -> Result<String, String> {

@@ -1548,7 +1548,7 @@ pub async fn file_duplicate(path: String) -> Result<FileTreeEntry, String> {
     crate::blocking::off_main_thread(move || file_duplicate_blocking(path)).await
 }
 
-pub(crate) fn file_duplicate_blocking(path: String) -> Result<FileTreeEntry, String> {
+fn file_duplicate_blocking(path: String) -> Result<FileTreeEntry, String> {
     let (root, source) = resolve_workspace_existing_path(&path, false)?;
     crate::typeset_state::ensure_project_revision(&root)?;
     let target = duplicate_target_path(&source)?;

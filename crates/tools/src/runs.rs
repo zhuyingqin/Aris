@@ -130,11 +130,11 @@ fn save_locked(path: &Path, runs: &Value) -> Result<(), String> {
     // `runs_load_at` would recover from.
     if let Ok(current) = std::fs::read(path) {
         if serde_json::from_slice::<Value>(&current).is_ok() {
-            runtime::write_replace_while_locked(&path.with_extension("json.bak"), &current)
+            runtime::write_file_atomically_while_locked(&path.with_extension("json.bak"), &current)
                 .map_err(|e| format!("failed to back up runs.json: {e}"))?;
         }
     }
-    runtime::write_replace_while_locked(path, &data)
+    runtime::write_file_atomically_while_locked(path, &data)
         .map_err(|e| format!("failed to replace runs.json: {e}"))
 }
 

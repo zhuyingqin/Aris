@@ -15,6 +15,7 @@ import {
   literatureFullTextSearch,
   literatureImportBibliography,
   literatureImportPdfAsRecord,
+  literatureOcrCancel,
   literatureMergeDuplicates,
   literatureSearchCancel,
   literatureSearchProtocolCreate,
@@ -1796,6 +1797,13 @@ function RetrievalCardBrowser({
 // Main component
 // ──────────────────────────────────────────────────────────────────────────────
 
+/** A PDF import the user canceled: reported as canceled, not as a failure. */
+class PdfImportCanceled extends Error {
+  constructor() {
+    super("PDF import canceled");
+  }
+}
+
 export default function Literature({
   pageView: controlledPageView,
   onPageViewChange,
@@ -1867,6 +1875,27 @@ export default function Literature({
   }>({ total: 0, exhausted: true, loading: false });
   const [duplicateCandidates, setDuplicateCandidates] = useState<LiteratureDuplicateCandidate[]>([]);
   const [pdfDragging, setPdfDragging] = useState(false);
+  // The PDF import in flight, so it can be shown and canceled: importing a
+  // scanned PDF reads every page with OCR and can take minutes.
+  const [pdfImport, setPdfImport] = useState<{ requestId: string; name: string } | null>(null);
+  const canceledImports = useRef(new Set<string>());
+  const runPdfImport = useCallback(async (sourcePath: string) => {
+    const requestId = crypto.randomUUID();
+    setPdfImport({ requestId, name: sourcePath.split(/[\\/]/).pop() || sourcePath });
+    try {
+      return await literatureImportPdfAsRecord<{ record: { recordId: string } }>(sourcePath, undefined, requestId);
+    } catch (error) {
+      throw canceledImports.current.has(requestId) ? new PdfImportCanceled() : error;
+    } finally {
+      canceledImports.current.delete(requestId);
+      setPdfImport((current) => (current?.requestId === requestId ? null : current));
+    }
+  }, []);
+  const cancelPdfImport = useCallback(() => {
+    if (!pdfImport) return;
+    canceledImports.current.add(pdfImport.requestId);
+    void literatureOcrCancel(pdfImport.requestId);
+  }, [pdfImport]);
   // Read once: later writes come from this component's own state.
   const [layoutPrefs] = useState(readLayoutPrefs);
   const [sort, setSort] = useState<SortKey>(() => (
@@ -2210,13 +2239,17 @@ export default function Literature({
         if (event.payload.type !== "drop") return;
         const sourcePath = event.payload.paths.find((path) => path.toLocaleLowerCase().endsWith(".pdf"));
         if (!sourcePath) return;
-        void literatureImportPdfAsRecord<{ record: { recordId: string } }>(sourcePath)
+        void runPdfImport(sourcePath)
           .then(async (result) => {
             await load(projectId, { quiet: true });
             setSelectedId(result.record.recordId);
             logActivity("ok", copy.dialogs.pdfDropImported);
           })
           .catch((error) => {
+            if (error instanceof PdfImportCanceled) {
+              logActivity("info", copy.dialogs.pdfImportCanceled);
+              return;
+            }
             const message = copy.dialogs.pdfDropImportFailed(String(error));
             setError(message);
             logActivity("error", message);
@@ -2231,7 +2264,7 @@ export default function Literature({
       disposed = true;
       unlisten?.();
     };
-  }, [load, logActivity, projectId, setError]);
+  }, [load, logActivity, projectId, runPdfImport, setError]);
 
   const libraryPapers = library.papers;
   const isTrashView = view === "trash";
@@ -2369,11 +2402,15 @@ export default function Literature({
     try {
       const selected = await openDialog({ multiple: false, filters: [{ name: "PDF", extensions: ["pdf"] }] });
       if (!selected || Array.isArray(selected)) return;
-      const result = await literatureImportPdfAsRecord<{ record: { recordId: string } }>(selected);
+      const result = await runPdfImport(selected);
       await load(projectId, { quiet: true });
       setSelectedId(result.record.recordId);
       logActivity("ok", copy.dialogs.pdfImported);
     } catch (error) {
+      if (error instanceof PdfImportCanceled) {
+        logActivity("info", copy.dialogs.pdfImportCanceled);
+        return;
+      }
       const message = copy.dialogs.pdfImportFailed(String(error));
       setError(message);
       logActivity("error", message);
@@ -4022,6 +4059,12 @@ export default function Literature({
 
   const mainArea = (
     <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`} role="region" aria-label={viewLabel}>
+      {pdfImport && (
+        <div className="lit-pdf-import-progress" role="status">
+          <span>{copy.dialogs.pdfImporting(pdfImport.name)}</span>
+          <button type="button" onClick={cancelPdfImport}>{copy.dialogs.pdfImportCancel}</button>
+        </div>
+      )}
       <LiteratureToolbar
         quickFilter={quickFilter}
         quickCounts={quickCounts}

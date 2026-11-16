@@ -7801,3 +7801,29 @@ kbd {
   background: #e8edf5;
   border-color: #a8cdfc;
 }
+
+/* A PDF import in flight (OCR can take minutes), with its cancel button. */
+.lit-pdf-import-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.lit-pdf-import-progress span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.lit-pdf-import-progress button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.lit-pdf-import-progress button:hover { border-color: var(--accent); }

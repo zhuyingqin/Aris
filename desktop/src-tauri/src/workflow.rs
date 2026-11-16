@@ -1958,11 +1958,9 @@ pub(crate) async fn reviewer_turn(
     let prompt = if rubric_packet.section.is_empty() {
         prompt
     } else {
-        format!(
-            "{prompt}\n\n{}\n\n{}",
-            rubric_packet.section,
-            runtime::plugins::GATE_RUBRIC_ISSUE_FORMAT
-        )
+        // A gate's answer format is in the caller's system text, so the section
+        // goes last here, followed by how a gate reports a violation.
+        format!("{}\n\n{}", rubric_packet.place_in(prompt, None), runtime::plugins::GATE_RUBRIC_ISSUE_FORMAT)
     };
     let reply = ctx
         .run_reviewer_oneshot(reviewer_system, prompt, action_id.clone())
@@ -1980,8 +1978,7 @@ fn gate_rubric_packet(workspace: &Path, material: &str) -> runtime::plugins::Rub
     let Ok(set) = store.freeze() else {
         return runtime::plugins::RubricPacket::default();
     };
-    let rubrics = store.review_rubrics_for(&set);
-    runtime::plugins::render_review_rubrics(&runtime::plugins::applicable_review_rubrics(&rubrics, material))
+    runtime::plugins::rubric_packet_for(&store.review_rubrics_for(&set), material)
 }
 
 /// The gate reply with the controller's rubric record in it, the approval

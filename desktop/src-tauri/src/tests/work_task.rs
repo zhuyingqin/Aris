@@ -1638,3 +1638,36 @@ fn a_plugin_page_origin_is_kept_on_the_task_and_checked() {
     let bad = WorkTaskOrigin { report_widget: Some("../x".into()), ..origin };
     assert!(crate::work_task::commands::create_core_with_origin(&fixture.project_id, "T".into(), String::new(), None, Some(bad)).is_err());
 }
+
+/// The TS side (`desktop/src/contracts/reviewWire.test.ts`) holds its hand-written
+/// types to the same sample, so a field renamed on either side fails a test.
+#[test]
+fn review_wire_types_match_the_shared_sample() {
+    use crate::work_task::model::WorkTaskOrigin;
+    use runtime::plugins::{ReviewRubricRecord, ReviewSeverity, RubricCheck, RubricCheckResult};
+    let sample: serde_json::Value =
+        serde_json::from_str(include_str!("../../../src/contracts/reviewWire.json")).expect("sample");
+    let record = ReviewRubricRecord {
+        delivered: vec!["@lab/review/evidence".into()],
+        omitted: vec!["@lab/review/long".into()],
+        checks: vec![RubricCheck {
+            criterion: "@lab/review/evidence#numbers".into(),
+            severity: ReviewSeverity::Critical,
+            result: RubricCheckResult::Violated,
+            note: "0.91 is in no result file".into(),
+        }],
+        unknown_criteria: vec!["@lab/review/evidence#ghost".into()],
+        verdict_corrected: true,
+    };
+    let origin = WorkTaskOrigin {
+        plugin_name: "@local/experiment-triage".into(),
+        panel_id: "triage".into(),
+        report_panel: Some("triage".into()),
+        report_widget: Some("findings".into()),
+    };
+    assert_eq!(serde_json::to_value(&record).unwrap(), sample["reviewRubricRecord"]);
+    assert_eq!(serde_json::to_value(&origin).unwrap(), sample["workTaskOrigin"]);
+    // And the sample reads back into the Rust types unchanged.
+    let back: ReviewRubricRecord = serde_json::from_value(sample["reviewRubricRecord"].clone()).unwrap();
+    assert_eq!(back, record);
+}

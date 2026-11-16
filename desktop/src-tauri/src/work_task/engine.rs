@@ -764,13 +764,15 @@ async fn review_and_revise(
 
         // Rubrics from the set the run froze; which apply can change with
         // each revised result.
-        let rubric_packet = runtime::plugins::render_review_rubrics(
-            &runtime::plugins::applicable_review_rubrics(
-                &review_rubrics,
-                &format!("{}\n{}\n{}", task.title, task.prompt, summary),
-            ),
+        let rubric_packet = runtime::plugins::rubric_packet_for(
+            &review_rubrics,
+            &format!("{}\n{}\n{}", task.title, task.prompt, summary),
         );
-        let prompt = reviewer_prompt(task, &snapshot, &summary, &tree_path, &rubric_packet.section);
+        // Before the Reviewer's instructions, which end with the answer format.
+        let prompt = rubric_packet.place_in(
+            reviewer_prompt(task, &snapshot, &summary, &tree_path),
+            Some(REVIEWER_INSTRUCTIONS_HEADING),
+        );
         let flag = stop.flag.clone();
         let model = task.model.clone();
         let review_session = session_id.to_string();
@@ -940,7 +942,6 @@ fn reviewer_prompt(
     snapshot: &WorkTaskReviewSnapshot,
     summary: &str,
     tree_path: &Path,
-    rubric_section: &str,
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str(
@@ -1012,14 +1013,12 @@ fn reviewer_prompt(
         summary.trim()
     });
     prompt.push_str("\n\n");
-    if !rubric_section.is_empty() {
-        prompt.push_str("# Installed review criteria\n\n");
-        prompt.push_str(rubric_section);
-        prompt.push_str("\n\n");
-    }
     prompt.push_str(REVIEWER_INSTRUCTIONS);
     prompt
 }
+
+/// The heading `REVIEWER_INSTRUCTIONS` opens with; rubric sections go before it.
+const REVIEWER_INSTRUCTIONS_HEADING: &str = "# Your job";
 
 const REVIEWER_INSTRUCTIONS: &str = "# Your job\n\n\
      Decide whether this result does what the task asked. Check the claim against the diff: a \
@@ -2032,7 +2031,7 @@ mod tests {
         };
         // A path that does not exist, so the patch read fails — the prompt has
         // to say so rather than quietly present a diff-free review.
-        let prompt = reviewer_prompt(&task, &snapshot, "Tightened the argument.", Path::new("/nope"), "");
+        let prompt = reviewer_prompt(&task, &snapshot, "Tightened the argument.", Path::new("/nope"));
 
         assert!(prompt.contains("Rewrite section 3"));
         assert!(prompt.contains("Tighten the argument."));
@@ -2069,7 +2068,7 @@ mod tests {
             empty_reason: Some(WorkTaskEmptyReason::ArtifactsOnly),
             captured_at: 0,
         };
-        let prompt = reviewer_prompt(&task, &snapshot, "Wrote the report.", Path::new("/nope"), "");
+        let prompt = reviewer_prompt(&task, &snapshot, "Wrote the report.", Path::new("/nope"));
         assert!(prompt.contains("report.pdf"));
         assert!(prompt.contains("No repository files were changed"));
     }
@@ -2087,7 +2086,8 @@ mod tests {
             empty_reason: None,
             captured_at: 0,
         };
-        let prompt = reviewer_prompt(&task, &snapshot, "Wrote it.", Path::new("/nope"), "RUBRIC-SECTION");
+        let packet = runtime::plugins::RubricPacket { section: "RUBRIC-SECTION".into(), ..Default::default() };
+        let prompt = packet.place_in(reviewer_prompt(&task, &snapshot, "Wrote it.", Path::new("/nope")), Some(REVIEWER_INSTRUCTIONS_HEADING));
         let rubric = prompt.find("RUBRIC-SECTION").expect("the rubric section");
         let format = prompt.find("Reply with a single JSON object").expect("the format");
         assert!(rubric < format);

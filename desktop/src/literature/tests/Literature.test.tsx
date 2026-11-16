@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   literatureDuplicateCandidates: vi.fn(),
   literatureMergeDuplicates: vi.fn(),
   literatureImportPdfAsRecord: vi.fn(),
+  literatureOcrCancel: vi.fn(),
   literatureApplyDelta: vi.fn(),
   literatureRestoreItems: vi.fn(),
   literatureUpdateCollections: vi.fn(),
@@ -73,6 +74,7 @@ vi.mock("../../api/tauri", () => ({
   literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
   literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
+  literatureOcrCancel: mocks.literatureOcrCancel,
   literatureApplyDelta: mocks.literatureApplyDelta,
   literatureRestoreItems: mocks.literatureRestoreItems,
   literatureUpdateCollections: mocks.literatureUpdateCollections,
@@ -1119,6 +1121,30 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "状态" }));
     expect(screen.getByRole("button", { name: "收件箱 1" })).toBeTruthy();
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
+  });
+
+  it("shows a PDF import while it runs and cancels it as canceled, not failed", async () => {
+    const user = userEvent.setup();
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(dialog.open).mockResolvedValueOnce("E:/papers/scanned.pdf");
+    let reject: (error: unknown) => void = () => undefined;
+    mocks.literatureImportPdfAsRecord.mockReturnValueOnce(new Promise((_, fail) => { reject = fail; }));
+    mocks.literatureOcrCancel.mockImplementation(async () => { reject("PDF text extraction was canceled"); return true; });
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "添加文献" }));
+    await user.click(within(screen.getByRole("menu", { name: "添加文献" })).getByRole("menuitem", { name: /导入 PDF/ }));
+    const progress = (await screen.findByText(/正在导入 scanned\.pdf/)).closest("[role=status]");
+    expect(progress).not.toBeNull();
+    const [, , requestId] = mocks.literatureImportPdfAsRecord.mock.calls.at(-1)!;
+    expect(typeof requestId).toBe("string");
+
+    await user.click(screen.getByRole("button", { name: "取消导入" }));
+    expect(mocks.literatureOcrCancel).toHaveBeenCalledWith(requestId);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消导入" })).toBeNull());
+    // A cancel is not reported as an import failure.
+    expect(screen.queryByText(/导入 PDF 失败/)).toBeNull();
   });
 
   it("keeps every import route available in a populated library and creates a manual item", async () => {
