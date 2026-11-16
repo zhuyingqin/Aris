@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use super::{package_files, InstalledPlugin, PackageFiles, PluginMcp, PluginPreview, PluginStore, Record};
 
@@ -102,6 +103,9 @@ pub struct McpServerDiff {
 pub struct CapabilityDiff {
     pub skills: ListChange,
     pub ui_panels: ListChange,
+    /// Reviewer rubrics as `<rubric id> (<criterion count>)`: a changed set of
+    /// criteria changes what the independent Reviewer checks.
+    pub review_rubrics: ListChange,
     pub mcp_servers: Vec<McpServerDiff>,
     /// Command lines this computer would start, across every server.
     pub commands: ListChange,
@@ -147,9 +151,35 @@ fn diff(
             .ui_panels
             .iter()
             // A panel gaining or losing its own page is a change to review.
-            .map(|panel| match panel.page {
-                Some(_) => format!("{} (page)", panel.id),
-                None => panel.id.clone(),
+            .map(|panel| match (&panel.page, panel.propose_tasks) {
+                (Some(_), true) => format!("{} (page, tasks)", panel.id),
+                (Some(_), false) => format!("{} (page)", panel.id),
+                (None, _) => panel.id.clone(),
+            })
+            .collect()
+    };
+    let rubrics = |package: &PluginPreview| -> BTreeSet<String> {
+        package
+            .capabilities
+            .review_rubrics
+            .iter()
+            .map(|rubric| {
+                // The criteria text itself: an edited check is a change too.
+                let mut hash = Sha256::new();
+                for criterion in &rubric.criteria {
+                    hash.update(criterion.id.as_bytes());
+                    hash.update([0]);
+                    hash.update(criterion.severity.as_str().as_bytes());
+                    hash.update([0]);
+                    hash.update(criterion.check.as_bytes());
+                    hash.update([0]);
+                }
+                for keyword in &rubric.applies_when {
+                    hash.update(keyword.as_bytes());
+                    hash.update([1]);
+                }
+                let digest = format!("{:x}", hash.finalize());
+                format!("{} ({} criteria, {})", rubric.id, rubric.criteria.len(), &digest[..8])
             })
             .collect()
     };
@@ -222,6 +252,7 @@ fn diff(
     let mut diff = CapabilityDiff {
         skills: ListChange::between(&names(before), &names(after)),
         ui_panels: ListChange::between(&panels(before), &panels(after)),
+        review_rubrics: ListChange::between(&rubrics(before), &rubrics(after)),
         commands: ListChange::between(&commands.0, &commands.1),
         env_keys: ListChange::between(&env_keys.0, &env_keys.1),
         mcp_servers,
@@ -229,6 +260,7 @@ fn diff(
     };
     diff.changed = !diff.skills.is_empty()
         || !diff.ui_panels.is_empty()
+        || !diff.review_rubrics.is_empty()
         || diff
             .mcp_servers
             .iter()

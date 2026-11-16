@@ -1,5 +1,38 @@
 # ARIS-Code Changelog
 
+## v0.4.90 (2026-11-16)
+
+- **Reviewer packs** — a plugin can add review criteria (`somniq.reviewer`) to
+  the independent Reviewer. They apply by keyword, reach only the Reviewer's
+  packet, and are used by Chat review, work-task review and workflow approval
+  gates. The controller records which rubrics were sent and which were left out
+  for length, reconciles each criterion's result with the Reviewer's issues
+  (an unmentioned criterion is "not reported", never "met"), and turns a pass
+  into a revision when a critical criterion was violated. The review panel and
+  the task board show the record.
+- **Plugin pages hand work to the background** — a page panel with
+  `"proposeTasks": true` can propose a work task (`somniq.task`); the app shows
+  the proposal and only the user's click creates or starts it. The task records
+  which page asked, and the page follows it with `somniq.tasks` /
+  `somniq.onTasks`: state, Reviewer verdict, summary, changed files and
+  deliverables, read from the board rather than from what the task wrote back.
+  New templates: `reviewer-pack`, `experiment-triage`.
+- **Responsive literature and file work** — PDF import with OCR, image OCR,
+  attachment reading, PDF bytes, folder duplication and Typeset project export
+  run off the window's thread. OCR and PDF tools have timeouts and can be
+  canceled (`literature_ocr_cancel`); PDF bytes travel as binary.
+- **Safer persistence** — the experiment run library (`runs.json`), `config.json`,
+  and the remote/OAuth credential files are replaced atomically under a lock,
+  so concurrent updates are not lost and a crash cannot leave them missing. An
+  unreadable `config.json` is kept aside before it would be overwritten.
+- **Fixes** — work-task create, edit and delete now notify every view of the
+  board; credentials are dropped when a web request is redirected to another
+  origin; the slide builder (`paper-slides`) gains a deterministic
+  `slides.json` deck builder; dead code found in the 2026-11-14 audit removed.
+- **CI** — a Windows desktop job covers plugins, the review loop and its rubric
+  record, work-task review, workflow gates, plugin page tasks, the run library
+  and bounded subprocesses.
+
 ## v0.4.89 (2026-11-14)
 
 - **Official plugins** — Literature, LaTeX, Figures and Mail are switchable

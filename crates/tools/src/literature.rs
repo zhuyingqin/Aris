@@ -13202,10 +13202,13 @@ fn strip_version(id: &str) -> String {
     id.to_string()
 }
 
+/// Dedupe key for a title. Keeps every Unicode letter and digit: an
+/// ASCII-only filter reduced each all-Chinese title to the same empty key, so
+/// identifier-less CNKI/Wanfang results collapsed into one paper.
 fn normalized_title(title: &str) -> String {
     title
         .chars()
-        .filter(char::is_ascii_alphanumeric)
+        .filter(|character| character.is_alphanumeric())
         .collect::<String>()
         .to_lowercase()
 }

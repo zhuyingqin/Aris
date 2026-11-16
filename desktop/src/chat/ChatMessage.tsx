@@ -1010,6 +1010,9 @@ const PLUGIN_APPROVAL_COPY = {
     skills: "Skill",
     panels: "侧栏面板",
     ownPage: "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
+    proposesTasks: "（可提议后台任务，每次都需你确认）",
+    rubrics: "审查细则",
+    rubricsNote: "独立 Reviewer 每次审查都会检查这些条目，Executor 看不到它们",
     commands: "会在这台电脑上运行的命令",
     envKeys: "环境变量（只列名称）",
     requires: "依赖的官方插件（关闭时它不运行）",
@@ -1035,6 +1038,9 @@ const PLUGIN_APPROVAL_COPY = {
     skills: "Skills",
     panels: "Sidebar panels",
     ownPage: " (own page: runs the package's page code, sandboxed, no network)",
+    proposesTasks: " (may propose background tasks; you confirm each one)",
+    rubrics: "Review rubrics",
+    rubricsNote: "The independent Reviewer checks these on every review; the Executor never sees them",
     commands: "Commands this computer will run",
     envKeys: "Environment variables (names only)",
     requires: "Official plugins it needs (it does not run while one is off)",
@@ -1160,14 +1166,24 @@ function PluginApprovalCall({
           <>
             {listChange(copy.skills, diff.skills)}
             {listChange(copy.panels, diff.uiPanels)}
+            {listChange(copy.rubrics, diff.reviewRubrics)}
           </>
         ) : card.kind !== "remove" && (
-          skills.length === 0 && uiPanels.length === 0 && mcpServers.length === 0 ? (
+          skills.length === 0 && uiPanels.length === 0 && mcpServers.length === 0 && !(card.capabilities.reviewRubrics?.length) ? (
             <p className="chat-plugin-approval-muted">{copy.nothing}</p>
           ) : (
             <dl className="chat-plugin-approval-capabilities">
               {skills.length > 0 && <><dt>{copy.skills}</dt><dd>{skills.join(", ")}</dd></>}
-              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => (typeof panel.title === "string" ? panel.title : panel.title[language]) + (panel.page ? copy.ownPage : "")).join(", ")}</dd></>}
+              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => (typeof panel.title === "string" ? panel.title : panel.title[language]) + (panel.page ? copy.ownPage : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
+              {(card.capabilities.reviewRubrics?.length ?? 0) > 0 && (
+                <>
+                  <dt>{copy.rubrics}</dt>
+                  <dd>
+                    {card.capabilities.reviewRubrics!.map((rubric) => `${typeof rubric.title === "string" ? rubric.title : rubric.title[language]} (${rubric.criteria})`).join(", ")}
+                    <span className="chat-plugin-approval-muted"> · {copy.rubricsNote}</span>
+                  </dd>
+                </>
+              )}
               {mcpServers.length > 0 && (
                 <>
                   <dt>{copy.commands}</dt>

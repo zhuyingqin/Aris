@@ -34,6 +34,7 @@ const COPY = {
     needsOfficial: "缺官方插件",
     needsOfficialHint: (names: string) => `它依赖的官方插件${names}在本项目已关闭，所以没有运行（Skills、MCP、面板都不加载）。在上方“官方插件”里打开后，下一次运行生效。`,
     requires: "依赖官方插件",
+    rubrics: "审查细则",
     enabledHint: "下一次运行开始生效。",
     runningHint: (runs: number) => `${runs} 个正在运行的回合或任务在使用这个版本。`,
     restartHint: (runs: number) => `${runs} 个正在运行的回合或任务仍使用开始时的插件集；改动在它们下一次开始时生效。`,
@@ -84,6 +85,7 @@ const COPY = {
     needsOfficial: "Needs an official plugin",
     needsOfficialHint: (names: string) => `The official plugin it depends on (${names}) is off for this project, so it is not running: no Skills, MCP or panels. Turn it on under Official plugins above; it applies from the next run.`,
     requires: "Requires official plugins",
+    rubrics: "Review rubrics",
     enabledHint: "Applies from the next run.",
     runningHint: (runs: number) => `In use by ${runs} running ${runs === 1 ? "turn or task" : "turns or tasks"}.`,
     restartHint: (runs: number) => `${runs} running ${runs === 1 ? "turn or task still uses" : "turns or tasks still use"} the set it started with; the change applies when ${runs === 1 ? "it next starts" : "they next start"}.`,
@@ -164,6 +166,7 @@ function CapabilityChips({ item, copy }: { item: PluginPreview; copy: Copy }) {
     uiPanels.length > 0 && <Chip key="ui" icon="panelRight" label={`${uiPanels.length} ${copy.ui}`} />,
     skills.length > 0 && <Chip key="skills" icon="sparkle" label={`${skills.length} ${copy.skills}`} />,
     mcpServers.length > 0 && <Chip key="mcp" icon="lightning" label={`${mcpServers.length} ${copy.mcp}`} />,
+    (item.capabilities.reviewRubrics?.length ?? 0) > 0 && <Chip key="rubrics" icon="check" label={`${item.capabilities.reviewRubrics!.length} ${copy.rubrics}`} />,
   ].filter(Boolean);
   return <div className="plugin-chips">{chips.length > 0 ? chips : <span className="plugin-chip is-empty">{copy.noCapabilities}</span>}</div>;
 }
@@ -183,7 +186,12 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
   return <dl className="plugin-details" id={id}>
     <div><dt>{copy.skills}</dt><dd>{skills.length ? <span className="plugin-tags">{skills.map((skill) => <code key={skill}>{skill}</code>)}</span> : copy.none}</dd></div>
     <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} /> : copy.none}</dd></div>
-    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? (language === "cn" ? "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）" : " (own page: runs the package's page code, sandboxed, no network)") : "")).join("、") : copy.none}</dd></div>
+    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? (language === "cn" ? "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）" : " (own page: runs the package's page code, sandboxed, no network)") : "")
+      + (panel.proposeTasks ? (language === "cn" ? "（可提议后台任务，每次都需你确认）" : " (may propose background tasks; you confirm each one)") : "")).join("、") : copy.none}</dd></div>
+    {(item.capabilities.reviewRubrics?.length ?? 0) > 0 && <div><dt>{copy.rubrics}</dt><dd><ul className="plugin-rubrics">{item.capabilities.reviewRubrics!.map((rubric) => <li key={rubric.id}>
+      <strong>{uiText(rubric.title, language)}</strong>{rubric.appliesWhen?.length ? <span className="plugin-rubric-when"> · {language === "cn" ? "触发词" : "when"}: {rubric.appliesWhen.join(", ")}</span> : null}
+      <ul>{rubric.criteria.map((criterion) => <li key={criterion.id}><code>{criterion.severity}</code> {criterion.check}</li>)}</ul>
+    </li>)}</ul></dd></div>}
     {(item.capabilities.requires?.length ?? 0) > 0 && <div><dt>{copy.requires}</dt><dd>{officialNames(item.capabilities.requires, language)}</dd></div>}
     <div><dt>{copy.source}</dt><dd><code className="plugin-path">{item.source}</code></dd></div>
     <div><dt>{copy.snapshot}</dt><dd><code title={item.digest}>{item.digest.slice(0, 16)}</code></dd></div>
@@ -364,7 +372,7 @@ function UpgradeDiff({ plan, copy }: { plan: PluginUpgradePlan; copy: Copy }) {
   const title = plan.currentEnabled ? copy.diffApproved : copy.diffInstalled;
   const envChanged = [...new Set(diff.mcpServers.flatMap((server) => server.envChanged))];
   const rows: [string, ListChange, string[]?][] = [
-    [copy.skills, diff.skills], [copy.ui, diff.uiPanels], [copy.commands, diff.commands], [copy.envKeys, diff.envKeys, envChanged],
+    [copy.skills, diff.skills], [copy.ui, diff.uiPanels], [copy.rubrics, diff.reviewRubrics ?? { added: [], removed: [] }], [copy.commands, diff.commands], [copy.envKeys, diff.envKeys, envChanged],
   ];
   const shown = rows.filter(([, change, extra]) => change.added.length + change.removed.length + (extra?.length ?? 0) > 0);
   return <div className="plugin-diff" role="group" aria-label={title}>

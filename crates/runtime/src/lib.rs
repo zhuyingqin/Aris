@@ -62,7 +62,9 @@ mod tool_recovery;
 mod tool_output_artifact;
 mod usage;
 
-pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
+pub use atomic_file::{
+    with_path_lock, write_replace as write_file_atomically, write_replace_while_locked,
+};
 pub use pdf_text::{
     extract_pdf_text_from_bytes, extract_pdf_text_with_quality, PdfExtractionMetadata,
     PdfTextExtraction, PdfTextQuality,

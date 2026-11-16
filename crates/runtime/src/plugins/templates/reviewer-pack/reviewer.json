@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "rubrics": [
+    {
+      "id": "evidence",
+      "title": { "en": "Evidence behind claims", "cn": "结论要有证据" },
+      "criteria": [
+        { "id": "numbers-traced", "severity": "critical", "check": "Every reported number (metric, count, percentage, p-value) can be traced to a result file, table or tool output in the evidence. A number that appears only in the answer is a violation." },
+        { "id": "baseline-same-setup", "severity": "high", "check": "A claim that a method beats a baseline compares both under the same data split, budget and metric, and says so. A comparison with mismatched setups, or one whose setup is not stated, is a violation." },
+        { "id": "limits-stated", "severity": "medium", "check": "The answer states what was not verified or not run (for example missing seeds, untested datasets, unchecked citations) instead of implying full coverage." }
+      ]
+    },
+    {
+      "id": "statistics",
+      "title": { "en": "Statistics reported in full", "cn": "统计结论要报全" },
+      "appliesWhen": ["significant", "significance", "p-value", "p <", "confidence interval", "t-test", "anova", "显著", "p 值", "p值", "置信区间", "t 检验", "方差分析"],
+      "criteria": [
+        { "id": "test-named", "severity": "high", "check": "Each significance claim names the test used, the sample size and whether it is one- or two-sided." },
+        { "id": "effect-size", "severity": "high", "check": "Each significance claim reports an effect size or confidence interval, not only a p-value." },
+        { "id": "multiple-comparisons", "severity": "medium", "check": "When several hypotheses are tested together, the answer says whether and how it corrected for multiple comparisons." }
+      ]
+    }
+  ]
+}

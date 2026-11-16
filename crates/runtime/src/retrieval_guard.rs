@@ -2576,7 +2576,7 @@ fn deterministic_request_key(
         .filter(|value| !value.is_empty())
     {
         return Some(sha256_hex(
-            format!("{tool_name} provider {fingerprint}").as_bytes(),
+            format!("{tool_name}\0provider\0{fingerprint}").as_bytes(),
         ));
     }
     let mut value = serde_json::from_str::<Value>(input).ok()?;

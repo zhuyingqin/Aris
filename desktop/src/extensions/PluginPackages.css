@@ -271,3 +271,18 @@
   padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--text); font: inherit; font-size: 12px;
 }
+
+/* Review rubrics: what the independent Reviewer will check, shown in full before approval. */
+.plugin-rubrics,
+.plugin-rubrics ul {
+  margin: 0;
+  padding-left: 16px;
+}
+.plugin-rubrics > li + li { margin-top: 6px; }
+.plugin-rubrics ul { margin-top: 3px; color: var(--text-dim); }
+.plugin-rubrics code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--accent);
+}
+.plugin-rubric-when { color: var(--text-dim); font-size: 11.5px; }

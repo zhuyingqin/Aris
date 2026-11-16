@@ -69,3 +69,96 @@ fn background_process_views(
 #[cfg(test)]
 #[path = "tests/process.rs"]
 mod tests;
+
+/// Why [`output_bounded`] stopped a process before it finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedStop {
+    TimedOut,
+    Canceled,
+}
+
+/// Run `command` to completion like `Command::output`, but give up after
+/// `timeout` or as soon as `cancel` is raised: the child is killed and waited
+/// for, so no OCR or PDF tool outlives the request that started it. Output is
+/// drained on its own threads so a chatty child cannot block on a full pipe.
+pub fn output_bounded(
+    command: &mut Command,
+    timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<std::process::Output, BoundedOutputError> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(BoundedOutputError::Spawn)?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BoundedOutputError::Wait(error));
+            }
+        }
+        let stop = if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            Some(BoundedStop::Canceled)
+        } else if std::time::Instant::now() >= deadline {
+            Some(BoundedStop::TimedOut)
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout.join();
+            let _ = stderr.join();
+            return Err(BoundedOutputError::Stopped(stop));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+#[derive(Debug)]
+pub enum BoundedOutputError {
+    Spawn(std::io::Error),
+    Wait(std::io::Error),
+    Stopped(BoundedStop),
+}
+
+impl BoundedOutputError {
+    /// A message naming the tool, in the shape the callers already used.
+    pub fn describe(&self, tool: &str, timeout: std::time::Duration) -> String {
+        match self {
+            Self::Spawn(error) => format!("{tool} is unavailable: {error}"),
+            Self::Wait(error) => format!("{tool} could not be waited for: {error}"),
+            Self::Stopped(BoundedStop::TimedOut) => {
+                format!("{tool} took longer than {}s and was stopped", timeout.as_secs())
+            }
+            Self::Stopped(BoundedStop::Canceled) => format!("{tool} was canceled"),
+        }
+    }
+
+}

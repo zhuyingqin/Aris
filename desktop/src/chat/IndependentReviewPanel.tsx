@@ -39,6 +39,12 @@ export default function IndependentReviewPanel({
       issues: "发现的问题",
       checked: "已核查证据",
       toolChecks: "Reviewer 工具调用",
+      rubrics: "插件审查细则",
+      rubricOmitted: "因长度未下发（本轮未检查）",
+      rubricUnknown: "Reviewer 引用了未下发的细则（已忽略）",
+      rubricCorrected: "有 critical 细则被违反，控制器已把“通过”改为“需修改”。",
+      rubricResult: { met: "满足", violated: "违反", not_applicable: "不适用", unverified: "无法核实", unreported: "未报告" },
+      criterion: "细则",
       missing: "缺失检查",
       instructions: "修订要求",
       clear: "清除审查记录",
@@ -54,6 +60,12 @@ export default function IndependentReviewPanel({
       issues: "Issues found",
       checked: "Evidence checked",
       toolChecks: "Reviewer tool calls",
+      rubrics: "Plugin review rubrics",
+      rubricOmitted: "Left out for length (not checked this round)",
+      rubricUnknown: "Cited by the Reviewer but never sent (ignored)",
+      rubricCorrected: "A critical criterion was violated, so the controller changed pass to revise.",
+      rubricResult: { met: "Met", violated: "Violated", not_applicable: "Not applicable", unverified: "Unverified", unreported: "Not reported" },
+      criterion: "Criterion",
       missing: "Missing checks",
       instructions: "Revision instructions",
       clear: "Clear review history",
@@ -116,6 +128,7 @@ export default function IndependentReviewPanel({
                     {round.result.issues.map((issue, index) => (
                       <article key={`${round.attempt}-${index}`} className={`independent-review-issue severity-${issue.severity}`}>
                         <div><span>{issue.severity || "issue"}</span><strong>{issue.title}</strong></div>
+                        {issue.criterion && <code className="independent-review-criterion" title={copy.criterion}>{issue.criterion}</code>}
                         <p>{issue.detail}</p>
                         {issue.evidence && <small>{issue.evidence}</small>}
                         {issue.recommendation && <p className="recommendation">{issue.recommendation}</p>}
@@ -129,6 +142,27 @@ export default function IndependentReviewPanel({
                 {/* The controller's record of the Reviewer's own tool calls, which can repeat, so the index is part of the key. */}
                 {round.result.toolChecks && round.result.toolChecks.length > 0 && (
                   <section><h3>{copy.toolChecks}</h3><ul className="independent-review-tool-checks">{round.result.toolChecks.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</ul></section>
+                )}
+                {/* Recorded by the controller, not the Reviewer: what this round's packet carried, what it left out, and the result per criterion. */}
+                {round.result.rubrics && (
+                  <section className="independent-review-rubrics">
+                    <h3>{copy.rubrics}</h3>
+                    {round.result.rubrics.verdictCorrected && <p className="independent-review-rubric-corrected">{copy.rubricCorrected}</p>}
+                    {(round.result.rubrics.checks ?? []).length > 0 && (
+                      <ul>{(round.result.rubrics.checks ?? []).map((check) => (
+                        <li key={check.criterion} data-result={check.result}>
+                          <code>{check.criterion}</code> <span className="independent-review-rubric-result">{copy.rubricResult[check.result] ?? check.result}</span>
+                          {check.note && <small> {check.note}</small>}
+                        </li>
+                      ))}</ul>
+                    )}
+                    {(round.result.rubrics.omitted ?? []).length > 0 && (
+                      <p><span>{copy.rubricOmitted}: </span>{(round.result.rubrics.omitted ?? []).map((key) => <code key={key}>{key}</code>)}</p>
+                    )}
+                    {(round.result.rubrics.unknownCriteria ?? []).length > 0 && (
+                      <p><span>{copy.rubricUnknown}: </span>{(round.result.rubrics.unknownCriteria ?? []).map((key) => <code key={key}>{key}</code>)}</p>
+                    )}
+                  </section>
                 )}
                 {round.result.missingChecks.length > 0 && (
                   <section><h3>{copy.missing}</h3><ul>{round.result.missingChecks.map((item) => <li key={item}>{item}</li>)}</ul></section>

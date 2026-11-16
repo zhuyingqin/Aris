@@ -1117,6 +1117,7 @@ fn restarting_a_task_drops_the_previous_attempts_result() {
             reviewer_model: "reviewer".into(),
             exhausted: false,
             checked_at: 1,
+            rubrics: None,
         });
         Ok(())
     })
@@ -1605,4 +1606,35 @@ fn a_task_row_records_the_plugin_set_its_run_froze() {
     old.as_object_mut().unwrap().remove("pluginSet");
     let old: crate::work_task::model::WorkTask = serde_json::from_value(old).unwrap();
     assert_eq!(old.plugin_set, None);
+}
+
+#[test]
+fn a_plugin_page_origin_is_kept_on_the_task_and_checked() {
+    use crate::work_task::model::WorkTaskOrigin;
+    let fixture = fixture("origin");
+    let origin = WorkTaskOrigin {
+        plugin_name: "@local/experiment-triage".into(),
+        panel_id: "triage".into(),
+        report_panel: Some("triage".into()),
+        report_widget: Some("findings".into()),
+    };
+    let task = crate::work_task::commands::create_core_with_origin(
+        &fixture.project_id,
+        "Investigate r2".into(),
+        "Why did r2 diverge?".into(),
+        None,
+        Some(origin.clone()),
+    )
+    .expect("create");
+    let stored = store::list(&fixture.project_id)
+        .into_iter()
+        .find(|item| item.id == task.id)
+        .expect("stored");
+    assert_eq!(stored.origin.as_ref(), Some(&origin));
+    // A board task made by hand has no origin, and none is serialized.
+    let plain = create_core(&fixture.project_id, "By hand".into(), String::new(), None).unwrap();
+    assert!(serde_json::to_value(&plain).unwrap().get("origin").is_none());
+    // Ids that could not be a panel or widget are refused before a row is written.
+    let bad = WorkTaskOrigin { report_widget: Some("../x".into()), ..origin };
+    assert!(crate::work_task::commands::create_core_with_origin(&fixture.project_id, "T".into(), String::new(), None, Some(bad)).is_err());
 }

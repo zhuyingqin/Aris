@@ -4866,3 +4866,16 @@ fn every_builtin_index_is_a_registered_literature_source_in_priority_order() {
     assert_eq!(adapter_availability("cnki").status, "not_implemented");
     assert_eq!(adapter_availability("crossref").status, "available");
 }
+
+#[test]
+fn normalized_title_keeps_chinese_titles_distinct() {
+    assert_eq!(
+        normalized_title("Lifelong Anomaly Detection: A Survey"),
+        "lifelonganomalydetectionasurvey"
+    );
+    assert_eq!(normalized_title("基于深度学习的图像分割"), "基于深度学习的图像分割");
+    assert_ne!(
+        normalized_title("基于深度学习的图像分割"),
+        normalized_title("面向遥感影像的目标检测")
+    );
+}

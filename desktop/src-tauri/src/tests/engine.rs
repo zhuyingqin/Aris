@@ -3746,3 +3746,113 @@ fn the_figure_scheme_serves_nothing_while_figures_is_off() {
     assert!(!touched, "the asset must not be read while Figures is off");
     assert_eq!(no_project.status(), 200);
 }
+
+// ---- plugin review rubrics in the Reviewer's packets ---------------------------------
+
+#[test]
+fn review_rubrics_sit_before_the_answer_format_in_both_packets() {
+    let workspace = no_git_workspace("rubrics");
+    let section = "Installed review rubrics. RUBRIC-MARKER `@lab/review/evidence#numbers`";
+    let full = with_review_rubrics(
+        independent_review_prompt("Report the accuracy", "Accuracy is 91%.", "", "", &[], 1, workspace.path(), "openai", "executor-model"),
+        section,
+    );
+    let increment = with_review_rubrics(
+        incremental_review_packet(&incremental_input(
+            IncrementalReviewKind::NewRequest,
+            workspace.path(),
+            "Report the accuracy",
+            "Accuracy is 91%.",
+            "",
+            "",
+            None,
+        )),
+        section,
+    );
+    for packet in [&full, &increment] {
+        let rubric = packet.find("RUBRIC-MARKER").expect("the rubric section");
+        let format = packet.rfind("Return exactly one JSON object").expect("the answer format");
+        assert!(rubric < format, "the answer format stays last");
+        assert_eq!(packet.matches("RUBRIC-MARKER").count(), 1);
+    }
+    // Nothing installed: the packet is exactly what it was.
+    let plain = independent_review_prompt("Report", "Done.", "", "", &[], 1, workspace.path(), "openai", "m");
+    assert_eq!(with_review_rubrics(plain.clone(), ""), plain);
+}
+
+#[test]
+fn a_verdict_can_name_the_rubric_criterion_an_issue_violates() {
+    let parsed = parse_independent_review(
+        r#"{"verdict":"revise","summary":"An unsourced number","issues":[{"severity":"critical","title":"91% has no source","detail":"No result file holds it.","evidence":"answer","recommendation":"Cite the file.","criterion":"@lab/review/evidence#numbers"}],"evidenceChecked":["@lab/review/evidence#numbers"],"missingChecks":[],"revisionInstructions":["Cite the result file."],"relevantToGoal":false,"progressDelta":null,"criteriaSatisfied":[]}"#,
+    )
+    .expect("a verdict");
+    assert_eq!(parsed.issues[0].criterion.as_deref(), Some("@lab/review/evidence#numbers"));
+    // The Executor's revision prompt carries the finding, not the rubric's own text or key.
+    let ContentBlock::Text { text } = &revision_prompt(&parsed, 1).blocks[0] else { panic!("text") };
+    assert!(text.contains("91% has no source"));
+    assert!(!text.contains("@lab/review"));
+    // Serialized for the UI and audit log, with the controller's record.
+    let mut recorded = parsed;
+    apply_review_rubric_record(&mut recorded, &evidence_packet());
+    let value = serde_json::to_value(&recorded).unwrap();
+    assert_eq!(value["issues"][0]["criterion"], "@lab/review/evidence#numbers");
+    assert_eq!(value["rubrics"]["delivered"][0], "@lab/review/evidence");
+    assert_eq!(value["rubrics"]["checks"][0]["result"], "violated");
+    assert!(value.get("rubricChecks").is_none(), "the Reviewer's own account is not the record");
+}
+
+fn evidence_packet() -> runtime::plugins::RubricPacket {
+    use runtime::plugins::{ActiveReviewRubric, ReviewCriterion, ReviewRubric, ReviewSeverity, UiText};
+    let rubric = ActiveReviewRubric {
+        plugin_name: "@lab/review".into(),
+        plugin_version: "1.0.0".into(),
+        rubric: ReviewRubric {
+            id: "evidence".into(),
+            title: UiText::Plain("Evidence".into()),
+            applies_when: vec![],
+            criteria: vec![
+                ReviewCriterion { id: "numbers".into(), check: "Trace every number.".into(), severity: ReviewSeverity::Critical },
+                ReviewCriterion { id: "limits".into(), check: "State the limits.".into(), severity: ReviewSeverity::Medium },
+            ],
+        },
+    };
+    runtime::plugins::render_review_rubrics(&[&rubric])
+}
+
+#[test]
+fn a_pass_that_violates_a_critical_criterion_becomes_a_revision() {
+    let mut review = parse_independent_review(
+        r#"{"verdict":"pass","summary":"Looks fine","issues":[],"rubricChecks":[{"criterion":"@lab/review/evidence#numbers","result":"violated","note":"0.91 is in no result file"},{"criterion":"@lab/review/evidence#ghost","result":"met"}],"evidenceChecked":[],"missingChecks":[],"revisionInstructions":[],"relevantToGoal":false,"criteriaSatisfied":[]}"#,
+    )
+    .expect("a verdict");
+    apply_review_rubric_record(&mut review, &evidence_packet());
+    assert_eq!(review.verdict, IndependentReviewVerdict::Revise);
+    let record = review.rubrics.as_ref().expect("a record");
+    assert!(record.verdict_corrected);
+    assert_eq!(record.unknown_criteria, ["@lab/review/evidence#ghost"]);
+    assert_eq!(record.checks[1].result, runtime::plugins::RubricCheckResult::Unreported);
+    // The reported violation became an issue at the criterion's severity, and
+    // what the Executor reads names no rubric key.
+    assert_eq!(review.issues.len(), 1);
+    assert_eq!(review.issues[0].severity, "critical");
+    let ContentBlock::Text { text } = &revision_prompt(&review, 1).blocks[0] else { panic!("text") };
+    assert!(text.contains("0.91 is in no result file"));
+    assert!(!text.contains("@lab/review"));
+}
+
+#[test]
+fn an_unavailable_review_records_every_sent_criterion_as_unreported() {
+    let mut review = IndependentReviewResult::default();
+    apply_review_rubric_record(&mut review, &evidence_packet());
+    let record = review.rubrics.expect("a record");
+    assert_eq!(record.delivered, ["@lab/review/evidence"]);
+    assert!(record.checks.iter().all(|c| c.result == runtime::plugins::RubricCheckResult::Unreported));
+    // Without a packet, a stray criterion key never survives.
+    let mut stray = parse_independent_review(
+        r#"{"verdict":"revise","summary":"x","issues":[{"severity":"high","title":"t","criterion":"@x/y#z"}]}"#,
+    )
+    .unwrap();
+    apply_review_rubric_record(&mut stray, &runtime::plugins::RubricPacket::default());
+    assert!(stray.issues[0].criterion.is_none());
+    assert!(stray.rubrics.is_none());
+}

@@ -5,8 +5,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PLUGIN_PANEL_CHANGED_EVENT, pluginsDraftPage, pluginsUiPage, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiPanel, type UiPanelState } from "../api/plugins";
 import type { Language } from "../store";
+import { hasNativeBackend } from "../api/transport";
+import { onWorkTaskChanged, workTaskList } from "../api/tauri";
+import { pluginTaskRecords, type PluginTaskRecord } from "./pluginTaskRecords";
 import { PLUGIN_PAGE_SANDBOX, pluginPageDocument, type PluginPageTheme } from "./pluginPageDocument";
-import type { PluginPageAction } from "./useChatPluginPanels";
+import PluginTaskProposal, { MAX_TASK_PROMPT_CHARS, MAX_TASK_TITLE_CHARS, type TaskOutcome, type TaskProposal } from "./PluginTaskProposal";
+import { uiText, type PluginPageAction } from "./useChatPluginPanels";
 
 const COPY = {
   cn: { loading: "正在打开页面…", retry: "重新加载", isolation: "无法隔离这个页面，已停止运行它。" },
@@ -69,6 +73,11 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
   const [source, setSource] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  // A task the page proposed, waiting for the user; the page's call waits with it.
+  const [proposal, setProposal] = useState<TaskProposal | null>(null);
+  const asking = useRef<((outcome: TaskOutcome) => void) | null>(null);
+  const policy = useRef({ proposeTasks: false, title: "", projectScope: false });
+  policy.current = { proposeTasks: panel.proposeTasks === true, title: uiText(panel.title, language), projectScope: (store ?? panel).scope === "project" };
   const { pluginName, id: pageId } = panel;
   // The data lives with the store panel; the page's files with this one.
   const panelId = store?.id ?? pageId;
@@ -136,6 +145,40 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
         }
       }
     };
+    /**
+     * The page asks for a background task. Only a panel that declared
+     * `proposeTasks` may ask, one proposal at a time, and the answer is the
+     * user's: the call resolves when they decide. A draft being tried is
+     * always declined, without showing anything.
+     */
+    const propose = (args: { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined): Promise<TaskOutcome> => {
+      if (draft) return Promise.resolve({ status: "declined" });
+      const { proposeTasks, title: panelTitle, projectScope } = policy.current;
+      if (!proposeTasks) return Promise.reject(new Error('This panel does not declare "proposeTasks": true'));
+      if (!hasNativeBackend()) return Promise.reject(new Error("Background tasks need the SomniQ desktop app"));
+      if (asking.current) return Promise.reject(new Error("A task proposal is already waiting for the user"));
+      const title = typeof args?.title === "string" ? args.title.trim() : "";
+      const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
+      if (!title || title.length > MAX_TASK_TITLE_CHARS) return Promise.reject(new Error(`A task title must contain 1..${MAX_TASK_TITLE_CHARS} characters`));
+      if (!prompt || prompt.length > MAX_TASK_PROMPT_CHARS) return Promise.reject(new Error(`A task prompt must contain 1..${MAX_TASK_PROMPT_CHARS} characters`));
+      let report: TaskProposal["report"];
+      if (args?.reportTo != null) {
+        const widget = shape().widgets.find((item) => item.id === args.reportTo);
+        if (!widget) return Promise.reject(new Error(`reportTo: this panel declares no widget "${String(args.reportTo)}"`));
+        // A task runs in a session of its own, so only project data is one it can reach.
+        if (!projectScope) return Promise.reject(new Error('reportTo needs a panel with "scope": "project"'));
+        report = { panelId, widgetId: widget.id, widgetType: widget.type };
+      }
+      return new Promise((resolve) => {
+        asking.current = resolve;
+        setProposal({ pluginName, pageId, panelTitle, title, prompt, report });
+      });
+    };
+    /** The tasks this page proposed, as the board has them. */
+    const tasks = async (): Promise<PluginTaskRecord[]> => {
+      if (draft || !hasNativeBackend()) return [];
+      return pluginTaskRecords(await workTaskList(), pluginName, pageId);
+    };
     const receive = (event: MessageEvent) => {
       const from = page();
       const message = event.data as { channel?: unknown; type?: unknown; id?: unknown; method?: unknown; args?: { widget?: unknown; value?: unknown }; text?: unknown; path?: unknown; panel?: unknown; height?: unknown } | null;
@@ -151,7 +194,9 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
       if (message.type === "open-panel" && typeof message.panel === "string" && PANEL_ID.test(message.panel)) act.current({ type: "open-panel", pluginName, panelId: message.panel });
       if (message.type !== "call" || typeof message.id !== "number") return;
       const { id, method, args } = message;
-      const work = method === "data" ? load() : method === "set" ? (writes.current = writes.current.catch(() => undefined).then(() => write(args?.widget, args?.value))) : Promise.reject(new Error(`Unknown call: ${String(method)}`));
+      const work = method === "data" ? load() : method === "set" ? (writes.current = writes.current.catch(() => undefined).then(() => write(args?.widget, args?.value)))
+        : method === "task" ? propose(args as { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined).then((outcome) => { if (outcome.status !== "declined") void pushTasks(); return outcome; })
+        : method === "tasks" ? tasks() : Promise.reject(new Error(`Unknown call: ${String(method)}`));
       const mine = channel.current;
       void (work as Promise<unknown>).then(
         (value) => { if (mine === channel.current) send({ type: "result", id, ok: true, value }); },
@@ -166,11 +211,34 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
       const mine = channel.current;
       void load().then((data) => { if (mine === channel.current) send({ type: "data", data }); }, () => undefined);
     };
+    // A proposed task's progress reaches the page as the board records it.
+    // Only what changed is sent, and only to a page that can propose tasks.
+    let sentTasks = "";
+    let live = true;
+    const pushTasks = async () => {
+      if (draft || !policy.current.proposeTasks || !hasNativeBackend()) return;
+      const mine = channel.current;
+      const records = await tasks().catch(() => null);
+      if (!live || !records || mine !== channel.current) return;
+      const text = JSON.stringify(records);
+      if (text === sentTasks) return;
+      sentTasks = text;
+      send({ type: "tasks", tasks: records });
+    };
+    const unlisten = !draft && policy.current.proposeTasks && hasNativeBackend()
+      ? onWorkTaskChanged(() => { void pushTasks(); }).catch(() => () => undefined)
+      : null;
     window.addEventListener("message", receive);
     window.addEventListener(PLUGIN_PANEL_CHANGED_EVENT, changed);
     return () => {
+      live = false;
+      void unlisten?.then((stop) => stop());
       window.removeEventListener("message", receive);
       window.removeEventListener(PLUGIN_PANEL_CHANGED_EVENT, changed);
+      // The page that asked is going away: its proposal goes with it.
+      asking.current?.({ status: "declined" });
+      asking.current = null;
+      setProposal(null);
     };
   }, [projectPath, pluginName, panelId, sessionId, load, page, send, copy.isolation]);
 
@@ -185,5 +253,13 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
   if (!source) return <p className="plugin-page-frame-status chat-plugin-empty" role="status">{copy.loading}</p>;
   // No `allow-same-origin`: the shell and the page inside it have no origin,
   // no storage and no way to reach this document.
-  return <iframe ref={shell} className="plugin-page-frame" title={typeof panel.title === "string" ? panel.title : panel.title[language]} sandbox={PLUGIN_PAGE_SANDBOX} referrerPolicy="no-referrer" srcDoc={source} />;
+  const decided = (outcome: TaskOutcome) => {
+    asking.current?.(outcome);
+    asking.current = null;
+    setProposal(null);
+  };
+  return <>
+    <iframe ref={shell} className="plugin-page-frame" title={typeof panel.title === "string" ? panel.title : panel.title[language]} sandbox={PLUGIN_PAGE_SANDBOX} referrerPolicy="no-referrer" srcDoc={source} />
+    {proposal && <PluginTaskProposal proposal={proposal} language={language} onDone={decided} />}
+  </>;
 }

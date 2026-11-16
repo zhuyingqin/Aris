@@ -334,6 +334,8 @@ export interface ReviewerGate {
   summary?: string;
   issues: string[];
   reviewedAt?: string;
+  /** The controller's record of the plugin review rubrics this gate used. */
+  rubrics?: import("../api/tauri").ReviewRubricRecord;
 }
 
 export interface ReviewWorkflowStage {
@@ -514,67 +516,11 @@ export interface ReviewWorkflowSaveInput {
   leaseOwnerTurnId?: string;
 }
 
-export interface LiteratureQueryVariant {
-  kind: string;
-  query: string;
-  rationale: string;
-  maxResults?: number;
-}
-
-export interface LiteratureProtocolPreview {
-  protocol: {
-    id: string;
-    revision: number;
-    maxResults?: number;
-  };
-  plan: Array<{
-    source: string;
-    query: string;
-    queryVariants: LiteratureQueryVariant[];
-    queryVariantPlan?: Array<LiteratureQueryVariant & {
-      maxResults: number;
-      willExecute: boolean;
-    }>;
-    maxResults: number;
-    sortOrder?: string;
-    adapterStatus: string;
-    coverageNote: string;
-  }>;
-  maxResults: number;
-}
-
-export interface LiteratureProtocolExecution {
-  searchRun: {
-    id: string;
-    status: string;
-    recordIds: string[];
-    /** Per-record provider and query-variant attribution, when the kernel run
-     * carried it. `variantRanks` is the record-to-matrix-path link. */
-    rankedRecords?: Array<{
-      recordId: string;
-      sourceRanks?: Record<string, number>;
-      variantRanks?: Record<string, number>;
-      fusedScoreMicros?: number;
-      rankingScoreMicros?: number;
-      rankingSignals?: {
-        titleCoverageMillis?: number;
-        impactMillis?: number | null;
-      };
-    }>;
-    sourceAttempts: Array<{
-      source: string;
-      status: string;
-      returnedCount: number;
-      coverage: {
-        totalHits?: number;
-        fetched: number;
-        unique: number;
-        exhausted: boolean;
-        nextCursor?: string;
-        truncatedReason?: string;
-      };
-      failureMessage?: string;
-    }>;
-  };
-  warnings: string[];
-}
+// Search-protocol wire types have one owner: the literature module, which
+// talks to the same kernel commands. A second hand-written copy here drifted
+// (it lost `cancelled` and the shared record-rank type).
+export type {
+  LiteratureProtocolExecution,
+  LiteratureProtocolPreview,
+  LiteratureQueryVariant,
+} from "../literature/literatureTypes";

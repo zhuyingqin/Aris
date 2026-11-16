@@ -1019,6 +1019,11 @@ export default function App() {
         onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
     />
   );
+  // Every page gets its own boundary, so a render error or a failed lazy chunk
+  // in one page leaves the always-mounted Chat and Code panes untouched.
+  const renderViewFallback = (viewError: Error, reset: () => void) => (
+    <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />
+  );
 
   return (
     <div className={`app${navigationShell ? " app-navigation-shell" : ""}${chatShell ? " app-chat-shell chat-background-surface" : ""}${codeShell ? " app-code-shell" : ""}`}>
@@ -1129,12 +1134,12 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+          fallback={renderViewFallback}
         >
           <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled" && renderedTab !== "tasks"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+              fallback={renderViewFallback}
             >
               <ChatPane />
             </ErrorBoundary>
@@ -1143,7 +1148,7 @@ export default function App() {
             <div className="app-code-pane" hidden={renderedTab !== "lab"}>
               <ErrorBoundary
                 resetKey="code"
-                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+                fallback={renderViewFallback}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
                   <CodePane onWorkbenchReadyChange={setCodeWorkbenchReady} />
@@ -1152,33 +1157,47 @@ export default function App() {
             </div>
           )}
           {renderedTab === "literature" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
-              <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
-            </Suspense>
+            <ErrorBoundary resetKey="literature" fallback={renderViewFallback}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
+                <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
+              </Suspense>
+            </ErrorBoundary>
           )}
           {workflowsMounted && (
             <div className="app-workflows-pane" hidden={renderedTab !== "workflows"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.workflows} />}>
-                <Workflows />
-              </Suspense>
+              <ErrorBoundary resetKey="workflows" fallback={renderViewFallback}>
+                <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.workflows} />}>
+                  <Workflows />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           )}
           {OFFICIAL_PLUGIN_PAGES.map(({ tab: pageTab, Component, mount, paneClassName }) => {
             const visible = renderedTab === pageTab;
             if (mount === "keep" ? !keptPages.has(pageTab) : !visible) return null;
             const body = (
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav[pageTab as keyof typeof copy.nav] ?? pageTab} />}>
-                <Component visible={visible} />
-              </Suspense>
+              <ErrorBoundary resetKey={pageTab} fallback={renderViewFallback}>
+                <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav[pageTab as keyof typeof copy.nav] ?? pageTab} />}>
+                  <Component visible={visible} />
+                </Suspense>
+              </ErrorBoundary>
             );
             return mount === "keep"
               ? <div key={pageTab} className={paneClassName} hidden={!visible}>{body}</div>
               : <Fragment key={pageTab}>{body}</Fragment>;
           })}
-          {renderedTab === "extensions" && (pluginPage && currentProject
-            ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
-            : <Extensions />)}
-          {renderedTab === "settings" && <Settings />}
+          {renderedTab === "extensions" && (
+            <ErrorBoundary resetKey={pluginPage ? "plugin-page" : "extensions"} fallback={renderViewFallback}>
+              {pluginPage && currentProject
+                ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
+                : <Extensions />}
+            </ErrorBoundary>
+          )}
+          {renderedTab === "settings" && (
+            <ErrorBoundary resetKey="settings" fallback={renderViewFallback}>
+              <Settings />
+            </ErrorBoundary>
+          )}
         </ErrorBoundary>
 
         {clientOutdated && (

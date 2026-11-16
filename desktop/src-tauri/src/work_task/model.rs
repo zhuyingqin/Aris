@@ -358,6 +358,10 @@ pub struct WorkTaskReviewIssue {
     pub detail: String,
     #[serde(default)]
     pub recommendation: String,
+    /// The installed review criterion (`<package>/<rubric>#<id>`) this issue
+    /// reports, for the board. Never put in the executor's revision prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<String>,
 }
 
 /// The independent review a task's result went through.
@@ -388,6 +392,9 @@ pub struct WorkTaskReviewState {
     #[serde(default)]
     pub exhausted: bool,
     pub checked_at: u64,
+    /// The controller's record of the plugin review rubrics this round used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubrics: Option<runtime::plugins::ReviewRubricRecord>,
 }
 
 /// A deliverable a task produced that is not part of the project's own files.
@@ -475,6 +482,45 @@ pub struct WorkTaskPluginSet {
     pub set: runtime::plugins::PluginSet,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTaskOrigin {
+    pub plugin_name: String,
+    /// The page panel that proposed the task.
+    pub panel_id: String,
+    /// The panel and widget the task was asked to write its conclusion to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_panel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_widget: Option<String>,
+}
+
+impl WorkTaskOrigin {
+    const MAX_NAME_CHARS: usize = 214;
+    const MAX_ID_CHARS: usize = 64;
+
+    /// Origins come from the host frame, but are checked like any input.
+    pub fn validate(&self) -> Result<(), String> {
+        let id_ok = |value: &str| {
+            !value.is_empty()
+                && value.len() <= Self::MAX_ID_CHARS
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        };
+        if self.plugin_name.trim().is_empty() || self.plugin_name.len() > Self::MAX_NAME_CHARS {
+            return Err("a task origin needs a plugin name".to_string());
+        }
+        if !id_ok(&self.panel_id) {
+            return Err("a task origin needs a valid panel id".to_string());
+        }
+        for value in [&self.report_panel, &self.report_widget].into_iter().flatten() {
+            if !id_ok(value) {
+                return Err("a task origin's report target is not a valid id".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One task on the board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -549,6 +595,10 @@ pub struct WorkTask {
     /// can point at the cards it actually produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_task_id: Option<String>,
+    /// The plugin page that proposed this task, as the host recorded it when
+    /// the user confirmed. Lets that page follow the task it asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<WorkTaskOrigin>,
     /// The one occurrence of that automation this card was queued for.
     ///
     /// The dedupe key for scheduled dispatch: the scheduler looks it up under
@@ -618,6 +668,7 @@ impl WorkTask {
             merge_intent: None,
             model: None,
             scheduled_task_id: None,
+            origin: None,
             scheduled_occurrence_key: None,
             target_session_id: None,
             progress_message: None,
@@ -879,6 +930,7 @@ mod tests {
             reviewer_model: "reviewer".into(),
             exhausted: false,
             checked_at: 1,
+            rubrics: None,
         });
         task.worktree = Some(WorkTaskWorktree {
             path: "/tmp/wt".into(),

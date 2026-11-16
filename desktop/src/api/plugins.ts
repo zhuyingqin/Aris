@@ -14,6 +14,8 @@ export interface PluginPreview {
     skillRoots: string[];
     mcpServers: { name: string; command: string; args: string[]; env?: Record<string, string> }[];
     uiPanels: UiPanel[];
+    /** Criteria the package adds to the independent Reviewer (`somniq.reviewer`). Absent on older backends. */
+    reviewRubrics?: ReviewRubric[];
     /** Official plugins the package needs (`somniq.requires`); absent on older backends. */
     requires?: string[];
   };
@@ -66,6 +68,12 @@ export interface PackageFileChange {
 }
 
 export interface ListChange { added: string[]; removed: string[] }
+export interface ReviewRubric {
+  id: string;
+  title: UiText;
+  appliesWhen?: string[];
+  criteria: { id: string; check: string; severity: "critical" | "high" | "medium" | "low" }[];
+}
 export interface McpServerDiff {
   name: string;
   change: "added" | "removed" | "changed" | "unchanged";
@@ -78,6 +86,8 @@ export interface McpServerDiff {
 export interface CapabilityDiff {
   skills: ListChange;
   uiPanels: ListChange;
+  /** Absent on older backends. */
+  reviewRubrics?: ListChange;
   mcpServers: McpServerDiff[];
   commands: ListChange;
   envKeys: ListChange;
@@ -209,6 +219,8 @@ export interface UiPanel {
   /** Another panel of the same package whose data this panel's page reads
    *  and writes; this panel then keeps none of its own. */
   dataPanel?: string;
+  /** The page may propose background work tasks; the user decides on each. */
+  proposeTasks?: boolean;
   widgets: UiWidget[];
 }
 export interface ActiveUiPanel extends UiPanel {
@@ -271,7 +283,9 @@ export interface PluginApprovalCard {
   capabilities: {
     skills: string[];
     /** `page`: the panel runs the package's own HTML and JavaScript, sandboxed. */
-    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean }[];
+    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean; proposeTasks?: boolean }[];
+    /** Criteria the independent Reviewer will check; the Executor never sees them. */
+    reviewRubrics?: { id: string; title: UiText; criteria: number; appliesWhen: string[] }[];
     /** Environment variable names only; values never leave the backend. */
     mcpServers: { name: string; command: string; args: string[]; envKeys: string[]; requestTimeoutSecs?: number | null }[];
     /** Official plugins it needs; it does not run while one is off. */

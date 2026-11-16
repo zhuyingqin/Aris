@@ -236,8 +236,17 @@ pub fn typeset_output_files(pdf_path: String) -> Result<Vec<TypesetOutputFile>, 
 /// The desktop equivalent of Overleaf's "Download project as zip": the source
 /// a collaborator or a journal actually needs, without the build artifacts that
 /// make an archive three times its useful size.
+///
+/// Zipping a whole project is disk-bound, so it runs off the window's thread.
 #[tauri::command]
-pub fn typeset_export_project(
+pub async fn typeset_export_project(
+    root_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    crate::blocking::off_main_thread(move || typeset_export_project_blocking(root_path, destination_path)).await
+}
+
+pub(crate) fn typeset_export_project_blocking(
     root_path: String,
     destination_path: String,
 ) -> Result<String, String> {

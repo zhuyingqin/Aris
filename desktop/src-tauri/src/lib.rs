@@ -813,7 +813,6 @@ pub fn run() {
                     }
                 });
             }
-            watcher::spawn_event_watcher(app.handle().clone());
             watcher::spawn_workspace_file_watcher(app.handle().clone());
             official_plugins::start_services(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
@@ -1083,6 +1082,7 @@ pub fn run() {
             literature::literature_llm,
             literature::literature_llm_cancel,
             literature::literature_search_cancel,
+            literature::literature_ocr_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
             paper_reading::paper_reading_prepare,

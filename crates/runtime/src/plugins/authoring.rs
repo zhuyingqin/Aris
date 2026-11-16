@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use super::{dsh, ui, Diagnostic, MAX_BYTES, MAX_DEPTH, MAX_FILES};
+use super::{dsh, reviewer, ui, Diagnostic, MAX_BYTES, MAX_DEPTH, MAX_FILES};
 
 /// Where agents put packages they are writing, relative to the project root.
 /// Any directory in the workspace works; this keeps drafts out of research
@@ -31,9 +31,10 @@ const DIAGNOSTIC_HINTS: &[(&str, &str)] = &[
     ("group", "A group row's config must be an array of rows."),
     ("capability", "Only @deepseek-ai/dsh-skill-filesystem and @deepseek-ai/dsh-mcp-client rows are supported; PluginManager inspect lists the config fields each accepts."),
     ("ui", "Check ui.json against PluginManager inspect: a supported slot, known widget types with only their own fields, unique ids, and text within the limits."),
+    ("reviewer", "Check reviewer.json against PluginManager inspect's reviewer rules: schemaVersion 1, 1-8 rubrics with unique ids and titles, each with 1-20 criteria of {id, check, severity} where severity is critical, high, medium or low, and appliesWhen keywords within the limits."),
     ("requires", "List only official plugin ids in somniq.requires (literature, latex, figures, mail), and only the ones the package cannot work without."),
     ("duplicate-capability", "Give every skill and every MCP serverName in the package a different name."),
-    ("empty", "Add at least one skill (dsh-skill-filesystem row), MCP server (dsh-mcp-client row) or somniq.ui panel."),
+    ("empty", "Add at least one skill (dsh-skill-filesystem row), MCP server (dsh-mcp-client row), somniq.ui panel or somniq.reviewer rubric."),
     ("skill-alias", "Rename the skill: its name is reserved by a SomniQ skill alias."),
     ("skill-builtin", "Rename the skill directory and its frontmatter name to something not in PluginManager inspect's built-in skill list."),
     ("integrity", "The installed copy is missing or was modified; remove the plugin and install it again from its source directory."),
@@ -84,6 +85,7 @@ pub struct AuthoringContract {
     pub dsh: DshRules,
     pub skills: SkillRules,
     pub ui: UiRules,
+    pub reviewer: ReviewerRules,
     pub templates: Vec<TemplateSummary>,
     pub diagnostic_hints: Vec<DiagnosticHint>,
 }
@@ -179,6 +181,23 @@ pub struct UiWidgetRule {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<&'static str>,
     /// One complete widget of this type, valid as written.
+    pub example: serde_json::Value,
+}
+
+/// `somniq.reviewer`: criteria the independent Reviewer checks.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewerRules {
+    pub manifest: &'static str,
+    pub schema_version: u32,
+    pub purpose: &'static str,
+    pub max_rubrics: usize,
+    pub max_criteria_per_rubric: usize,
+    pub max_check_chars: usize,
+    pub max_keywords: usize,
+    pub max_keyword_chars: usize,
+    pub severities: &'static [&'static str],
+    pub rules: Vec<&'static str>,
     pub example: serde_json::Value,
 }
 
@@ -315,8 +334,8 @@ pub fn authoring_contract() -> AuthoringContract {
             max_title_chars: ui::MAX_UI_TITLE_CHARS,
             max_text_chars: ui::MAX_UI_TEXT_CHARS,
             text: "A string, or { \"en\": \"...\", \"cn\": \"...\" } with both languages. Shown as plain text with line breaks kept.",
-            panel_fields: &["id", "slot", "title", "icon", "order", "scope", "page", "dataPanel", "widgets"],
-            page: "Optional, schemaVersion 3, in either slot: a package-relative .html file (UTF-8, at most 1 MiB) that draws the whole panel itself, with its own HTML, CSS and JavaScript, instead of the host drawing the widgets. It may link other package files by relative path and they are inlined before it loads: <link rel=stylesheet> (with @import and url()), <script src>, <img src>/srcset, poster and CSS fonts; vendor libraries as package files. ES modules are .mjs files imported as \"pkg:<package-relative path>\" (relative module imports do not resolve). Scripts read other files with somniq.asset(path) (a data: URL) and somniq.text(path) (text), path relative to the page. These files together (js, mjs, css, html, json, txt, csv, md, images, fonts, audio, video, wasm) may be up to 12 MiB. It runs in a sandboxed frame with no network, no storage and no access to the app; anything it loads from a URL is blocked. The panel's widgets are then its data stores (usually one or more json widgets; none is allowed for a page that keeps no data). The page talks to the host only through window.somniq: `await somniq.ready()` gives { language: \"en\" | \"cn\", theme: { mode, colors }, data: { <widget id>: value } }; `await somniq.set(widgetId, value)` saves one widget's value in that widget's shape and rejects with the reason when it does not fit; `await somniq.data()` re-reads; `somniq.onData(fn)` and `somniq.onTheme(fn)` are called on changes, including the agent's PluginPanel writes; `somniq.prompt(text)` puts text in the Chat composer for the user to send (a page never sends a message itself); `somniq.openFile(path)` opens a project-relative file beside the chat; `somniq.openPanel(panelId)` opens a nav.page panel of the same package; `somniq.resize(px)` sets the height of a chat.brief glance (ignored elsewhere). A panel with a page may set `dataPanel` to the id of another panel of the same package with the same scope: it then declares no widgets and its page reads and writes that panel's widgets, so a glance and the full page show one store, and a save in either reaches the other through onData. Theme colors are set on <html> as CSS variables --somniq-bg, --somniq-surface, --somniq-raised, --somniq-border, --somniq-text, --somniq-muted, --somniq-accent and --somniq-font, with data-theme=\"light\" | \"dark\"; use them so the page follows the app's theme. Treat widget values as untrusted input: build DOM with textContent, never innerHTML.",
+            panel_fields: &["id", "slot", "title", "icon", "order", "scope", "page", "dataPanel", "proposeTasks", "widgets"],
+            page: "Optional, schemaVersion 3, in either slot: a package-relative .html file (UTF-8, at most 1 MiB) that draws the whole panel itself, with its own HTML, CSS and JavaScript, instead of the host drawing the widgets. It may link other package files by relative path and they are inlined before it loads: <link rel=stylesheet> (with @import and url()), <script src>, <img src>/srcset, poster and CSS fonts; vendor libraries as package files. ES modules are .mjs files imported as \"pkg:<package-relative path>\" (relative module imports do not resolve). Scripts read other files with somniq.asset(path) (a data: URL) and somniq.text(path) (text), path relative to the page. These files together (js, mjs, css, html, json, txt, csv, md, images, fonts, audio, video, wasm) may be up to 12 MiB. It runs in a sandboxed frame with no network, no storage and no access to the app; anything it loads from a URL is blocked. The panel's widgets are then its data stores (usually one or more json widgets; none is allowed for a page that keeps no data). The page talks to the host only through window.somniq: `await somniq.ready()` gives { language: \"en\" | \"cn\", theme: { mode, colors }, data: { <widget id>: value } }; `await somniq.set(widgetId, value)` saves one widget's value in that widget's shape and rejects with the reason when it does not fit; `await somniq.data()` re-reads; `somniq.onData(fn)` and `somniq.onTheme(fn)` are called on changes, including the agent's PluginPanel writes; `somniq.prompt(text)` puts text in the Chat composer for the user to send (a page never sends a message itself); `somniq.openFile(path)` opens a project-relative file beside the chat; `somniq.openPanel(panelId)` opens a nav.page panel of the same package; `somniq.resize(px)` sets the height of a chat.brief glance (ignored elsewhere); `await somniq.task({ title, prompt, reportTo? })` proposes a background work task, and only on a panel that sets \"proposeTasks\": true: the app shows the proposal to the user, who may edit it and then starts it, only creates it, or declines, and the call resolves to { status: \"started\" | \"created\" | \"declined\", taskId? } (one proposal at a time; title up to 120 characters, prompt up to 8000). The task runs on the task board in its own working copy, with a line naming the plugin added to its prompt. reportTo, allowed only on a \"scope\": \"project\" panel, names one of the panel's widgets: the finished task is asked to write its conclusion there with PluginPanel, so the page shows the result through onData. That write is a request the task may not follow; what the page can rely on is `await somniq.tasks()` and `somniq.onTasks(fn)`: the tasks this page proposed, newest first, as the task board records them, { taskId, title, status, state: \"todo\" | \"active\" | \"waiting\" | \"ready\" | \"done\" | \"failed\" | \"canceled\", phase?, reportTo?, review?: { verdict, summary, round, exhausted, issues, rubrics? }, result?: { summary, filesChanged, files, artifacts, merged }, error? }, pushed again whenever one of them changes. Draw a task's row from its state, not from what the page saved when it asked. A panel with a page may set `dataPanel` to the id of another panel of the same package with the same scope: it then declares no widgets and its page reads and writes that panel's widgets, so a glance and the full page show one store, and a save in either reaches the other through onData. Theme colors are set on <html> as CSS variables --somniq-bg, --somniq-surface, --somniq-raised, --somniq-border, --somniq-text, --somniq-muted, --somniq-accent and --somniq-font, with data-theme=\"light\" | \"dark\"; use them so the page follows the app's theme. Treat widget values as untrusted input: build DOM with textContent, never innerHTML.",
             max_page_bytes: ui::MAX_UI_PAGE_BYTES,
             scopes: ui::UI_SCOPES,
             scope: "Optional, default session: each conversation has its own copy of the panel's data. project: one copy shared by every conversation of the project, for a board that outlives a chat.",
@@ -330,6 +349,35 @@ pub fn authoring_contract() -> AuthoringContract {
             max_table_columns: ui::MAX_UI_COLUMNS,
             max_form_fields: ui::MAX_UI_FIELDS,
             max_select_options: ui::MAX_UI_OPTIONS,
+        },
+        reviewer: ReviewerRules {
+            manifest: "package.json `somniq`: { \"manifestVersion\": 1, \"reviewer\": \"./reviewer.json\" } (may sit beside \"ui\")",
+            schema_version: reviewer::REVIEWER_SCHEMA_VERSION,
+            purpose: "Review criteria the independent Reviewer checks whenever it reviews an answer in this project: a lab's standards, a venue's checklist, a field's methodological rules. They go into the Reviewer's packet only; the Executor's prompt never carries them. The Reviewer marks an issue it raises for a violated criterion with that criterion's key, <package>/<rubric>#<criterion>, and a violated critical criterion keeps the verdict from passing.",
+            max_rubrics: reviewer::MAX_REVIEW_RUBRICS,
+            max_criteria_per_rubric: reviewer::MAX_REVIEW_CRITERIA,
+            max_check_chars: reviewer::MAX_REVIEW_CHECK_CHARS,
+            max_keywords: reviewer::MAX_REVIEW_KEYWORDS,
+            max_keyword_chars: reviewer::MAX_REVIEW_KEYWORD_CHARS,
+            severities: &["critical", "high", "medium", "low"],
+            rules: vec![
+                "reviewer.json is { \"schemaVersion\": 1, \"rubrics\": [...] }; each rubric is { id, title, appliesWhen?, criteria }, each criterion { id, check, severity }. Ids match [A-Za-z0-9_-]{1,64} and are unique within their list; title is a string or { en, cn } of up to 80 characters.",
+                "Write each check as one verifiable instruction about the answer and its evidence (\"Every reported number can be traced to a result file\"), not as advice to the Executor.",
+                "appliesWhen lists keywords; the rubric applies only when the user's request or the answer contains one of them (case-insensitive substring, so Chinese keywords work). Leave it out to apply the rubric to every reviewed answer.",
+                "Rubrics are reviewed and approved like any capability: changing a criterion's text changes the package and needs the user's approval again.",
+            ],
+            example: serde_json::json!({
+                "schemaVersion": 1,
+                "rubrics": [{
+                    "id": "evidence",
+                    "title": {"en": "Evidence behind claims", "cn": "结论要有证据"},
+                    "criteria": [{
+                        "id": "numbers-traced",
+                        "severity": "critical",
+                        "check": "Every reported number can be traced to a result file, table or tool output in the evidence."
+                    }]
+                }]
+            }),
         },
         templates: TEMPLATES.iter().map(TemplateSummary::of).collect(),
         diagnostic_hints: DIAGNOSTIC_HINTS
@@ -386,6 +434,23 @@ const TEMPLATES: &[PluginTemplate] = &[
             ("todo/todo.css", include_str!("templates/todo-workspace/todo/todo.css")),
             ("todo/app.mjs", include_str!("templates/todo-workspace/todo/app.mjs")),
             ("todo/glance.html", include_str!("templates/todo-workspace/todo/glance.html")),
+        ],
+    },
+    PluginTemplate {
+        id: "experiment-triage",
+        description: "Experiment triage (somniq.ui, schemaVersion 3, proposeTasks): a project page listing runs the agent fills with PluginPanel; an Investigate button on a run proposes a background work task with somniq.task, which the user confirms, and the finished task writes its findings back onto the page (reportTo).",
+        files: &[
+            ("package.json", include_str!("templates/experiment-triage/package.json")),
+            ("ui.json", include_str!("templates/experiment-triage/ui.json")),
+            ("page.html", include_str!("templates/experiment-triage/page.html")),
+        ],
+    },
+    PluginTemplate {
+        id: "reviewer-pack",
+        description: "Review criteria (somniq.reviewer) the independent Reviewer checks on every answer: numbers traced to evidence, like-for-like baselines and stated limits, plus statistics reported in full whenever a result is called significant.",
+        files: &[
+            ("package.json", include_str!("templates/reviewer-pack/package.json")),
+            ("reviewer.json", include_str!("templates/reviewer-pack/reviewer.json")),
         ],
     },
     PluginTemplate {
@@ -506,7 +571,7 @@ mod tests {
         let ids = plugin_template_ids();
         assert_eq!(
             ids,
-            ["chat-panel", "data-panel", "page-panel", "todo-workspace", "skill-pack", "mcp-stdio-python"]
+            ["chat-panel", "data-panel", "page-panel", "todo-workspace", "experiment-triage", "reviewer-pack", "skill-pack", "mcp-stdio-python"]
         );
         for id in ids {
             let dir = write_template(temp.path(), id);
@@ -533,6 +598,15 @@ mod tests {
                     assert_eq!(slots, ["nav.page", "chat.brief"]);
                     assert_eq!(capabilities.ui_panels[1].data_panel.as_deref(), Some("tasks"));
                     assert!(capabilities.ui_panels[1].widgets.is_empty());
+                }
+                "experiment-triage" => {
+                    assert_eq!(capabilities.ui_panels.len(), 1);
+                    assert!(capabilities.ui_panels[0].propose_tasks);
+                }
+                "reviewer-pack" => {
+                    let ids: Vec<_> = capabilities.review_rubrics.iter().map(|r| r.id.as_str()).collect();
+                    assert_eq!(ids, ["evidence", "statistics"]);
+                    assert!(capabilities.ui_panels.is_empty());
                 }
                 "skill-pack" => assert_eq!(capabilities.skills, ["example-checklist"]),
                 "mcp-stdio-python" => {

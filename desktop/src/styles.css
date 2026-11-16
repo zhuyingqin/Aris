@@ -21659,6 +21659,29 @@ button.chat-workflow-file-path:hover {
 
 .independent-review-issue .recommendation { color: var(--text); }
 
+/* Which installed review criterion an issue reports: package/rubric#id. */
+.independent-review-rubrics ul { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; }
+.independent-review-rubrics li small { color: var(--text-3); }
+.independent-review-rubric-result { font-size: 12px; font-weight: 600; }
+.independent-review-rubrics li[data-result="violated"] .independent-review-rubric-result { color: var(--danger, #e5484d); }
+.independent-review-rubrics li[data-result="met"] .independent-review-rubric-result { color: var(--success, #3fb27f); }
+.independent-review-rubrics li[data-result="unreported"] .independent-review-rubric-result,
+.independent-review-rubrics li[data-result="unverified"] .independent-review-rubric-result { color: var(--warning, #e0a23a); }
+.independent-review-rubric-corrected { color: var(--danger, #e5484d); font-size: 12.5px; }
+.independent-review-issue .independent-review-criterion,
+.independent-review-rubrics code {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-3);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
 @keyframes sq-glow-breathe {
   0%, 100% { opacity: 0.68; transform: translate3d(0, 0, 0) scale(0.99); }
   50% { opacity: 0.86; transform: translate3d(0, 0, 0) scale(1.035); }
@@ -25642,3 +25665,8 @@ button.chat-remote-session-item:hover {
     animation: none !important;
   }
 }
+
+/* Work task board: the controller's record of plugin review criteria. */
+.tasks-review-rubrics { display: grid; gap: 2px; margin: 4px 0 6px; }
+.tasks-review-rubrics small { color: var(--text-3); }
+.tasks-review-criterion { display: inline-block; margin: 2px 0; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }

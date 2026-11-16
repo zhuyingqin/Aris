@@ -1113,6 +1113,15 @@ fn capabilities_output(capabilities: &runtime::plugins::PluginCapabilities) -> V
             // The panel runs the package's own HTML and JavaScript (sandboxed).
             "page": panel.page.is_some(),
             "dataPanel": panel.data_panel,
+            // The page may propose background work tasks; each needs the user's click.
+            "proposeTasks": panel.propose_tasks,
+        })).collect::<Vec<_>>(),
+        // Criteria the independent Reviewer will check; the Executor never sees them.
+        "reviewRubrics": capabilities.review_rubrics.iter().map(|rubric| json!({
+            "id": rubric.id,
+            "title": rubric.title,
+            "criteria": rubric.criteria.len(),
+            "appliesWhen": rubric.applies_when,
         })).collect::<Vec<_>>(),
         "mcpServers": capabilities.mcp_servers.iter().map(|server| json!({
             "name": server.name,

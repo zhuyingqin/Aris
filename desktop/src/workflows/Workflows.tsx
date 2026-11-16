@@ -300,6 +300,8 @@ interface WorkflowModelGateway {
     prompt: string,
     requestId: string,
     title: string,
+    /** An approval gate: only gates carry the project's plugin review rubrics. */
+    options?: { gate?: boolean },
   ) => Promise<string>;
 }
 
@@ -974,6 +976,8 @@ interface GateVerdict {
   summary: string;
   issues: string[];
   skipped: boolean;
+  /** Written by the Rust controller into the reply, never by the Reviewer. */
+  rubrics?: ReviewerGate["rubrics"];
 }
 
 /**
@@ -994,13 +998,14 @@ async function gateVerdict(
   if (run.reviewerDisabled) {
     return { approved: true, summary: skippedGate().summary ?? "", issues: [], skipped: true };
   }
-  const raw = await gateway.reviewer(run, system, prompt, requestId, title);
-  const review = parseModelJson<{ approved?: boolean; summary?: string; issues?: string[] }>(raw);
+  const raw = await gateway.reviewer(run, system, prompt, requestId, title, { gate: true });
+  const review = parseModelJson<{ approved?: boolean; summary?: string; issues?: string[]; rubrics?: ReviewerGate["rubrics"] }>(raw);
   return {
     approved: review.approved === true,
     summary: review.summary?.trim() || fallbackSummary,
     issues: Array.isArray(review.issues) ? review.issues.filter(Boolean).slice(0, 12) : [],
     skipped: false,
+    rubrics: review.rubrics,
   };
 }
 
@@ -1012,6 +1017,7 @@ function gateFromVerdict(verdict: GateVerdict): ReviewerGate {
     summary: verdict.summary,
     issues: verdict.issues,
     reviewedAt: nowIso(),
+    ...(verdict.rubrics ? { rubrics: verdict.rubrics } : {}),
   };
 }
 
@@ -4349,6 +4355,7 @@ export default function Workflows() {
     prompt,
     requestId,
     title,
+    options,
   ) => {
     const meta: WorkflowModelRequestMeta = { actor: "Independent Reviewer", title };
     setModelRequestActive(requestId, meta, true);
@@ -4368,6 +4375,7 @@ export default function Workflows() {
         stageId: taskRun.activeStageId,
         system,
         prompt,
+        gate: options?.gate === true,
       });
       updateLiveActivity({
         id: requestId,
@@ -5146,6 +5154,7 @@ export default function Workflows() {
         ? "Reviewer 未返回可解析结论。"
         : "浏览器预览：使用内置审查规则验证了检索式矩阵。";
     let issues: string[] = preflightRejected ? preflightIssues.slice(0, 12) : [];
+    let planRubrics: ReviewerGate["rubrics"];
     const activityId = `plan-review-${Date.now().toString(36)}`;
     const gateSkipped = run.reviewerDisabled === true;
     try {
@@ -5156,8 +5165,10 @@ export default function Workflows() {
           planReviewPrompt(run, plan),
           activityId,
           "Reviewer 审查检索计划",
+          { gate: true },
         );
-        const review = extractJson<{ approved?: boolean; summary?: string; issues?: string[] }>(raw);
+        const review = extractJson<{ approved?: boolean; summary?: string; issues?: string[]; rubrics?: ReviewerGate["rubrics"] }>(raw);
+        planRubrics = review.rubrics;
         approved = review.approved === true;
         summary = review.summary?.trim() || summary;
         issues = Array.isArray(review.issues) ? review.issues.filter(Boolean).slice(0, 12) : [];
@@ -5204,6 +5215,7 @@ export default function Workflows() {
       summary,
       issues,
       reviewedAt: nowIso(),
+      ...(planRubrics ? { rubrics: planRubrics } : {}),
     };
     try {
       await persist(

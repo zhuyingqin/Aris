@@ -111,30 +111,31 @@ fn read_runs_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("{} is not valid JSON: {e}", path.display()))
 }
 
+/// Replace the whole library. Serialized with every other writer of the same
+/// `runs.json` in this process, and atomic: the file is either the old library
+/// or the new one, never missing or half-written.
 pub fn runs_save_at(base: &Path, runs: &Value) -> Result<(), String> {
+    let path = runs_path_at(base);
+    runtime::with_path_lock(&path, || save_locked(&path, runs))
+}
+
+// Call only while holding `with_path_lock(path)`.
+fn save_locked(path: &Path, runs: &Value) -> Result<(), String> {
     if !runs.is_object() {
         return Err("runs library must be a JSON object".to_string());
     }
-    let path = runs_path_at(base);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let backup = path.with_extension("json.bak");
     let data = serde_json::to_vec_pretty(runs).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    let had_existing = path.exists();
-    if had_existing {
-        std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        if had_existing {
-            let _ = std::fs::copy(&backup, &path);
+    // Back up the current library before replacing it, but only one that
+    // parses: a damaged primary must never overwrite the good backup that
+    // `runs_load_at` would recover from.
+    if let Ok(current) = std::fs::read(path) {
+        if serde_json::from_slice::<Value>(&current).is_ok() {
+            runtime::write_replace_while_locked(&path.with_extension("json.bak"), &current)
+                .map_err(|e| format!("failed to back up runs.json: {e}"))?;
         }
-        return Err(format!("failed to replace runs.json: {error}"));
     }
-    Ok(())
+    runtime::write_replace_while_locked(path, &data)
+        .map_err(|e| format!("failed to replace runs.json: {e}"))
 }
 
 /// Merge one run record into the library by `id`: field-level merge onto an
@@ -148,6 +149,14 @@ pub fn runs_upsert_at(base: &Path, record: &Value) -> Result<Value, String> {
         .ok_or("run record must have a non-empty `id`")?
         .to_string();
 
+    // The read, the merge and the write are one critical section, so two
+    // concurrent updates can never both start from the same old library and
+    // have the second silently drop the first.
+    let path = runs_path_at(base);
+    runtime::with_path_lock(&path, || upsert_locked(base, &path, &id, record))
+}
+
+fn upsert_locked(base: &Path, path: &Path, id: &str, record: &Value) -> Result<Value, String> {
     let mut library = runs_load_at(base)?;
     if !library.is_object() {
         library = empty_runs();
@@ -164,7 +173,7 @@ pub fn runs_upsert_at(base: &Path, record: &Value) -> Result<Value, String> {
         };
         if let Some(existing) = runs
             .iter_mut()
-            .find(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .find(|r| r.get("id").and_then(Value::as_str) == Some(id))
         {
             merge_object(existing, record);
             merged = existing.clone();
@@ -173,7 +182,7 @@ pub fn runs_upsert_at(base: &Path, record: &Value) -> Result<Value, String> {
             merged = record.clone();
         }
     }
-    runs_save_at(base, &library)?;
+    save_locked(path, &library)?;
     Ok(merged)
 }
 

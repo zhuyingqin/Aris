@@ -13,7 +13,6 @@
 //! (the clients use `reqwest::blocking`), matching `literature.rs`.
 
 mod agent_tools;
-mod atomic_file;
 mod auto_literature;
 mod autoconfig;
 mod cache;

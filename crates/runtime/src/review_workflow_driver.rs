@@ -971,6 +971,7 @@ fn invalidate_downstream(run: &mut ReviewWorkflowRun, ordinal: u32) {
             summary: None,
             issues: Vec::new(),
             reviewed_at: None,
+            rubrics: None,
         };
     }
 }

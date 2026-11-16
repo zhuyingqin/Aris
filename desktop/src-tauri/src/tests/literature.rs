@@ -1,5 +1,5 @@
 #[cfg(windows)]
-use super::{extract_pdf_text_by_page, literature_image_ocr, windows_ocr};
+use super::{extract_pdf_text_by_page, image_ocr, windows_ocr, NEVER_CANCELED};
 use super::{
     extraction_from_rag_pages, import_attachment_at, import_pdf_at, resolve_pdf_path_at,
     validate_vision_model, vision_message, LiteratureRagPdfPage, LiteratureVisionImage,
@@ -211,9 +211,9 @@ fn extracts_a_scanned_pdf_with_windows_ocr() {
         rendered.success(),
         "pdftoppm must be available to run this test"
     );
-    windows_ocr(&base.join("scan.png")).expect("Windows OCR must be available to run this test");
+    windows_ocr(&base.join("scan.png"), &NEVER_CANCELED).expect("Windows OCR must be available to run this test");
     let direct_ocr =
-        literature_image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"))
+        image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"), &NEVER_CANCELED)
             .expect("OCR rendered page bytes");
     assert!(direct_ocr.contains("Scanned OCR test 12345"));
     let scanned = crate::process::hidden_command("pdflatex")

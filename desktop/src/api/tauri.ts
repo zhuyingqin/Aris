@@ -269,6 +269,7 @@ import type {
   PermissionModeView,
   PptMasterDeck,
   WorkTask,
+  WorkTaskOrigin,
   WorkTaskReviewSnapshot,
   WorkTaskSnapshot,
   ProfileStats,
@@ -1018,19 +1019,21 @@ export interface WorkTaskChangedEvent {
 }
 export const onWorkTaskChanged = (handler: (event: WorkTaskChangedEvent) => void) =>
   listen<WorkTaskChangedEvent>("work-task-changed", (event) => handler(event.payload));
-export const workTaskCreate = (title: string, prompt: string, model?: string | null) =>
-  invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null });
+export const workTaskCreate = (title: string, prompt: string, model?: string | null, origin?: WorkTaskOrigin | null) =>
+  invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null, origin: origin ?? null });
 /** Create and queue in one step — the board's default, because a task someone
  *  just described is meant to run. */
 export const workTaskCreateAndStart = (
   title: string,
   prompt: string,
   model?: string | null,
+  origin?: WorkTaskOrigin | null,
 ) =>
   invoke<WorkTask>("work_task_create_and_start", {
     title,
     prompt,
     model: model ?? null,
+    origin: origin ?? null,
   });
 export const workTaskUpdate = (
   taskId: string,
@@ -1441,10 +1444,18 @@ export const literatureRagSearch = (
     query,
     limit: limit ?? null,
   });
-export const literaturePdfBytes = (relativePath: string) =>
-  invoke<number[]>("literature_pdf_bytes", { relativePath });
-export const literatureImageOcr = (image: number[]) =>
-  invoke<string>("literature_image_ocr", { image });
+/** A library file's bytes. The app sends raw bytes (an ArrayBuffer); a number
+ *  array (an older host, a test double) is accepted too. */
+export const literaturePdfBytes = async (relativePath: string): Promise<Uint8Array> => {
+  const raw = await invoke<ArrayBuffer | number[]>("literature_pdf_bytes", { relativePath });
+  return Array.isArray(raw) ? Uint8Array.from(raw) : new Uint8Array(raw);
+};
+/** OCR one page image. Pass `requestId` to make it stoppable with `literatureOcrCancel`. */
+export const literatureImageOcr = (image: number[], requestId?: string) =>
+  invoke<string>("literature_image_ocr", { image, requestId: requestId ?? null });
+/** Stop an in-flight OCR or PDF import; `false` when it already finished. */
+export const literatureOcrCancel = (requestId: string) =>
+  invoke<boolean>("literature_ocr_cancel", { requestId });
 export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 export const literatureAttachmentOpen = (relativePath: string) =>
@@ -2485,6 +2496,8 @@ export interface IndependentReviewIssue {
   detail: string;
   evidence: string;
   recommendation: string;
+  /** `<package>/<rubric>#<criterion>`: the installed review criterion this issue reports. */
+  criterion?: string;
 }
 
 export interface IndependentReviewResult {
@@ -2505,6 +2518,22 @@ export interface IndependentReviewResult {
   exhausted: boolean;
   /** What a Reviewer thread opened with its own read-only tools, as the controller recorded the calls. Absent for a one-shot review. */
   toolChecks?: string[];
+  /** The controller's record of this round's plugin review rubrics: what the packet carried and left out, and the result per criterion. */
+  rubrics?: ReviewRubricRecord;
+}
+
+export type RubricCheckResult = "met" | "violated" | "not_applicable" | "unverified" | "unreported";
+
+export interface ReviewRubricRecord {
+  /** Rubrics (`<package>/<rubric>`) whose criteria were in the packet. */
+  delivered?: string[];
+  /** Rubrics that applied but were left out for length: never sent, so never checked. */
+  omitted?: string[];
+  checks?: { criterion: string; severity: string; result: RubricCheckResult; note?: string }[];
+  /** Criterion keys the Reviewer cited that the packet never carried. */
+  unknownCriteria?: string[];
+  /** The controller turned a pass into a revision because a critical criterion was violated. */
+  verdictCorrected?: boolean;
 }
 
 export interface IndependentReviewEvent {

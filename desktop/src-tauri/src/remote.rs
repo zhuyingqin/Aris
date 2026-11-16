@@ -925,7 +925,7 @@ fn normalize_gateway_url(value: &str) -> Result<String, String> {
 /// STUN/STUNS URLs; TURN credentials must not be copied into a desktop setting
 /// or bundled mobile PWA, and P2's defined non-direct fallback is the existing
 /// end-to-end encrypted WSS/TCP relay.
-#[allow(dead_code)]
+#[cfg(test)]
 fn normalize_ice_servers(values: Vec<String>) -> Result<Vec<String>, String> {
     if values.len() > 8 {
         return Err("configure at most eight STUN servers".to_string());
@@ -4104,12 +4104,12 @@ struct RemoteComputeChannel {
 #[derive(Debug, Clone)]
 pub(crate) struct ImageAssistSession {
     pub(crate) device_id: String,
-    /// Correlates this transport session with its brokered match.
-    #[allow(dead_code, reason = "consumed by the Image Assist match state machine")]
+    /// Correlates this transport session with its brokered match. Written
+    /// when the session opens; only surfaced through `Debug` today.
+    #[allow(dead_code, reason = "write-only correlation id, surfaced via Debug")]
     pub(crate) match_id: String,
     /// The peer descriptor the gateway introduced. Held only for the lifetime
     /// of the match; it is never merged into the paired-device store.
-    #[allow(dead_code, reason = "consumed by the Image Assist match state machine")]
     pub(crate) peer: DeviceDescriptor,
 }
 
@@ -4369,7 +4369,6 @@ fn reserve_image_assist_relay_session(
     result
 }
 
-#[allow(dead_code, reason = "called by the match state machine on close")]
 pub(crate) fn remove_image_assist_session(state: &RemoteAgentState, session_id: &str) {
     if let Ok(mut sessions) = state.image_assist_sessions.lock() {
         sessions.remove(session_id);
@@ -5108,7 +5107,7 @@ pub fn remote_control_p2p_closed(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn read_audit(path: &Path, limit: usize) -> Result<Vec<RemoteAuditEntry>, String> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,

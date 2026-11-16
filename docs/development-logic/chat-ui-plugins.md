@@ -536,3 +536,72 @@ M1 之后的反馈是"还是三列"：三列只是示例模板的设计，但单
 - **限制**：
   - 审批卡片只在 Agent 真正调用 upgrade 时出现。隔离实例无法运行模型，所以卡片上的部分是用测试页验证的，没有经过完整的对话回合。
   - 版本历史不显示两个历史版本之间的文件差异。
+
+## 页面提议后台任务（`proposeTasks`，2026-11-15）
+
+可执行页面原来只能把文字放进输入框（`somniq.prompt`，永不自动发送）。慢而独立的
+排查，比如"这条实验为什么发散"，放进当前对话会占住对话；现在页面可以把它交给
+待办任务看板，在独立工作副本里跑。
+
+### 声明与桥
+
+- 面板新增可选字段 `proposeTasks: true`，只允许出现在 schemaVersion 3、带 `page`
+  的面板上（预览诊断 `/panels/N/proposeTasks`）。批准卡片与插件详情注明"可提议
+  后台任务，每次都需你确认"。升级差异里面板显示为 `<id> (page, tasks)`，所以加上
+  或去掉这项都算一次需要重新批准的变更。
+- 桥方法 `await somniq.task({ title, prompt, reportTo? })`。标题 1–120 字符，
+  内容 1–8000 字符，同一时刻只能有一个提议在等待。结果为
+  `{ status: "started" | "created" | "declined", taskId? }`。
+- 实现位于 `PluginPageFrame.tsx` 的 `propose`（校验）和 `PluginTaskProposal.tsx`
+  （宿主绘制的确认框，`createPortal` 到 `document.body`，盖在一切之上，页面没法
+  遮住或伪造它）。引导脚本对 `task` 调用不改写页面的 `state.data`。
+
+### 只有用户能创建任务
+
+- 页面脚本可以在没有用户手势时调用 `somniq.task`，所以它只能"提议"：宿主弹出
+  确认框，写明是哪个插件、哪个页面提的，标题和内容可编辑。"创建并开始"、
+  "只创建"、"不创建"（也可以按 Esc）三个按钮都在宿主里，页面的调用一直挂起到
+  用户做出选择为止。
+- 创建走既有的 `work_task_create_and_start` / `work_task_create`，与看板手动建任务
+  是同一条路径：工作树隔离、权限、独立 Reviewer、验收合并全部照常。
+- 宿主在任务内容末尾追加来源行（插件名 + 页面标题 + "用户在 SomniQ 中确认创建"），
+  这一行由宿主写，不由页面写。
+- 试用草稿（`draft`）里的页面调用一律得到 `declined`，不弹框。页面卸载或切换时，
+  挂起的提议按 `declined` 结束。
+
+### 结果写回页面（`reportTo`）
+
+- `reportTo` 必须是本面板（或其 `dataPanel`）已声明的组件，且面板 `scope` 为
+  `project`：任务在自己的会话里运行，只有项目范围的数据它才写得到。
+- 宿主在任务内容里追加一段说明：先用 `PluginPanel list` 查看该组件的值形状，再用
+  `write` 写入简短结论，并标明哪些部分没有核实。写入走既有 `PluginPanel`，无人值守
+  运行本来就允许写面板数据；页面经 `plugin-panel-changed` → `onData` 即时显示。
+- 这是"请任务写"，不是保证：任务失败或没有遵守说明时，页面不会收到这段结论。
+  页面可依赖的是下面的任务状态。
+
+### 页面跟踪自己派出的任务（`somniq.tasks` / `onTasks`）
+
+- 创建时宿主把来源写进任务：`WorkTask.origin = { pluginName, panelId, reportPanel?,
+  reportWidget? }`。这几项由宿主框架填写（插件名和页面面板 id 都来自宿主自己的
+  记录），页面不能伪造；后端还会校验 id 的格式。看板上手动建的任务没有 `origin`。
+- `await somniq.tasks()` 返回本页派出的任务（按 `origin` 过滤，最新在前）；
+  `somniq.onTasks(fn)` 在其中任何一个变化时收到整张列表。宿主订阅
+  `work-task-changed`，重新读取看板，只有本页任务的内容真变了才推送。
+- 记录由宿主从看板真实数据生成（`pluginTaskRecords.ts`），不取决于任务模型写回了
+  什么：`state`（`todo / active / waiting / ready / done / failed / canceled`）、看板原始
+  `status`、运行中的 `phase`、`review`（Reviewer 判定、摘要、轮次、问题、细则计数）、
+  `result`（执行总结、改动文件数与路径、交付物、是否已合并）、失败时的 `error`。
+- 页面关闭期间任务结束也没关系：再次打开时 `tasks()` 拿到的就是当前状态，所以行
+  不会一直停在"调查中"。任务从看板删除后，模板把该行显示为"任务已删除"。
+
+### 模板
+
+`experiment-triage`：一个 `nav.page` 页面，列出 Agent 用 `PluginPanel` 填的实验记录
+（`runs` json 组件；没有数据时显示带标注的示例行）。每行有"派 AI 调查"，结论写回
+`findings` markdown 组件，行上显示 调查中 / 已加入看板 / 已取消。
+
+### 未做
+
+- 声明式按钮的 `task` 动作（目前只有自绘页面能提议任务）。
+- 宿主不会把任务结果自动写进某个组件：结构化结果经 `tasks()` 交给页面，由页面决定
+  是否用 `somniq.set` 持久化。

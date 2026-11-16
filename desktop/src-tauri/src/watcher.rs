@@ -1,14 +1,9 @@
-//! Live runtime and workspace event bridges.
+//! Workspace file event bridge.
 //!
-//! Polls `events.jsonl` every 500ms and emits each newly-appended line to the
-//! frontend as a `run-event`. Workspace files use the operating system's native
-//! watcher and are normalized into a separate `workspace-file-changed` event.
-//!
-//! On first tick the whole file is replayed so the timeline starts populated.
+//! Workspace files use the operating system's native watcher and are
+//! normalized into a `workspace-file-changed` event.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -16,10 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::{ErrorKind, Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{files, projects, state};
+use crate::{files, projects};
 
 const WORKSPACE_FILE_CHANGED_EVENT: &str = "workspace-file-changed";
 const WATCH_REBIND_INTERVAL: Duration = Duration::from_millis(500);
@@ -188,48 +182,6 @@ pub fn spawn_workspace_file_watcher(app: AppHandle) {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
-        }
-    });
-}
-
-pub fn spawn_event_watcher(app: AppHandle) {
-    thread::spawn(move || {
-        let mut active_path = state::events_path();
-        let mut offset: u64 = 0;
-        loop {
-            let path = state::events_path();
-            if path != active_path {
-                active_path = path.clone();
-                offset = 0;
-            }
-            if let Ok(mut file) = File::open(&path) {
-                let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-                if len < offset {
-                    // file truncated or rotated — replay from the start
-                    offset = 0;
-                }
-                if len > offset && file.seek(SeekFrom::Start(offset)).is_ok() {
-                    let mut buf = String::new();
-                    if file.read_to_string(&mut buf).is_ok() {
-                        // Only consume through the final newline so a half-written
-                        // trailing line is picked up on the next tick instead.
-                        if let Some(last_newline) = buf.rfind('\n') {
-                            let consumed = &buf[..=last_newline];
-                            offset += consumed.len() as u64;
-                            for line in consumed.lines() {
-                                let line = line.trim();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                if let Ok(value) = serde_json::from_str::<Value>(line) {
-                                    let _ = app.emit("run-event", value);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(500));
         }
     });
 }

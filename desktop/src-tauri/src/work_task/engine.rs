@@ -745,6 +745,8 @@ async fn review_and_revise(
         };
     }
     let tree_path = PathBuf::from(&tree.path);
+    let review_rubrics = runtime::plugins::PluginStore::for_workspace(&plugin_run.set().project)
+        .review_rubrics_for(plugin_run.set());
 
     let mut round = 1u32;
     loop {
@@ -760,7 +762,15 @@ async fn review_and_revise(
             &format!("Independent review, round {round}"),
         );
 
-        let prompt = reviewer_prompt(task, &snapshot, &summary, &tree_path);
+        // Rubrics from the set the run froze; which apply can change with
+        // each revised result.
+        let rubric_packet = runtime::plugins::render_review_rubrics(
+            &runtime::plugins::applicable_review_rubrics(
+                &review_rubrics,
+                &format!("{}\n{}\n{}", task.title, task.prompt, summary),
+            ),
+        );
+        let prompt = reviewer_prompt(task, &snapshot, &summary, &tree_path, &rubric_packet.section);
         let flag = stop.flag.clone();
         let model = task.model.clone();
         let review_session = session_id.to_string();
@@ -775,6 +785,7 @@ async fn review_and_revise(
                     prompt,
                     flag,
                     model.as_deref(),
+                    &rubric_packet,
                 )
             }))
         })
@@ -891,6 +902,7 @@ fn unavailable_review(round: u32, reason: &str) -> super::model::WorkTaskReviewS
         reviewer_model: String::new(),
         exhausted: false,
         checked_at: store::now_ms(),
+        rubrics: None,
     }
 }
 
@@ -928,6 +940,7 @@ fn reviewer_prompt(
     snapshot: &WorkTaskReviewSnapshot,
     summary: &str,
     tree_path: &Path,
+    rubric_section: &str,
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str(
@@ -999,6 +1012,11 @@ fn reviewer_prompt(
         summary.trim()
     });
     prompt.push_str("\n\n");
+    if !rubric_section.is_empty() {
+        prompt.push_str("# Installed review criteria\n\n");
+        prompt.push_str(rubric_section);
+        prompt.push_str("\n\n");
+    }
     prompt.push_str(REVIEWER_INSTRUCTIONS);
     prompt
 }
@@ -2014,7 +2032,7 @@ mod tests {
         };
         // A path that does not exist, so the patch read fails — the prompt has
         // to say so rather than quietly present a diff-free review.
-        let prompt = reviewer_prompt(&task, &snapshot, "Tightened the argument.", Path::new("/nope"));
+        let prompt = reviewer_prompt(&task, &snapshot, "Tightened the argument.", Path::new("/nope"), "");
 
         assert!(prompt.contains("Rewrite section 3"));
         assert!(prompt.contains("Tighten the argument."));
@@ -2051,9 +2069,49 @@ mod tests {
             empty_reason: Some(WorkTaskEmptyReason::ArtifactsOnly),
             captured_at: 0,
         };
-        let prompt = reviewer_prompt(&task, &snapshot, "Wrote the report.", Path::new("/nope"));
+        let prompt = reviewer_prompt(&task, &snapshot, "Wrote the report.", Path::new("/nope"), "");
         assert!(prompt.contains("report.pdf"));
         assert!(prompt.contains("No repository files were changed"));
+    }
+
+    /// Installed criteria reach the task Reviewer ahead of the answer format,
+    /// and the revision prompt the executor reads names no criterion key.
+    #[test]
+    fn task_review_carries_rubrics_but_the_revision_prompt_names_no_key() {
+        let task = WorkTask::new("rev-3".into(), "Write the report".into(), String::new(), 0);
+        let snapshot = WorkTaskReviewSnapshot {
+            base_sha: "aaa".into(),
+            head_sha: "bbb".into(),
+            files: Vec::new(),
+            artifacts: Vec::new(),
+            empty_reason: None,
+            captured_at: 0,
+        };
+        let prompt = reviewer_prompt(&task, &snapshot, "Wrote it.", Path::new("/nope"), "RUBRIC-SECTION");
+        let rubric = prompt.find("RUBRIC-SECTION").expect("the rubric section");
+        let format = prompt.find("Reply with a single JSON object").expect("the format");
+        assert!(rubric < format);
+
+        let review = super::super::model::WorkTaskReviewState {
+            round: 1,
+            max_rounds: 2,
+            verdict: super::super::model::WorkTaskVerdict::Revise,
+            summary: "Numbers lack a source.".into(),
+            issues: vec![super::super::model::WorkTaskReviewIssue {
+                severity: "critical".into(),
+                title: "0.91 has no source".into(),
+                detail: "No result file holds it.".into(),
+                recommendation: "Cite the file.".into(),
+                criterion: Some("@lab/review/evidence#numbers".into()),
+            }],
+            reviewer_model: "m".into(),
+            exhausted: false,
+            checked_at: 0,
+            rubrics: None,
+        };
+        let text = revision_prompt(&review);
+        assert!(text.contains("0.91 has no source"));
+        assert!(!text.contains("@lab/review"));
     }
 
     /// The executor is sent back with the issues themselves, not just "try
@@ -2071,10 +2129,12 @@ mod tests {
                 detail: "The summary says it was rewritten; the diff only changes section 2."
                     .into(),
                 recommendation: "Rewrite section 3, or correct the summary.".into(),
+                criterion: None,
             }],
             reviewer_model: "some-model".into(),
             exhausted: false,
             checked_at: 0,
+            rubrics: None,
         };
         let prompt = revision_prompt(&review);
 
@@ -2099,6 +2159,7 @@ mod tests {
             reviewer_model: String::new(),
             exhausted: false,
             checked_at: 0,
+            rubrics: None,
         };
         let prompt = revision_prompt(&review);
         assert!(prompt.contains("re-read your own work"));

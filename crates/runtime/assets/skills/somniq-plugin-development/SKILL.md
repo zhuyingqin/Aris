@@ -125,6 +125,26 @@ a pannable idea canvas, a chart dashboard built from modules).
   `somniq.resize(px)` sets a `chat.brief` glance's height (40-320 px; call it
   from a `ResizeObserver` on `<body>` so the glance is exactly as tall as its
   content).
+- **Handing work to the background.** A panel that sets `"proposeTasks": true`
+  may call `await somniq.task({ title, prompt, reportTo })` to propose a work
+  task. The app shows the proposal to the user, who can edit it, then start
+  it, only create it, or decline; the call resolves to
+  `{ status: "started" | "created" | "declined", taskId? }` and only one
+  proposal can wait at a time. The task runs on the task board in its own
+  working copy, so it suits slow, self-contained investigations (why did this
+  run diverge, check these citations); quick things still belong in
+  `somniq.prompt`. Write the prompt so a fresh agent with no chat history can
+  do the job: what to look at, what not to touch, what to report. On a
+  `"scope": "project"` panel, `reportTo: "<widget id>"` asks the finished task
+  to write its conclusion into that widget with `PluginPanel`, and the page
+  shows it through `onData` — a request the task may not follow. To follow a
+  task, use `await somniq.tasks()` and `somniq.onTasks(list => ...)`: the
+  tasks this page proposed as the task board records them, each with
+  `taskId`, `state` (`todo`, `active`, `waiting`, `ready`, `done`, `failed`,
+  `canceled`), the Reviewer's verdict under `review`, and the run's summary,
+  changed files and deliverables under `result`. Draw each row from that
+  `state`, so a row never stays "investigating" after its task ended. The
+  `experiment-triage` template is a complete example.
 - **One store, several views.** A page panel may set
   `"dataPanel": "<id of another panel of this package>"` (same scope) and
   declare no widgets: its page then reads and writes that panel's widgets.
@@ -152,6 +172,21 @@ a pannable idea canvas, a chart dashboard built from modules).
   page: say so, and ask the user to tell you what to adjust.
 - The approval card tells the user this panel runs the package's own page
   code. Changing the page is a package change: raise the version and upgrade.
+
+## Review criteria for the independent Reviewer
+
+A package can also add **review rubrics**: `"somniq": { "manifestVersion": 1,
+"reviewer": "./reviewer.json" }`, next to `"ui"` or alone. Each rubric is a
+list of criteria (`id`, `check`, `severity`: critical, high, medium or low)
+that the independent Reviewer checks whenever it reviews an answer in this
+project, optionally only when the request or answer contains one of its
+`appliesWhen` keywords. Use this for the standards a user or lab wants every
+answer held to (a venue's checklist, a field's statistical rules, "every
+number must come from a result file"). Write each check as one verifiable
+statement about the answer and its evidence. The criteria go only to the
+Reviewer, never into your own prompt, so do not try to read them back to
+pass review: do the work they describe. Start from the `reviewer-pack`
+template; `PluginManager inspect` lists the limits under `reviewer`.
 
 ## Who does what
 

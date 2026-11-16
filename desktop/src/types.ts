@@ -1270,6 +1270,8 @@ export interface WorkTaskReviewIssue {
   title: string;
   detail: string;
   recommendation: string;
+  /** The installed review criterion (`<package>/<rubric>#<id>`) this issue reports. */
+  criterion?: string;
 }
 
 /** The independent review a task's result went through. */
@@ -1285,6 +1287,8 @@ export interface WorkTaskReviewState {
   /** Ran out of rounds with issues outstanding, rather than being satisfied. */
   exhausted: boolean;
   checkedAt: number;
+  /** The controller's record of the plugin review rubrics this round used. */
+  rubrics?: import("./api/tauri").ReviewRubricRecord;
 }
 
 export type WorkTaskFileChangeKind =
@@ -1366,6 +1370,13 @@ export interface WorkTaskSnapshot {
 }
 
 /** One card on the work-task board. */
+export interface WorkTaskOrigin {
+  pluginName: string;
+  panelId: string;
+  reportPanel?: string | null;
+  reportWidget?: string | null;
+}
+
 export interface WorkTask {
   id: string;
   title: string;
@@ -1394,6 +1405,8 @@ export interface WorkTask {
   model?: string | null;
   /** The automation that produced this task, when one did. */
   scheduledTaskId?: string | null;
+  /** The plugin page that proposed this task, recorded by the host. */
+  origin?: WorkTaskOrigin | null;
   /** The one occurrence of that automation this card was queued for. */
   scheduledOccurrenceKey?: string | null;
   /** Conversation the automation's target mode chose for the run. */

@@ -362,7 +362,7 @@ fn chat_project_binding(
 /// Compatibility validation for callers that need to validate an opaque
 /// session id before its Chat UI projection has been persisted. A real remote
 /// chat read/send must use [`remote_chat_session_validate`] instead.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn validate_remote_chat_target(
     project_id: &str,
     session_id: &str,
@@ -5926,7 +5926,7 @@ fn infer_project_intent(
     }))
 }
 
-fn extract_json_object(raw: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(raw: &str) -> Option<&str> {
     let mut start = None;
     let mut depth = 0_u32;
     let mut in_string = false;
@@ -6902,6 +6902,10 @@ struct IndependentReviewIssue {
     evidence: String,
     #[serde(default)]
     recommendation: String,
+    /// The installed review criterion this issue reports a violation of,
+    /// `<package>/<rubric>#<criterion>`, when it came from a Reviewer pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    criterion: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -6943,6 +6947,14 @@ struct IndependentReviewResult {
     /// omitted) for a one-shot review, which has no tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_checks: Vec<String>,
+    /// The Reviewer's own per-criterion account (`rubricChecks`). Input to
+    /// the controller's record below, never shown as the record itself.
+    #[serde(default, skip_serializing)]
+    rubric_checks: Vec<runtime::plugins::ReportedRubricCheck>,
+    /// What this round's packet carried and left out, and what the review
+    /// found per criterion, as the controller reconciled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rubrics: Option<runtime::plugins::ReviewRubricRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7800,6 +7812,97 @@ PASS is allowed when claims material to the current request are supported by the
     )
 }
 
+/// Put the installed review rubrics in a Reviewer packet, ahead of its
+/// answer-format instructions so those stay the last thing it reads. Only
+/// Reviewer packets get this section: the Executor never sees the rubrics.
+/// Record what `packet` carried against what the review said about it, and
+/// hold the verdict to the packet's rules rather than to the Reviewer's word:
+/// an issue citing a criterion carries at least that criterion's severity, a
+/// reported violation always becomes an issue, a key nobody was sent is
+/// cleared, and a violated critical criterion turns a pass into a revision.
+fn apply_review_rubric_record(
+    review: &mut IndependentReviewResult,
+    packet: &runtime::plugins::RubricPacket,
+) {
+    use runtime::plugins::{reconcile_rubric_checks, severity_below, ReviewRubricRecord, RubricIssue};
+    let reported = std::mem::take(&mut review.rubric_checks);
+    if packet.is_empty() {
+        for issue in &mut review.issues {
+            issue.criterion = None;
+        }
+        return;
+    }
+    if review.verdict == IndependentReviewVerdict::Unavailable {
+        review.rubrics = Some(ReviewRubricRecord::unanswered(packet));
+        return;
+    }
+    let issues = review
+        .issues
+        .iter()
+        .map(|issue| RubricIssue { criterion: issue.criterion.clone(), severity: issue.severity.clone() })
+        .collect::<Vec<_>>();
+    let reconciled = reconcile_rubric_checks(packet, &reported, &issues);
+    let mut unknown = reconciled.unknown_reported.clone();
+    for &index in &reconciled.unknown_issue_criteria {
+        if let Some(key) = review.issues[index].criterion.take() {
+            unknown.push(key);
+        }
+    }
+    for (issue, floor) in review.issues.iter_mut().zip(&reconciled.issue_floor) {
+        if let Some(floor) = floor {
+            if severity_below(&issue.severity, *floor) {
+                issue.severity = floor.as_str().to_string();
+            }
+        }
+    }
+    for check in &reconciled.violated_without_issue {
+        review.issues.push(IndependentReviewIssue {
+            severity: check.severity.as_str().to_string(),
+            // Title and detail reach the Executor's revision prompt, which never
+            // carries rubric keys or text: the Reviewer's evidence note only.
+            title: "A required review check failed".to_string(),
+            detail: check.note.clone(),
+            evidence: String::new(),
+            recommendation: "Bring the answer in line with this installed review criterion.".to_string(),
+            criterion: Some(check.criterion.clone()),
+        });
+    }
+    let critical = reconciled.critical_violations();
+    let mut verdict_corrected = false;
+    if review.verdict == IndependentReviewVerdict::Pass && !critical.is_empty() {
+        review.verdict = IndependentReviewVerdict::Revise;
+        review.revision_instructions.push(
+            "Resolve the critical findings above before this answer can be accepted.".to_string(),
+        );
+        review.summary = format!(
+            "{} [Controller: changed pass to revise because a critical review criterion was violated.]",
+            review.summary.trim()
+        )
+        .trim()
+        .to_string();
+        verdict_corrected = true;
+    }
+    unknown.sort();
+    unknown.dedup();
+    review.rubrics = Some(ReviewRubricRecord {
+        delivered: packet.delivered.clone(),
+        omitted: packet.omitted.clone(),
+        checks: reconciled.checks,
+        unknown_criteria: unknown,
+        verdict_corrected,
+    });
+}
+
+fn with_review_rubrics(packet: String, section: &str) -> String {
+    if section.is_empty() {
+        return packet;
+    }
+    match packet.rfind("Return exactly one JSON object") {
+        Some(at) => format!("{}{section}\n\n{}", &packet[..at], &packet[at..]),
+        None => format!("{packet}\n\n{section}"),
+    }
+}
+
 /// Largest incremental review packet, in characters. The first packet of a
 /// Reviewer thread carries the whole case and can run past a hundred thousand;
 /// every later one carries only what changed, and this bound holds however many
@@ -7973,6 +8076,7 @@ pub(crate) fn run_work_task_review(
     prompt: String,
     cancelled: Arc<AtomicBool>,
     executor_model_override: Option<&str>,
+    rubrics: &runtime::plugins::RubricPacket,
 ) -> crate::work_task::model::WorkTaskReviewState {
     use crate::work_task::model::{WorkTaskReviewIssue, WorkTaskReviewState, WorkTaskVerdict};
 
@@ -7994,7 +8098,8 @@ pub(crate) fn run_work_task_review(
         &executor_provider,
         &executor_model,
     );
-    let result = run.result;
+    let mut result = run.result;
+    apply_review_rubric_record(&mut result, rubrics);
     let verdict = match result.verdict {
         IndependentReviewVerdict::Pass => WorkTaskVerdict::Pass,
         IndependentReviewVerdict::Revise => WorkTaskVerdict::Revise,
@@ -8014,11 +8119,13 @@ pub(crate) fn run_work_task_review(
                 title: issue.title,
                 detail: issue.detail,
                 recommendation: issue.recommendation,
+                criterion: issue.criterion,
             })
             .collect(),
         reviewer_model: result.reviewer_model,
         exhausted: false,
         checked_at: crate::work_task::store::now_ms(),
+        rubrics: result.rubrics,
     }
 }
 
@@ -9823,6 +9930,11 @@ async fn run_chat_turn_with_context(
             let mut evidence_sections =
                 vec![review_materialized_evidence(&summary, &worker_workspace)];
             let review_attempt_base = persisted_review_memory.last_attempt;
+            // From the plugin set this turn froze, like every other capability.
+            let review_rubrics = runtime::plugins::PluginStore::for_workspace(
+                &worker_plugin_run.set().project,
+            )
+            .review_rubrics_for(worker_plugin_run.set());
             let mut prior_reviews = persisted_review_memory
                 .rounds
                 .iter()
@@ -9856,10 +9968,17 @@ async fn run_chat_turn_with_context(
                 let delegation_evidence = worker_turn_agent.as_ref().map(|agent|
                     collaboration::review_evidence(agent, &worker_sessions_dir)).unwrap_or_default();
                 let round_tool_evidence = format!("{}\n\n{}", trace_sections.last().map_or("", String::as_str), delegation_evidence);
+                // Which rubrics apply can change with each revised answer.
+                let applicable_rubrics = runtime::plugins::applicable_review_rubrics(
+                    &review_rubrics,
+                    &format!("{worker_user_text}\n{text}"),
+                );
+                let rubric_packet = runtime::plugins::render_review_rubrics(&applicable_rubrics);
+                let rubric_section = rubric_packet.section.clone();
                 // The whole case, as the one-shot path has always sent it. A
                 // Reviewer thread asks for it only on first contact.
                 let full_prompt = || {
-                    independent_review_prompt(
+                    with_review_rubrics(independent_review_prompt(
                         &worker_user_text,
                         &text,
                         &format!("{}\n\n{}", cumulative_review_sections(
@@ -9874,7 +9993,7 @@ async fn run_chat_turn_with_context(
                         &worker_workspace,
                         &worker_executor_provider,
                         &worker_executor_model,
-                    )
+                    ), &rubric_section)
                 };
                 // Chat only: a work task's own review of what it committed
                 // stays the one-shot review it has always been.
@@ -9890,7 +10009,7 @@ async fn run_chat_turn_with_context(
                             // Only this round's material: the sections the
                             // Executor produced since the Reviewer last looked.
                             incremental: &|| {
-                                incremental_review_packet(&IncrementalReviewInput {
+                                with_review_rubrics(incremental_review_packet(&IncrementalReviewInput {
                                     kind: if review_revision_count == 0 {
                                         IncrementalReviewKind::NewRequest
                                     } else {
@@ -9909,7 +10028,7 @@ async fn run_chat_turn_with_context(
                                     workspace: &worker_workspace,
                                     executor_provider: &worker_executor_provider,
                                     executor_model: &worker_executor_model,
-                                })
+                                }), &rubric_section)
                             },
                         },
                         &worker_workspace,
@@ -9943,6 +10062,7 @@ async fn run_chat_turn_with_context(
                 }
                 reviewer_usages.extend(review_run.usages);
                 let mut review = review_run.result;
+                apply_review_rubric_record(&mut review, &rubric_packet);
                 let should_revise = review.verdict == IndependentReviewVerdict::Revise
                     && review_revision_count < MAX_INDEPENDENT_REVISIONS;
                 if review.verdict == IndependentReviewVerdict::Revise && !should_revise {

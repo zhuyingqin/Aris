@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import { makeId, textFromTurn } from "./model";
 import { noteTurnActivity } from "./modelWait";
+import { chatImageMimeType } from "../imageFiles";
 
 export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
@@ -170,19 +171,6 @@ function mimeTypeFromDataUrl(value: string): string | null {
 
 const MAX_PATH_IMAGE_BYTES = 8 * 1024 * 1024;
 
-function imageMimeTypeFromPath(path: string): string | null {
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  switch (extension) {
-    case "jpg":
-    case "jpeg": return "image/jpeg";
-    case "png": return "image/png";
-    case "gif": return "image/gif";
-    case "webp": return "image/webp";
-    case "bmp": return "image/bmp";
-    default: return null;
-  }
-}
-
 function dataUrlFromBytes(bytes: ArrayBuffer, mimeType: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -195,7 +183,7 @@ function dataUrlFromBytes(bytes: ArrayBuffer, mimeType: string): Promise<string>
 function isImageAttachment(attachment: ChatAttachment): boolean {
   return attachment.kind === "image"
     || Boolean(attachment.mimeType?.startsWith("image/"))
-    || Boolean(attachment.path && imageMimeTypeFromPath(attachment.path));
+    || Boolean(attachment.path && chatImageMimeType(attachment.path));
 }
 
 async function imageInputFromAttachment(attachment: ChatAttachment): Promise<ChatImageInput | null> {
@@ -207,7 +195,7 @@ async function imageInputFromAttachment(attachment: ChatAttachment): Promise<Cha
     };
   }
   if (!attachment.path) return null;
-  const mimeType = attachment.mimeType || imageMimeTypeFromPath(attachment.path);
+  const mimeType = attachment.mimeType || chatImageMimeType(attachment.path);
   if (!mimeType) return null;
   const bytes = await fileReadBytes(attachment.path);
   if (bytes.byteLength > MAX_PATH_IMAGE_BYTES) return null;

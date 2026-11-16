@@ -493,6 +493,9 @@ pub struct ReviewerGate {
     #[serde(default)]
     pub issues: Vec<String>,
     pub reviewed_at: Option<String>,
+    /// The controller's record of the plugin review rubrics this gate used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubrics: Option<crate::plugins::ReviewRubricRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1695,6 +1698,7 @@ fn default_review_stages() -> Vec<ReviewWorkflowStage> {
                 summary: None,
                 issues: Vec::new(),
                 reviewed_at: None,
+                rubrics: None,
             },
             started_at: None,
             completed_at: None,

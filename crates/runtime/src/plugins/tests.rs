@@ -2172,3 +2172,288 @@ fn the_plugin_store_guard_matches_the_store_and_nothing_else() {
         assert!(!command_names_plugin_store(command), "{command}");
     }
 }
+
+// ---- Reviewer packs and task-proposing pages ------------------------------------------
+
+fn reviewer_fixture(root: &Path, name: &str, version: &str, reviewer: serde_json::Value) -> PathBuf {
+    let source = root.join(format!("{}-{version}", name.replace(['/', '@'], "-")));
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "name": name, "version": version, "description": "Review criteria",
+            "somniq": { "manifestVersion": 1, "reviewer": "./reviewer.json" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(source.join("reviewer.json"), serde_json::to_vec(&reviewer).unwrap()).unwrap();
+    source
+}
+
+fn stats_rubrics(check: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "rubrics": [
+            { "id": "evidence", "title": "Evidence", "criteria": [
+                { "id": "numbers", "severity": "critical", "check": check }
+            ] },
+            { "id": "stats", "title": { "en": "Statistics", "cn": "统计" }, "appliesWhen": ["显著", "p-value"], "criteria": [
+                { "id": "effect-size", "severity": "high", "check": "Report an effect size with every significance claim." }
+            ] }
+        ]
+    })
+}
+
+#[test]
+fn a_reviewer_pack_validates_its_rubrics() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+
+    let good = reviewer_fixture(temp.path(), "@lab/review", "1.0.0", stats_rubrics("Trace every number."));
+    let preview = store.preview(&good).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    let ids: Vec<_> = preview.capabilities.review_rubrics.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["evidence", "stats"]);
+
+    let cases = [
+        ("schema", serde_json::json!({"schemaVersion": 2, "rubrics": stats_rubrics("x")["rubrics"]}), "/schemaVersion"),
+        ("no rubrics", serde_json::json!({"schemaVersion": 1, "rubrics": []}), "/rubrics"),
+        ("no criteria", serde_json::json!({"schemaVersion": 1, "rubrics": [{"id": "a", "title": "A", "criteria": []}]}), "/rubrics/0/criteria"),
+        ("duplicate criterion", serde_json::json!({"schemaVersion": 1, "rubrics": [{"id": "a", "title": "A", "criteria": [
+            {"id": "c", "severity": "low", "check": "one"}, {"id": "c", "severity": "low", "check": "two"}]}]}), "/rubrics/0/criteria/1/id"),
+        ("empty check", serde_json::json!({"schemaVersion": 1, "rubrics": [{"id": "a", "title": "A", "criteria": [
+            {"id": "c", "severity": "low", "check": "  "}]}]}), "/rubrics/0/criteria/0/check"),
+        ("long keyword", serde_json::json!({"schemaVersion": 1, "rubrics": [{"id": "a", "title": "A", "appliesWhen": ["x".repeat(41)], "criteria": [
+            {"id": "c", "severity": "low", "check": "one"}]}]}), "/rubrics/0/appliesWhen"),
+    ];
+    for (index, (label, reviewer, at)) in cases.into_iter().enumerate() {
+        let source = reviewer_fixture(temp.path(), "@lab/bad", &format!("0.0.{index}"), reviewer);
+        let preview = store.preview(&source).unwrap();
+        assert!(!preview.can_enable, "{label}");
+        assert!(preview.capabilities.review_rubrics.is_empty(), "{label}");
+        assert!(
+            preview.diagnostics.iter().any(|d| d.code == "reviewer" && d.path.as_deref() == Some(at)),
+            "{label}: {:?}",
+            preview.diagnostics
+        );
+    }
+
+    // An unknown severity or field is a parse error of the whole document.
+    let unknown = reviewer_fixture(temp.path(), "@lab/unknown", "1.0.0", serde_json::json!({"schemaVersion": 1, "rubrics": [
+        {"id": "a", "title": "A", "criteria": [{"id": "c", "severity": "blocker", "check": "one"}]}]}));
+    let preview = store.preview(&unknown).unwrap();
+    assert!(!preview.can_enable);
+    assert!(preview.diagnostics.iter().any(|d| d.code == "reviewer" && d.file.as_deref() == Some("reviewer.json")));
+
+    // A missing document is named in package.json.
+    let missing = reviewer_fixture(temp.path(), "@lab/missing", "1.0.0", serde_json::json!({}));
+    fs::remove_file(missing.join("reviewer.json")).unwrap();
+    let preview = store.preview(&missing).unwrap();
+    assert!(preview.diagnostics.iter().any(|d| d.code == "reviewer" && d.path.as_deref() == Some("/somniq/reviewer")));
+}
+
+#[test]
+fn review_rubrics_come_from_the_frozen_set_and_apply_by_keyword() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("review-project");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let first = reviewer_fixture(temp.path(), "@lab/review", "1.0.0", stats_rubrics("Trace every number."));
+    install_enabled(&store, &first);
+
+    let run = PluginRun::begin(&store, "chat turn");
+    let rubrics = store.review_rubrics_for(run.set());
+    let keys: Vec<_> = rubrics.iter().map(ActiveReviewRubric::key).collect();
+    assert_eq!(keys, ["@lab/review/evidence", "@lab/review/stats"]);
+
+    // Turning the package off mid-run does not change what this run's Reviewer checks.
+    store.set_enabled("@lab/review", false).unwrap();
+    assert_eq!(store.review_rubrics_for(run.set()).len(), 2);
+    let later = PluginRun::begin(&store, "next turn");
+    assert!(store.review_rubrics_for(later.set()).is_empty());
+
+    // Keywords: case-insensitive, Chinese by substring; no keywords applies always.
+    let applies = |text: &str| -> Vec<String> {
+        applicable_review_rubrics(&rubrics, text).into_iter().map(ActiveReviewRubric::key).collect()
+    };
+    assert_eq!(applies("The loss went down."), ["@lab/review/evidence"]);
+    assert_eq!(applies("结果在 0.05 水平上显著"), ["@lab/review/evidence", "@lab/review/stats"]);
+    assert_eq!(applies("We report the P-VALUE."), ["@lab/review/evidence", "@lab/review/stats"]);
+
+    let packet = render_review_rubrics(&applicable_review_rubrics(&rubrics, "显著"));
+    let section = &packet.section;
+    assert_eq!(packet.delivered, ["@lab/review/evidence", "@lab/review/stats"]);
+    assert!(packet.omitted.is_empty());
+    assert!(section.contains("rubricChecks"));
+    assert!(section.contains("`@lab/review/evidence#numbers`: Trace every number."), "{section}");
+    assert!(section.contains("[critical]"));
+    assert!(section.contains("Statistics / 统计"));
+    assert!(section.contains("the Executor was not shown them"));
+    assert!(render_review_rubrics(&[]).is_empty());
+}
+
+#[test]
+fn rubric_packets_stay_bounded_and_name_what_they_left_out() {
+    let long = "Check this carefully. ".repeat(27);
+    let rubric = |id: usize| ActiveReviewRubric {
+        plugin_name: "@lab/big".into(),
+        plugin_version: "1.0.0".into(),
+        rubric: ReviewRubric {
+            id: format!("r{id}"),
+            title: UiText::Plain(format!("Rubric {id}")),
+            applies_when: vec![],
+            criteria: (0..20)
+                .map(|n| ReviewCriterion { id: format!("c{n}"), check: long.clone(), severity: ReviewSeverity::Low })
+                .collect(),
+        },
+    };
+    let rubrics: Vec<_> = (0..8).map(rubric).collect();
+    let packet = render_review_rubrics(&rubrics.iter().collect::<Vec<_>>());
+    let section = &packet.section;
+    assert!(section.chars().count() < MAX_REVIEW_RUBRIC_PACKET_CHARS + 2_000);
+    assert!(section.contains("Omitted for length"));
+    assert!(section.contains("@lab/big/r7"));
+    // What was left out is never recorded as sent, and none of its criteria
+    // reach the per-criterion record.
+    assert!(packet.omitted.contains(&"@lab/big/r7".to_string()));
+    assert!(!packet.delivered.contains(&"@lab/big/r7".to_string()));
+    assert_eq!(packet.delivered.len() + packet.omitted.len(), 8);
+    assert!(packet.criteria.iter().all(|c| !c.key.starts_with("@lab/big/r7#")));
+    assert_eq!(packet.criteria.len(), packet.delivered.len() * 20);
+}
+
+fn two_criteria_packet() -> RubricPacket {
+    let rubric = ActiveReviewRubric {
+        plugin_name: "@lab/review".into(),
+        plugin_version: "1.0.0".into(),
+        rubric: ReviewRubric {
+            id: "evidence".into(),
+            title: UiText::Plain("Evidence".into()),
+            applies_when: vec![],
+            criteria: vec![
+                ReviewCriterion { id: "numbers".into(), check: "Trace every number.".into(), severity: ReviewSeverity::Critical },
+                ReviewCriterion { id: "limits".into(), check: "State the limits.".into(), severity: ReviewSeverity::Medium },
+            ],
+        },
+    };
+    render_review_rubrics(&[&rubric])
+}
+
+#[test]
+fn an_issue_citing_a_criterion_makes_it_violated_whatever_the_checks_say() {
+    let packet = two_criteria_packet();
+    let reported = vec![ReportedRubricCheck { criterion: "@lab/review/evidence#numbers".into(), result: "met".into(), note: String::new() }];
+    let issues = vec![
+        RubricIssue { criterion: Some("@lab/review/evidence#numbers".into()), severity: "low".into() },
+        RubricIssue { criterion: Some("@lab/other/x#y".into()), severity: "high".into() },
+        RubricIssue { criterion: None, severity: "medium".into() },
+    ];
+    let out = reconcile_rubric_checks(&packet, &reported, &issues);
+    assert_eq!(out.checks[0].result, RubricCheckResult::Violated);
+    // The other criterion was sent but never reported: unreported, not met.
+    assert_eq!(out.checks[1].result, RubricCheckResult::Unreported);
+    assert_eq!(out.issue_floor, [Some(ReviewSeverity::Critical), None, None]);
+    assert_eq!(out.unknown_issue_criteria, [1]);
+    assert_eq!(out.critical_violations().len(), 1);
+    assert!(severity_below("low", ReviewSeverity::Critical));
+    assert!(!severity_below("critical", ReviewSeverity::Critical));
+}
+
+#[test]
+fn a_reported_violation_without_an_issue_is_surfaced_and_unknown_keys_are_dropped() {
+    let packet = two_criteria_packet();
+    let reported = vec![
+        ReportedRubricCheck { criterion: "@lab/review/evidence#numbers".into(), result: "Violated".into(), note: "table says 0.91, log says 0.89".into() },
+        ReportedRubricCheck { criterion: "@lab/review/evidence#limits".into(), result: "not applicable".into(), note: String::new() },
+        ReportedRubricCheck { criterion: "@lab/review/evidence#made-up".into(), result: "met".into(), note: String::new() },
+    ];
+    let out = reconcile_rubric_checks(&packet, &reported, &[]);
+    assert_eq!(out.violated_without_issue.len(), 1);
+    assert_eq!(out.violated_without_issue[0].note, "table says 0.91, log says 0.89");
+    assert_eq!(out.checks[1].result, RubricCheckResult::NotApplicable);
+    assert_eq!(out.unknown_reported, ["@lab/review/evidence#made-up"]);
+    assert_eq!(out.checks.len(), 2);
+    let unanswered = ReviewRubricRecord::unanswered(&packet);
+    assert!(unanswered.checks.iter().all(|c| c.result == RubricCheckResult::Unreported));
+}
+
+#[test]
+fn a_changed_criterion_is_an_upgrade_change_to_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("review-upgrade");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &reviewer_fixture(temp.path(), "@lab/review", "1.0.0", stats_rubrics("Trace every number.")));
+    let next = reviewer_fixture(temp.path(), "@lab/review", "1.1.0", stats_rubrics("Trace every number to a file."));
+    let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
+    assert!(plan.diff.changed);
+    assert_eq!(plan.diff.review_rubrics.added.len(), 1);
+    assert!(plan.diff.review_rubrics.added[0].starts_with("evidence (1 criteria, "));
+    assert_eq!(plan.diff.review_rubrics.removed.len(), 1);
+}
+
+#[test]
+fn propose_tasks_is_only_for_a_panel_with_its_own_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = temp.path().join("tasks-pkg");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({"name": "@lab/tasks", "version": "1.0.0", "somniq": {"manifestVersion": 1, "ui": "./ui.json"}})).unwrap(),
+    )
+    .unwrap();
+    fs::write(source.join("page.html"), "<!doctype html><p>page</p>").unwrap();
+    let write_ui = |panel: serde_json::Value| {
+        fs::write(source.join("ui.json"), serde_json::to_vec(&serde_json::json!({"schemaVersion": 3, "panels": [panel]})).unwrap()).unwrap();
+    };
+
+    write_ui(serde_json::json!({"id": "p", "slot": "nav.page", "title": "P", "scope": "project", "page": "./page.html", "proposeTasks": true,
+        "widgets": [{"id": "findings", "type": "markdown", "title": "Findings"}]}));
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    assert!(preview.capabilities.ui_panels[0].propose_tasks);
+
+    write_ui(serde_json::json!({"id": "p", "slot": "chat.sidebar", "title": "P", "proposeTasks": true,
+        "widgets": [{"id": "notes", "type": "notes", "title": "Notes"}]}));
+    let preview = store.preview(&source).unwrap();
+    assert!(!preview.can_enable);
+    assert!(
+        preview.diagnostics.iter().any(|d| d.path.as_deref() == Some("/panels/0/proposeTasks")),
+        "{:?}",
+        preview.diagnostics
+    );
+}
+
+#[test]
+fn an_approval_gate_cannot_approve_past_a_violated_critical_criterion() {
+    let packet = two_criteria_packet();
+    let mut gate = serde_json::json!({
+        "approved": true,
+        "summary": "Plan is fine.",
+        "issues": ["[@lab/review/evidence#limits] limits are not stated"],
+        "rubricChecks": [{"criterion": "@lab/review/evidence#numbers", "result": "violated", "note": "query count does not match the table"}]
+    });
+    let gate = gate.as_object_mut().unwrap();
+    assert!(apply_rubrics_to_gate(gate, &packet));
+    assert_eq!(gate["approved"], false);
+    assert!(gate.get("rubricChecks").is_none());
+    let issues = gate["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[1], "[@lab/review/evidence#numbers] query count does not match the table");
+    let record: ReviewRubricRecord = serde_json::from_value(gate["rubrics"].clone()).unwrap();
+    assert!(record.verdict_corrected);
+    assert_eq!(record.checks[1].result, RubricCheckResult::Violated, "the tagged issue marks limits violated");
+
+    // Nothing installed: the reply is not touched.
+    let mut plain = serde_json::json!({"approved": true, "summary": "ok", "issues": []});
+    assert!(!apply_rubrics_to_gate(plain.as_object_mut().unwrap(), &RubricPacket::default()));
+    assert!(plain.get("rubrics").is_none());
+}

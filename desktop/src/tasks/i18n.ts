@@ -25,6 +25,9 @@ export const REVIEW_COPY: Record<
     verdict: Record<WorkTaskVerdict, string>;
     reviewedBy: (model: string) => string;
     exhausted: (rounds: number) => string;
+    rubrics: (checked: number, violated: number, unreported: number) => string;
+    rubricsOmitted: (keys: string) => string;
+    rubricsCorrected: string;
     empty: Record<WorkTaskEmptyReason, string>;
   }
 > = {
@@ -47,6 +50,9 @@ export const REVIEW_COPY: Record<
     },
     reviewedBy: (model) => `审查者：${model}`,
     exhausted: (rounds) => `已用完 ${rounds} 轮修改，下面这些问题仍然存在，请你自己判断。`,
+    rubrics: (checked, violated, unreported) => `插件审查细则：下发 ${checked} 条，违反 ${violated} 条，未报告 ${unreported} 条`,
+    rubricsOmitted: (keys) => `因长度未下发（未检查）：${keys}`,
+    rubricsCorrected: "有 critical 细则被违反，控制器已把“通过”改为“需修改”。",
     empty: {
       no_repository_changes: "任务跑完了，但没有改动任何文件——它可能只是读取和分析。会话里有它的结论。",
       artifacts_only: "没有改动仓库文件，但产出了独立交付物，在下面单独审阅。",
@@ -76,6 +82,10 @@ export const REVIEW_COPY: Record<
     reviewedBy: (model) => `Reviewed by ${model}`,
     exhausted: (rounds) =>
       `${rounds} revision rounds were spent and these are still outstanding — your call.`,
+    rubrics: (checked, violated, unreported) =>
+      `Plugin review criteria: ${checked} sent, ${violated} violated, ${unreported} not reported`,
+    rubricsOmitted: (keys) => `Left out for length (not checked): ${keys}`,
+    rubricsCorrected: "A critical criterion was violated, so the controller changed pass to revise.",
     empty: {
       no_repository_changes:
         "The task ran but changed no files — it may have only read and analysed. Its conclusion is in the transcript.",

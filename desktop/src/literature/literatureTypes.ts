@@ -661,6 +661,8 @@ export interface LiteratureProtocolPreview {
       willExecute: boolean;
     }>;
     maxResults: number;
+    /** The protocol's sort order, echoed on every plan row by the kernel. */
+    sortOrder?: string;
     adapterStatus: string;
     coverageNote: string;
   }>;

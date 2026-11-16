@@ -20,6 +20,7 @@ mod authoring;
 mod builtin;
 mod dsh;
 mod lifecycle;
+mod reviewer;
 mod store_guard;
 mod ui;
 mod upgrade;
@@ -28,6 +29,7 @@ mod versions;
 pub use authoring::*;
 pub use builtin::*;
 pub use lifecycle::*;
+pub use reviewer::*;
 pub use store_guard::*;
 pub use ui::*;
 pub use upgrade::*;
@@ -101,6 +103,9 @@ pub struct PluginCapabilities {
     pub mcp_servers: Vec<PluginMcp>,
     #[serde(default)]
     pub ui_panels: Vec<UiPanel>,
+    /// Review criteria for the independent Reviewer (`somniq.reviewer`).
+    #[serde(default)]
+    pub review_rubrics: Vec<ReviewRubric>,
     /// Official plugins the package needs (`somniq.requires`), known ids only.
     #[serde(default)]
     pub requires: Vec<String>,
@@ -609,11 +614,12 @@ impl PluginStore {
         if capabilities.skills.is_empty()
             && capabilities.mcp_servers.is_empty()
             && capabilities.ui_panels.is_empty()
+            && capabilities.review_rubrics.is_empty()
             && !diagnostics.iter().any(|d| d.severity == "error")
         {
             diagnostics.push(Diagnostic::error(
                 "empty",
-                "Package contains no supported Skills, MCP servers or UI panels",
+                "Package contains no supported Skills, MCP servers, UI panels or review rubrics",
             ));
         }
         if capabilities.skills.iter().any(|name| {

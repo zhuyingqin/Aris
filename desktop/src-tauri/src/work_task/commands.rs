@@ -88,15 +88,23 @@ fn stamp_derived(tasks: Vec<WorkTask>) -> Vec<WorkTask> {
         .collect()
 }
 
+// Every command that changes a row announces it, not only the engine: a plugin
+// page and a second window follow the board through `work-task-changed`.
 #[tauri::command]
 pub async fn work_task_create(
+    app: AppHandle,
     projects_state: State<'_, ProjectState>,
     title: String,
     prompt: String,
     model: Option<String>,
+    origin: Option<super::model::WorkTaskOrigin>,
 ) -> Result<WorkTask, String> {
     let (project_id, _) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || create_core(&project_id, title, prompt, model)).await
+    let emit_project = project_id.clone();
+    let created =
+        crate::blocking::off_main_thread(move || create_core_with_origin(&project_id, title, prompt, model, origin)).await?;
+    engine::emit_changed(&app, &emit_project);
+    Ok(created)
 }
 
 pub(crate) fn create_core(
@@ -105,6 +113,19 @@ pub(crate) fn create_core(
     prompt: String,
     model: Option<String>,
 ) -> Result<WorkTask, String> {
+    create_core_with_origin(project_id, title, prompt, model, None)
+}
+
+pub(crate) fn create_core_with_origin(
+    project_id: &str,
+    title: String,
+    prompt: String,
+    model: Option<String>,
+    origin: Option<super::model::WorkTaskOrigin>,
+) -> Result<WorkTask, String> {
+    if let Some(origin) = &origin {
+        origin.validate()?;
+    }
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("a work task needs a title".to_string());
@@ -112,6 +133,7 @@ pub(crate) fn create_core(
     let now = store::now_ms();
     let mut task = WorkTask::new(new_task_id(now), title, prompt.trim().to_string(), now);
     task.model = model.filter(|value| !value.trim().is_empty());
+    task.origin = origin;
     store::insert(project_id, task)
 }
 
@@ -131,6 +153,7 @@ pub async fn work_task_create_and_start(
     title: String,
     prompt: String,
     model: Option<String>,
+    origin: Option<super::model::WorkTaskOrigin>,
 ) -> Result<WorkTask, String> {
     let (project_id, project_path) = binding(&projects_state)?;
     let queued = crate::blocking::off_main_thread({
@@ -138,7 +161,7 @@ pub async fn work_task_create_and_start(
         let project_path = project_path.clone();
         move || {
             worktree::ensure_can_host_tasks(&project_path)?;
-            let created = create_core(&project_id, title, prompt, model)?;
+            let created = create_core_with_origin(&project_id, title, prompt, model, origin)?;
             start_core(&project_id, &project_path, &created.id)
         }
     })
@@ -246,6 +269,7 @@ pub(crate) fn queue_scheduled_run(
 
 #[tauri::command]
 pub async fn work_task_update(
+    app: AppHandle,
     projects_state: State<'_, ProjectState>,
     task_id: String,
     title: Option<String>,
@@ -253,10 +277,13 @@ pub async fn work_task_update(
     model: Option<String>,
 ) -> Result<WorkTask, String> {
     let (project_id, _) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || {
+    let emit_project = project_id.clone();
+    let updated = crate::blocking::off_main_thread(move || {
         update_core(&project_id, &task_id, title, prompt, model)
     })
-    .await
+    .await?;
+    engine::emit_changed(&app, &emit_project);
+    Ok(updated)
 }
 
 /// Editing is refused while the engine owns the task.
@@ -297,11 +324,15 @@ pub(crate) fn update_core(
 
 #[tauri::command]
 pub async fn work_task_delete(
+    app: AppHandle,
     projects_state: State<'_, ProjectState>,
     task_id: String,
 ) -> Result<(), String> {
     let (project_id, project_path) = binding(&projects_state)?;
-    crate::blocking::off_main_thread(move || delete_core(&project_id, &project_path, &task_id)).await
+    let emit_project = project_id.clone();
+    crate::blocking::off_main_thread(move || delete_core(&project_id, &project_path, &task_id)).await?;
+    engine::emit_changed(&app, &emit_project);
+    Ok(())
 }
 
 pub(crate) fn delete_core(

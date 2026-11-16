@@ -41,7 +41,7 @@ pub struct UiLocales {
 }
 
 impl UiText {
-    fn validate(&self, max: usize) -> Result<(), String> {
+    pub(super) fn validate(&self, max: usize) -> Result<(), String> {
         let valid = |s: &str| !s.trim().is_empty() && s.chars().count() <= max;
         if match self {
             Self::Plain(s) => valid(s),
@@ -82,6 +82,10 @@ pub struct UiPanel {
     /// the full page it summarizes then show one store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_panel: Option<String>,
+    /// The panel's page may propose background work tasks. Each proposal is
+    /// shown to the user, who creates it or not; the page never creates one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub propose_tasks: bool,
     #[serde(default)]
     pub widgets: Vec<UiWidget>,
 }
@@ -267,6 +271,9 @@ struct UiManifest {
     /// any of them is off for a run, the package does not run at all.
     #[serde(default)]
     requires: Vec<String>,
+    /// Review criteria for the independent Reviewer ([`super::reviewer`]).
+    #[serde(default)]
+    reviewer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -610,6 +617,12 @@ pub(super) fn inspect_ui(
             capabilities.requires.push(id.clone());
         }
     }
+    super::reviewer::inspect_reviewer(
+        files,
+        header.reviewer.as_deref(),
+        capabilities,
+        diagnostics,
+    );
     let Some(ui) = header.ui else {
         return;
     };
@@ -739,6 +752,12 @@ pub(super) fn inspect_ui(
             problem(
                 format!("{at}/scope"),
                 format!("A {UI_SLOT_NAV_PAGE} panel must set \"scope\": \"project\""),
+            );
+        }
+        if panel.propose_tasks && !(pages && panel.page.is_some()) {
+            problem(
+                format!("{at}/proposeTasks"),
+                format!("proposeTasks is for a panel's own page: it needs schemaVersion {UI_SCHEMA_PAGE} and a page"),
             );
         }
         if let Some(file) = &panel.page {

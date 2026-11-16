@@ -22,6 +22,7 @@ import "../modelPricing.css";
 import "./ChatComposerGit.css";
 import "./ChatComposerModel.css";
 import "./ChatComposerLayout.css";
+import { chatImageMimeType } from "../imageFiles";
 
 interface ContextStatusView {
   kind: "warning" | "compacted";
@@ -204,7 +205,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
         kind: "image",
         name: imported.name,
         path: imported.path,
-        mimeType: file.type || imageMimeTypeFromPath(imported.path) || "image/png",
+        mimeType: file.type || chatImageMimeType(imported.path) || "image/png",
       };
     }
     const preview = await dataUrlFromFile(file);
@@ -257,7 +258,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
 
 export async function attachmentFromPath(path: string): Promise<ChatAttachment> {
   const imported = await chatImportAttachment(path);
-  const mimeType = imageMimeTypeFromPath(imported.path);
+  const mimeType = chatImageMimeType(imported.path);
   return {
     id: makeId("attachment"),
     kind: mimeType ? "image" : "file",
@@ -265,19 +266,6 @@ export async function attachmentFromPath(path: string): Promise<ChatAttachment> 
     path: imported.path,
     mimeType: mimeType ?? undefined,
   };
-}
-
-function imageMimeTypeFromPath(path: string): string | null {
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  switch (extension) {
-    case "jpg":
-    case "jpeg": return "image/jpeg";
-    case "png": return "image/png";
-    case "gif": return "image/gif";
-    case "webp": return "image/webp";
-    case "bmp": return "image/bmp";
-    default: return null;
-  }
 }
 
 const PERMISSION_OPTIONS = [

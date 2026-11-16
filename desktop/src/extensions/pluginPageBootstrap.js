@@ -48,7 +48,7 @@
     });
     return parts.join("/");
   };
-  var listeners = { data: [], theme: [] };
+  var listeners = { data: [], theme: [], tasks: [] };
   var pending = new Map();
   var sequence = 0;
   var applyTheme = function (theme) {
@@ -83,7 +83,8 @@
   var call = function (method, args) {
     return new Promise(function (resolve, reject) {
       var id = ++sequence;
-      pending.set(id, { resolve: resolve, reject: reject });
+      // Only a data call answers with the panel's data.
+      pending.set(id, { resolve: resolve, reject: reject, data: method === "data" || method === "set" });
       post({ type: "call", id: id, method: method, args: args });
     });
   };
@@ -95,12 +96,14 @@
       if (!task) return;
       pending.delete(message.id);
       if (message.ok) {
-        state.data = message.value;
+        if (task.data) state.data = message.value;
         task.resolve(message.value);
       } else task.reject(new Error(String(message.error)));
     } else if (message.type === "data") {
       state.data = message.data;
       emit("data", message.data);
+    } else if (message.type === "tasks") {
+      emit("tasks", message.tasks);
     } else if (message.type === "theme") {
       state.theme = message.theme;
       applyTheme(message.theme);
@@ -128,6 +131,35 @@
       },
       onTheme: function (listener) {
         return subscribe("theme", listener);
+      },
+      /**
+       * Propose a background work task: { title, prompt, reportTo? }. The app
+       * shows it to the user, who creates it, starts it or declines; the page
+       * never creates one itself. `reportTo` names a widget of this panel the
+       * task writes its conclusion into when it finishes. Resolves to
+       * { status: "started" | "created" | "declined", taskId? }.
+       */
+      task: function (spec) {
+        spec = spec || {};
+        return call("task", {
+          title: String(spec.title == null ? "" : spec.title),
+          prompt: String(spec.prompt == null ? "" : spec.prompt),
+          reportTo: spec.reportTo == null ? null : String(spec.reportTo),
+        });
+      },
+      /**
+       * The tasks this page proposed, newest first, as the task board records
+       * them: { taskId, title, status, state: "todo" | "active" | "waiting" | "ready" |
+       * "done" | "failed" | "canceled", phase?, review?, result?, error? }.
+       * `result` carries the run's closing summary, changed files and
+       * deliverables; `review` the independent Reviewer's verdict.
+       */
+      tasks: function () {
+        return call("tasks");
+      },
+      /** Called with the whole list whenever one of this page's tasks changes. */
+      onTasks: function (listener) {
+        return subscribe("tasks", listener);
       },
       /** Put text in the Chat composer. The user sends it. */
       prompt: function (text) {

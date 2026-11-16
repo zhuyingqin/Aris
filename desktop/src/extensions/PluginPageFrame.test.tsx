@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/plugins";
+import * as tauri from "../api/tauri";
 import PluginPage from "./PluginPage";
 import { pluginPageDocument } from "./pluginPageDocument";
 
 vi.mock("../api/plugins", async (original) => ({
   ...(await original<typeof import("../api/plugins")>()), pluginsUiPage: vi.fn(), pluginsUiStateGet: vi.fn(), pluginsUiStateUpdate: vi.fn(),
 }));
-vi.mock("../api/tauri", () => ({ openExternalUrl: vi.fn() }));
+vi.mock("../api/tauri", () => ({ openExternalUrl: vi.fn(), workTaskCreate: vi.fn(), workTaskCreateAndStart: vi.fn(), workTaskList: vi.fn(), onWorkTaskChanged: vi.fn() }));
+vi.mock("../api/transport", async (original) => ({ ...(await original<typeof import("../api/transport")>()), hasNativeBackend: () => true }));
 vi.mock("../chat/MarkdownContent", () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
 
 const panel: api.ActiveUiPanel = {
@@ -197,6 +199,105 @@ describe("PluginPageFrame", () => {
     await deliver({ channel: "chan-chan-chan-chan-chan", type: "error", message: "isolation" });
     expect(screen.queryByTitle("Focus board")).toBeNull();
     expect(screen.getByRole("alert").textContent).toContain("could not be isolated");
+  });
+
+  it("asks the user before a page's task proposal becomes a background task", async () => {
+    const channel = "chan-chan-chan-chan-chan";
+    const task = (id: number, args: Record<string, unknown>) => ({ channel, type: "call", id, method: "task", args });
+    const lastResult = (id: number) => post.mock.calls.map(([message]) => message).filter((message) => message.id === id).at(-1);
+
+    // A panel that did not declare proposeTasks is refused, and nothing is shown.
+    await mount();
+    await deliver(task(1, { title: "Investigate r2", prompt: "Why did r2 diverge?" }));
+    await waitFor(() => expect(lastResult(1)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("proposeTasks") })));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    cleanup();
+
+    vi.mocked(tauri.onWorkTaskChanged).mockResolvedValue(() => undefined);
+    const triage: api.ActiveUiPanel = { ...panel, proposeTasks: true, widgets: [...panel.widgets, { id: "findings", type: "markdown", title: "Findings" }] };
+    render(<PluginPage panel={triage} projectPath="F:/project" language="en" onAction={onAction} />);
+    const shell = await screen.findByTitle("Focus board") as HTMLIFrameElement;
+    Object.defineProperty(shell, "contentWindow", { value: { 0: pageWindow } });
+
+    // A report target the panel does not declare is refused before asking anyone.
+    await deliver(task(2, { title: "T", prompt: "P", reportTo: "nowhere" }));
+    await waitFor(() => expect(lastResult(2)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("nowhere") })));
+
+    await deliver(task(3, { title: "Investigate r2", prompt: "Why did r2 diverge?", reportTo: "findings" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("@local/focus-board");
+    expect(dialog.textContent).toContain("findings");
+    // One proposal at a time: a second ask while the first waits is refused.
+    await deliver(task(4, { title: "Again", prompt: "Again" }));
+    await waitFor(() => expect(lastResult(4)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("already waiting") })));
+    // The page's call has no answer until the user decides.
+    expect(lastResult(3)).toBeUndefined();
+
+    vi.mocked(tauri.workTaskList).mockResolvedValue([]);
+    vi.mocked(tauri.workTaskCreateAndStart).mockResolvedValue({ id: "task-7" } as Awaited<ReturnType<typeof tauri.workTaskCreateAndStart>>);
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Investigate run r2" } });
+    await act(async () => { screen.getByRole("button", { name: "Create and start" }).click(); });
+    await waitFor(() => expect(lastResult(3)).toEqual(expect.objectContaining({ ok: true, value: { status: "started", taskId: "task-7" } })));
+    const [title, prompt, , origin] = vi.mocked(tauri.workTaskCreateAndStart).mock.calls[0];
+    expect(title).toBe("Investigate run r2");
+    // The task records which page asked, so that page can follow it.
+    expect(origin).toEqual({ pluginName: "@local/focus-board", panelId: "focus-board", reportPanel: "focus-board", reportWidget: "findings" });
+    expect(prompt.startsWith("Why did r2 diverge?")).toBe(true);
+    // The host, not the page, says where the task came from and where it reports.
+    expect(prompt).toContain('proposed by the page "Focus board" of plugin @local/focus-board');
+    expect(prompt).toContain("widget findings (markdown) on panel focus-board");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Declining tells the page so and creates nothing.
+    await deliver(task(5, { title: "Another", prompt: "Look again" }));
+    await act(async () => { (await screen.findByRole("button", { name: "Decline" })).click(); });
+    await waitFor(() => expect(lastResult(5)).toEqual(expect.objectContaining({ ok: true, value: { status: "declined" } })));
+    expect(tauri.workTaskCreate).not.toHaveBeenCalled();
+    expect(tauri.workTaskCreateAndStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a page follow the tasks it proposed, from the board's own records", async () => {
+    const channel = "chan-chan-chan-chan-chan";
+    const lastResult = (id: number) => post.mock.calls.map(([message]) => message).filter((message) => message.id === id).at(-1);
+    const pushes = () => post.mock.calls.map(([message]) => message).filter((message) => message.type === "tasks");
+    const base = { prompt: "", sortOrder: 0, runSeq: 1, createdAt: 1, updatedAt: 2 };
+    const mine = { pluginName: "@local/focus-board", panelId: "focus-board", reportWidget: "findings" };
+    const running = { ...base, id: "t-run", title: "Investigate r2", status: "running", origin: mine, progressMessage: "Reading logs" };
+    const other = { ...base, id: "t-other", title: "Someone else's", status: "running", origin: { pluginName: "@local/other", panelId: "focus-board" } };
+    const manual = { ...base, id: "t-manual", title: "Made on the board", status: "review" };
+    let notify: (() => void) | undefined;
+    vi.mocked(tauri.onWorkTaskChanged).mockImplementation(async (handler) => { notify = () => handler({ projectId: "p", revision: 2 } as never); return () => undefined; });
+    vi.mocked(tauri.workTaskList).mockResolvedValue([running, other, manual] as never);
+
+    const triage: api.ActiveUiPanel = { ...panel, proposeTasks: true };
+    render(<PluginPage panel={triage} projectPath="F:/project" language="en" onAction={onAction} />);
+    const shell = await screen.findByTitle("Focus board") as HTMLIFrameElement;
+    Object.defineProperty(shell, "contentWindow", { value: { 0: pageWindow } });
+
+    await deliver({ channel, type: "call", id: 1, method: "tasks" });
+    await waitFor(() => expect(lastResult(1)?.ok).toBe(true));
+    // Only this page's tasks, in terms a page can draw.
+    expect(lastResult(1).value).toEqual([expect.objectContaining({ taskId: "t-run", state: "active", phase: "Reading logs", reportTo: "findings" })]);
+
+    // The task finishes and is reviewed: the page is told without asking again.
+    vi.mocked(tauri.workTaskList).mockResolvedValue([{
+      ...running, status: "review", progressMessage: null, resultSummary: "lr warm-up was removed",
+      changes: { filesChanged: 1, additions: 3, deletions: 1 },
+      reviewSnapshot: { baseSha: "a", headSha: "b", files: [{ path: "notes/r2.md", changeKind: "added" }], artifacts: [], capturedAt: 0 },
+      reviewState: { round: 1, maxRounds: 2, verdict: "pass", summary: "Cause is supported by the log.", issues: [], reviewerModel: "m", exhausted: false, checkedAt: 3 },
+    }, other] as never);
+    await act(async () => { notify?.(); await Promise.resolve(); });
+    await waitFor(() => expect(pushes()).toHaveLength(1));
+    const [record] = pushes()[0].tasks;
+    expect(record).toEqual(expect.objectContaining({ taskId: "t-run", state: "ready" }));
+    expect(record.review).toEqual(expect.objectContaining({ verdict: "pass", summary: "Cause is supported by the log." }));
+    expect(record.result).toEqual(expect.objectContaining({ summary: "lr warm-up was removed", filesChanged: 1, files: ["notes/r2.md"], merged: false }));
+    expect(record.phase).toBeUndefined();
+
+    // A change elsewhere on the board that leaves this page's tasks as they were sends nothing.
+    await act(async () => { notify?.(); await Promise.resolve(); });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pushes()).toHaveLength(1);
   });
 
   it("shows why a page did not load and can try again", async () => {
