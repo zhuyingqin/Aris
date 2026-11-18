@@ -36,6 +36,8 @@ export type SvgIconName =
   | "fit"
   | "folder"
   | "graph"
+  | "barChart"
+  | "lineChart"
   | "helpCircle"
   | "image"
   | "inbox"
@@ -174,6 +176,10 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M6.3 2.8H2.8v3.5M9.7 2.8h3.5v3.5M13.2 9.7v3.5H9.7M2.8 9.7v3.5h3.5", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "folder":
       return [node("path", { d: "M2.4 4.2h4l1.1 1.4h6.1v6.2a1 1 0 0 1-1 1H3.4a1 1 0 0 1-1-1z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "barChart":
+      return [node("path", { d: "M3.5 13V8.5M8 13V3.5M12.5 13V6.5", strokeLinecap: "round" })];
+    case "lineChart":
+      return [node("path", { d: "M2.5 12 6 7.5l3 2.5 4.5-6", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "graph":
       return [node("circle", { cx: 4, cy: 5, r: 1.25 }), node("circle", { cx: 12, cy: 4, r: 1.25 }), node("circle", { cx: 9.5, cy: 12, r: 1.25 }), node("path", { d: "m5.1 5.4 5.7-1M4.8 6l4 4.9m2.1-5.8-1 5.6", strokeLinecap: "round" })];
     case "helpCircle":

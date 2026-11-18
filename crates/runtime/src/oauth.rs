@@ -361,13 +361,9 @@ fn write_credentials_root(path: &PathBuf, root: &Map<String, Value>) -> io::Resu
     }
     let rendered = serde_json::to_string_pretty(&Value::Object(root.clone()))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let temp_path = path.with_extension("json.tmp");
-    fs::write(&temp_path, format!("{rendered}\n"))?;
-    // Windows fs::rename fails if target exists — remove first
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    fs::rename(temp_path, path)
+    // Replace in place: removing the old file first left a window in which a
+    // crash lost every saved credential.
+    crate::write_file_atomically(path, format!("{rendered}\n"))
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {

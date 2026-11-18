@@ -16,12 +16,12 @@ pub(super) fn validate_source(
 ) -> Result<(), String> {
     let parent = store::load(workspace, &reference.id)?;
     if parent.pending_raster_edit.is_some() {
-        return Err("请先应用图片修改结果。".into());
+        return Err(runtime::ui_lang::tr_static("请先应用图片修改结果。", "Apply the image edit result first.", "Aplica primero el resultado de la edición de la imagen.").into());
     }
     let original = raster::raster_image(workspace, &parent, reference.index)?;
     if reference.hash != store::hash(&original.bytes) || reference.hash != store::hash(&image.bytes)
     {
-        return Err("图片版本已变更，请重新选择。".into());
+        return Err(runtime::ui_lang::tr_static("图片版本已变更，请重新选择。", "The image version has changed. Choose again.", "La versión de la imagen cambió. Vuelve a elegir.").into());
     }
     Ok(())
 }

@@ -68,11 +68,7 @@
 
 /* Split panes can be narrow in a wide window. Choose rows from the card's
    width, so changing a model name or context percentage cannot add a row. */
-@container chat-composer (min-width: 28rem) and (max-width: 40rem) {
-  .chat-input-wrap .chat-footer-left {
-    min-width: max-content;
-  }
-
+@container chat-composer (max-width: 40rem) {
   .chat-input-wrap .chat-workspace-bar {
     flex: 0 0 var(--chat-composer-control-size);
     min-width: 0;
@@ -89,11 +85,9 @@
   .chat-workspace-chevron {
     display: none;
   }
-}
-
-@container chat-composer (max-width: 28rem) {
   .chat-input-wrap .chat-input-footer {
     flex-wrap: wrap;
+    row-gap: 0.375rem;
   }
 
   .chat-input-wrap .chat-footer-left,
@@ -104,6 +98,19 @@
 
   .chat-input-wrap .chat-footer-right {
     justify-content: flex-end;
+  }
+
+  .chat-input-wrap .chat-footer-right .chat-pill-wrap {
+    flex: 0 1 auto;
+    max-width: calc(100% - 5.5rem);
+  }
+
+  .chat-input-wrap .chat-model-pill {
+    max-width: 100%;
+  }
+
+  .chat-input-wrap .chat-model-price {
+    display: none;
   }
 
   .chat-footer-right .ctx-ring {

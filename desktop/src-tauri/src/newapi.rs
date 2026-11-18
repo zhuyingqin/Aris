@@ -107,7 +107,7 @@ pub struct NewApiAuthStatus {
 
 fn secure_base(base: &str) -> Result<String, String> {
     let url = reqwest::Url::parse(base.trim())
-        .map_err(|_| "请配置有效的 HTTPS 账号服务器地址".to_string())?;
+        .map_err(|_| runtime::ui_lang::tr_static("请配置有效的 HTTPS 账号服务器地址", "Configure a valid HTTPS account server address.", "Configura una dirección HTTPS válida para el servidor de cuentas.").to_string())?;
     let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
         || url.host_str().is_none()
@@ -117,20 +117,20 @@ fn secure_base(base: &str) -> Result<String, String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("账号服务器必须使用 HTTPS（本机回环地址除外）".to_string());
+        return Err(runtime::ui_lang::tr_static("账号服务器必须使用 HTTPS（本机回环地址除外）", "The account server must use HTTPS (except for loopback addresses).", "El servidor de cuentas debe usar HTTPS (salvo direcciones de loopback).").to_string());
     }
     Ok(url.origin().ascii_serialization())
 }
 
 pub(crate) fn configured_managed_base() -> Result<String, String> {
     let fallback: Value = serde_json::from_str(MANAGED_NEWAPI_CONFIG)
-        .map_err(|_| "托管账号服务器构建配置无效".to_string())?;
+        .map_err(|_| runtime::ui_lang::tr_static("托管账号服务器构建配置无效", "The managed account server in this build is misconfigured.", "La configuración del servidor de cuentas gestionado en esta compilación no es válida.").to_string())?;
     let candidate = option_env!("VITE_MANAGED_NEWAPI_URL")
         .or_else(|| fallback.get("baseUrl").and_then(Value::as_str))
-        .ok_or_else(|| "托管账号服务器未配置".to_string())?;
+        .ok_or_else(|| runtime::ui_lang::tr_static("托管账号服务器未配置", "No managed account server is configured.", "No hay ningún servidor de cuentas gestionado configurado.").to_string())?;
     let base = secure_base(candidate)?;
     if !cfg!(debug_assertions) && !base.starts_with("https://") {
-        return Err("发布版托管账号服务器必须使用 HTTPS".to_string());
+        return Err(runtime::ui_lang::tr_static("发布版托管账号服务器必须使用 HTTPS", "The managed account server of a release build must use HTTPS.", "El servidor de cuentas gestionado de una versión publicada debe usar HTTPS.").to_string());
     }
     Ok(base)
 }
@@ -149,7 +149,7 @@ fn approved_managed_base(base: &str) -> Result<String, String> {
     if base == official || (cfg!(debug_assertions) && loopback) {
         Ok(base)
     } else {
-        Err("托管账号只能连接此构建指定的官方 HTTPS 服务器".to_string())
+        Err(runtime::ui_lang::tr_static("托管账号只能连接此构建指定的官方 HTTPS 服务器", "A managed account can only connect to the official HTTPS server of this build.", "Una cuenta gestionada solo puede conectarse al servidor HTTPS oficial de esta compilación.").to_string())
     }
 }
 
@@ -248,12 +248,12 @@ async fn fetch_auth_status(
         .get(format!("{base}/api/status"))
         .send()
         .await
-        .map_err(|error| format!("无法读取注册配置: {error}"))?;
-    let body = parse_json(response, "注册配置").await?;
+        .map_err(|error| runtime::tr!("无法读取注册配置: {error}", "Could not read the sign-up settings: {error}", "No se pudo leer la configuración de registro: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("注册配置", "Sign-up settings", "Configuración de registro")).await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return Err(if message.is_empty() {
-            "无法读取注册配置".to_string()
+            runtime::ui_lang::tr_static("无法读取注册配置", "Could not read the sign-up settings", "No se pudo leer la configuración de registro").to_string()
         } else {
             message
         });
@@ -310,7 +310,7 @@ async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, S
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("{label}响应读取失败: {error}"))?;
+        .map_err(|error| runtime::tr!("{label}响应读取失败: {error}", "{label}: reading the response failed: {error}", "{label}: no se pudo leer la respuesta: {error}"))?;
     if let Some(error) =
         runtime::client_outdated_error(status.as_u16(), &String::from_utf8_lossy(&bytes))
     {
@@ -319,14 +319,14 @@ async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, S
 
     parse_json_bytes(&bytes).map_err(|error| {
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return format!("{label}请求过于频繁，请稍后重试 (HTTP 429)");
+            return runtime::tr!("{label}请求过于频繁，请稍后重试 (HTTP 429)", "{label}: too many requests, try again later (HTTP 429)", "{label}: demasiadas solicitudes, vuelve a intentarlo más tarde (HTTP 429)");
         }
         if !status.is_success() && bytes.is_empty() {
-            return format!("{label}请求失败: HTTP {status}，请稍后重试");
+            return runtime::tr!("{label}请求失败: HTTP {status}，请稍后重试", "{label}: request failed: HTTP {status}, try again later", "{label}: la solicitud falló: HTTP {status}, vuelve a intentarlo más tarde");
         }
         let preview = response_preview(&bytes);
-        format!(
-            "{label}响应解析失败: HTTP {status}, Content-Type {content_type}: {error}; 响应内容: {preview}"
+        runtime::tr!(
+            "{label}响应解析失败: HTTP {status}, Content-Type {content_type}: {error}; 响应内容: {preview}", "{label}: parsing the response failed: HTTP {status}, Content-Type {content_type}: {error}; response body: {preview}", "{label}: no se pudo interpretar la respuesta: HTTP {status}, Content-Type {content_type}: {error}; contenido de la respuesta: {preview}"
         )
     })
 }
@@ -642,7 +642,7 @@ fn refresh_cookies_from_headers(headers: &HeaderMap) -> Vec<NewApiRefreshCookie>
 
 fn refresh_cookie_header(cookies: &[NewApiRefreshCookie]) -> Result<HeaderValue, String> {
     if cookies.len() != 1 {
-        return Err("登录续期凭据无效，请重新登录".to_string());
+        return Err(runtime::ui_lang::tr_static("登录续期凭据无效，请重新登录", "The sign-in renewal credential is invalid. Please sign in again.", "La credencial de renovación de sesión no es válida. Vuelve a iniciar sesión.").to_string());
     }
     let value = cookies
         .iter()
@@ -651,13 +651,13 @@ fn refresh_cookie_header(cookies: &[NewApiRefreshCookie]) -> Result<HeaderValue,
                 || !valid_cookie_name(&cookie.name)
                 || !valid_cookie_value(&cookie.value)
             {
-                return Err("登录续期凭据无效，请重新登录".to_string());
+                return Err(runtime::ui_lang::tr_static("登录续期凭据无效，请重新登录", "The sign-in renewal credential is invalid. Please sign in again.", "La credencial de renovación de sesión no es válida. Vuelve a iniciar sesión.").to_string());
             }
             Ok(format!("{}={}", cookie.name, cookie.value))
         })
         .collect::<Result<Vec<_>, String>>()?
         .join("; ");
-    HeaderValue::from_str(&value).map_err(|_| "登录续期凭据无效，请重新登录".to_string())
+    HeaderValue::from_str(&value).map_err(|_| runtime::ui_lang::tr_static("登录续期凭据无效，请重新登录", "The sign-in renewal credential is invalid. Please sign in again.", "La credencial de renovación de sesión no es válida. Vuelve a iniciar sesión.").to_string())
 }
 
 fn newapi_refresh_secret_account(base: &str) -> String {
@@ -671,7 +671,7 @@ fn newapi_refresh_secret_account(base: &str) -> String {
 
 fn save_refresh_session(base: &str, refresh_session: &NewApiRefreshSession) -> Result<(), String> {
     let bytes = serde_json::to_vec(refresh_session)
-        .map_err(|error| format!("无法编码登录续期凭据: {error}"))?;
+        .map_err(|error| runtime::tr!("无法编码登录续期凭据: {error}", "Could not encode the sign-in renewal credential: {error}", "No se pudo codificar la credencial de renovación de sesión: {error}"))?;
     refresh_store::write(&newapi_refresh_secret_account(base), &bytes)?;
     remember_refresh_session(base, refresh_session);
     Ok(())
@@ -685,7 +685,7 @@ fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, Stri
         return Ok(None);
     };
     let refresh_session = serde_json::from_slice::<NewApiRefreshSession>(&secret)
-        .map_err(|_| "保存的登录续期凭据无效，请重新登录".to_string())?;
+        .map_err(|_| runtime::ui_lang::tr_static("保存的登录续期凭据无效，请重新登录", "The saved sign-in renewal credential is invalid. Please sign in again.", "La credencial de renovación de sesión guardada no es válida. Vuelve a iniciar sesión.").to_string())?;
     refresh_cookie_header(&refresh_session.cookies)?;
     if refresh_session
         .session_id
@@ -693,7 +693,7 @@ fn load_refresh_session(base: &str) -> Result<Option<NewApiRefreshSession>, Stri
         .map(str::trim)
         .is_none_or(str::is_empty)
     {
-        return Err("保存的登录续期凭据无效，请重新登录".to_string());
+        return Err(runtime::ui_lang::tr_static("保存的登录续期凭据无效，请重新登录", "The saved sign-in renewal credential is invalid. Please sign in again.", "La credencial de renovación de sesión guardada no es válida. Vuelve a iniciar sesión.").to_string());
     }
     remember_refresh_session(base, &refresh_session);
     Ok(Some(refresh_session))
@@ -861,18 +861,18 @@ async fn login(
         .json(&serde_json::json!({ "username": username, "password": password }))
         .send()
         .await
-        .map_err(|error| format!("无法连接服务器: {error}"))?;
+        .map_err(|error| runtime::tr!("无法连接服务器: {error}", "Failed to connect to the server: {error}", "No se pudo conectar con el servidor: {error}"))?;
     let mut refresh_cookies = refresh_cookies_from_headers(response.headers());
-    let mut body = parse_json(response, "登录").await?;
+    let mut body = parse_json(response, runtime::ui_lang::tr_static("登录", "Sign-in", "Inicio de sesión")).await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return Err(if message.is_empty() {
-            "账号或密码错误".to_string()
+            runtime::ui_lang::tr_static("账号或密码错误", "Incorrect account or password", "La cuenta o la contraseña no son correctas").to_string()
         } else {
             message
         });
     }
-    let data = body.get("data").ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
+    let data = body.get("data").ok_or_else(|| runtime::ui_lang::tr_static("登录成功但未返回用户信息", "Signed in, but no user information was returned", "Se inició sesión, pero no se devolvió información del usuario").to_string())?;
     let requires_verification = ["require_2fa", "require2fa", "require_verification"]
         .iter().any(|key| status_bool(data, key, false));
     if requires_verification {
@@ -890,15 +890,15 @@ async fn login(
             request = request.header(ORIGIN, origin);
         }
         let response = request.send().await
-            .map_err(|error| format!("两步验证失败: {error}"))?;
+            .map_err(|error| runtime::tr!("两步验证失败: {error}", "Two-step verification failed: {error}", "Falló la verificación en dos pasos: {error}"))?;
         refresh_cookies = refresh_cookies_from_headers(response.headers());
-        body = parse_json(response, "两步验证").await?;
+        body = parse_json(response, runtime::ui_lang::tr_static("两步验证", "Two-step verification", "Verificación en dos pasos")).await?;
         if !api_ok(&body) {
-            return Err(session_api_error(&body, "两步验证码错误或已过期"));
+            return Err(session_api_error(&body, runtime::ui_lang::tr_static("两步验证码错误或已过期", "The two-step verification code is wrong or has expired", "El código de verificación en dos pasos es incorrecto o caducó")));
         }
     }
-    let data = body.get("data").ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
-    let user_id = data_user_id(data).ok_or_else(|| "登录成功但未返回用户信息".to_string())?;
+    let data = body.get("data").ok_or_else(|| runtime::ui_lang::tr_static("登录成功但未返回用户信息", "Signed in, but no user information was returned", "Se inició sesión, pero no se devolvió información del usuario").to_string())?;
+    let user_id = data_user_id(data).ok_or_else(|| runtime::ui_lang::tr_static("登录成功但未返回用户信息", "Signed in, but no user information was returned", "Se inició sesión, pero no se devolvió información del usuario").to_string())?;
     let refresh_session = data_session_id(data).and_then(|session_id| {
         (refresh_cookies.len() == 1).then_some(NewApiRefreshSession {
             cookies: refresh_cookies,
@@ -933,10 +933,10 @@ async fn find_token(
     let response = with_session(client.get(format!("{base}/api/token/")), session)
         .send()
         .await
-        .map_err(|error| format!("获取令牌列表失败: {error}"))?;
-    let body = parse_json(response, "令牌列表").await?;
+        .map_err(|error| runtime::tr!("获取令牌列表失败: {error}", "Fetching the token list failed: {error}", "No se pudo obtener la lista de tokens: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("令牌列表", "Token list", "Lista de tokens")).await?;
     if !api_ok(&body) {
-        let message = session_api_error(&body, "获取令牌列表失败");
+        let message = session_api_error(&body, runtime::ui_lang::tr_static("获取令牌列表失败", "Fetching the token list failed", "No se pudo obtener la lista de tokens"));
         if is_invalid_session_error(&message) {
             return Err(message);
         }
@@ -969,10 +969,10 @@ async fn create_token(
         .json(&managed_token_create_payload(&generated_key))
         .send()
         .await
-        .map_err(|error| format!("创建令牌失败: {error}"))?;
-    let body = parse_json(response, "创建令牌").await?;
+        .map_err(|error| runtime::tr!("创建令牌失败: {error}", "Creating the token failed: {error}", "No se pudo crear el token: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("创建令牌", "Create token", "Crear token")).await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "创建令牌失败"));
+        return Err(session_api_error(&body, runtime::ui_lang::tr_static("创建令牌失败", "Creating the token failed", "No se pudo crear el token")));
     }
     let mut candidate = body
         .get("data")
@@ -1113,12 +1113,12 @@ async fn fetch_token_key(
     )
     .send()
     .await
-    .map_err(|error| format!("获取令牌密钥失败: {error}"))?;
-    let body = parse_json(response, "令牌密钥").await?;
+    .map_err(|error| runtime::tr!("获取令牌密钥失败: {error}", "Fetching the token key failed: {error}", "No se pudo obtener la clave del token: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("令牌密钥", "Token key", "Clave del token")).await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "获取令牌密钥失败"));
+        return Err(session_api_error(&body, runtime::ui_lang::tr_static("获取令牌密钥失败", "Fetching the token key failed", "No se pudo obtener la clave del token")));
     }
-    token_key_from_body(&body).ok_or_else(|| "令牌密钥为空".to_string())
+    token_key_from_body(&body).ok_or_else(|| runtime::ui_lang::tr_static("令牌密钥为空", "The token key is empty", "La clave del token está vacía").to_string())
 }
 
 fn collect_model_ids(value: &Value, out: &mut Vec<String>) {
@@ -1165,10 +1165,10 @@ async fn user_models(
     let response = with_session(client.get(format!("{base}/api/user/models")), session)
         .send()
         .await
-        .map_err(|error| format!("获取模型列表失败: {error}"))?;
-    let body = parse_json(response, "模型列表").await?;
+        .map_err(|error| runtime::tr!("获取模型列表失败: {error}", "Fetching the model list failed: {error}", "No se pudo obtener la lista de modelos: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("模型列表", "Model list", "Lista de modelos")).await?;
     if !api_ok(&body) {
-        let message = session_api_error(&body, "获取模型列表失败");
+        let message = session_api_error(&body, runtime::ui_lang::tr_static("获取模型列表失败", "Fetching the model list failed", "No se pudo obtener la lista de modelos"));
         if is_invalid_session_error(&message) {
             return Err(message);
         }
@@ -1245,8 +1245,8 @@ async fn fetch_user_token(
     let response = with_session(client.get(format!("{base}/api/user/token")), session)
         .send()
         .await
-        .map_err(|error| format!("获取用户访问令牌失败: {error}"))?;
-    let body = parse_json(response, "用户访问令牌").await?;
+        .map_err(|error| runtime::tr!("获取用户访问令牌失败: {error}", "Fetching the user access token failed: {error}", "No se pudo obtener el token de acceso del usuario: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("用户访问令牌", "User access token", "Token de acceso del usuario")).await?;
     if !api_ok(&body) {
         return Ok(None);
     }
@@ -1305,13 +1305,13 @@ async fn get_or_create_token(
             Some(token) => token,
             None => find_token(client, base, session)
                 .await?
-                .ok_or_else(|| "令牌创建后仍未找到".to_string())?,
+                .ok_or_else(|| runtime::ui_lang::tr_static("令牌创建后仍未找到", "The token was created but could not be found", "El token se creó, pero no se encuentra").to_string())?,
         },
     };
     if let Some(key) = token.key {
         return Ok((key, token.id));
     }
-    let token_id = token.id.ok_or_else(|| "令牌未返回可用 ID".to_string())?;
+    let token_id = token.id.ok_or_else(|| runtime::ui_lang::tr_static("令牌未返回可用 ID", "The token has no usable ID", "El token no tiene un ID utilizable").to_string())?;
     // The list response only ever returns a masked key, so a fresh reveal call
     // is otherwise required on *every* refresh. Reuse a previously-revealed
     // key for the same token id to avoid tripping the gateway's rate limit on
@@ -1334,12 +1334,12 @@ fn stored_session() -> Result<(String, NewApiSession), String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .ok_or_else(|| "尚未登录 New API".to_string())?;
+        .ok_or_else(|| runtime::ui_lang::tr_static("尚未登录 New API", "Not signed in to New API", "No has iniciado sesión en New API").to_string())?;
     let base = approved_managed_base(&base)?;
     let user_id = obj
         .get("newapi_user_id")
         .and_then(value_as_i64)
-        .ok_or_else(|| "尚未登录 New API".to_string())?;
+        .ok_or_else(|| runtime::ui_lang::tr_static("尚未登录 New API", "Not signed in to New API", "No has iniciado sesión en New API").to_string())?;
     let user_token = obj
         .get("newapi_access_token")
         .and_then(Value::as_str)
@@ -1387,17 +1387,17 @@ async fn refresh_browser_session(
     let response = request
         .send()
         .await
-        .map_err(|error| format!("登录续期失败: {error}"))?;
+        .map_err(|error| runtime::tr!("登录续期失败: {error}", "Renewing the sign-in failed: {error}", "No se pudo renovar la sesión: {error}"))?;
     let rotated_cookies = refresh_cookies_from_headers(response.headers());
-    let body = parse_json(response, "登录续期").await?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("登录续期", "Sign-in renewal", "Renovación de sesión")).await?;
     if !api_ok(&body) {
         // Only a rejection of the long-lived refresh credential confirms that
         // sign-in has ended. An ordinary access-token rejection can be renewed.
-        return clear_session_if_invalid(Err(session_api_error(&body, "登录续期失败")));
+        return clear_session_if_invalid(Err(session_api_error(&body, runtime::ui_lang::tr_static("登录续期失败", "Renewing the sign-in failed", "No se pudo renovar la sesión"))));
     }
     let data = body.get("data").unwrap_or(&body);
     let access_token =
-        data_user_token(data).ok_or_else(|| "登录续期成功但未返回访问令牌".to_string())?;
+        data_user_token(data).ok_or_else(|| runtime::ui_lang::tr_static("登录续期成功但未返回访问令牌", "The sign-in was renewed, but no access token was returned", "La sesión se renovó, pero no se devolvió un token de acceso").to_string())?;
     let access_expires_at = data_access_expires_at(data);
     let refresh_session = session
         .refresh_session
@@ -1422,8 +1422,6 @@ async fn refresh_browser_session(
 /// against new-api's `/v1/user/self` and never the rotating refresh cookie,
 /// which must not leave the OS credential store.
 pub(crate) struct AccountOwnershipCredential {
-    /// The account service that issued `access_token`.
-    pub(crate) base_url: String,
     pub(crate) user_id: i64,
     pub(crate) access_token: String,
 }
@@ -1439,14 +1437,13 @@ pub(crate) async fn account_ownership_credential(
     }
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
-    let (base_url, session) = authenticated_stored_session(&client).await?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
+    let (_base_url, session) = authenticated_stored_session(&client).await?;
     let access_token = session
         .user_token
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| SESSION_EXPIRED_MESSAGE.to_string())?;
     Ok(Some(AccountOwnershipCredential {
-        base_url,
         user_id: session.user_id,
         access_token,
     }))
@@ -1465,8 +1462,8 @@ pub(crate) fn signed_in_base_url() -> Option<String> {
     approved_managed_base(base).ok()
 }
 
-/// The signed-in account as literature adapters see it: the research gateway's
-/// school Scopus route identifies the caller with it.
+/// The signed-in account as account-billed tools see it: DeepSeek search and
+/// the school Scopus route are charged to its downstream API token.
 pub(crate) struct ResearchAccount;
 
 fn research_api_credential(
@@ -1498,28 +1495,6 @@ impl tools::research_account::ResearchAccountProvider for ResearchAccount {
         // load_object overlays the OS-held downstream API key. The dashboard
         // access token and refresh cookie are never used by paid tool routes.
         Ok(research_api_credential(&base, &config::load_object()))
-    }
-
-    fn credential(
-        &self,
-    ) -> Result<Option<tools::research_account::ResearchAccountCredential>, String> {
-        // Adapters block, on a runtime's blocking pool or a plain thread, while
-        // renewal is async. A private current-thread runtime on its own thread
-        // serves both without ever nesting one `block_on` inside another.
-        let credential = std::thread::spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("账号凭证查询失败: {error}"))?
-                .block_on(account_ownership_credential())
-        })
-        .join()
-        .map_err(|_| "账号凭证查询失败".to_string())??;
-        Ok(credential.map(|credential| tools::research_account::ResearchAccountCredential {
-            issuer: credential.base_url,
-            user_id: credential.user_id,
-            access_token: credential.access_token,
-        }))
     }
 }
 
@@ -1657,7 +1632,7 @@ pub(crate) async fn replace_rejected_model_key(base_url: String, rejected_key: S
     let fetched = async {
         let client = account_http_client_builder(Duration::from_secs(20))
             .build()
-            .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+            .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
         with_authenticated_session(&client, |client, base, session| async move {
             let (key, token_id) = get_or_create_token(&client, &base, &session, false).await?;
             config::persist_newapi_executor_credentials(&base, &key, token_id)?;
@@ -1689,7 +1664,7 @@ pub async fn newapi_auth_status(base_url: String) -> Result<NewApiAuthStatus, St
     let base = approved_managed_base(&base_url)?;
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     fetch_auth_status(&client, &base).await
 }
 
@@ -1744,12 +1719,12 @@ pub async fn newapi_login(
     let base = approved_managed_base(&base_url)?;
     let username = username.trim().to_string();
     if username.is_empty() || password.is_empty() {
-        return Err("请输入账号和密码".to_string());
+        return Err(runtime::ui_lang::tr_static("请输入账号和密码", "Enter your account and password", "Escribe tu cuenta y tu contraseña").to_string());
     }
     let client = account_http_client_builder(Duration::from_secs(30))
         .cookie_store(true)
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
 
     let session = login(&client, &base, &username, &password, two_factor_code.as_deref()).await?;
     // Save the long-lived session before minting or persisting downstream
@@ -1830,23 +1805,23 @@ pub async fn newapi_send_verification(input: NewApiVerificationInput) -> Result<
     let base = approved_managed_base(&input.base_url)?;
     let email = input.email.trim().to_string();
     if email.is_empty() {
-        return Err("请先输入邮箱".to_string());
+        return Err(runtime::ui_lang::tr_static("请先输入邮箱", "Enter your email first", "Primero escribe tu correo electrónico").to_string());
     }
     let turnstile = optional_payload_value(input.turnstile).unwrap_or_default();
     let client = account_http_client_builder(Duration::from_secs(30))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     let response = client
         .get(format!("{base}/api/verification"))
         .query(&[("email", email.as_str()), ("turnstile", turnstile.as_str())])
         .send()
         .await
-        .map_err(|error| format!("无法连接服务器: {error}"))?;
-    let body = parse_json(response, "邮箱验证码").await?;
+        .map_err(|error| runtime::tr!("无法连接服务器: {error}", "Failed to connect to the server: {error}", "No se pudo conectar con el servidor: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("邮箱验证码", "Email verification code", "Código de verificación por correo")).await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return Err(if message.is_empty() {
-            "验证码发送失败".to_string()
+            runtime::ui_lang::tr_static("验证码发送失败", "Sending the verification code failed", "No se pudo enviar el código de verificación").to_string()
         } else {
             message
         });
@@ -1863,32 +1838,32 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
     let username = input.username.trim().to_string();
     let password = input.password;
     if username.is_empty() || password.is_empty() {
-        return Err("请输入账号和密码".to_string());
+        return Err(runtime::ui_lang::tr_static("请输入账号和密码", "Enter your account and password", "Escribe tu cuenta y tu contraseña").to_string());
     }
     let password_len = password.chars().count();
     if !(8..=20).contains(&password_len) {
-        return Err("密码长度需要为 8-20 位".to_string());
+        return Err(runtime::ui_lang::tr_static("密码长度需要为 8-20 位", "The password must be 8-20 characters long", "La contraseña debe tener entre 8 y 20 caracteres").to_string());
     }
 
     let client = account_http_client_builder(Duration::from_secs(30))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     let status = fetch_auth_status(&client, &base).await?;
     if !status.register_enabled {
-        return Err("当前服务器未开放注册".to_string());
+        return Err(runtime::ui_lang::tr_static("当前服务器未开放注册", "This server does not allow sign-ups", "Este servidor no admite registros").to_string());
     }
     if !status.password_register_enabled {
-        return Err("当前服务器未开放账号密码注册".to_string());
+        return Err(runtime::ui_lang::tr_static("当前服务器未开放账号密码注册", "This server does not allow sign-up with an account and password", "Este servidor no admite el registro con cuenta y contraseña").to_string());
     }
     let email = optional_payload_value(input.email);
     let verification_code = optional_payload_value(input.verification_code);
     let aff_code = optional_payload_value(input.aff_code);
     let turnstile = optional_payload_value(input.turnstile);
     if status.email_verification && (email.is_none() || verification_code.is_none()) {
-        return Err("当前服务器注册需要邮箱和验证码".to_string());
+        return Err(runtime::ui_lang::tr_static("当前服务器注册需要邮箱和验证码", "Signing up on this server needs an email and a verification code", "Para registrarte en este servidor necesitas un correo y un código de verificación").to_string());
     }
     if status.turnstile_check && turnstile.is_none() {
-        return Err("当前服务器注册需要人机验证，请先在网页端完成注册".to_string());
+        return Err(runtime::ui_lang::tr_static("当前服务器注册需要人机验证，请先在网页端完成注册", "Signing up on this server needs a human verification check. Finish signing up on the website first", "Para registrarte en este servidor hace falta una verificación humana. Completa primero el registro en la web").to_string());
     }
 
     let mut payload = serde_json::Map::new();
@@ -1906,12 +1881,12 @@ pub async fn newapi_register(input: NewApiRegisterInput) -> Result<(), String> {
         .json(&payload)
         .send()
         .await
-        .map_err(|error| format!("无法连接服务器: {error}"))?;
-    let body = parse_json(response, "注册").await?;
+        .map_err(|error| runtime::tr!("无法连接服务器: {error}", "Failed to connect to the server: {error}", "No se pudo conectar con el servidor: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("注册", "Sign-up", "Registro")).await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return Err(if message.is_empty() {
-            "注册失败".to_string()
+            runtime::ui_lang::tr_static("注册失败", "Sign-up failed", "No se pudo completar el registro").to_string()
         } else {
             message
         });
@@ -2159,14 +2134,14 @@ async fn user_self(
     let response = with_session(client.get(format!("{base}/api/user/self")), session)
         .send()
         .await
-        .map_err(|error| format!("获取账户信息失败: {error}"))?;
-    let body = parse_json(response, "账户信息").await?;
+        .map_err(|error| runtime::tr!("获取账户信息失败: {error}", "Fetching the account information failed: {error}", "No se pudo obtener la información de la cuenta: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("账户信息", "Account information", "Información de la cuenta")).await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "获取账户信息失败"));
+        return Err(session_api_error(&body, runtime::ui_lang::tr_static("获取账户信息失败", "Fetching the account information failed", "No se pudo obtener la información de la cuenta")));
     }
     body.get("data")
         .cloned()
-        .ok_or_else(|| "账户信息为空".to_string())
+        .ok_or_else(|| runtime::ui_lang::tr_static("账户信息为空", "The account information is empty", "La información de la cuenta está vacía").to_string())
 }
 
 fn ratio_to_string(value: &Value) -> String {
@@ -2312,7 +2287,7 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
     }
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     with_authenticated_session(&client, bootstrap_account).await
 }
 
@@ -2395,7 +2370,7 @@ async fn bootstrap_account(
 }
 
 async fn parse_usage_log_json(response: reqwest::Response) -> Result<Value, String> {
-    parse_json(response, "调用明细").await
+    parse_json(response, runtime::ui_lang::tr_static("调用明细", "Usage details", "Detalle de uso")).await
 }
 
 fn normalize_usage_log_error(error: String) -> String {
@@ -2406,7 +2381,7 @@ fn normalize_usage_log_error(error: String) -> String {
         .split_once(": ")
         .map(|(_, cause)| cause)
         .unwrap_or(error.as_str());
-    format!("获取调用明细失败: {cause}")
+    runtime::tr!("获取调用明细失败: {cause}", "Fetching the usage details failed: {cause}", "No se pudo obtener el detalle de uso: {cause}")
 }
 
 #[tauri::command]
@@ -2415,7 +2390,7 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
     let page_size = page_size.clamp(1, 100);
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端初始化失败: {error}", "Initializing the HTTP client failed: {error}", "No se pudo inicializar el cliente HTTP: {error}"))?;
     with_authenticated_session(&client, |client, base, session| async move {
         fetch_usage_logs(&client, &base, &session, page, page_size).await
     })
@@ -2438,10 +2413,10 @@ async fn fetch_usage_logs(
     let response = with_session(request, session)
         .send()
         .await
-        .map_err(|error| format!("获取调用明细失败: {error}"))?;
+        .map_err(|error| runtime::tr!("获取调用明细失败: {error}", "Fetching the usage details failed: {error}", "No se pudo obtener el detalle de uso: {error}"))?;
     let body = parse_usage_log_json(response).await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "获取调用明细失败"));
+        return Err(session_api_error(&body, runtime::ui_lang::tr_static("获取调用明细失败", "Fetching the usage details failed", "No se pudo obtener el detalle de uso")));
     }
 
     let data = body.get("data").unwrap_or(&body);
@@ -2469,11 +2444,11 @@ async fn fetch_usage_logs(
 #[tauri::command]
 pub async fn newapi_models() -> Result<Vec<String>, String> {
     if !has_stored_session() {
-        return Err("尚未登录 New API，无法获取模型列表".to_string());
+        return Err(runtime::ui_lang::tr_static("尚未登录 New API，无法获取模型列表", "Not signed in to New API, so the model list cannot be fetched", "No has iniciado sesión en New API, así que no se puede obtener la lista de modelos").to_string());
     }
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     with_authenticated_session(&client, account_models).await
 }
 

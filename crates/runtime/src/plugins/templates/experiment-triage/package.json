@@ -1,0 +1,6 @@
+{
+  "name": "@local/experiment-triage",
+  "version": "0.1.0",
+  "description": "A project page of experiment runs. Pick a run that looks wrong and send the agent to investigate it as a background task; the task writes its conclusion back onto the page.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

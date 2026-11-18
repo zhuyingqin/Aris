@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 2,
+  "panels": [
+    {
+      "id": "reading-cards",
+      "slot": "chat.sidebar",
+      "title": {
+        "en": "Reading cards",
+        "cn": "阅读卡片",
+        "es": "Fichas de lectura"
+      },
+      "order": 20,
+      "scope": "project",
+      "widgets": [
+        {
+          "id": "intro",
+          "type": "text",
+          "text": {
+            "en": "One card per paper in this project's library, in the same format, with a page for every statement. Cards live in notes/cards/.",
+            "cn": "本项目文献库中每篇论文一张卡片，格式统一，每条内容都标页码。卡片保存在 notes/cards/。",
+            "es": "Una ficha por artículo de la biblioteca del proyecto, con el mismo formato y la página de cada afirmación. Las fichas se guardan en notes/cards/."
+          }
+        },
+        {
+          "id": "summary",
+          "type": "metrics",
+          "title": {
+            "en": "Library",
+            "cn": "文献库",
+            "es": "Biblioteca"
+          }
+        },
+        {
+          "id": "coverage",
+          "type": "progress",
+          "title": {
+            "en": "Papers with a card",
+            "cn": "已有卡片的论文",
+            "es": "Artículos con ficha"
+          }
+        },
+        {
+          "id": "cards",
+          "type": "list",
+          "title": {
+            "en": "Papers",
+            "cn": "论文",
+            "es": "Artículos"
+          }
+        },
+        {
+          "id": "make-missing",
+          "type": "button",
+          "label": {
+            "en": "Make the missing cards",
+            "cn": "补齐缺少的卡片",
+            "es": "Hacer las fichas pendientes"
+          },
+          "action": {
+            "type": "prompt",
+            "send": true,
+            "text": {
+              "en": "Use the reading-card skill: write a reading card for every paper in this project's library that has none yet, then update the Reading cards panel of @local/reading-cards. Answer in the language I use in this conversation.",
+              "cn": "使用 reading-card 技能：为本项目文献库中还没有卡片的每篇论文写一张阅读卡片，然后更新 @local/reading-cards 的阅读卡片面板。用中文回答。",
+              "es": "Usa la skill reading-card: escribe una ficha de lectura para cada artículo de la biblioteca del proyecto que aún no tenga ficha y después actualiza el panel Fichas de lectura de @local/reading-cards. Responde en español."
+            }
+          }
+        },
+        {
+          "id": "one-card",
+          "type": "form",
+          "title": {
+            "en": "Card for one paper",
+            "cn": "为一篇论文做卡片",
+            "es": "Ficha de un artículo"
+          },
+          "fields": [
+            {
+              "key": "paper",
+              "label": {
+                "en": "Paper (title, key or file)",
+                "cn": "论文（标题、引用键或文件）",
+                "es": "Artículo (título, clave o archivo)"
+              },
+              "input": "text"
+            }
+          ],
+          "submit": {
+            "label": {
+              "en": "Make the card",
+              "cn": "生成卡片",
+              "es": "Hacer la ficha"
+            },
+            "action": {
+              "type": "prompt",
+              "text": {
+                "en": "Use the reading-card skill to write or update the reading card of this paper: {{paper}}. Then update the Reading cards panel of @local/reading-cards.",
+                "cn": "使用 reading-card 技能，为这篇论文写或更新阅读卡片：{{paper}}。然后更新 @local/reading-cards 的阅读卡片面板。",
+                "es": "Usa la skill reading-card para escribir o actualizar la ficha de lectura de este artículo: {{paper}}. Después actualiza el panel Fichas de lectura de @local/reading-cards."
+              }
+            }
+          }
+        },
+        {
+          "id": "refresh",
+          "type": "button",
+          "label": {
+            "en": "Refresh the list",
+            "cn": "刷新列表",
+            "es": "Actualizar la lista"
+          },
+          "action": {
+            "type": "prompt",
+            "send": true,
+            "text": {
+              "en": "Compare this project's literature library with notes/cards/ and update the Reading cards panel of @local/reading-cards with PluginPanel (cards list, summary metrics, coverage). Write no cards and change no files.",
+              "cn": "对照本项目文献库和 notes/cards/，用 PluginPanel 更新 @local/reading-cards 的阅读卡片面板（论文列表、概览指标、覆盖进度）。不写卡片，不改任何文件。",
+              "es": "Compara la biblioteca del proyecto con notes/cards/ y actualiza con PluginPanel el panel Fichas de lectura de @local/reading-cards (lista de artículos, métricas y cobertura). No escribas fichas ni cambies archivos."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

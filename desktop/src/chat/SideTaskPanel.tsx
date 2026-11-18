@@ -8,6 +8,7 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { tr } from "../language";
 import type { ChatAttachment, ChatTurn, PermissionModeView } from "../types";
 import ChatComposer from "./ChatComposer";
 import ChatThread from "./ChatThread";
@@ -86,8 +87,9 @@ interface Props {
 
 export default function SideTaskPanel({ taskId, initialTitle, projectId, model, ready, onMetadataChange }: Props) {
   const language = useStore((state) => state.language);
-  const copy = language === "cn"
-    ? {
+  const copy = tr(
+    language,
+    {
       title: "侧边任务",
       emptyTitle: "处理一个旁路问题",
       emptyDescription: "继承当前项目上下文，但不会读取主聊天记录，也不会保存到项目。",
@@ -98,8 +100,8 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
         { id: "explain", label: "解释报错", hint: "读日志并给出可能原因", prompt: "阅读下面这段报错/日志，判断最可能的原因，并指出需要检查的文件：\n" },
         { id: "check", label: "核对事实", hint: "只读检索，不改动项目", prompt: "帮我核对一个说法是否与项目现状一致，并给出证据出处：" },
       ],
-    }
-    : {
+    },
+    {
       title: "Side task",
       emptyTitle: "Handle a question on the side",
       emptyDescription: "Uses project context without reading the main chat or saving into the project.",
@@ -110,7 +112,24 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
         { id: "explain", label: "Explain an error", hint: "Read the log, name likely causes", prompt: "Read this error/log, judge the most likely cause, and point to the files worth checking:\n" },
         { id: "check", label: "Check a claim", hint: "Read-only lookup, no edits", prompt: "Check whether the following claim matches the current project, and cite the evidence: " },
       ],
-    };
+    },
+    {
+      title: "Tarea lateral",
+      emptyTitle: "Resuelve una pregunta aparte",
+      emptyDescription: "Usa el contexto del proyecto sin leer el chat principal ni guardar nada en el proyecto.",
+      preview: "Respuesta de la tarea lateral en la vista previa del navegador.",
+      source: "Tarea lateral temporal",
+      starters: [
+        { id: "locate", label: "Localizar código", hint: "Encuentra dónde se implementa algo", prompt: "Localiza en este proyecto los archivos y funciones que implementan lo siguiente y explica cómo se conectan: " },
+        { id: "explain", label: "Explicar un error", hint: "Lee el registro y señala las causas probables", prompt: "Lee este error/registro, determina la causa más probable y señala los archivos que vale la pena revisar:\n" },
+        { id: "check", label: "Comprobar una afirmación", hint: "Consulta de solo lectura, sin cambios", prompt: "Comprueba si la siguiente afirmación coincide con el estado actual del proyecto y cita la evidencia: " },
+      ],
+    },
+  );
+  const permission = useMemo<PermissionModeView>(() => ({
+    ...READ_ONLY_PERMISSION,
+    description: tr(language, "仅检查与搜索", "Inspect and search only", "Solo inspeccionar y buscar"),
+  }), [language]);
   const initialStoredStateRef = useRef<StoredSideTaskState | null>(null);
   if (initialStoredStateRef.current === null) initialStoredStateRef.current = readStoredSideTaskState(projectId, taskId);
   const initialStoredState = initialStoredStateRef.current;
@@ -232,9 +251,12 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
   const title = useMemo(() => sideTaskTitle(turns, initialTitle), [initialTitle, turns]);
   const handoff = useMemo(() => {
     if (!lastResult) return null;
-    return language === "cn"
-      ? `[侧边任务回流 · ${title}]\n\n${lastResult}\n\n来源：${copy.source}`
-      : `[Side task handoff · ${title}]\n\n${lastResult}\n\nSource: ${copy.source}`;
+    return tr(
+      language,
+      `[侧边任务回流 · ${title}]\n\n${lastResult}\n\n来源：${copy.source}`,
+      `[Side task handoff · ${title}]\n\n${lastResult}\n\nSource: ${copy.source}`,
+      `[Resultado de la tarea lateral · ${title}]\n\n${lastResult}\n\nFuente: ${copy.source}`,
+    );
   }, [copy.source, language, lastResult, title]);
 
   useEffect(() => {
@@ -273,7 +295,7 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
           ready={ready && permissionReady}
           editing={false}
           focusRequest={focusRequest}
-          permission={READ_ONLY_PERMISSION}
+          permission={permission}
           modelName={model}
           onInputChange={setInput}
           onAttachmentsChange={setAttachments}

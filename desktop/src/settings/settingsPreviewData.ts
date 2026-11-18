@@ -151,4 +151,5 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
 export const PREVIEW_SETTINGS_DATA: Record<Language, PreviewSettingsData> = {
   cn: buildPreviewSettingsData("cn", SETTINGS_COPY.cn.general),
   en: buildPreviewSettingsData("en", SETTINGS_COPY.en.general),
+  es: buildPreviewSettingsData("es", SETTINGS_COPY.es.general),
 };

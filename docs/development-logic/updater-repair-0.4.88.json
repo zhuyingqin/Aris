@@ -1,0 +1,161 @@
+{
+  "version": "0.4.88",
+  "status": "complete",
+  "checkedAt": "2026-11-14T00:25:17.765266+00:00",
+  "release": "https://github.com/zhuyingqin/Aris/releases/tag/v0.4.88",
+  "sourceCommit": "31511e6e7194b4d81ce0ff9522ddbf4907d4880b",
+  "signing": {
+    "method": "Local official Tauri CLI 2.11.2, original private-key backup",
+    "clientPublicKeyMatched": true,
+    "localEd25519Verified": true,
+    "remoteIndependentPythonCryptographyVerified": true,
+    "trustedCommentVerified": true,
+    "modifiedPayloadRejected": true,
+    "downloadedMirrorInstallerSignatureVerified": true,
+    "privateKeyLoggedUploadedOrCommitted": false
+  },
+  "originalInstallerPreserved": true,
+  "assets": {
+    "BUILD-MANIFEST.json": {
+      "bytes": 5281,
+      "sha256": "0c16f8530ebdb1fa3c9f5e98928ceabfc78598b37768b5dc15c2b7549b1e5e01"
+    },
+    "latest.json": {
+      "bytes": 1315,
+      "sha256": "9c0ecb8883e94c88e75c8fbddc1ba1190ac3799e8353538e4aa722446d0abaea"
+    },
+    "SHA256SUMS.txt": {
+      "bytes": 189,
+      "sha256": "2d3ed0bc030b147dd7bc2529145fde173caab96ec13744d0cac76351ce89a893"
+    },
+    "SomniQ.Studio_0.4.88_x64-setup.exe": {
+      "bytes": 131754807,
+      "sha256": "5a757207c92fc59a0493c35b0b8d7a78c8ec647c597ee0ba44a77840aac13d32"
+    },
+    "SomniQ.Studio_0.4.88_x64-setup.exe.sig": {
+      "bytes": 428,
+      "sha256": "cdb8b6eac38ba71f84a682036d983e485bf3f963fb2b838a534b889300f67fa8"
+    },
+    "UPDATER-VERIFICATION.json": {
+      "bytes": 1035,
+      "sha256": "0c841dbde3c1c6b16faf979fb8a91ec81a95870bc91f8c5bb3c7f06ccd87f136"
+    }
+  },
+  "publicEndpoints": {
+    "githubLatest": {
+      "url": "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json",
+      "version": "0.4.88",
+      "contentType": "application/octet-stream",
+      "sha256": "9c0ecb8883e94c88e75c8fbddc1ba1190ac3799e8353538e4aa722446d0abaea",
+      "signatureMatches": true,
+      "platforms": [
+        "windows-x86_64",
+        "windows-x86_64-msvc"
+      ],
+      "redirectHost": "release-assets.githubusercontent.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
+    },
+    "mirrorLatest": {
+      "url": "https://somni.ensuanx.com/releases/latest.json",
+      "version": "0.4.88",
+      "contentType": "application/json",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
+      "signatureMatches": true,
+      "platforms": [
+        "windows-x86_64",
+        "windows-x86_64-msvc"
+      ],
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
+    },
+    "mirrorLatestDownloadAlias": {
+      "url": "https://somni.ensuanx.com/releases/latest/download/latest.json",
+      "version": "0.4.88",
+      "contentType": "application/json",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
+      "signatureMatches": true,
+      "platforms": [
+        "windows-x86_64",
+        "windows-x86_64-msvc"
+      ],
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
+    },
+    "mirrorLatestAlias": {
+      "url": "https://somni.ensuanx.com/releases/latest/latest.json",
+      "version": "0.4.88",
+      "contentType": "application/json",
+      "sha256": "42c2fdef758a9254a004d9754369f5500207ef3ef64c1caf733f97989bc55b7a",
+      "signatureMatches": true,
+      "platforms": [
+        "windows-x86_64",
+        "windows-x86_64-msvc"
+      ],
+      "redirectHost": "somni.ensuanx.com",
+      "pubDate": "2026-11-12T03:26:44.000Z",
+      "pubDateUnixTimestamp": 1794454004,
+      "signatureUnchanged": true
+    }
+  },
+  "mirrorInstaller": {
+    "url": "https://somni.ensuanx.com/releases/v0.4.88/SomniQ.Studio_0.4.88_x64-setup.exe",
+    "contentType": "application/octet-stream",
+    "bytes": 131754807,
+    "sha256": "5a757207c92fc59a0493c35b0b8d7a78c8ec647c597ee0ba44a77840aac13d32",
+    "fullHttpsDownloadVerified": true
+  },
+  "mirrorDownloadAlias": {
+    "url": "https://somni.ensuanx.com/releases/latest/SomniQ.Studio_latest_x64-setup.exe",
+    "status": 206,
+    "contentRange": "bytes 0-63/131754807",
+    "installerPrefixMatches": true,
+    "contentType": "application/octet-stream"
+  },
+  "previousClient": {
+    "previousVersion": "0.4.86",
+    "publicKeyMatches": true,
+    "endpoints": [
+      "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json",
+      "https://somni.ensuanx.com/releases/latest.json"
+    ]
+  },
+  "windowsTargets": [
+    "windows-x86_64",
+    "windows-x86_64-msvc"
+  ],
+  "macos088Available": false,
+  "hostedActions": {
+    "stillBlockedByBilling": true,
+    "failedRun": "https://github.com/zhuyingqin/Aris/actions/runs/43478470136",
+    "notRequiredForCompletedLocalRepair": true
+  },
+  "scriptTestsPassed": 11,
+  "actionlint": "passed",
+  "originalFullDownloadVerificationAt": "2026-11-13T22:35:01.809Z",
+  "nativeUpdaterComparatorTestsPassed": 4,
+  "updaterTimestampCorrection": {
+    "reason": "The initial signing repair incorrectly used release publication time for unchanged installer bytes. Shipped clients treat a later pub_date as a new build even at the same version.",
+    "originalIncorrectPubDate": "2026-11-12T04:00:26.000Z",
+    "correctPubDate": "2026-11-12T03:26:44.000Z",
+    "embeddedBuildUnixTimestamp": 1794454004,
+    "source": "Original BUILD-MANIFEST.json builtAt, corroborated by the retained local build-time.json",
+    "alreadyInstalled088OffersUpdate": false,
+    "installed086Offers088": true,
+    "installerAndSignatureUnchanged": true,
+    "publicEndpointsVerified": [
+      "githubLatest",
+      "mirrorLatest",
+      "mirrorLatestAlias",
+      "mirrorLatestDownloadAlias"
+    ],
+    "mirrorMetadataBackedUp": true,
+    "repairStatePublicationDateIgnored": true,
+    "missingBuildTimestampRejected": true
+  }
+}

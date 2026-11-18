@@ -119,7 +119,7 @@ describe("TypesetPdfPresentation", () => {
   it("toggles colors when clicking the invert button", () => {
     renderPresentation();
 
-    const invertBtn = screen.getByRole("button", { name: "Invert PDF colours" });
+    const invertBtn = screen.getByRole("button", { name: "Invert PDF colors" });
     fireEvent.click(invertBtn);
     expect(onToggleInverted).toHaveBeenCalledTimes(1);
   });

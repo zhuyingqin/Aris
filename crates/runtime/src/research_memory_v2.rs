@@ -2298,13 +2298,9 @@ fn validate_capture(capture: &ResearchMemoryV2Capture) -> Result<(), String> {
 }
 
 fn research_memory_v2_db_path() -> PathBuf {
-    let config = std::env::var("ARIS_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(crate::home_dir())
-                .join(".config")
-                .join("SomniQ")
-        });
+    // Same root as every other config reader (`ARIS_CONFIG_ROOT`), so an
+    // isolated profile or test never writes the real memory database.
+    let config = crate::somniq_config_dir_from_env();
     std::env::var_os("SOMNIQ_RESEARCH_MEMORY_V2_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

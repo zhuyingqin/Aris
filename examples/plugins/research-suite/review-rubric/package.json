@@ -1,0 +1,6 @@
+{
+  "name": "@local/review-rubric",
+  "version": "0.1.0",
+  "description": "Criteria the independent Reviewer applies to any literature review, related-work section or comparison of published methods: page-level evidence, comparable protocols, and a clear line between what a paper shows and what the review proposes.",
+  "somniq": { "manifestVersion": 1, "reviewer": "./reviewer.json" }
+}

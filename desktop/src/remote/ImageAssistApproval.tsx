@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { imageAssistConsent, imageAssistDecide, imageAssistPublish, imageAssistRoster } from "../api/tauri";
+import { useStore, type Language } from "../store";
 import { storedImageAssistLocation } from "./imageAssistLocation";
 import {
   imageAssistActivitySnapshot,
@@ -39,6 +40,88 @@ const CONSENT_EVENT = "image-assist-consent";
 const ERROR_EVENT = "image-assist-error";
 const MATCH_EVENT = "image-assist-match";
 
+const COPY: Record<Language, {
+  accepted: string;
+  declined: string;
+  matching: string;
+  close: string;
+  consentTitle: string;
+  consentSubtitle: string;
+  consentPromptLabel: string;
+  aspectRatio: (ratio: string) => string;
+  consentNote: string;
+  cancel: string;
+  working: string;
+  send: string;
+  requestTitle: string;
+  requestMeta: (fingerprint: string, remaining: number) => string;
+  fullPrompt: string;
+  requestNote: string;
+  decline: string;
+  accept: string;
+}> = {
+  cn: {
+    accepted: "已接受请求，正在创建图片互助临时会话",
+    declined: "已拒绝该图片请求",
+    matching: "请求已提交，正在匹配在线互助用户",
+    close: "关闭",
+    consentTitle: "把这个提示词发给另一位用户？",
+    consentSubtitle: "将请一位在线的陌生用户用他们的 ChatGPT 账号代为生成。",
+    consentPromptLabel: "将发送的内容",
+    aspectRatio: (ratio) => `比例 ${ratio}`,
+    consentNote: "对方必须读到这段提示词才能出图，生成的图片也会留在对方的 ChatGPT 记录里。端到端加密不能改变这一点。",
+    cancel: "取消",
+    working: "处理中…",
+    send: "发送并请求生成",
+    requestTitle: "另一位用户请求你代为生成图片",
+    requestMeta: (fingerprint, remaining) => `设备 ${fingerprint} · 今日还可帮助 ${remaining} 次`,
+    fullPrompt: "完整提示词",
+    requestNote: "同意后将使用你本机绑定的 ChatGPT 账号生成，消耗你的额度并留在你的 ChatGPT 记录中。",
+    decline: "拒绝",
+    accept: "同意并生成",
+  },
+  en: {
+    accepted: "Request accepted. Creating a temporary image-assist session…",
+    declined: "Image request declined",
+    matching: "Request sent. Looking for an online helper…",
+    close: "Close",
+    consentTitle: "Send this prompt to another user?",
+    consentSubtitle: "An online stranger will generate the image with their ChatGPT account.",
+    consentPromptLabel: "Content to send",
+    aspectRatio: (ratio) => `Aspect ratio ${ratio}`,
+    consentNote: "The other user must read this prompt to generate the image, and the image stays in their ChatGPT history. End-to-end encryption does not change this.",
+    cancel: "Cancel",
+    working: "Working…",
+    send: "Send and request image",
+    requestTitle: "Another user wants you to generate an image for them",
+    requestMeta: (fingerprint, remaining) => `Device ${fingerprint} · ${remaining} ${remaining === 1 ? "assist" : "assists"} left today`,
+    fullPrompt: "Full prompt",
+    requestNote: "If you accept, the image is generated with the ChatGPT account linked on this computer. It uses your quota and stays in your ChatGPT history.",
+    decline: "Decline",
+    accept: "Accept and generate",
+  },
+  es: {
+    accepted: "Solicitud aceptada. Creando una sesión temporal de ayuda con imágenes",
+    declined: "Solicitud de imagen rechazada",
+    matching: "Solicitud enviada. Buscando a alguien en línea que te ayude",
+    close: "Cerrar",
+    consentTitle: "¿Enviar este prompt a otro usuario?",
+    consentSubtitle: "Una persona desconocida en línea generará la imagen con su cuenta de ChatGPT.",
+    consentPromptLabel: "Contenido que se enviará",
+    aspectRatio: (ratio) => `Proporción ${ratio}`,
+    consentNote: "La otra persona tiene que leer este prompt para generar la imagen, y la imagen quedará en su historial de ChatGPT. El cifrado de extremo a extremo no cambia esto.",
+    cancel: "Cancelar",
+    working: "Procesando…",
+    send: "Enviar y solicitar imagen",
+    requestTitle: "Otro usuario te pide que generes una imagen por él",
+    requestMeta: (fingerprint, remaining) => `Dispositivo ${fingerprint} · ${remaining === 1 ? "Puedes ayudar 1 vez más hoy" : `Puedes ayudar ${remaining} veces más hoy`}`,
+    fullPrompt: "Prompt completo",
+    requestNote: "Si aceptas, la imagen se generará con la cuenta de ChatGPT vinculada en este equipo, consumirá tu cuota y quedará en tu historial de ChatGPT.",
+    decline: "Rechazar",
+    accept: "Aceptar y generar",
+  },
+};
+
 /** How long a refusal notice stays on screen before fading out. */
 const NOTICE_TIMEOUT_MS = 15_000;
 
@@ -61,6 +144,8 @@ const ROSTER_INTERVAL_MS = 45_000;
  * this does not by itself opt anyone in.
  */
 export function ImageAssistApproval() {
+  const language = useStore((s) => s.language);
+  const copy = COPY[language];
   const [pending, setPending] = useState<ImageAssistApprovalPrompt | null>(null);
   const [consent, setConsent] = useState<ImageAssistConsentPrompt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -171,7 +256,7 @@ export function ImageAssistApproval() {
         updateActivity({
           matchId: pending.matchId,
           stage: accept ? "accepted" : "declined",
-          detail: accept ? "已接受请求，正在创建图片互助临时会话" : "已拒绝该图片请求",
+          detail: accept ? copy.accepted : copy.declined,
           prompt: pending.prompt,
           aspectRatio: pending.aspectRatio,
         });
@@ -181,7 +266,7 @@ export function ImageAssistApproval() {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [pending, busy, dismiss, updateActivity],
+    [pending, busy, dismiss, updateActivity, copy],
   );
 
   const answerConsent = useCallback(
@@ -194,7 +279,7 @@ export function ImageAssistApproval() {
           updateActivity({
             matchId: null,
             stage: "matching",
-            detail: "请求已提交，正在匹配在线互助用户",
+            detail: copy.matching,
             prompt: consent.prompt,
             aspectRatio: consent.aspectRatio,
           });
@@ -207,13 +292,13 @@ export function ImageAssistApproval() {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [consent, busy, updateActivity],
+    [consent, busy, updateActivity, copy],
   );
 
   const noticeBanner = notice ? (
     <div className="sp-image-assist-notice" role="status">
       <span>{notice}</span>
-      <button type="button" onClick={() => setNotice(null)} aria-label="关闭">
+      <button type="button" onClick={() => setNotice(null)} aria-label={copy.close}>
         ×
       </button>
     </div>
@@ -225,25 +310,25 @@ export function ImageAssistApproval() {
       <div className="sp-image-assist-approval" role="dialog" aria-modal="true">
         <div className="sp-image-assist-approval-card">
           <div className="sp-image-assist-approval-head">
-            <strong>把这个提示词发给另一位用户？</strong>
-            <small>将请一位在线的陌生用户用他们的 ChatGPT 账号代为生成。</small>
+            <strong>{copy.consentTitle}</strong>
+            <small>{copy.consentSubtitle}</small>
           </div>
 
           <div className="sp-image-assist-approval-prompt">
-            <label>将发送的内容</label>
+            <label>{copy.consentPromptLabel}</label>
             <pre>{consent.prompt}</pre>
-            {consent.aspectRatio ? <small>比例 {consent.aspectRatio}</small> : null}
+            {consent.aspectRatio ? <small>{copy.aspectRatio(consent.aspectRatio)}</small> : null}
           </div>
 
           <p className="sp-image-assist-approval-note">
-            对方必须读到这段提示词才能出图，生成的图片也会留在对方的 ChatGPT 记录里。端到端加密不能改变这一点。
+            {copy.consentNote}
           </p>
 
           {error ? <p className="sp-image-assist-approval-error">{error}</p> : null}
 
           <div className="sp-image-assist-approval-actions">
             <button type="button" onClick={() => void answerConsent(false)} disabled={busy}>
-              取消
+              {copy.cancel}
             </button>
             <button
               type="button"
@@ -251,7 +336,7 @@ export function ImageAssistApproval() {
               onClick={() => void answerConsent(true)}
               disabled={busy}
             >
-              {busy ? "处理中…" : "发送并请求生成"}
+              {busy ? copy.working : copy.send}
             </button>
           </div>
         </div>
@@ -267,29 +352,29 @@ export function ImageAssistApproval() {
     <div className="sp-image-assist-approval" role="dialog" aria-modal="true">
       <div className="sp-image-assist-approval-card">
         <div className="sp-image-assist-approval-head">
-          <strong>另一位用户请求你代为生成图片</strong>
+          <strong>{copy.requestTitle}</strong>
           <small>
-            设备 {pending.peerFingerprint} · 今日还可帮助 {pending.remainingToday} 次
+            {copy.requestMeta(pending.peerFingerprint, pending.remainingToday)}
           </small>
         </div>
 
         <div className="sp-image-assist-approval-prompt">
-          <label>完整提示词</label>
+          <label>{copy.fullPrompt}</label>
           {/* Rendered as text, never as markup: this string comes from a
               stranger and must not be able to inject anything. */}
           <pre>{pending.prompt}</pre>
-          {pending.aspectRatio ? <small>比例 {pending.aspectRatio}</small> : null}
+          {pending.aspectRatio ? <small>{copy.aspectRatio(pending.aspectRatio)}</small> : null}
         </div>
 
         <p className="sp-image-assist-approval-note">
-          同意后将使用你本机绑定的 ChatGPT 账号生成，消耗你的额度并留在你的 ChatGPT 记录中。
+          {copy.requestNote}
         </p>
 
         {error ? <p className="sp-image-assist-approval-error">{error}</p> : null}
 
         <div className="sp-image-assist-approval-actions">
           <button type="button" onClick={() => void decide(false)} disabled={busy}>
-            拒绝
+            {copy.decline}
           </button>
           <button
             type="button"
@@ -297,7 +382,7 @@ export function ImageAssistApproval() {
             onClick={() => void decide(true)}
             disabled={busy}
           >
-            {busy ? "处理中…" : "同意并生成"}
+            {busy ? copy.working : copy.accept}
           </button>
         </div>
       </div>

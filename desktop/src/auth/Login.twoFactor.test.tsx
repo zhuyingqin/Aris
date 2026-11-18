@@ -22,7 +22,7 @@ async function begin() {
   fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "password123" } });
   await submit();
 }
-async function submit() { await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Log in" })); }); }
+async function submit() { await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Sign in" })); }); }
 it("prompts for a second factor and submits an authenticator code", async () => {
   await begin();
   expect(useStore.getState().authed).toBe(false);

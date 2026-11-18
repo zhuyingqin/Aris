@@ -19,9 +19,9 @@ describe("AuthChecking screen", () => {
     render(<AuthChecking />);
 
     expect(screen.getByRole("status")).toBeTruthy();
-    expect(screen.getByText("Verifying sign-in...")).toBeTruthy();
+    expect(screen.getByText("Checking sign-in status…")).toBeTruthy();
     expect(screen.getByText("SomniQ Studio")).toBeTruthy();
-    expect(screen.getByText("Validating secure session and gateway connection...")).toBeTruthy();
+    expect(screen.getByText("Validating secure credentials and the gateway connection…")).toBeTruthy();
     expect(screen.getByAltText("SomniQ")).toBeTruthy();
   });
 

@@ -1,3 +1,4 @@
+import { languageLocale, tr, type Language } from "./language";
 import type { ModelPrice, ModelPricingCatalog } from "./types";
 
 export const DEEPSEEK_PRICE_BASELINE = "deepseek-v4.1-flash";
@@ -61,9 +62,10 @@ export function parseModelPricingCatalog(value: unknown): ModelPricingCatalog | 
 
 export const modelPricingExpiresAt = (catalog: ModelPricingCatalog) => Math.min(catalog.validUntil, catalog.fetchedAt + MODEL_PRICING_TTL_MS);
 
-function tierLabel(tier: string | null, cn: boolean): string {
-  if (!tier) return cn ? "标准" : "Standard";
-  if (cn) return ({ peak: "高峰", off_peak: "低峰", standard: "标准", base: "基础" } as Record<string, string>)[tier] ?? tier;
+function tierLabel(tier: string | null, language: Language): string {
+  if (!tier) return tr(language, "标准", "Standard", "Estándar");
+  if (language === "cn") return ({ peak: "高峰", off_peak: "低峰", standard: "标准", base: "基础" } as Record<string, string>)[tier] ?? tier;
+  if (language === "es") return ({ peak: "pico", off_peak: "valle", standard: "estándar", base: "base" } as Record<string, string>)[tier] ?? tier;
   return tier;
 }
 
@@ -81,49 +83,50 @@ function relativeRate(rate: number | null, baseline: number | null): string {
   return rate !== null && baseline !== null && baseline > 0 ? ratioLabel(rate / baseline) : "—";
 }
 
-export function modelPricingSummary(state: ModelPricingState, language: "cn" | "en"): string {
-  const cn = language === "cn";
+export function modelPricingSummary(state: ModelPricingState, language: Language): string {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const baseline = state.catalog?.peakBaseline;
   const ready = tokenPrice(baseline) && baseline.inputRate + baseline.outputRate > 0;
-  const basis = ready ? `${DEEPSEEK_PRICE_BASELINE} ${cn ? "高峰" : "peak"} = 1×` : cn ? "DeepSeek 高峰基准价格不可用" : "DeepSeek peak baseline price unavailable";
-  const cache = state.stale ? cn ? " · 缓存价格" : " · Cached prices" : "";
-  return `${basis} · ${cn ? "输入:输出 1:1" : "Input:output 1:1"}${cache}`;
+  const basis = ready ? `${DEEPSEEK_PRICE_BASELINE} ${t("高峰", "peak", "pico")} = 1×` : t("DeepSeek 高峰基准价格不可用", "DeepSeek peak baseline price unavailable", "Precio base de DeepSeek en hora pico no disponible");
+  const cache = state.stale ? t(" · 缓存价格", " · Cached prices", " · Precios en caché") : "";
+  return `${basis} · ${t("输入:输出 1:1", "Input:output 1:1", "Entrada:salida 1:1")}${cache}`;
 }
 
-export function modelPriceView(model: string, state: ModelPricingState | null | undefined, language: "cn" | "en"): ModelPriceView | null {
+export function modelPriceView(model: string, state: ModelPricingState | null | undefined, language: Language): ModelPriceView | null {
   if (!state) return null;
-  const cn = language === "cn";
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const unknown = (label: string, explanation = label): ModelPriceView => ({ label, title: explanation, kind: "unknown" });
-  if (!state.catalog) return unknown(state.loading ? cn ? "价格加载中" : "Loading price"
-    : cn ? "价格暂不可用" : "Price unavailable");
+  if (!state.catalog) return unknown(state.loading ? t("价格加载中", "Loading price", "Cargando precio")
+    : t("价格暂不可用", "Price unavailable", "Precio no disponible"));
   const price = state.catalog.models.find((item) => item.model === model);
-  const updated = `${cn ? "更新于" : "Updated"} ${new Date(state.catalog.fetchedAt).toLocaleString(cn ? "zh-CN" : "en-US")}`;
-  const cached = state.stale ? `\n${state.failed ? cn ? "刷新失败，显示缓存价格" : "Refresh failed; showing cached prices"
-    : cn ? "显示缓存价格，待刷新" : "Showing cached prices; refresh pending"}` : "";
+  const updated = `${t("更新于", "Updated", "Actualizado")} ${new Date(state.catalog.fetchedAt).toLocaleString(languageLocale(language))}`;
+  const cached = state.stale ? `\n${state.failed ? t("刷新失败，显示缓存价格", "Refresh failed; showing cached prices", "Error al actualizar; se muestran precios en caché")
+    : t("显示缓存价格，待刷新", "Showing cached prices; refresh pending", "Se muestran precios en caché; actualización pendiente")}` : "";
   const detail = (text: string) => `${text}\n${updated}${cached}`;
   if (price?.billing === "per_request") return { label: "0.1", kind: "per-request", sortValue: 0.1,
-    title: detail(cn ? "按次计费，无法与 DeepSeek 的 Token 单价比较" : "Per-request billing cannot be compared with DeepSeek token rates.") };
-  if (price?.billing === "tiered") return unknown(cn ? "阶梯计费" : "Variable pricing",
-    detail(cn ? "价格随用量或计费档位变化，暂无统一倍率" : "Pricing varies by usage or billing tier; no single multiplier is available."));
-  if (!tokenPrice(price)) return unknown(cn ? "价格未知" : "Price unknown", detail(cn ? "当前账号分组的有效价格尚未确认" : "The effective price for this account group is not available."));
+    title: detail(t("按次计费，无法与 DeepSeek 的 Token 单价比较", "Per-request billing cannot be compared with DeepSeek token rates.", "La facturación por solicitud no se puede comparar con las tarifas por token de DeepSeek.")) };
+  if (price?.billing === "tiered") return unknown(t("阶梯计费", "Tiered pricing", "Precio escalonado"),
+    detail(t("价格随用量或计费档位变化，暂无统一倍率", "Pricing varies by usage or billing tier; no single multiplier is available.", "El precio varía según el uso o el nivel de facturación; no hay un multiplicador único.")));
+  if (!tokenPrice(price)) return unknown(t("价格未知", "Price unknown", "Precio desconocido"), detail(t("当前账号分组的有效价格尚未确认", "The effective price for this account group is not available.", "El precio efectivo para el grupo de esta cuenta no está disponible.")));
   if (price.inputRate === 0 && price.outputRate === 0) {
-    return { label: cn ? "免费" : "Free", title: detail(cn ? "当前分组的输入、输出费率均为零" : "Input and output rates are both zero for this group."), kind: "free", sortValue: 0 };
+    return { label: t("免费", "Free", "Gratis"), title: detail(t("当前分组的输入、输出费率均为零", "Input and output rates are both zero for this group.", "Las tarifas de entrada y salida de este grupo son cero.")), kind: "free", sortValue: 0 };
   }
   const baseline = state.catalog.peakBaseline;
   if (!tokenPrice(baseline) || baseline.inputRate + baseline.outputRate <= 0) {
-    return unknown(cn ? "基准不可用" : "Baseline unavailable", detail(modelPricingSummary(state, language)));
+    return unknown(t("基准不可用", "Baseline unavailable", "Referencia no disponible"), detail(modelPricingSummary(state, language)));
   }
   const ratio = (price.inputRate + price.outputRate) / (baseline.inputRate + baseline.outputRate);
-  if (!Number.isFinite(ratio)) return unknown(cn ? "价格未知" : "Price unknown");
+  if (!Number.isFinite(ratio)) return unknown(t("价格未知", "Price unknown", "Precio desconocido"));
   const label = ratioLabel(ratio);
   const lines = [
-    `${DEEPSEEK_PRICE_BASELINE} ${cn ? "高峰" : "peak"} = 1×`,
-    cn ? `参考倍率 ${label}（输入:输出 Token 数量 1:1，不含缓存命中）` : `Reference ${label} (input:output tokens 1:1, excluding cache hits)`,
-    `${cn ? "输入" : "Input"} ${relativeRate(price.inputRate, baseline.inputRate)} · ${cn ? "输出" : "Output"} ${relativeRate(price.outputRate, baseline.outputRate)}`,
-    cn ? `参考上下文 ${state.catalog.referenceInputTokens} 个输入 Token；当前档位 ${tierLabel(price.tier, cn)}；DeepSeek 高峰基准`
-      : `Reference context: ${state.catalog.referenceInputTokens} input tokens; model tier: ${tierLabel(price.tier, cn)}; DeepSeek peak baseline`,
+    `${DEEPSEEK_PRICE_BASELINE} ${t("高峰", "peak", "pico")} = 1×`,
+    t(`参考倍率 ${label}（输入:输出 Token 数量 1:1，不含缓存命中）`, `Reference ${label} (input:output tokens 1:1, excluding cache hits)`, `Referencia ${label} (tokens de entrada:salida 1:1, sin aciertos de caché)`),
+    `${t("输入", "Input", "Entrada")} ${relativeRate(price.inputRate, baseline.inputRate)} · ${t("输出", "Output", "Salida")} ${relativeRate(price.outputRate, baseline.outputRate)}`,
+    t(`参考上下文 ${state.catalog.referenceInputTokens} 个输入 Token；当前档位 ${tierLabel(price.tier, language)}；DeepSeek 高峰基准`,
+      `Reference context: ${state.catalog.referenceInputTokens} input tokens; model tier: ${tierLabel(price.tier, language)}; DeepSeek peak baseline`,
+      `Contexto de referencia: ${state.catalog.referenceInputTokens} tokens de entrada; nivel del modelo: ${tierLabel(price.tier, language)}; referencia de DeepSeek en hora pico`),
   ];
-  if (price.cacheReadRate !== null && baseline.cacheReadRate !== null) lines.push(`${cn ? "缓存读取" : "Cache read"} ${relativeRate(price.cacheReadRate, baseline.cacheReadRate)}`);
-  if (price.cacheCreationRate !== null && baseline.cacheCreationRate !== null) lines.push(`${cn ? "缓存写入" : "Cache write"} ${relativeRate(price.cacheCreationRate, baseline.cacheCreationRate)}`);
+  if (price.cacheReadRate !== null && baseline.cacheReadRate !== null) lines.push(`${t("缓存读取", "Cache read", "Lectura de caché")} ${relativeRate(price.cacheReadRate, baseline.cacheReadRate)}`);
+  if (price.cacheCreationRate !== null && baseline.cacheCreationRate !== null) lines.push(`${t("缓存写入", "Cache write", "Escritura de caché")} ${relativeRate(price.cacheCreationRate, baseline.cacheCreationRate)}`);
   return { label, title: detail(lines.join("\n")), kind: "ratio", sortValue: ratio };
 }

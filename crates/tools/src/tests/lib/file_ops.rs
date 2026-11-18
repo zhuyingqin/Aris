@@ -531,6 +531,234 @@ fn multi_edit_creates_one_revertible_audit_record() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(windows)]
+#[test]
+fn multi_edit_retries_a_readable_windows_lock_and_keeps_one_latex_audit() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("multi-edit-windows-lock");
+    let dir = root.join("答辩 资料");
+    fs::create_dir_all(&dir).expect("create Unicode workspace");
+    let _workspace = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let path = dir.join("main.tex");
+    let original = "\\begin{frame}{研究问题}\r\n旧目标\r\n\\end{frame}\r\n\\begin{frame}{方法}\r\n旧方法\r\n\\end{frame}\r\n";
+    fs::write(&path, original).expect("seed CRLF LaTeX source");
+    let read = execute_tool("read_file", &json!({ "path": path })).expect("read source");
+    let read: serde_json::Value = serde_json::from_str(&read).expect("read JSON");
+    let input = json!({
+        "path": path,
+        "expected_revision": issued_revision(&read),
+        "edits": [
+            { "old_string": "旧目标", "new_string": "新目标\n补充证据" },
+            { "old_string": "旧方法", "new_string": "新方法" }
+        ]
+    });
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2) // FILE_SHARE_READ | FILE_SHARE_WRITE; no DELETE
+        .open(&path)
+        .expect("hold readable source without delete sharing");
+    let writer = thread::spawn(move || {
+        execute_tool_with_context(
+            "multi_edit",
+            &input,
+            ToolRunContext {
+                session_id: Some("windows-latex-edit".to_string()),
+                tool_use_id: Some("toolu-windows-latex-edit".to_string()),
+                ..ToolRunContext::default()
+            },
+        )
+    });
+    wait_for_file_tool_temporary(&dir);
+    thread::sleep(Duration::from_millis(600));
+    drop(held);
+
+    let output = writer
+        .join()
+        .expect("file tool worker")
+        .expect("multi_edit should survive the transient lock");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("multi_edit JSON");
+    let expected = original
+        .replace("旧目标", "新目标\r\n补充证据")
+        .replace("旧方法", "新方法");
+    assert_eq!(
+        fs::read(&path).expect("read edited source"),
+        expected.as_bytes()
+    );
+    assert_eq!(output["editsApplied"], 2);
+    assert_eq!(output["replacements"], 2);
+    assert_eq!(
+        output["revision"],
+        runtime::file_revision(path.to_str().unwrap()).expect("current source revision")
+    );
+    let listed = execute_tool(
+        "change_list",
+        &json!({ "session_id": "windows-latex-edit" }),
+    )
+    .expect("list source audit");
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("audit JSON");
+    let records = listed["records"].as_array().expect("audit records");
+    assert_eq!(records.len(), 1, "retries must not duplicate the audit");
+    assert_eq!(records[0]["changeId"], output["changeId"]);
+    assert_eq!(records[0]["toolUseId"], "toolu-windows-latex-edit");
+    assert_eq!(
+        fs::read_dir(&dir).expect("list source directory").count(),
+        1
+    );
+    fs::remove_dir_all(root).expect("remove temporary workspace");
+}
+
+#[cfg(windows)]
+#[test]
+fn multi_edit_rechecks_revision_when_a_windows_lock_releases_after_an_external_save() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("multi-edit-windows-external-save");
+    let dir = root.join("答辩 资料");
+    fs::create_dir_all(&dir).expect("create Unicode workspace");
+    let _workspace = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let path = dir.join("main.tex");
+    fs::write(
+        &path,
+        "\\begin{frame}{研究问题}\r\n旧目标\r\n\\end{frame}\r\n",
+    )
+    .expect("seed source");
+    let revision = runtime::file_revision(path.to_str().unwrap()).expect("source revision");
+    let input = json!({
+        "path": path,
+        "expected_revision": revision,
+        "edits": [{ "old_string": "旧目标", "new_string": "本次修改" }]
+    });
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2) // readable and writable, but replacement is blocked
+        .open(&path)
+        .expect("hold target without delete sharing");
+    let writer = thread::spawn(move || {
+        execute_tool_with_context(
+            "multi_edit",
+            &input,
+            ToolRunContext {
+                session_id: Some("windows-external-save".to_string()),
+                tool_use_id: Some("toolu-must-not-publish".to_string()),
+                ..ToolRunContext::default()
+            },
+        )
+    });
+    wait_for_file_tool_temporary(&dir);
+    // The sibling temporary file proves source validation has completed.
+    // Allow failed replacement attempts before emulating an editor's save.
+    thread::sleep(Duration::from_millis(100));
+    let later = "\\begin{frame}{外部编辑器保存}\r\n保留这个更新\r\n\\end{frame}\r\n";
+    fs::write(&path, later).expect("external save while replacement waits");
+    drop(held);
+
+    let error = writer
+        .join()
+        .expect("file tool worker")
+        .expect_err("a changed source must reject the pending replacement");
+    let report: serde_json::Value =
+        serde_json::from_str(&error).expect("tool preserves structured revision conflict");
+    assert_eq!(report["code"], "revision_conflict");
+    assert_eq!(report["expectedRevision"], revision);
+    assert_eq!(
+        report["currentRevision"],
+        runtime::file_revision(path.to_str().unwrap()).expect("external source revision")
+    );
+    assert_eq!(
+        fs::read(&path).expect("read external save"),
+        later.as_bytes()
+    );
+    let listed = execute_tool(
+        "change_list",
+        &json!({ "session_id": "windows-external-save" }),
+    )
+    .expect("inspect rejected mutation's audit");
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("audit JSON");
+    assert!(listed["records"]
+        .as_array()
+        .expect("audit records")
+        .is_empty());
+    assert_eq!(
+        fs::read_dir(&dir).expect("list source directory").count(),
+        1
+    );
+    fs::remove_dir_all(root).expect("remove temporary workspace");
+}
+
+#[cfg(windows)]
+fn wait_for_file_tool_temporary(dir: &std::path::Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if fs::read_dir(dir)
+            .expect("list source directory")
+            .any(|entry| {
+                entry
+                    .expect("source directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp")
+            })
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "file tool should stage a sibling temporary file before replacement"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn multi_edit_preserves_the_published_state_in_a_tool_level_audit_error() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("multi-edit-tool-audit-failure");
+    fs::create_dir_all(&root).expect("create workspace");
+    let _workspace = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
+    let path = root.join("main.tex");
+    fs::write(&path, "old source\r\n").expect("seed source");
+    fs::create_dir_all(root.join(".somniq/changes/tool-audit-failure/ledger.jsonl"))
+        .expect("block audit append destination");
+    let error = execute_tool_with_context(
+        "multi_edit",
+        &json!({
+            "path": path,
+            "expected_revision": runtime::file_revision(path.to_str().unwrap()).expect("revision"),
+            "edits": [{ "old_string": "old source", "new_string": "new source" }]
+        }),
+        ToolRunContext {
+            session_id: Some("tool-audit-failure".to_string()),
+            ..ToolRunContext::default()
+        },
+    )
+    .expect_err("audit append must fail");
+    let report: serde_json::Value =
+        serde_json::from_str(&error).expect("tool preserves structured audit failure");
+    assert_eq!(report["code"], "multi_edit_audit_failed");
+    assert_eq!(report["stage"], "audit");
+    assert_eq!(report["published"], true);
+    assert_eq!(report["auditState"], "unconfirmed");
+    assert_eq!(report["fileState"], "attempted_update");
+    assert_eq!(
+        report["currentRevision"],
+        runtime::file_revision(path.to_str().unwrap()).expect("published source revision")
+    );
+    assert_eq!(
+        fs::read(&path).expect("read published source"),
+        b"new source\r\n"
+    );
+    fs::remove_dir_all(root).expect("remove temporary workspace");
+}
+
 /// Read the `revision` a tool result issued for `path`.
 fn issued_revision(output: &serde_json::Value) -> &str {
     output["file"]["revision"]

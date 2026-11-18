@@ -13,6 +13,9 @@ mod config;
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
 #[cfg(feature = "devserver")]
 pub mod devserver;
+/// One-shot model calls for the memory-L1 evaluation harness.
+#[cfg(feature = "memory-eval")]
+pub mod memory_eval_bridge;
 mod engine;
 mod env;
 mod files;
@@ -29,8 +32,10 @@ mod mcp;
 mod membership;
 mod memory;
 mod newapi;
+mod official_plugins;
 mod oracle_web;
 mod platform;
+mod plugins;
 mod playwright_pdf;
 mod ppt_master;
 mod process;
@@ -655,7 +660,15 @@ pub fn run() {
     hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
-        .register_uri_scheme_protocol("somniq-figure", |context, request| figures::editor_asset(context.app_handle(), &request))
+        // The scheme is registered at build time whatever the switches say; with
+        // the Figures plugin off for the current project it serves nothing.
+        .register_uri_scheme_protocol("somniq-figure", |context, request| {
+            let app = context.app_handle();
+            let project = crate::projects::current_project_path(&app.state::<crate::projects::ProjectState>()).ok();
+            official_plugins::figure_scheme_response(project.as_deref(), || {
+                figures::editor_asset(app, &request)
+            })
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -800,9 +813,8 @@ pub fn run() {
                     }
                 });
             }
-            watcher::spawn_event_watcher(app.handle().clone());
             watcher::spawn_workspace_file_watcher(app.handle().clone());
-            mail::spawn_event_watchers(app.handle().clone());
+            official_plugins::start_services(app.handle().clone());
             scheduled::spawn_runner(app.handle().clone());
             work_task::engine::start_runner(app.handle().clone());
             spawn_autorun_prompt(app.handle());
@@ -991,7 +1003,26 @@ pub fn run() {
             scheduled::scheduled_task_update,
             scheduled::scheduled_task_set_status,
             scheduled::scheduled_task_delete,
+            scheduled::scheduled_task_preview,
+            scheduled::scheduled_task_history,
+            scheduled::scheduled_task_run_now,
             mcp::mcp_config_get,
+            official_plugins::official_plugins_list,
+            official_plugins::official_plugins_set,
+            plugins::plugins_list,
+            plugins::plugins_preview,
+            plugins::plugins_install,
+            plugins::plugins_set_enabled,
+            plugins::plugins_upgrade,
+            plugins::plugins_rollback,
+            plugins::plugins_draft_changes,
+            plugins::plugins_draft_page,
+            plugins::plugins_check_mcp,
+            plugins::plugins_remove,
+            plugins::plugins_ui_list,
+            plugins::plugins_ui_state_get,
+            plugins::plugins_ui_state_update,
+            plugins::plugins_ui_page,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
             oracle_web::oracle_web_status,
@@ -1051,6 +1082,7 @@ pub fn run() {
             literature::literature_llm,
             literature::literature_llm_cancel,
             literature::literature_search_cancel,
+            literature::literature_ocr_cancel,
             literature::literature_review_llm,
             literature::literature_llm_vision,
             paper_reading::paper_reading_prepare,
@@ -1112,6 +1144,7 @@ pub fn run() {
             engine::chat_permission_set,
             engine::chat_permission_respond,
             engine::chat_question_respond,
+            plugins::chat_plugin_approval_respond,
             engine::chat_command_specs,
             engine::chat_run_command,
             engine::chat_send_rich,

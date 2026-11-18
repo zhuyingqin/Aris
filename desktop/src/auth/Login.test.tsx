@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LanguageChoice from "./LanguageChoice";
 import Login from "./Login";
 import { DEFAULT_AUTH_SERVER, useStore } from "../store";
+import { openExternalUrl } from "../api/tauri";
 
 vi.mock("../api/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/tauri")>();
   return {
     ...actual,
+    openExternalUrl: vi.fn().mockResolvedValue(undefined),
     newapiAuthStatus: vi.fn().mockResolvedValue({
       registerEnabled: false,
       passwordRegisterEnabled: false,
@@ -52,9 +54,17 @@ describe("Login and first-entry workspace choice", () => {
     render(<Login />);
 
     expect(screen.queryByRole("heading", { name: "Choose your language" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Log in" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
     expect(screen.getByPlaceholderText("Username")).toBeTruthy();
     expect(localStorage.getItem("somniq-ui-language")).toBeNull();
+  });
+
+  it("opens the website's forgot-password page from the login form", () => {
+    render(<Login />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+
+    expect(vi.mocked(openExternalUrl)).toHaveBeenCalledWith("https://ensuanx.com/login.html?mode=forgot&lang=en");
   });
 
   it("keeps the first-entry choices pending until they are confirmed", () => {

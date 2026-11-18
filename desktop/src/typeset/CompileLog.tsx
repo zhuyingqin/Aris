@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { LatexDiagnostic } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
+import { languageLocale } from "../language";
 import type { CompileLiveLog, CompileLogFilter, CompileLogLevel, CompileResult, CompileStatus } from "./compileModel";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { ToolIcon } from "./ToolIcon";
@@ -33,7 +34,7 @@ export default function CompileLog({
     : [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
   const pdfState = result?.pdfState ?? (result?.success ? "fresh" : result?.partialOutput ? "partial" : "missing");
   const sourceHash = result?.rootSourceHash ?? "";
-  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : copy.notRecorded;
+  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString(languageLocale(language)) : copy.notRecorded;
   const diagnostics = useMemo(() => (result?.diagnostics ?? []).map((diagnostic, index) => {
     const level: CompileLogLevel = diagnostic.severity === "warning" && /(?:over|under)full\s+\\?hbox/i.test(diagnostic.message)
       ? "info"

@@ -13,6 +13,9 @@
 //! - **It has to be able to write.** Which is why the decision above can be
 //!   "yes": [`worktree`] gives every task a throwaway checkout on a throwaway
 //!   branch, so an autonomous write reaches nothing the user has not accepted.
+//!   A project that is a plain folder rather than a Git repository gets the
+//!   same checkout from a private repository SomniQ keeps for it outside the
+//!   folder ([`shadow`]).
 //! - **It can be cancelled mid-flight.** Every launch claims a fresh `run_seq`
 //!   and every settle is conditioned on it, so a cancel racing a completing
 //!   turn settles nothing instead of resurrecting a card the user just dropped.
@@ -22,5 +25,6 @@ pub(crate) mod commands;
 pub(crate) mod engine;
 pub(crate) mod model;
 pub(crate) mod permission;
+pub(crate) mod shadow;
 pub(crate) mod store;
 pub(crate) mod worktree;

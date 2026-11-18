@@ -1,5 +1,143 @@
 # ARIS-Code Changelog
 
+## v0.4.90 (2026-11-17)
+
+- **Spanish** — the interface is available in Chinese, English and Spanish.
+  Every page, the Workflows page (previously Chinese-only), the
+  app's own error and status messages, and the Code tab's VS Code UI follow the
+  language chosen in Settings. Plugin manifests may add `es` text; plugin pages
+  receive `locale` (`en`, `cn` or `es`) from `somniq.ready()`. Manifests that
+  use `es` are not accepted by older app versions.
+- **Scanned and garbled PDFs** — a new `read_pdf_pages` tool renders PDF pages
+  to images the model reads directly, with optional OCR text. It uses the PDF
+  and OCR engines built into Windows (no installation), else Poppler or MuPDF
+  with Tesseract. When `read_file` finds no usable text layer it hands the
+  model this tool instead of leaving it to install libraries or write scripts,
+  and the model is told to report an unreadable document to the user rather
+  than work through failing shell commands.
+- **Requests stay light** — a model request carries only the six most recent
+  images (two when retrying after a timeout); older images stay in the session.
+  Long image-heavy turns no longer grow until the gateway times out.
+- **Slides** — the `paper-slides` deck builder embeds SVG figures, adds a
+  full-bleed illustration layout and illustrated cover, section and card
+  slides.
+- **Research plugin examples** — nine example packages under
+  `examples/plugins/research-suite/` (reading cards, comparison matrix,
+  literature watch, manuscript checks, claim checker, submission profiles,
+  reviewer response, review rubric). Data-panel prompts may be localized.
+- **Sign-in** — the login page links to password recovery.
+- **Reviewer packs** — a plugin can add review criteria (`somniq.reviewer`) to
+  the independent Reviewer. They apply by keyword, reach only the Reviewer's
+  packet, and are used by Chat review, work-task review and workflow approval
+  gates. The controller records which rubrics were sent and which were left out
+  for length, reconciles each criterion's result with the Reviewer's issues
+  (an unmentioned criterion is "not reported", never "met"), and turns a pass
+  into a revision when a critical criterion was violated. The review panel and
+  the task board show the record.
+- **Plugin pages hand work to the background** — a page panel with
+  `"proposeTasks": true` can propose a work task (`somniq.task`); the app shows
+  the proposal and only the user's click creates or starts it. The task records
+  which page asked, and the page follows it with `somniq.tasks` /
+  `somniq.onTasks`: state, Reviewer verdict, summary, changed files and
+  deliverables, read from the board rather than from what the task wrote back.
+  New templates: `reviewer-pack`, `experiment-triage`.
+- **Responsive literature and file work** — PDF import with OCR, image OCR,
+  attachment reading, PDF bytes, folder duplication and Typeset project export
+  run off the window's thread. OCR and PDF tools have timeouts and can be
+  canceled (`literature_ocr_cancel`); PDF bytes travel as binary.
+- **Safer persistence** — the experiment run library (`runs.json`), `config.json`,
+  and the remote/OAuth credential files are replaced atomically under a lock,
+  so concurrent updates are not lost and a crash cannot leave them missing. An
+  unreadable `config.json` is kept aside before it would be overwritten.
+- **Fixes** — work-task create, edit and delete now notify every view of the
+  board; credentials are dropped when a web request is redirected to another
+  origin; the slide builder (`paper-slides`) gains a deterministic
+  `slides.json` deck builder; dead code found in the 2026-11-14 audit removed.
+- **CI** — a Windows desktop job covers plugins, the review loop and its rubric
+  record, work-task review, workflow gates, plugin page tasks, the run library
+  and bounded subprocesses.
+
+## v0.4.89 (2026-11-14)
+
+- **Official plugins** — Literature, LaTeX, Figures and Mail are switchable
+  official plugins. A global switch and a per-project override decide whether
+  each one's page, tools, skills, settings and background work load; a project
+  file may only ask for one to be off. Mail is off by default. Each run keeps
+  the switch state it started with.
+- **Settings and pages** — Literature settings have their own Settings page,
+  hidden while the plugin is off. Typeset, Figures and Mail mount as official
+  plugin page contributions; the PDF reader moved to a shared `pdf/` module
+  that the Chat side viewer and the library both use.
+- **User plugins and official plugins** — a user package can declare
+  `somniq.requires`; it does not run while a required official plugin is off,
+  and the Plugins page and approval card say which one it waits for. The
+  model's file tools refuse the project plugin store, and shell, PowerShell and
+  REPL commands that name it are refused before they run.
+- **Research workflow fixes** — the Scopus school route is billed through the
+  managed gateway, "continue" keeps the active task plan, plugin continuation
+  carries the plan, the brief starts collapsed and local file errors are
+  classified.
+- **Windows release** — manifests and lockfiles target 0.4.89. GitHub-hosted
+  Actions remain blocked by the account billing lock, so the Windows x64
+  installer is built locally.
+
+## v0.4.88 (2026-11-11)
+
+- **Native Word work in Chat** — generate new DOCX files with local Pandoc,
+  edit exact text and formatting while preserving non-target package content,
+  and render final revisions through LibreOffice. Version checks, candidate
+  publication, audit records and undo cover document writes.
+- **Daily office documents** — convert tab-separated quotations to native
+  tables, repeat table headers, skip cover numbering, change a selected section's
+  orientation, populate supported content controls, accept supported inline
+  revisions and clear explicitly scoped personal properties. Native contents
+  indexes are calculated by LibreOffice and remain updatable.
+- **Agent document workflows** — Chinese office requests expose the production
+  document tools. Product guidance preserves formatting and later instructions,
+  rereads structural anchors and distinguishes rendering from visual/editor
+  approval. Ten natural-language cases use the shared Chat runtime; fourteen
+  direct document cases retain their own checks and evidence.
+- **Dependencies and validation scope** — Pandoc, LibreOffice and Python with
+  python-docx/odfpy are separately installed local engines; native TOC calculation
+  also needs LibreOffice's Python UNO support. Word/WPS, independent visual review
+  and legacy binary .doc remain unverified. Known input-glyph and Agent narrative
+  counting defects are retained in the acceptance reports.
+- **Windows release** — manifests and lockfiles target 0.4.88. The locally built
+  x64 installer is provided with SHA-256 checksums. The November 13 updater repair
+  adds a verified signature and latest.json to the unchanged installer, promotes
+  0.4.88 to GitHub Latest and synchronizes the signed Windows update to the China
+  mirror. The manifest retains the installer's original build timestamp so an
+  installed 0.4.88 does not repeatedly offer the identical installer.
+
+## v0.4.87 (2026-11-10)
+
+- **Project plugins from a conversation** — create, diagnose, install and edit
+  local plugin packages in Chat, with explicit desktop approval before enabling
+  executable capabilities. Packages share one lifecycle, keep version history
+  and support upgrade review and rollback. Each run keeps a frozen plugin set.
+- **Plugin pages and research panels** — project pages, compact Chat glances,
+  tables, metrics, charts and editable notes keep research state close to the
+  conversation. Custom pages run in sandboxed frames and communicate through
+  the host's declared interfaces. Starter packages cover panels, pages, skills,
+  task planning and Python MCP tools.
+- **Reliable scheduled research work** — calendar, recurrence and Cron rules
+  use explicit time zones, idempotent dispatch and delivery history. Work tasks
+  also isolate changes for ordinary project folders through a private shadow
+  repository, preserving review and acceptance without adding a Git repository
+  to the user's folder.
+- **Research continuity and independent review** — unfinished task plans keep
+  their turn moving, Reviewer calls use fresh isolated child sessions, and
+  project turns can read their own sub-agent reports. Chat submission locks,
+  question input and Windows file writes handle their recovery paths.
+- **Reading, writing and Chat polish** — select PDF text, fold LaTeX
+  environments, copy rendered formulas as source, and keep visual tables,
+  equations and diagram previews synchronized. Chat localizes tool states and
+  presents routine inspection more quietly.
+- **Release consistency** — desktop and shared Rust manifests and lockfiles
+  target 0.4.87. The release workflow can build Windows x64 and macOS universal
+  installers, signed updater payloads and the combined manifest from a selected
+  branch, retaining the result as a draft for review.
+
 ## v0.4.86 (2026-10-22)
 
 - **Membership payments in the desktop app** — purchase Go, Plus or Pro with

@@ -20,6 +20,8 @@ import { useStore } from "../store";
 import type { McpConfigView, OracleWebStatusView } from "../types";
 import Extensions from "./Extensions";
 
+vi.mock("../api/plugins", () => ({ pluginsList: vi.fn().mockResolvedValue([]) }));
+
 vi.mock("../api/tauri", () => ({
   isTauri: () => true,
   mcpConfigGet: vi.fn(),

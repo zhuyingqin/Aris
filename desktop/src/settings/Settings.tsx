@@ -13,13 +13,14 @@ import { SvgIcon } from "../SvgIcon";
 import type { ConfigView } from "../types";
 import { MailSettingsDetail } from "./MailSettings";
 import MemorySettings from "./MemorySettings";
+import LiteratureSettings from "./LiteratureSettings";
+import { officialPluginEnabled } from "../extensions/officialPlugins";
 import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import AboutSettings from "./AboutSettings";
 import AccountSettings from "./AccountSettings";
 import GeneralSettings from "./GeneralSettings";
 import ModelsSettings from "./ModelsSettings";
-import Extensions from "../extensions/Extensions";
 import { SETTINGS_COPY } from "./i18n";
 import {
   SETTINGS_NAV_GROUPS,
@@ -64,6 +65,8 @@ export default function Settings() {
   const language = useStore((state) => state.language);
   const logout = useStore((state) => state.logout);
   const hideMail = useStore((state) => state.hideMail);
+  // The Literature plugin owns this page; it goes with the plugin.
+  const hideLiterature = useStore((state) => officialPluginEnabled(state.officialPlugins, "literature") === false);
   const currentProjectId = useStore((state) => state.currentProject?.id);
   const localizedCopy = SETTINGS_COPY[language];
   const copy = { ...localizedCopy.general, ...localizedCopy.providers };
@@ -208,16 +211,17 @@ export default function Settings() {
       ...group,
       items: group.items.filter((item) => {
         if (item.id === "mail" && hideMail) return false;
+        if (item.id === "literature" && hideLiterature) return false;
         return true;
       }),
     })).filter((group) => group.items.length > 0);
-  }, [hideMail]);
+  }, [hideMail, hideLiterature]);
 
   useEffect(() => {
-    if (hideMail && activeSettingsTab === "mail") {
+    if ((hideMail && activeSettingsTab === "mail") || (hideLiterature && activeSettingsTab === "literature")) {
       setActiveSettingsTab("general");
     }
-  }, [hideMail, activeSettingsTab]);
+  }, [hideMail, hideLiterature, activeSettingsTab]);
 
   const navLabels = SETTINGS_NAV_LABELS[language];
   const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
@@ -294,6 +298,10 @@ export default function Settings() {
         </div></SettingsPage>
       )}
 
+      {activeSettingsTab === "literature" && !hideLiterature && (
+        <SettingsPage kind="literature" title={layoutCopy.literature}><LiteratureSettings key={currentProjectId} language={language} /></SettingsPage>
+      )}
+
       {(activeSettingsTab === "memory" || visitedTabs.has("memory")) && (
         <SettingsPage kind="memory" title={layoutCopy.memory} hidden={activeSettingsTab !== "memory"}><MemorySettings key={currentProjectId} language={language} /></SettingsPage>
       )}
@@ -306,12 +314,6 @@ export default function Settings() {
           managedModels={managedModels}
           connection={connection}
         /></SettingsPage>
-      )}
-
-      {(activeSettingsTab === "extensions" || visitedTabs.has("extensions")) && (
-        <SettingsPage kind="extensions" title={layoutCopy.extensions} hidden={activeSettingsTab !== "extensions"}><div className="sp-extensions-embed">
-          <Extensions embedded />
-        </div></SettingsPage>
       )}
 
       {(activeSettingsTab === "remote" || visitedTabs.has("remote")) && (

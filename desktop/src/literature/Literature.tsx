@@ -15,6 +15,7 @@ import {
   literatureFullTextSearch,
   literatureImportBibliography,
   literatureImportPdfAsRecord,
+  literatureOcrCancel,
   literatureMergeDuplicates,
   literatureSearchCancel,
   literatureSearchProtocolCreate,
@@ -39,6 +40,7 @@ import {
   type ProjectRagSearchResult,
 } from "../api/tauri";
 import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { imageMimeType, isImagePath } from "../imageFiles";
 import ImageLightbox from "../ImageLightbox";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
@@ -110,7 +112,7 @@ const PANEL_LIMITS = {
 } as const;
 type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json" | "zotero-json";
 
-const PdfReader = lazy(() => import("./PdfReader"));
+const PdfReader = lazy(() => import("../pdf/PdfReader"));
 
 const AUTO_RETRIEVAL_CARDS_STORAGE_KEY = "somniq-literature-auto-retrieval-cards-v1";
 const DISCOVER_MODE_STORAGE_KEY = "somniq-literature-discover-mode-v1";
@@ -164,7 +166,7 @@ function ReproducibleSearchPanel({
   onCompleted: () => Promise<void>;
   onActivity: (level: ActivityLevel, message: string) => void;
 }) {
-  const cn = language === "cn";
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const [question, setQuestion] = useState("");
   const [sources, setSources] = useState<string[]>([...SEARCH_SOURCES]);
   const [maxResults, setMaxResults] = useState(50);
@@ -226,9 +228,11 @@ function ReproducibleSearchPanel({
     try {
       const draft: LiteratureSearchProtocolDraft = {
         question: normalized,
-        scope: cn
-          ? "由桌面端创建的可复现发现检索。"
-          : "Reproducible discovery search created in Desktop.",
+        scope: t(
+          "由桌面端创建的可复现发现检索。",
+          "Reproducible discovery search created in Desktop.",
+          "Búsqueda de descubrimiento reproducible creada en el escritorio.",
+        ),
         timeWindow: timeWindow.trim(),
         databases: sources,
         queries: {},
@@ -247,9 +251,11 @@ function ReproducibleSearchPanel({
       setPreview(next);
       onActivity(
         "info",
-        cn
-          ? `已创建并预览检索协议 ${created.protocol.id}`
-          : `Created and previewed search protocol ${created.protocol.id}`,
+        t(
+          `已创建并预览检索协议 ${created.protocol.id}`,
+          `Created and previewed search protocol ${created.protocol.id}`,
+          `Protocolo de búsqueda ${created.protocol.id} creado y previsualizado`,
+        ),
       );
     } catch (cause) {
       setError(String(cause));
@@ -279,21 +285,25 @@ function ReproducibleSearchPanel({
       setExecution(result);
       await onCompleted();
       const label = continueRunId
-        ? (cn ? "续搜运行" : "Continuation run")
-        : (cn ? "检索运行" : "Search run");
+        ? t("续搜运行", "Continuation run", "Ejecución de continuación")
+        : t("检索运行", "Search run", "Ejecución de búsqueda");
       if (result.cancelled) {
         onActivity(
           "warn",
-          cn
-            ? `${label} ${result.searchRun.id}：已停止，保留 ${result.searchRun.recordIds.length} 条记录，可继续检索`
-            : `${label} ${result.searchRun.id}: stopped; ${result.searchRun.recordIds.length} records kept and the run can be continued`,
+          t(
+            `${label} ${result.searchRun.id}：已停止，保留 ${result.searchRun.recordIds.length} 条记录，可继续检索`,
+            `${label} ${result.searchRun.id}: stopped; ${result.searchRun.recordIds.length} records kept and the run can be continued`,
+            `${label} ${result.searchRun.id}: detenida; se conservan ${result.searchRun.recordIds.length} registros y puedes continuarla`,
+          ),
         );
       } else {
         onActivity(
           result.searchRun.status === "completed" ? "ok" : "warn",
-          cn
-            ? `${label} ${result.searchRun.id}：${result.searchRun.status}，保留 ${result.searchRun.recordIds.length} 条记录`
-            : `${label} ${result.searchRun.id}: ${result.searchRun.status}; retained ${result.searchRun.recordIds.length} records`,
+          t(
+            `${label} ${result.searchRun.id}：${result.searchRun.status}，保留 ${result.searchRun.recordIds.length} 条记录`,
+            `${label} ${result.searchRun.id}: ${result.searchRun.status}; ${result.searchRun.recordIds.length} records kept`,
+            `${label} ${result.searchRun.id}: ${result.searchRun.status}; se conservan ${result.searchRun.recordIds.length} registros`,
+          ),
         );
       }
     } catch (cause) {
@@ -326,9 +336,11 @@ function ReproducibleSearchPanel({
       await literatureSearchCancel(requestId);
       onActivity(
         "info",
-        cn
-          ? "已请求停止检索，将在当前请求结束后停下。"
-          : "Stop requested; the run ends after the request already in flight.",
+        t(
+          "已请求停止检索，将在当前请求结束后停下。",
+          "Stop requested; the run stops once the current request finishes.",
+          "Detención solicitada; la ejecución terminará cuando acabe la solicitud en curso.",
+        ),
       );
     } catch (cause) {
       setStopping(false);
@@ -345,12 +357,16 @@ function ReproducibleSearchPanel({
     ) ?? false);
 
   return (
-    <section className="lit-protocol-search" aria-label={cn ? "可复现外部文献检索" : "Reproducible external literature search"}>
+    <section className="lit-protocol-search" aria-label={t("可复现外部文献检索", "Reproducible external literature search", "Búsqueda externa reproducible de literatura")}>
       <div className="lit-protocol-search-head">
         <div>
-          <span>{cn ? "外部发现" : "External discovery"}</span>
-          <h2>{cn ? "可复现检索协议" : "Reproducible search protocol"}</h2>
-          <p>{cn ? "先检查数据源、查询变体与上限，再明确确认网络检索。" : "Review sources, query variants, and bounds before explicitly confirming network retrieval."}</p>
+          <span>{t("外部发现", "External discovery", "Descubrimiento externo")}</span>
+          <h2>{t("可复现检索协议", "Reproducible search protocol", "Protocolo de búsqueda reproducible")}</h2>
+          <p>{t(
+            "先检查数据源、查询变体与上限，再明确确认网络检索。",
+            "Review sources, query variants, and bounds before explicitly confirming network retrieval.",
+            "Revisa las fuentes, las variantes de consulta y los límites antes de confirmar la búsqueda en red.",
+          )}</p>
         </div>
       </div>
       <div className="lit-protocol-search-form">
@@ -361,7 +377,7 @@ function ReproducibleSearchPanel({
             setPreview(null);
             setExecution(null);
           }}
-          placeholder={cn ? "研究问题、主题或关键词" : "Research question, topic, or keywords"}
+          placeholder={t("研究问题、主题或关键词", "Research question, topic, or keywords", "Pregunta de investigación, tema o palabras clave")}
           rows={3}
         />
         <div className="lit-protocol-source-row">
@@ -376,7 +392,7 @@ function ReproducibleSearchPanel({
             </label>
           ))}
           <label className="lit-protocol-limit">
-            {cn ? "每源上限" : "Per-source limit"}
+            {t("每源上限", "Per-source limit", "Límite por fuente")}
             <input
               type="number"
               min={1}
@@ -390,11 +406,11 @@ function ReproducibleSearchPanel({
             />
           </label>
           <label className="lit-protocol-limit">
-            {cn ? "时间窗" : "Time window"}
+            {t("时间窗", "Time window", "Periodo")}
             <input
               type="text"
               value={timeWindow}
-              placeholder={cn ? "如 2020-2025" : "e.g. 2020-2025"}
+              placeholder={t("如 2020-2025", "e.g. 2020-2025", "p. ej., 2020-2025")}
               onChange={(event) => {
                 setTimeWindow(event.target.value);
                 setPreview(null);
@@ -408,7 +424,9 @@ function ReproducibleSearchPanel({
             disabled={!question.trim() || sources.length === 0 || busy != null}
             onClick={() => void createPreview()}
           >
-            {busy === "preview" ? (cn ? "正在预览…" : "Previewing…") : (cn ? "创建并预览" : "Create & preview")}
+            {busy === "preview"
+              ? t("正在预览…", "Previewing…", "Previsualizando…")
+              : t("创建并预览", "Create & preview", "Crear y previsualizar")}
           </button>
         </div>
       </div>
@@ -416,8 +434,12 @@ function ReproducibleSearchPanel({
       {preview && (
         <div className="lit-protocol-preview">
           <div className="lit-protocol-preview-title">
-            <strong>{cn ? "执行预览" : "Execution preview"}</strong>
-            <span>{cn ? `每个数据源最多保留 ${preview.maxResults} 条唯一记录` : `Up to ${preview.maxResults} unique records retained per source`}</span>
+            <strong>{t("执行预览", "Execution preview", "Vista previa de la ejecución")}</strong>
+            <span>{t(
+              `每个数据源最多保留 ${preview.maxResults} 条唯一记录`,
+              `Up to ${preview.maxResults} unique records retained per source`,
+              `Se conservan hasta ${preview.maxResults} registros únicos por fuente`,
+            )}</span>
           </div>
           <div className="lit-protocol-plan-grid">
             {preview.plan.map((item) => (
@@ -436,8 +458,8 @@ function ReproducibleSearchPanel({
                   <div key={`${item.source}-${variant.kind}`} className="lit-protocol-query">
                     <span>
                       {variant.kind} · {variant.willExecute
-                        ? `max ${variant.maxResults}`
-                        : "not scheduled"}
+                        ? t(`最多 ${variant.maxResults}`, `max ${variant.maxResults}`, `máx. ${variant.maxResults}`)
+                        : t("未安排", "not scheduled", "no programada")}
                     </span>
                     <code>{variant.query}</code>
                   </div>
@@ -452,7 +474,11 @@ function ReproducibleSearchPanel({
                 checked={confirmed}
                 onChange={(event) => setConfirmed(event.target.checked)}
               />
-              {cn ? "我已检查查询与范围，确认执行外部网络检索。" : "I reviewed the queries and scope and confirm external network retrieval."}
+              {t(
+                "我已检查查询与范围，确认执行外部网络检索。",
+                "I reviewed the queries and scope and confirm external network retrieval.",
+                "He revisado las consultas y el alcance, y confirmo la búsqueda externa en red.",
+              )}
             </label>
             <button
               type="button"
@@ -460,18 +486,24 @@ function ReproducibleSearchPanel({
               disabled={!confirmed || busy != null}
               onClick={() => void execute()}
             >
-              {busy === "execute" ? (cn ? "正在检索…" : "Searching…") : (cn ? "确认并执行" : "Confirm & execute")}
+              {busy === "execute"
+                ? t("正在检索…", "Searching…", "Buscando…")
+                : t("确认并执行", "Confirm & execute", "Confirmar y ejecutar")}
             </button>
             {busy === "execute" && (
               <button
                 type="button"
                 disabled={stopping}
                 onClick={() => void stopSearch()}
-                title={cn
-                  ? "在当前数据源请求结束后停止；已检索到的记录会保留，可继续检索。"
-                  : "Stops after the request already in flight; retrieved records are kept and the run can be continued."}
+                title={t(
+                  "在当前数据源请求结束后停止；已检索到的记录会保留，可继续检索。",
+                  "Stops after the request already in flight; retrieved records are kept and the run can be continued.",
+                  "Se detiene cuando acabe la solicitud en curso; los registros obtenidos se conservan y puedes continuar la ejecución.",
+                )}
               >
-                {stopping ? (cn ? "正在停止…" : "Stopping…") : (cn ? "停止检索" : "Stop")}
+                {stopping
+                  ? t("正在停止…", "Stopping…", "Deteniendo…")
+                  : t("停止检索", "Stop", "Detener")}
               </button>
             )}
           </div>
@@ -481,30 +513,30 @@ function ReproducibleSearchPanel({
       {execution && (
         <div className="lit-protocol-coverage">
           <div>
-            <strong>{cn ? "覆盖状态" : "Coverage"}</strong>
-            <span>{execution.searchRun.status} · {execution.searchRun.recordIds.length} {cn ? "条唯一记录" : "unique records"}</span>
+            <strong>{t("覆盖状态", "Coverage", "Cobertura")}</strong>
+            <span>{execution.searchRun.status} · {execution.searchRun.recordIds.length} {t("条唯一记录", "unique records", "registros únicos")}</span>
           </div>
           <div className="lit-protocol-coverage-grid">
             {execution.searchRun.sourceAttempts.map((attempt, index) => (
               <article key={`${attempt.source}-${attempt.status}-${index}`}>
                 <header><strong>{attempt.source}</strong><span>{attempt.status}</span></header>
                 <dl>
-                  <div><dt>total</dt><dd>{attempt.coverage.totalHits ?? "?"}</dd></div>
-                  <div><dt>fetched</dt><dd>{attempt.coverage.fetched}</dd></div>
-                  <div><dt>unique</dt><dd>{attempt.coverage.unique}</dd></div>
+                  <div><dt>{t("总数", "total", "total")}</dt><dd>{attempt.coverage.totalHits ?? "?"}</dd></div>
+                  <div><dt>{t("已获取", "fetched", "obtenidos")}</dt><dd>{attempt.coverage.fetched}</dd></div>
+                  <div><dt>{t("唯一", "unique", "únicos")}</dt><dd>{attempt.coverage.unique}</dd></div>
                   <div>
-                    <dt>{cn ? "覆盖率" : "coverage"}</dt>
+                    <dt>{t("覆盖率", "coverage", "cobertura")}</dt>
                     <dd>
                       {attempt.coverage.totalHits && attempt.coverage.totalHits > 0
                         ? `${Math.min(100, Math.round((attempt.coverage.fetched / attempt.coverage.totalHits) * 100))}%`
-                        : "n/a"}
+                        : t("不适用", "n/a", "n/d")}
                     </dd>
                   </div>
                 </dl>
                 <p className={attempt.coverage.exhausted ? "complete" : "truncated"}>
                   {attempt.coverage.exhausted
-                    ? (cn ? "已遍历完" : "exhausted")
-                    : `${cn ? "未遍历完" : "not exhausted"} · ${attempt.coverage.truncatedReason ?? "unknown"}`}
+                    ? t("已遍历完", "exhausted", "agotada")
+                    : `${t("未遍历完", "not exhausted", "no agotada")} · ${attempt.coverage.truncatedReason ?? t("未知", "unknown", "desconocido")}`}
                 </p>
                 {attempt.failureMessage && <small>{attempt.failureMessage}</small>}
               </article>
@@ -518,8 +550,8 @@ function ReproducibleSearchPanel({
               onClick={() => void continueSearch()}
             >
               {busy === "execute"
-                ? (cn ? "正在继续…" : "Continuing…")
-                : (cn ? "继续未完成的数据源" : "Continue incomplete sources")}
+                ? t("正在继续…", "Continuing…", "Continuando…")
+                : t("继续未完成的数据源", "Continue incomplete sources", "Continuar con las fuentes incompletas")}
             </button>
           )}
         </div>
@@ -589,13 +621,13 @@ interface LiteratureProps {
 type LiteratureCopy = (typeof LITERATURE_COPY)[Language];
 
 const TAG_COLORS = ["amber", "blue", "green", "purple", "accent"];
-const TAG_COLOR_OPTIONS = [
-  { value: "#f59e0b", label: "amber" },
-  { value: "#3b82f6", label: "blue" },
-  { value: "#22c55e", label: "green" },
-  { value: "#a855f7", label: "purple" },
-  { value: "#ef4444", label: "red" },
-  { value: "#06b6d4", label: "cyan" },
+const TAG_COLOR_OPTIONS: Array<{ value: string; label: Record<Language, string> }> = [
+  { value: "#f59e0b", label: { cn: "琥珀色", en: "Amber", es: "Ámbar" } },
+  { value: "#3b82f6", label: { cn: "蓝色", en: "Blue", es: "Azul" } },
+  { value: "#22c55e", label: { cn: "绿色", en: "Green", es: "Verde" } },
+  { value: "#a855f7", label: { cn: "紫色", en: "Purple", es: "Morado" } },
+  { value: "#ef4444", label: { cn: "红色", en: "Red", es: "Rojo" } },
+  { value: "#06b6d4", label: { cn: "青色", en: "Cyan", es: "Cian" } },
 ];
 
 function tagColorClass(tag: string, color?: string): string {
@@ -1796,6 +1828,13 @@ function RetrievalCardBrowser({
 // Main component
 // ──────────────────────────────────────────────────────────────────────────────
 
+/** A PDF import the user canceled: reported as canceled, not as a failure. */
+class PdfImportCanceled extends Error {
+  constructor() {
+    super("PDF import canceled");
+  }
+}
+
 export default function Literature({
   pageView: controlledPageView,
   onPageViewChange,
@@ -1867,6 +1906,27 @@ export default function Literature({
   }>({ total: 0, exhausted: true, loading: false });
   const [duplicateCandidates, setDuplicateCandidates] = useState<LiteratureDuplicateCandidate[]>([]);
   const [pdfDragging, setPdfDragging] = useState(false);
+  // The PDF import in flight, so it can be shown and canceled: importing a
+  // scanned PDF reads every page with OCR and can take minutes.
+  const [pdfImport, setPdfImport] = useState<{ requestId: string; name: string } | null>(null);
+  const canceledImports = useRef(new Set<string>());
+  const runPdfImport = useCallback(async (sourcePath: string) => {
+    const requestId = crypto.randomUUID();
+    setPdfImport({ requestId, name: sourcePath.split(/[\\/]/).pop() || sourcePath });
+    try {
+      return await literatureImportPdfAsRecord<{ record: { recordId: string } }>(sourcePath, undefined, requestId);
+    } catch (error) {
+      throw canceledImports.current.has(requestId) ? new PdfImportCanceled() : error;
+    } finally {
+      canceledImports.current.delete(requestId);
+      setPdfImport((current) => (current?.requestId === requestId ? null : current));
+    }
+  }, []);
+  const cancelPdfImport = useCallback(() => {
+    if (!pdfImport) return;
+    canceledImports.current.add(pdfImport.requestId);
+    void literatureOcrCancel(pdfImport.requestId);
+  }, [pdfImport]);
   // Read once: later writes come from this component's own state.
   const [layoutPrefs] = useState(readLayoutPrefs);
   const [sort, setSort] = useState<SortKey>(() => (
@@ -2210,13 +2270,17 @@ export default function Literature({
         if (event.payload.type !== "drop") return;
         const sourcePath = event.payload.paths.find((path) => path.toLocaleLowerCase().endsWith(".pdf"));
         if (!sourcePath) return;
-        void literatureImportPdfAsRecord<{ record: { recordId: string } }>(sourcePath)
+        void runPdfImport(sourcePath)
           .then(async (result) => {
             await load(projectId, { quiet: true });
             setSelectedId(result.record.recordId);
             logActivity("ok", copy.dialogs.pdfDropImported);
           })
           .catch((error) => {
+            if (error instanceof PdfImportCanceled) {
+              logActivity("info", copy.dialogs.pdfImportCanceled);
+              return;
+            }
             const message = copy.dialogs.pdfDropImportFailed(String(error));
             setError(message);
             logActivity("error", message);
@@ -2231,7 +2295,7 @@ export default function Literature({
       disposed = true;
       unlisten?.();
     };
-  }, [load, logActivity, projectId, setError]);
+  }, [load, logActivity, projectId, runPdfImport, setError]);
 
   const libraryPapers = library.papers;
   const isTrashView = view === "trash";
@@ -2352,7 +2416,7 @@ export default function Literature({
           format: report.format,
           imported: report.imported,
           merged: report.merged,
-          migratedChildren: migratedChildren.join(language === "cn" ? "、" : ", "),
+          migratedChildren: migratedChildren.join(tr(language, "、", ", ", ", ")),
           skipped: report.skipped,
           warningSummary,
         }),
@@ -2369,11 +2433,15 @@ export default function Literature({
     try {
       const selected = await openDialog({ multiple: false, filters: [{ name: "PDF", extensions: ["pdf"] }] });
       if (!selected || Array.isArray(selected)) return;
-      const result = await literatureImportPdfAsRecord<{ record: { recordId: string } }>(selected);
+      const result = await runPdfImport(selected);
       await load(projectId, { quiet: true });
       setSelectedId(result.record.recordId);
       logActivity("ok", copy.dialogs.pdfImported);
     } catch (error) {
+      if (error instanceof PdfImportCanceled) {
+        logActivity("info", copy.dialogs.pdfImportCanceled);
+        return;
+      }
       const message = copy.dialogs.pdfImportFailed(String(error));
       setError(message);
       logActivity("error", message);
@@ -2502,9 +2570,12 @@ export default function Literature({
         if (!cancelled) {
           setFullTextMatchIds(null);
           setFullTextPage({ total: 0, exhausted: true, loading: false });
-          const message = language === "cn"
-            ? `本地全文检索失败，已回退到基础匹配：${String(error)}`
-            : `Local full-text search failed; using basic matching: ${String(error)}`;
+          const message = tr(
+            language,
+            `本地全文检索失败，已回退到基础匹配：${String(error)}`,
+            `Local full-text search failed; using basic matching: ${String(error)}`,
+            `Falló la búsqueda local de texto completo; se usa la coincidencia básica: ${String(error)}`,
+          );
           setError(message);
           logActivity("warn", message);
         }
@@ -2537,9 +2608,12 @@ export default function Literature({
       });
     } catch (error) {
       setFullTextPage((current) => ({ ...current, loading: false }));
-      const message = language === "cn"
-        ? `加载更多本地检索结果失败：${String(error)}`
-        : `Failed to load more local search results: ${String(error)}`;
+      const message = tr(
+        language,
+        `加载更多本地检索结果失败：${String(error)}`,
+        `Failed to load more local search results: ${String(error)}`,
+        `No se pudieron cargar más resultados de la búsqueda local: ${String(error)}`,
+      );
       setError(message);
       logActivity("warn", message);
     }
@@ -4022,6 +4096,12 @@ export default function Literature({
 
   const mainArea = (
     <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`} role="region" aria-label={viewLabel}>
+      {pdfImport && (
+        <div className="lit-pdf-import-progress" role="status">
+          <span>{copy.dialogs.pdfImporting(pdfImport.name)}</span>
+          <button type="button" onClick={cancelPdfImport}>{copy.dialogs.pdfImportCancel}</button>
+        </div>
+      )}
       <LiteratureToolbar
         quickFilter={quickFilter}
         quickCounts={quickCounts}
@@ -4365,7 +4445,7 @@ export default function Literature({
       ) : (
         <div className="lit-workspace-empty">
           <span className="lit-workspace-empty-icon" aria-hidden="true"><SvgIcon name="bookOpen" size={28} /></span>
-          <p>{copy.selectPaperToOpen}<span hidden>Select a paper to open it here.</span></p>
+          <p>{copy.selectPaperToOpen}<span hidden>{tr(language, "Select a paper to open it here.", "Select a paper to open it here.", "Selecciona un artículo para abrirlo aquí.")}</span></p>
         </div>
       )}
     </section>
@@ -4537,17 +4617,22 @@ export default function Literature({
       {activeLibraryScope && (
         <div className="lit-library-scope-banner" role="status">
           <div className="lit-library-scope-copy">
-            <span>工作流原始文献库</span>
+            <span>{tr(language, "工作流原始文献库", "Workflow source library", "Biblioteca de origen del flujo de trabajo")}</span>
             <strong>{activeLibraryScope.title}</strong>
             <small>
-              已显示 {scopedLoadedCount}/{activeLibraryScope.recordIds.length} 篇收纳记录；这里只限制当前视图，不会复制或删除文献。
+              {tr(
+                language,
+                `已显示 ${scopedLoadedCount}/${activeLibraryScope.recordIds.length} 篇收纳记录；这里只限制当前视图，不会复制或删除文献。`,
+                `Showing ${scopedLoadedCount}/${activeLibraryScope.recordIds.length} collected records; this only filters the current view and does not copy or delete papers.`,
+                `Se muestran ${scopedLoadedCount}/${activeLibraryScope.recordIds.length} registros recopilados; esto solo filtra la vista actual y no copia ni elimina artículos.`,
+              )}
             </small>
           </div>
           <div className="lit-library-scope-actions">
             {activeLibraryScope.workflowRunId && (
-              <button type="button" onClick={() => setTab("workflows")}>返回工作流</button>
+              <button type="button" onClick={() => setTab("workflows")}>{tr(language, "返回工作流", "Back to workflow", "Volver al flujo de trabajo")}</button>
             )}
-            <button type="button" onClick={() => setLiteratureLibraryScope(null)}>退出筛选</button>
+            <button type="button" onClick={() => setLiteratureLibraryScope(null)}>{tr(language, "退出筛选", "Clear filter", "Quitar filtro")}</button>
           </div>
         </div>
       )}
@@ -6279,9 +6364,9 @@ function InfoTab({
                     aria-label={copy.infoTab.tagColorAria(tag)}
                     onChange={(event) => onSetTagColor(tag, event.target.value)}
                   >
-                    <option value="" disabled>auto</option>
+                    <option value="" disabled>{tr(language, "自动", "Auto", "Automático")}</option>
                     {TAG_COLOR_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
+                      <option key={option.value} value={option.value}>{option.label[language]}</option>
                     ))}
                   </select>
                 )}
@@ -6344,7 +6429,7 @@ function InfoTab({
             </>
           )}
           {paper.isbn && <><dt>ISBN</dt><dd>{paper.isbn}</dd></>}
-          {paper.citationKey && <><dt>Citation key</dt><dd>{paper.citationKey}</dd></>}
+          {paper.citationKey && <><dt>{tr(language, "Citation key", "Citation key", "Clave de cita")}</dt><dd>{paper.citationKey}</dd></>}
           {Object.entries(displayFields).map(([key, value]) => (
             <Fragment key={key}>
               <dt>{key}</dt><dd>{value}</dd>

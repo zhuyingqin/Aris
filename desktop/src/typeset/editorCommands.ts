@@ -4,7 +4,7 @@ import { EditorView } from "@codemirror/view";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import type { Language } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
-import { scanLatexStructure } from "./latexStructure";
+import { scanLatexStructure } from "../editor/latex/latexStructure";
 import type { TextSearchMatch } from "./pdfTextMatch";
 
 function ensureEmptyLine(text: string, pos: number): { prefix: string; suffix: string } {

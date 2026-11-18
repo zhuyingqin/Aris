@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import type { ChatSession } from "./types";
 import { noteTurnActivity } from "./modelWait";
+import { tr, type Language } from "../language";
 
 export const SESSIONS_KEY = "somniq-chat-sessions-v2";
 export const LEGACY_SESSIONS_KEY = "aris-chat-sessions-v2";
@@ -130,6 +131,8 @@ export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): C
     role: raw.role === "assistant" ? "assistant" : "user",
     blocks,
     readOnly: Boolean(raw.readOnly),
+    // An app-inserted turn must come back as one, or it reads as the user's.
+    origin: raw.origin === "plugin-continuation" ? raw.origin : undefined,
     omittedTurnIndex: typeof raw.omittedTurnIndex === "number" && Number.isFinite(raw.omittedTurnIndex)
       ? raw.omittedTurnIndex
       : undefined,
@@ -326,6 +329,7 @@ function isUnusableChatTitle(value: string): boolean {
   // paper-search response template can start with "状态：未确认"; treating that
   // as a title makes unrelated conversations indistinguishable in the sidebar.
   if (/^(?:状态)?[:：]?(?:未确认|无法确认|待确认|不确定|未知|证据不足)$/u.test(compact)) return true;
+  if (/^(?:estado\s*[:：]\s*)?sin confirmar$/i.test(lower)) return true;
   if (/^(?:status\s*[:：]\s*)?(?:unconfirmed|not verified|inconclusive|pending|unknown|insufficient evidence)$/i.test(lower)) return true;
   if (lower.startsWith("<think") || lower.includes("</think")) return true;
   return [
@@ -394,8 +398,10 @@ const REPL_WRITE_RE =
   /(?:\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?["'][^"']*[wax]|\.(?:write_text|write_bytes)\s*\()/i;
 
 function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
-  const parsed = parseToolBlockJson(block, "input");
-  const raw = (parsed as { todos?: unknown })?.todos;
+  if (block.isError || block.output === undefined) return null;
+  const output = parseToolBlockJson(block, "output") as { newTodos?: unknown; new_todos?: unknown } | null;
+  const parsed = parseToolBlockJson(block, "input") as { todos?: unknown } | null;
+  const raw = output?.newTodos ?? output?.new_todos ?? parsed?.todos;
   if (!Array.isArray(raw)) return null;
   const todos: ChatTodoItem[] = [];
   for (const entry of raw) {
@@ -415,17 +421,21 @@ function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
 // The latest persisted TodoWrite plan drives the floating workflow box. Plans
 // belong to the session, so keep the last snapshot across later user messages
 // and reloads instead of making it disappear at the next request boundary.
-export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
+export function latestTodoSnapshotFromTurns(turns: ChatTurn[]): ChatTodoItem[] | null {
   for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const blocks = turns[turnIndex].blocks;
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];
       if (block.kind !== "tool" || block.name !== "TodoWrite") continue;
       const todos = parseTodoList(block);
-      if (todos && todos.length > 0) return todos;
+      if (todos !== null) return todos;
     }
   }
-  return [];
+  return null;
+}
+
+export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
+  return latestTodoSnapshotFromTurns(turns) ?? [];
 }
 
 function stringField(record: Record<string, unknown> | null, keys: string[]): string | null {
@@ -867,6 +877,7 @@ type SessionGroup = { id: string; label: string; sessions: ChatSession[] };
 export function groupSessionsByProject(
   sessions: ChatSession[],
   projects: DesktopProject[],
+  language: Language = "en",
 ): SessionGroup[] {
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const order = new Map(projects.map((project, index) => [project.id, index]));
@@ -880,7 +891,9 @@ export function groupSessionsByProject(
     .sort(([left], [right]) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER))
     .map(([projectId, projectSessions]) => ({
       id: projectId,
-      label: names.get(projectId) ?? (projectId === "default" ? "SomniQ Desktop Workspace" : "Unknown project"),
+      label: names.get(projectId) ?? (projectId === "default"
+        ? "SomniQ Desktop Workspace"
+        : tr(language, "未知项目", "Unknown project", "Proyecto desconocido")),
       sessions: projectSessions.sort((left, right) =>
         Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt),
     }));

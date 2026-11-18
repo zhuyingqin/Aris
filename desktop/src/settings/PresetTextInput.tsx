@@ -1,4 +1,4 @@
-import { useStore } from "../store";
+import { tr, useStore } from "../store";
 import { SETTINGS_COPY } from "./i18n";
 import { isManagedModelServerUrl, type PresetOption } from "./settingsProviderCatalog";
 
@@ -27,7 +27,7 @@ export default function PresetTextInput({
   return (
     <div className="st-preset-control">
       <select
-        aria-label={`${label} (${language === "cn" ? "预设" : "preset"})`}
+        aria-label={`${label} (${tr(language, "预设", "preset", "preajuste")})`}
         value={currentPreset}
         disabled={disabled}
         onChange={(event) => {

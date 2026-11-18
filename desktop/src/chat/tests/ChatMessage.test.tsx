@@ -46,6 +46,32 @@ afterEach(() => {
 });
 
 describe("ChatMessage rendering", () => {
+  it("summarizes successful inspection in Typeset while keeping failures, live tools and findings visible", async () => {
+    useStore.setState({ tab: "typeset" });
+    const user = userEvent.setup();
+    const { container } = render(<ChatMessage
+      turn={{ id: "typeset-activity", role: "assistant", streaming: true, blocks: [
+        { kind: "tool", id: "compact-read", name: "read_file", input: "{}", output: "chapter content" },
+        { kind: "tool", id: "compact-search", name: "grep_search", input: "{}", output: "matching lines" },
+        { kind: "tool", id: "failed-read", name: "read_file", input: "{}", output: "missing file", isError: true },
+        { kind: "tool", id: "pending-read", name: "read_file", input: "{}" },
+        { kind: "text", text: "Final finding: verify the figure caption." },
+      ] }}
+      canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined}
+    />);
+    const activity = screen.getByRole("button", { name: /Ran 2 reads and searches/ });
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".tool-error")).toHaveLength(1);
+    expect(container.querySelectorAll(".tool-running")).toHaveLength(1);
+    expect(screen.getByText("Final finding: verify the figure caption.")).toBeTruthy();
+    expect(screen.queryByText("matching lines")).toBeNull();
+    await user.click(activity);
+    expect(activity.getAttribute("aria-expanded")).toBe("true");
+    const child = container.querySelector(".chat-tool-activity .chat-tool-group-body .chat-tool-header")!;
+    fireEvent.click(child);
+    expect(screen.getByText("chapter content")).toBeTruthy();
+  });
+
   it("keeps live LaTeX output in one stable viewport and follows it only from the end", () => {
     const message = (stdoutTail: string, stderrTail: string | null = null) => (
       <ChatMessage
@@ -840,7 +866,7 @@ describe("ChatMessage rendering", () => {
       output: JSON.stringify({ status: "completed", model: "gpt-image-2", prompt: "A research diagram",
         images: [{ path: ".somniq/artifacts/somni-images/run/image-1.png" }] }),
     }] }} canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined} />);
-    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    expect(screen.getByText("Generated 1 image")).toBeTruthy();
     await userEvent.click(screen.getByText("Somni drawing"));
     expect(screen.getByText(/gpt-image-2/)).toBeTruthy();
     expect(screen.getByText("A research diagram")).toBeTruthy();
@@ -876,7 +902,7 @@ describe("ChatMessage rendering", () => {
       />,
     );
 
-    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    expect(screen.getByText("Generated 1 image")).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(
         ".somniq/artifacts/oracle-images/run/diagram.png",
@@ -1141,7 +1167,7 @@ describe("ChatMessage rendering", () => {
     );
 
     const badge = screen.getByRole("button", {
-      name: /Open independent Reviewer details: gpt-5-reviewer is independently reviewing/,
+      name: /View independent Reviewer details: gpt-5-reviewer is independently reviewing/,
     });
     expect(screen.getByText("Reviewer Agent · openai")).toBeTruthy();
     expect(onOpenIndependentReview).not.toHaveBeenCalled();

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { rubricCounts } from "../reviewRubrics";
+
 import {
   workTaskArtifactExport,
   workTaskReviewPatch,
@@ -165,6 +167,17 @@ export default function TaskReviewPanel({ task, language, onError }: TaskReviewP
       </div>
       {review.summary && <p>{review.summary}</p>}
       {review.exhausted && <p className="tasks-review-exhausted">{copy.exhausted(review.maxRounds)}</p>}
+      {/* The controller's record, not the Reviewer's account. */}
+      {review.rubrics && (
+        <div className="tasks-review-rubrics">
+          {review.rubrics.verdictCorrected && <p className="tasks-review-exhausted">{copy.rubricsCorrected}</p>}
+          {(() => {
+            const counts = rubricCounts(review.rubrics);
+            return counts.sent > 0 && <small>{copy.rubrics(counts.sent, counts.violated, counts.unreported)}</small>;
+          })()}
+          {(review.rubrics.omitted ?? []).length > 0 && <small>{copy.rubricsOmitted((review.rubrics.omitted ?? []).join(", "))}</small>}
+        </div>
+      )}
       {review.issues.length > 0 && (
         <ul className="tasks-review-issues">
           {review.issues.map((issue, index) => (
@@ -174,6 +187,7 @@ export default function TaskReviewPanel({ task, language, onError }: TaskReviewP
               </span>
               <div>
                 <strong>{issue.title}</strong>
+                {issue.criterion && <code className="tasks-review-criterion">{issue.criterion}</code>}
                 {issue.detail && <p>{issue.detail}</p>}
                 {issue.recommendation && <em>{issue.recommendation}</em>}
               </div>

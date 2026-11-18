@@ -1,12 +1,12 @@
 use serde_json::json;
-use std::sync::{Mutex, OnceLock};
 
 const MINIMAL_IPYNB: &str = r#"{"cells":[{"cell_type":"code","id":"c1","metadata":{},"source":"x = 41","outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
 const PARAM_IPYNB: &str = r#"{"cells":[{"cell_type":"code","id":"params","metadata":{"tags":["parameters"]},"source":"seed = 0","outputs":[],"execution_count":null},{"cell_type":"code","id":"body","metadata":{},"source":"print(seed)","outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
 
+/// The crate-wide env lock, not a local one: this module sets
+/// `ARIS_WORKSPACE_ROOT`, which the file-audit tests read mid-test.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    crate::tests::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

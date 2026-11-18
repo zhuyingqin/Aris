@@ -17,6 +17,10 @@ import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import { tr } from "../language";
+
+/** Copy for widgets built outside React, in the current UI language. */
+const uiText = (cn: string, en: string, es: string) => tr(useStore.getState().language, cn, en, es);
 import { labelTarget } from "../editor/latexTooltips";
 import {
   LatexStructureIndex,
@@ -26,7 +30,7 @@ import {
   type LatexArgument,
   type LatexCommand,
   type LatexHeading,
-} from "./latexStructure";
+} from "../editor/latex/latexStructure";
 import type { SectionNumberingPrefix } from "./outlineModel";
 import {
   SECNUMDEPTH_CHAPTERED,
@@ -53,11 +57,13 @@ import {
 } from "./theoremEnvironments";
 import { parseTable, type TableModel } from "./latexTable";
 import { buildTableGrid, isTableGridEvent } from "./tableWidget";
+import { visualClickScrollEffect, type VisualScrollAnchor } from "./visualScrollAnchor";
 import {
   reparseVisualLatex,
   visualDecorationScheduler,
 } from "./visualDecorationScheduler";
 import { renderTikzPreview } from "./tikzPreview";
+import { renderCompiledDiagram, type CompiledDiagramRequest, type VisualCompiledDocument } from "./compiledDiagramPreview";
 export { VISUAL_REPARSE_IDLE_MS } from "./visualDecorationScheduler";
 
 /**
@@ -84,7 +90,8 @@ type VisualPointerStart = {
    * their exact source span so a drag that starts inside one can still create
    * a real CodeMirror selection (copy/delete/replace all keep working). */
   objectRange?: { from: number; to: number };
-  release?: () => void;
+  scrollAnchor?: VisualScrollAnchor;
+  release?: (event?: Event) => void;
 };
 const visualPointerStarts = new WeakMap<HTMLElement, VisualPointerStart>();
 const visualEditorViews = new WeakMap<HTMLElement, EditorView>();
@@ -93,6 +100,10 @@ const visualEditorViews = new WeakMap<HTMLElement, EditorView>();
 // first one in between (including a decoration rebuild), which is visible as a
 // flash when a drag begins on a section number/title.
 const handledVisualPointerDowns = new WeakSet<MouseEvent>();
+export const visualCompiledDocument = Facet.define<VisualCompiledDocument | null, VisualCompiledDocument | null>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
 export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
@@ -182,7 +193,7 @@ function beginVisualPointerSelection(view: EditorView, event: MouseEvent): void 
     && objectTo <= view.state.doc.length
     ? { from: objectFrom, to: objectTo }
     : undefined;
-  const release = () => {
+  const release = (event?: Event) => {
     const current = visualPointerStarts.get(editor);
     if (current?.release !== release) return;
     visualPointerStarts.delete(editor);
@@ -190,7 +201,8 @@ function beginVisualPointerSelection(view: EditorView, event: MouseEvent): void 
     window.removeEventListener("blur", release);
     editor.classList.remove("cm-vis-pointer-selecting");
     try {
-      view.dispatch({ effects: visualPointerSelecting.of(false) });
+      const scroll = event?.type === "blur" ? null : visualClickScrollEffect(view, current.scrollAnchor);
+      view.dispatch({ effects: [visualPointerSelecting.of(false), ...(scroll ? [scroll] : [])] });
     } catch {
       // The editor can be destroyed while the pointer is still held down.
     }
@@ -524,11 +536,15 @@ class PreambleWidget extends WidgetType {
     const el = document.createElement("div");
     el.className = "cm-vis-preamble";
     const label = document.createElement("span");
-    label.textContent = "Document preamble";
+    label.textContent = uiText("文档导言区", "Document preamble", "Preámbulo del documento");
     const count = document.createElement("strong");
-    count.textContent = `${this.lineCount} lines`;
+    count.textContent = uiText(`${this.lineCount} 行`, `${this.lineCount} ${this.lineCount === 1 ? "line" : "lines"}`, `${this.lineCount} ${this.lineCount === 1 ? "línea" : "líneas"}`);
     el.append(label, count);
-    el.title = "Preamble is hidden in the visual view — edit it in Code mode";
+    el.title = uiText(
+      "导言区在可视化视图中隐藏——请在代码模式中编辑",
+      "Preamble is hidden in the visual view — edit it in Code mode",
+      "El preámbulo está oculto en la vista visual; edítalo en el modo Código",
+    );
     return el;
   }
   ignoreEvent() {
@@ -602,7 +618,11 @@ class TheoremLabelWidget extends WidgetType {
     el.textContent = this.number ? `${this.label} ${this.number}` : this.label;
     if (this.onJump) {
       el.classList.add("cm-vis-theorem-editable");
-      el.title = "Double-click to edit theorem source in Code mode";
+      el.title = uiText(
+        "双击在代码模式中编辑定理源码",
+        "Double-click to edit theorem source in Code mode",
+        "Haz doble clic para editar el código del teorema en el modo Código",
+      );
       el.addEventListener("dblclick", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -795,7 +815,7 @@ class FrameKickerWidget extends WidgetType {
     wrapper.className = `cm-vis-frame-header ${BLOCK_TARGET_CLASS}`;
     const kicker = document.createElement("span");
     kicker.className = "cm-vis-frame-kicker";
-    kicker.textContent = `Slide ${this.number}`;
+    kicker.textContent = uiText(`幻灯片 ${this.number}`, `Slide ${this.number}`, `Diapositiva ${this.number}`);
     wrapper.append(kicker);
     if (this.fallbackTitle) {
       const title = document.createElement("strong");
@@ -844,7 +864,11 @@ class CustomMacroWidget extends WidgetType {
     const el = document.createElement("span");
     el.className = "cm-vis-custom-macro";
     el.textContent = this.text;
-    el.title = "User-defined LaTeX macro — edit its source in Visual or Code view";
+    el.title = uiText(
+      "用户自定义 LaTeX 宏——可在可视化或代码视图中编辑源码",
+      "User-defined LaTeX macro — edit its source in Visual or Code view",
+      "Macro de LaTeX definida por el usuario; edita su código en la vista Visual o Código",
+    );
     return el;
   }
   ignoreEvent() {
@@ -952,7 +976,7 @@ class TitleWidget extends WidgetType {
     if (!range || !this.onJump) return;
     const onJump = this.onJump;
     el.classList.add("cm-vis-title-editable");
-    el.title = "Double-click to edit in Code mode";
+    el.title = uiText("双击在代码模式中编辑", "Double-click to edit in Code mode", "Haz doble clic para editar en el modo Código");
     el.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -964,7 +988,7 @@ class TitleWidget extends WidgetType {
     el.className = "cm-vis-title";
     const h = document.createElement("div");
     h.className = "cm-vis-title-name";
-    h.textContent = this.title || "Untitled";
+    h.textContent = this.title || uiText("无标题", "Untitled", "Sin título");
     this.jumpTarget(h, this.titleRange);
     el.append(h);
     if (this.author) {
@@ -1130,7 +1154,7 @@ async function resolveFigurePath(imagePath: string, sourcePath: string | null): 
 function buildCaptionEl(caption: string): HTMLDivElement {
   const cap = document.createElement("div");
   cap.className = "cm-vis-caption";
-  cap.textContent = caption;
+  cap.textContent = caption.replace(/\s+/g, " ").trim();
   return cap;
 }
 
@@ -1248,6 +1272,7 @@ class TableWidget extends WidgetType {
     /** Lossless model of the same environment; null when it could not be
      * parsed, in which case the grid renders read-only as it always did. */
     private readonly model: TableModel | null = null,
+    private readonly captionBefore = false,
   ) {
     super();
   }
@@ -1256,7 +1281,8 @@ class TableWidget extends WidgetType {
       other.hasHeader === this.hasHeader &&
       other.caption === this.caption &&
       rangesEqual(other.sourceRange, this.sourceRange) &&
-      Boolean(other.model) === Boolean(this.model) &&
+      other.captionBefore === this.captionBefore &&
+      JSON.stringify(other.model) === JSON.stringify(this.model) &&
       JSON.stringify(other.rows) === JSON.stringify(this.rows)
     );
   }
@@ -1268,6 +1294,7 @@ class TableWidget extends WidgetType {
     wrap.setAttribute("role", "group");
     const copy = TYPESET_EDITOR_COPY[useStore.getState().language].table;
     wrap.setAttribute("aria-label", copy.tableLabel);
+    if (this.caption && this.captionBefore) wrap.append(buildCaptionEl(this.caption));
     wrap.append(buildTableGrid({
       view,
       model: this.model,
@@ -1276,7 +1303,7 @@ class TableWidget extends WidgetType {
       blockTargetClass: BLOCK_TARGET_CLASS,
       copy,
     }));
-    if (this.caption) wrap.append(buildCaptionEl(this.caption));
+    if (this.caption && !this.captionBefore) wrap.append(buildCaptionEl(this.caption));
     return wrap;
   }
   // The grid hosts its own `contenteditable` cells. Without this CodeMirror
@@ -1285,19 +1312,18 @@ class TableWidget extends WidgetType {
   ignoreEvent = (event: Event) => (isTableGridEvent(event) ? true : blockIgnoreEvent(event));
 }
 
-/**
- * Best-effort preview for a `figure`/`table` float whose content is a
- * graph-shaped TikZ/PGF drawing. The source is unchanged; double-click/caret
- * still opens it in Code view to edit the drawing. When the lightweight
- * previewer cannot find graph data, the card remains an honest fallback rather
- * than pretending to have compiled arbitrary TeX.
- */
+// Equal widgets can share DOM across decoration rebuilds; cancellation belongs
+// to that DOM even when CodeMirror replaces the WidgetType instance.
+const pendingDiagramRenders = new WeakMap<HTMLElement, AbortController>();
+
+/** A drawing uses its compiled PDF box whenever the source is current. */
 class DiagramWidget extends WidgetType {
   constructor(
     private readonly label: string,
     private readonly caption: string,
     private readonly tikzSource: string,
     private readonly sourceRange: Range,
+    private readonly compiled: CompiledDiagramRequest | null,
   ) {
     super();
   }
@@ -1305,37 +1331,57 @@ class DiagramWidget extends WidgetType {
     return other.label === this.label
       && other.caption === this.caption
       && other.tikzSource === this.tikzSource
-      && rangesEqual(other.sourceRange, this.sourceRange);
+      && rangesEqual(other.sourceRange, this.sourceRange)
+      && other.compiled?.pdfPath === this.compiled?.pdfPath
+      && other.compiled?.revision === this.compiled?.revision
+      && other.compiled?.sourcePath === this.compiled?.sourcePath
+      && other.compiled?.endLine === this.compiled?.endLine;
   }
-  toDOM() {
+  toDOM(view?: EditorView) {
+    const copy = TYPESET_EDITOR_COPY[useStore.getState().language].diagram;
     const el = document.createElement("div");
     el.className = `cm-vis-figure cm-vis-diagram ${BLOCK_TARGET_CLASS}`;
     el.dataset.visualSelectFrom = String(this.sourceRange.from);
     el.dataset.visualSelectTo = String(this.sourceRange.to);
+    const body = document.createElement("div");
     const preview = renderTikzPreview(this.tikzSource);
+    const canvas = document.createElement("div");
+    canvas.className = "cm-vis-diagram-canvas";
+    const hint = document.createElement("div");
+    hint.className = "cm-vis-diagram-hint";
     if (preview) {
-      // Diagrams commonly need a wider natural canvas than the text column.
-      // Do not squash their labels and arrows to make every diagram fit: the
-      // dedicated canvas keeps the SVG at its authored preview size and offers
-      // horizontal scrolling when necessary.
-      const canvas = document.createElement("div");
-      canvas.className = "cm-vis-diagram-canvas";
       canvas.append(preview);
-      el.append(canvas);
+      body.append(canvas);
     } else {
       const icon = createSvgIcon("diagram", 28, "cm-vis-figure-icon");
-      el.append(icon);
       const name = document.createElement("div");
       name.className = "cm-vis-figure-name";
       name.textContent = this.label;
-      el.append(name);
-      const hint = document.createElement("div");
-      hint.className = "cm-vis-diagram-hint";
-      hint.textContent = "Preview unavailable; edit in Code view to change the drawing";
-      el.append(hint);
+      hint.textContent = this.compiled ? copy.loading : copy.compileToPreview;
+      body.append(icon, name, hint);
     }
+    el.append(body);
     if (this.caption) el.append(buildCaptionEl(this.caption));
+    if (this.compiled) {
+      const controller = new AbortController();
+      pendingDiagramRenders.set(el, controller);
+      void renderCompiledDiagram(this.compiled, controller.signal).then((rendered) => {
+        if (controller.signal.aborted) return;
+        rendered.setAttribute("aria-label", copy.previewLabel);
+        canvas.replaceChildren(rendered);
+        body.replaceChildren(canvas);
+        view?.requestMeasure();
+      }).catch(() => {
+        if (controller.signal.aborted) return;
+        hint.textContent = copy.compileToPreview;
+        view?.requestMeasure();
+      });
+    }
     return el;
+  }
+  destroy(dom: HTMLElement) {
+    pendingDiagramRenders.get(dom)?.abort();
+    pendingDiagramRenders.delete(dom);
   }
   ignoreEvent = blockIgnoreEvent;
 }
@@ -1469,6 +1515,15 @@ function stripTableCellMarkup(input: string): string {
     cursor = argumentStart;
   }
   return stripMarkup(output);
+}
+
+
+/** Use the same brace-aware cells for display and editing so nested commands
+ * cannot shift which preview text corresponds to a source cell. */
+function previewTabularRows(body: string, model: TableModel | null): string[][] {
+  if (!model) return parseTabular(body);
+  return model.rows.map((row) => row.cells.map((cell) =>
+    stripTableCellMarkup(cell.text).replace(/\\([%&_#$])/g, "$1").trim()));
 }
 
 /** Split a `tabular`/`longtable` body into a grid, dropping layout commands. */
@@ -1612,7 +1667,7 @@ const visualBlockClickHandlers = EditorView.domEventHandlers({
     const pointerStart = visualPointerStarts.get(view.dom);
     // The window listener normally releases the frozen decorations after this
     // handler bubbles. The microtask also covers hosts that stop propagation.
-    if (pointerStart?.release) queueMicrotask(pointerStart.release);
+    if (pointerStart?.release) queueMicrotask(() => pointerStart.release?.());
     const target = eventTarget;
     if (!target) return false;
     const isBlockTarget = Boolean(target.closest(`.${BLOCK_TARGET_CLASS}`));
@@ -1651,7 +1706,7 @@ const visualBlockClickHandlers = EditorView.domEventHandlers({
       && mathEditFrom >= 0
       && mathEditTo >= mathEditFrom
       && mathEditTo <= view.state.doc.length;
-    let pos = line.to;
+    let pos = pointerStart?.objectRange?.from ?? line.to;
     if (headingRange) {
       pos = positionInRangeAtCoords(view, headingRange.from, headingRange.to, event.clientX, event.clientY);
     } else if (mathTarget && hasMathEditRange) {
@@ -1665,8 +1720,15 @@ const visualBlockClickHandlers = EditorView.domEventHandlers({
       // rather than allowing the nested KaTeX DOM to swallow it.
       pos = Math.round(mathEditFrom + ratio * (mathEditTo - mathEditFrom));
     }
-    // The target was just clicked, so it is already visible. Avoid a redundant
-    // scroll request that can move the page when decorations are measured.
+    // Frozen replacement blocks map to one source line whose end may be the
+    // end of the entire table. Open at its real start and keep that line at the
+    // card's former screen position after the pointer freeze is released.
+    const object = target.closest<HTMLElement>("[data-visual-select-from]");
+    const top = mathTarget?.getBoundingClientRect().top
+      ?? object?.getBoundingClientRect().top
+      ?? view.coordsAtPos(pos)?.top;
+    if (pointerStart && top != null) pointerStart.scrollAnchor = { pos, top };
+    view.focus();
     view.dispatch({ selection: EditorSelection.cursor(pos) });
     return true;
   },
@@ -2009,7 +2071,7 @@ function buildDecorations(
       );
       let fallbackTitle = structure.commands.some((command) =>
         command.name === "titlepage" && command.from >= beginTo && command.from < endFrom,
-      ) ? "Title slide" : "Untitled slide";
+      ) ? uiText("标题页", "Title slide", "Diapositiva de título") : uiText("无标题幻灯片", "Untitled slide", "Diapositiva sin título");
       if (frameTitle?.requiredArguments[0]) {
         const commandFrom = frameTitle.from;
         const title = frameTitle.requiredArguments[0];
@@ -2129,15 +2191,15 @@ function buildDecorations(
       openFloatRanges.push({ from: envFrom, to: envTo });
       continue; // caret/selection is editing this float — leave it fully raw
     }
-    const inner = text.slice(environment.bodyFrom, environment.bodyTo);
     const innerFrom = environment.bodyFrom;
     const caption = readCaption(innerFrom, environment.bodyTo);
     if (environment.name.startsWith("table")) {
       const tabularMatch = findTabularMatches(text, structure, innerFrom, envTo)[0];
+      const model = editableTableModel(text, tabularMatch);
       const parsedTable = tabularMatch?.environment === "longtable"
         ? longtableRows(tabularMatch.body)
         : tabularMatch
-          ? { rows: parseTabular(tabularMatch.body), hasHeader: /\\toprule/.test(tabularMatch.source), caption: "" }
+          ? { rows: previewTabularRows(tabularMatch.body, model), hasHeader: /\\toprule/.test(tabularMatch.source), caption: "" }
           : null;
       const rows = parsedTable?.rows ?? [];
       if (tabularMatch && rows.length > 0) {
@@ -2150,7 +2212,9 @@ function buildDecorations(
               parsedTable?.hasHeader ?? false,
               caption || parsedTable?.caption,
               { from: envFrom, to: envTo },
-              editableTableModel(text, tabularMatch),
+              model,
+              structure.commands.some((command) => command.name === "caption"
+                && command.from >= innerFrom && command.from < tabularMatch.from),
             ),
             block: true,
           }),
@@ -2172,19 +2236,32 @@ function buildDecorations(
         );
         continue;
       }
-      // No `\includegraphics` — render graph-shaped TikZ/PGF in a lightweight
-      // SVG preview instead of hiding the entire drawing behind a placeholder.
-      const drawingMatch = /\\begin\{(tikzpicture|pgfpicture)\}/.exec(inner);
-      if (drawingMatch) {
+      // SyncTeX associates the complete drawing box with its closing line.
+      const drawings = structure.environments.filter((candidate) =>
+        (candidate.name === "tikzpicture" || candidate.name === "pgfpicture")
+          && candidate.closed && candidate.from >= innerFrom && candidate.to <= environment.bodyTo,
+      );
+      const drawing = drawings[0];
+      if (drawing) {
+        const document = state.facet(visualCompiledDocument);
+        const compiled = drawings.length === 1 && document?.source === text && sourcePath ? {
+          pdfPath: document.pdfPath,
+          revision: document.revision,
+          sourcePath,
+          endLine: state.doc.lineAt(drawing.endFrom).number,
+        } : null;
         hide(
           envFrom,
           envTo,
           Decoration.replace({
             widget: new DiagramWidget(
-              drawingMatch[1] === "pgfpicture" ? "PGF diagram" : "TikZ diagram",
+              drawing.name === "pgfpicture"
+                ? uiText("PGF 图", "PGF diagram", "Diagrama PGF")
+                : uiText("TikZ 图", "TikZ diagram", "Diagrama TikZ"),
               caption,
-              inner,
+              text.slice(drawing.from, drawings[drawings.length - 1].to),
               { from: envFrom, to: envTo },
+              compiled,
             ),
             block: true,
           }),
@@ -2204,9 +2281,10 @@ function buildDecorations(
     const to = tb.to;
     if (withinOpenFloat(from)) continue;
     if (touchesSelection(from, to) || selectionOverlaps(state.selection, from, to)) continue;
+    const model = editableTableModel(text, tb);
     const parsedTable = tb.environment === "longtable"
       ? longtableRows(tb.body)
-      : { rows: parseTabular(tb.body), hasHeader: /\\toprule/.test(tb.source), caption: "" };
+      : { rows: previewTabularRows(tb.body, model), hasHeader: /\\toprule/.test(tb.source), caption: "" };
     const rows = parsedTable.rows;
     if (rows.length === 0) continue;
     hide(
@@ -2218,7 +2296,7 @@ function buildDecorations(
           parsedTable.hasHeader,
           parsedTable.caption,
           { from, to },
-          editableTableModel(text, tb),
+          model,
         ),
         block: true,
       }),
@@ -2411,6 +2489,9 @@ function buildDecorations(
     if (withinHeading(command.from) || withinMath(command.from)) continue;
     const argument = command.requiredArguments[0];
     if (!argument || touchesSelection(command.from, command.to)) continue;
+    // Empty formatting is an insertion point. Folding both delimiters would
+    // leave nothing to click, and a zero-length style mark is invalid in CM.
+    if (!sourceWithoutComments(argument.contentFrom, argument.contentTo).trim()) continue;
     hide(command.from, argument.contentFrom);
     marks.push({ from: argument.contentFrom, to: argument.contentTo, value: Decoration.mark({ class: cls }) });
     hide(argument.contentTo, argument.to);
@@ -2639,7 +2720,7 @@ function buildDecorations(
     // rest reveal on caret so the source stays reachable.
     if (!isEndDoc && touchesSelection(from, to)) continue;
     if (command.name === "tableofcontents") {
-      hide(from, to, Decoration.replace({ widget: new ChipWidget("Table of contents", "toc") }));
+      hide(from, to, Decoration.replace({ widget: new ChipWidget(uiText("目录", "Table of contents", "Índice"), "toc") }));
     } else if (command.name === "newpage" || command.name === "clearpage") {
       hide(from, to, Decoration.replace({
         widget: new PageBreakWidget(command.name),

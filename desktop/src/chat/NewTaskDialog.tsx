@@ -1,3 +1,4 @@
+import type { Language } from "../store";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
@@ -5,7 +6,7 @@ import { SvgIcon } from "../SvgIcon";
 import "./NewTaskDialog.css";
 
 interface Props {
-  language: "cn" | "en";
+  language: Language;
   projects: DesktopProject[];
   initialProjectId: string;
   busy?: boolean;
@@ -41,6 +42,20 @@ const COPY = {
     create: "Save",
     creating: "Saving…",
     shortcut: "Ctrl + Enter to save",
+  },
+  es: {
+    title: "Nueva tarea",
+    close: "Cerrar el diálogo de nueva tarea",
+    question: "¿En qué trabajamos?",
+    placeholder: "Describe la tarea de investigación, el resultado esperado o el problema que hay que resolver…",
+    execution: "Ejecutar localmente con SomniQ",
+    review: "Un Revisor independiente comprueba el resultado",
+    target: "Destino",
+    currentProject: "Proyecto actual",
+    cancel: "Cancelar",
+    create: "Guardar",
+    creating: "Guardando…",
+    shortcut: "Ctrl + Enter para guardar",
   },
 } as const;
 

@@ -748,7 +748,7 @@ fn answer_from_retrieval(result: &ProjectRagSearchResponse) -> Result<String, St
         !result.knowledge.results.is_empty() || !result.literature.results.is_empty();
     if !has_evidence {
         return Ok(
-            "当前本地检索索引未找到足够证据；请先解析相关 PDF 或换用更具体的问题。".to_string(),
+            runtime::ui_lang::tr_static("当前本地检索索引未找到足够证据；请先解析相关 PDF 或换用更具体的问题。", "The local search index has not found enough evidence. Parse the relevant PDFs first or ask a more specific question.", "El índice de búsqueda local no encontró suficiente evidencia. Analiza primero los PDF relevantes o haz una pregunta más concreta.").to_string(),
         );
     }
     run_oneshot(

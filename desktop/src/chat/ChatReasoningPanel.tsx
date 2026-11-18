@@ -1,10 +1,12 @@
+import type { Language } from "../store";
+import { tr } from "../language";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { SvgIcon } from "../SvgIcon";
 import { DEFAULT_REASONING_EFFORT, reasoningLevelName } from "./reasoningLevels";
 import "./ChatReasoningPanel.css";
 
 interface Props {
-  language: "cn" | "en";
+  language: Language;
   effort: string;
   /** Backend-supported levels, from weakest to strongest. */
   levels: readonly string[];
@@ -22,7 +24,7 @@ export default function ChatReasoningPanel({ language, effort, levels, modelName
   const cancelled = useRef(false);
   const appliedEffort = useRef(effort);
   appliedEffort.current = effort;
-  const label = language === "cn" ? "思考强度" : "Reasoning effort";
+  const label = tr(language, "思考强度", "Reasoning effort", "Esfuerzo de razonamiento");
   const index = levels.indexOf(draft);
   const progress = levels.length > 1 ? Math.max(0, index) / (levels.length - 1) : 0;
   const visualStyle = {
@@ -61,8 +63,8 @@ export default function ChatReasoningPanel({ language, effort, levels, modelName
           <button
             type="button"
             className="chat-reasoning-reset"
-            aria-label={language === "cn" ? "恢复默认强度（高）" : "Reset to default (High)"}
-            title={language === "cn" ? "恢复默认强度（高）" : "Reset to default (High)"}
+            aria-label={tr(language, "恢复默认强度（高）", "Reset to default (High)", "Restablecer el valor predeterminado (Alto)")}
+            title={tr(language, "恢复默认强度（高）", "Reset to default (High)", "Restablecer el valor predeterminado (Alto)")}
             disabled={locked || (effort === DEFAULT_REASONING_EFFORT && draft === effort)}
             onClick={() => {
               setDraft(DEFAULT_REASONING_EFFORT);
@@ -75,7 +77,7 @@ export default function ChatReasoningPanel({ language, effort, levels, modelName
       </div>
       {modelName && (onOpenModel ? (
         <button type="button" className="chat-reasoning-model" disabled={locked}
-          aria-label={`${language === "cn" ? "切换模型：" : "Switch model: "}${modelName}`} onClick={onOpenModel}>
+          aria-label={`${tr(language, "切换模型：", "Switch model: ", "Cambiar modelo: ")}${modelName}`} onClick={onOpenModel}>
           <span>{modelName}</span><SvgIcon name="chevronRight" size={12} />
         </button>
       ) : <div className="chat-reasoning-model">{modelName}</div>)}

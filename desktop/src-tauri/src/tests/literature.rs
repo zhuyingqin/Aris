@@ -1,5 +1,5 @@
 #[cfg(windows)]
-use super::{extract_pdf_text_by_page, literature_image_ocr, windows_ocr};
+use super::{extract_pdf_text_by_page, image_ocr, windows_ocr};
 use super::{
     extraction_from_rag_pages, import_attachment_at, import_pdf_at, resolve_pdf_path_at,
     validate_vision_model, vision_message, LiteratureRagPdfPage, LiteratureVisionImage,
@@ -211,9 +211,9 @@ fn extracts_a_scanned_pdf_with_windows_ocr() {
         rendered.success(),
         "pdftoppm must be available to run this test"
     );
-    windows_ocr(&base.join("scan.png")).expect("Windows OCR must be available to run this test");
+    windows_ocr(&base.join("scan.png"), &NEVER_CANCELED).expect("Windows OCR must be available to run this test");
     let direct_ocr =
-        literature_image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"))
+        image_ocr(std::fs::read(base.join("scan.png")).expect("read scan image"), &NEVER_CANCELED)
             .expect("OCR rendered page bytes");
     assert!(direct_ocr.contains("Scanned OCR test 12345"));
     let scanned = crate::process::hidden_command("pdflatex")
@@ -246,7 +246,7 @@ fn extracts_a_scanned_pdf_with_windows_ocr() {
 // function taking a plain `&Path`, which is what makes these runnable.
 
 use super::{
-    literature_attachment_status_at, literature_import_pdf_as_record_core,
+    literature_attachment_status_at, literature_import_pdf_as_record_core, NEVER_CANCELED,
     literature_rag_index_library_core, resolve_attachment_path_at,
 };
 
@@ -270,7 +270,7 @@ fn an_unreadable_pdf_falls_back_to_the_file_stem_and_claims_no_inference() {
     let base = temp_base("import-fallback");
     let source = stub_pdf_at(&base.join("incoming"), "Attention Is All You Need.pdf");
 
-    let report = literature_import_pdf_as_record_core(&base, &source, None).expect("import");
+    let report = literature_import_pdf_as_record_core(&base, &source, None, &NEVER_CANCELED).expect("import");
 
     assert_eq!(report["metadata"]["titleInferred"], false);
     assert_eq!(report["metadata"]["doi"], serde_json::Value::Null);
@@ -283,7 +283,7 @@ fn a_supplied_title_wins_and_is_never_reported_as_inferred() {
     let base = temp_base("import-supplied");
     let source = stub_pdf_at(&base.join("incoming"), "raw-download-slug.pdf");
 
-    let report = literature_import_pdf_as_record_core(&base, &source, Some("A Chosen Title"))
+    let report = literature_import_pdf_as_record_core(&base, &source, Some("A Chosen Title"), &NEVER_CANCELED)
         .expect("import");
 
     assert_eq!(report["metadata"]["titleInferred"], false);
@@ -310,7 +310,7 @@ fn a_blank_supplied_title_falls_through_instead_of_naming_the_record_empty() {
     let base = temp_base("import-blank");
     let source = stub_pdf_at(&base.join("incoming"), "meaningful-stem.pdf");
 
-    literature_import_pdf_as_record_core(&base, &source, Some("   ")).expect("import");
+    literature_import_pdf_as_record_core(&base, &source, Some("   "), &NEVER_CANCELED).expect("import");
 
     let titles = library_titles(&base);
     assert_eq!(titles, vec!["meaningful-stem".to_string()]);
@@ -324,7 +324,7 @@ fn a_supplied_title_reaches_the_library_verbatim() {
     let base = temp_base("import-title-precedence");
     let source = stub_pdf_at(&base.join("incoming"), "raw-download-slug.pdf");
 
-    literature_import_pdf_as_record_core(&base, &source, Some("A Chosen Title")).expect("import");
+    literature_import_pdf_as_record_core(&base, &source, Some("A Chosen Title"), &NEVER_CANCELED).expect("import");
 
     assert_eq!(library_titles(&base), vec!["A Chosen Title".to_string()]);
     let _ = std::fs::remove_dir_all(&base);
@@ -387,7 +387,7 @@ fn a_failing_document_is_recorded_without_aborting_the_library_run() {
     let base = temp_base("rag-index-isolation");
     for name in ["first.pdf", "second.pdf", "third.pdf"] {
         let source = stub_pdf_at(&base.join("incoming"), name);
-        literature_import_pdf_as_record_core(&base, &source, None).expect("seed record");
+        literature_import_pdf_as_record_core(&base, &source, None, &NEVER_CANCELED).expect("seed record");
     }
 
     let summary = tauri::async_runtime::block_on(literature_rag_index_library_core(

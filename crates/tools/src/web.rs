@@ -3442,6 +3442,21 @@ pub(crate) fn build_http_client_with_proxy(
     builder.build().map_err(|error| error.to_string())
 }
 
+/// Credentials are scoped to the origin they were issued for. Redirects are
+/// followed by hand here, so drop them before a hop to another origin (the
+/// same rule browsers and reqwest's own redirect policy apply).
+pub(crate) fn strip_credential_headers(headers: &mut HeaderMap) {
+    for name in [
+        reqwest::header::AUTHORIZATION.as_str(),
+        reqwest::header::PROXY_AUTHORIZATION.as_str(),
+        reqwest::header::COOKIE.as_str(),
+        "x-api-key",
+        "x-subscription-token",
+    ] {
+        headers.remove(name);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_web_request(
     method: Method,
@@ -3461,12 +3476,13 @@ fn send_web_request(
         let mut current_method = method.clone();
         let mut redirect_count = 0;
         let mut redirect_chain = vec![url.clone()];
+        let mut current_headers = headers.clone();
         loop {
             let client = build_http_client(&current_url, allow_private)?;
             let is_arxiv_api_request = is_arxiv_api_query_endpoint(&current_url);
             let mut request = client
                 .request(current_method.clone(), current_url.clone())
-                .headers(headers.clone());
+                .headers(current_headers.clone());
             if let Some(body) = body.as_ref().filter(|_| current_method != Method::GET) {
                 request = request.body(body.clone());
             }
@@ -3510,6 +3526,9 @@ fn send_web_request(
                     StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER
                 ) {
                     current_method = Method::GET;
+                }
+                if next.origin() != current_url.origin() {
+                    strip_credential_headers(&mut current_headers);
                 }
                 current_url = next;
                 redirect_chain.push(current_url.clone());

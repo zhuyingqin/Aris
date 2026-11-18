@@ -13,6 +13,7 @@ import {
   onComputePeerEvent,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { tr } from "../language";
 import "./ComputePanel.css";
 import type {
   ComputeJobEvent,
@@ -50,17 +51,17 @@ function relativeProjectPath(path: string, projectPath: string | null): string {
 }
 
 function statusLabel(status: ComputeJobStatus, language: Language): string {
-  const labels: Record<ComputeJobStatus, [string, string]> = {
-    queued: ["排队", "Queued"],
-    preparing: ["准备", "Preparing"],
-    running: ["运行中", "Running"],
-    succeeded: ["成功", "Succeeded"],
-    failed: ["失败", "Failed"],
-    cancelled: ["已取消", "Cancelled"],
-    timed_out: ["超时", "Timed out"],
-    lost: ["已中断", "Interrupted"],
+  const labels: Record<ComputeJobStatus, [string, string, string]> = {
+    queued: ["排队", "Queued", "En cola"],
+    preparing: ["准备", "Preparing", "Preparando"],
+    running: ["运行中", "Running", "En ejecución"],
+    succeeded: ["成功", "Succeeded", "Completada"],
+    failed: ["失败", "Failed", "Fallida"],
+    cancelled: ["已取消", "Cancelled", "Cancelada"],
+    timed_out: ["超时", "Timed out", "Tiempo agotado"],
+    lost: ["已中断", "Interrupted", "Interrumpida"],
   };
-  return labels[status][language === "cn" ? 0 : 1];
+  return tr(language, ...labels[status]);
 }
 
 function formatDuration(job: ComputeJobRecord): string {
@@ -74,10 +75,10 @@ function formatDuration(job: ComputeJobRecord): string {
 function transportLabel(transport: string, language: Language): string {
   if (transport === "p2p_webrtc" || transport === "p2p") return "WebRTC P2P";
   if (transport === "tcp_relay") {
-    return language === "cn" ? "服务器加密中继" : "Encrypted server relay";
+    return tr(language, "服务器加密中继", "Encrypted server relay", "Relé cifrado del servidor");
   }
   if (transport === "p2p_tcp") {
-    return language === "cn" ? "局域网直连（旧版）" : "LAN direct (legacy)";
+    return tr(language, "局域网直连（旧版）", "LAN direct (legacy)", "LAN directa (heredado)");
   }
   return transport;
 }
@@ -90,7 +91,7 @@ export default function ComputePanel({
   activeKind,
   kernel,
 }: ComputePanelProps) {
-  const cn = language === "cn";
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const [capabilities, setCapabilities] = useState<ComputeNodeCapabilities | null>(null);
   const [peers, setPeers] = useState<ComputePeer[]>([]);
   const [targetNodeId, setTargetNodeId] = useState("local");
@@ -273,9 +274,9 @@ export default function ComputePanel({
     <>
       <section className="compute-panel compute-runtime-panel compute-node">
         <div className="compute-panel-head">
-          <h3>{cn ? "计算目标" : "Compute target"}</h3>
+          <h3>{t("计算目标", "Compute target", "Destino de cómputo")}</h3>
           <button className="compute-btn ghost" type="button" onClick={() => void refresh()}>
-            {cn ? "刷新" : "Refresh"}
+            {t("刷新", "Refresh", "Actualizar")}
           </button>
         </div>
         <select
@@ -286,11 +287,11 @@ export default function ComputePanel({
           <option value="local">
             {capabilities
               ? `${capabilities.displayName} · ${capabilities.logicalCpus} CPU`
-              : (cn ? "本机 Worker" : "Local worker")}
+              : t("本机 Worker", "Local worker", "Worker local")}
           </option>
           {peers.map((peer) => (
             <option key={peer.nodeId} value={peer.nodeId} disabled={!peer.connected}>
-              {peer.displayName} · {peer.connected ? (cn ? "在线" : "online") : (cn ? "离线" : "offline")}
+              {peer.displayName} · {peer.connected ? t("在线", "online", "en línea") : t("离线", "offline", "sin conexión")}
             </option>
           ))}
         </select>
@@ -298,14 +299,14 @@ export default function ComputePanel({
           <span className={`compute-online-dot${targetAvailable ? "" : " offline"}`} />
           <span>
             {targetNodeId === "local"
-              ? (cn ? "本机在线" : "Local online")
-              : (targetAvailable ? (cn ? "远端在线" : "Remote online") : (cn ? "远端离线" : "Remote offline"))}
+              ? t("本机在线", "Local online", "Local en línea")
+              : (targetAvailable ? t("远端在线", "Remote online", "Remoto en línea") : t("远端离线", "Remote offline", "Remoto sin conexión"))}
           </span>
           {targetNodeId === "local" && capabilities && <em>{capabilities.platform}/{capabilities.architecture}</em>}
           {selectedPeer?.transport && <em>{transportLabel(selectedPeer.transport, language)}</em>}
         </div>
         <label className="compute-field">
-          <span>{cn ? "超时（秒）" : "Timeout (seconds)"}</span>
+          <span>{t("超时（秒）", "Timeout (seconds)", "Tiempo límite (segundos)")}</span>
           <input
             type="number"
             min={1}
@@ -315,7 +316,7 @@ export default function ComputePanel({
           />
         </label>
         <label className="compute-field">
-          <span>{cn ? "回传产物" : "Returned artifacts"}</span>
+          <span>{t("回传产物", "Returned artifacts", "Artefactos devueltos")}</span>
           <input value={artifactGlobs} onChange={(event) => setArtifactGlobs(event.target.value)} />
         </label>
         <button
@@ -324,22 +325,22 @@ export default function ComputePanel({
           disabled={!runnable || !targetAvailable || busy}
           onClick={() => void submitCurrent()}
         >
-          {busy ? (cn ? "提交中…" : "Submitting…") : (cn ? "在所选节点运行当前文件" : "Run current file on target")}
+          {busy ? t("提交中…", "Submitting…", "Enviando…") : t("在所选节点运行当前文件", "Run current file on selected target", "Ejecutar el archivo actual en el destino")}
         </button>
         {!runnable && (
           <div className="compute-muted">
-            {cn ? "打开一个 Notebook 或 Python 文件以创建持久化计算任务。" : "Open a notebook or Python file to create a durable compute job."}
+            {t("打开一个 Notebook 或 Python 文件以创建持久化计算任务。", "Open a notebook or Python file to create a durable compute job.", "Abre un notebook o un archivo de Python para crear una tarea de cómputo persistente.")}
           </div>
         )}
       </section>
 
       <section className="compute-panel compute-runtime-panel">
         <div className="compute-panel-head">
-          <h3>{cn ? "计算任务" : "Compute jobs"}</h3>
+          <h3>{t("计算任务", "Compute jobs", "Tareas de cómputo")}</h3>
           <span className="compute-count-badge">{jobs.length}</span>
         </div>
         {jobs.length === 0 ? (
-          <div className="compute-muted">{cn ? "还没有计算任务。" : "No compute jobs yet."}</div>
+          <div className="compute-muted">{t("还没有计算任务。", "No compute jobs yet.", "Aún no hay tareas de cómputo.")}</div>
         ) : (
           <div className="compute-job-list">
             {jobs.slice(0, 12).map((job) => (
@@ -362,7 +363,7 @@ export default function ComputePanel({
               <code>{selectedJob.request.jobId.slice(0, 8)}</code>
               {!TERMINAL.has(selectedJob.status) && (
                 <button className="compute-btn warn" type="button" disabled={busy} onClick={() => void cancelSelected()}>
-                  {cn ? "取消任务" : "Cancel job"}
+                  {t("取消任务", "Cancel job", "Cancelar tarea")}
                 </button>
               )}
             </div>
@@ -372,12 +373,12 @@ export default function ComputePanel({
                 {stderr && <span className="compute-stderr">{stderr}</span>}
               </pre>
             ) : (
-              <div className="compute-muted">{cn ? "等待日志…" : "Waiting for logs…"}</div>
+              <div className="compute-muted">{t("等待日志…", "Waiting for logs…", "Esperando registros…")}</div>
             )}
             {selectedJob.result?.error && <div className="compute-inline-error">{selectedJob.result.error}</div>}
             {selectedJob.result?.artifacts && selectedJob.result.artifacts.length > 0 && (
               <div className="compute-artifacts">
-                <strong>{cn ? "产物" : "Artifacts"}</strong>
+                <strong>{t("产物", "Artifacts", "Artefactos")}</strong>
                 {selectedJob.result.artifacts.map((artifact) => (
                   <span key={artifact.path} title={artifact.sha256}>
                     {artifact.path} · {Math.ceil(artifact.sizeBytes / 1024)} KB

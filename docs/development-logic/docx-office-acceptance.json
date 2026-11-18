@@ -1,0 +1,3018 @@
+{
+  "schemaVersion": 2,
+  "date": "2026-11-11",
+  "reportedAt": "2026-11-12T01:20:19.737234+00:00",
+  "scope": "Operator-planned daily-office acceptance on authored anonymous fixtures; public official documentation defines behaviors, not real customer task histories.",
+  "requirementType": "complete_daily_office_requirements",
+  "sourceDocuments": "authored_anonymous_fixtures",
+  "counts": {
+    "cases": 14,
+    "automatedPass": 14,
+    "knownVisualIssues": 1,
+    "raw": {
+      "automated_pass": 14
+    }
+  },
+  "acceptanceInterpretation": "All listed automated requirements passed; this is not a zero-defect visual, independent Reviewer, model-conversation, or Word/WPS approval.",
+  "execution": {
+    "scope": "Operator-planned daily-office acceptance on authored anonymous fixtures; public official documentation defines behaviors, not real customer task histories.",
+    "startedAt": "2026-11-12T00:59:04.289525+00:00",
+    "runnerRevision": "sha256:821b818794bc662b186c57abffa3bdd0e51b94e3edffd53b108924e951e1d153",
+    "buildManifest": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\driver-build-manifest-2.json",
+    "buildManifestRevision": "sha256:4390056ce358a695d9fc89a560479db1af882c7c3d05d000c07bba16c8e46828",
+    "implementationRevisions": {
+      "crates/runtime/src/document_export.rs": "sha256:6142c9c3b3d61c4372f85453e221fbad9e66bf17cc29097fccca1aa09a9b3eaa",
+      "crates/runtime/src/docx.rs": "sha256:eb9d4987681e611780cbe40f954f31171dbfea97777ba236c7552f0a5ede07ec",
+      "crates/runtime/assets/docx/format_docx.py": "sha256:94d0434379c941612eed0a6145f157a65e13e704b16f461cc895e18df2d4c173",
+      "crates/runtime/assets/docx/structure_docx.py": "sha256:6c24b579ae7e18730b25894e1a5ca22a6373ca15d777f072e218aad985bcc379",
+      "crates/runtime/assets/docx/format_odt.py": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e",
+      "crates/tools/src/lib.rs": "sha256:bc3bbc42afb0847fa613a622091a53614162e096e11355ac9bcbd2bee8eafb90",
+      "crates/runtime/assets/docx/office_docx.py": "sha256:d129875baea7cde2d24092f5af0cd30b6e4d1da400801ef78a3ab5b8fd94e841",
+      "crates/runtime/assets/docx/toc_index.py": "sha256:0a373af7eb9a9b92b5e2313a44b5cab4f352b46e6895e3d3c54cd8ba68d02030",
+      "crates/chat/src/lib.rs": "sha256:cc52cb37b617f06503101a7214332a0e0f4c1548e77e65cc9b745809b2e1dd54",
+      "crates/runtime/assets/prompts/system.md": "sha256:7d3ff8d2b1f4e9cdde03846e610bfdf5b228f5af214ef559cf8bf45465f93e02",
+      "tools/docx/run_office_acceptance.py": "sha256:e877caed44728505c67c610e46698301d1c323fecfbc1ecb710ccc1adaf0cce4",
+      "tools/docx/office_fixtures.py": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab",
+      "tools/docx/office_cases.json": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3"
+    },
+    "sourceManifest": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\manifest.json",
+    "sourceManifestRevision": "sha256:db494877cfcc3407e41afc7558b0b7713d94266945ce69fb8bc5f5b77d5423e4",
+    "sourceDocuments": "authored_anonymous_fixtures",
+    "taskConversationReplay": "not_run",
+    "independentVisualReviewer": "not_run",
+    "wordWpsVerification": "not_run",
+    "visualReview": "pending",
+    "runState": "complete",
+    "counts": {
+      "automated_pass": 14
+    },
+    "renderedCandidatePages": 20,
+    "diagnosticPages": 0,
+    "allOriginalInputsUnchanged": true
+  },
+  "evidence": {
+    "resultsPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\results.json",
+    "resultsRevision": "sha256:1430f64c4df02f4bf9c4b00ae7db0e0a99cda60c73fbf90f9fa33fa30b4a98d2",
+    "observationsPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\page-observations.json",
+    "observationsRevision": "sha256:9b1b9b9beace3fb779f3b6b2a0a6e35f6662c958240d8fe7a7de0987617225e6",
+    "integrityVerification": {
+      "verifiedAt": "2026-11-12T01:18:35.315577+00:00",
+      "scope": "Saved evidence integrity; does not turn failed tasks or executor observations into independent approval.",
+      "run": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2",
+      "runnerRevision": "sha256:821b818794bc662b186c57abffa3bdd0e51b94e3edffd53b108924e951e1d153",
+      "resultsRevision": "sha256:1430f64c4df02f4bf9c4b00ae7db0e0a99cda60c73fbf90f9fa33fa30b4a98d2",
+      "observationsRevision": "sha256:9b1b9b9beace3fb779f3b6b2a0a6e35f6662c958240d8fe7a7de0987617225e6",
+      "allIntegrityChecksPassed": true,
+      "cases": 14,
+      "rawCounts": {
+        "automated_pass": 14
+      },
+      "publicSources": 10,
+      "originalInputsUnchanged": 14,
+      "candidateDocuments": 14,
+      "candidatePagesObserved": 20,
+      "diagnosticPagesObserved": 0,
+      "schemaAdditionalErrors": 0,
+      "actualUndoChecks": 16,
+      "toolCalls": 99,
+      "toolCallsReturningErrors": 0,
+      "independentReviewer": "not_run",
+      "wordWpsVerification": "not_run",
+      "taskConversationReplay": "not_run"
+    },
+    "nativeTocUpdate": {
+      "nativeIndexes": 1,
+      "headingEdits": 1,
+      "updatedAfterHeadingChange": true,
+      "inputUnchanged": true,
+      "sourceRevision": "sha256:63b1959ea1bdb2dc478fd791879f66c56fc647b1b37467d365eeae086b4c2cd0",
+      "beforeIndex": "1 本期工作\t1\r\n1.1 进度与成果\t1\r\n2 本期工作\t1\r\n2.1 进度与成果\t1\r\n3 本期工作\t1\r\n3.1 进度与成果\t1",
+      "afterIndex": "1 更新后的工作\t1\r\n1.1 进度与成果\t1\r\n2 本期工作\t1\r\n2.1 进度与成果\t1\r\n3 本期工作\t1\r\n3.1 进度与成果\t1"
+    },
+    "fontDiagnosticPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\font-diagnostic.json",
+    "fontDiagnosticRevision": "sha256:1c2b7bbc177bcac2385e1b322f0b55e8b304436f94c5e6da3a900bd4e643e872"
+  },
+  "visualReview": {
+    "role": "executor",
+    "pagesObserved": 20,
+    "method": "Executor directly inspected all run-1 PNGs. Every final run-2 PNG is byte-identical by SHA-256 to its inspected page. These observations bind that same pixel evidence to the final DOCX and PDF revisions; no UI automation.",
+    "knownIssue": "The fillable_controls title has a defective glyph already present in the original input rendering. It is not visually approved.",
+    "independentReviewer": "not_run",
+    "wordWpsVerification": "not_run"
+  },
+  "regressions": {
+    "command": "cargo test --offline --workspace -- --test-threads=1",
+    "logPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\workspace-final.log",
+    "logRevision": "sha256:bc3db79690d26caf4208685be64b5ba22873cbe6032f3d18c29591ec594dea25",
+    "suites": 20,
+    "passed": 1614,
+    "failed": 0,
+    "ignored": 7,
+    "pythonRegressionsPassed": 22,
+    "independentReviewer": "not_run",
+    "wordWpsVerification": "not_run"
+  },
+  "sources": [
+    {
+      "id": "line_spacing",
+      "url": "https://support.microsoft.com/en-us/word/change-the-line-spacing-in-word",
+      "requirement": "设置行距、段前段后距，并控制同页排版。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/change-the-line-spacing-in-word",
+      "status": 200,
+      "title": "Change the line and paragraph spacing in Word",
+      "fetchedAt": "2026-11-11T18:10:27.155434+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\line_spacing.html",
+      "sha256": "1866221a193c6be13ab841b1dcea30783dac211da45d026b7cb56f40d495b7c0",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\line_spacing.txt",
+      "textSha256": "c51d26189c393e2a9e3271b278c853ab964d20358267d3c9decf9256eff9911d"
+    },
+    {
+      "id": "convert_table",
+      "url": "https://support.microsoft.com/en-us/word/convert-text-to-a-table-or-a-table-to-text",
+      "requirement": "使用段落和制表符分隔行列；内容带逗号时应使用制表符。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/convert-text-to-a-table-or-a-table-to-text",
+      "status": 200,
+      "title": "Convert text to a table or a table to text",
+      "fetchedAt": "2026-11-11T18:10:27.213941+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\convert_table.html",
+      "sha256": "524a73b0f9a20fe801678fe0412087f553a3e5ca4f7d396c88d4c5454e8d32c1",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\convert_table.txt",
+      "textSha256": "5ce961d746fd38dcc2b0b170efdb2e0868a02e08e9ff97ec5d1c7f26abc41c04"
+    },
+    {
+      "id": "repeat_header",
+      "url": "https://support.microsoft.com/en-us/word/repeat-table-header-on-subsequent-pages",
+      "requirement": "长表自动跨页时，每页重复首行表头。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/repeat-table-header-on-subsequent-pages",
+      "status": 200,
+      "title": "Repeat table header on subsequent pages",
+      "fetchedAt": "2026-11-11T18:10:27.236900+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\repeat_header.html",
+      "sha256": "6a5752c7261973e83fac539b58abe6d7faa38f6efb6e17bedda08f62996ca8cc",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\repeat_header.txt",
+      "textSha256": "974cb01cfe9b2cf25bdca10c43c15e36fe3bcf3e7a9cb69f2a622fb1c16f23a6"
+    },
+    {
+      "id": "page_numbers",
+      "url": "https://support.microsoft.com/en-us/word/start-page-numbering-later-in-your-document",
+      "requirement": "封面可不显示页码；后续页可从指定数字开始。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/start-page-numbering-later-in-your-document",
+      "status": 200,
+      "title": "Start page numbering later in your document",
+      "fetchedAt": "2026-11-11T18:10:27.141355+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\page_numbers.html",
+      "sha256": "a8af2bc282b33d224b563aac735050bf74cbe4faef6b3ae2284ca0d716adc1df",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\page_numbers.txt",
+      "textSha256": "0427a8d6d9b3624c6f5e376123293cc1c0deb37d0f92e6e331c1ba3b8c6a45e5"
+    },
+    {
+      "id": "orientation",
+      "url": "https://support.microsoft.com/en-us/word/training/change-page-orientation-to-landscape-or-portrait",
+      "requirement": "既可调整整份文档，也可仅将指定内容所在页改为横向。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/training/change-page-orientation-to-landscape-or-portrait",
+      "status": 200,
+      "title": "Change page orientation to landscape or portrait",
+      "fetchedAt": "2026-11-11T18:10:27.704007+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\orientation.html",
+      "sha256": "fa3a7bbac2919e84e731ec73bf14a4a4854570ce77882ed53cd25b3cd44161e0",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\orientation.txt",
+      "textSha256": "450010c9a0211b15b580bac1589041ef6e4da1ea7f6a68bc78b91370c9a57a9a"
+    },
+    {
+      "id": "hidden_data",
+      "url": "https://support.microsoft.com/en-us/office/collab-files/remove-hidden-data-and-personal-information-by-inspecting-documents-presentations-or-workbooks",
+      "requirement": "对外副本应检查并清理隐藏个人信息，包括文档属性；只改可见文字不足以证明完成。",
+      "finalUrl": "https://support.microsoft.com/en-us/office/collab-files/remove-hidden-data-and-personal-information-by-inspecting-documents-presentations-or-workbooks",
+      "status": 200,
+      "title": "Remove hidden data and personal information by inspecting documents, presentations, or workbooks",
+      "fetchedAt": "2026-11-11T18:10:27.714599+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\hidden_data.html",
+      "sha256": "2d10d5bf7106d25e1d0ccb087cf981964241e2ff94024df10c50579b63911952",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\hidden_data.txt",
+      "textSha256": "715197871a84bb920ee391f02392aa90701e77a5049e140b8f3120fcf0468b11"
+    },
+    {
+      "id": "revisions",
+      "url": "https://support.microsoft.com/en-us/word/training/track-changes-in-word",
+      "requirement": "接受或拒绝修订后再定稿；关闭显示不等于清除修订。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/training/track-changes-in-word",
+      "status": 200,
+      "title": "Track changes in Word",
+      "fetchedAt": "2026-11-11T18:10:27.710599+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\revisions.html",
+      "sha256": "957ba4fba7f2afd885aa0910a0edc62cc912835e1d94be423fb2900e158db0b3",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\revisions.txt",
+      "textSha256": "aba25117d77d1b8a9562f6285dcb59797edf205d45a0cca971a8351f2d5cb78c"
+    },
+    {
+      "id": "forms",
+      "url": "https://support.microsoft.com/en-us/word/create-a-form-in-word-that-users-can-complete-or-print",
+      "requirement": "原生内容控件提供可填写文字、日期和下拉选项等表单功能。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/create-a-form-in-word-that-users-can-complete-or-print",
+      "status": 200,
+      "title": "Create a form in Word that users can complete or print",
+      "fetchedAt": "2026-11-11T18:10:27.764590+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\forms.html",
+      "sha256": "29dadafbe7ccb0067de6f643660d58d2762808ea926e10ee054709cc3580e2ea",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\forms.txt",
+      "textSha256": "a87b8864aee4c412813e80548b2f977f179a2e6e7bc5c80dad3ad2c6dc04b240"
+    },
+    {
+      "id": "contents",
+      "url": "https://support.microsoft.com/en-us/word/training/insert-a-table-of-contents",
+      "requirement": "自动目录依据标题生成并可更新；手写目录不能替代。",
+      "finalUrl": "https://support.microsoft.com/en-us/word/training/insert-a-table-of-contents",
+      "status": 200,
+      "title": "Insert a table of contents",
+      "fetchedAt": "2026-11-11T18:10:28.242629+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\contents.html",
+      "sha256": "7bde9a1cd232bd22a9b9338c743f42060acb9c5af5b13d0ae733156d2c7a2e53",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\contents.txt",
+      "textSha256": "d0a45b4a9ebabafcd9938652c2281d15bc32b49fccdea22b41629cf894bc999c"
+    },
+    {
+      "id": "save_pdf",
+      "url": "https://support.microsoft.com/en-us/office/collab-files/save-or-convert-to-pdf-or-xps-in-office-desktop-apps",
+      "requirement": "导出实际 PDF 文件用于分发或打印，并核对交付文件。",
+      "finalUrl": "https://support.microsoft.com/en-us/office/collab-files/save-or-convert-to-pdf-or-xps-in-office-desktop-apps",
+      "status": 200,
+      "title": "Save or convert to PDF or XPS in Office Desktop apps",
+      "fetchedAt": "2026-11-11T18:10:28.228780+00:00",
+      "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\save_pdf.html",
+      "sha256": "7838d115fb4ace16b8bb9cd19bdb8feb285f9c807ee97124e388146d62a25b89",
+      "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\save_pdf.txt",
+      "textSha256": "8394e5222fdebfe5ac3aa693158e5eb349fac9d0684cc6bcd157ab808eb1271d"
+    }
+  ],
+  "results": [
+    {
+      "id": "office_notice",
+      "label": "一页维护通知",
+      "sources": [
+        "line_spacing",
+        "save_pdf"
+      ],
+      "request": "保留通知原文，标题18磅居中，正文12磅1.15倍行距，维护时间标红，保持A4且恰好一页。",
+      "criteria": [
+        "原文不变",
+        "标题/正文和时间范围格式正确",
+        "A4一页且无多余白页"
+      ],
+      "checks": [
+        {
+          "label": "notification text and other package parts retained",
+          "passed": true
+        },
+        {
+          "label": "title centered at 18 pt; body 12 pt at 1.15 line spacing",
+          "passed": true
+        },
+        {
+          "label": "only exact maintenance-time range is red",
+          "passed": true
+        },
+        {
+          "label": "exactly one A4 page without blank pages",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\office_notice.docx",
+      "sourceRevision": "sha256:cff850db14308f68dc809f94b2c675c03efe333932523a1c138144423b07bf94",
+      "auditChecks": [
+        {
+          "tool": "format_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\office_notice\\office_notice.docx",
+      "evidence": {
+        "documentRevision": "sha256:74a2591f3857cea0ea9150613d67ad60879c805bfe8e88dea8066fb421a4cb28",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-t37j3a\\document.pdf",
+        "pdfRevision": "sha256:337e57eda7b37093531d613a11009e55b37330c7bcaedaa5f5af33f2ae322110",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-t37j3a\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\office_notice\\pages\\page-001.png",
+          "revision": "sha256:ea783a4155c695f6efcbe89e4be36585463eaf2ef7e122e6305ae39753bb18ce",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "系统维护通知\n办公室通知 2026-11-11\n各部门同事：\n为完成网络设备升级，信息中心安排统一维护。\n维护时间：2026 年11 月16 日 18:00—20:00。\n影响范围：办公网络及内部文件服务。\n请提前保存工作文件，维护期间暂停上传大文件。\n紧急事项请联系信息中心值班人员。\n办公室\n2026 年11 月11 日"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "meeting_minutes",
+      "label": "会议纪要更新行动项",
+      "sources": [
+        "line_spacing"
+      ],
+      "request": "将采购清单的负责人由陈工改为李工，截止日期改为2026-11-20；其他行动项、表格和原格式保持不变。",
+      "criteria": [
+        "仅指定行动项两处文字变化",
+        "其他内容、表格结构和格式保留",
+        "一页可读"
+      ],
+      "checks": [
+        {
+          "label": "only explicitly selected text changed",
+          "passed": true
+        },
+        {
+          "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+          "passed": true
+        },
+        {
+          "label": "one complete nonblank page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\meeting_minutes.docx",
+      "sourceRevision": "sha256:1b3874fd400f34725d1132334aa3e90436659e8ed4bc4c9741e06127d1b9b34a",
+      "auditChecks": [
+        {
+          "tool": "edit_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "restored_exact_previous_bytes"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\meeting_minutes\\meeting_minutes.docx",
+      "evidence": {
+        "documentRevision": "sha256:12dcf7a46d1efee81381692a6643302b70ad47d622b238a351ca5848a308fb48",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-4UimfR\\document.pdf",
+        "pdfRevision": "sha256:9ced7fa2afa0bc61085bbbebde34a548b577e06d403fc1b5a873f0c7b4bbaac5",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-4UimfR\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\meeting_minutes\\pages\\page-001.png",
+          "revision": "sha256:cbd024290b671b0c0f5aa1499672832a4e117ae54d566d3ffe091b983700aa9a",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "目例会 要项 纪\n会议日期：2026 年11 月11 日；地点：会议室A。\n参会人员：项目组示例成员；记录人：办公室。\n行动项 负责人 截止日期\n整理采购清单 李工 2026-11-20\n核对测试设备 杨工 2026-11-19\n汇总实施风险 周工 2026-11-21\n下次会议：2026 年11 月23 日；未决事项继续跟踪。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "contract_edit",
+      "label": "合同金额和交付日期修改",
+      "sources": [
+        "save_pdf",
+        "revisions"
+      ],
+      "request": "将合同价款12,800.00改为13,500.00元，交付日改为2026年12月01日；保留加粗金额、含税斜体、签字栏及其他条款。",
+      "criteria": [
+        "跨run金额与日期精确修改",
+        "原run及段落属性保留",
+        "签字栏和其他条款保留"
+      ],
+      "checks": [
+        {
+          "label": "only explicitly selected text changed",
+          "passed": true
+        },
+        {
+          "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+          "passed": true
+        },
+        {
+          "label": "one complete nonblank page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\contract_edit.docx",
+      "sourceRevision": "sha256:dcf3f274b24cc69ec24ac872b65969492df1d891d1f6938e837ab0700edd0917",
+      "auditChecks": [
+        {
+          "tool": "edit_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "restored_exact_previous_bytes"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\contract_edit\\contract_edit.docx",
+      "evidence": {
+        "documentRevision": "sha256:0e315d86f87bcba526a36c39b3ef8df686df6d2b54c2f64d124814dbda1512a8",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ttdspG\\document.pdf",
+        "pdfRevision": "sha256:d4cdc7334c70fd511b90308d3d5faa5633a2379a5e226afcbbd070f6ae446cc1",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ttdspG\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\contract_edit\\pages\\page-001.png",
+          "revision": "sha256:ebc06608244f760fbbc8e7551da9201987b849909c22de7bd598432bd297a485",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "采 合同设备 购\n甲方：示例科技有限公司；乙方：示例设备有限公司。\n合同价款为人民币 13,500.00 元（含税）。\n交付日期：2026 年12 月01 日。\n验收标准：设备到货并完成双方确认，其他条款保持有效。\n甲方签字：________________    乙方签字：________________"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "expense_form",
+      "label": "带合并单元格的报销单",
+      "sources": [
+        "forms"
+      ],
+      "request": "把住宿金额改为1,000.00、合计改为1,520.00；保留原合并单元格、边框、其他费用和审批签字栏。",
+      "criteria": [
+        "指定金额正确且合计一致",
+        "表格合并、边框和签字栏保留",
+        "一页可读"
+      ],
+      "checks": [
+        {
+          "label": "only explicitly selected text changed",
+          "passed": true
+        },
+        {
+          "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+          "passed": true
+        },
+        {
+          "label": "expense total matches specified line amounts",
+          "passed": true
+        },
+        {
+          "label": "one complete nonblank page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\expense_form.docx",
+      "sourceRevision": "sha256:82e110cbb8e9c6e6ab747ca7509e48d12517e2efec515728d4d20c0de0b29f8b",
+      "auditChecks": [
+        {
+          "tool": "edit_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "restored_exact_previous_bytes"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\expense_form\\expense_form.docx",
+      "evidence": {
+        "documentRevision": "sha256:21f486ebba7591f2f579046b809e180d03380dce777f9b6febc2112aaf3a89cb",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nfjuWv\\document.pdf",
+        "pdfRevision": "sha256:2b28a9980ab943c49ec83e4e8bb3a03e9f4089ae806e8bb0773d94d75c6d5241",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nfjuWv\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\expense_form\\pages\\page-001.png",
+          "revision": "sha256:b0e0f31138de3b68891a419a75bafe4267edfd74afcb58b5bf31193bc2a33a41",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "差旅 用费 报销单\n行政部 项目号：OFF-011\n报销人 周示例 期间 2026-11\n项目 单据数 金额（元） 说明\n交通 2 320.00 高铁\n住宿 2 1,000.00 会议住宿\n补贴 2 200.00 100 元/天\n合计 1,520.00 共6 张单据\n经办人：____________  部门负责人：____________  财务复核：____________"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "quotation_table",
+      "label": "报价清单转表格并导出PDF",
+      "sources": [
+        "convert_table",
+        "save_pdf"
+      ],
+      "request": "把制表符报价清单转为5行4列表格；品名内的逗号不能分列，金额原样保留、数字右对齐，并交付同名PDF。",
+      "criteria": [
+        "原生5×4表格",
+        "品名逗号及所有金额保留",
+        "数字右对齐",
+        "同名PDF及内容完整"
+      ],
+      "checks": [
+        {
+          "label": "native 5 by 4 table with comma-containing product and every number intact",
+          "passed": true
+        },
+        {
+          "label": "all numeric cells right aligned",
+          "passed": true
+        },
+        {
+          "label": "named PDF preserves every cell value and note on one nonblank page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\quotation_table.docx",
+      "sourceRevision": "sha256:03865ede5b3a9f8f9320ee23a2a7a5260f7d4f32dfa3f41db4519d73679b7bb3",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        },
+        {
+          "tool": "format_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "pdfDelivery": {
+        "filePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\quotation_table\\quotation_table.pdf",
+        "revision": "sha256:87bb1453365d58aade56b1d21f66aad7239914cfbfeaee3ad2db908d8204783b",
+        "sourceRevision": "sha256:a26406b65b7f2702091bf9849b908defac892e7f14e927503c8626f9b985dd7f",
+        "changeId": "chg_f4e7f986dc2a30b0",
+        "evidence": {
+          "documentRevision": "sha256:a26406b65b7f2702091bf9849b908defac892e7f14e927503c8626f9b985dd7f",
+          "state": "rendered",
+          "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+          "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Dn95Rg\\document.pdf",
+          "pdfRevision": "sha256:87bb1453365d58aade56b1d21f66aad7239914cfbfeaee3ad2db908d8204783b",
+          "pageCount": 1,
+          "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Dn95Rg\\evidence.json",
+          "visualReview": "pending",
+          "targetEditorVerification": "unverified",
+          "warnings": []
+        }
+      },
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\quotation_table\\quotation_table.docx",
+      "evidence": {
+        "documentRevision": "sha256:a26406b65b7f2702091bf9849b908defac892e7f14e927503c8626f9b985dd7f",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Dn95Rg\\document.pdf",
+        "pdfRevision": "sha256:87bb1453365d58aade56b1d21f66aad7239914cfbfeaee3ad2db908d8204783b",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Dn95Rg\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\quotation_table\\pages\\page-001.png",
+          "revision": "sha256:1ba4a9f3421cc3ceab579a898412a5c6c79c1e9be69985282e58a328069c0d8c",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "公用品 价办 报 单\n品名 数量 单价（元） 小计（元）\n打印纸,A4 10 28.50 285.00\n文件夹 12 7.25 87.00\n记号笔 6 4.50 27.00\n合计 399.00\n报价有效期：2026 年11 月30 日；价格含税，不含运输。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "report_pagination",
+      "label": "三页报告连续页码",
+      "sources": [
+        "page_numbers"
+      ],
+      "request": "在现有三页报告右下角添加连续1至3页码，保留单位页眉、正文和原分页。",
+      "criteria": [
+        "三页右下角依次1至3",
+        "原页眉及文字保留",
+        "无新增空白页"
+      ],
+      "checks": [
+        {
+          "label": "original three pages and body text retained",
+          "passed": true
+        },
+        {
+          "label": "all original headers retained byte for byte",
+          "passed": true
+        },
+        {
+          "label": "pages 1 through 3 numbered at bottom right",
+          "passed": true,
+          "observed": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ],
+            [
+              "3"
+            ]
+          ]
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\report_pagination.docx",
+      "sourceRevision": "sha256:9f75af57e4865caa3adb9a43287f50d87783e8b2bb2337469747b75a6d3484cf",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\report_pagination\\report_pagination.docx",
+      "evidence": {
+        "documentRevision": "sha256:c0e916f390ceffc53132745ddd3dd9958b466409cdd719b24832581118e9c990",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-4pXPwB\\document.pdf",
+        "pdfRevision": "sha256:483893cd73e1e5e83e89ec69bcc3077cad0ca0a7c0d421996eb40aba27c10444",
+        "pageCount": 3,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-4pXPwB\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\report_pagination\\pages\\page-001.png",
+          "revision": "sha256:aa2f4f1364a3ddd9cad6a906ee3ab45ca1ef9cfbe0206e3b9b3a784d2f380be0",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "1",
+              "x": 521.4,
+              "y": 38.589
+            }
+          ],
+          "text": "示例单位 · 内部资料\n1\n年度 目 行情况项 执\n第 1 部分 行执 记录\nRPT-1-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-08 本期事项按计划推进，交付物与责任人已核对。"
+        },
+        {
+          "page": 2,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\report_pagination\\pages\\page-002.png",
+          "revision": "sha256:608fe9a0da3138c340669c2954a5ca8b24d414c7796acf4eb7bbcd291508268a",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "2",
+              "x": 521.4,
+              "y": 38.589
+            }
+          ],
+          "text": "示例单位 · 内部资料\n2\n第 2 部分 行执 记录\nRPT-2-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-08 本期事项按计划推进，交付物与责任人已核对。"
+        },
+        {
+          "page": 3,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\report_pagination\\pages\\page-003.png",
+          "revision": "sha256:d58992a9cf457134f8860e48775a4502d3e5ae40dc56e2d6e4ce6b6f1e253d42",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "3",
+              "x": 521.4,
+              "y": 38.589
+            }
+          ],
+          "text": "示例单位 · 内部资料\n3\n第 3 部分 行执 记录\nRPT-3-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-3-08 本期事项按计划推进，交付物与责任人已核对。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "contact_deduplication",
+      "label": "联络名单去重",
+      "sources": [],
+      "request": "按工号去重，保留首次出现的完整记录及原顺序，不留下空段或白尾页。",
+      "criteria": [
+        "工号唯一且首次顺序保留",
+        "未删除唯一记录",
+        "无残留空段或白尾页"
+      ],
+      "checks": [
+        {
+          "label": "six unique records in original first-occurrence order",
+          "passed": true
+        },
+        {
+          "label": "remaining XML and all other parts unchanged; no cleared empty paragraphs",
+          "passed": true
+        },
+        {
+          "label": "one nonblank page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\contact_deduplication.docx",
+      "sourceRevision": "sha256:8b0181bc505368e829b6ebe3ee0ffc2da908fc1acb5b274216074e5abb9790e7",
+      "auditChecks": [
+        {
+          "tool": "delete_docx_paragraphs",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\contact_deduplication\\contact_deduplication.docx",
+      "evidence": {
+        "documentRevision": "sha256:bc5d2a3790109d097074d944d9890e572147b39f583178a1615434aa7db7fdb7",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-V4pNry\\document.pdf",
+        "pdfRevision": "sha256:d83929d8315a5e27ee30667eda7dcf0551ec22e9d253f741080826c3061f7547",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-V4pNry\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\contact_deduplication\\pages\\page-001.png",
+          "revision": "sha256:60e17bfb35a2e2f927d168d1c83242eaaebfbdbcdafee422493b75ca3ca4f736",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "目 名项 联络 单\n001｜成员示例 1｜项目组｜010-5550-0101\n002｜成员示例 2｜项目组｜010-5550-0102\n003｜成员示例 3｜项目组｜010-5550-0103\n004｜成员示例 4｜项目组｜010-5550-0104\n005｜成员示例 5｜项目组｜010-5550-0105\n006｜成员示例 6｜项目组｜010-5550-0106"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "external_redaction",
+      "label": "对外材料完整脱敏",
+      "sources": [
+        "hidden_data"
+      ],
+      "request": "将正文联系人和电话脱敏，同时清除作者及最后修改者等隐藏个人信息；项目编号和预算不变。",
+      "criteria": [
+        "正文联系人及电话不再出现",
+        "隐藏作者和最后修改者清除",
+        "项目编号和预算保留"
+      ],
+      "checks": [
+        {
+          "label": "visible name and phone removed from document text and PDF",
+          "passed": true
+        },
+        {
+          "label": "hidden author and last-modified identity removed",
+          "passed": true,
+          "remainingTestMarkers": [],
+          "packagePart": "docProps/core.xml"
+        },
+        {
+          "label": "project identifier and budget preserved",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\external_redaction.docx",
+      "sourceRevision": "sha256:083e6ca978b44547f0115b2738076c66efae0eca380765928498a13149fb2daf",
+      "auditChecks": [
+        {
+          "tool": "edit_docx",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "restored_exact_previous_bytes"
+        },
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\external_redaction\\external_redaction.docx",
+      "evidence": {
+        "documentRevision": "sha256:d8b005c5c2c45f968bfdcd66c5128a2f52ff10315c5f45149e3865ca15868988",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-c2Ru8L\\document.pdf",
+        "pdfRevision": "sha256:1221d1c6726d038459e08daebbcd728f7f9ff706bf2a2cae99edac4acba1f68c",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-c2Ru8L\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\external_redaction\\pages\\page-001.png",
+          "revision": "sha256:a1ba7dd764ca554af3bbbed62eb9963fdd37220d910082bfb1106be071ce0465",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "外情况 明对 说\n联系人：联系人 A；电话：已隐藏。\n项目编号：PRJ-2026-011；预算金额：25,000.00 元。\n本文仅用于说明本期项目进度。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "long_table_header",
+      "label": "跨页库存表重复表头",
+      "sources": [
+        "repeat_header"
+      ],
+      "request": "现有60条库存明细跨页时每页重复首行表头，保持全部编码、数量及原表格内容。",
+      "criteria": [
+        "原生重复表头属性",
+        "实际跨页且每页表头可见",
+        "全部60条数据保留"
+      ],
+      "checks": [
+        {
+          "label": "native first-row repeat-header property",
+          "passed": true
+        },
+        {
+          "label": "all original table text preserved",
+          "passed": true
+        },
+        {
+          "label": "table spans multiple pages and retains all 60 inventory IDs",
+          "passed": true
+        },
+        {
+          "label": "header visible on every actual page",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\long_table_header.docx",
+      "sourceRevision": "sha256:ad8b852f8bad194804080dd757e4995774cc3c32962df8ad9ab6021e2f92f791",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\long_table_header\\long_table_header.docx",
+      "evidence": {
+        "documentRevision": "sha256:43b3aa3c3657a4044c1c58bb12c3437afb48fd6faca985cb1780ca2c326c27cf",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ZdJtC4\\document.pdf",
+        "pdfRevision": "sha256:0c01cfb823c586e589e72a9485ffc8ee63990df65e9be2dc86f96cf2f0885224",
+        "pageCount": 2,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ZdJtC4\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\long_table_header\\pages\\page-001.png",
+          "revision": "sha256:53a774edcee492879906f0473cc0861a6f3b53a8aaaf20c83d55fec0c80544d8",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "031",
+              "x": 224.95,
+              "y": 114.339
+            },
+            {
+              "value": "5",
+              "x": 297.75,
+              "y": 118.039
+            },
+            {
+              "value": "2",
+              "x": 433.75,
+              "y": 114.339
+            },
+            {
+              "value": "032",
+              "x": 224.95,
+              "y": 94.589
+            },
+            {
+              "value": "6",
+              "x": 297.75,
+              "y": 98.289
+            },
+            {
+              "value": "3",
+              "x": 433.75,
+              "y": 94.589
+            },
+            {
+              "value": "033",
+              "x": 224.95,
+              "y": 74.839
+            },
+            {
+              "value": "7",
+              "x": 297.75,
+              "y": 78.539
+            },
+            {
+              "value": "4",
+              "x": 433.75,
+              "y": 74.839
+            }
+          ],
+          "text": "存 点明库 盘 细\n库存编码 物品名称 数量 存放位置\nINV-001 办公物品 001 2 A 区 2 架\nINV-002 办公物品 002 3 A 区 3 架\nINV-003 办公物品 003 4 A 区 4 架\nINV-004 办公物品 004 5 A 区 5 架\nINV-005 办公物品 005 6 A 区 1 架\nINV-006 办公物品 006 7 A 区 2 架\nINV-007 办公物品 007 8 A 区 3 架\nINV-008 办公物品 008 9 A 区 4 架\nINV-009 办公物品 009 1 A 区 5 架\nINV-010 办公物品 010 2 A 区 1 架\nINV-011 办公物品 011 3 A 区 2 架\nINV-012 办公物品 012 4 A 区 3 架\nINV-013 办公物品 013 5 A 区 4 架\nINV-014 办公物品 014 6 A 区 5 架\nINV-015 办公物品 015 7 A 区 1 架\nINV-016 办公物品 016 8 A 区 2 架\nINV-017 办公物品 017 9 A 区 3 架\nINV-018 办公物品 018 1 A 区 4 架\nINV-019 办公物品 019 2 A 区 5 架\nINV-020 办公物品 020 3 A 区 1 架\nINV-021 办公物品 021 4 A 区 2 架\nINV-022 办公物品 022 5 A 区 3 架\nINV-023 办公物品 023 6 A 区 4 架\nINV-024 办公物品 024 7 A 区 5 架\nINV-025 办公物品 025 8 A 区 1 架\nINV-026 办公物品 026 9 A 区 2 架\nINV-027 办公物品 027 1 A 区 3 架\nINV-028 办公物品 028 2 A 区 4 架\nINV-029 办公物品 029 3 A 区 5 架\nINV-030 办公物品 030 4 A 区 1 架\nINV-031 办公物品 031 5 A 区 2 架\nINV-032 办公物品 032 6 A 区 3 架\nINV-033 办公物品 033 7 A 区 4 架"
+        },
+        {
+          "page": 2,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\long_table_header\\pages\\page-002.png",
+          "revision": "sha256:9b2f96f4ce33825b639b9ae7efc050c3fbe99a234d2247c27a361c95160c905c",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "库存编码 物品名称 数量 存放位置\nINV-034 办公物品 034 8 A 区 5 架\nINV-035 办公物品 035 9 A 区 1 架\nINV-036 办公物品 036 1 A 区 2 架\nINV-037 办公物品 037 2 A 区 3 架\nINV-038 办公物品 038 3 A 区 4 架\nINV-039 办公物品 039 4 A 区 5 架\nINV-040 办公物品 040 5 A 区 1 架\nINV-041 办公物品 041 6 A 区 2 架\nINV-042 办公物品 042 7 A 区 3 架\nINV-043 办公物品 043 8 A 区 4 架\nINV-044 办公物品 044 9 A 区 5 架\nINV-045 办公物品 045 1 A 区 1 架\nINV-046 办公物品 046 2 A 区 2 架\nINV-047 办公物品 047 3 A 区 3 架\nINV-048 办公物品 048 4 A 区 4 架\nINV-049 办公物品 049 5 A 区 5 架\nINV-050 办公物品 050 6 A 区 1 架\nINV-051 办公物品 051 7 A 区 2 架\nINV-052 办公物品 052 8 A 区 3 架\nINV-053 办公物品 053 9 A 区 4 架\nINV-054 办公物品 054 1 A 区 5 架\nINV-055 办公物品 055 2 A 区 1 架\nINV-056 办公物品 056 3 A 区 2 架\nINV-057 办公物品 057 4 A 区 3 架\nINV-058 办公物品 058 5 A 区 4 架\nINV-059 办公物品 059 6 A 区 5 架\nINV-060 办公物品 060 7 A 区 1 架"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "cover_page_numbering",
+      "label": "封面无页码正文从1开始",
+      "sources": [
+        "page_numbers"
+      ],
+      "request": "三页报告封面不显示页码，第二页开始显示1、2，其他版式保持不变。",
+      "criteria": [
+        "封面无页码",
+        "正文两页分别为1、2",
+        "原有三页及正文保留"
+      ],
+      "checks": [
+        {
+          "label": "original three pages and body text retained",
+          "passed": true
+        },
+        {
+          "label": "all original headers retained byte for byte",
+          "passed": true
+        },
+        {
+          "label": "cover has no footer page number",
+          "passed": true,
+          "observed": []
+        },
+        {
+          "label": "body begins at 1 then 2",
+          "passed": true,
+          "observed": [
+            [
+              "1"
+            ],
+            [
+              "2"
+            ]
+          ]
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\cover_page_numbering.docx",
+      "sourceRevision": "sha256:92cd16db8e29abfda189427d3d46c4a7bf2d160b5c5a77ba2e7c2c5d1a824d5d",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\cover_page_numbering\\cover_page_numbering.docx",
+      "evidence": {
+        "documentRevision": "sha256:8e0570f9b10d60c6d6d719c0a06735ad6876e40cd99c90c9a7666d1aa0d53e06",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-0ALW3I\\document.pdf",
+        "pdfRevision": "sha256:3a9d103a5c0f5e888c07647d75fe217c37604a1d192079277d95a1db29f8f54b",
+        "pageCount": 3,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-0ALW3I\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\cover_page_numbering\\pages\\page-001.png",
+          "revision": "sha256:46896fd9bf0eb5ceb7ce7ba0ec41929311338cf5650e5e522fe0a03568d90971",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "目 告项 总结报\n报告日期：2026 年11 月11 日\n封面不显示页码，正文从下一页开始。"
+        },
+        {
+          "page": 2,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\cover_page_numbering\\pages\\page-002.png",
+          "revision": "sha256:6873022116bbae0da0047fd7df5df01659331841362e48e85cebbec7ccb1d3e9",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "1",
+              "x": 294.75,
+              "y": 38.589
+            }
+          ],
+          "text": "示例单位 · 内部资料\n1\n第 1 部分 行执 记录\nRPT-1-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-1-08 本期事项按计划推进，交付物与责任人已核对。"
+        },
+        {
+          "page": 3,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\cover_page_numbering\\pages\\page-003.png",
+          "revision": "sha256:a9ea82a2530a7d8b1a1421d9fc5de7bc692baa2b6b81cd89766587098b9bcb77",
+          "allWhite": false,
+          "footerNumbers": [
+            {
+              "value": "2",
+              "x": 294.75,
+              "y": 38.589
+            }
+          ],
+          "text": "示例单位 · 内部资料\n2\n第 2 部分 行执 记录\nRPT-2-01 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-02 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-03 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-04 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-05 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-06 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-07 本期事项按计划推进，交付物与责任人已核对。\nRPT-2-08 本期事项按计划推进，交付物与责任人已核对。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "landscape_appendix",
+      "label": "仅宽表附件改横向",
+      "sources": [
+        "orientation"
+      ],
+      "request": "封面保持纵向，仅第二节宽表附件改为横向，保留全部表格内容与分节。",
+      "criteria": [
+        "第一节纵向",
+        "第二节横向",
+        "原分节及全部数据保留"
+      ],
+      "checks": [
+        {
+          "label": "only second of two sections is landscape",
+          "passed": true
+        },
+        {
+          "label": "all original table text and geometry preserved",
+          "passed": true
+        },
+        {
+          "label": "portrait cover then landscape appendix in actual PDF",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\landscape_appendix.docx",
+      "sourceRevision": "sha256:c32772158926d488ee08d91883256e8015cfcfd30ad6ea81c8e169668a5c1acc",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\landscape_appendix\\landscape_appendix.docx",
+      "evidence": {
+        "documentRevision": "sha256:b339b135080fe8ac05e467b92e704bba87155599331a31cf8710dc1ff7f79114",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-8avoMw\\document.pdf",
+        "pdfRevision": "sha256:70b8a0c27794e0d4636352e168a2ee97c5a29a5e94effaf99eedfb8ea6ab0f37",
+        "pageCount": 2,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-8avoMw\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\landscape_appendix\\pages\\page-001.png",
+          "revision": "sha256:3f074fd1ce585cc80c467c76327c0944120f9f9fc682ec8a415e86adbc8b50b9",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "存分析 告库 报\n本页为纵向封面，附件从下一节开始。"
+        },
+        {
+          "page": 2,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\landscape_appendix\\pages\\page-002.png",
+          "revision": "sha256:daa26d56603ebaadf6364c804b3e7837dbf11c8f99b8bf3883b2526e11359bfe",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "附  存 表录 库 汇总\n字段 1 字段 2 字段 3 字段 4 字段 5 字段 6 字段 7 字段 8 字段 9 字段\n10\n1-1 1-2 1-3 1-4 1-5 1-6 1-7 1-8 1-9 1-10\n2-1 2-2 2-3 2-4 2-5 2-6 2-7 2-8 2-9 2-10\n3-1 3-2 3-3 3-4 3-5 3-6 3-7 3-8 3-9 3-10\n4-1 4-2 4-3 4-4 4-5 4-6 4-7 4-8 4-9 4-10"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "accept_revisions",
+      "label": "接受合同修订生成定稿",
+      "sources": [
+        "revisions"
+      ],
+      "request": "接受合同中的全部修订，成稿只保留新金额11,000.00，不残留插入、删除修订标记。",
+      "criteria": [
+        "保留已接受的新金额",
+        "无w:ins/w:del修订节点",
+        "其他条款保留"
+      ],
+      "checks": [
+        {
+          "label": "all inline insert/delete revisions accepted",
+          "passed": true
+        },
+        {
+          "label": "new amount and original other clauses retained",
+          "passed": true
+        },
+        {
+          "label": "accepted new amount appears in PDF without deleted amount",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\accept_revisions.docx",
+      "sourceRevision": "sha256:008aac5f7804c7aa4c59f7b411fb224273371d18240ccad89f7144f49e2bcd73",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\accept_revisions\\accept_revisions.docx",
+      "evidence": {
+        "documentRevision": "sha256:da0a4f882414a66e528570a50c188285b2828a37bb1176b91f6b1542ab880ab5",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ARBycn\\document.pdf",
+        "pdfRevision": "sha256:02ed5f9e98994cc144c96de2231d783b92c23ce53c5c4f7689fd00b80a179fb8",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-ARBycn\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\accept_revisions\\pages\\page-001.png",
+          "revision": "sha256:efe91ea73b221a9d58508445aa75f5197c7d01a49e16872fdd5f577f0b7c1091",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "采 合同修 稿购 订\n合同价款为人民币 11,000.00 元。\n交付与验收条款维持原约定。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "automatic_contents",
+      "label": "工作报告自动目录",
+      "sources": [
+        "contents"
+      ],
+      "request": "根据现有一级、二级标题插入可更新的原生目录和页码，不使用手写目录代替。",
+      "criteria": [
+        "原生TOC字段",
+        "一级二级标题及页码正确",
+        "可随标题变更更新"
+      ],
+      "checks": [
+        {
+          "label": "native updatable TOC field with six populated heading entries",
+          "passed": true
+        },
+        {
+          "label": "original heading/body XML retained beyond the directory",
+          "passed": true
+        },
+        {
+          "label": "all directory entries and headings visible without placeholder",
+          "passed": true
+        },
+        {
+          "label": "cached directory page numbers match actual heading pages",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\automatic_contents.docx",
+      "sourceRevision": "sha256:6fadc5e1f8163a4a69fbcc70a4166f131f89f820a8d4e7f558a67c4ceb56fbfb",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\automatic_contents\\automatic_contents.docx",
+      "evidence": {
+        "documentRevision": "sha256:63b1959ea1bdb2dc478fd791879f66c56fc647b1b37467d365eeae086b4c2cd0",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-EpygBT\\document.pdf",
+        "pdfRevision": "sha256:071805d430181535473d516e6b65f3190cc433afde102ee1bda0e0aa585ce030",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-EpygBT\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\automatic_contents\\pages\\page-001.png",
+          "revision": "sha256:0867632f25c9eb022e256a543a2f374fbb467f0eccb137ae113c66a4976d59fc",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "季度工作 告报\n1 本期工作....................................................................................................................................1\n1.1 进度与成果........................................................................................................................1\n2 本期工作....................................................................................................................................1\n2.1 进度与成果........................................................................................................................1\n3 本期工作....................................................................................................................................1\n3.1 进度与成果........................................................................................................................1\n1 本期工作\n1.1 度与成果进\n季度事项 1：过程记录及交付清单完整。\n2 本期工作\n2.1 度与成果进\n季度事项 2：过程记录及交付清单完整。\n3 本期工作\n3.1 度与成果进\n季度事项 3：过程记录及交付清单完整。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "no_issue_observed_by_executor"
+    },
+    {
+      "id": "fillable_controls",
+      "label": "保留可填写表单控件",
+      "sources": [
+        "forms"
+      ],
+      "request": "填写原生内容控件中的姓名，同时保留下拉列表及其选项；不能把控件转成普通文字。",
+      "criteria": [
+        "目标姓名已填写",
+        "文字控件及下拉控件保留",
+        "原选项和其他内容保留"
+      ],
+      "checks": [
+        {
+          "label": "text filled and both native controls retained",
+          "passed": true
+        },
+        {
+          "label": "control properties and dropdown options retained exactly",
+          "passed": true
+        },
+        {
+          "label": "filled name visible in final PDF",
+          "passed": true
+        },
+        {
+          "label": "Open XML SDK finds no additional schema errors",
+          "passed": true
+        }
+      ],
+      "visualReview": "pending",
+      "wordWpsVerification": "not_run",
+      "independentVisualReviewer": "not_run",
+      "taskConversationReplay": "not_run",
+      "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\inputs\\fillable_controls.docx",
+      "sourceRevision": "sha256:deceafa5bc38f05dc88a570ae0d03c54a17bea25c71a37c69dc4500a0ca9e499",
+      "auditChecks": [
+        {
+          "tool": "edit_docx_structure",
+          "reversibleBinaryRecord": true,
+          "actualUndo": "removed_new_file"
+        }
+      ],
+      "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\fillable_controls\\fillable_controls.docx",
+      "evidence": {
+        "documentRevision": "sha256:d1559b2a2911cd4e55433878fc4ef6c364ae3bcd37b45d517683d8072ef15812",
+        "state": "rendered",
+        "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+        "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-eMErWX\\document.pdf",
+        "pdfRevision": "sha256:d34009664bc808011ef6a2531fcb3aea5234796b09a2406daa14a2a20e0e45fb",
+        "pageCount": 1,
+        "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-eMErWX\\evidence.json",
+        "visualReview": "pending",
+        "targetEditorVerification": "unverified",
+        "warnings": []
+      },
+      "pageImages": [
+        {
+          "page": 1,
+          "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-2\\fillable_controls\\pages\\page-001.png",
+          "revision": "sha256:58ae8f9326b8d14f3ab2de79be5f0893152d27c8608d25b5b6b272b2b2b6fe8f",
+          "allWhite": false,
+          "footerNumbers": [],
+          "text": "人 信息登 表员 记\n姓名：周示例\n部门：行政\n请保留文字控件和部门下拉选项。"
+        }
+      ],
+      "originalInputUnchanged": true,
+      "status": "automated_pass",
+      "visualObservation": "known_inherited_title_glyph_defect"
+    }
+  ],
+  "limitations": [
+    "14 fixtures and business values are authored anonymous examples; public documentation defines behavior. No original customer attachment replay or population success rate.",
+    "These native-tool plans contain operator-selected anchors and parameters. Actual shared Chat model runs are reported separately in docx-agent-acceptance.md.",
+    "The fillable-controls title renders one defective glyph in both the unmodified input and final candidate; exact fallback cause remains unproven. Do not claim all pages are visually clean.",
+    "remove_personal_metadata only clears core author/last-modifier and application company/manager; it is not a comprehensive privacy scrub.",
+    "accept_revisions only supports inline run insertion/deletion and current run/paragraph properties; structural/move revisions fail explicitly.",
+    "Executor page observations do not replace an independent Reviewer. Word/WPS and legacy binary .doc remain unverified.",
+    "No desktop UI/Tauri API changes; no installed application update or new release is implied by these development-branch results."
+  ],
+  "history": {
+    "initialOfficeAcceptance": {
+      "schemaVersion": 1,
+      "date": "2026-11-11",
+      "scope": "Operator-planned daily-office acceptance on authored anonymous fixtures; public official documentation defines behaviors, not real customer task histories.",
+      "requirementType": "complete_daily_office_requirements",
+      "sourceDocuments": "authored_anonymous_fixtures",
+      "limitations": [
+        "公开官方说明定义操作行为，14份文件及业务数值为自建匿名样例；不是客户附件或下载机构表单。",
+        "联络名单去重为自建办公场景，无对应公开来源。",
+        "显式操作员计划及参数通过生产原生工具执行，未测试完整模型对话或应用其他工具路径。",
+        "Executor页面观察与独立Reviewer严格区分；Word/WPS打开保存未测试。",
+        "未测试旧二进制.doc；本批DOCX通过不证明其他格式或目标编辑器通过。",
+        "原始partial含控件拒绝场景：没有填写成功，也不算任务通过。"
+      ],
+      "counts": {
+        "cases": 14,
+        "fullTaskPassed": 6,
+        "notFullySatisfied": 8,
+        "raw": {
+          "automated_pass": 6,
+          "execution_error": 1,
+          "partial": 3,
+          "native_capability_gap": 4
+        }
+      },
+      "execution": {
+        "runDirectory": "F:/Agent/Aris/.somniq/research/docx-office-20261111/run-1",
+        "runState": "complete",
+        "startedAt": "2026-11-11T18:14:32.857642+00:00",
+        "runnerPath": "F:/Agent/Aris/.somniq/research/docx-native-repair-20261111/docx-acceptance-r6.exe",
+        "runnerRevision": "sha256:aca16effa942be7948a458afd7f25a6e5126a395d2edd08d14346b98a3d6f839",
+        "buildManifest": "F:\\Agent\\Aris\\.somniq\\research\\docx-native-repair-20261111\\run-6\\results.json",
+        "buildManifestRevision": "sha256:ed025bd520cf203a93cfed7a236234e5f4b714dd08039ba3e86eb897f2302bb0",
+        "implementationRevisions": {
+          "crates/runtime/src/document_export.rs": "sha256:e5f3d8b3c8cb1d98275a250cad5ae486eb2aac2e14ff3a7fe184d0a6838d2d5a",
+          "crates/runtime/src/docx.rs": "sha256:839a250836230481fedeb437bd54e336296e70821984a244c094c551bd19d452",
+          "crates/runtime/assets/docx/format_docx.py": "sha256:3d21357b1601a51b68046ecc2df189d80caaf8e7a7a64cc745b9eac38b37f322",
+          "crates/runtime/assets/docx/structure_docx.py": "sha256:ba076d4299795ef23b625b56665b930fe2269170af5457b3bb0f0b2597f2295c",
+          "crates/runtime/assets/docx/format_odt.py": "sha256:b91a9f08a54cfc6e3f35ccf67cce31fb98ea15c331b0711517f586dd43fcfb4e",
+          "crates/tools/src/lib.rs": "sha256:bc1a2dbb1b2205a14f86584127989b54a9bff9377555f1e1fb41cd5c946d93d6",
+          "crates/chat/src/lib.rs": "sha256:b50c8d6e1b49a4c9c10e8fcf5113385a6466b20d38f350fbfa012cc2606bd7f7",
+          "crates/runtime/assets/prompts/system.md": "sha256:1dbe92014bf351634b97f9070ddd6e796384cba193252f456ea638e1ac7524b3",
+          "tools/docx/run_office_acceptance.py": "sha256:a79968ceaeef0c45c760d3d18402454f14041f73509aac8abbd25d026e2822d8",
+          "tools/docx/office_fixtures.py": "sha256:6fdaa81581f12fa565bc30ca12073bead95dfe6df9893e7fab1728d991f4fcab",
+          "tools/docx/office_cases.json": "sha256:f635d8ececf2f3d496a51cad577db5fd09d0e952627f905668ba0a1c81e0dac3"
+        },
+        "sourcesMatchedBeforeAndAfterRun": true,
+        "taskConversationReplay": "not_run",
+        "independentVisualReviewer": "not_run",
+        "wordWpsVerification": "not_run",
+        "productionVisualReview": "pending",
+        "productionTargetEditorVerification": "unverified"
+      },
+      "sourceManifest": {
+        "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\manifest.json",
+        "revision": "sha256:db494877cfcc3407e41afc7558b0b7713d94266945ce69fb8bc5f5b77d5423e4"
+      },
+      "sources": [
+        {
+          "id": "line_spacing",
+          "url": "https://support.microsoft.com/en-us/word/change-the-line-spacing-in-word",
+          "requirement": "设置行距、段前段后距，并控制同页排版。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/change-the-line-spacing-in-word",
+          "status": 200,
+          "title": "Change the line and paragraph spacing in Word",
+          "fetchedAt": "2026-11-11T18:10:27.155434+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\line_spacing.html",
+          "sha256": "1866221a193c6be13ab841b1dcea30783dac211da45d026b7cb56f40d495b7c0",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\line_spacing.txt",
+          "textSha256": "c51d26189c393e2a9e3271b278c853ab964d20358267d3c9decf9256eff9911d"
+        },
+        {
+          "id": "convert_table",
+          "url": "https://support.microsoft.com/en-us/word/convert-text-to-a-table-or-a-table-to-text",
+          "requirement": "使用段落和制表符分隔行列；内容带逗号时应使用制表符。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/convert-text-to-a-table-or-a-table-to-text",
+          "status": 200,
+          "title": "Convert text to a table or a table to text",
+          "fetchedAt": "2026-11-11T18:10:27.213941+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\convert_table.html",
+          "sha256": "524a73b0f9a20fe801678fe0412087f553a3e5ca4f7d396c88d4c5454e8d32c1",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\convert_table.txt",
+          "textSha256": "5ce961d746fd38dcc2b0b170efdb2e0868a02e08e9ff97ec5d1c7f26abc41c04"
+        },
+        {
+          "id": "repeat_header",
+          "url": "https://support.microsoft.com/en-us/word/repeat-table-header-on-subsequent-pages",
+          "requirement": "长表自动跨页时，每页重复首行表头。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/repeat-table-header-on-subsequent-pages",
+          "status": 200,
+          "title": "Repeat table header on subsequent pages",
+          "fetchedAt": "2026-11-11T18:10:27.236900+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\repeat_header.html",
+          "sha256": "6a5752c7261973e83fac539b58abe6d7faa38f6efb6e17bedda08f62996ca8cc",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\repeat_header.txt",
+          "textSha256": "974cb01cfe9b2cf25bdca10c43c15e36fe3bcf3e7a9cb69f2a622fb1c16f23a6"
+        },
+        {
+          "id": "page_numbers",
+          "url": "https://support.microsoft.com/en-us/word/start-page-numbering-later-in-your-document",
+          "requirement": "封面可不显示页码；后续页可从指定数字开始。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/start-page-numbering-later-in-your-document",
+          "status": 200,
+          "title": "Start page numbering later in your document",
+          "fetchedAt": "2026-11-11T18:10:27.141355+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\page_numbers.html",
+          "sha256": "a8af2bc282b33d224b563aac735050bf74cbe4faef6b3ae2284ca0d716adc1df",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\page_numbers.txt",
+          "textSha256": "0427a8d6d9b3624c6f5e376123293cc1c0deb37d0f92e6e331c1ba3b8c6a45e5"
+        },
+        {
+          "id": "orientation",
+          "url": "https://support.microsoft.com/en-us/word/training/change-page-orientation-to-landscape-or-portrait",
+          "requirement": "既可调整整份文档，也可仅将指定内容所在页改为横向。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/training/change-page-orientation-to-landscape-or-portrait",
+          "status": 200,
+          "title": "Change page orientation to landscape or portrait",
+          "fetchedAt": "2026-11-11T18:10:27.704007+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\orientation.html",
+          "sha256": "fa3a7bbac2919e84e731ec73bf14a4a4854570ce77882ed53cd25b3cd44161e0",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\orientation.txt",
+          "textSha256": "450010c9a0211b15b580bac1589041ef6e4da1ea7f6a68bc78b91370c9a57a9a"
+        },
+        {
+          "id": "hidden_data",
+          "url": "https://support.microsoft.com/en-us/office/collab-files/remove-hidden-data-and-personal-information-by-inspecting-documents-presentations-or-workbooks",
+          "requirement": "对外副本应检查并清理隐藏个人信息，包括文档属性；只改可见文字不足以证明完成。",
+          "finalUrl": "https://support.microsoft.com/en-us/office/collab-files/remove-hidden-data-and-personal-information-by-inspecting-documents-presentations-or-workbooks",
+          "status": 200,
+          "title": "Remove hidden data and personal information by inspecting documents, presentations, or workbooks",
+          "fetchedAt": "2026-11-11T18:10:27.714599+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\hidden_data.html",
+          "sha256": "2d10d5bf7106d25e1d0ccb087cf981964241e2ff94024df10c50579b63911952",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\hidden_data.txt",
+          "textSha256": "715197871a84bb920ee391f02392aa90701e77a5049e140b8f3120fcf0468b11"
+        },
+        {
+          "id": "revisions",
+          "url": "https://support.microsoft.com/en-us/word/training/track-changes-in-word",
+          "requirement": "接受或拒绝修订后再定稿；关闭显示不等于清除修订。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/training/track-changes-in-word",
+          "status": 200,
+          "title": "Track changes in Word",
+          "fetchedAt": "2026-11-11T18:10:27.710599+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\revisions.html",
+          "sha256": "957ba4fba7f2afd885aa0910a0edc62cc912835e1d94be423fb2900e158db0b3",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\revisions.txt",
+          "textSha256": "aba25117d77d1b8a9562f6285dcb59797edf205d45a0cca971a8351f2d5cb78c"
+        },
+        {
+          "id": "forms",
+          "url": "https://support.microsoft.com/en-us/word/create-a-form-in-word-that-users-can-complete-or-print",
+          "requirement": "原生内容控件提供可填写文字、日期和下拉选项等表单功能。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/create-a-form-in-word-that-users-can-complete-or-print",
+          "status": 200,
+          "title": "Create a form in Word that users can complete or print",
+          "fetchedAt": "2026-11-11T18:10:27.764590+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\forms.html",
+          "sha256": "29dadafbe7ccb0067de6f643660d58d2762808ea926e10ee054709cc3580e2ea",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\forms.txt",
+          "textSha256": "a87b8864aee4c412813e80548b2f977f179a2e6e7bc5c80dad3ad2c6dc04b240"
+        },
+        {
+          "id": "contents",
+          "url": "https://support.microsoft.com/en-us/word/training/insert-a-table-of-contents",
+          "requirement": "自动目录依据标题生成并可更新；手写目录不能替代。",
+          "finalUrl": "https://support.microsoft.com/en-us/word/training/insert-a-table-of-contents",
+          "status": 200,
+          "title": "Insert a table of contents",
+          "fetchedAt": "2026-11-11T18:10:28.242629+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\contents.html",
+          "sha256": "7bde9a1cd232bd22a9b9338c743f42060acb9c5af5b13d0ae733156d2c7a2e53",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\contents.txt",
+          "textSha256": "d0a45b4a9ebabafcd9938652c2281d15bc32b49fccdea22b41629cf894bc999c"
+        },
+        {
+          "id": "save_pdf",
+          "url": "https://support.microsoft.com/en-us/office/collab-files/save-or-convert-to-pdf-or-xps-in-office-desktop-apps",
+          "requirement": "导出实际 PDF 文件用于分发或打印，并核对交付文件。",
+          "finalUrl": "https://support.microsoft.com/en-us/office/collab-files/save-or-convert-to-pdf-or-xps-in-office-desktop-apps",
+          "status": 200,
+          "title": "Save or convert to PDF or XPS in Office Desktop apps",
+          "fetchedAt": "2026-11-11T18:10:28.228780+00:00",
+          "htmlPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\save_pdf.html",
+          "sha256": "7838d115fb4ace16b8bb9cd19bdb8feb285f9c807ee97124e388146d62a25b89",
+          "textPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\save_pdf.txt",
+          "textSha256": "8394e5222fdebfe5ac3aa693158e5eb349fac9d0684cc6bcd157ab808eb1271d"
+        }
+      ],
+      "evidenceIntegrity": {
+        "verifiedAt": "2026-11-11T18:24:37.927569+00:00",
+        "scope": "Saved evidence integrity; does not turn failed tasks or executor observations into independent approval.",
+        "run": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1",
+        "runnerRevision": "sha256:aca16effa942be7948a458afd7f25a6e5126a395d2edd08d14346b98a3d6f839",
+        "resultsRevision": "sha256:6506c8b052be90a4a9cf0bff6f0bd92c9eb531788259500358169d54d5734bd2",
+        "observationsRevision": "sha256:90fd3239f2dc35d33134cfd499156d7963f742f3fb4e1d8eafbff2ea883b10de",
+        "allIntegrityChecksPassed": true,
+        "cases": 14,
+        "rawCounts": {
+          "automated_pass": 6,
+          "execution_error": 1,
+          "partial": 3,
+          "native_capability_gap": 4
+        },
+        "publicSources": 10,
+        "originalInputsUnchanged": 14,
+        "candidateDocuments": 8,
+        "candidatePagesObserved": 12,
+        "diagnosticPagesObserved": 2,
+        "schemaAdditionalErrors": 0,
+        "actualUndoChecks": 8,
+        "toolCalls": 67,
+        "toolCallsReturningErrors": 6,
+        "independentReviewer": "not_run",
+        "wordWpsVerification": "not_run",
+        "taskConversationReplay": "not_run"
+      },
+      "observations": {
+        "path": "F:/Agent/Aris/.somniq/research/docx-office-20261111/page-observations.json",
+        "reviewerRole": "executor",
+        "candidatePages": 12,
+        "sourceDiagnosticPages": 2,
+        "allSavedPagesInspected": true,
+        "independentReviewer": "not_run"
+      },
+      "fileRevisions": {
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\results.json": "sha256:6506c8b052be90a4a9cf0bff6f0bd92c9eb531788259500358169d54d5734bd2",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\tool-calls.json": "sha256:b8900ddfaffeeadbc50be05a9c1b9fcc62eefbe33a2184df30f254fb5631c93a",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs.json": "sha256:2aa28e15c89fb4b6574312f0dc30b4515435dc8fa77d1fb9f9942ebedb09b56d",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\schema-validation.json": "sha256:f59874b15c05be081d7d0530df5273cd10bdaba7c7acb96b30ae29e04b59e3a3",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1.log": "sha256:1158c4db4b1cb8a9eca1c2adacccd50cb46c8e03dd200fe671d0f769542ce819",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\official-sources\\manifest.json": "sha256:db494877cfcc3407e41afc7558b0b7713d94266945ce69fb8bc5f5b77d5423e4",
+        "F:\\Agent\\Aris\\tools\\docx\\fetch_office_sources.py": "sha256:7efc7b4eb2a432d45b9f941a7853419bd27a73e0cbefe9f30eb04eaafbc4b5d3",
+        "F:\\Agent\\Aris\\tools\\docx\\verify_office_evidence.py": "sha256:36ea20af3d77aff3d481e06a4fd5d22c4eef28f835a3ad7caa6e44f520846979",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\page-observations.json": "sha256:90fd3239f2dc35d33134cfd499156d7963f742f3fb4e1d8eafbff2ea883b10de",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\verification.json": "sha256:d4dafb9a8726b4a301342c4e39efe2bf98d6269b8d4a51efd3861ee252cbdde8",
+        "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\quotation-failure-diagnosis.json": "sha256:f1407b15dcbf152764eb40cb3c9171bf71b7969f781be6b54f200666a46a61c7",
+        "F:\\Agent\\Aris\\tools\\docx\\README.md": "sha256:30df030d06c637a874e5faa222d437e6808edad91b8a9da289f6363f0532e10c",
+        "F:\\Agent\\Aris\\docs\\development-logic\\docx-office-acceptance.md": "sha256:09d1dd4bdadb407053a039a48deeb13285887b29938022cac851ed2bf6c0a439"
+      },
+      "cases": [
+        {
+          "id": "office_notice",
+          "label": "一页维护通知",
+          "request": "保留通知原文，标题18磅居中，正文12磅1.15倍行距，维护时间标红，保持A4且恰好一页。",
+          "criteria": [
+            "原文不变",
+            "标题/正文和时间范围格式正确",
+            "A4一页且无多余白页"
+          ],
+          "sources": [
+            "line_spacing",
+            "save_pdf"
+          ],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "通知原文和非目标部件保留；标题、行距、精确时间红色范围符合要求，A4单页。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\office_notice.docx",
+          "sourceRevision": "sha256:bd072bd698d553acae4e9136a72b2e3e0baf68c23c6d92143176d5c65e3f6346",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "notification text and other package parts retained",
+              "passed": true
+            },
+            {
+              "label": "title centered at 18 pt; body 12 pt at 1.15 line spacing",
+              "passed": true
+            },
+            {
+              "label": "only exact maintenance-time range is red",
+              "passed": true
+            },
+            {
+              "label": "exactly one A4 page without blank pages",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "format_docx",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "removed_new_file"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\office_notice\\office_notice.docx",
+          "evidence": {
+            "documentRevision": "sha256:01fd4e5aad7dc13d790d629705889494a1031b34f7abd5bc9b23323bd9576941",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-trCHMH\\document.pdf",
+            "pdfRevision": "sha256:a0457c8580f16a2f11ef776c47cf0f5fd6d6f75f2f183a10d5f3bcaaffee0fbd",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-trCHMH\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\office_notice\\pages\\page-001.png",
+              "revision": "sha256:ea783a4155c695f6efcbe89e4be36585463eaf2ef7e122e6305ae39753bb18ce",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "office_notice",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\office_notice\\office_notice.docx",
+              "documentRevision": "sha256:01fd4e5aad7dc13d790d629705889494a1031b34f7abd5bc9b23323bd9576941",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-trCHMH\\document.pdf",
+              "pdfRevision": "sha256:a0457c8580f16a2f11ef776c47cf0f5fd6d6f75f2f183a10d5f3bcaaffee0fbd",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\office_notice\\pages\\page-001.png",
+              "imageRevision": "sha256:ea783a4155c695f6efcbe89e4be36585463eaf2ef7e122e6305ae39753bb18ce",
+              "notes": "通知完整显示在A4单页；标题居中，维护时间准确标红，正文及日期保留，无裁切、重叠或白尾页；保留输入模板原有标题下蓝线。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "office_notice",
+            "candidateRevision": "sha256:01fd4e5aad7dc13d790d629705889494a1031b34f7abd5bc9b23323bd9576941",
+            "baselineRevision": "sha256:bd072bd698d553acae4e9136a72b2e3e0baf68c23c6d92143176d5c65e3f6346",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "meeting_minutes",
+          "label": "会议纪要更新行动项",
+          "request": "将采购清单的负责人由陈工改为李工，截止日期改为2026-11-20；其他行动项、表格和原格式保持不变。",
+          "criteria": [
+            "仅指定行动项两处文字变化",
+            "其他内容、表格结构和格式保留",
+            "一页可读"
+          ],
+          "sources": [
+            "line_spacing"
+          ],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "仅指定负责人和截止日期变化；其他行动项、表格及格式保留。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\meeting_minutes.docx",
+          "sourceRevision": "sha256:38144d6e4fe101a5fa9c367911d2b923eae5f14cc2482f1c5609a4cce33d0f42",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "only explicitly selected text changed",
+              "passed": true
+            },
+            {
+              "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+              "passed": true
+            },
+            {
+              "label": "one complete nonblank page",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "restored_exact_previous_bytes"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\meeting_minutes\\meeting_minutes.docx",
+          "evidence": {
+            "documentRevision": "sha256:5ba6cd29abcdc75c24f7503fbcb33280fd6a8a876e32e3f7fdbc1968b9a03908",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Eu20G4\\document.pdf",
+            "pdfRevision": "sha256:08cfe5f69cd3f8267b70ff48d167d690144f1f40fbd6096bd7d3f6312499d936",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Eu20G4\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\meeting_minutes\\pages\\page-001.png",
+              "revision": "sha256:cbd024290b671b0c0f5aa1499672832a4e117ae54d566d3ffe091b983700aa9a",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "meeting_minutes",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\meeting_minutes\\meeting_minutes.docx",
+              "documentRevision": "sha256:5ba6cd29abcdc75c24f7503fbcb33280fd6a8a876e32e3f7fdbc1968b9a03908",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Eu20G4\\document.pdf",
+              "pdfRevision": "sha256:08cfe5f69cd3f8267b70ff48d167d690144f1f40fbd6096bd7d3f6312499d936",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\meeting_minutes\\pages\\page-001.png",
+              "imageRevision": "sha256:cbd024290b671b0c0f5aa1499672832a4e117ae54d566d3ffe091b983700aa9a",
+              "notes": "第一行动项显示李工和2026-11-20，另两项杨工11/19、周工11/21保留；表格与会议信息清晰，单页无裁切、溢出或白尾页。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "meeting_minutes",
+            "candidateRevision": "sha256:5ba6cd29abcdc75c24f7503fbcb33280fd6a8a876e32e3f7fdbc1968b9a03908",
+            "baselineRevision": "sha256:38144d6e4fe101a5fa9c367911d2b923eae5f14cc2482f1c5609a4cce33d0f42",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "contract_edit",
+          "label": "合同金额和交付日期修改",
+          "request": "将合同价款12,800.00改为13,500.00元，交付日改为2026年12月01日；保留加粗金额、含税斜体、签字栏及其他条款。",
+          "criteria": [
+            "跨run金额与日期精确修改",
+            "原run及段落属性保留",
+            "签字栏和其他条款保留"
+          ],
+          "sources": [
+            "save_pdf",
+            "revisions"
+          ],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "跨run金额、日期精确替换，原run属性、含税斜体和签字栏保留。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\contract_edit.docx",
+          "sourceRevision": "sha256:a82ec2b6c36666aa8f666ba8f6feb1b5dbe5af2b4a18b025a4fa7a845c22e008",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "only explicitly selected text changed",
+              "passed": true
+            },
+            {
+              "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+              "passed": true
+            },
+            {
+              "label": "one complete nonblank page",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "restored_exact_previous_bytes"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contract_edit\\contract_edit.docx",
+          "evidence": {
+            "documentRevision": "sha256:08344d339c2d2f3f3517829e5148f20d8c6df7d486f7865b1bde897b53abb7e5",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-BQMlF6\\document.pdf",
+            "pdfRevision": "sha256:2f63b59887e1dcfa88d6dd5876c620e552d7d9ee01608ffad446af8a0ddfb72b",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-BQMlF6\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contract_edit\\pages\\page-001.png",
+              "revision": "sha256:ebc06608244f760fbbc8e7551da9201987b849909c22de7bd598432bd297a485",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "contract_edit",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contract_edit\\contract_edit.docx",
+              "documentRevision": "sha256:08344d339c2d2f3f3517829e5148f20d8c6df7d486f7865b1bde897b53abb7e5",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-BQMlF6\\document.pdf",
+              "pdfRevision": "sha256:2f63b59887e1dcfa88d6dd5876c620e552d7d9ee01608ffad446af8a0ddfb72b",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contract_edit\\pages\\page-001.png",
+              "imageRevision": "sha256:ebc06608244f760fbbc8e7551da9201987b849909c22de7bd598432bd297a485",
+              "notes": "合同价款显示13,500.00元且加粗，含税保留斜体，交付日为2026年12月01日；双方名称、验收条款和签字栏完整，单页无裁切或重叠。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "contract_edit",
+            "candidateRevision": "sha256:08344d339c2d2f3f3517829e5148f20d8c6df7d486f7865b1bde897b53abb7e5",
+            "baselineRevision": "sha256:a82ec2b6c36666aa8f666ba8f6feb1b5dbe5af2b4a18b025a4fa7a845c22e008",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "expense_form",
+          "label": "带合并单元格的报销单",
+          "request": "把住宿金额改为1,000.00、合计改为1,520.00；保留原合并单元格、边框、其他费用和审批签字栏。",
+          "criteria": [
+            "指定金额正确且合计一致",
+            "表格合并、边框和签字栏保留",
+            "一页可读"
+          ],
+          "sources": [
+            "forms"
+          ],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "住宿1,000.00、合计1,520.00；Decimal复核合计；合并、边框和签字保留。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\expense_form.docx",
+          "sourceRevision": "sha256:e09289098ce837c94c74710d50a526d38039989bb42e0d333cb11667e3b1cf26",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "only explicitly selected text changed",
+              "passed": true
+            },
+            {
+              "label": "table geometry, merged cells, run/paragraph properties and other parts retained",
+              "passed": true
+            },
+            {
+              "label": "expense total matches specified line amounts",
+              "passed": true
+            },
+            {
+              "label": "one complete nonblank page",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "restored_exact_previous_bytes"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\expense_form\\expense_form.docx",
+          "evidence": {
+            "documentRevision": "sha256:b604c5feb69e674a5da1411393638dcb06934827484700566ceba2e011571acd",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-G9cI0P\\document.pdf",
+            "pdfRevision": "sha256:8456ef32c138016ea0e4874fbb15a050c4a5d602c1734eb29eeacb2ac5880920",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-G9cI0P\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\expense_form\\pages\\page-001.png",
+              "revision": "sha256:b0e0f31138de3b68891a419a75bafe4267edfd74afcb58b5bf31193bc2a33a41",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "expense_form",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\expense_form\\expense_form.docx",
+              "documentRevision": "sha256:b604c5feb69e674a5da1411393638dcb06934827484700566ceba2e011571acd",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-G9cI0P\\document.pdf",
+              "pdfRevision": "sha256:8456ef32c138016ea0e4874fbb15a050c4a5d602c1734eb29eeacb2ac5880920",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\expense_form\\pages\\page-001.png",
+              "imageRevision": "sha256:b0e0f31138de3b68891a419a75bafe4267edfd74afcb58b5bf31193bc2a33a41",
+              "notes": "住宿1,000.00、合计1,520.00显示正确；首行和合计行合并单元格、完整边框及三处审批签字栏保留，单页清晰，无裁切、重叠或白尾页。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "expense_form",
+            "candidateRevision": "sha256:b604c5feb69e674a5da1411393638dcb06934827484700566ceba2e011571acd",
+            "baselineRevision": "sha256:e09289098ce837c94c74710d50a526d38039989bb42e0d333cb11667e3b1cf26",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "quotation_table",
+          "label": "报价清单转表格并导出PDF",
+          "request": "把制表符报价清单转为5行4列表格；品名内的逗号不能分列，金额原样保留、数字右对齐，并交付同名PDF。",
+          "criteria": [
+            "原生5×4表格",
+            "品名逗号及所有金额保留",
+            "数字右对齐",
+            "同名PDF及内容完整"
+          ],
+          "sources": [
+            "convert_table",
+            "save_pdf"
+          ],
+          "rawStatus": "execution_error",
+          "fullTaskPassed": false,
+          "finding": "正常制表符在生产转换器中触发protected_range；未发布表格或PDF，后续对齐和同名PDF条件未执行。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\quotation_table.docx",
+          "sourceRevision": "sha256:813977e183f9764c6f293d467e2bf2472e1f81ed5d692cab3e814e0d4fe2db8a",
+          "originalInputUnchanged": true,
+          "checks": [],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [],
+          "schemaValidation": null,
+          "nativeContractProbe": null,
+          "executionError": "docx_export:engine_failed python-docx: Traceback (most recent call last):\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\format_docx.py\", line 374, in <module>\n    result['appliedOperations'] = structure_document(args.source, args.output, plan)\n                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\structure_docx.py\", line 180, in structure_document\n    plain(p, item['expected_text'])\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\structure_docx.py\", line 41, in plain\n    text_runs(paragraph)\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\format_docx.py\", line 80, in text_runs\n    raise ValueError('protected_range: range crosses an object or structural boundary')\nValueError: protected_range: range crosses an object or structural boundary\n\n",
+          "failureDiagnosis": {
+            "scope": "Read-only diagnosis of failed native conversion, preserving the original run result.",
+            "case": "quotation_table",
+            "callIndexOneBased": 29,
+            "tool": "edit_docx_structure",
+            "exitCode": 1,
+            "error": "docx_export:engine_failed python-docx: Traceback (most recent call last):\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\format_docx.py\", line 374, in <module>\n    result['appliedOperations'] = structure_document(args.source, args.output, plan)\n                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\structure_docx.py\", line 180, in structure_document\n    plain(p, item['expected_text'])\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\structure_docx.py\", line 41, in plain\n    text_runs(paragraph)\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-YFtk6Q\\format_docx.py\", line 80, in text_runs\n    raise ValueError('protected_range: range crosses an object or structural boundary')\nValueError: protected_range: range crosses an object or structural boundary\n\n",
+            "delimiter": "\t",
+            "selectedParagraphs": 5,
+            "sourceRevision": "sha256:813977e183f9764c6f293d467e2bf2472e1f81ed5d692cab3e814e0d4fe2db8a",
+            "sourceUnchanged": true,
+            "nativeTabElements": 15,
+            "intermediatePublished": false,
+            "candidatePublished": false,
+            "diagnosis": "python-docx encodes input tab separators as w:tab. structure_docx.plain calls format_docx.text_runs, which rejects non-w:t run children before table conversion. The failure originates in the production tool, not PDF conversion or an unavailable runtime.",
+            "futureRequirements": [
+              "Retain the comma in 打印纸,A4",
+              "Native 5x4 table with exact original cell values",
+              "Right aligned numeric cells",
+              "Same-name PDF delivery",
+              "Actual undo and input preservation",
+              "Open XML SDK and full PDF page review"
+            ]
+          },
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "report_pagination",
+          "label": "三页报告连续页码",
+          "request": "在现有三页报告右下角添加连续1至3页码，保留单位页眉、正文和原分页。",
+          "criteria": [
+            "三页右下角依次1至3",
+            "原页眉及文字保留",
+            "无新增空白页"
+          ],
+          "sources": [
+            "page_numbers"
+          ],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "三页页脚依次1、2、3并位于右下，原页眉字节、正文及分页保留。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\report_pagination.docx",
+          "sourceRevision": "sha256:89aa8b92cf622533a85bf08916a37db56ba2386ef850c3d71f70a807dbfe3900",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "original three pages and body text retained",
+              "passed": true
+            },
+            {
+              "label": "all original headers retained byte for byte",
+              "passed": true
+            },
+            {
+              "label": "pages 1 through 3 numbered at bottom right",
+              "passed": true,
+              "observed": [
+                [
+                  "1"
+                ],
+                [
+                  "2"
+                ],
+                [
+                  "3"
+                ]
+              ]
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx_structure",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "removed_new_file"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\report_pagination.docx",
+          "evidence": {
+            "documentRevision": "sha256:4d1e57d3356e39184beaeff70c6e61f74ff895c34015bbc03bd3a2c5629156ca",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Jp5HIi\\document.pdf",
+            "pdfRevision": "sha256:3d207c9d8821cf87fba49fcd4e7028e53919713b3b5ad018afde10f5e584e107",
+            "pageCount": 3,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Jp5HIi\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-001.png",
+              "revision": "sha256:aa2f4f1364a3ddd9cad6a906ee3ab45ca1ef9cfbe0206e3b9b3a784d2f380be0",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "1",
+                  "x": 521.4,
+                  "y": 38.589
+                }
+              ]
+            },
+            {
+              "page": 2,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-002.png",
+              "revision": "sha256:608fe9a0da3138c340669c2954a5ca8b24d414c7796acf4eb7bbcd291508268a",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "2",
+                  "x": 521.4,
+                  "y": 38.589
+                }
+              ]
+            },
+            {
+              "page": 3,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-003.png",
+              "revision": "sha256:d58992a9cf457134f8860e48775a4502d3e5ae40dc56e2d6e4ce6b6f1e253d42",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "3",
+                  "x": 521.4,
+                  "y": 38.589
+                }
+              ]
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "report_pagination",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\report_pagination.docx",
+              "documentRevision": "sha256:4d1e57d3356e39184beaeff70c6e61f74ff895c34015bbc03bd3a2c5629156ca",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Jp5HIi\\document.pdf",
+              "pdfRevision": "sha256:3d207c9d8821cf87fba49fcd4e7028e53919713b3b5ad018afde10f5e584e107",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-001.png",
+              "imageRevision": "sha256:aa2f4f1364a3ddd9cad6a906ee3ab45ca1ef9cfbe0206e3b9b3a784d2f380be0",
+              "notes": "第1部分八条执行记录清晰，单位页眉保留；右下角页码1，无文字溢出、页脚碰撞或空白页。"
+            },
+            {
+              "case": "report_pagination",
+              "kind": "candidate",
+              "page": 2,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\report_pagination.docx",
+              "documentRevision": "sha256:4d1e57d3356e39184beaeff70c6e61f74ff895c34015bbc03bd3a2c5629156ca",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Jp5HIi\\document.pdf",
+              "pdfRevision": "sha256:3d207c9d8821cf87fba49fcd4e7028e53919713b3b5ad018afde10f5e584e107",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-002.png",
+              "imageRevision": "sha256:608fe9a0da3138c340669c2954a5ca8b24d414c7796acf4eb7bbcd291508268a",
+              "notes": "第2部分八条执行记录清晰，单位页眉保留；右下角页码2，无文字溢出、页脚碰撞或空白页。"
+            },
+            {
+              "case": "report_pagination",
+              "kind": "candidate",
+              "page": 3,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\report_pagination.docx",
+              "documentRevision": "sha256:4d1e57d3356e39184beaeff70c6e61f74ff895c34015bbc03bd3a2c5629156ca",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Jp5HIi\\document.pdf",
+              "pdfRevision": "sha256:3d207c9d8821cf87fba49fcd4e7028e53919713b3b5ad018afde10f5e584e107",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\report_pagination\\pages\\page-003.png",
+              "imageRevision": "sha256:d58992a9cf457134f8860e48775a4502d3e5ae40dc56e2d6e4ce6b6f1e253d42",
+              "notes": "第3部分八条执行记录清晰，单位页眉保留；右下角页码3，无文字溢出、页脚碰撞或空白页。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "report_pagination",
+            "candidateRevision": "sha256:4d1e57d3356e39184beaeff70c6e61f74ff895c34015bbc03bd3a2c5629156ca",
+            "baselineRevision": "sha256:89aa8b92cf622533a85bf08916a37db56ba2386ef850c3d71f70a807dbfe3900",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "contact_deduplication",
+          "label": "联络名单去重",
+          "request": "按工号去重，保留首次出现的完整记录及原顺序，不留下空段或白尾页。",
+          "criteria": [
+            "工号唯一且首次顺序保留",
+            "未删除唯一记录",
+            "无残留空段或白尾页"
+          ],
+          "sources": [],
+          "rawStatus": "automated_pass",
+          "fullTaskPassed": true,
+          "finding": "保留首次001至006六条及顺序；真实移除重复段，无残留空段。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\contact_deduplication.docx",
+          "sourceRevision": "sha256:6821ba10a2310ea20da42a133ad089840a7d4ff76b4460879ff0b29161450934",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "six unique records in original first-occurrence order",
+              "passed": true
+            },
+            {
+              "label": "remaining XML and all other parts unchanged; no cleared empty paragraphs",
+              "passed": true
+            },
+            {
+              "label": "one nonblank page",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "delete_docx_paragraphs",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "removed_new_file"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contact_deduplication\\contact_deduplication.docx",
+          "evidence": {
+            "documentRevision": "sha256:a6c8beae4b7a64a4b6194246b757cdfeecff325739583841b60ad8ff2d37d347",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-9UZklo\\document.pdf",
+            "pdfRevision": "sha256:580f933601ed0d54bb8c9e540023215dd2d7a652d46d8d6129a665ac96bdb9e7",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-9UZklo\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contact_deduplication\\pages\\page-001.png",
+              "revision": "sha256:60e17bfb35a2e2f927d168d1c83242eaaebfbdbcdafee422493b75ca3ca4f736",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "contact_deduplication",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contact_deduplication\\contact_deduplication.docx",
+              "documentRevision": "sha256:a6c8beae4b7a64a4b6194246b757cdfeecff325739583841b60ad8ff2d37d347",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-9UZklo\\document.pdf",
+              "pdfRevision": "sha256:580f933601ed0d54bb8c9e540023215dd2d7a652d46d8d6129a665ac96bdb9e7",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\contact_deduplication\\pages\\page-001.png",
+              "imageRevision": "sha256:60e17bfb35a2e2f927d168d1c83242eaaebfbdbcdafee422493b75ca3ca4f736",
+              "notes": "名单只含001至006六条记录，姓名、项目组和电话完整，顺序保留，无残留空段、裁切、重叠或白尾页。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "contact_deduplication",
+            "candidateRevision": "sha256:a6c8beae4b7a64a4b6194246b757cdfeecff325739583841b60ad8ff2d37d347",
+            "baselineRevision": "sha256:6821ba10a2310ea20da42a133ad089840a7d4ff76b4460879ff0b29161450934",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "external_redaction",
+          "label": "对外材料完整脱敏",
+          "request": "将正文联系人和电话脱敏，同时清除作者及最后修改者等隐藏个人信息；项目编号和预算不变。",
+          "criteria": [
+            "正文联系人及电话不再出现",
+            "隐藏作者和最后修改者清除",
+            "项目编号和预算保留"
+          ],
+          "sources": [
+            "hidden_data"
+          ],
+          "rawStatus": "partial",
+          "fullTaskPassed": false,
+          "finding": "可见姓名电话已替换，但core.xml中的作者和最后修改者测试标记仍在，未完整脱敏。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\external_redaction.docx",
+          "sourceRevision": "sha256:202fd2256d7f910c36a3fbc40507ae825bcd663595cea46b956aba409af746ac",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "visible name and phone removed from document text and PDF",
+              "passed": true
+            },
+            {
+              "label": "hidden author and last-modified identity removed",
+              "passed": false,
+              "remainingTestMarkers": [
+                "OFFICE_TEST_AUTHOR_031",
+                "OFFICE_TEST_REVIEWER_009"
+              ],
+              "packagePart": "docProps/core.xml"
+            },
+            {
+              "label": "project identifier and budget preserved",
+              "passed": true
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "restored_exact_previous_bytes"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\external_redaction\\external_redaction.docx",
+          "evidence": {
+            "documentRevision": "sha256:80283892f418562b3619d25a57b1849951fceb996ec9b96802aa95a57f95a121",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-cyO5CN\\document.pdf",
+            "pdfRevision": "sha256:f12d579832c9275db1d2f0126264630d4d9b9cc4b680710432bba186dafd8490",
+            "pageCount": 1,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-cyO5CN\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\external_redaction\\pages\\page-001.png",
+              "revision": "sha256:a1ba7dd764ca554af3bbbed62eb9963fdd37220d910082bfb1106be071ce0465",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "external_redaction",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\external_redaction\\external_redaction.docx",
+              "documentRevision": "sha256:80283892f418562b3619d25a57b1849951fceb996ec9b96802aa95a57f95a121",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-cyO5CN\\document.pdf",
+              "pdfRevision": "sha256:f12d579832c9275db1d2f0126264630d4d9b9cc4b680710432bba186dafd8490",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\external_redaction\\pages\\page-001.png",
+              "imageRevision": "sha256:a1ba7dd764ca554af3bbbed62eb9963fdd37220d910082bfb1106be071ce0465",
+              "notes": "可见联系人已改为联系人A，电话为已隐藏；项目编号PRJ-2026-011和预算25,000.00元保留，单页无裁切或重叠。本观察仅证明可见页面，不能证明隐藏属性已脱敏。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "external_redaction",
+            "candidateRevision": "sha256:80283892f418562b3619d25a57b1849951fceb996ec9b96802aa95a57f95a121",
+            "baselineRevision": "sha256:202fd2256d7f910c36a3fbc40507ae825bcd663595cea46b956aba409af746ac",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "long_table_header",
+          "label": "跨页库存表重复表头",
+          "request": "现有60条库存明细跨页时每页重复首行表头，保持全部编码、数量及原表格内容。",
+          "criteria": [
+            "原生重复表头属性",
+            "实际跨页且每页表头可见",
+            "全部60条数据保留"
+          ],
+          "sources": [
+            "repeat_header"
+          ],
+          "rawStatus": "native_capability_gap",
+          "fullTaskPassed": false,
+          "finding": "无重复表头原生操作；参数探测被拒绝，无候选。原输入诊断第二页缺表头。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\long_table_header.docx",
+          "sourceRevision": "sha256:efe5cc9e50c63db2c1873e3477243e1005dd72808b41d83f33c5316ed17ca4ec",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "required native repeat-table-header operation available",
+              "passed": false,
+              "reason": "Current native format and structure contracts expose no existing-table header-row operation."
+            },
+            {
+              "label": "baseline really spans multiple pages and retains all 60 inventory IDs",
+              "passed": true
+            }
+          ],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": {
+            "documentRevision": "sha256:efe5cc9e50c63db2c1873e3477243e1005dd72808b41d83f33c5316ed17ca4ec",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nwAjHH\\document.pdf",
+            "pdfRevision": "sha256:7be1bc220c3d764c2374236d8c8d59e7ee194c9c4a40b73fbf3a3572bd8280d6",
+            "pageCount": 2,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nwAjHH\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "diagnosticPages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\long_table_header\\diagnostic-pages\\page-001.png",
+              "revision": "sha256:53a774edcee492879906f0473cc0861a6f3b53a8aaaf20c83d55fec0c80544d8",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "031",
+                  "x": 224.95,
+                  "y": 114.339
+                },
+                {
+                  "value": "5",
+                  "x": 297.75,
+                  "y": 118.039
+                },
+                {
+                  "value": "2",
+                  "x": 433.75,
+                  "y": 114.339
+                },
+                {
+                  "value": "032",
+                  "x": 224.95,
+                  "y": 94.589
+                },
+                {
+                  "value": "6",
+                  "x": 297.75,
+                  "y": 98.289
+                },
+                {
+                  "value": "3",
+                  "x": 433.75,
+                  "y": 94.589
+                },
+                {
+                  "value": "033",
+                  "x": 224.95,
+                  "y": 74.839
+                },
+                {
+                  "value": "7",
+                  "x": 297.75,
+                  "y": 78.539
+                },
+                {
+                  "value": "4",
+                  "x": 433.75,
+                  "y": 74.839
+                }
+              ]
+            },
+            {
+              "page": 2,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\long_table_header\\diagnostic-pages\\page-002.png",
+              "revision": "sha256:e3ebff619b769f615bb193d029a8f665cd6fc1fae05a446fbe249c7486803c65",
+              "allWhite": false,
+              "footerNumbers": []
+            }
+          ],
+          "executorObservations": [
+            {
+              "case": "long_table_header",
+              "kind": "diagnostic",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\long_table_header.docx",
+              "documentRevision": "sha256:efe5cc9e50c63db2c1873e3477243e1005dd72808b41d83f33c5316ed17ca4ec",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nwAjHH\\document.pdf",
+              "pdfRevision": "sha256:7be1bc220c3d764c2374236d8c8d59e7ee194c9c4a40b73fbf3a3572bd8280d6",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\long_table_header\\diagnostic-pages\\page-001.png",
+              "imageRevision": "sha256:53a774edcee492879906f0473cc0861a6f3b53a8aaaf20c83d55fec0c80544d8",
+              "notes": "原输入诊断页，非修改候选。首行库存编码、物品名称、数量、存放位置可见，INV-001至INV-033各行清晰，无裁切。"
+            },
+            {
+              "case": "long_table_header",
+              "kind": "diagnostic",
+              "page": 2,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\long_table_header.docx",
+              "documentRevision": "sha256:efe5cc9e50c63db2c1873e3477243e1005dd72808b41d83f33c5316ed17ca4ec",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-nwAjHH\\document.pdf",
+              "pdfRevision": "sha256:7be1bc220c3d764c2374236d8c8d59e7ee194c9c4a40b73fbf3a3572bd8280d6",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\long_table_header\\diagnostic-pages\\page-002.png",
+              "imageRevision": "sha256:e3ebff619b769f615bb193d029a8f665cd6fc1fae05a446fbe249c7486803c65",
+              "notes": "原输入诊断页，非修改候选。第二页从INV-034开始至INV-060结束，未重复表头；行内容清晰，无裁切。该问题仍未解决。"
+            }
+          ],
+          "schemaValidation": null,
+          "nativeContractProbe": {
+            "tool": "format_docx",
+            "error": "unknown field `repeat_table_header`, expected one of `paragraph_id`, `style`, `font_name`, `east_asia_font`, `font_size_pt`, `alignment`, `line_spacing`, `space_before_pt`, `space_after_pt`, `first_line_indent_pt`, `keep_with_next`, `widow_control`, `compact_empty_paragraph`, `range`, `run_filter`, `subscript`, `superscript`, `strikethrough`, `color`, `tab_stops`\n",
+            "rejected": true,
+            "sourceUnchanged": true,
+            "noCandidatePublished": true
+          },
+          "executionError": null,
+          "baselineHeaderOnEachPage": [
+            true,
+            false
+          ],
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "cover_page_numbering",
+          "label": "封面无页码正文从1开始",
+          "request": "三页报告封面不显示页码，第二页开始显示1、2，其他版式保持不变。",
+          "criteria": [
+            "封面无页码",
+            "正文两页分别为1、2",
+            "原有三页及正文保留"
+          ],
+          "sources": [
+            "page_numbers"
+          ],
+          "rawStatus": "partial",
+          "fullTaskPassed": false,
+          "finding": "原正文和页眉保留；实际页码为封面1、正文2/3，未满足封面隐藏及正文1起。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\cover_page_numbering.docx",
+          "sourceRevision": "sha256:4145155a24915bc84b5cea3441d40d662ced9732956ed47955a496f34fe40283",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "original three pages and body text retained",
+              "passed": true
+            },
+            {
+              "label": "all original headers retained byte for byte",
+              "passed": true
+            },
+            {
+              "label": "cover has no footer page number",
+              "passed": false,
+              "observed": [
+                "1"
+              ]
+            },
+            {
+              "label": "body begins at 1 then 2",
+              "passed": false,
+              "observed": [
+                [
+                  "2"
+                ],
+                [
+                  "3"
+                ]
+              ]
+            },
+            {
+              "label": "Open XML SDK finds no additional schema errors",
+              "passed": true
+            }
+          ],
+          "auditChecks": [
+            {
+              "tool": "edit_docx_structure",
+              "reversibleBinaryRecord": true,
+              "actualUndo": "removed_new_file"
+            }
+          ],
+          "outputPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\cover_page_numbering.docx",
+          "evidence": {
+            "documentRevision": "sha256:a9bade166a73fc4a6534f3126b6470847997736be92d72c1e22ba1f60c58e0ff",
+            "state": "rendered",
+            "rendererVersion": "LibreOffice 26.8.2.2 9dea406ab7695df6325b11b0e19fdca8db4b7276",
+            "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Nih06v\\document.pdf",
+            "pdfRevision": "sha256:8bf39ae6703abbdcaeb0dbc7b356fcf9e237a8a674bd247e8ac18f3b2a4cf61d",
+            "pageCount": 3,
+            "evidencePath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Nih06v\\evidence.json",
+            "visualReview": "pending",
+            "targetEditorVerification": "unverified",
+            "warnings": []
+          },
+          "candidatePages": [
+            {
+              "page": 1,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-001.png",
+              "revision": "sha256:07664444e26b48278353c0328a28ab92dabc2eb9a0d17f713681c3690f1a743c",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "1",
+                  "x": 294.75,
+                  "y": 38.589
+                }
+              ]
+            },
+            {
+              "page": 2,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-002.png",
+              "revision": "sha256:8fe466eef1f09b24b7cbd0bd546518b9a48598facf70f873847dae4d0c625e91",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "2",
+                  "x": 294.75,
+                  "y": 38.589
+                }
+              ]
+            },
+            {
+              "page": 3,
+              "path": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-003.png",
+              "revision": "sha256:285085a811fd21e645e5d251f9545100f913ea25fd731c11ece792d5836afd6d",
+              "allWhite": false,
+              "footerNumbers": [
+                {
+                  "value": "3",
+                  "x": 294.75,
+                  "y": 38.589
+                }
+              ]
+            }
+          ],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [
+            {
+              "case": "cover_page_numbering",
+              "kind": "candidate",
+              "page": 1,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\cover_page_numbering.docx",
+              "documentRevision": "sha256:a9bade166a73fc4a6534f3126b6470847997736be92d72c1e22ba1f60c58e0ff",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Nih06v\\document.pdf",
+              "pdfRevision": "sha256:8bf39ae6703abbdcaeb0dbc7b356fcf9e237a8a674bd247e8ac18f3b2a4cf61d",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-001.png",
+              "imageRevision": "sha256:07664444e26b48278353c0328a28ab92dabc2eb9a0d17f713681c3690f1a743c",
+              "notes": "封面日期与说明完整，未裁切或重叠；页底中间实际显示1，违反封面不显示页码要求。"
+            },
+            {
+              "case": "cover_page_numbering",
+              "kind": "candidate",
+              "page": 2,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\cover_page_numbering.docx",
+              "documentRevision": "sha256:a9bade166a73fc4a6534f3126b6470847997736be92d72c1e22ba1f60c58e0ff",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Nih06v\\document.pdf",
+              "pdfRevision": "sha256:8bf39ae6703abbdcaeb0dbc7b356fcf9e237a8a674bd247e8ac18f3b2a4cf61d",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-002.png",
+              "imageRevision": "sha256:8fe466eef1f09b24b7cbd0bd546518b9a48598facf70f873847dae4d0c625e91",
+              "notes": "第一部分八条记录和单位页眉清晰，版面无裁切；正文第一页实际显示2，未从1开始。"
+            },
+            {
+              "case": "cover_page_numbering",
+              "kind": "candidate",
+              "page": 3,
+              "documentPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\cover_page_numbering.docx",
+              "documentRevision": "sha256:a9bade166a73fc4a6534f3126b6470847997736be92d72c1e22ba1f60c58e0ff",
+              "pdfPath": "F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-Nih06v\\document.pdf",
+              "pdfRevision": "sha256:8bf39ae6703abbdcaeb0dbc7b356fcf9e237a8a674bd247e8ac18f3b2a4cf61d",
+              "imagePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\cover_page_numbering\\pages\\page-003.png",
+              "imageRevision": "sha256:285085a811fd21e645e5d251f9545100f913ea25fd731c11ece792d5836afd6d",
+              "notes": "第二部分八条记录和单位页眉清晰，版面无裁切或白尾页；正文第二页实际显示3，未按要求显示2。"
+            }
+          ],
+          "schemaValidation": {
+            "case": "cover_page_numbering",
+            "candidateRevision": "sha256:a9bade166a73fc4a6534f3126b6470847997736be92d72c1e22ba1f60c58e0ff",
+            "baselineRevision": "sha256:4145155a24915bc84b5cea3441d40d662ced9732956ed47955a496f34fe40283",
+            "candidate": [],
+            "baseline": [],
+            "added": []
+          },
+          "nativeContractProbe": null,
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "landscape_appendix",
+          "label": "仅宽表附件改横向",
+          "request": "封面保持纵向，仅第二节宽表附件改为横向，保留全部表格内容与分节。",
+          "criteria": [
+            "第一节纵向",
+            "第二节横向",
+            "原分节及全部数据保留"
+          ],
+          "sources": [
+            "orientation"
+          ],
+          "rawStatus": "native_capability_gap",
+          "fullTaskPassed": false,
+          "finding": "无指定分节方向原生操作，参数被拒绝；未发布候选。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\landscape_appendix.docx",
+          "sourceRevision": "sha256:e5660db8c660294b3d4a084ef52f35f87ce989ca501b2b7d8edcf42803f88391",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "native section-specific orientation operation available",
+              "passed": false,
+              "reason": "No section layout operation in the current native contract."
+            }
+          ],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [],
+          "schemaValidation": null,
+          "nativeContractProbe": {
+            "tool": "format_docx",
+            "error": "unknown field `section_orientation`, expected one of `paragraph_id`, `style`, `font_name`, `east_asia_font`, `font_size_pt`, `alignment`, `line_spacing`, `space_before_pt`, `space_after_pt`, `first_line_indent_pt`, `keep_with_next`, `widow_control`, `compact_empty_paragraph`, `range`, `run_filter`, `subscript`, `superscript`, `strikethrough`, `color`, `tab_stops`\n",
+            "rejected": true,
+            "sourceUnchanged": true,
+            "noCandidatePublished": true
+          },
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "accept_revisions",
+          "label": "接受合同修订生成定稿",
+          "request": "接受合同中的全部修订，成稿只保留新金额11,000.00，不残留插入、删除修订标记。",
+          "criteria": [
+            "保留已接受的新金额",
+            "无w:ins/w:del修订节点",
+            "其他条款保留"
+          ],
+          "sources": [
+            "revisions"
+          ],
+          "rawStatus": "native_capability_gap",
+          "fullTaskPassed": false,
+          "finding": "修订文件受保护且无接受修订入口，未生成定稿。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\accept_revisions.docx",
+          "sourceRevision": "sha256:5a6ee7dae75957686688eb60ffc0ce455bb8bbfdce392aa0ef5fbce785285fc6",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "accept-all-revisions native action available",
+              "passed": false,
+              "reason": "Formatting explicitly rejects revision-bearing documents; no accept/reject action is exposed."
+            }
+          ],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [],
+          "schemaValidation": null,
+          "nativeContractProbe": {
+            "tool": "format_docx",
+            "error": "docx_export:engine_failed python-docx: Traceback (most recent call last):\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-KEVBKW\\format_docx.py\", line 383, in <module>\n    format_document(args.source, args.output, plan)\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-KEVBKW\\format_docx.py\", line 207, in format_document\n    check_document(original, root)\n  File \"F:\\Agent\\Aris\\.somniq\\artifacts\\docx\\run-KEVBKW\\format_docx.py\", line 158, in check_document\n    raise ValueError('protected_document: fields, tracked changes and controls require a specialised editor')\nValueError: protected_document: fields, tracked changes and controls require a specialised editor\n\n",
+            "rejected": true,
+            "sourceUnchanged": true,
+            "noCandidatePublished": true
+          },
+          "executionError": null,
+          "originalRevisionNodes": 2,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "automatic_contents",
+          "label": "工作报告自动目录",
+          "request": "根据现有一级、二级标题插入可更新的原生目录和页码，不使用手写目录代替。",
+          "criteria": [
+            "原生TOC字段",
+            "一级二级标题及页码正确",
+            "可随标题变更更新"
+          ],
+          "sources": [
+            "contents"
+          ],
+          "rawStatus": "native_capability_gap",
+          "fullTaskPassed": false,
+          "finding": "无TOC原生action，拒绝后未生成候选；未用静态文字替代。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\automatic_contents.docx",
+          "sourceRevision": "sha256:ed35b03e4f6ef0351c8370b46d4c930a72158e6687d7e5bae5f7e6cb8a4b7498",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "native automatic updatable TOC insertion available",
+              "passed": false,
+              "reason": "No native TOC action or export option; a typed static list would not meet the requirement."
+            }
+          ],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [],
+          "schemaValidation": null,
+          "nativeContractProbe": {
+            "tool": "edit_docx_structure",
+            "error": "unknown variant `insert_table_of_contents`, expected one of `insert_breaks`, `insert_blank_page`, `insert_table`, `insert_image`, `text_to_table`, `page_numbers`, `bibliography_reference`\n",
+            "rejected": true,
+            "sourceUnchanged": true,
+            "noCandidatePublished": true
+          },
+          "executionError": null,
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        },
+        {
+          "id": "fillable_controls",
+          "label": "保留可填写表单控件",
+          "request": "填写原生内容控件中的姓名，同时保留下拉列表及其选项；不能把控件转成普通文字。",
+          "criteria": [
+            "目标姓名已填写",
+            "文字控件及下拉控件保留",
+            "原选项和其他内容保留"
+          ],
+          "sources": [
+            "forms"
+          ],
+          "rawStatus": "partial",
+          "fullTaskPassed": false,
+          "finding": "姓名未填写；控件受到保护，修改被拒绝。原始partial状态保留，不能解释为完成部分填写。",
+          "sourcePath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-20261111\\run-1\\inputs\\fillable_controls.docx",
+          "sourceRevision": "sha256:bbeb2267580865a10cc9a9ad0502bf24f0e3b74160e37b213e876b99daf3e424",
+          "originalInputUnchanged": true,
+          "checks": [
+            {
+              "label": "edit native content-control value while preserving the control",
+              "passed": false,
+              "reason": "Content controls are protected by the current native editing contract."
+            }
+          ],
+          "auditChecks": [],
+          "outputPath": null,
+          "evidence": null,
+          "candidatePages": [],
+          "diagnosticEvidence": null,
+          "diagnosticPages": [],
+          "executorObservations": [],
+          "schemaValidation": null,
+          "nativeContractProbe": {
+            "tool": "edit_docx",
+            "error": "docx_error:protected_paragraph Tracked changes, fields, managed controls or alternate representations require a specialised edit\n",
+            "rejected": true,
+            "sourceUnchanged": true,
+            "unchangedCandidateCopyRemoved": true
+          },
+          "executionError": null,
+          "originalContentControls": 2,
+          "statusInterpretation": "Rejected without filling; raw partial is retained for audit and is not a task success.",
+          "independentReviewer": "not_run",
+          "wordWpsVerification": "not_run",
+          "taskConversationReplay": "not_run"
+        }
+      ],
+      "followUpPriority": [
+        {
+          "order": 1,
+          "cases": [
+            "quotation_table",
+            "cover_page_numbering",
+            "external_redaction"
+          ],
+          "criteria": "重新满足完整表格/PDF、封面/起始编号和正文/隐藏属性条件，验证输入保留、撤销、schema和全页PDF。"
+        },
+        {
+          "order": 2,
+          "cases": [
+            "long_table_header",
+            "landscape_appendix",
+            "accept_revisions",
+            "automatic_contents",
+            "fillable_controls"
+          ],
+          "criteria": "补足原生操作和结构保证；TOC须可更新、修订须真正接受、表单须保留可编辑控件；保护拒绝不能计通过。"
+        }
+      ],
+      "reuse": "沿用python-docx、LibreOffice及Open XML结构适配，不另建分页引擎；详见docx-open-source-selection.md。",
+      "verificationScope": "本轮只新增验收代码及报告；Python/JSON语法、实际原生工具运行、SDK、页面和证据一致性检查。此前全仓测试结果不充当本轮完整办公成功率。"
+    },
+    "firstRepairRun": {
+      "resultsPath": "F:\\Agent\\Aris\\.somniq\\research\\docx-office-repair-20261111\\run-1\\results.json",
+      "resultsRevision": "sha256:cea9a7947fbfd9e103be89d86d5b6379db908412fb21c143ceffd724541a667e",
+      "counts": {
+        "automated_pass": 12,
+        "partial": 2
+      },
+      "findings": [
+        "Repeat-header w:val=true rendered but failed SDK enumeration validation; changed to on.",
+        "TOC page assertion used reordered CJK text from pypdf; PDFium glyph/size extraction now checks actual heading pages, and a separate native-index update check confirms updatability."
+      ]
+    }
+  }
+}

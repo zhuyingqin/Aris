@@ -11,6 +11,7 @@ import { formatUserFacingError } from "../errorMessage";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type { ConfigPatch, ConfigView } from "../types";
 import { useModelAutoSave } from "./useModelAutoSave";
+import { normalizeLanguage } from "./settingsFormatters";
 import {
   normalizeExecutorProvider,
   normalizeReviewerProvider,
@@ -58,7 +59,7 @@ export function useSettingsConnectionState({
 
   /** Reseed confirmed settings while preserving independent preference saves. */
   const loadConfig = (view: ConfigView, preservePreferences = false) => {
-    const nextLanguage = view.language === "en" ? "en" : "cn";
+    const nextLanguage = normalizeLanguage(view.language);
     if (!preservePreferences) setLanguage(nextLanguage, { syncRuntime: false });
     setConfigView((current) => preservePreferences && current ? {
       ...view, language: current.language, memoryWriteApproval: current.memoryWriteApproval,
@@ -82,7 +83,7 @@ export function useSettingsConnectionState({
   const saveLanguage = async (value: Language) => {
     const native = hasNativeBackend();
     const confirmed = native ? (await configSet({ language: value })).language : value;
-    const next = confirmed === "en" ? "en" : "cn";
+    const next = normalizeLanguage(confirmed);
     // Native config is authoritative; local storage is its startup cache.
     setLanguage(next, { syncRuntime: false, requirePersistence: !native });
     setConfigView((current) => current ? { ...current, language: next } : current);

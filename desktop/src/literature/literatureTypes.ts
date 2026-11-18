@@ -63,7 +63,8 @@ export type ScreeningDecision = "include" | "exclude" | "maybe";
 export type CriterionKind = "include" | "exclude";
 
 export type AnchorKind = "abstract" | "metadata" | "pdf";
-export type EvidenceSource = "text" | "vision";
+export type { EvidenceSource } from "../pdf/annotationTypes";
+import type { EvidenceSource } from "../pdf/annotationTypes";
 
 /** Project-level reference frame for the Agent's "for you" judgment — what
  * makes a Brief tailored rather than a generic summary. Stored at the top of
@@ -220,45 +221,14 @@ export interface EvidenceNote {
   imageFingerprint?: string;
 }
 
-export type PdfAnnotationKind = "core" | "evidence" | "answer-support" | "note";
-export type PdfAnnotationColor = "yellow" | "green" | "blue" | "red" | "purple";
-/** Visual treatment of a mark. Absent = "highlight" (back-compat with older records). */
-export type PdfAnnotationStyle = "highlight" | "underline" | "strikethrough";
-
-export interface PdfAnnotationRect {
-  /** Normalized coordinates relative to the rendered PDF page. */
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-export interface PdfAnnotation {
-  id: string;
-  /** Normalized parent attachment item, when the annotation belongs to a PDF child. */
-  attachmentId?: string;
-  page: number;
-  pageLabel?: string;
-  quote: string;
-  note: string;
-  kind: PdfAnnotationKind;
-  annotationType?: string;
-  color?: PdfAnnotationColor;
-  style?: PdfAnnotationStyle;
-  rects?: PdfAnnotationRect[];
-  position?: unknown;
-  sortIndex?: number;
-  author?: string;
-  isExternal?: boolean;
-  source?: EvidenceSource;
-  imageFingerprint?: string;
-  /** Id of the Brief section, evidence item, or answer chain that created it. */
-  sourceId?: string;
-  /** Evidence item that directly grounds an answer-support annotation. */
-  evidenceId?: string;
-  sourcePayload?: unknown;
-  createdAt: string;
-}
+export type {
+  PdfAnnotation,
+  PdfAnnotationColor,
+  PdfAnnotationKind,
+  PdfAnnotationRect,
+  PdfAnnotationStyle,
+} from "../pdf/annotationTypes";
+import type { PdfAnnotation } from "../pdf/annotationTypes";
 
 /**
  * A project-local file or an external resource associated with a paper.
@@ -691,6 +661,8 @@ export interface LiteratureProtocolPreview {
       willExecute: boolean;
     }>;
     maxResults: number;
+    /** The protocol's sort order, echoed on every plan row by the kernel. */
+    sortOrder?: string;
     adapterStatus: string;
     coverageNote: string;
   }>;

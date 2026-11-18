@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { chatDelete, chatUiSessionDelete, isTauri } from "../api/tauri";
-import { useStore } from "../store";
+import { tr, useStore } from "../store";
 import type { ChatSession } from "./types";
 
 const CHAT_SIDEBAR_WIDTH_KEY = "somniq-chat-sidebar-w";
@@ -61,9 +61,20 @@ export function useChatSessionController({
       // A Rust ledger owns this runtime lifecycle. Hiding its transcript must
       // not silently delete a live autonomous workflow/task or its audit trail.
       restoreSession(removed);
+      const language = useStore.getState().language;
       setError(removed.ownerKind === "work_task"
-        ? "Task conversations are managed from To-dos and cannot be deleted from Chat."
-        : "Workflow conversations are managed from Workflows and cannot be deleted from Chat.");
+        ? tr(
+          language,
+          "任务对话由“待办任务”管理，无法在对话中删除。",
+          "Task conversations are managed from To-dos and cannot be deleted from Chat.",
+          "Las conversaciones de tareas se gestionan desde Tareas de trabajo y no se pueden eliminar desde el chat.",
+        )
+        : tr(
+          language,
+          "工作流对话由“研究流程”管理，无法在对话中删除。",
+          "Workflow conversations are managed from Workflows and cannot be deleted from Chat.",
+          "Las conversaciones de flujos de trabajo se gestionan desde Flujos de trabajo y no se pueden eliminar desde el chat.",
+        ));
       return;
     }
     setDeleted(removed);

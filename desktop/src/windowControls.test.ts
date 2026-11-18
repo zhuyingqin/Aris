@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import DesktopWindowControls from "./DesktopWindowControls";
 import { isWindowFullscreen, requestWindowAction, setWindowFullscreen } from "./windowControls";
+import { useStore } from "./store";
 
 const mocks = vi.hoisted(() => ({
   isTauri: vi.fn(),
@@ -54,6 +55,7 @@ describe("window controls", () => {
 
   it("renders minimize, maximize and close controls on a frameless pre-workspace screen", () => {
     mocks.isTauri.mockReturnValue(true);
+    useStore.setState({ language: "cn" });
 
     render(createElement(DesktopWindowControls));
 
@@ -65,6 +67,17 @@ describe("window controls", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
     expect(nativeWindow.close).toHaveBeenCalledOnce();
+  });
+
+  it("labels the pre-workspace window controls in the UI language", () => {
+    mocks.isTauri.mockReturnValue(true);
+    useStore.setState({ language: "es" });
+
+    render(createElement(DesktopWindowControls));
+
+    expect(screen.getByRole("button", { name: "Minimizar ventana" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Maximizar ventana" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cerrar ventana" })).toBeTruthy();
   });
 
   it("does not duplicate native macOS traffic lights", () => {

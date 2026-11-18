@@ -125,3 +125,59 @@ fn carries_the_capture_file_through_to_the_summary() {
         "a service the shell forked was never redirected, so it has no log"
     );
 }
+
+/// A command that keeps running for `seconds`, on every platform the app builds for.
+fn sleeper(seconds: u32) -> std::process::Command {
+    if cfg!(windows) {
+        let mut command = super::hidden_command("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", &format!("Start-Sleep -Seconds {seconds}")]);
+        command
+    } else {
+        let mut command = super::hidden_command("sleep");
+        command.arg(seconds.to_string());
+        command
+    }
+}
+
+#[test]
+fn a_bounded_process_is_killed_when_it_runs_past_its_timeout() {
+    let started = std::time::Instant::now();
+    let result = super::output_bounded(&mut sleeper(30), std::time::Duration::from_millis(800), None);
+    assert!(matches!(result, Err(super::BoundedOutputError::Stopped(super::BoundedStop::TimedOut))));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "returned only after the child exited");
+    let message = result.unwrap_err().describe("Tesseract OCR", std::time::Duration::from_secs(120));
+    assert!(message.contains("120s"), "{message}");
+}
+
+#[test]
+fn a_bounded_process_stops_as_soon_as_it_is_canceled() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raise = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        raise.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let result = super::output_bounded(&mut sleeper(30), std::time::Duration::from_secs(60), Some(&cancel));
+    assert!(matches!(result, Err(super::BoundedOutputError::Stopped(super::BoundedStop::Canceled))));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn a_bounded_process_that_finishes_returns_its_output() {
+    let mut command = if cfg!(windows) {
+        let mut command = super::hidden_command("cmd");
+        command.args(["/C", "echo bounded"]);
+        command
+    } else {
+        let mut command = super::hidden_command("echo");
+        command.arg("bounded");
+        command
+    };
+    let output = super::output_bounded(&mut command, std::time::Duration::from_secs(30), None).expect("ran");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("bounded"));
+    // A missing tool is reported as unavailable, as before.
+    let missing = super::output_bounded(&mut super::hidden_command("somniq-no-such-tool"), std::time::Duration::from_secs(5), None);
+    assert!(missing.unwrap_err().describe("pdftoppm", std::time::Duration::from_secs(5)).contains("unavailable"));
+}

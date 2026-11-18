@@ -7,6 +7,7 @@ import { accountMenuPlan } from "../accountMenuPlan";
 import { ACCOUNT_CACHE_KEY, readCachedAccount, writeCachedAccount } from "../accountCache";
 import { newapiBootstrap, type NewApiAccount } from "../api/tauri";
 import type { FigureView } from "../figures/types";
+import { BILLED_REQUEST_FINISHED_EVENT, figureRunWasBilled } from "../extensions/officialPluginGuards";
 import { useStore } from "../store";
 import { useAccountRefresh } from "../useAccountRefresh";
 
@@ -117,10 +118,11 @@ describe("account allowance refresh", () => {
     render(<Harness />);
     await settle();
     const completed = { active: false, run: { requests: [{ finishedAt: "2026-10-16T12:00:01Z" }] } } as FigureView;
-    act(() => events.figure?.({ ...completed, active: true }));
+    expect(figureRunWasBilled({ ...completed, active: true })).toBe(false);
     expect(newapiBootstrap).toHaveBeenCalledTimes(1);
     vi.mocked(newapiBootstrap).mockResolvedValue(consumedAccount);
-    act(() => events.figure?.(completed));
+    expect(figureRunWasBilled(completed)).toBe(true);
+    act(() => { window.dispatchEvent(new Event(BILLED_REQUEST_FINISHED_EVENT)); });
     await settle();
     expect(newapiBootstrap).toHaveBeenCalledTimes(2);
     act(() => events.error?.());
@@ -136,11 +138,11 @@ describe("account allowance refresh", () => {
     openMenu();
     await settle();
     expect(screen.getByText("$32.70")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("Refresh failed. Showing last allowance.");
+    expect(screen.getByRole("status").textContent).toBe("Refresh failed. Showing the last known allowance.");
     const retry = deferred<NewApiAccount>();
     vi.mocked(newapiBootstrap).mockReturnValueOnce(retry.promise);
     fireEvent.click(screen.getByRole("button", { name: "Refresh allowance" }));
-    expect(screen.getByRole("button", { name: "Refreshing allowance" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Refreshing allowance…" })).toHaveProperty("disabled", true);
     expect(screen.getByRole("group", { name: "Plan allowance" }).getAttribute("aria-busy")).toBe("true");
     await act(async () => { retry.resolve(consumedAccount); });
     expect(screen.getByText("$30.00")).toBeTruthy();
@@ -235,6 +237,10 @@ describe("account allowance refresh", () => {
     view.unmount();
     await act(async () => { older.resolve(consumedAccount); });
     expect(readCachedAccount()).toEqual(initialAccount);
-    expect(events.unlisten).toHaveBeenCalledTimes(3);
+    // Chat done and chat error; the billing announcement is a window event.
+    expect(events.unlisten).toHaveBeenCalledTimes(2);
+    const calls = vi.mocked(newapiBootstrap).mock.calls.length;
+    act(() => { window.dispatchEvent(new Event(BILLED_REQUEST_FINISHED_EVENT)); });
+    expect(vi.mocked(newapiBootstrap).mock.calls.length).toBe(calls);
   });
 });

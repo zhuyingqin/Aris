@@ -74,7 +74,7 @@ pub(crate) fn load(account_base: &str) -> Option<ManagedKey> {
 /// error tells the caller the key will have to be fetched again next launch.
 pub(crate) fn store(account_base: &str, key: ManagedKey) -> Result<(), String> {
     let account = account_name(account_base);
-    let bytes = serde_json::to_vec(&key).map_err(|error| format!("无法编码模型密钥: {error}"))?;
+    let bytes = serde_json::to_vec(&key).map_err(|error| runtime::tr!("无法编码模型密钥: {error}", "Could not encode the model key: {error}", "No se pudo codificar la clave del modelo: {error}"))?;
     if let Ok(mut cache) = cache().lock() {
         cache.insert(account.clone(), Some(key));
     }
@@ -98,27 +98,27 @@ mod backend {
 
     fn entry(account: &str) -> Result<KeyringEntry, String> {
         KeyringEntry::new(crate::newapi::NEWAPI_REFRESH_KEYRING_SERVICE, account)
-            .map_err(|error| format!("无法访问系统凭据存储: {error}"))
+            .map_err(|error| runtime::tr!("无法访问系统凭据存储: {error}", "Could not access the system credential store: {error}", "No se pudo acceder al almacén de credenciales del sistema: {error}"))
     }
 
     pub(super) fn read(account: &str) -> Result<Option<Vec<u8>>, String> {
         match entry(account)?.get_secret() {
             Ok(secret) => Ok(Some(secret)),
             Err(KeyringError::NoEntry) => Ok(None),
-            Err(error) => Err(format!("无法读取系统凭据: {error}")),
+            Err(error) => Err(runtime::tr!("无法读取系统凭据: {error}", "Could not read the system credential: {error}", "No se pudo leer la credencial del sistema: {error}")),
         }
     }
 
     pub(super) fn write(account: &str, secret: &[u8]) -> Result<(), String> {
         entry(account)?
             .set_secret(secret)
-            .map_err(|error| format!("无法保存系统凭据: {error}"))
+            .map_err(|error| runtime::tr!("无法保存系统凭据: {error}", "Could not save the system credential: {error}", "No se pudo guardar la credencial del sistema: {error}"))
     }
 
     pub(super) fn delete(account: &str) -> Result<(), String> {
         match entry(account)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(format!("无法删除系统凭据: {error}")),
+            Err(error) => Err(runtime::tr!("无法删除系统凭据: {error}", "Could not delete the system credential: {error}", "No se pudo eliminar la credencial del sistema: {error}")),
         }
     }
 }

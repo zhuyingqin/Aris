@@ -40,17 +40,17 @@ it("refreshes verification requirements when entering registration", async () =>
 });
 it("sends a code, applies cooldown and includes it in registration", async () => {
   await openRegistration();
-  fill("Username", "researcher"); fill("8-20 characters", "password123");
+  fill("Username", "researcher"); fill("8–20 characters", "password123");
   fill("Re-enter your password", "password123"); fill("name@example.com", "reader@example.com");
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Send" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Send code" })); });
   expect(newapiSendVerification).toHaveBeenCalledWith({ baseUrl: DEFAULT_AUTH_SERVER, email: "reader@example.com" });
-  expect((screen.getByRole("button", { name: "30s" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Resend in 30s" }) as HTMLButtonElement).disabled).toBe(true);
   fill("Email verification code", "123456");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create account" })); });
   expect(register).toHaveBeenCalledWith(DEFAULT_AUTH_SERVER, "researcher", "password123", {
     email: "reader@example.com", verificationCode: "123456", affCode: undefined,
   });
-  expect(screen.getByRole("status").textContent).toContain("Registration successful");
+  expect(screen.getByRole("status").textContent).toContain("Account created");
 });
 it("clears a code when the email changes", async () => {
   await openRegistration(); fill("Email verification code", "123456"); fill("name@example.com", "other@example.com");
@@ -59,7 +59,7 @@ it("clears a code when the email changes", async () => {
 it("allows retry after a send failure", async () => {
   vi.mocked(newapiSendVerification).mockRejectedValueOnce(new Error("Email delivery failed"));
   await openRegistration(); fill("name@example.com", "reader@example.com");
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Send" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Send code" })); });
   expect(screen.getByRole("alert").textContent).toContain("Email delivery failed");
-  expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "Send code" }) as HTMLButtonElement).disabled).toBe(false);
 });

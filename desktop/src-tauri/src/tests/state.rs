@@ -67,6 +67,62 @@ fn project_bound_state_directories_ignore_the_active_project() {
     assert_eq!(super::state_root(), active.join("run-state"));
 }
 
+/// A sub-agent's full report is written to this project's agent store
+/// (`agents/agent-*.md`). The parent agent kept getting "outside the isolated
+/// workspace" when it read that report (12 re-learning events across 4
+/// projects), so the store is a read-only root of the project's own turns.
+/// Another project's store and the session logs stay out of reach, and the
+/// store is still not writable.
+#[test]
+fn project_turns_read_their_own_sub_agent_reports_only() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _config = EnvGuard::set("ARIS_CONFIG_ROOT", temp.path().join("config"));
+    let workspace = temp.path().join("workspace");
+    let own = "project-cccccccccccccccc";
+    let other = "project-dddddddddddddddd";
+    let context = super::project_execution_context(&workspace, own).unwrap();
+    let own_report = project_runtime_dir(own).join("agents").join("agent-1.md");
+    let other_report = project_runtime_dir(other).join("agents").join("agent-2.md");
+    let session_log = project_runtime_dir(own)
+        .join("sessions")
+        .join("chat-1.events.jsonl");
+    for (path, text) in [
+        (&own_report, "own sub-agent report"),
+        (&other_report, "other project's report"),
+        (&session_log, "{}"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    runtime::with_project_execution_context(&context, || {
+        let read = runtime::read_file(&own_report.to_string_lossy(), None, None)
+            .expect("this project's sub-agent report is readable");
+        assert!(read.file.content.contains("own sub-agent report"));
+        for denied in [&other_report, &session_log] {
+            let error = runtime::read_file(&denied.to_string_lossy(), None, None)
+                .expect_err("only this project's agent store was opened");
+            assert!(
+                error.to_string().contains("outside the isolated workspace"),
+                "{error}"
+            );
+        }
+        let error = runtime::write_file(&own_report.to_string_lossy(), "overwritten")
+            .expect_err("the agent store is read-only");
+        assert!(
+            error.to_string().contains("outside the isolated workspace"),
+            "{error}"
+        );
+    });
+    assert_eq!(
+        std::fs::read_to_string(&own_report).unwrap(),
+        "own sub-agent report"
+    );
+}
+
 /// The retrieval protocol's four tools have to travel together.
 ///
 /// Its refusals name the next tool by hand — "call RetrievalPlan", "call

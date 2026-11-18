@@ -1,0 +1,433 @@
+{
+  "schemaVersion": 2,
+  "createdAt": "2026-11-11T04:10:35.525330+00:00",
+  "purpose": "真实用户请求衍生的验收规范；工具集成通过不等于完整任务通过。",
+  "privacy": "公开内容为人工脱敏改写、无原始用户标识/机构/文件正文；原始证据仅留本地 .somniq。",
+  "originalUserDocumentsAvailable": false,
+  "snapshots": [
+    {
+      "id": "word-request-selection",
+      "sha256": "3325b660e33b424e829172427d81ba3168eb18bf28918f033c339fff3a023e6d",
+      "selectionCounts": {
+        "selectedInferenceRecords": 800,
+        "desktopConversationRecords": 351,
+        "userMessageOccurrences": 540,
+        "excludedBackgroundRecords": 449,
+        "distinctInstructionsWithinAccount": 30,
+        "duplicateMessageOccurrences": 510
+      }
+    },
+    {
+      "id": "follow-up-selection",
+      "sha256": "2fa62998d3f165925e91f2b5b7699629efab7c99476bf5801a19ab5c3f9c504e",
+      "selectionCounts": {
+        "selectedInferenceRecords": 107,
+        "desktopConversationRecords": 17,
+        "userMessageOccurrences": 41,
+        "excludedBackgroundRecords": 90,
+        "distinctInstructionsWithinAccount": 3,
+        "duplicateMessageOccurrences": 38
+      }
+    }
+  ],
+  "samplingLimitations": [
+    "关键词限量抽样，不代表全体用户、全部 Word 任务或任务成功率。",
+    "不同推理调用重复携带历史消息，必须去重；上下文问候也可能入选，需人工筛选。",
+    "只将原始 role=user 指令用作用户标准，排除助手、Reviewer、标题/记忆任务和运行时检查点。",
+    "同一请求的不同修改轮次可以是不同验收约束，但不是独立用户样本。",
+    "原始附件未留存在本次快照中；构造的样本明确标为衍生样本。"
+  ],
+  "toolChecks": [
+    "native_math_and_template",
+    "text_edit_preserves_format",
+    "latest_instruction_no_tables",
+    "supplied_template_is_authority",
+    "two_pages_text_unchanged",
+    "failed_or_unreadable_input_preserves_output",
+    "protected_objects_fail_closed",
+    "local_images_embedded",
+    "external_resources_not_fetched"
+  ],
+  "engineeringControls": {
+    "native_math_and_template": "产品需要原生可编辑公式，属于研究工作区技术验收，未冒充本次真实客户的原话。",
+    "local_images_embedded": "图片内容与权限/版本保留，属于生成器工程验收。",
+    "external_resources_not_fetched": "本地处理和可审查外部操作的产品约束。",
+    "failed_or_unreadable_input_preserves_output": "失败保护、并发版本和不完整输入的工程约束。",
+    "protected_objects_fail_closed": "保护复杂对象和不发布部分结果的工程约束。"
+  },
+  "requestCases": [
+    {
+      "id": "REQ-01",
+      "requirement": "将四份材料整合成一份完整文档。",
+      "sources": [
+        {
+          "ref": "b45c747961186b5f9152",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "e904e837c87e6a931e16703eebb114353852e05b3d568b769f39f2de56d49ea9",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "合并附件中的四份材料，生成整体文档。"
+        ],
+        "fixture": "四份独立材料，分别包含不同的职责与待办标记。"
+      },
+      "passCriteria": [
+        "四份来源均成功读取；记录来源对应关系。",
+        "每份材料的独有职责、事实和待办均有去向；相互矛盾的数字先说明，不能自行相加。",
+        "存在未读取附件或未知内容时，不得声称整体材料已完整合并。"
+      ],
+      "toolChecks": [
+        "failed_or_unreadable_input_preserves_output"
+      ],
+      "coverage": "failure-control-only",
+      "remaining": [
+        "原始附件不可得，完整内容合并和对话执行待验收。"
+      ]
+    },
+    {
+      "id": "REQ-02",
+      "requirement": "调整字体段落，最终恰好两页、左右对照，文字不变；首段格式与正文一致。",
+      "sources": [
+        {
+          "ref": "64e24a60d7f2ccf453f1",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "1ee559730c31859d3a27209a3be9111327058a21a82f5f0e7c9abf8e82f3007d",
+          "role": "user"
+        },
+        {
+          "ref": "dd599e5d38e63db19662",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "a382273120efc399bdb864d164eac5534c04a036dfa849601cb197fb1839bd1c",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "在文字不变的前提下调整字体、段落和行距，最终排成两页，首段与正文采用同一套格式。"
+        ],
+        "fixture": "脱敏衍生的标题和四十行阅读材料，输入字号过大，含保留的分页位置。"
+      },
+      "passCriteria": [
+        "格式修改前后所有正文文本节点的值和顺序一致；数学对象及非目标包部件不变。",
+        "最终候选文件在记录的渲染器和字体环境下恰好两页，PDF 与最终 DOCX 哈希绑定。",
+        "首段与正文的字体、字号和段落参数一致；页面逐页检查无截断、遮挡和意外空白。",
+        "两页左右对照的阅读顺序与用户指定编辑器/打印方式相符；不能仅以页数代替验收。"
+      ],
+      "toolChecks": [
+        "two_pages_text_unchanged"
+      ],
+      "coverage": "tool-fixture-automatic-properties",
+      "remaining": [
+        "原文未重放；对照阅读、页面均衡和 Word/WPS 页数仍需验收。"
+      ]
+    },
+    {
+      "id": "REQ-03",
+      "requirement": "标题上移、来源署名小于标题，正文两面均衡。",
+      "sources": [
+        {
+          "ref": "81c5148dce7ab1563fe6",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "c6b66734cf039f3ad3e033bd97feb35b94965fb06a3acfc7614021b4d08066d9",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "标题适当上移，来源署名小于标题，两面内容分布均衡。"
+        ],
+        "fixture": "含标题、署名和正文的两页副本。"
+      },
+      "passCriteria": [
+        "文字和署名保留；标题、署名的字号关系与已确认的要求一致。",
+        "逐页检查标题位置、署名层级和两面正文分布，并保存问题页码。",
+        "字号表述“小2号”存在解释空间，未确认前不能擅自认定为小 2pt；不得自设“均衡”的百分比阈值。"
+      ],
+      "toolChecks": [],
+      "coverage": "standard-defined-not-executed",
+      "remaining": [
+        "需明确字号含义并完成两面页面审查。"
+      ]
+    },
+    {
+      "id": "REQ-04",
+      "requirement": "润色申请表，格式不变，并删除指定意见内容。",
+      "sources": [
+        {
+          "ref": "55a9603502ca8fbdd3f4",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "c584ffff8c6ae3569f119c0f13b4991b0511b47629b3a887e0ebdeeea7ca4db2",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "只润色指定文字，保留申请表原格式，删去指定意见内容。"
+        ],
+        "fixture": "带表格、不同字体和原生公式的匿名申请表。"
+      },
+      "passCriteria": [
+        "文字替换仅覆盖获准段落；原有样式、表格结构、媒体、关系和公式保留。",
+        "删除指定意见的范围已明确；若涉及整行/整节删除，必须使用支持该操作的入口并检查布局。",
+        "保存前后页面对照，确认表格、签名位置和分页未出现非预期改变；可撤销恢复原稿。"
+      ],
+      "toolChecks": [
+        "text_edit_preserves_format",
+        "protected_objects_fail_closed"
+      ],
+      "coverage": "text-edit-and-protection-only",
+      "remaining": [
+        "原始表单不可得；结构删除未接入，不能把精确文字替换通过等同于整项任务完成。"
+      ]
+    },
+    {
+      "id": "REQ-05",
+      "requirement": "按标准公文格式生成或整理 Word，并提供文件路径。",
+      "sources": [
+        {
+          "ref": "a176b093d07641ecdb85",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "8158a9f4444a7ca02ed23cc0ee739fdc56b52372964a54d4ede567dfe54cb8d1",
+          "role": "user"
+        },
+        {
+          "ref": "fde11aa35f7c550bf97e",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "3b49bcf319391509ccdf9ba7e655cc0b4d01f0f64023ebb5abcb96a354446481",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "根据指定公文样式整理材料并生成 Word，提供实际保存路径。"
+        ],
+        "fixture": "一份匿名材料和机构样式参考 DOCX。"
+      },
+      "passCriteria": [
+        "以用户指定规范/机构模板为格式依据；普通研究模板不能被标为“公文合规”。",
+        "新文件确实采用参考文件的正文样式、页面尺寸和页边距，记录模板哈希。",
+        "交付路径存在、可读且指向最终候选版本；逐页检查标题、正文、落款和日期。"
+      ],
+      "toolChecks": [
+        "supplied_template_is_authority"
+      ],
+      "coverage": "template-mechanism-only",
+      "remaining": [
+        "未获得实际公文模板；国家/机构公文合规未验证。"
+      ]
+    },
+    {
+      "id": "REQ-06",
+      "requirement": "依据录音、议程和模板整理会议材料，保留实际到场信息，精简无关讨论。",
+      "sources": [
+        {
+          "ref": "adc7dc3f9cfa6c6422c2",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "82e7962d090c26e8e894830df0b6b8582adaf9334141b57edc16d8f6a7ec8a5d",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "按给定模板整理纪要，保留实际出席信息，重点简洁并删除无关讨论。"
+        ],
+        "fixture": "匿名转写文本、议程、出席清单和模板。"
+      },
+      "passCriteria": [
+        "参会单位/人员/人数均能追溯到输入，不能虚构指标或实绩。",
+        "议程与实际讨论区分清楚，精简不删除行动项和明确责任。",
+        "模板选择正确；内容证据检查和页面检查分别给结论。"
+      ],
+      "toolChecks": [
+        "supplied_template_is_authority"
+      ],
+      "coverage": "template-mechanism-only",
+      "remaining": [
+        "录音、原始议程和模板不可得；内容提炼及完整任务重放未执行。"
+      ]
+    },
+    {
+      "id": "REQ-07",
+      "requirement": "只在聊天中回复文字，不修改文档。",
+      "sources": [
+        {
+          "ref": "c2febc272ca4343054e2",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "bf54968e4c404fef048fc3ce4a25d269eb7d24570f002cc71b34c883b6a73f4c",
+          "role": "user"
+        },
+        {
+          "ref": "fc76e79a7aba2d3a9d81",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "84e59ae5dd720c1290d88d786a4ff0e61579a5780daa13e1ccd114848ca7ebfb",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "不用修改文档，直接在这里用文字告诉我。"
+        ],
+        "fixture": "附带可读 DOCX，记录执行前文件清单及哈希。"
+      },
+      "passCriteria": [
+        "最终答复直接包含文字内容。",
+        "没有调用文档修改/导出工具；工作区原文档和候选文件清单均未发生写入。"
+      ],
+      "toolChecks": [],
+      "coverage": "shared-agent-anonymous-fixture-verified",
+      "remaining": [
+        "客户原始会话未重放；通过范围仅为匿名通知样本的文字答复和零用户文件写入。"
+      ],
+      "agentAcceptance": {
+        "caseId": "only_text",
+        "status": "anonymous_fixture_automated_pass",
+        "successfulSourceRead": true,
+        "executedCalls": 1,
+        "userFileWrites": 0,
+        "originalCustomerConversationReplayed": false
+      }
+    },
+    {
+      "id": "REQ-08",
+      "requirement": "在合并材料的后续修改中，第一条总计七人，采用文字说明，不做表格。",
+      "sources": [
+        {
+          "ref": "b45c747961186b5f9152",
+          "snapshot": "word-request-selection",
+          "instructionSha256": "e904e837c87e6a931e16703eebb114353852e05b3d568b769f39f2de56d49ea9",
+          "role": "user"
+        },
+        {
+          "ref": "8adc3e2c17c58491c3c0",
+          "snapshot": "follow-up-selection",
+          "instructionSha256": "a152956d4a51e7a824c602c33a81609eaad9615317499ce2b6f55b253707eb25",
+          "role": "user"
+        },
+        {
+          "ref": "e04cc5febc4b214c4e02",
+          "snapshot": "follow-up-selection",
+          "instructionSha256": "8fe6ed6b7bc44c7264ba05c046a1f2cfb6bcb357cc7be71fc103c1ff8adb325f",
+          "role": "user"
+        }
+      ],
+      "scenario": {
+        "instructions": [
+          "合并四份材料。",
+          "第一项统筹为七人。",
+          "不用表格，用文字说清楚。"
+        ],
+        "fixture": "匿名材料含共享人员的两个岗位，最终总计七人。"
+      },
+      "passCriteria": [
+        "最终 DOCX 中不存在 Word 表格，最终答复不以表格重述该内容。",
+        "第一项总人数为七人，跨岗位共享人员不重复累计。",
+        "以用户最后一轮明确要求为准；不能因助手早先建议表格而保留表格。"
+      ],
+      "toolChecks": [
+        "latest_instruction_no_tables"
+      ],
+      "coverage": "shared-agent-derived-latest-instruction-and-counts-only",
+      "remaining": [
+        "原始四份材料合并、跨岗位共享人员去重和完整客户会话未验证；不能提升为原任务整项通过。"
+      ],
+      "agentAcceptance": {
+        "caseId": "latest_no_tables",
+        "status": "partial_derivative_automated_pass",
+        "firstTurnPeople": 8,
+        "firstTurnExecutionStaff": 6,
+        "firstTurnNativeTables": 1,
+        "finalPeople": 7,
+        "finalExecutionStaff": 5,
+        "finalNativeTables": 0,
+        "coordinatorAndLiaisonCountsUnchanged": true,
+        "finalAssistantResponseUsesTable": false,
+        "firstTurnRevision": "sha256:96dfe48c2fd954b7b2975469a060eb1fa4d189f4442816bc82850c036d623e4c",
+        "finalRevision": "sha256:51ee831d2c4399da526e2090131d4b1b5182daf7d9f3b9fca19d0390f47f120a",
+        "futureTurnsPersistedBeforePresentation": false,
+        "originalFourSourceMerge": "not_run",
+        "sharedPersonnelDeduplication": "not_run"
+      }
+    }
+  ],
+  "completionRule": "整项通过必须满足对应全部 passCriteria；自动属性、页面审查、独立 Reviewer、模型对话重放、Word/WPS 分别记录。未验证的维度不得提升为通过。",
+  "nativeRepairRegression": {
+    "assessmentDate": "2026-11-11",
+    "scope": "production tool integration on anonymised request-derived fixtures and engineering controls",
+    "originalUserDocuments": false,
+    "groupsPassed": 9,
+    "results": {
+      "path": ".somniq/research/docx-native-repair-20261111/request-regression/results.json",
+      "sha256": "21090c1081726bd46e69e13827b0588c82153d3ac7dbfa10b6884005deb37840"
+    },
+    "pageObservations": {
+      "path": ".somniq/research/docx-native-repair-20261111/request-regression/page-observations.json",
+      "sha256": "793f4646da005290c39a21c811a02b5ca6e76c1c05bab1e41e91e5165bfad4dc"
+    },
+    "pageCount": 6,
+    "executorVisualReview": "reviewed_with_recorded_observations",
+    "runnerRevision": "sha256:aca16effa942be7948a458afd7f25a6e5126a395d2edd08d14346b98a3d6f839",
+    "runtimeSourceRevision": "sha256:e5f3d8b3c8cb1d98275a250cad5ae486eb2aac2e14ff3a7fe184d0a6838d2d5a",
+    "formatterSourceRevision": "sha256:3d21357b1601a51b68046ecc2df189d80caaf8e7a7a64cc745b9eac38b37f322",
+    "toolChecks": [
+      "native_math_and_template",
+      "text_edit_preserves_format",
+      "latest_instruction_no_tables",
+      "supplied_template_is_authority",
+      "two_pages_text_unchanged",
+      "failed_or_unreadable_input_preserves_output",
+      "protected_objects_fail_closed",
+      "local_images_embedded",
+      "external_resources_not_fetched"
+    ],
+    "fullCustomerRequestAcceptance": "not_established",
+    "taskConversationReplay": "not_run",
+    "independentReviewer": "not_run",
+    "wordWpsAfterRepairs": "not_run",
+    "productionEvidenceVisualReview": "pending",
+    "workspaceVerification": {
+      "workspaceCommand": "cargo test --workspace -- --test-threads=1",
+      "workspacePassed": 1614,
+      "workspaceFailed": 0,
+      "workspaceIgnored": 7,
+      "workspaceLog": ".somniq\\research\\docx-native-repair-20261111\\workspace-tests-complete.log",
+      "workspaceLogSha256": "819fb558d83467ad7cca43a29031c2d84b985193dc6c3f7db9ac95267cb5a27c",
+      "pythonTestsPassed": 16,
+      "pythonLog": ".somniq\\research\\docx-native-repair-20261111\\python-tests-final.log",
+      "pythonLogSha256": "c6a28bb1ab85e788d878ad505deba86f38292d7240c68988069014fb8432f982",
+      "requestDerivedAndEngineeringGroupsPassed": 9,
+      "requestRegressionResultsSha256": "21090c1081726bd46e69e13827b0588c82153d3ac7dbfa10b6884005deb37840",
+      "requestRenderedPagesObserved": 6,
+      "requestObservationSha256": "793f4646da005290c39a21c811a02b5ca6e76c1c05bab1e41e91e5165bfad4dc",
+      "schemaCandidates": 19,
+      "schemaNewErrors": 0
+    }
+  },
+  "sharedAgentAcceptance": {
+    "reportedAt": "2026-11-12T02:11:37.759482+00:00",
+    "report": {
+      "path": "docs/development-logic/docx-agent-acceptance.json",
+      "revision": "sha256:a5f3bff630414b2bd7c50768b62e593135e468ed7e44c84fe59ef4387c81a7fa"
+    },
+    "runResultsRevision": "sha256:8243ac0d57c47a4a17dc13a4168cae59f375561f67e80ed3b7a4f88096667cb3",
+    "snapshotManifest": {
+      "path": ".somniq\\research\\docx-office-repair-20261111\\agent-snapshot-manifest.json",
+      "revision": "sha256:fea9ccf6f23e30a3037eb535d9fbc154a0ea3b6ed3b9bda0c652008ce4ec6032"
+    },
+    "model": "deepseek-v4.1-flash",
+    "execution": "production_shared_chat_with_desktop_configuration",
+    "automatedCasesPassed": 10,
+    "observedFinalPages": 13,
+    "customerRequirementScope": {
+      "REQ-07": "anonymous-fixture-only",
+      "REQ-08": "partial-derivative-only"
+    },
+    "desktopUi": "not_run",
+    "productModelPageImageReview": "not_run",
+    "independentReviewer": "not_run",
+    "wordWpsVerification": "not_run",
+    "legacyDoc": "not_run",
+    "installedPackageUpdated": false
+  }
+}

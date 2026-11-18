@@ -146,7 +146,7 @@ pub(crate) fn cached_to_check(tool: &CachedTool) -> super::LocalEnvironmentCheck
         message: tool
             .reason
             .clone()
-            .unwrap_or_else(|| "（缓存结果，环境未变化）".to_string()),
+            .unwrap_or_else(|| runtime::ui_lang::tr_static("（缓存结果，环境未变化）", "(Cached result; the environment has not changed)", "(Resultado en caché; el entorno no ha cambiado)").to_string()),
         detail: None,
     }
 }
@@ -155,14 +155,14 @@ pub(crate) fn cached_to_check(tool: &CachedTool) -> super::LocalEnvironmentCheck
 /// full probe, so the UI shows the correct labels even when served from cache.
 pub(crate) fn enrich_cached_labels(checks: &mut [super::LocalEnvironmentCheck]) {
     let mapping: &[(&str, &str, &str)] = &[
-        ("python", "Python", "运行环境"),
+        ("python", "Python", runtime::ui_lang::tr_static("运行环境", "Runtime", "Entorno de ejecución")),
         ("jupyter", "Jupyter", "Notebook"),
-        ("matlab", "MATLAB", "数值计算"),
-        ("latex", "LaTeX", "论文排版"),
+        ("matlab", "MATLAB", runtime::ui_lang::tr_static("数值计算", "Numerical computing", "Cálculo numérico")),
+        ("latex", "LaTeX", runtime::ui_lang::tr_static("论文排版", "Typesetting", "Maquetación")),
         ("node", "Node.js", "MCP"),
         ("uv", "uv", "MCP / Python"),
-        ("tesseract", "Tesseract OCR", "文献识别"),
-        ("pdftoppm", "PDF rasterizer", "文献识别"),
+        ("tesseract", "Tesseract OCR", runtime::ui_lang::tr_static("文献识别", "Document recognition", "Reconocimiento de documentos")),
+        ("pdftoppm", "PDF rasterizer", runtime::ui_lang::tr_static("文献识别", "Document recognition", "Reconocimiento de documentos")),
     ];
     for check in checks.iter_mut() {
         if let Some((_, label, category)) = mapping.iter().find(|(id, _, _)| *id == check.id) {

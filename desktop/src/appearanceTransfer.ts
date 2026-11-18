@@ -1,6 +1,6 @@
 import { APPEARANCE_KEY, DEFAULT_APPEARANCE, normalizeAppearance, useAppearance, type Appearance } from "./appearance";
 import { DEFAULT_EDITOR_SETTINGS, EDITOR_FONT_FAMILIES, EDITOR_FONT_SIZES, EDITOR_LINE_HEIGHTS, EDITOR_SETTINGS_STORAGE_KEY, getEditorSettings, syncEditorSettings } from "./editor/editorSettings";
-import { useStore, type ThemeMode } from "./store";
+import { tr, useStore, type Language, type ThemeMode } from "./store";
 import { UI_COLOR_PRESETS, UI_COLOR_STORAGE_KEY, type UiColor } from "./uiColors";
 import { UI_TYPOGRAPHY_STORAGE_KEY, type UiTypographyPreference } from "./uiTypography";
 
@@ -40,8 +40,11 @@ export function exportAppearancePreset() {
   preset.appearance.wallpaperName = ""; preset.appearance.wallpaperRevision = "";
   return JSON.stringify(preset, null, 2);
 }
-export function parseAppearancePreset(raw: string): AppearancePreset {
-  if (raw.length > 100_000) throw new Error("Theme file is too large.");
+export const themeFileTooLarge = (language: Language) =>
+  tr(language, "主题文件过大。", "Theme file is too large.", "El archivo de tema es demasiado grande.");
+
+export function parseAppearancePreset(raw: string, language: Language = "en"): AppearancePreset {
+  if (raw.length > 100_000) throw new Error(themeFileTooLarge(language));
   const preset = JSON.parse(raw) as AppearancePreset;
   if (!preset || preset.format !== "somniq-appearance" || preset.version !== 1 || !preset.appearance || typeof preset.appearance !== "object"
     || !["light", "dark", "system"].includes(preset.theme) || !UI_COLOR_PRESETS.includes(preset.color)
@@ -49,7 +52,7 @@ export function parseAppearancePreset(raw: string): AppearancePreset {
     || !Number.isInteger(preset.typography.fontSize) || preset.typography.fontSize < 12 || preset.typography.fontSize > 20
     || !preset.editor || !EDITOR_FONT_FAMILIES.includes(preset.editor.fontFamily)
     || !EDITOR_FONT_SIZES.includes(preset.editor.fontSize) || !EDITOR_LINE_HEIGHTS.includes(preset.editor.lineHeight)) {
-    throw new Error("Invalid SomniQ appearance file.");
+    throw new Error(tr(language, "不是有效的 SomniQ 外观文件。", "Invalid SomniQ appearance file.", "El archivo de apariencia de SomniQ no es válido."));
   }
   const appearance = normalizeAppearance(preset.appearance);
   if (appearance.wallpaper === "custom") appearance.wallpaper = "none";

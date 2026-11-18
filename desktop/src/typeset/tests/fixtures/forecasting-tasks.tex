@@ -1,0 +1,116 @@
+\begin{tikzpicture}[
+  font=\footnotesize,
+  >={Latex[length=1.5mm]},
+  cell/.style={draw=black!40,minimum width=3.6mm,minimum height=3.2mm,inner sep=0pt},
+  win/.style={cell,fill=blue!22,draw=blue!50!black},
+  fut/.style={cell,draw=black!20},
+  tgt/.style={cell,fill=orange!55,draw=orange!70!black},
+  lab/.style={font=\scriptsize,inner sep=1pt},
+  ptitle/.style={anchor=base west,inner sep=0pt,font=\footnotesize},
+  fn/.style={->,thick,black!65},
+]
+\def\dx{0.42}
+%% ---------------- (a) univariate ----------------
+\begin{scope}[shift={(0,0)}]
+\node[ptitle] at (0,0) {\textbf{(a)} Univariate forecasting};
+\node[lab,anchor=east] at (0.6,-0.85) {$y$};
+\foreach \i in {0,...,13} {
+  \pgfmathsetmacro{\xx}{0.8+\i*\dx}
+  \ifnum\i<2 \node[cell] at (\xx,-0.85) {};
+  \else\ifnum\i<8 \node[win] at (\xx,-0.85) {};
+  \else\ifnum\i=10 \node[tgt] at (\xx,-0.85) {};
+  \else \node[fut] at (\xx,-0.85) {}; \fi\fi\fi
+}
+\pgfmathsetmacro{\xorig}{0.8+7.5*\dx}
+\pgfmathsetmacro{\xwin}{0.8+1.5*\dx}
+\pgfmathsetmacro{\xtgt}{0.8+10.5*\dx}
+\draw[black!60,densely dashed] (\xorig,-0.55) -- (\xorig,-1.1);
+\node[lab,anchor=south] at (\xorig,-0.55) {origin $t$};
+\draw[decorate,decoration={brace,amplitude=3pt,mirror},black!60]
+  (\xwin,-1.1) -- ({\xorig-0.02},-1.1)
+  node[midway,below=3pt,lab] {window $H_t$};
+\draw[decorate,decoration={brace,amplitude=3pt,mirror},black!60]
+  ({\xorig+0.02},-1.1) -- (\xtgt,-1.1)
+  node[midway,below=3pt,lab] {horizon $h$};
+\end{scope}
+%% ---------------- (b) multivariate ----------------
+\begin{scope}[shift={(7.2,0)}]
+\node[ptitle] at (0,0) {\textbf{(b)} Multivariate forecasting};
+\node[lab,anchor=east] at (0.6,-0.6) {$y$};
+\node[lab,anchor=east] at (0.6,-0.98) {$x^{(1)}$};
+\node[lab,anchor=east] at (0.6,-1.36) {$x^{(2)}$};
+\foreach \i in {0,...,13} {
+  \pgfmathsetmacro{\xx}{0.8+\i*\dx}
+  \ifnum\i<2 \node[cell] at (\xx,-0.6) {};
+  \else\ifnum\i<8 \node[win] at (\xx,-0.6) {};
+  \else\ifnum\i=10 \node[tgt] at (\xx,-0.6) {};
+  \else \node[fut] at (\xx,-0.6) {}; \fi\fi\fi
+}
+\foreach \yy in {-0.98,-1.36} {
+  \foreach \i in {0,...,7} {
+    \pgfmathsetmacro{\xx}{0.8+\i*\dx}
+    \ifnum\i<2 \node[cell] at (\xx,\yy) {};
+    \else \node[win] at (\xx,\yy) {}; \fi
+  }
+}
+\pgfmathsetmacro{\xbr}{0.8+7*\dx+0.24}
+\draw[decorate,decoration={brace,amplitude=3pt},black!60]
+  (\xbr,-0.44) -- (\xbr,-1.52);
+\draw[fn] ({\xbr+0.12},-0.98) -- node[below,lab] {$f$} ({0.8+10*\dx},-0.78);
+\end{scope}
+%% ---------------- (c) single-step ----------------
+\begin{scope}[shift={(0,-2.2)}]
+\node[ptitle] at (0,0) {\textbf{(c)} Single-step forecasting};
+\node[lab,anchor=east] at (0.6,-0.85) {$y$};
+\foreach \i in {0,...,13} {
+  \pgfmathsetmacro{\xx}{0.8+\i*\dx}
+  \ifnum\i<2 \node[cell] at (\xx,-0.85) {};
+  \else\ifnum\i<8 \node[win] at (\xx,-0.85) {};
+  \else\ifnum\i=8 \node[tgt] at (\xx,-0.85) {};
+  \else \node[fut] at (\xx,-0.85) {}; \fi\fi\fi
+}
+\pgfmathsetmacro{\xa}{0.8+7*\dx}
+\pgfmathsetmacro{\xb}{0.8+8*\dx}
+\draw[fn] (\xa,-0.68) to[bend left=55] node[above,lab] {$f$} (\xb,-0.68);
+\node[lab,anchor=north] at (\xb,-1.05) {$\widehat y_{t+1}$};
+\end{scope}
+%% ---------------- (d) multi-step ----------------
+\begin{scope}[shift={(7.2,-2.2)}]
+\node[ptitle] at (0,0) {\textbf{(d)} Multi-step forecasting};
+\node[lab,anchor=east] at (0.6,-0.85) {$y$};
+\foreach \i in {0,...,13} {
+  \pgfmathsetmacro{\xx}{0.8+\i*\dx}
+  \ifnum\i<2 \node[cell] at (\xx,-0.85) {};
+  \else\ifnum\i<8 \node[win] at (\xx,-0.85) {};
+  \else\ifnum\i<13 \node[tgt] at (\xx,-0.85) {};
+  \else \node[fut] at (\xx,-0.85) {}; \fi\fi\fi
+}
+\pgfmathsetmacro{\xa}{0.8+7*\dx}
+\pgfmathsetmacro{\xc}{0.8+10*\dx}
+\draw[fn] (\xa,-0.68) to[bend left=35] node[above,lab] {$F$} (\xc,-0.68);
+\draw[decorate,decoration={brace,amplitude=3pt,mirror},black!60]
+  ({0.8+7.6*\dx},-1.05) -- ({0.8+12.4*\dx},-1.05)
+  node[midway,below=3pt,lab] {$\widehat{\mathbf y}_{t+1:t+h}$};
+\end{scope}
+%% ---------------- (e) long-term ----------------
+\begin{scope}[shift={(0,-4.3)}]
+\node[ptitle] at (0,0) {\textbf{(e)} Long-term forecasting (LTSF)};
+\node[lab,anchor=east] at (0.6,-0.85) {$y$};
+\draw[fill=blue!22,draw=blue!50!black] (0.62,-1.01) rectangle (2.30,-0.69);
+\draw[fill=orange!55,draw=orange!70!black] (2.34,-1.01) rectangle (6.30,-0.69);
+\draw[white,line width=1.4pt] (4.15,-1.09) -- (4.25,-0.61);
+\draw[white,line width=1.4pt] (4.31,-1.09) -- (4.41,-0.61);
+\node[lab,anchor=north] at (1.46,-1.06) {window $H_t$};
+\node[lab,anchor=north] at (4.32,-1.06) {$h=720$ (30 days of hourly data)};
+\end{scope}
+%% ---------------- (f) short-term ----------------
+\begin{scope}[shift={(7.2,-4.3)}]
+\node[ptitle] at (0,0) {\textbf{(f)} Short-term forecasting (STSF)};
+\node[lab,anchor=east] at (0.6,-0.85) {$y$};
+\draw[fill=blue!22,draw=blue!50!black] (0.62,-1.01) rectangle (2.30,-0.69);
+\draw[fill=orange!55,draw=orange!70!black] (2.34,-1.01) rectangle (2.80,-0.69);
+\draw[black!30,densely dotted] (2.86,-0.85) -- (6.30,-0.85);
+\node[lab,anchor=north] at (1.46,-1.06) {window $H_t$};
+\node[lab,anchor=north west] at (2.30,-1.06) {$h=12$ (one hour of 5-min data)};
+\end{scope}
+\end{tikzpicture}

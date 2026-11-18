@@ -971,3 +971,28 @@ fn hooks_summary_counts_both_string_and_object_style_items() {
         "expected mixed-style count of 3 hooks: {rendered}"
     );
 }
+
+
+/// Without the official LaTeX plugin the template keeps its diagram advice but
+/// loses every LaTeX route; with it the template is untouched.
+#[test]
+fn the_template_drops_latex_diagram_routes_when_latex_is_off() {
+    let with_latex = super::SystemPromptBuilder::new().build().join("\n");
+    let without = super::SystemPromptBuilder::new()
+        .without_latex_guidance(true)
+        .build()
+        .join("\n");
+    assert!(with_latex.contains("`latex-diagrams` skill"));
+    assert!(with_latex.contains("`LaTeXCompile`"));
+    assert!(!without.contains("latex-diagrams"));
+    assert!(!without.contains("LaTeXCompile"));
+    assert!(!without.contains("TikZ"));
+    assert!(without.contains("# Explanatory diagrams"));
+    assert!(without.contains("Mermaid remains suitable"));
+    assert!(without.contains("`SomniImage` tool"));
+    // The sections around it are unchanged.
+    let after = |text: &str| text[text.find("# Task scope and completion").unwrap()..].to_string();
+    assert_eq!(after(&with_latex), after(&without));
+    let before = |text: &str| text[..text.find("# Explanatory diagrams").unwrap()].to_string();
+    assert_eq!(before(&with_latex), before(&without));
+}

@@ -286,10 +286,11 @@ fn recover_merge_locked(
         );
     };
 
-    let landed = worktree::branch_is_merged_into(project_path, &intent.branch, &intent.base_branch);
+    let repo = worktree::ProjectRepo::for_task(project_path, task.worktree.as_ref());
+    let landed = worktree::branch_is_merged_into(&repo, &intent.branch, &intent.base_branch);
     match landed {
         Ok(true) => {
-            let commit = worktree::resolve(project_path, &intent.base_branch)
+            let commit = worktree::resolve_in(&repo, &intent.base_branch)
                 .unwrap_or_else(|_| intent.base_head.clone());
             // The work is on the base branch, so the checkout is finished with
             // — but the branch stays, exactly as on the live path.
@@ -561,10 +562,28 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         Err(error) => return RunOutcome::Failed(error),
     };
     // A resume continues the same conversation, so the turn sees everything the
-    // interrupted one had already worked out rather than re-deriving it.
+    // interrupted one had already worked out rather than re-deriving it. A
+    // scheduled card may name the conversation it belongs to (its automation's
+    // fixed or reserved session); otherwise each run gets its own.
     let session_id = match task.session_id.clone() {
         Some(existing) if resumed => existing,
-        _ => format!("work-task-{}-{}", task.id, run_seq),
+        _ => task
+            .target_session_id
+            .clone()
+            .unwrap_or_else(|| format!("work-task-{}-{}", task.id, run_seq)),
+    };
+    // The plugins this run may use, frozen once for the whole run: the
+    // executor turn, every revision and the independent review all resolve
+    // plugins from this set, and it goes into the task record as the run's
+    // audit trail. Toggling a plugin while the task runs reaches its next run.
+    let plugin_run = Arc::new(crate::state::begin_plugin_run(
+        &project_path.to_path_buf(),
+        project_id,
+        format!("work-task {} run {run_seq}", task.id),
+    ));
+    let plugin_set = super::model::WorkTaskPluginSet {
+        run_seq,
+        set: plugin_run.set().clone(),
     };
     if store::update(project_id, &task.id, |current| {
         if current.run_seq != run_seq {
@@ -572,6 +591,7 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         }
         current.worktree = Some(tree.clone());
         current.session_id = Some(session_id.clone());
+        current.plugin_set = Some(plugin_set.clone());
         current.status = WorkTaskStatus::Running;
         current.progress_message = Some("Running the model turn".to_string());
         current.last_heartbeat_at = Some(store::now_ms());
@@ -604,12 +624,16 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         crate::engine::WorkTaskTurnBinding {
             task_id: task.id.clone(),
             run_seq,
+            plugin_run: Some(plugin_run.clone()),
         },
-        if resumed {
-            resume_prompt(&task, &tree.branch)
-        } else {
-            task_prompt(&task, &tree.branch)
-        },
+        with_folder_note(
+            if resumed {
+                resume_prompt(&task, &tree.branch)
+            } else {
+                task_prompt(&task, &tree.branch)
+            },
+            &tree,
+        ),
         task.model.clone(),
         stop.flag.clone(),
     )
@@ -666,6 +690,7 @@ async fn run(app: &AppHandle, project_id: &str, project_path: &Path, task: WorkT
         run_seq,
         &stop,
         &session_id,
+        &plugin_run,
         summary,
         snapshot,
     )
@@ -707,6 +732,8 @@ async fn review_and_revise(
     // revision turn in the old conversation — replaying a discarded attempt's
     // context into the run that replaced it.
     session_id: &str,
+    // The set the run froze; reviews and revisions stay within it.
+    plugin_run: &Arc<runtime::plugins::PluginRun>,
     mut summary: String,
     mut snapshot: WorkTaskReviewSnapshot,
 ) -> RunOutcome {
@@ -718,6 +745,8 @@ async fn review_and_revise(
         };
     }
     let tree_path = PathBuf::from(&tree.path);
+    let review_rubrics = runtime::plugins::PluginStore::for_workspace(&plugin_run.set().project)
+        .review_rubrics_for(plugin_run.set());
 
     let mut round = 1u32;
     loop {
@@ -733,18 +762,34 @@ async fn review_and_revise(
             &format!("Independent review, round {round}"),
         );
 
-        let prompt = reviewer_prompt(task, &snapshot, &summary, &tree_path);
+        // Rubrics from the set the run froze; which apply can change with
+        // each revised result.
+        let rubric_packet = runtime::plugins::rubric_packet_for(
+            &review_rubrics,
+            &format!("{}\n{}\n{}", task.title, task.prompt, summary),
+        );
+        // Before the Reviewer's instructions, which end with the answer format.
+        let prompt = rubric_packet.place_in(
+            reviewer_prompt(task, &snapshot, &summary, &tree_path),
+            Some(REVIEWER_INSTRUCTIONS_HEADING),
+        );
         let flag = stop.flag.clone();
         let model = task.model.clone();
         let review_session = session_id.to_string();
+        let review_plugins = plugin_run.clone();
         let checked = crate::blocking::off_main_thread(move || {
-            Ok(crate::engine::run_work_task_review(
-                &review_session,
-                round as usize,
-                prompt,
-                flag,
-                model.as_deref(),
-            ))
+            // The Reviewer is a tool-less model call today; entering the run
+            // keeps it within the frozen set if it ever resolves plugins.
+            Ok(review_plugins.enter(|| {
+                crate::engine::run_work_task_review(
+                    &review_session,
+                    round as usize,
+                    prompt,
+                    flag,
+                    model.as_deref(),
+                    &rubric_packet,
+                )
+            }))
         })
         .await;
         let Ok(mut review) = checked else {
@@ -798,6 +843,7 @@ async fn review_and_revise(
             crate::engine::WorkTaskTurnBinding {
                 task_id: task.id.clone(),
                 run_seq,
+                plugin_run: Some(plugin_run.clone()),
             },
             revision_prompt(&review),
             task.model.clone(),
@@ -858,6 +904,7 @@ fn unavailable_review(round: u32, reason: &str) -> super::model::WorkTaskReviewS
         reviewer_model: String::new(),
         exhausted: false,
         checked_at: store::now_ms(),
+        rubrics: None,
     }
 }
 
@@ -969,6 +1016,9 @@ fn reviewer_prompt(
     prompt.push_str(REVIEWER_INSTRUCTIONS);
     prompt
 }
+
+/// The heading `REVIEWER_INSTRUCTIONS` opens with; rubric sections go before it.
+const REVIEWER_INSTRUCTIONS_HEADING: &str = "# Your job";
 
 const REVIEWER_INSTRUCTIONS: &str = "# Your job\n\n\
      Decide whether this result does what the task asked. Check the claim against the diff: a \
@@ -1095,6 +1145,27 @@ fn task_prompt(task: &WorkTask, branch: &str) -> String {
          branches yourself.\n\n{OUTPUT_POLICY}\n\nFinish with a short summary of what you changed \
          and anything you deliberately left undone."
     ));
+    prompt
+}
+
+/// Say what the checkout is when the project is a plain folder.
+///
+/// The rest of the prompt talks about a Git worktree and a branch, which is
+/// true of the checkout but not of the project. Without this the model reads
+/// "the user's own checkout" as a repository it can inspect, and a file the
+/// snapshot left out (a dataset over the size limit) looks like something it
+/// should recreate.
+fn with_folder_note(mut prompt: String, tree: &super::model::WorkTaskWorktree) -> String {
+    if tree.shadow_git_dir.is_some() {
+        prompt.push_str(&format!(
+            "\n\nThe project itself is a plain folder, not a Git repository. This checkout is a \
+             copy of it that SomniQ tracks with a private repository; when the user accepts your \
+             work, the changed files are written back into the folder. Files over {} MB, caches \
+             such as `node_modules/` or `.venv/`, and files another program held open were not \
+             copied. If something you expected is missing, say so rather than recreating it.",
+            super::shadow::MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
     prompt
 }
 
@@ -1298,8 +1369,11 @@ fn accept_locked(project_id: &str, project_path: &Path, task_id: &str) -> Result
     // merge leaves enough for `recover_merge` to ask Git what happened. A
     // `merging` row cannot be cancelled by the user, so without this it would
     // have no way out at all.
-    let base_head = worktree::resolve(project_path, &tree.base_branch)
-        .unwrap_or_else(|_| tree.base_sha.clone());
+    let base_head = worktree::resolve_in(
+        &worktree::ProjectRepo::for_task(project_path, Some(&tree)),
+        &tree.base_branch,
+    )
+    .unwrap_or_else(|_| tree.base_sha.clone());
     store::update(project_id, task_id, |task| {
         task.status = WorkTaskStatus::Merging;
         task.merge_intent = Some(WorkTaskMergeIntent {
@@ -1463,8 +1537,11 @@ fn prepare_merge_repair_locked(
     if !worktree::has_unmerged_paths(Path::new(&tree.path))? {
         return Err(merge_error.to_string());
     }
-    let base_head = worktree::resolve(project_path, &tree.base_branch)
-        .unwrap_or_else(|_| tree.base_sha.clone());
+    let base_head = worktree::resolve_in(
+        &worktree::ProjectRepo::for_task(project_path, Some(&tree)),
+        &tree.base_branch,
+    )
+    .unwrap_or_else(|_| tree.base_sha.clone());
     let merge_session_id = task
         .session_id
         .clone()
@@ -1494,6 +1571,12 @@ pub(crate) fn spawn_merge_repair(
     tauri::async_runtime::spawn(async move {
         let mut task = task;
         let mut error = merge_error;
+        // Every repair pass of this merge uses the plugin set it started with.
+        let plugin_run = Arc::new(crate::state::begin_plugin_run(
+            &project_path,
+            &project_id,
+            format!("work-task {} merge repair", task.id),
+        ));
         // A base branch can move while the Agent is working. Give the same
         // Agent up to two follow-up passes rather than bouncing an ordinary
         // concurrent edit back to the user immediately.
@@ -1513,6 +1596,7 @@ pub(crate) fn spawn_merge_repair(
                 crate::engine::WorkTaskTurnBinding {
                     task_id: task.id.clone(),
                     run_seq: task.run_seq,
+                    plugin_run: Some(plugin_run.clone()),
                 },
                 merge_repair_prompt(&task, &error),
                 task.model.clone(),
@@ -1865,6 +1949,7 @@ mod tests {
             branch: "somniq/task/merge-1".into(),
             base_branch: "main".into(),
             base_sha: "abc".into(),
+            ..Default::default()
         });
         let prompt = merge_repair_prompt(&task, "both added: library.json");
 
@@ -1988,6 +2073,47 @@ mod tests {
         assert!(prompt.contains("No repository files were changed"));
     }
 
+    /// Installed criteria reach the task Reviewer ahead of the answer format,
+    /// and the revision prompt the executor reads names no criterion key.
+    #[test]
+    fn task_review_carries_rubrics_but_the_revision_prompt_names_no_key() {
+        let task = WorkTask::new("rev-3".into(), "Write the report".into(), String::new(), 0);
+        let snapshot = WorkTaskReviewSnapshot {
+            base_sha: "aaa".into(),
+            head_sha: "bbb".into(),
+            files: Vec::new(),
+            artifacts: Vec::new(),
+            empty_reason: None,
+            captured_at: 0,
+        };
+        let packet = runtime::plugins::RubricPacket { section: "RUBRIC-SECTION".into(), ..Default::default() };
+        let prompt = packet.place_in(reviewer_prompt(&task, &snapshot, "Wrote it.", Path::new("/nope")), Some(REVIEWER_INSTRUCTIONS_HEADING));
+        let rubric = prompt.find("RUBRIC-SECTION").expect("the rubric section");
+        let format = prompt.find("Reply with a single JSON object").expect("the format");
+        assert!(rubric < format);
+
+        let review = super::super::model::WorkTaskReviewState {
+            round: 1,
+            max_rounds: 2,
+            verdict: super::super::model::WorkTaskVerdict::Revise,
+            summary: "Numbers lack a source.".into(),
+            issues: vec![super::super::model::WorkTaskReviewIssue {
+                severity: "critical".into(),
+                title: "0.91 has no source".into(),
+                detail: "No result file holds it.".into(),
+                recommendation: "Cite the file.".into(),
+                criterion: Some("@lab/review/evidence#numbers".into()),
+            }],
+            reviewer_model: "m".into(),
+            exhausted: false,
+            checked_at: 0,
+            rubrics: None,
+        };
+        let text = revision_prompt(&review);
+        assert!(text.contains("0.91 has no source"));
+        assert!(!text.contains("@lab/review"));
+    }
+
     /// The executor is sent back with the issues themselves, not just "try
     /// again" — and is told to argue rather than silently ignore one.
     #[test]
@@ -2003,10 +2129,12 @@ mod tests {
                 detail: "The summary says it was rewritten; the diff only changes section 2."
                     .into(),
                 recommendation: "Rewrite section 3, or correct the summary.".into(),
+                criterion: None,
             }],
             reviewer_model: "some-model".into(),
             exhausted: false,
             checked_at: 0,
+            rubrics: None,
         };
         let prompt = revision_prompt(&review);
 
@@ -2031,6 +2159,7 @@ mod tests {
             reviewer_model: String::new(),
             exhausted: false,
             checked_at: 0,
+            rubrics: None,
         };
         let prompt = revision_prompt(&review);
         assert!(prompt.contains("re-read your own work"));

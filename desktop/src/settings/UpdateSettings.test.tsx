@@ -39,7 +39,7 @@ describe("UpdateSettings", () => {
     vi.mocked(appUpdateCheck).mockImplementationOnce(() => new Promise(resolve => { resolveCheck = resolve; }));
     render(<UpdateSettings language="en" appVersion="0.4.76" />);
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-    expect((screen.getByRole("button", { name: "Checking..." }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Checking…" }) as HTMLButtonElement).disabled).toBe(true);
     resolveCheck?.({ available: false });
     expect(await screen.findByText("You are on the latest version")).toBeTruthy();
   });

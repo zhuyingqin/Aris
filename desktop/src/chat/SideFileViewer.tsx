@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { fileAssetUrl, fileOpen, fileReadBytes, fileReadText, fileReveal, isTauri } from "../api/tauri";
 import { SharedEditor } from "../editor/SharedEditor";
 import { basename, languageForPath, workspaceFileOpenTarget } from "../editor/workspaceFiles";
+import { latexWorkspaceOn } from "../extensions/officialPlugins";
 import { useStore, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { PdfAnnotation } from "../literature/literatureTypes";
@@ -20,7 +21,7 @@ import "./SideFileViewer.css";
 /** PDF support (reader + literature stylesheet) is only paid for on first use. */
 const PdfReader = lazy(async () => {
   await import("../literature/Literature.css");
-  return import("../literature/PdfReader");
+  return import("../pdf/PdfReader");
 });
 
 const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];
@@ -72,6 +73,29 @@ const VIEWER_COPY = {
     citedEvidence: "Cited evidence",
     citedEvidenceHint: "Opened at the source page; yellow marks show evidence used by the answer.",
   },
+  es: {
+    loading: "Leyendo el archivo…",
+    failed: (reason: string) => `No se puede abrir aquí: ${reason}`,
+    empty: "Este archivo está vacío.",
+    preview: "Vista previa",
+    source: "Código fuente",
+    viewMode: "Vista de archivo",
+    projectRoot: "Raíz del proyecto",
+    kinds: {
+      pdf: "PDF",
+      image: "Imagen",
+      markdown: "Markdown",
+      text: "Texto",
+    },
+    refresh: "Recargar",
+    openWorkspace: (target: string) => target === "code" ? "Abrir en Code" : "Abrir en LaTeX",
+    openExternal: "Abrir con la app del sistema",
+    reveal: "Mostrar en el explorador de archivos",
+    selectionHint: (count: number) => `${count} caracteres seleccionados · se pueden enviar a la tarea principal`,
+    pdfPage: (page: number) => `Página ${page}`,
+    citedEvidence: "Evidencia citada",
+    citedEvidenceHint: "Abierto en la página de origen; las marcas amarillas muestran la evidencia usada en la respuesta.",
+  },
 } as const;
 
 function fileParent(path: string): string {
@@ -111,7 +135,8 @@ export default function SideFileViewer({
   const currentProject = useStore((state) => state.currentProject);
   const copy = VIEWER_COPY[language];
   const kind = useMemo(() => sideFileKind(path), [path]);
-  const workspaceTarget = useMemo(() => workspaceFileOpenTarget(path), [path]);
+  const latexWorkspace = useStore((state) => latexWorkspaceOn(state.officialPlugins));
+  const workspaceTarget = useMemo(() => workspaceFileOpenTarget(path, { latexWorkspace }), [path, latexWorkspace]);
   const fileLocation = useMemo(() => {
     const parent = fileParent(path);
     if (!currentProject) return parent || copy.projectRoot;

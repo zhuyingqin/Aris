@@ -4,9 +4,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import OnboardingTutorial, { ONBOARDING_STORAGE_KEY } from "../OnboardingTutorial";
+import { useStore } from "../store";
 
 beforeEach(() => {
   localStorage.clear();
+  useStore.setState({ language: "cn" });
 });
 
 afterEach(() => {
@@ -21,6 +23,15 @@ describe("OnboardingTutorial", () => {
     expect(screen.getByRole("dialog", { name: /左侧图标栏/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "跳过" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "下一步" })).toBeTruthy();
+  });
+
+  it("renders the tutorial in Spanish", () => {
+    useStore.setState({ language: "es" });
+    render(<OnboardingTutorial />);
+
+    expect(screen.getByRole("dialog", { name: /Barra de iconos izquierda/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Omitir" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Siguiente" })).toBeTruthy();
   });
 
   it("persists the seen flag when skipped", async () => {

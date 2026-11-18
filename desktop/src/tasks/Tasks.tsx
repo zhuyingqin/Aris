@@ -1,3 +1,5 @@
+import type { Language } from "../store";
+import { tr } from "../language";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -46,15 +48,15 @@ const EMPTY_DRAFT: Draft = { id: null, title: "", prompt: "" };
 /** Events are the fast path; this only repairs a dropped notification. */
 const BOARD_POLL_MS = 30_000;
 
-function relativeAge(timestamp: number, language: "cn" | "en") {
+function relativeAge(timestamp: number, language: Language) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
-  if (seconds < 60) return language === "cn" ? "刚刚" : "now";
+  if (seconds < 60) return tr(language, "刚刚", "now", "ahora");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return language === "cn" ? `${minutes} 分钟` : `${minutes}m`;
+  if (minutes < 60) return tr(language, `${minutes} 分钟`, `${minutes}m`, `${minutes} min`);
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return language === "cn" ? `${hours} 小时` : `${hours}h`;
+  if (hours < 24) return tr(language, `${hours} 小时`, `${hours}h`, `${hours} h`);
   const days = Math.floor(hours / 24);
-  return language === "cn" ? `${days} 天` : `${days}d`;
+  return tr(language, `${days} 天`, `${days}d`, `${days} d`);
 }
 
 /**

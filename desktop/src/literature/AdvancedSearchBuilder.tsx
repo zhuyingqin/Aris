@@ -5,6 +5,7 @@ import { LITERATURE_COPY } from "./i18n";
 import {
   SEARCH_FIELD_OPTIONS,
   SEARCH_OPERATOR_OPTIONS,
+  searchOptionLabel,
   type LiteratureSearchField,
   type LiteratureSearchOperator,
 } from "./advancedSearch";
@@ -99,7 +100,7 @@ export default function AdvancedSearchBuilder({
               >
                 {SEARCH_FIELD_OPTIONS.map((option) => (
                   <option value={option.value} key={option.value}>
-                    {language === "cn" ? option.labelCn : option.labelEn}
+                    {searchOptionLabel(option, language)}
                   </option>
                 ))}
               </select>
@@ -110,7 +111,7 @@ export default function AdvancedSearchBuilder({
               >
                 {SEARCH_OPERATOR_OPTIONS.map((option) => (
                   <option value={option.value} key={option.value}>
-                    {language === "cn" ? option.labelCn : option.labelEn}
+                    {searchOptionLabel(option, language)}
                   </option>
                 ))}
               </select>

@@ -802,10 +802,43 @@ pub(crate) fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
     strip_managed_key(&mut obj);
     remove_third_party_api_settings(&mut obj);
     let json = serde_json::to_string_pretty(&Value::Object(obj)).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    preserve_unreadable_config(&path);
+    runtime::write_file_atomically(&path, json).map_err(|e| e.to_string())
+}
+
+/// `load_raw_object` reads an unparseable `config.json` as an empty object, so
+/// the next save would replace every setting with the few keys being written.
+/// Keep the unreadable original beside it before that happens.
+fn preserve_unreadable_config(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let readable = text.trim().is_empty()
+        || serde_json::from_str::<Value>(&text)
+            .map(|value| value.is_object())
+            .unwrap_or(false);
+    if readable {
+        return;
+    }
+    let stamp = runtime::epoch_secs_now();
+    let backup = path.with_file_name(format!("config.json.unreadable-{stamp}"));
+    if let Err(error) = std::fs::copy(path, &backup) {
+        eprintln!("SomniQ could not back up unreadable config.json: {error}");
+    }
+}
+
+/// Serializes this process's load→modify→save updates of `config.json`, so
+/// two concurrent commands cannot both load the old object and drop each
+/// other's keys on save. Do not call another locked helper while holding it.
+fn config_update_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn set_somni_image_preferences(enabled: bool, model: Option<String>) -> Result<(), String> {
+    let _guard = config_update_lock();
     let mut obj = load_object();
     obj.insert("somni_image_enabled".into(), Value::Bool(enabled));
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
@@ -820,6 +853,7 @@ pub(crate) fn set_somni_image_preferences(enabled: bool, model: Option<String>) 
 /// flow to stash the new-api session (base URL, user id, access token) so the
 /// account bootstrap can refresh later without re-prompting for a password.
 pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
+    let _guard = config_update_lock();
     let mut obj = load_object();
     for (key, value) in values {
         obj.insert((*key).to_string(), value.clone());
@@ -829,6 +863,7 @@ pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
 
 /// Drop keys from `config.json`, leaving every other setting untouched.
 pub(crate) fn remove_values(keys: &[&str]) -> Result<(), String> {
+    let _guard = config_update_lock();
     let mut obj = load_object();
     let mut removed = false;
     for key in keys {
@@ -845,6 +880,7 @@ pub(crate) fn remove_values(keys: &[&str]) -> Result<(), String> {
 /// also removes the legacy dashboard access JWT if one was saved by an older
 /// desktop build.
 pub(crate) fn persist_newapi_session_metadata(values: &[(&str, Value)]) -> Result<(), String> {
+    let _guard = config_update_lock();
     let mut obj = load_object();
     obj.remove("newapi_access_token");
     for (key, value) in values {

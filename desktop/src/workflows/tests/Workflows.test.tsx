@@ -28,6 +28,7 @@ import Workflows, {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({
+    language: "cn",
     tab: "workflows",
     currentProject: {
       id: "workflow-test-project",
@@ -750,7 +751,7 @@ describe("Workflows", () => {
       }],
     } as unknown as ReviewWorkflowRun;
     const preview: LiteratureProtocolPreview = {
-      protocol: { id: "matrix-protocol-1", revision: 1, maxResults: 100 },
+      protocol: { id: "matrix-protocol-1", revision: 1, maxResults: 100 } as LiteratureProtocolPreview["protocol"],
       plan: [{
         source: "scopus",
         query: "TITLE-ABS-KEY((large language model) AND (time series forecasting) AND uncertainty)",

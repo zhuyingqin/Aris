@@ -4,6 +4,18 @@
 use serde::{Deserialize, Serialize};
 
 const MAX_TEXT_PAGES: usize = 1_000;
+const NO_TEXT_MARKER: &str = "[PDF text extraction found no readable text.";
+const UNCONFIRMED_MARKER: &str = "[PDF text quality: unconfirmed.";
+/// The way forward for a local PDF whose text layer cannot be trusted. Without
+/// a named tool the model improvised: installed PDF libraries, wrote scripts,
+/// and retried failing shell commands while the user waited.
+const PAGE_VIEW_HINT: &str = "For a local PDF, call read_pdf_pages with the page numbers you need (up to 4 per call; ocr=true adds machine OCR text) to look at the rendered pages. Do not install PDF libraries or write extraction scripts. If the pages still cannot be read, tell the user briefly and ask for a readable copy or the pasted text.";
+
+/// Whether a file-tool result carries a PDF text layer that needs a page view.
+#[must_use]
+pub fn output_needs_page_view(output: &str) -> bool {
+    output.contains(NO_TEXT_MARKER) || output.contains(UNCONFIRMED_MARKER)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,9 +51,9 @@ impl PdfTextExtraction {
     pub fn text_for_reading(&self) -> String {
         match self.metadata.quality {
             PdfTextQuality::Readable => self.text.clone(),
-            PdfTextQuality::NoText => "[PDF text extraction found no readable text. Use a rendered page view or local OCR; do not infer the document's contents from this result.]".to_string(),
+            PdfTextQuality::NoText => format!("{NO_TEXT_MARKER} The pages are probably scanned images. {PAGE_VIEW_HINT} Do not infer the document's contents from this result.]"),
             PdfTextQuality::Unconfirmed => format!(
-                "[PDF text quality: unconfirmed. {} Verify the rendered pages or use another extractor before quoting formulas, numbers, or exact wording.]\n\n{}",
+                "{UNCONFIRMED_MARKER} {} If the text below is garbled or incomplete, or before quoting formulas, numbers or exact wording: {PAGE_VIEW_HINT}]\n\n{}",
                 self.metadata.warnings.join(" "),
                 self.text
             ),
@@ -152,7 +164,7 @@ fn extract_by_page(bytes: &[u8]) -> Result<PageExtraction, String> {
         }
     }
     if !result.pages_without_text.is_empty() {
-        result.warnings.push(format!("Pages {:?} have no readable text; they may be blank, scanned, or unsupported. Check their rendered pages before claiming complete coverage.", result.pages_without_text));
+        result.warnings.push(format!("Pages {:?} have no readable text; they may be blank, scanned, or unsupported. View them with read_pdf_pages before claiming complete coverage.", result.pages_without_text));
     }
     if result.text.is_empty()
         && result

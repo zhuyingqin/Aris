@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { WorkflowProcessLog } from "../Workflows";
 import type { ReviewWorkflowRun, ReviewWorkflowStage } from "../workflowTypes";
+import { useStore } from "../../store";
+
+// These assertions pin the Chinese copy; the store defaults to English.
+useStore.setState({ language: "cn" });
 
 const stage = {
   id: "gap-analysis",

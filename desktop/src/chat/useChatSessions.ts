@@ -13,7 +13,7 @@ import {
   reviewWorkflowTranscript,
   type RemoteChatSessionUpdatedEvent,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { tr, useStore } from "../store";
 import type { ChatTurn } from "../types";
 import { CURRENT_KEY, LEGACY_CURRENT_KEY, LEGACY_SESSIONS_KEY, LEGACY_SESSIONS_KEY_V1, SESSIONS_KEY, makeSession, migrateSession, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
@@ -213,12 +213,12 @@ function applyRemoteTurnBuffer(session: ChatSession, buffer: RemoteTurnBuffer): 
         ? [{
             kind: "notice" as const,
             message: buffer.activity === "tool"
-              ? "SomniQ is running a tool…"
+              ? tr(useStore.getState().language, "SomniQ 正在运行工具…", "SomniQ is running a tool…", "SomniQ está ejecutando una herramienta…")
               : buffer.activity === "compacting"
-                ? "SomniQ is compacting this conversation…"
+                ? tr(useStore.getState().language, "SomniQ 正在压缩此对话…", "SomniQ is compacting this conversation…", "SomniQ está compactando esta conversación…")
                 : buffer.activity === "preparing"
-                  ? "SomniQ is preparing this turn…"
-                  : "SomniQ is thinking…",
+                  ? tr(useStore.getState().language, "SomniQ 正在准备本回合…", "SomniQ is preparing this turn…", "SomniQ está preparando este turno…")
+                  : tr(useStore.getState().language, "SomniQ 正在思考…", "SomniQ is thinking…", "SomniQ está pensando…"),
           }]
         : [],
     streaming: !buffer.completed && !buffer.error,
@@ -281,7 +281,7 @@ function workflowSessionStub(projectId: string, workflow: WorkflowSessionSummary
     ...fresh,
     id: `wf-${workflow.id}`,
     projectId,
-    title: `Workflow · ${workflow.title}`,
+    title: `${tr(useStore.getState().language, "工作流", "Workflow", "Flujo de trabajo")} · ${workflow.title}`,
     workflowContextKey: `review-workflow:${workflow.id}`,
     workflowRunId: workflow.id,
     ownerKind: "review_workflow",
@@ -406,7 +406,12 @@ export function useChatSessions(projectId?: string | null) {
         if (backendSessions.length === 0 && merged.length > 0) {
           void chatUiSessionsSave(persistentSessions(merged))
             .then(clearLocalSessionSnapshots)
-            .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
+            .catch((error) => setError(tr(
+              useStore.getState().language,
+              `保存对话会话失败：${String(error)}`,
+              `Failed to save chat sessions: ${String(error)}`,
+              `No se pudieron guardar las sesiones de chat: ${String(error)}`,
+            )));
           return;
         }
         const backendUpdatedAt = new Map(backendSessions.map((session) => [session.id, session.updatedAt]));
@@ -421,7 +426,12 @@ export function useChatSessions(projectId?: string | null) {
         if (sessionsToPersist.length > 0) {
           void Promise.all(sessionsToPersist.map(enqueueSessionSave))
             .then(clearLocalSessionSnapshots)
-            .catch((error) => setError(`Failed to recover chat sessions: ${String(error)}`));
+            .catch((error) => setError(tr(
+              useStore.getState().language,
+              `恢复对话会话失败：${String(error)}`,
+              `Failed to recover chat sessions: ${String(error)}`,
+              `No se pudieron recuperar las sesiones de chat: ${String(error)}`,
+            )));
         } else if (localRecoverySessions.length > 0) {
           // All snapshots were already reflected in the native store.
           clearLocalSessionSnapshots();
@@ -596,7 +606,7 @@ export function useChatSessions(projectId?: string | null) {
       if (event.phase === "error" && buffer && buffer.messageId === messageId) {
         cancelBufferedSessionUpdate(id);
         buffer.completed = true;
-        buffer.error = event.error || "Remote chat failed.";
+        buffer.error = event.error || tr(useStore.getState().language, "远程对话失败。", "Remote chat failed.", "Falló el chat remoto.");
         updateBufferedSession(id, { ...buffer });
         remoteTurnBuffers.current.delete(id);
         return;
@@ -676,7 +686,12 @@ export function useChatSessions(projectId?: string | null) {
       })
       .catch((error) => {
         for (const id of savingIds) dirtySessionIds.current.add(id);
-        setError(`Failed to save chat sessions: ${String(error)}`);
+        setError(tr(
+          useStore.getState().language,
+          `保存对话会话失败：${String(error)}`,
+          `Failed to save chat sessions: ${String(error)}`,
+          `No se pudieron guardar las sesiones de chat: ${String(error)}`,
+        ));
       });
   }, [enqueueSessionSave, setError]);
 
@@ -775,7 +790,12 @@ export function useChatSessions(projectId?: string | null) {
       // silently drops the caller onto an empty session that looks like a
       // workflow which never ran, with nothing on screen saying why.
       if (isWorkflowSession(session)) {
-        setError(`Failed to load workflow transcript: ${String(cause)}`);
+        setError(tr(
+          useStore.getState().language,
+          `加载工作流对话记录失败：${String(cause)}`,
+          `Failed to load workflow transcript: ${String(cause)}`,
+          `No se pudo cargar la transcripción del flujo de trabajo: ${String(cause)}`,
+        ));
       }
       return null;
     }
@@ -869,7 +889,7 @@ export function useChatSessions(projectId?: string | null) {
           ?? await chatUiSessionLoad<ChatSession>(id).catch(() => null)
         : await chatUiSessionLoad<ChatSession>(id).catch(() => null)
           ?? await recoverSessionFromEventLog(session);
-      if (!stored) throw new Error("chat session not found");
+      if (!stored) throw new Error(tr(useStore.getState().language, "未找到对话会话", "chat session not found", "no se encontró la sesión de chat"));
       const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
       setAllSessions((previous) => previous.map((item) => {
         if (item.id !== id) return item;
@@ -878,7 +898,12 @@ export function useChatSessions(projectId?: string | null) {
         return remoteBuffer ? applyRemoteTurnBuffer(merged, { ...remoteBuffer }) : merged;
       }));
     } catch (error) {
-      setError(`Failed to load chat session: ${String(error)}`);
+      setError(tr(
+        useStore.getState().language,
+        `加载对话会话失败：${String(error)}`,
+        `Failed to load chat session: ${String(error)}`,
+        `No se pudo cargar la sesión de chat: ${String(error)}`,
+      ));
     } finally {
       loadingSessionIds.current.delete(id);
     }

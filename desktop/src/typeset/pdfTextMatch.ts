@@ -3,7 +3,7 @@
 // synctex data, and it is pure string work — no React, no DOM, no canvas — so
 // the CJK / ligature / short-string edge cases can be unit tested directly.
 
-import { isEscapedLatex } from "./latexStructure";
+import { isEscapedLatex } from "../editor/latex/latexStructure";
 
 export type TextSearchMatch = {
   start: number;

@@ -1,0 +1,9 @@
+# Adds the skills under ./skills. SomniQ keeps its own user and project skill
+# roots, so includeDefaultRoots must stay false.
+- insert:
+    - id: skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        includeDefaultRoots: false
+        customSkillDirs:
+          - ./skills

@@ -667,7 +667,7 @@ describe("visualDecorations", () => {
     const ranges = visualDecorationRanges(source);
     const frameHeader = ranges.find((range) => range.from === frameFrom && range.widget);
 
-    expect(frameHeader?.widget?.toDOM().textContent).toContain("Slide 1");
+    expect(frameHeader?.widget?.toDOM().textContent).toContain("幻灯片 1");
     expect(ranges.some((range) => range.from === frameFrom && range.className === "cm-vis-frame-line")).toBe(true);
     expect(ranges.some((range) => range.from === frameFrom && range.className === "cm-vis-frame-first")).toBe(true);
     expect(ranges.some((range) => range.from === titleFrom && range.className === "cm-vis-frame-title")).toBe(true);
@@ -762,7 +762,7 @@ describe("visualDecorations", () => {
     const ranges = visualDecorationRanges(source);
     const frameHeader = ranges.find((range) => range.from === frameFrom && range.widget);
 
-    expect(frameHeader?.widget?.toDOM().textContent).toContain("Title slide");
+    expect(frameHeader?.widget?.toDOM().textContent).toContain("标题页");
     expect(ranges.some((range) => range.from === titlePageFrom && range.to === titlePageFrom + "\\titlepage".length)).toBe(true);
     expect(ranges.some((range) => range.from === columnFrom && range.to === columnFrom + "\\column{0.5\\textwidth}".length)).toBe(true);
   });

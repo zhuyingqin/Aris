@@ -1,15 +1,17 @@
+import type { Language } from "../store";
 import type { ChatBlock } from "../types";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 
 type ReviewBlock = Extract<ChatBlock, { kind: "review" }>;
 
-function reviewerName(block: ReviewBlock, language: "cn" | "en") {
+function reviewerName(block: ReviewBlock, language: Language) {
   if (block.reviewerModel) return block.reviewerModel;
-  return language === "cn" ? "独立 Reviewer Agent" : "Independent Reviewer Agent";
+  return tr(language, "独立 Reviewer Agent", "Independent Reviewer Agent", "Agente Reviewer independiente");
 }
 
-function reviewStatus(block: ReviewBlock, language: "cn" | "en") {
+function reviewStatus(block: ReviewBlock, language: Language) {
   const reviewer = reviewerName(block, language);
   if (language === "cn") {
     if (block.phase === "reviewing") return `${reviewer} 正在独立审核`;
@@ -21,6 +23,17 @@ function reviewStatus(block: ReviewBlock, language: "cn" | "en") {
     if (block.verdict === "needs_user") return `${reviewer} 需要用户决策`;
     if (block.verdict === "unavailable") return "独立 Reviewer 当前不可用";
     return `${reviewer} 已完成审核`;
+  }
+  if (language === "es") {
+    if (block.phase === "reviewing") return `${reviewer} está revisando de forma independiente`;
+    if (block.phase === "revising") {
+      return `Executor está aplicando los comentarios de ${reviewer} ${block.revision ?? block.attempt}/${block.maxRevisions}`;
+    }
+    if (block.verdict === "pass") return `${reviewer} aprobó la respuesta`;
+    if (block.verdict === "revise") return `${reviewer} pidió otra revisión`;
+    if (block.verdict === "needs_user") return `${reviewer} necesita que decidas`;
+    if (block.verdict === "unavailable") return "El Reviewer independiente no está disponible";
+    return `${reviewer} completó la revisión`;
   }
   if (block.phase === "reviewing") return `${reviewer} is independently reviewing`;
   if (block.phase === "revising") {
@@ -44,9 +57,12 @@ export default function IndependentReviewBadge({
   const status = reviewStatus(block, language);
   const provider = block.reviewerProvider?.trim();
   const active = block.phase === "reviewing" || block.phase === "revising";
-  const label = language === "cn"
-    ? `查看独立 Reviewer 审查详情：${status}`
-    : `Open independent Reviewer details: ${status}`;
+  const label = tr(
+    language,
+    `查看独立 Reviewer 审查详情：${status}`,
+    `View independent Reviewer details: ${status}`,
+    `Abrir los detalles del Reviewer independiente: ${status}`,
+  );
 
   return (
     <button

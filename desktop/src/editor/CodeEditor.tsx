@@ -13,7 +13,7 @@ import {
 import { kernelCompletion, kernelInspect, type CompleteFn, type InspectFn } from "./kernelIntel";
 import { latexVscodeHighlighting } from "./latexVscodeHighlighting";
 import { latexMathPreview, latexReferenceTooltip } from "./latexTooltips";
-import { TYPESET_EDITOR_COPY } from "../typeset/i18n";
+import { LATEX_REFERENCE_TOOLTIP_COPY } from "./latex/latexCopy";
 import { useStore } from "../store";
 import type { EditorLanguage, EditorUpdate, SharedEditorHandle } from "./editorTypes";
 
@@ -122,7 +122,7 @@ export default function CodeEditor({
       // Source mode's answers to what Visual mode renders inline: the formula
       // under the pointer, and where a cross-reference or link points.
       list.push(latexMathPreview);
-      list.push(latexReferenceTooltip(TYPESET_EDITOR_COPY[useStore.getState().language].referenceTooltip));
+      list.push(latexReferenceTooltip(LATEX_REFERENCE_TOOLTIP_COPY[useStore.getState().language]));
     }
     if (wrap) list.push(EditorView.lineWrapping);
     if (placeholder) list.push(placeholderExtension(placeholder));

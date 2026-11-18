@@ -18,14 +18,25 @@ const COPY = {
   },
   en: {
     checking: "Checking local image generation…",
-    incompatible: "Image help is enabled, but the webpage image component needs an update before this computer can help others.",
-    missing: "Image help is enabled, but the webpage image component must be installed before this computer can help others.",
-    account: "Image help is enabled, but no image account is bound. Select a ChatGPT image account in Webpage Accounts.",
+    incompatible: "Image help is on, but the web image component needs an update before this computer can help others.",
+    missing: "Image help is on, but the web image component must be installed before this computer can help others.",
+    account: "Image help is on, but no image account is assigned. Choose a ChatGPT account for images in ChatGPT web automation settings.",
     update: "Update image component",
     install: "Install image component",
     installing: "Installing image component…",
     failed: "Unable to check or restore local image generation: ",
     retry: "Check again",
+  },
+  es: {
+    checking: "Comprobando la generación local de imágenes…",
+    incompatible: "La ayuda con imágenes está activada, pero el componente de imágenes web necesita actualizarse antes de que este equipo pueda ayudar a otros.",
+    missing: "La ayuda con imágenes está activada, pero hay que instalar el componente de imágenes web antes de que este equipo pueda ayudar a otros.",
+    account: "La ayuda con imágenes está activada, pero no hay ninguna cuenta de imágenes vinculada. Selecciona una cuenta de ChatGPT para imágenes en Cuentas web.",
+    update: "Actualizar el componente de imágenes",
+    install: "Instalar el componente de imágenes",
+    installing: "Instalando el componente de imágenes…",
+    failed: "No se pudo comprobar ni restaurar la generación local de imágenes: ",
+    retry: "Volver a comprobar",
   },
 };
 

@@ -43,6 +43,6 @@ describe("persisted scientific style contracts", () => {
   it("names modified contracts by family and output choices rather than raw prompt text", () => {
     const value = compileFigureStyle({ ...DEFAULT_STYLE_SPEC, family: "tensors", layout: "vertical", palette: "mono", density: "compact", print: true });
     expect(styleLabel(value, "cn")).toBe("张量与空间 · 黑白灰 · 印刷适配");
-    expect(styleLabel(value, "en")).toBe("Tensor & spatial · Grayscale · Print ready");
+    expect(styleLabel(value, "en")).toBe("Tensor & spatial · Grayscale · Print-ready");
   });
 });

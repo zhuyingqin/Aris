@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "comparison-matrix",
+      "slot": "nav.page",
+      "title": { "en": "Comparison matrix", "cn": "文献对比矩阵", "es": "Matriz comparativa" },
+      "icon": "grid",
+      "order": 10,
+      "scope": "project",
+      "page": "./matrix/index.html",
+      "widgets": [
+        { "id": "matrix", "type": "json", "title": { "en": "Matrix data", "cn": "矩阵数据", "es": "Datos de la matriz" } }
+      ]
+    }
+  ]
+}
