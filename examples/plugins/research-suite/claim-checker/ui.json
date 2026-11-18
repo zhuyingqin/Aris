@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "checker",
+      "slot": "nav.page",
+      "title": { "en": "Claim checker", "cn": "论断核查", "es": "Verificador de afirmaciones" },
+      "icon": "check",
+      "order": 30,
+      "scope": "project",
+      "page": "./claims/index.html",
+      "proposeTasks": true,
+      "widgets": [
+        { "id": "claims", "type": "json", "title": { "en": "Cited claims", "cn": "引用论断", "es": "Afirmaciones citadas" } },
+        { "id": "summary", "type": "markdown", "title": { "en": "What to fix", "cn": "待修改清单", "es": "Qué corregir" } }
+      ]
+    }
+  ]
+}

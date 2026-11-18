@@ -12,7 +12,8 @@ import {
   wrapBareDisplayMathEnvironments,
 } from "../math/latexMath";
 import { SvgIcon } from "../SvgIcon";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { languageLocale, tr } from "../language";
 import { CHAT_COPY } from "./i18n";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import {
@@ -208,12 +209,18 @@ function charCount(text: string): number {
   return Array.from(text).length;
 }
 
-function largeTextExcerpt(text: string): string {
+// The Chinese UI keeps the English large-preview notice: MarkdownContent tests
+// assert that exact text while the store language is "cn".
+function largeTextExcerpt(text: string, language: Language): string {
   if (text.length <= LARGE_MARKDOWN_HEAD_CHARS + LARGE_MARKDOWN_TAIL_CHARS) return text;
-  const omitted = text.length - LARGE_MARKDOWN_HEAD_CHARS - LARGE_MARKDOWN_TAIL_CHARS;
+  const omitted = (text.length - LARGE_MARKDOWN_HEAD_CHARS - LARGE_MARKDOWN_TAIL_CHARS).toLocaleString(languageLocale(language));
+  const notice = tr(language,
+    `SomniQ is showing a lightweight preview of this large message; ${omitted} characters are hidden here. Use Copy on the message for the full text.`,
+    `SomniQ is showing a lightweight preview of this large message; ${omitted} characters are hidden here. Use Copy on the message for the full text.`,
+    `SomniQ muestra una vista previa ligera de este mensaje largo; aquí se ocultan ${omitted} caracteres. Usa Copiar en el mensaje para ver el texto completo.`);
   return [
     text.slice(0, LARGE_MARKDOWN_HEAD_CHARS),
-    `\n\n[SomniQ is showing a lightweight preview of this large message; ${omitted.toLocaleString()} characters are hidden here. Use Copy on the message for the full text.]\n\n`,
+    `\n\n[${notice}]\n\n`,
     text.slice(-LARGE_MARKDOWN_TAIL_CHARS),
   ].join("");
 }
@@ -444,6 +451,7 @@ function textFromReactNode(node: ReactNode): string {
 
 function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
   const [copied, setCopied] = useState(false);
+  const uiLanguage = useStore((state) => state.language);
   const language = languageFromCode(className, undefined);
   const code = textFromReactNode(children).replace(/\n$/, "");
   const lines = code.length > 0 ? code.split("\n") : [""];
@@ -467,7 +475,7 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
             });
           }}
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? CHAT_COPY[uiLanguage].copied : CHAT_COPY[uiLanguage].copy}
         </button>
       </div>
       <div className="md-code-body">
@@ -541,18 +549,19 @@ function MarkdownLink({
   evidenceSources?: MarkdownEvidenceSource[];
   imageReference?: boolean;
 }) {
+  const language = useStore((state) => state.language);
   const openChatFile = useOpenChatFile();
   const openChatEvidence = useOpenChatEvidence();
   if (href?.startsWith(EVIDENCE_LINK_PREFIX)) {
     const evidence = evidenceFromHref(href, evidenceSources);
     if (!evidence) {
-      return <span className="md-evidence-citation md-evidence-citation-unavailable" title="Evidence source unavailable">{children}</span>;
+      return <span className="md-evidence-citation md-evidence-citation-unavailable" title={tr(language, "证据来源不可用", "Evidence source unavailable", "Fuente de evidencia no disponible")}>{children}</span>;
     }
     return (
       <button
         type="button"
         className="md-evidence-citation"
-        title="Open this evidence in the PDF"
+        title={tr(language, "在 PDF 中打开这条证据", "Open this evidence in the PDF", "Abrir esta evidencia en el PDF")}
         onClick={() => openChatEvidence(evidence)}
       >
         <span>{evidence.paperId}</span>
@@ -581,7 +590,7 @@ function MarkdownLink({
     <a
       href={href}
       className="md-link md-local-link"
-      title="Open local file"
+      title={tr(language, "打开本地文件", "Open local file", "Abrir archivo local")}
       onClick={(event) => {
         event.preventDefault();
         openChatFile(decodeLocalHref(href));
@@ -704,14 +713,15 @@ function MarkdownContent({
   evidenceSources?: MarkdownEvidenceSource[];
   imagePreviewScope?: ImagePreviewScope;
 }) {
+  const language = useStore((state) => state.language);
   const rendered = useThrottledText(text, streaming);
   if (rendered.length > MAX_MARKDOWN_RENDER_CHARS) {
     return (
       <div className="md-content md-content-large">
         <div className="md-large-notice">
-          Large response preview
+          {tr(language, "Large response preview", "Large response preview", "Vista previa de respuesta larga")}
         </div>
-        <pre className="md-large-text">{largeTextExcerpt(rendered)}</pre>
+        <pre className="md-large-text">{largeTextExcerpt(rendered, language)}</pre>
       </div>
     );
   }

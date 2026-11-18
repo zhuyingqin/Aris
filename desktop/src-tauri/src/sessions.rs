@@ -426,6 +426,8 @@ fn is_retrieval_status_title(value: &str) -> bool {
             | "unknown"
             | "status:insufficientevidence"
             | "insufficientevidence"
+            | "estado:sinconfirmar"
+            | "sinconfirmar"
     )
 }
 

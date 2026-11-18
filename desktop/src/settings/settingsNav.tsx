@@ -150,11 +150,13 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
 export const SETTINGS_NAV_LABELS: Record<Language, Record<SettingsNavId, string>> = {
   cn: SETTINGS_COPY.cn.nav.labels,
   en: SETTINGS_COPY.en.nav.labels,
+  es: SETTINGS_COPY.es.nav.labels,
 };
 
 export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroupId, string>> = {
   cn: SETTINGS_COPY.cn.nav.groupLabels,
   en: SETTINGS_COPY.en.nav.groupLabels,
+  es: SETTINGS_COPY.es.nav.groupLabels,
 };
 
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([

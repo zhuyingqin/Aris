@@ -4,7 +4,7 @@
     {
       "id": "research-panel",
       "slot": "chat.sidebar",
-      "title": { "en": "Research panel", "cn": "研究面板" },
+      "title": { "en": "Research panel", "cn": "研究面板", "es": "Panel de investigación" },
       "order": 10,
       "widgets": [
         {
@@ -12,12 +12,13 @@
           "type": "text",
           "text": {
             "en": "Replace this with one or two sentences on what the panel is for.",
-            "cn": "把这里改成一两句话，说明这个面板的用途。"
+            "cn": "把这里改成一两句话，说明这个面板的用途。",
+            "es": "Sustituye esto por una o dos frases sobre para qué sirve el panel."
           }
         },
-        { "id": "next-steps", "type": "todo-list", "title": { "en": "Next steps", "cn": "下一步" } },
-        { "id": "notes", "type": "notes", "title": { "en": "Notes", "cn": "笔记" } },
-        { "id": "plan", "type": "agent-plan", "title": { "en": "Agent plan", "cn": "执行进度" } }
+        { "id": "next-steps", "type": "todo-list", "title": { "en": "Next steps", "cn": "下一步", "es": "Próximos pasos" } },
+        { "id": "notes", "type": "notes", "title": { "en": "Notes", "cn": "笔记", "es": "Notas" } },
+        { "id": "plan", "type": "agent-plan", "title": { "en": "Agent plan", "cn": "执行进度", "es": "Plan del agente" } }
       ]
     }
   ]

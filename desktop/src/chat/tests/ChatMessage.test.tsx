@@ -59,7 +59,7 @@ describe("ChatMessage rendering", () => {
       ] }}
       canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined}
     />);
-    const activity = screen.getByRole("button", { name: /2 read and search operations complete/ });
+    const activity = screen.getByRole("button", { name: /Ran 2 reads and searches/ });
     expect(activity.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelectorAll(".tool-error")).toHaveLength(1);
     expect(container.querySelectorAll(".tool-running")).toHaveLength(1);
@@ -866,7 +866,7 @@ describe("ChatMessage rendering", () => {
       output: JSON.stringify({ status: "completed", model: "gpt-image-2", prompt: "A research diagram",
         images: [{ path: ".somniq/artifacts/somni-images/run/image-1.png" }] }),
     }] }} canRetry={false} onEdit={() => undefined} onRetry={() => undefined} onContinue={() => undefined} />);
-    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    expect(screen.getByText("Generated 1 image")).toBeTruthy();
     await userEvent.click(screen.getByText("Somni drawing"));
     expect(screen.getByText(/gpt-image-2/)).toBeTruthy();
     expect(screen.getByText("A research diagram")).toBeTruthy();
@@ -902,7 +902,7 @@ describe("ChatMessage rendering", () => {
       />,
     );
 
-    expect(screen.getByText("Generated 1 image(s)")).toBeTruthy();
+    expect(screen.getByText("Generated 1 image")).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.fileReadBytes).toHaveBeenCalledWith(
         ".somniq/artifacts/oracle-images/run/diagram.png",
@@ -1167,7 +1167,7 @@ describe("ChatMessage rendering", () => {
     );
 
     const badge = screen.getByRole("button", {
-      name: /Open independent Reviewer details: gpt-5-reviewer is independently reviewing/,
+      name: /View independent Reviewer details: gpt-5-reviewer is independently reviewing/,
     });
     expect(screen.getByText("Reviewer Agent · openai")).toBeTruthy();
     expect(onOpenIndependentReview).not.toHaveBeenCalled();

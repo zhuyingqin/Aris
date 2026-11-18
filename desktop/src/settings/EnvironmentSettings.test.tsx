@@ -58,7 +58,7 @@ describe("EnvironmentSettings", () => {
     fireEvent.change(input, { target: { value: "  C:/Research-env  " } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(input).toHaveProperty("disabled", true);
-    expect(screen.getByRole("button", { name: "Applying..." })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Applying…" })).toHaveProperty("disabled", true);
     fireEvent.keyDown(input, { key: "Enter" });
     expect(configSet).toHaveBeenCalledTimes(1);
     expect(configSet).toHaveBeenCalledWith({ pythonEnvironmentPath: "C:/Research-env" });
@@ -109,7 +109,7 @@ describe("EnvironmentSettings", () => {
     let fail!: (error: Error) => void;
     vi.mocked(localEnvironmentChecks).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    const checking = screen.getByRole("button", { name: "Checking..." });
+    const checking = screen.getByRole("button", { name: "Checking…" });
     expect(checking).toHaveProperty("disabled", true);
     expect(screen.getByText("Python 3.12.8")).toBeTruthy();
     fireEvent.click(checking);

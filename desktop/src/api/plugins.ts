@@ -182,10 +182,11 @@ export const pluginsSetEnabled = (projectPath: string, name: string, enabled: bo
 export const pluginsRemove = (projectPath: string, name: string) =>
   changed(projectPath, invoke<void>("plugins_remove", { projectPath, name }));
 
-export type UiText = string | { en: string; cn: string };
+/** Plugin-authored text: one string, or per language. `es` is optional; Spanish falls back to `en`. */
+export type UiText = string | { en: string; cn: string; es?: string };
 /** What a click does. The host does it on the user's click; no package code runs. */
 export type UiClick =
-  | { type: "prompt"; text: string; send?: boolean }
+  | { type: "prompt"; text: UiText; send?: boolean }
   | { type: "open-file"; path: string };
 export interface UiField {
   key: string;

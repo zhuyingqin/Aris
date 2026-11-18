@@ -1945,3 +1945,11 @@ fn latex_requests_route_the_latex_tools_only_while_they_are_offered() {
     let groups = super::intent_tool_groups("把 main.tex 用 xelatex 编译一下", &without);
     assert!(groups.iter().all(|group| group.profile != "latex"));
 }
+
+#[test]
+fn language_preference_names_the_fallback_language() {
+    assert!(super::language_preference_section("cn").contains("use Chinese."));
+    assert!(super::language_preference_section("es").contains("use Spanish."));
+    assert!(super::language_preference_section("en").contains("use English."));
+    assert!(super::language_preference_section("").contains("use English."));
+}

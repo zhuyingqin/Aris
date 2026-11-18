@@ -19,6 +19,7 @@
 // `pkg:<path>` names of an import map. The page's links never leave the
 // package, and nothing it names outside the package resolves.
 import type { UiPageFile } from "../api/plugins";
+import type { Language } from "../language";
 import bootstrap from "./pluginPageBootstrap.js?raw";
 
 export interface PluginPageTheme {
@@ -28,7 +29,10 @@ export interface PluginPageTheme {
   font: string;
 }
 export interface PluginPageInitial {
+  /** Kept to `en` | `cn` for pages written before other UI languages existed. */
   language: "en" | "cn";
+  /** The app's UI language: `en`, `cn` or `es`. New pages pick their copy by this. */
+  locale?: Language;
   theme: PluginPageTheme;
   /** Every declared widget's value, by widget id. */
   data: Record<string, unknown>;

@@ -3,6 +3,7 @@ import { fileAssetUrl, fileReadBytes, isTauri } from "../api/tauri";
 import ImageLightbox from "../ImageLightbox";
 import { imageMimeType, isImagePath } from "../imageFiles";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { normalizeLocalFileHref } from "./localFileLinks";
 import { readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
@@ -114,9 +115,9 @@ export default function ChatImagePreview({
     ? { minHeight: reserved }
     : undefined;
   const image = failed ? (
-    <span>{language === "cn" ? "无法加载图片" : "Could not load image"} · {title ?? alt ?? normalizedSrc}</span>
+    <span>{tr(language, "无法加载图片", "Could not load image", "No se pudo cargar la imagen")} · {title ?? alt ?? normalizedSrc}</span>
   ) : !displaySrc ? (
-    <span className="chat-image-loading" style={reserveStyle}>{title ?? alt ?? (language === "cn" ? "正在读取图片…" : "Loading image…")}</span>
+    <span className="chat-image-loading" style={reserveStyle}>{title ?? alt ?? (tr(language, "正在读取图片…", "Loading image…", "Cargando imagen…"))}</span>
   ) : (
     <>
       <img
@@ -147,7 +148,7 @@ export default function ChatImagePreview({
         type="button"
         className={`${previewClass} chat-image-preview-button`}
         data-image-path={imagePath}
-        title={title ?? (language === "cn" ? "查看图片" : "Open image")}
+        title={title ?? (tr(language, "查看图片", "Open image", "Abrir imagen"))}
         aria-haspopup={onClick ? undefined : "dialog"}
         onClick={() => onClick ? onClick() : setLightboxOpen(true)}
       >

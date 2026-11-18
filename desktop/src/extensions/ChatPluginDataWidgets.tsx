@@ -8,8 +8,9 @@ import MarkdownContent from "../chat/MarkdownContent";
 import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
 import { WidgetSection } from "./ChatPluginSection";
+import { uiText } from "./useChatPluginPanels";
 
-const text = (value: UiText, language: Language) => typeof value === "string" ? value : value[language];
+const text = (value: UiText, language: Language) => uiText(value, language);
 
 const COPY = {
   cn: {
@@ -21,6 +22,11 @@ const COPY = {
     empty: "Nothing here yet. It appears once the agent updates this panel.", rows: (n: number) => `${n} rows`, items: (n: number) => `${n} items`,
     openFile: "Open in side panel", openLink: "Open in browser", showData: "View data", category: "Category", choose: "Choose…",
     yes: "yes", no: "no", fills: "Fills the composer", sends: "Sends right away", opens: "Opens the file",
+  },
+  es: {
+    empty: "Aún no hay nada. Aparecerá cuando el agente actualice este panel.", rows: (n: number) => `${n} filas`, items: (n: number) => `${n} elementos`,
+    openFile: "Abrir en el panel lateral", openLink: "Abrir en el navegador", showData: "Ver datos", category: "Categoría", choose: "Elige…",
+    yes: "sí", no: "no", fills: "Rellena el cuadro de mensaje", sends: "Se envía al instante", opens: "Abre el archivo",
   },
 };
 
@@ -39,8 +45,9 @@ export function fillPrompt(template: string, values: Record<string, string>): st
   return template.replace(/\{\{([\s\S]*?)\}\}/g, (_match, key: string) => values[key.trim()] ?? "");
 }
 
-function runClick(action: UiClick, actions: PanelActions, values: Record<string, string> = {}) {
-  if (action.type === "prompt") actions.onPrompt?.(fillPrompt(action.text, values).trim(), action.send === true);
+function runClick(action: UiClick, actions: PanelActions, language: Language, values: Record<string, string> = {}) {
+  // A prompt may be written per language, like the panel's labels.
+  if (action.type === "prompt") actions.onPrompt?.(fillPrompt(text(action.text, language), values).trim(), action.send === true);
   else actions.onOpenFile?.(action.path);
 }
 const clickHint = (action: UiClick, language: Language) => {
@@ -191,7 +198,7 @@ function FormWidget({ title, fields, submit, language, actions }: {
   return <WidgetSection title={title} icon="edit">
     <form className="chat-plugin-form" onSubmit={(event) => {
       event.preventDefault();
-      runClick(submit.action, actions, Object.fromEntries(fields.map((field) => {
+      runClick(submit.action, actions, language, Object.fromEntries(fields.map((field) => {
         const value = values[field.key];
         return [field.key, field.input === "checkbox" ? (value === true ? copy.yes : copy.no) : String(value ?? "").trim()];
       })));
@@ -224,7 +231,7 @@ export const isDataWidget = (widget: UiWidget): widget is DataWidget =>
   !["todo-list", "notes", "agent-plan", "text", "json"].includes(widget.type);
 
 export function DataWidgetView({ widget, value, language, actions }: { widget: DataWidget; value: unknown; language: Language; actions: PanelActions }) {
-  if (widget.type === "button") return <button type="button" className="chat-plugin-button chat-plugin-action chat-plugin-standalone" title={clickHint(widget.action, language)} disabled={!clickable(widget.action, actions)} onClick={() => runClick(widget.action, actions)}>
+  if (widget.type === "button") return <button type="button" className="chat-plugin-button chat-plugin-action chat-plugin-standalone" title={clickHint(widget.action, language)} disabled={!clickable(widget.action, actions)} onClick={() => runClick(widget.action, actions, language)}>
     <SvgIcon name={widget.action.type === "open-file" ? "document" : widget.action.send ? "send" : "sparkle"} size={12} />{text(widget.label, language)}
   </button>;
   const title = text(widget.title, language);

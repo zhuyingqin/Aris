@@ -24,6 +24,7 @@ import {
   onChatToolResult,
 } from "../api/tauri";
 import { useStore, type Language } from "../store";
+import { languagePromptName, tr } from "../language";
 import { LITERATURE_COPY } from "./i18n";
 import {
   emptyLibrary,
@@ -980,7 +981,7 @@ const llmScreen = async (
  * confirmed product decision, not something to second-guess. Every prompt
  * below that instructs the model to write in a specific language reads this
  * instead of hardcoding Chinese. */
-const outputLanguageName = (language: Language) => (language === "cn" ? "Chinese" : "English");
+const outputLanguageName = languagePromptName;
 
 const BRIEF_SYSTEM = (language: Language) =>
   `You are a precise research reading assistant. Produce a structured brief based only on the complete extracted full text supplied by the user. Every claim must cite the page that supports it. Be concrete and include numbers from the paper in Results. Write all section values in ${outputLanguageName(language)}. Respond with a single JSON object and nothing else.`;
@@ -1095,7 +1096,7 @@ const ANSWER_CHAIN_SYSTEM = (language: Language) =>
 const roleNote = (role: string, note: string, language: Language) => {
   const labels = LITERATURE_COPY[language].evidenceRole as Record<string, string>;
   const label = labels[role] ?? role;
-  return language === "cn" ? `${label}：${note}` : `${label}: ${note}`;
+  return tr(language, `${label}：${note}`, `${label}: ${note}`, `${label}: ${note}`);
 };
 
 const literatureVisionLlmJson = async (
@@ -2150,16 +2151,16 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             // tool input is informational only
           }
           if (tool.name === "LiteratureSearch") {
-            log("info", `Agent (Chat): searching "${String(input.query ?? "...")}"`, {
+            log("info", LITERATURE_COPY[useStore.getState().language].store.agentSearching(String(input.query ?? "...")), {
               open: true,
             });
           } else if (tool.name === "LiteratureLibraryUpsert") {
             const count = Array.isArray(input.papers) ? input.papers.length : "?";
-            log("info", `Agent (Chat): refreshing the projection for ${count} canonical records...`, {
+            log("info", LITERATURE_COPY[useStore.getState().language].store.agentRefreshingProjection(count), {
               open: true,
             });
           } else if (tool.name === "LiteraturePdfDownload") {
-            log("info", `Agent (Chat): downloading PDF ${String(input.fileName ?? "")}`, {
+            log("info", LITERATURE_COPY[useStore.getState().language].store.agentDownloadingPdf(String(input.fileName ?? "")), {
               open: true,
             });
           }
@@ -2170,7 +2171,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         onChatToolResult((result) => {
           if (disposed || !result.name.startsWith("Literature")) return;
           if (result.isError) {
-            log("warn", `! Agent ${result.name} failed: ${result.output.slice(0, 160)}`);
+            log("warn", LITERATURE_COPY[useStore.getState().language].store.agentToolFailed(result.name, result.output.slice(0, 160)));
             return;
           }
           let output: Record<string, unknown> = {};
@@ -2182,17 +2183,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           if (result.name === "LiteratureSearch") {
             const runId = String((output.searchRun as Record<string, unknown> | undefined)?.id ?? "");
             const count = Array.isArray(output.papers) ? output.papers.length : 0;
-            log(
-              "ok",
-              `Agent recorded ${count} canonical results${runId ? ` in SearchRun ${runId}` : ""}.`,
-            );
+            log("ok", LITERATURE_COPY[useStore.getState().language].store.agentRecordedResults(count, runId));
           } else if (result.name === "LiteratureLibraryUpsert") {
-            log(
-              "ok",
-              `Agent refreshed the local literature database for ${Number(output.merged ?? 0)} canonical records.`,
-            );
+            log("ok", LITERATURE_COPY[useStore.getState().language].store.agentRefreshedDatabase(Number(output.merged ?? 0)));
           } else if (result.name === "LiteraturePdfDownload") {
-            log("ok", `Agent downloaded ${String(output.relativePath ?? "PDF")}`);
+            log("ok", LITERATURE_COPY[useStore.getState().language].store.agentDownloaded(String(output.relativePath ?? "PDF")));
           }
         }),
       );
@@ -2233,15 +2228,10 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
                       : task,
                   ),
                 }));
-                log("info", `Linked review task to saved search: "${matchingSearch.query}"`);
+                log("info", LITERATURE_COPY[useStore.getState().language].store.linkedReviewTaskToSearch(matchingSearch.query));
               }
               const delta = get().library.papers.length - before;
-              log(
-                delta > 0 ? "ok" : "info",
-                delta > 0
-                  ? `Library reloaded after chat turn: ${delta} new ${delta === 1 ? "paper" : "papers"}`
-                  : "Library reloaded after chat turn (no new papers)",
-              );
+              log(delta > 0 ? "ok" : "info", LITERATURE_COPY[useStore.getState().language].store.libraryReloadedAfterChat(delta));
             });
         }),
       );
@@ -2264,7 +2254,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         (paper) => belongs(paper) && !paper.screenings?.[taskId]?.userConfirmed,
       );
       if (candidates.length === 0) {
-        log("info", `No unconfirmed papers match the scope for "${task.question}".`);
+        log("info", LITERATURE_COPY[useStore.getState().language].store.noUnconfirmedPapers(task.question));
         return;
       }
 
@@ -2438,7 +2428,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
               : run,
           ),
         }));
-        log("error", `ScreenRun ${screenRunId} failed: ${String(error)}`, { open: true });
+        log("error", LITERATURE_COPY[useStore.getState().language].store.screenRunFailed(screenRunId, String(error)), { open: true });
       } finally {
         set({ screening: false });
       }
@@ -2524,7 +2514,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           papers: library.papers.filter((paper) => !targets.has(paper.id)),
           trash: (library.trash ?? []).filter((paper) => !targets.has(paper.id)),
         }));
-        log("warn", "permanently deleted " + targets.size + " paper(s)", { open: true });
+        log("warn", LITERATURE_COPY[useStore.getState().language].store.papersPermanentlyDeleted(targets.size), { open: true });
         return;
       }
       try {
@@ -2544,7 +2534,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         } else {
           await get().load(projectId, { quiet: true });
         }
-        log("warn", "permanently deleted " + (response?.deletedIds?.length ?? targets.size) + " paper(s)", { open: true });
+        log("warn", LITERATURE_COPY[useStore.getState().language].store.papersPermanentlyDeleted(response?.deletedIds?.length ?? targets.size), { open: true });
       } catch (error) {
         const message = "failed to permanently delete papers: " + String(error);
         set({ error: message });
@@ -2707,7 +2697,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         }
         if (get().loadedProjectId !== projectId) return null;
         await refreshLibraryModel(projectId);
-        log("info", "created manual literature item: " + title);
+        log("info", LITERATURE_COPY[useStore.getState().language].store.manualItemCreated(title));
         return response.recordId;
       } catch (error) {
         if (get().loadedProjectId !== projectId) return null;

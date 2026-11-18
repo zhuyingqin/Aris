@@ -17,6 +17,7 @@ import {
   writeTurnMeasurements,
 } from "./transcriptMetrics";
 import type { Language } from "../store";
+import { tr } from "../language";
 
 /** One definition of "parked at the bottom", shared by the return-to-bottom
  *  control and the virtualizer's own bottom anchoring (`scrollEndThreshold`).
@@ -105,7 +106,7 @@ export function composerGrowthAdjustment(previousInset: number, nextInset: numbe
 }
 
 export function scrollBottomLabel(language: Language) {
-  return language === "cn" ? "回到底部" : "Back to bottom";
+  return tr(language, "回到底部", "Back to bottom", "Volver al final");
 }
 
 /**
@@ -142,10 +143,14 @@ interface VirtualTurnPosition {
   size: number;
 }
 
-export function questionPreviewFromTurn(turn: ChatTurn): string {
+export function questionPreviewFromTurn(turn: ChatTurn, language: Language = "cn"): string {
   const attachments = turn.attachments ?? [];
+  const extra = attachments.length - 1;
   const attachmentPreview = attachments.length > 0
-    ? `附件：${attachments[0].name}${attachments.length > 1 ? ` + ${attachments.length - 1} 个文件` : ""}`
+    ? tr(language,
+      `附件：${attachments[0].name}${extra > 0 ? ` + ${extra} 个文件` : ""}`,
+      `Attachment: ${attachments[0].name}${extra > 0 ? ` + ${extra} ${extra === 1 ? "file" : "files"}` : ""}`,
+      `Adjunto: ${attachments[0].name}${extra > 0 ? ` + ${extra} ${extra === 1 ? "archivo" : "archivos"}` : ""}`)
     : "";
   const text = textFromTurn(turn)
     .replace(/\s+/g, " ")
@@ -156,10 +161,10 @@ export function questionPreviewFromTurn(turn: ChatTurn): string {
     return chars.length > 48 ? `${chars.slice(0, 48).join("")}...` : previewText;
   }
   if (attachmentPreview) return attachmentPreview;
-  return "未命名提问";
+  return tr(language, "未命名提问", "Untitled question", "Pregunta sin título");
 }
 
-export function questionMarkersFromTurns(turns: ChatTurn[]): QuestionMarker[] {
+export function questionMarkersFromTurns(turns: ChatTurn[], language: Language = "cn"): QuestionMarker[] {
   const markers: QuestionMarker[] = [];
   turns.forEach((turn, turnIndex) => {
     // A turn the app inserted (plugin verification) is not a question.
@@ -168,7 +173,7 @@ export function questionMarkersFromTurns(turns: ChatTurn[]): QuestionMarker[] {
       id: turn.id,
       turnIndex,
       number: markers.length + 1,
-      preview: questionPreviewFromTurn(turn),
+      preview: questionPreviewFromTurn(turn, language),
     });
   });
   return markers;
@@ -286,13 +291,13 @@ interface Props {
   onOpenIndependentReview?: () => void;
 }
 
-function ChatMessageFallback({ error, reset }: { error: Error; reset: () => void }) {
+function ChatMessageFallback({ error, reset, language }: { error: Error; reset: () => void; language: Language }) {
   return (
     <article className="chat-turn chat-assistant chat-turn-error">
       <div className="chat-error-card">
-        <strong>Message failed to render</strong>
-        <span>{error.message || "This message hit a UI rendering error."}</span>
-        <button type="button" onClick={reset}>Retry</button>
+        <strong>{tr(language, "消息渲染失败", "Message failed to render", "No se pudo mostrar el mensaje")}</strong>
+        <span>{error.message || tr(language, "这条消息遇到了界面渲染错误。", "This message hit a UI rendering error.", "Este mensaje provocó un error al renderizar la interfaz.")}</span>
+        <button type="button" onClick={reset}>{tr(language, "重试", "Retry", "Reintentar")}</button>
       </div>
     </article>
   );
@@ -313,9 +318,7 @@ function QuestionTimeline({
   if (markers.length < 2) return null;
   const active = activeNumber ?? markers[markers.length - 1]?.number ?? null;
   const activeLabel = active ?? markers.length;
-  const title = language === "cn"
-    ? `本轮对话提问目录 (${activeLabel}/${markers.length})`
-    : `Question directory (${activeLabel}/${markers.length})`;
+  const title = tr(language, `本轮对话提问目录 (${activeLabel}/${markers.length})`, `Question index (${activeLabel}/${markers.length})`, `Índice de preguntas (${activeLabel}/${markers.length})`);
   return (
     <div
       className={`chat-question-timeline${open ? " open" : ""}`}
@@ -352,7 +355,7 @@ function QuestionTimeline({
           ))}
         </span>
       </button>
-      <div className="chat-question-popover" role="list" aria-label={language === "cn" ? "本轮对话提问" : "Questions in thread"}>
+      <div className="chat-question-popover" role="list" aria-label={tr(language, "本轮对话提问", "Questions in thread", "Preguntas de la conversación")}>
         {markers.map((marker) => (
           <button
             key={marker.id}
@@ -477,7 +480,7 @@ export default function ChatThread({
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems[virtualItems.length - 1];
   const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
-  const questionMarkers = useMemo(() => questionMarkersFromTurns(turns), [turns]);
+  const questionMarkers = useMemo(() => questionMarkersFromTurns(turns, language), [turns, language]);
   const activeQuestion = useMemo(
     () => activeQuestionNumber(questionMarkers, firstVisibleTurnIndex),
     [firstVisibleTurnIndex, questionMarkers],
@@ -791,7 +794,7 @@ export default function ChatThread({
                       // together with no separator ("文献检索深度检索搜索近年论文…").
                       aria-label={[starter.label, starter.badge, starter.hint]
                         .filter(Boolean)
-                        .join(language === "cn" ? "，" : ", ")}
+                        .join(tr(language, "，", ", ", ", "))}
                       onClick={() => onStarter(starter.prompt)}
                     >
                       <span className="chat-starter-icon" aria-hidden="true"><StarterIcon id={starter.id} /></span>
@@ -832,7 +835,7 @@ export default function ChatThread({
                 >
                   <ErrorBoundary
                     resetKey={turnRenderKey(turn)}
-                    fallback={(error, reset) => <ChatMessageFallback error={error} reset={reset} />}
+                    fallback={(error, reset) => <ChatMessageFallback error={error} reset={reset} language={language} />}
                   >
                     <ChatMessage
                       turn={turn}

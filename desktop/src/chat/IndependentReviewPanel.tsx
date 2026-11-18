@@ -1,11 +1,15 @@
 import type { Language } from "../store";
+import { tr } from "../language";
 import type { IndependentReviewResult } from "../api/tauri";
 import type { IndependentReviewState } from "./useIndependentReview";
 
 function verdictLabel(result: IndependentReviewResult, language: Language) {
-  const labels = language === "cn"
-    ? { pass: "通过", revise: "需要修订", needs_user: "需要用户决策", unavailable: "审查不可用" }
-    : { pass: "Passed", revise: "Revision required", needs_user: "Needs user", unavailable: "Review unavailable" };
+  const labels = tr(
+    language,
+    { pass: "通过", revise: "需要修订", needs_user: "需要用户决策", unavailable: "审查不可用" },
+    { pass: "Passed", revise: "Revision required", needs_user: "Needs user", unavailable: "Review unavailable" },
+    { pass: "Aprobado", revise: "Requiere revisión", needs_user: "Requiere tu decisión", unavailable: "Revisión no disponible" },
+  );
   return labels[result.verdict];
 }
 
@@ -14,6 +18,11 @@ function phaseLabel(state: IndependentReviewState, language: Language) {
     if (state.phase === "reviewing") return "独立审查中";
     if (state.phase === "revising") return `Executor 修订中 ${state.revision}/${state.maxRevisions}`;
     return "独立审查已完成";
+  }
+  if (language === "es") {
+    if (state.phase === "reviewing") return "Revisión independiente en curso";
+    if (state.phase === "revising") return `Executor revisando ${state.revision}/${state.maxRevisions}`;
+    return "Revisión independiente completada";
   }
   if (state.phase === "reviewing") return "Independent review in progress";
   if (state.phase === "revising") return `Executor revising ${state.revision}/${state.maxRevisions}`;
@@ -30,8 +39,9 @@ export default function IndependentReviewPanel({
   onClear?: () => void;
 }) {
   const latest = state.rounds[state.rounds.length - 1]?.result;
-  const copy = language === "cn"
-    ? {
+  const copy = tr(
+    language,
+    {
       title: "独立 Reviewer",
       independent: "独立身份",
       executor: "Executor",
@@ -51,8 +61,8 @@ export default function IndependentReviewPanel({
       clearBusy: "审查运行时不能清除，请先停止当前任务。",
       waiting: "Reviewer 正在对照请求、工具证据、工作区文件和成功标准寻找反例。",
       exhausted: "已达到最多两轮自动修订，剩余问题不会被伪装成已通过。",
-    }
-    : {
+    },
+    {
       title: "Independent Reviewer",
       independent: "Independent identity",
       executor: "Executor",
@@ -72,7 +82,29 @@ export default function IndependentReviewPanel({
       clearBusy: "Stop the current task before clearing an active review.",
       waiting: "The Reviewer is checking the request, tool evidence, workspace files, and success criteria for counterexamples.",
       exhausted: "The two automatic revision rounds are exhausted; unresolved issues are not presented as passed.",
-    };
+    },
+    {
+      title: "Reviewer independiente",
+      independent: "Identidad independiente",
+      executor: "Executor",
+      reviewer: "Reviewer",
+      issues: "Problemas encontrados",
+      checked: "Evidencia comprobada",
+      toolChecks: "Llamadas a herramientas del Reviewer",
+      rubrics: "Criterios de revisión del plugin",
+      rubricOmitted: "Omitido por extensión (no se comprobó en esta ronda)",
+      rubricUnknown: "Citado por el Reviewer pero nunca enviado (ignorado)",
+      rubricCorrected: "Se incumplió un criterio crítico, así que el controlador cambió «aprobado» por «revisar».",
+      rubricResult: { met: "Cumplido", violated: "Incumplido", not_applicable: "No aplica", unverified: "Sin verificar", unreported: "Sin informar" },
+      criterion: "Criterio",
+      missing: "Comprobaciones pendientes",
+      instructions: "Instrucciones de revisión",
+      clear: "Borrar historial de revisión",
+      clearBusy: "Detén la tarea actual antes de borrar una revisión activa.",
+      waiting: "El Reviewer está buscando contraejemplos en la solicitud, la evidencia de herramientas, los archivos del espacio de trabajo y los criterios de éxito.",
+      exhausted: "Se agotaron las dos rondas de revisión automática; los problemas sin resolver no se presentan como aprobados.",
+    },
+  );
 
   return (
     <div className="independent-review-panel">
@@ -118,7 +150,7 @@ export default function IndependentReviewPanel({
           {state.rounds.map((round) => (
             <details key={round.attempt} className="independent-review-round" open={round.attempt === state.rounds[state.rounds.length - 1]?.attempt}>
               <summary>
-                <span>Review {round.attempt}</span>
+                <span>{tr(language, "Review", "Review", "Revisión")} {round.attempt}</span>
                 <strong className={`verdict-${round.result.verdict}`}>{verdictLabel(round.result, language)}</strong>
               </summary>
               <div className="independent-review-round-body">

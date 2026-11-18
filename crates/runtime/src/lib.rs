@@ -36,6 +36,7 @@ mod mcp_health;
 mod mcp_stdio;
 mod oauth;
 mod paths;
+pub mod pdf_render;
 mod pdf_text;
 mod permissions;
 pub mod plugins;
@@ -59,6 +60,7 @@ pub mod skill_registry;
 mod task_plan;
 mod tool_outcome;
 mod tool_recovery;
+pub mod ui_lang;
 mod tool_output_artifact;
 mod usage;
 

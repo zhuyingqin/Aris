@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 2,
+  "panels": [
+    {
+      "id": "submission",
+      "slot": "chat.sidebar",
+      "title": {
+        "en": "Submission check",
+        "cn": "投稿检查",
+        "es": "Lista de envío"
+      },
+      "order": 40,
+      "scope": "project",
+      "widgets": [
+        {
+          "id": "profile",
+          "type": "markdown",
+          "title": {
+            "en": "Active venue profile",
+            "cn": "当前期刊档案",
+            "es": "Perfil de envío activo"
+          }
+        },
+        {
+          "id": "status",
+          "type": "metrics",
+          "title": {
+            "en": "Status",
+            "cn": "状态",
+            "es": "Estado"
+          }
+        },
+        {
+          "id": "checklist",
+          "type": "table",
+          "title": {
+            "en": "Checklist",
+            "cn": "检查清单",
+            "es": "Lista de comprobación"
+          },
+          "columns": [
+            {
+              "key": "item",
+              "title": {
+                "en": "Requirement",
+                "cn": "要求",
+                "es": "Requisito"
+              }
+            },
+            {
+              "key": "required",
+              "title": {
+                "en": "Required",
+                "cn": "要求值",
+                "es": "Exigido"
+              }
+            },
+            {
+              "key": "actual",
+              "title": {
+                "en": "Manuscript",
+                "cn": "稿件实际",
+                "es": "Manuscrito"
+              }
+            },
+            {
+              "key": "ok",
+              "title": {
+                "en": "OK",
+                "cn": "通过",
+                "es": "OK"
+              }
+            },
+            {
+              "key": "evidence",
+              "title": {
+                "en": "Evidence",
+                "cn": "依据",
+                "es": "Evidencia"
+              }
+            }
+          ]
+        },
+        {
+          "id": "check-now",
+          "type": "button",
+          "label": {
+            "en": "Check now",
+            "cn": "立即检查",
+            "es": "Comprobar ahora"
+          },
+          "action": {
+            "type": "prompt",
+            "send": true,
+            "text": {
+              "en": "Check this project's main manuscript against the active profile of @local/submission-profiles. Read the panel with PluginPanel; if no profile is set, ask me for one and stop. Measure each requirement from the files themselves (pages from the compiled PDF, words of the abstract, author names or acknowledgements in an anonymous submission, the bibliography style, figure formats and resolution) and write one checklist row per requirement with required value, actual value, ok (true/false) and the evidence (file, and line or page). Write the status metrics (passed, failed, not checkable). Change no project files.",
+              "cn": "按 @local/submission-profiles 的当前期刊档案检查本项目主稿件。先用 PluginPanel 读取面板；没有档案就问我并停下。每项要求都从文件本身测量（页数取编译后的 PDF、摘要字数、匿名投稿中的作者名或致谢、参考文献格式、图片格式与分辨率），每项写一行清单：要求值、实际值、ok（true/false）和依据（文件及行号或页码）。写入状态指标（通过、未通过、无法检查）。不改项目文件。",
+              "es": "Comprueba el manuscrito principal del proyecto con el perfil activo de @local/submission-profiles. Lee el panel con PluginPanel; si no hay perfil, pídemelo y detente. Mide cada requisito en los propios archivos (páginas del PDF compilado, palabras del resumen, nombres de autor o agradecimientos en un envío anónimo, estilo bibliográfico, formato y resolución de las figuras) y escribe una fila por requisito con el valor exigido, el real, ok (true/false) y la evidencia (archivo y línea o página). Escribe las métricas de estado (cumplidos, no cumplidos, no comprobables). No cambies archivos del proyecto."
+            }
+          }
+        },
+        {
+          "id": "set-profile",
+          "type": "form",
+          "title": {
+            "en": "Set the venue profile",
+            "cn": "设置期刊档案",
+            "es": "Definir el perfil de envío"
+          },
+          "fields": [
+            {
+              "key": "venue",
+              "label": {
+                "en": "Venue",
+                "cn": "期刊或会议",
+                "es": "Revista o congreso"
+              },
+              "input": "text"
+            },
+            {
+              "key": "pages",
+              "label": {
+                "en": "Page limit",
+                "cn": "页数上限",
+                "es": "Límite de páginas"
+              },
+              "input": "number"
+            },
+            {
+              "key": "abstract",
+              "label": {
+                "en": "Abstract word limit",
+                "cn": "摘要字数上限",
+                "es": "Palabras del resumen (máx.)"
+              },
+              "input": "number"
+            },
+            {
+              "key": "anonymous",
+              "label": {
+                "en": "Anonymous review",
+                "cn": "匿名评审",
+                "es": "Revisión anónima"
+              },
+              "input": "checkbox"
+            },
+            {
+              "key": "refs",
+              "label": {
+                "en": "Reference style",
+                "cn": "参考文献格式",
+                "es": "Estilo de referencias"
+              },
+              "input": "text"
+            },
+            {
+              "key": "other",
+              "label": {
+                "en": "Other requirements",
+                "cn": "其他要求",
+                "es": "Otros requisitos"
+              },
+              "input": "textarea"
+            }
+          ],
+          "submit": {
+            "label": {
+              "en": "Use this profile",
+              "cn": "使用此档案",
+              "es": "Usar este perfil"
+            },
+            "action": {
+              "type": "prompt",
+              "text": {
+                "en": "Set the active profile of @local/submission-profiles with PluginPanel. Venue: {{venue}}. Page limit: {{pages}}. Abstract word limit: {{abstract}}. Anonymous review: {{anonymous}}. Reference style: {{refs}}. Other requirements: {{other}}. Write it as a short Markdown list in the profile widget (say whether references count toward the page limit if I said so, otherwise mark it as unknown), clear the old checklist, then run the check.",
+                "cn": "用 PluginPanel 设置 @local/submission-profiles 的当前档案。期刊或会议：{{venue}}。页数上限：{{pages}}。摘要字数上限：{{abstract}}。匿名评审：{{anonymous}}。参考文献格式：{{refs}}。其他要求：{{other}}。在档案组件里写成简短的 Markdown 列表（我说明了参考文献是否计入页数就写上，否则标为未知），清空旧清单，然后运行检查。",
+                "es": "Define con PluginPanel el perfil activo de @local/submission-profiles. Revista o congreso: {{venue}}. Límite de páginas: {{pages}}. Palabras máximas del resumen: {{abstract}}. Revisión anónima: {{anonymous}}. Estilo de referencias: {{refs}}. Otros requisitos: {{other}}. Escríbelo como una lista breve en Markdown en el widget del perfil (indica si las referencias cuentan para el límite de páginas si lo he dicho; si no, márcalo como desconocido), vacía la lista anterior y después ejecuta la comprobación."
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

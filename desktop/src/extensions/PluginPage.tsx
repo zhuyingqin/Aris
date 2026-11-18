@@ -6,6 +6,7 @@
 import type { ActiveUiPanel } from "../api/plugins";
 import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
+import { tr } from "../language";
 import ChatPluginPanel from "./ChatPluginPanel";
 import PluginEditButton from "./PluginEditButton";
 import PluginPageFrame from "./PluginPageFrame";
@@ -23,7 +24,7 @@ export default function PluginPage({ panel, projectPath, language, onAction }: {
     <header className="plugin-page-head">
       <span className="plugin-page-icon" aria-hidden="true"><SvgIcon name={pluginPageIcon(panel)} size={16} /></span>
       <h1>{title}</h1>
-      <span className="plugin-page-source" title={panel.pluginName}>{language === "cn" ? "插件页面" : "Plugin page"} · {panel.pluginName}</span>
+      <span className="plugin-page-source" title={panel.pluginName}>{tr(language, "插件页面", "Plugin page", "Página del plugin")} · {panel.pluginName}</span>
       {edit}
     </header>
     <PluginPageFrame panel={panel} projectPath={projectPath} language={language} onAction={onAction} />
@@ -32,7 +33,7 @@ export default function PluginPage({ panel, projectPath, language, onAction }: {
     <header className="plugin-page-head">
       <span className="plugin-page-icon" aria-hidden="true"><SvgIcon name={pluginPageIcon(panel)} size={18} /></span>
       <h1>{title}</h1>
-      <span className="plugin-page-source" title={panel.pluginName}>{language === "cn" ? "插件页面" : "Plugin page"} · {panel.pluginName}</span>
+      <span className="plugin-page-source" title={panel.pluginName}>{tr(language, "插件页面", "Plugin page", "Página del plugin")} · {panel.pluginName}</span>
       {edit}
     </header>
     <div className="plugin-page-body">

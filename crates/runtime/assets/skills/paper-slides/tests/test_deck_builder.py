@@ -189,6 +189,58 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(code, 0, report["issues"])
         self.assertEqual(len(list((self.root / ".deck_cache").glob("eq-*.png"))), 2)  # split on the line break
 
+    def test_svg_is_embedded_as_vector_with_png_fallback(self):
+        try:
+            import fitz  # noqa: F401
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">'
+               '<rect x="10" y="10" width="380" height="180" rx="16" fill="#2F6FDE"/></svg>')
+        (self.root / "arch.svg").write_text(svg, encoding="utf-8")
+        report, code, out = self.build(deck([{"id": "f", "layout": "figure", "title": "T", "image": "arch.svg",
+                                              "notes": "n"}]))
+        self.assertEqual(code, 0, report["issues"])
+        import zipfile
+        with zipfile.ZipFile(out) as z:
+            names = z.namelist()
+            self.assertTrue(any(n.endswith(".svg") for n in names))
+            self.assertIn("image/svg+xml", z.read("[Content_Types].xml").decode())
+            slide_xml = z.read("ppt/slides/slide1.xml").decode()
+        self.assertIn("svgBlip", slide_xml)
+        pic = next(sh for sh in Presentation(str(out)).slides[0].shapes if sh.shape_type == 13)
+        self.assertAlmostEqual(pic.width / pic.height, 2.0, places=2)  # aspect kept from the viewBox
+
+    def test_illustration_layouts_label_ai_images(self):
+        Image.new("RGB", (1536, 1024), "navy").save(self.root / "hero.png")
+        Image.new("RGB", (1024, 1024), "teal").save(self.root / "card.png")
+        slides = [
+            {"id": "t", "layout": "title", "image": "hero.png", "ai_generated": True, "notes": "n"},
+            {"id": "h", "layout": "hero", "image": "hero.png", "ai_generated": True,
+             "statement": "Big events are where data is thinnest", "subtitle": "only **0.04%** positives", "notes": "n"},
+            {"id": "s", "layout": "section", "title": "Method", "number": "02", "image": "hero.png",
+             "ai_generated": True, "notes": "n"},
+            {"id": "c", "layout": "cards", "title": "Three traps", "notes": "n", "cards": [
+                {"title": "A", "text": "a", "image": "card.png", "ai_generated": True},
+                {"title": "B", "text": "b", "image": "card.png", "ai_generated": True}]},
+        ]
+        report, code, out = self.build(deck(slides))
+        self.assertEqual(code, 0, report["issues"])
+        prs = Presentation(str(out))
+        for i, slide in enumerate(prs.slides):
+            texts = [sh.text_frame.text for sh in slide.shapes if sh.has_text_frame]
+            self.assertTrue(any("AI-generated" in t for t in texts), i)
+            self.assertTrue(any(sh.shape_type == 13 for sh in slide.shapes), i)  # a picture
+
+    def test_hero_requires_image_and_unlabeled_ai_images_warn(self):
+        report, code, _ = self.build(deck([{"id": "h", "layout": "hero", "statement": "x", "notes": "n"}]))
+        self.assertEqual(code, 1)
+        self.assertIn("empty_content", self.codes(report))
+        (self.root / "somni-images").mkdir()
+        Image.new("RGB", (800, 500), "navy").save(self.root / "somni-images" / "a.png")
+        report, code, _ = self.build(deck([{"id": "f", "layout": "figure", "title": "T",
+                                            "image": "somni-images/a.png", "notes": "n"}]))
+        self.assertIn("ai_image_unlabeled", self.codes(report, "warning"))
+
     def test_cjk_wrapping_counts_more_lines_in_narrow_boxes(self):
         m = DB.Metrics("Microsoft YaHei", "Microsoft YaHei")
         text = "逆强化学习的根本困难在于没有答案可以对照，非线性对象没有解析解"

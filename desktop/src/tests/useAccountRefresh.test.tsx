@@ -138,11 +138,11 @@ describe("account allowance refresh", () => {
     openMenu();
     await settle();
     expect(screen.getByText("$32.70")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("Refresh failed. Showing last allowance.");
+    expect(screen.getByRole("status").textContent).toBe("Refresh failed. Showing the last known allowance.");
     const retry = deferred<NewApiAccount>();
     vi.mocked(newapiBootstrap).mockReturnValueOnce(retry.promise);
     fireEvent.click(screen.getByRole("button", { name: "Refresh allowance" }));
-    expect(screen.getByRole("button", { name: "Refreshing allowance" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Refreshing allowance…" })).toHaveProperty("disabled", true);
     expect(screen.getByRole("group", { name: "Plan allowance" }).getAttribute("aria-busy")).toBe("true");
     await act(async () => { retry.resolve(consumedAccount); });
     expect(screen.getByText("$30.00")).toBeTruthy();

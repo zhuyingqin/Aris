@@ -264,6 +264,6 @@ jobs:
       - name: Verify editable slides, provenance and independent review
         run: python -B crates/runtime/assets/skills/paper-slides/tests/test_slide_quality.py -v
       - name: Install deck builder dependencies
-        run: python -m pip install 'python-pptx==1.0.2' 'pillow>=10'
+        run: python -m pip install 'python-pptx==1.0.2' 'pillow>=10' 'pymupdf>=1.24' 'matplotlib>=3.8'
       - name: Verify the deterministic deck builder
         run: python -B crates/runtime/assets/skills/paper-slides/tests/test_deck_builder.py -v

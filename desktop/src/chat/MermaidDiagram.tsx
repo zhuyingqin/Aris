@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useStore, type Theme } from "../store";
+import { tr, useStore, type Theme } from "../store";
 import { mermaidSizeKey, readRenderedHeight, rememberRenderedHeight } from "./renderSizeCache";
 
 type RenderState =
@@ -81,7 +81,7 @@ export async function renderMermaid(code: string, theme: Theme): Promise<string>
     }
     const parsed = await mermaid.parse(code, { suppressErrors: true });
     if (!parsed) {
-      throw new Error("Mermaid syntax error.");
+      throw new Error(tr(useStore.getState().language, "Mermaid 语法错误。", "Mermaid syntax error.", "Error de sintaxis de Mermaid."));
     }
     const rendered = await mermaid.render(nextRenderId(), code);
     resolveRender(rendered.svg);
@@ -164,6 +164,7 @@ export default function MermaidDiagram({
   streaming?: boolean;
 }) {
   const theme = useStore((store) => store.theme);
+  const language = useStore((store) => store.language);
   const [state, setState] = useState<RenderState>({
     status: "idle",
     svg: "",
@@ -280,22 +281,22 @@ export default function MermaidDiagram({
       <div className="md-mermaid-header">
         <span className="md-mermaid-lang">mermaid</span>
         <div className="md-mermaid-toolbar">
-          <div className="md-mermaid-zoom" aria-label="Diagram zoom">
+          <div className="md-mermaid-zoom" aria-label={tr(language, "图表缩放", "Diagram zoom", "Zoom del diagrama")}>
             <button
               type="button"
               className="md-mermaid-zoom-btn"
-              title="Zoom out"
+              title={tr(language, "缩小", "Zoom out", "Alejar")}
               onClick={() => setZoom((value) => clampZoom(value - ZOOM_STEP))}
             >
               -
             </button>
-            <span className="md-mermaid-zoom-label" title="Current zoom">
+            <span className="md-mermaid-zoom-label" title={tr(language, "当前缩放", "Current zoom", "Zoom actual")}>
               {formatZoom(zoom)}
             </span>
             <button
               type="button"
               className="md-mermaid-zoom-btn"
-              title="Zoom in"
+              title={tr(language, "放大", "Zoom in", "Acercar")}
               onClick={() => setZoom((value) => clampZoom(value + ZOOM_STEP))}
             >
               +
@@ -303,7 +304,7 @@ export default function MermaidDiagram({
             <button
               type="button"
               className="md-mermaid-zoom-btn"
-              title="Reset zoom"
+              title={tr(language, "重置缩放", "Reset zoom", "Restablecer zoom")}
               onClick={() => setZoom(1)}
             >
               100%
@@ -320,7 +321,7 @@ export default function MermaidDiagram({
               });
             }}
           >
-            {copied ? "Copied" : "Copy"}
+            {copied ? tr(language, "已复制", "Copied", "Copiado") : tr(language, "复制", "Copy", "Copiar")}
           </button>
           <button
             type="button"
@@ -328,7 +329,7 @@ export default function MermaidDiagram({
             aria-expanded={showSource}
             onClick={() => setSourceOpen((value) => !value)}
           >
-            {showSource ? "Hide source" : "Source"}
+            {showSource ? tr(language, "隐藏源码", "Hide source", "Ocultar código") : tr(language, "源码", "Source", "Código")}
           </button>
           </div>
         </div>
@@ -342,7 +343,7 @@ export default function MermaidDiagram({
         style={reservedHeight && !hasDiagram ? { minHeight: reservedHeight } : undefined}
       >
         {state.status === "loading" && !svg && (
-          <div className="md-mermaid-placeholder">Rendering diagram...</div>
+          <div className="md-mermaid-placeholder">{tr(language, "正在渲染图表…", "Rendering diagram...", "Renderizando diagrama…")}</div>
         )}
         {hasDiagram && (
           <div className="md-mermaid-stage" style={{ width: stageWidth, height: stageHeight }}>
@@ -355,9 +356,14 @@ export default function MermaidDiagram({
         )}
         {state.status === "error" && (
           <div className="md-mermaid-error-wrap">
-            <div className="md-mermaid-error-title">Mermaid syntax error</div>
+            <div className="md-mermaid-error-title">{tr(language, "Mermaid 语法错误", "Mermaid syntax error", "Error de sintaxis de Mermaid")}</div>
             <div className="md-mermaid-error">
-              The diagram was not rendered. Use the source view below to inspect or edit the code.
+              {tr(
+                language,
+                "图表未能渲染。可在下方源码视图中查看或修改代码。",
+                "The diagram was not rendered. Use the source view below to inspect or edit the code.",
+                "No se pudo renderizar el diagrama. Revisa o edita el código en la vista de código de abajo.",
+              )}
             </div>
             {state.error && <div className="md-mermaid-error-detail">{state.error}</div>}
           </div>

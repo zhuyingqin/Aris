@@ -6,6 +6,7 @@ import type { PaperReadingView } from "../paperReadingApi";
 import { guideFixture, layeredGuideFixture } from "./paperGuideFixture";
 
 const mocks = vi.hoisted(() => ({
+  uiLanguage: "cn" as "cn" | "en" | "es",
   models: vi.fn(), get: vi.fn(), prepare: vi.fn(), source: vi.fn(), start: vi.fn(), cancel: vi.fn(),
   revision: vi.fn(), page: vi.fn(), followUps: vi.fn(), list: vi.fn(), load: vi.fn(), remove: vi.fn(), ask: vi.fn(),
   updated: null as null | ((value: PaperReadingView) => void),
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../api/tauri", () => ({ chatModelOptions: mocks.models }));
 vi.mock("../../store", () => ({
   useStore: (selector: (state: unknown) => unknown) =>
-    selector({ language: "cn", currentProject: { id: "project-1" } }),
+    selector({ language: mocks.uiLanguage, currentProject: { id: "project-1" } }),
 }));
 vi.mock("../paperReadingApi", () => ({
   paperReadingGet: mocks.get, paperReadingPrepare: mocks.prepare,
@@ -68,6 +69,7 @@ function initial(): PaperReadingView {
 let backend: PaperReadingView;
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.uiLanguage = "cn";
   backend = initial();
   mocks.models.mockResolvedValue({ current: "vision-model", options: [{ value: "vision-model", label: "Vision A", description: null }, { value: "vision-b", label: "Vision B", description: null }] });
   mocks.get.mockResolvedValue(null);
@@ -118,6 +120,15 @@ describe("paper perception task", () => {
     expect(mocks.source).toHaveBeenCalledTimes(2);
     expect(mocks.source.mock.invocationCallOrder[1]).toBeLessThan(mocks.start.mock.invocationCallOrder[0]);
     expect(screen.getByText("识别完整性：未验证")).toBeTruthy();
+  });
+
+  it("starts a Spanish guide when the interface is Spanish", async () => {
+    mocks.uiLanguage = "es";
+    show();
+    await waitFor(() => expect(mocks.get).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Analizar artículo" }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    expect(mocks.prepare).toHaveBeenCalledWith(expect.objectContaining({ language: "es" }));
   });
 
   it("extends cached perception into explanations without processing the PDF again", async () => {

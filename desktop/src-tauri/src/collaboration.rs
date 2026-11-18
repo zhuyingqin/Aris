@@ -93,6 +93,7 @@ const CHILD_TOOLS: &[&str] = &[
     "read_file",
     "read_files",
     "read_docx",
+    "read_pdf_pages",
     "glob_search",
     "grep_search",
     "WebFetch",

@@ -1,6 +1,7 @@
+import type { Language } from "./store";
 import { isClientOutdatedError } from "./clientOutdated";
 
-export type ErrorMessageLanguage = "cn" | "en";
+export type ErrorMessageLanguage = Language;
 
 type ErrorCopy = {
   clientOutdated: string;
@@ -54,6 +55,23 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
     localFilePermission: "You do not have permission to access this local file or folder. Check its permissions or select an accessible location.",
     localFileBusy: "The local file is in use by another program. Close that program and retry.",
     unexpected: "The operation could not be completed. Please try again.",
+  },
+  es: {
+    clientOutdated: "Esta versión de SomniQ Studio ya no tiene soporte. Actualízala para continuar.",
+    authentication: "Error de autenticación. Vuelve a iniciar sesión o revisa la API key.",
+    upstreamCredentialExpired: "La credencial del servicio del modelo seleccionado ha caducado. Cambia de modelo o contacta con el administrador del servicio.",
+    signInExpired: "Tu sesión ha caducado. Vuelve a iniciar sesión.",
+    connection: "No se puede conectar con el servicio. Revisa tu conexión de red y vuelve a intentarlo.",
+    contextLimit: "Este chat es demasiado largo para el modelo seleccionado. Empieza un chat nuevo o compacta el contexto y vuelve a intentarlo.",
+    reasoningContinuation: "El modelo no pudo continuar con el historial de razonamiento que requieren las llamadas a herramientas. Reintenta o cambia de modelo para continuar.",
+    rateLimited: "La solicitud se limitó por frecuencia o la cuota actual no está disponible. Vuelve a intentarlo más tarde.",
+    modelUnavailable: "El modelo seleccionado no está disponible. Elige otro modelo en Configuración y vuelve a intentarlo.",
+    serviceUnavailable: "El servicio no está disponible temporalmente. Vuelve a intentarlo más tarde.",
+    localFile: "No se pudo acceder al archivo local. Comprueba que existe y que tienes permiso para usarlo.",
+    localFileMissing: "No se encontró el archivo o la carpeta local. Puede que se haya movido o eliminado; selecciónalo de nuevo y reintenta.",
+    localFilePermission: "No tienes permiso para acceder a este archivo o carpeta local. Revisa sus permisos o selecciona una ubicación accesible.",
+    localFileBusy: "Otro programa está usando el archivo local. Cierra ese programa y reintenta.",
+    unexpected: "No se pudo completar la operación. Vuelve a intentarlo.",
   },
 };
 
@@ -163,6 +181,7 @@ export function formatUserFacingError(
     || lower.includes("status 429")
     || lower.includes("quota")
     || lower.includes("额度")
+    || lower.includes("cuota")
   ) {
     return copy.rateLimited;
   }
@@ -174,6 +193,7 @@ export function formatUserFacingError(
     || lower.includes("model does not exist")
     || lower.includes("模型不存在")
     || lower.includes("模型不可用")
+    || lower.includes("modelo no disponible")
   ) {
     return copy.modelUnavailable;
   }
@@ -191,6 +211,7 @@ export function formatUserFacingError(
     || lower.includes("timeout")
     || lower.includes("无法连接")
     || lower.includes("连接超时")
+    || lower.includes("no se pudo conectar")
   ) {
     return copy.connection;
   }

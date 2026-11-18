@@ -83,6 +83,11 @@ default. Stop early only when:
 - a required tool is missing and cannot be installed (then deliver what exists
   and state exactly what is pending).
 
+If you keep a task list (TodoWrite), update it at every phase change — the user
+watches it, and a list stuck on "Phase 0" while you render pages looks frozen.
+Do not reopen page images you already inspected; re-render and open only the
+pages you changed (older images are dropped from the request to keep it fast).
+
 If context is running short, finish the current phase, write
 `SLIDES_STATE.json` with the next phase and resume immediately; do not hand
 the remaining phases back to the user as a question.
@@ -175,6 +180,36 @@ Rules:
 - Every result slide cites its evidence (figure file, table, log) — no orphan
   claims, no figure from another run.
 - Count matches the request; times sum to the slot minus Q&A.
+- Add a **Visual** column: every slide's picture source (see the visual plan
+  below). A deck of text-only slides is not finished.
+
+#### Visual plan
+
+Choose each slide's picture by what it must prove:
+
+| Content | Picture source | Layout |
+|---|---|---|
+| Measured results, data, experiments | Real figures from the source (cropped to the relevant panel) or native `chart`/`table` from the source numbers. **Never AI images.** | `figure`, `figure_text`, `chart`, `table`, `metrics` |
+| Method, architecture, pipeline, data flow | **SVG**: `/figure-spec` (JSON → SVG), or hand-written SVG / matplotlib `.svg`; simple flows as `process` | `figure`, `figure_text`, `process` |
+| Cover, section dividers, opening hook, motivation, application scene, physical intuition | **`SomniImage`** illustrations, when the tool is available | `title` / `section` / `hero` with `image`, `cards` with images, `figure_text` |
+
+SomniImage rules (it spends the user's gateway quota):
+
+- Budget: 3–5 images per deck (cover, 1–2 scenes/hooks, optionally one card
+  set). Ask before going beyond 6. One request per image; **never resubmit a
+  failed or timed-out request automatically** — use a text-only layout instead
+  and mention it in the report.
+- Prompts: describe subject, composition and mood; **no text, labels, numbers
+  or logos in the image** (put words on the slide). Reuse one style line for the
+  whole deck, e.g. "clean editorial illustration, soft gradients, deep navy and
+  warm orange palette, generous negative space on the left for a headline". Use
+  `size: 1536x1024` for cover/hero/section, `1024x1024` for cards.
+- The tool saves to `.somniq/artifacts/somni-images/`; copy the chosen file into
+  `slides/figures/` and set `"ai_generated": true` on that slide/card. Look at
+  each generated image with `ReadMediaFile` before using it; reject ones with
+  garbled text or misleading content.
+- If SomniImage is unavailable, keep the same layouts with SVG diagrams or
+  real figures, or fall back to `statement`/`cards` without images.
 
 Show the outline as a compact table. Apply `OUTLINE_CHECKPOINT` (above): unless
 a stop is warranted, continue directly to Phase 2.
@@ -200,9 +235,12 @@ Content rules (enforced by review):
 | Unicode maths in text | θ, ≤, x⁺, Θ₁₂; real equations go to the `equation` layout |
 | No AI filler | Remove "delve", "cutting-edge", "赋能", "全方位" style words |
 
-For diagrams beyond `process`/`cards`, generate a PNG: `/figure-spec` (export
-SVG → PNG), `/mermaid-diagram`, matplotlib, or `SomniImage` for conceptual
-illustrations (label schematics as such; never for results).
+Produce the visuals from the visual plan before building: SVG diagrams
+(`/figure-spec` renders straight to `.svg`; keep the SVG, no PNG conversion
+needed), extracted paper figures (PNG ≥ 200 dpi), and SomniImage illustrations
+(copied into `slides/figures/`, `ai_generated: true`). Generate independent
+SomniImage requests in the same assistant message when the runtime allows
+parallel tool calls, to save turns.
 
 **State**: `phase: 2`.
 

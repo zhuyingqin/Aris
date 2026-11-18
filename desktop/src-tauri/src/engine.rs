@@ -2132,6 +2132,9 @@ where
     ) -> Result<ToolOutput, ToolError> {
         match inner_result {
             Ok(output) => {
+                // Rendered PDF pages become media blocks before the text is
+                // measured, spilled or truncated below.
+                let output = runtime::pdf_render::lift_pdf_page_media(tool_name, output);
                 // An image result is not text that happens to be long: the
                 // conversation runtime lifts this exact JSON into an image
                 // content block and replaces the text with a one-line summary,
@@ -6226,6 +6229,8 @@ fn is_unusable_generated_title(title: &str) -> bool {
             | "unknown"
             | "status:insufficientevidence"
             | "insufficientevidence"
+            | "estado:sinconfirmar"
+            | "sinconfirmar"
     ) {
         return true;
     }

@@ -238,6 +238,17 @@ describe("Chat plugin panels", () => {
     expect(onOpenFile).toHaveBeenLastCalledWith("results/log.md");
   });
 
+  it("sends a localized prompt in the reader's language", async () => {
+    const onPrompt = vi.fn();
+    const localized: api.ActiveUiPanel = { ...board, widgets: [
+      { id: "refresh", type: "button", label: { en: "Refresh board", cn: "刷新看板", es: "Actualizar tablero" },
+        action: { type: "prompt", text: { en: "Refresh the board", cn: "刷新看板", es: "Actualiza el tablero" }, send: true } },
+    ] };
+    render(<ChatPluginPanel {...props} language="es" panel={localized} onPrompt={onPrompt} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Actualizar tablero" }));
+    expect(onPrompt).toHaveBeenLastCalledWith("Actualiza el tablero", true);
+  });
+
   it("turns a button or a filled form into a prompt for the composer, never a direct action", async () => {
     const onPrompt = vi.fn();
     const view = render(<ChatPluginPanel {...props} panel={board} onPrompt={onPrompt} />);

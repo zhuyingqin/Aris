@@ -9,4 +9,9 @@ export const SETTINGS_LAYOUT_COPY = {
     profile: "Profile", account: "Account", about: "About & diagnostics", global: "Global settings", local: "This device",
     advanced: "Advanced", modelScope: "Account model changes apply immediately. Save connection parameters to apply them.", update: "App updates", accountOverview: "Account overview",
   },
+  es: {
+    models: "Modelos y revisión", memory: "Memoria y contexto", mail: "Conexiones de correo", literature: "Biblioteca de literatura", remote: "Conexiones remotas",
+    profile: "Perfil", account: "Cuenta", about: "Acerca de y diagnóstico", global: "Ajustes globales", local: "Este dispositivo",
+    advanced: "Avanzado", modelScope: "Los cambios de modelo de la cuenta se aplican al instante. Guarda los parámetros de conexión para aplicarlos.", update: "Actualizaciones", accountOverview: "Resumen de la cuenta",
+  },
 };

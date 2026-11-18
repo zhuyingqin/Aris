@@ -13,6 +13,7 @@ import { LoginClientUpdateButton } from "../ClientOutdatedNotice";
 import { onClientOutdated } from "../clientOutdated";
 import { DreamScene, LoginBackdrop } from "./LoginScene";
 import { LOGIN_COPY } from "./i18n";
+import { forgotPasswordUrl } from "../accountSiteLinks";
 import "./login.css";
 
 // Self-contained sign-in screen shown before the app shell when the user has
@@ -294,7 +295,18 @@ export default function Login() {
           </div>
 
           <div className="sq-field" style={field(3)}>
-            <div className="sq-label">{copy.passwordLabel}</div>
+            <div className="sq-label sq-label-row">
+              <span>{copy.passwordLabel}</span>
+              {mode === "login" && (
+                <button
+                  type="button"
+                  className="sq-linkbtn sq-forgot-link"
+                  onClick={() => void openExternalUrl(forgotPasswordUrl(language))}
+                >
+                  {copy.forgotPassword}
+                </button>
+              )}
+            </div>
             <input
               className="sq-input"
               type="password"

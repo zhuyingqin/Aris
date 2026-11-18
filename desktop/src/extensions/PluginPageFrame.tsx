@@ -10,11 +10,12 @@ import { onWorkTaskChanged, workTaskList } from "../api/tauri";
 import { pluginTaskRecords, type PluginTaskRecord } from "./pluginTaskRecords";
 import { PLUGIN_PAGE_SANDBOX, pluginPageDocument, type PluginPageTheme } from "./pluginPageDocument";
 import PluginTaskProposal, { MAX_TASK_PROMPT_CHARS, MAX_TASK_TITLE_CHARS, type TaskOutcome, type TaskProposal } from "./PluginTaskProposal";
-import { uiText, type PluginPageAction } from "./useChatPluginPanels";
+import { pluginTextLanguage, uiText, type PluginPageAction } from "./useChatPluginPanels";
 
 const COPY = {
   cn: { loading: "正在打开页面…", retry: "重新加载", isolation: "无法隔离这个页面，已停止运行它。" },
   en: { loading: "Opening page…", retry: "Reload", isolation: "This page could not be isolated, so it was not run." },
+  es: { loading: "Abriendo página…", retry: "Recargar", isolation: "No se pudo aislar esta página, así que no se ejecutó." },
 };
 const MAX_PROMPT_CHARS = 4000;
 const MAX_PATH_CHARS = 1024;
@@ -114,7 +115,7 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
       })
       : Promise.all([pluginsUiPage(projectPath, pluginName, pageId), load()]);
     opened.then(([file, data]) => {
-      if (live) setSource(pluginPageDocument(file, channel.current, { language, theme: readTheme(), data }));
+      if (live) setSource(pluginPageDocument(file, channel.current, { language: pluginTextLanguage(language), locale: language, theme: readTheme(), data }));
     }).catch((failure) => { if (live) setError(String(failure)); });
     return () => { live = false; };
     // `panel.packageDigest`: an upgraded package is a different page.
@@ -263,7 +264,7 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
     setProposal(null);
   };
   return <>
-    <iframe ref={shell} className="plugin-page-frame" title={typeof panel.title === "string" ? panel.title : panel.title[language]} sandbox={PLUGIN_PAGE_SANDBOX} referrerPolicy="no-referrer" srcDoc={source} />
+    <iframe ref={shell} className="plugin-page-frame" title={uiText(panel.title, language)} sandbox={PLUGIN_PAGE_SANDBOX} referrerPolicy="no-referrer" srcDoc={source} />
     {proposal && <PluginTaskProposal proposal={proposal} language={language} onDone={decided} />}
   </>;
 }

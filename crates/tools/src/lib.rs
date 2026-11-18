@@ -123,6 +123,7 @@ pub fn tool_execution(name: &str) -> ToolExecution {
         | "read_odt"
         | "read_files"
         | "ReadMediaFile"
+        | "read_pdf_pages"
         | "WorkspaceLayout"
         | "change_list"
         | "change_get"
@@ -479,11 +480,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "ReadMediaFile",
-            description: "Read an image or other supported media file and attach its bytes as a native multimodal content block. Use this after creating or editing an image, and reread the result before judging it. Text/PDF files belong to read_file.",
+            description: "Read an image or other supported media file and attach its bytes as a native multimodal content block. Use this after creating or editing an image, and reread the result before judging it. Text/PDF files belong to read_file; rendered PDF pages come from read_pdf_pages.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "read_pdf_pages",
+            description: "Render pages of a local PDF to images attached directly to the result, so you can read scanned pages, figures, tables, formulas, and text whose font encoding is broken. Use it when read_file reports pdfExtraction.quality unconfirmed/no_text, when its text is garbled, or when exact layout, numbers or formulas matter. Renders up to 4 pages per call with tools already on this computer (the built-in Windows PDF engine, else Poppler pdftoppm or MuPDF mutool); ocr=true adds machine OCR text per page (Windows OCR or Tesseract), which can misread characters, so check it against the images. Never install packages or write scripts as a substitute; if no renderer is available, tell the user.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "pages": {
+                        "type": "string",
+                        "description": "1-based pages such as \"3\", \"1-4\" or \"2,5,7-8\". Defaults to the first 4 pages. Pages beyond the first 4 requested are listed as remaining for a later call."
+                    },
+                    "dpi": {
+                        "type": "integer", "minimum": 72, "maximum": 200, "default": 130,
+                        "description": "Render resolution. Raise it for small print or dense formulas."
+                    },
+                    "ocr": { "type": "boolean", "default": false }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -1821,6 +1844,13 @@ fn execute_tool_with_cancel_and_progress_in_context(
         }),
         "read_files" => from_value::<ReadFilesInput>(input).and_then(run_read_files),
         "ReadMediaFile" => from_value::<ReadFileInput>(input).and_then(run_read_media_file),
+        "read_pdf_pages" => from_value::<runtime::pdf_render::ReadPdfPagesInput>(input)
+            .and_then(|input| {
+                to_pretty_json(
+                    runtime::pdf_render::read_pdf_pages(&input, should_cancel)
+                        .map_err(io_to_string)?,
+                )
+            }),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
             from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, context))

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { newapiUsageLogs, type NewApiAccount, type NewApiUsageLogPage } from "../api/tauri";
+import { newapiUsageLogs, openExternalUrl, type NewApiAccount, type NewApiUsageLogPage } from "../api/tauri";
+import { changePasswordUrl } from "../accountSiteLinks";
 import { hasNativeBackend } from "../api/transport";
 import { formatUserFacingError } from "../errorMessage";
 import { readCachedUsageLogPages, writeCachedUsageLogPages } from "../accountCache";
 import { epochToDate } from "../timestamp";
 import { SvgIcon } from "../SvgIcon";
-import { useStore, type Language } from "../store";
+import { tr, useStore, type Language } from "../store";
 import { SETTINGS_COPY } from "./i18n";
 import {
   formatQuota,
@@ -177,12 +178,16 @@ export default function AccountSettings({
         <div className="sp-update-actions">
           {account && hasNativeBackend() && <button className="sp-btn sp-btn-primary" onClick={() => onPurchaseOpenChange(true)} type="button">
             <SvgIcon name="credit" size={13} />
-            {language === "cn" ? (paidMembership ? "会员升级" : "购买会员") : (paidMembership ? "Upgrade membership" : "Buy membership")}
+            {paidMembership ? tr(language, "会员升级", "Upgrade membership", "Mejorar membresía") : tr(language, "购买会员", "Buy membership", "Comprar membresía")}
           </button>}
           <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={accountPageRefreshing} type="button">
             <SvgIcon name={accountPageRefreshing ? "spinner" : "refresh"} size={13} />
             {accountPageRefreshing ? copy.authRefreshing : copy.authRefresh}
           </button>
+          {account && <button className="sp-btn sp-btn-secondary" onClick={() => void openExternalUrl(changePasswordUrl(language))} type="button">
+            <SvgIcon name="shieldCheck" size={13} />
+            {copy.authChangePassword}
+          </button>}
           <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">
             <SvgIcon name="close" size={13} />
             {copy.authLogout}

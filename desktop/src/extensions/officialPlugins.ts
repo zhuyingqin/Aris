@@ -36,6 +36,7 @@ export const switchTarget = (state: OfficialPluginState): "global" | "project" =
 export const OFFICIAL_PLUGIN_NAMES: Record<Language, Record<OfficialPluginId, string>> = {
   cn: { literature: "文献库", latex: "LaTeX", figures: "Figures", mail: "邮箱" },
   en: { literature: "Literature", latex: "LaTeX", figures: "Figures", mail: "Mail" },
+  es: { literature: "Bibliografía", latex: "LaTeX", figures: "Figures", mail: "Correo" },
 };
 
 export const officialPluginName = (id: string, language: Language): string =>

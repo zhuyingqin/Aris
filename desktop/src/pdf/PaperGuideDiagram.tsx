@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store";
+import { tr, type Language } from "../language";
 import { renderMermaid } from "../chat/MermaidDiagram";
 import type { BarChart, FlowDiagram, FlowNodeRole, TeachingDiagram } from "./paperReadingApi";
 import PaperReadingContent from "./PaperReadingContent";
@@ -71,7 +72,8 @@ const MIN_DIAGRAM_SCALE = 0.85;
 
 /** Drawn with the app's Mermaid theme. If drawing fails, the same content is
  * listed as text, so the picture's information is never lost. */
-function FlowFigure({ flow, english }: { flow: FlowDiagram; english: boolean }) {
+function FlowFigure({ flow, language }: { flow: FlowDiagram; language: Language }) {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const theme = useStore(store => store.theme);
   const code = useMemo(() => flowToMermaid(flow), [flow]);
   const [drawn, setDrawn] = useState<{ svg: string; failed: boolean }>({ svg: "", failed: false });
@@ -84,7 +86,7 @@ function FlowFigure({ flow, english }: { flow: FlowDiagram; english: boolean }) 
     return () => { active = false; };
   }, [code, theme]);
   if (drawn.failed) {
-    return <ol className="paper-essay-diagram-fallback" aria-label={english ? "Diagram as text" : "示意图（文字版）"}>
+    return <ol className="paper-essay-diagram-fallback" aria-label={t("示意图（文字版）", "Diagram as text", "Diagrama en texto")}>
       {flow.edges.map((edge, index) => <li key={index}>{nodeLabel(flow, edge.from)} → {edge.label ? `${edge.label} → ` : ""}{nodeLabel(flow, edge.to)}</li>)}
     </ol>;
   }
@@ -112,17 +114,18 @@ function BarFigure({ chart }: { chart: BarChart }) {
 
 /** A teaching picture with its provenance: a diagram drawn from the paper, or
  * numbers that are either the paper's own or invented for teaching. */
-export default function PaperGuideDiagram({ diagram, english, eyebrow }: {
-  diagram: TeachingDiagram; english: boolean; eyebrow: string;
+export default function PaperGuideDiagram({ diagram, language, eyebrow }: {
+  diagram: TeachingDiagram; language: Language; eyebrow: string;
 }) {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const provenance = diagram.kind === "flow"
-    ? (english ? "Teaching diagram drawn from the paper, not an original figure" : "讲解示意图：根据原文整理，不是论文原图")
+    ? (t("讲解示意图：根据原文整理，不是论文原图", "Teaching diagram drawn from the paper, not an original figure", "Diagrama didáctico elaborado a partir del artículo, no es una figura original"))
     : diagram.origin === "paper"
-      ? (english ? "Values from the paper's original table" : "数值来自论文原始表格")
-      : (english ? "Invented teaching data, not the paper's results" : "教学构造的数据，不是论文结果");
+      ? (t("数值来自论文原始表格", "Values from the paper's original table", "Valores de la tabla original del artículo"))
+      : (t("教学构造的数据，不是论文结果", "Illustrative teaching data, not the paper's results", "Datos inventados con fines didácticos, no son resultados del artículo"));
   return <figure className="paper-essay-diagram">
     <header className="paper-essay-diagram-head"><span className="paper-essay-eyebrow">{eyebrow}</span><strong>{diagram.title}</strong></header>
-    {diagram.kind === "flow" ? <FlowFigure flow={diagram} english={english} /> : <BarFigure chart={diagram} />}
+    {diagram.kind === "flow" ? <FlowFigure flow={diagram} language={language} /> : <BarFigure chart={diagram} />}
     <figcaption>
       <PaperReadingContent content={diagram.caption} />
       <p className="paper-essay-caption">{provenance}</p>

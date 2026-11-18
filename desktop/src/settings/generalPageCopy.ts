@@ -23,4 +23,16 @@ export const GENERAL_PAGE_COPY = {
     shortcutInvalid: "Use Ctrl, Alt, or Command with a letter, number, or function key.",
     shortcutConflict: "This key combination is in use. Choose a different shortcut, or release it and retry.",
   },
+  es: {
+    appearance: "Apariencia e idioma", mode: "Modo", languageDescription: "También se usa en las próximas respuestas del asistente.",
+    color: "Color de acento", colors: { default: "Azul predeterminado", purple: "Morado", teal: "Verde azulado", green: "Verde", orange: "Naranja", pink: "Rosa" },
+    workspace: "Espacio de trabajo", mail: "Correo", mailDescription: "Activa o desactiva el plugin oficial Correo: al apagarlo se detienen a la vez la página de Correo, las herramientas de correo y la escucha de correo nuevo; tus cuentas se conservan. En Plugins también puedes configurarlo por proyecto.", workflows: "Flujos de investigación", memoryDescription: "Pedir aprobación antes de guardar memoria local.",
+    advanced: "Avanzado", fontSize: "Tamaño del texto de la interfaz", fontDescription: "Las barras laterales, los menús y el texto se ajustan juntos.",
+    saving: "Guardando la política de memoria…", saved: "Política de memoria guardada", saveFailed: "No se pudo guardar. Se mantiene tu configuración anterior.", retry: "Reintentar",
+    preferenceSaving: "Guardando…", preferenceSaved: "Guardado",
+    shortcutEdit: "Editar el atajo de captura", shortcutRecording: "Pulsa un nuevo atajo…",
+    shortcutHint: "Haz clic para cambiar el atajo global. Esc cancela.", shortcutDesktopOnly: "Cambia el atajo en la aplicación de escritorio.",
+    shortcutInvalid: "Usa Ctrl, Alt o Command con una letra, un número o una tecla de función.",
+    shortcutConflict: "Esta combinación ya está en uso. Elige otro atajo, o libéralo y vuelve a intentarlo.",
+  },
 };

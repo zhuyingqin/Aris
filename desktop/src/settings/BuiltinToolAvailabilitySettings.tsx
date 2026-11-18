@@ -25,6 +25,15 @@ const COPY = {
     empty: "No research tools were detected.",
     preview: "Desktop research tool checks are unavailable in browser preview.",
   },
+  es: {
+    title: "Disponibilidad de herramientas de investigación",
+    refresh: "Volver a comprobar",
+    checking: "Comprobando…",
+    ready: "Disponible",
+    unavailable: "No disponible",
+    empty: "No se detectaron herramientas de investigación.",
+    preview: "Las comprobaciones de herramientas de investigación de escritorio no están disponibles en la vista previa en navegador.",
+  },
 } as const;
 
 export default function BuiltinToolAvailabilitySettings({ language }: { language: Language }) {

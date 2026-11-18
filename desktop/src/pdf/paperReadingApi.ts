@@ -183,11 +183,16 @@ export interface PaperReadingView {
   };
 }
 
+/** Language a guide is generated in. Saved runs keep whatever value they were
+ * created with (older runs only ever hold "zh" or "en"), so the stored
+ * `language` fields stay `string`; this is what new runs are started with. */
+export type PaperReadingLanguage = "zh" | "en" | "es";
+
 export const paperReadingGet = (projectId: string, paperId: string, relativePath: string) =>
   invoke<PaperReadingView | null>("paper_reading_get", { projectId, paperId, relativePath });
 
 export const paperReadingPrepare = (input: {
-  projectId: string; paperId: string; relativePath: string; documentRevision: string; language: string; model?: string; regenerate?: boolean; runId?: string;
+  projectId: string; paperId: string; relativePath: string; documentRevision: string; language: PaperReadingLanguage | (string & {}); model?: string; regenerate?: boolean; runId?: string;
 }) => invoke<PaperReadingView>("paper_reading_prepare", { input });
 
 export const paperReadingSource = (input: {

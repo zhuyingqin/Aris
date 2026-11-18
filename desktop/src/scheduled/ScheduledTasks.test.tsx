@@ -135,7 +135,7 @@ describe("ScheduledTasks", () => {
     render(<ScheduledTasks />);
 
     expect((await screen.findByRole("alert")).textContent).toContain("invalid Cron expression");
-    expect((screen.getByRole("button", { name: /Save Changes/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Save changes/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("keeps each delivery apart from the outcome of the work task it queued", async () => {
@@ -174,9 +174,9 @@ describe("ScheduledTasks", () => {
     const queuedDelivery = within(queued).getByTestId("delivery");
     const queuedOutcome = within(queued).getByTestId("outcome");
     expect(within(queuedDelivery).getByText("Queued")).toBeTruthy();
-    expect(within(queuedDelivery).getByText("3 missed run(s) folded in")).toBeTruthy();
+    expect(within(queuedDelivery).getByText("3 missed runs folded in")).toBeTruthy();
     // "Queued" is not "done": the outcome is the card's own state.
-    expect(within(queuedOutcome).getByText("Independent review")).toBeTruthy();
+    expect(within(queuedOutcome).getByText("In independent review")).toBeTruthy();
     expect(within(queuedOutcome).queryByText("Queued")).toBeNull();
 
     expect(within(within(missed).getByTestId("delivery")).getByText("Missed")).toBeTruthy();
@@ -213,7 +213,7 @@ describe("ScheduledTasks", () => {
     expect(screen.queryByRole("combobox", { name: "Linked chat" })).toBeNull();
     expect(screen.getByText('Every run opens a new chat in "Project A".')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Save Changes/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Save changes/ }));
     await waitFor(() => expect(scheduledTaskUpdate).toHaveBeenCalled());
     expect(scheduledTaskUpdate).toHaveBeenCalledWith(
       "task-1",

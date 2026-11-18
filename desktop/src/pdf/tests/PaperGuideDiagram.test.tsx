@@ -48,7 +48,7 @@ describe("teaching diagrams", () => {
 
   it("draws the flow with the app theme and falls back to text when drawing fails", async () => {
     renderMermaid.mockResolvedValueOnce('<svg data-testid="drawn" viewBox="0 0 1000 200"></svg>');
-    const { container, unmount } = render(<PaperGuideDiagram diagram={flow()} english eyebrow="See it in a picture" />);
+    const { container, unmount } = render(<PaperGuideDiagram diagram={flow()} language="en" eyebrow="See it in a picture" />);
     await waitFor(() => expect(container.querySelector('[data-testid="drawn"]')).toBeTruthy());
     // A wide flow shrinks only so far, then scrolls, so labels stay readable.
     expect(container.querySelector<HTMLElement>(".paper-essay-diagram-stage")!.style.minWidth).toBe("850px");
@@ -58,19 +58,19 @@ describe("teaching diagrams", () => {
     unmount();
 
     renderMermaid.mockRejectedValueOnce(new Error("syntax"));
-    render(<PaperGuideDiagram diagram={flow()} english={false} eyebrow="看图理解" />);
+    render(<PaperGuideDiagram diagram={flow()} language="cn" eyebrow="看图理解" />);
     const fallback = await screen.findByRole("list", { name: "示意图（文字版）" });
     expect(fallback.textContent).toContain("Queries $Q$ → Q·K^T → Score");
     expect(screen.getByText("讲解示意图：根据原文整理，不是论文原图")).toBeTruthy();
   });
 
   it("compares numbers on one scale and says where they come from", () => {
-    const { container, rerender } = render(<PaperGuideDiagram diagram={bars("paper")} english={false} eyebrow="看图理解" />);
+    const { container, rerender } = render(<PaperGuideDiagram diagram={bars("paper")} language="cn" eyebrow="看图理解" />);
     const fills = [...container.querySelectorAll<HTMLElement>(".paper-essay-bar-fill")].map(fill => fill.style.width);
     expect(fills).toEqual(["50%", "100%"]);
     expect(container.querySelector(".is-highlight")?.textContent).toContain("40 BLEU");
     expect(screen.getByText("数值来自论文原始表格")).toBeTruthy();
-    rerender(<PaperGuideDiagram diagram={bars("teaching")} english={false} eyebrow="看图理解" />);
+    rerender(<PaperGuideDiagram diagram={bars("teaching")} language="cn" eyebrow="看图理解" />);
     expect(screen.getByText("教学构造的数据，不是论文结果")).toBeTruthy();
     expect(renderMermaid).not.toHaveBeenCalled();
     expect(diagramMarkdown(bars("paper"))).toContain("| This paper | 40 |");
@@ -83,7 +83,7 @@ describe("teaching diagrams", () => {
     guide.outline.result!.diagram = { ...flow(), title: "The paper at a glance" };
     guide.lessons[0].task.result!.diagram = bars("teaching");
     const onSaveNote = vi.fn();
-    const { container } = render(<PaperGuideView guide={guide} document={null} onJump={vi.fn()} language="zh" onSaveNote={onSaveNote} />);
+    const { container } = render(<PaperGuideView guide={guide} document={null} onJump={vi.fn()} language="cn" onSaveNote={onSaveNote} />);
     expect(screen.getByText("一图看懂论文")).toBeTruthy();
     expect(screen.getByText("The paper at a glance")).toBeTruthy();
     fireEvent.click(screen.getAllByRole("button", { name: /什么是注意力/ })[0]);

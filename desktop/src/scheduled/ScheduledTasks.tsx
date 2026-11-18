@@ -19,6 +19,7 @@ import {
 } from "../api/tauri";
 import type { ChatSession } from "../chat/types";
 import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 import type {
   ChatModelOption,
@@ -93,12 +94,12 @@ const DEFAULT_INTERVAL = 15;
 const DEFAULT_CRON = "0 9 * * 1-5";
 const DEFAULT_RRULE = "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0";
 
-const PRESET_INTERVALS: Array<{ value: number; unit: IntervalUnit; label: string }> = [
-  { value: 15, unit: "minutes", label: "15 分钟" },
-  { value: 30, unit: "minutes", label: "30 分钟" },
-  { value: 1, unit: "hours", label: "1 小时" },
-  { value: 6, unit: "hours", label: "6 小时" },
-  { value: 1, unit: "days", label: "1 天" },
+const PRESET_INTERVALS: Array<{ value: number; unit: IntervalUnit; label: Record<Language, string> }> = [
+  { value: 15, unit: "minutes", label: { cn: "15 分钟", en: "15 minutes", es: "15 minutos" } },
+  { value: 30, unit: "minutes", label: { cn: "30 分钟", en: "30 minutes", es: "30 minutos" } },
+  { value: 1, unit: "hours", label: { cn: "1 小时", en: "1 hour", es: "1 hora" } },
+  { value: 6, unit: "hours", label: { cn: "6 小时", en: "6 hours", es: "6 horas" } },
+  { value: 1, unit: "days", label: { cn: "1 天", en: "1 day", es: "1 día" } },
 ];
 
 const PRESET_KEYWORDS = [
@@ -1009,7 +1010,7 @@ export default function ScheduledTasks({
                       className="sched-search-clear"
                       type="button"
                       onClick={() => setQuery("")}
-                      title="Clear search"
+                      title={tr(language, "清除搜索", "Clear search", "Borrar búsqueda")}
                     >
                       <SvgIcon name="close" size={12} />
                     </button>
@@ -1186,7 +1187,7 @@ export default function ScheduledTasks({
                       <SvgIcon name="sparkle" size={13} />
                       <span>{copy.promptHint}</span>
                     </div>
-                    <span className="sched-char-count">{form.prompt.length} 字符</span>
+                    <span className="sched-char-count">{tr(language, `${form.prompt.length} 字符`, `${form.prompt.length} characters`, `${form.prompt.length} caracteres`)}</span>
                   </div>
                   <textarea
                     className="sched-prompt-textarea"
@@ -1394,7 +1395,7 @@ export default function ScheduledTasks({
                                   type="button"
                                   onClick={() => setForm((cur) => ({ ...cur, intervalValue: preset.value, intervalUnit: preset.unit }))}
                                 >
-                                  {preset.label}
+                                  {preset.label[language]}
                                 </button>
                               );
                             })}

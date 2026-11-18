@@ -606,6 +606,8 @@ fn every_tool_has_a_failure_classification_decision() {
         // ODT reads return Err on any failed parse; Ok is a completed snapshot.
         "read_odt",
         "ReadMediaFile",
+        // Renderer/OCR failures return Err; Ok always carries rendered pages.
+        "read_pdf_pages",
         "session_search",
         "write_file",
         "write_files",
@@ -782,6 +784,8 @@ fn every_tool_is_triaged_for_external_retrieval() {
         "read_file",
         "read_docx",
         "read_files",
+        // Renders a local file with programs already on this computer.
+        "read_pdf_pages",
         "session_search",
         "write_file",
         "write_files",

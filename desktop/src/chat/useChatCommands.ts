@@ -4,7 +4,7 @@
 // hand-off from other views. It orchestrates the run controller's `beginRun`
 // for commands that expand into a model prompt.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   chatCommandSpecs,
   chatDebugZipExport,
@@ -13,14 +13,14 @@ import {
   skillsList,
   type ChatSendRequest,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { tr, useStore, type Language } from "../store";
 import type { ChatAttachment, ChatTurn, DesktopCommandSpec, SkillMeta } from "../types";
 import { CHAT_COPY } from "./i18n";
 import type { ChatSession } from "./types";
 import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   assistantTextTurn,
-  FALLBACK_SLASH_COMMANDS,
+  fallbackSlashCommands,
   outgoingMessage,
   userTurn,
   type PendingCommandSelection,
@@ -35,7 +35,7 @@ type BeginRun = (
   promptOverride?: string | ChatSendRequest,
 ) => Promise<void>;
 
-function debugExportResult(path: string): string {
+function debugExportResult(path: string, language: Language): string {
   const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const folder = separator > 0 ? path.slice(0, separator) : path;
   const folderHref = folder
@@ -43,7 +43,12 @@ function debugExportResult(path: string): string {
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, session-scoped usage log, diagnostics, tool-output artifacts`;
+  return tr(
+    language,
+    `调试导出\n  结果             已写入问题报告包\n  文件             \`${path}\`\n  文件夹           [打开导出文件夹](${folderHref})\n  用途             反馈会话卡住、空回复、截断或恢复错乱时请附上此 zip\n  包含             对话记录、事件、通信跟踪、运行时会话、本会话用量日志、诊断信息、工具输出产物`,
+    `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, session-scoped usage log, diagnostics, tool-output artifacts`,
+    `Exportación de depuración\n  Resultado        paquete de informe de errores creado\n  Archivo          \`${path}\`\n  Carpeta          [Abrir carpeta de exportación](${folderHref})\n  Uso              adjunta este zip cuando informes de sesiones atascadas, vacías, truncadas o mal restauradas\n  Incluye          transcripción, eventos, traza de comunicación, sesión de ejecución, registro de uso de la sesión, diagnósticos, artefactos de salida de herramientas`,
+  );
 }
 
 interface UseChatCommandsArgs {
@@ -82,7 +87,10 @@ export function useChatCommands({
   const currentProject = useStore((state) => state.currentProject);
 
   const [skills, setSkills] = useState<SkillMeta[]>([]);
-  const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
+  // `null` = use the built-in fallback list, which follows the UI language.
+  const [loadedCommands, setDesktopCommands] = useState<DesktopCommandSpec[] | null>(null);
+  const fallbackCommands = useMemo(() => fallbackSlashCommands(language), [language]);
+  const desktopCommands = loadedCommands ?? fallbackCommands;
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [exporting, setExporting] = useState(false);
   const [debugExporting, setDebugExporting] = useState(false);
@@ -96,7 +104,7 @@ export function useChatCommands({
     if (!isTauri()) return;
     chatCommandSpecs()
       .then(setDesktopCommands)
-      .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
+      .catch(() => setDesktopCommands(null));
     skillsList().then(setSkills).catch(() => undefined);
   }, [currentId, currentProject?.id]);
 
@@ -114,7 +122,7 @@ export function useChatCommands({
     if (!isTauri()) {
       const command = commandName || "help";
       const reply = command === "help"
-        ? FALLBACK_SLASH_COMMANDS
+        ? fallbackCommands
           .map((item) => `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ""} - ${item.description}`)
           .join("\n")
         : copy.previewCommandReply;
@@ -166,13 +174,13 @@ export function useChatCommands({
       patchTurns(session.id, (turns) => [
         ...turns,
         userTurn(text, []),
-        assistantTextTurn(`Command failed: ${message}`),
+        assistantTextTurn(tr(language, `命令执行失败：${message}`, `Command failed: ${message}`, `Error al ejecutar el comando: ${message}`)),
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
       return true;
     }
-  }, [applyContextTokens, beginRun, copy.previewCommandReply, patchTurns, refreshStatus, setError, setTab, setEditingTurnId, skills, updateSession]);
+  }, [applyContextTokens, beginRun, copy.previewCommandReply, fallbackCommands, language, patchTurns, refreshStatus, setError, setTab, setEditingTurnId, skills, updateSession]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
@@ -196,7 +204,12 @@ export function useChatCommands({
       if (!isTauri()) {
         patchTurns(session.id, (turns) => [
           ...turns,
-          assistantTextTurn("Export is available in the Tauri app."),
+          assistantTextTurn(tr(
+            language,
+            "导出功能仅在 Tauri 应用中可用。",
+            "Export is available in the Tauri app.",
+            "La exportación solo está disponible en la app de Tauri.",
+          )),
         ]);
         return;
       }
@@ -206,19 +219,19 @@ export function useChatCommands({
       if (result.refreshStatus) refreshStatus(session.model ?? null);
       patchTurns(session.id, (turns) => [
         ...turns,
-        assistantTextTurn(result.message ?? "Export complete."),
+        assistantTextTurn(result.message ?? tr(language, "导出完成。", "Export complete.", "Exportación completada.")),
       ]);
     } catch (error) {
       const message = String(error);
       setError(message);
       patchTurns(session.id, (turns) => [
         ...turns,
-        assistantTextTurn(`Export failed: ${message}`),
+        assistantTextTurn(tr(language, `导出失败：${message}`, `Export failed: ${message}`, `Error al exportar: ${message}`)),
       ]);
     } finally {
       setExporting(false);
     }
-  }, [exporting, patchTurns, refreshStatus, setError, setTab, currentSessionRef, runningSessionIdsRef]);
+  }, [exporting, language, patchTurns, refreshStatus, setError, setTab, currentSessionRef, runningSessionIdsRef]);
 
   const exportDebugZip = useCallback(async () => {
     const session = currentSessionRef.current;
@@ -228,26 +241,36 @@ export function useChatCommands({
       if (!isTauri()) {
         patchTurns(session.id, (turns) => [
           ...turns,
-          assistantTextTurn("Debug export is available in the Tauri app."),
+          assistantTextTurn(tr(
+            language,
+            "调试导出仅在 Tauri 应用中可用。",
+            "Debug export is available in the Tauri app.",
+            "La exportación de depuración solo está disponible en la app de Tauri.",
+          )),
         ]);
         return;
       }
       const path = await chatDebugZipExport(session.id, undefined, session.projectId);
       patchTurns(session.id, (turns) => [
         ...turns,
-        assistantTextTurn(debugExportResult(path)),
+        assistantTextTurn(debugExportResult(path, language)),
       ]);
     } catch (error) {
       const message = String(error);
       setError(message);
       patchTurns(session.id, (turns) => [
         ...turns,
-        assistantTextTurn(`Debug export failed: ${message}`),
+        assistantTextTurn(tr(
+          language,
+          `调试导出失败：${message}`,
+          `Debug export failed: ${message}`,
+          `Error en la exportación de depuración: ${message}`,
+        )),
       ]);
     } finally {
       setDebugExporting(false);
     }
-  }, [debugExporting, exporting, patchTurns, setError, currentSessionRef]);
+  }, [debugExporting, exporting, language, patchTurns, setError, currentSessionRef]);
 
   // One-shot "start a new chat with this draft" hand-off (e.g. Plugins). The
   // draft is only placed in the composer; the user decides to send it.

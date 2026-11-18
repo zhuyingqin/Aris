@@ -157,8 +157,8 @@ describe("GitWorkspace", () => {
   it("hands a selected Git diff to the native Code viewer", async () => {
     render(<GitWorkspace />);
 
-    await screen.findByRole("button", { name: "Open Diff in Code" });
-    fireEvent.click(screen.getByRole("button", { name: "Open Diff in Code" }));
+    await screen.findByRole("button", { name: "Open diff in Code" });
+    fireEvent.click(screen.getByRole("button", { name: "Open diff in Code" }));
 
     expect(useStore.getState().pendingCodeDiff).toEqual({
       path: "F:/research/notes/paper.md",
@@ -184,7 +184,7 @@ describe("GitWorkspace", () => {
     render(<GitWorkspace embedded />);
 
     expect(await screen.findByText("paper.md")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open Diff in Code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open diff in Code" })).toBeTruthy();
     expect(screen.queryByLabelText("Local branches")).toBeNull();
     expect(screen.queryByLabelText("Describe this change…")).toBeNull();
   });
@@ -481,7 +481,7 @@ describe("GitWorkspace", () => {
 
     render(<GitWorkspace embedded />);
 
-    expect(await screen.findByText("This diff is large. Reviewing one file at a time.")).toBeTruthy();
+    expect(await screen.findByText("This diff is large, so only one file is shown at a time.")).toBeTruthy();
     expect(screen.getByRole("note")).toBeTruthy();
   });
 

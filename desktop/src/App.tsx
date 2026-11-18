@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatError, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
-import { useStore, type Language, type Tab } from "./store";
+import { tr, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import { useAccountRefresh } from "./useAccountRefresh";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY, type SettingsTabRequest } from "./settingsTabRequest";
@@ -141,23 +141,23 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       settings: "Settings",
       scheduled: "Scheduled",
     },
-    loading: (label) => `Loading ${label}...`,
-    viewErrorTitle: "This view hit a UI error.",
-    viewErrorBody: "The current screen could not render.",
+    loading: (label) => `Loading ${label}…`,
+    viewErrorTitle: "Something went wrong in this view.",
+    viewErrorBody: "This page couldn't be displayed.",
     tryAgain: "Try again",
     userFallback: "User",
     accountInfo: "Account info",
     back: "Back",
     forward: "Forward",
-    toggleSidebar: "Show or hide the conversation sidebar",
-    findConversations: "Find conversations in the sidebar",
+    toggleSidebar: "Show or hide the chat sidebar",
+    findConversations: "Find chats in the sidebar",
     productMenuLabel: "SomniQ modules",
-    switchProduct: (name) => `Current module: ${name}. Switch module`,
+    switchProduct: (name) => `Current module: ${name}. Click to switch`,
     moreModules: "More modules",
     minimizeWindow: "Minimize window",
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
-    openChatCompanion: "Open writing companion",
+    openChatCompanion: "Open the floating paper-writing companion",
     currentProject: "Current project",
     noProject: "No project",
     projects: "Local projects",
@@ -165,12 +165,57 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     addProject: "Add local project…",
     openProjectFolder: "Open project folder",
     projectEmptyHint: "Choose a folder to add a project",
-    runStateDir: "run-state directory",
+    runStateDir: "Run state directory",
     openWorkspace: "Open workspace folder in file manager",
     dismiss: "Dismiss",
-    updateReady: (version) => `Update${version} installed. Restart SomniQ Studio.`,
+    updateReady: (version) => `Update${version} installed. Click to restart SomniQ Studio.`,
     updateDownloading: (version, percent) => percent != null ? `Installing update${version}: ${percent}%` : `Installing update${version}`,
     updateAvailable: (version) => `Update${version} available. Click to install.`,
+  },
+  es: {
+    nav: {
+      chat: "Chat",
+      lab: "Código",
+      typeset: "LaTeX",
+      figures: "Figuras",
+      literature: "Literatura",
+      workflows: "Flujos de trabajo",
+      mail: "Correo",
+      tasks: "Tareas de trabajo",
+      extensions: "Plugins",
+      settings: "Configuración",
+      scheduled: "Programadas",
+    },
+    loading: (label) => `Cargando ${label}…`,
+    viewErrorTitle: "Esta vista ha tenido un error de interfaz.",
+    viewErrorBody: "No se pudo mostrar la pantalla actual.",
+    tryAgain: "Reintentar",
+    userFallback: "Usuario",
+    accountInfo: "Información de la cuenta",
+    back: "Atrás",
+    forward: "Adelante",
+    toggleSidebar: "Mostrar u ocultar la barra lateral de conversaciones",
+    findConversations: "Buscar conversaciones en la barra lateral",
+    productMenuLabel: "Módulos de SomniQ",
+    switchProduct: (name) => `Módulo actual: ${name}. Haz clic para cambiar`,
+    moreModules: "Más módulos",
+    minimizeWindow: "Minimizar ventana",
+    maximizeWindow: "Maximizar ventana",
+    closeWindow: "Cerrar ventana",
+    openChatCompanion: "Abrir el asistente flotante de redacción de artículos",
+    currentProject: "Proyecto actual",
+    noProject: "Sin proyecto",
+    projects: "Proyectos locales",
+    dragToReorder: "Arrastra para reordenar",
+    addProject: "Añadir proyecto local…",
+    openProjectFolder: "Abrir carpeta del proyecto",
+    projectEmptyHint: "Elige una carpeta para añadir un proyecto",
+    runStateDir: "Directorio de estado de ejecución",
+    openWorkspace: "Abrir la carpeta de trabajo en el explorador de archivos",
+    dismiss: "Cerrar",
+    updateReady: (version) => `Actualización${version} instalada. Haz clic para reiniciar SomniQ Studio.`,
+    updateDownloading: (version, percent) => percent != null ? `Instalando actualización${version}: ${percent}%` : `Instalando actualización${version}`,
+    updateAvailable: (version) => `Actualización${version} disponible. Haz clic para instalar.`,
   },
 };
 
@@ -517,7 +562,7 @@ export default function App() {
       title: copy.addProject.replace(/…$/, ""),
     });
     if (typeof selected === "string") {
-      if (typesetDirty && !window.confirm("Discard the unsaved LaTeX changes and open the added project?")) {
+      if (typesetDirty && !window.confirm(tr(language, "放弃未保存的 LaTeX 修改并打开新添加的项目？", "Discard the unsaved LaTeX changes and open the added project?", "¿Descartar los cambios de LaTeX sin guardar y abrir el proyecto añadido?"))) {
         return;
       }
       try {
@@ -535,7 +580,7 @@ export default function App() {
     if (
       id !== currentProject?.id
       && typesetDirty
-      && !window.confirm("Discard the unsaved LaTeX changes and switch projects?")
+      && !window.confirm(tr(language, "放弃未保存的 LaTeX 修改并切换项目？", "Discard the unsaved LaTeX changes and switch projects?", "¿Descartar los cambios de LaTeX sin guardar y cambiar de proyecto?"))
     ) {
       return;
     }
@@ -945,7 +990,7 @@ export default function App() {
       projectBusy,
       account: {
         name: userName, plan: userPlan.label,
-        allowance: userPlan.remaining === null ? (language === "cn" ? "额度信息暂不可用" : "Allowance unavailable") : formatQuota(userPlan.remaining),
+        allowance: userPlan.remaining === null ? tr(language, "额度信息暂不可用", "Allowance unavailable", "Cuota no disponible") : formatQuota(userPlan.remaining),
         remainingPercent: userPlan.remainingPercent,
       },
     },

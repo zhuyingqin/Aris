@@ -34,7 +34,7 @@ import {
   type ChatSendRequest,
   type ChatTitleRequest,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { tr, useStore } from "../store";
 import { isImageGenerationModel } from "../imageModels";
 import type {
   ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
@@ -65,7 +65,7 @@ import {
   continueStoppedPrompt,
   contextForRetry,
   deferHeavyUiWork,
-  EMPTY_ASSISTANT_RESPONSE,
+  emptyAssistantResponse,
   estimateTokens,
   formatCompactTokens,
   needsBackendContextReset,
@@ -364,7 +364,7 @@ export function useChatRun({
           return {
             ...turn,
             streaming: false,
-            error: EMPTY_ASSISTANT_RESPONSE,
+            error: emptyAssistantResponse(),
             stopped: false,
           };
         }
@@ -463,13 +463,23 @@ export function useChatRun({
     setContextNotice({
       kind: "warning",
       sessionId: event.sessionId,
-      message: "Context is close to the auto-compact budget.",
+      message: tr(
+        language,
+        "上下文已接近自动压缩预算。",
+        "Context is close to the auto-compact budget.",
+        "El contexto está cerca del presupuesto de compactación automática.",
+      ),
       detail: budget
-        ? `${formatCompactTokens(event.usedTokens)} / ${formatCompactTokens(budget)} tokens${pct != null ? ` (${pct}%)` : ""}.`
-        : `${formatCompactTokens(event.usedTokens)} tokens in context.`,
+        ? `${formatCompactTokens(event.usedTokens)} / ${formatCompactTokens(budget)} tokens${pct != null ? ` (${pct}%)` : ""}${tr(language, "。", ".", ".")}`
+        : tr(
+          language,
+          `上下文中有 ${formatCompactTokens(event.usedTokens)} tokens。`,
+          `${formatCompactTokens(event.usedTokens)} tokens in context.`,
+          `${formatCompactTokens(event.usedTokens)} tokens en el contexto.`,
+        ),
       createdAt: Date.now(),
     });
-  }, [status?.compactionBudget, status?.contextWindow]);
+  }, [language, status?.compactionBudget, status?.contextWindow]);
 
   // Current ring value for a session, so the compaction notice can report how
   // much context was freed (before → after).
@@ -609,7 +619,7 @@ export function useChatRun({
       setStatus({
         ready: true,
         model: currentSession.model ?? `${binding.nodeName} Agent`,
-        provider: "Remote computer",
+        provider: tr(useStore.getState().language, "远程电脑", "Remote computer", "Equipo remoto"),
       });
       setPermission(null);
       setModelOptions([]);
@@ -623,7 +633,7 @@ export function useChatRun({
           setStatus({
             ready: true,
             model: selection.model ?? `${binding.nodeName} Agent`,
-            provider: "Remote computer",
+            provider: tr(useStore.getState().language, "远程电脑", "Remote computer", "Equipo remoto"),
           });
           const selectedModel = selection.model ?? null;
           if (selectedModel !== (currentSession.model ?? null)) {
@@ -721,7 +731,7 @@ export function useChatRun({
         setStatus({
           ready: true,
           model: selection.model ?? model,
-          provider: "Remote computer",
+          provider: tr(useStore.getState().language, "远程电脑", "Remote computer", "Equipo remoto"),
         });
         updateSession(currentSession.id, (session) => ({
           ...session,
@@ -841,7 +851,12 @@ export function useChatRun({
     try {
       if (session.remoteAgent) {
         if (attached.length > 0) {
-          throw new Error("Remote Agent chat does not support attachments yet.");
+          throw new Error(tr(
+            language,
+            "远程 Agent 对话暂不支持附件。",
+            "Remote agent chats don't support attachments yet.",
+            "El chat con el agente remoto aún no admite adjuntos.",
+          ));
         }
         const prompt = typeof promptOverride === "string"
           ? promptOverride
@@ -866,10 +881,20 @@ export function useChatRun({
       const workflowRunId = workflowRunIdForSession(session);
       if (workflowRunId) {
         if (attached.length > 0 || basePrompt.images?.length) {
-          throw new Error("Workflow discussion does not accept attachments yet.");
+          throw new Error(tr(
+            language,
+            "工作流讨论暂不接受附件。",
+            "Workflow discussion does not accept attachments yet.",
+            "La conversación del flujo de trabajo aún no acepta adjuntos.",
+          ));
         }
         if (shouldResetContext) {
-          throw new Error("Workflow conversations are append-only; retry from the current stage instead.");
+          throw new Error(tr(
+            language,
+            "工作流对话只能追加；请改为从当前阶段重试。",
+            "Workflow conversations are append-only; retry from the current stage instead.",
+            "Las conversaciones del flujo de trabajo solo admiten añadir mensajes; reintenta desde la etapa actual.",
+          ));
         }
         await run(session.id, basePrompt.text, {
           send: async (_sessionId, message) => {
@@ -928,7 +953,14 @@ export function useChatRun({
       const detail = formatUserFacingError(error, language);
       onError(
         session.id,
-        shouldResetContext ? `Unable to reset chat context: ${detail}` : detail,
+        shouldResetContext
+          ? tr(
+            language,
+            `无法重置对话上下文：${detail}`,
+            `Unable to reset chat context: ${detail}`,
+            `No se pudo restablecer el contexto del chat: ${detail}`,
+          )
+          : detail,
         false,
         false,
       );
@@ -948,7 +980,7 @@ export function useChatRun({
       await beginRun(
         session,
         session.turns,
-        "Continue from where you stopped.",
+        tr(language, "从中断处继续。", "Continue from where you stopped.", "Continúa desde donde te detuviste."),
         [],
         false,
         continueStoppedPrompt(),
@@ -956,7 +988,7 @@ export function useChatRun({
     } finally {
       releaseSendLock(session.id, sendLock);
     }
-  }, [acquireSendLock, beginRun, releaseSendLock]);
+  }, [acquireSendLock, beginRun, language, releaseSendLock]);
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;

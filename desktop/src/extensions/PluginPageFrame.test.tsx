@@ -135,6 +135,14 @@ describe("PluginPageFrame", () => {
     expect(source).toContain(JSON.stringify({ cards: [{ id: "a" }], todos: [{ id: "t1", text: "Read", completed: false }] }));
   });
 
+  it("tells a Spanish page its locale while older pages keep reading en or cn", async () => {
+    render(<PluginPage panel={panel} projectPath="F:/project" language="es" onAction={onAction} />);
+    const shell = await screen.findByTitle("Focus board") as HTMLIFrameElement;
+    const source = inner(shell.getAttribute("srcdoc")!);
+    expect(source).toContain('"language":"en"');
+    expect(source).toContain('"locale":"es"');
+  });
+
   it("answers only its own page, and saves through the checked widget write", async () => {
     await mount();
     vi.mocked(api.pluginsUiStateUpdate).mockResolvedValue(stateOf(4, [{ id: "b" }]));

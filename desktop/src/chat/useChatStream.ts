@@ -24,6 +24,7 @@ import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
 import { foldModelRetryNotice } from "./modelRetryNotice";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
+import { tr } from "../language";
 import { setClientChatStreamActivity } from "./chatActivity";
 
 const MAX_RUNNING_CHAT_SESSIONS = 5;
@@ -54,16 +55,32 @@ function compactionNoticeMessage(
   removedMessageCount: number,
   before: number | null,
   after: number | null,
+  language: ErrorMessageLanguage = "en",
 ): string {
   const base = removedMessageCount > 0
-    ? `Context compacted automatically; ${removedMessageCount} earlier messages were summarized.`
-    : "Context compacted automatically; large consumed tool payloads were shortened.";
+    ? tr(
+      language,
+      `上下文已自动压缩；${removedMessageCount} 条较早的消息已被总结。`,
+      `Context compacted automatically; ${removedMessageCount} earlier messages were summarized.`,
+      `El contexto se compactó automáticamente; se resumieron ${removedMessageCount} mensajes anteriores.`,
+    )
+    : tr(
+      language,
+      "上下文已自动压缩；已消费的大段工具输出已被截短。",
+      "Context compacted automatically; large consumed tool payloads were shortened.",
+      "El contexto se compactó automáticamente; se acortaron las salidas grandes de herramientas ya procesadas.",
+    );
   if (before != null && after != null && before > after) {
     const pct = Math.round((1 - after / before) * 100);
     return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
   }
   if (after != null) {
-    return `${base} Backend context is now ${formatTokenCount(after)} tokens.`;
+    return tr(
+      language,
+      `${base}后端上下文现为 ${formatTokenCount(after)} tokens。`,
+      `${base} Backend context is now ${formatTokenCount(after)} tokens.`,
+      `${base} El contexto del backend ahora tiene ${formatTokenCount(after)} tokens.`,
+    );
   }
   return base;
 }
@@ -395,7 +412,12 @@ export function useChatStream({
         if (!isCurrentListener()) return;
         flush(sessionId);
         const before = handlersRef.current.getContextTokens?.(sessionId) ?? null;
-        const message = compactionNoticeMessage(removedMessageCount, before, tokensAfter ?? null);
+        const message = compactionNoticeMessage(
+          removedMessageCount,
+          before,
+          tokensAfter ?? null,
+          handlersRef.current.language ?? "en",
+        );
         handlersRef.current.patchAssistant(sessionId, (turn) => ({
           ...turn,
           blocks: [...turn.blocks, { kind: "notice", message }],
@@ -429,7 +451,12 @@ export function useChatStream({
     if (runningSessions.current.size >= MAX_RUNNING_CHAT_SESSIONS) {
       handlersRef.current.onError(
         sessionId,
-        `at most ${MAX_RUNNING_CHAT_SESSIONS} chat turns can run at once`,
+        tr(
+          handlersRef.current.language ?? "en",
+          `最多只能同时运行 ${MAX_RUNNING_CHAT_SESSIONS} 个对话回合`,
+          `at most ${MAX_RUNNING_CHAT_SESSIONS} chat turns can run at once`,
+          `Solo se pueden ejecutar ${MAX_RUNNING_CHAT_SESSIONS} turnos de chat a la vez`,
+        ),
         false,
       );
       return false;

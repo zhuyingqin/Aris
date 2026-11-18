@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { languageLocale, tr } from "../language";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { chatModelOptions } from "../api/tauri";
 import type { ChatModelOption } from "../types";
@@ -8,7 +9,7 @@ import {
   onPaperReadingError, onPaperReadingUpdated, paperReadingAsk, paperReadingCancel, paperReadingDelete,
   paperReadingFollowUps, paperReadingGet, paperReadingList, paperReadingLoad, paperReadingPrepare,
   paperReadingSource, paperReadingStart,
-  type FollowUpMode, type PaperFollowUp, type PaperReadingVersion, type PaperReadingView, type PaperContentKind,
+  type FollowUpMode, type PaperFollowUp, type PaperReadingLanguage, type PaperReadingVersion, type PaperReadingView, type PaperContentKind,
 } from "./paperReadingApi";
 import { currentLesson, finalReview } from "./paperGuideModel";
 import { paperDocumentRevision, preparePaperPageEvidence } from "./pdfExtraction";
@@ -17,7 +18,7 @@ import PaperGuideView from "./PaperGuideView";
 import "./PaperReadingPanel.css";
 
 const COPY = {
-  zh: {
+  cn: {
     start: "多模态论文解析", results: "查看论文讲解", resume: "继续生成／重试失败内容", explain: "生成论文讲解",
     heading: "论文讲解", guideTab: "图文讲解", rawTab: "原文识别", records: "查看处理记录",
     intro: "从原图与公式，读懂论文的思路。",
@@ -61,7 +62,7 @@ const COPY = {
     intro: "Understand the paper through its figures, formulas and experiments.",
     introDetail: "One click reads the original, follows the paper's argument and explains key topics with steps, teaching examples and original sources.",
     outline: "Following the paper's argument", teaching: "Generating visual explanations", guideReady: "Paper guide ready",
-    stageRead: "Read originals", stageOutline: "Follow the argument", stageTeach: "Explain visually",
+    stageRead: "Read the original", stageOutline: "Follow the argument", stageTeach: "Explain visually",
     preparing: "Preparing original pages", running: "Processing pages", cancel: "Cancel",
     hide: "Hide results", show: "Show results", pageCoverage: "Page processing",
     candidates: "Identified content (candidates)", completeness: "Recognition completeness: not checked",
@@ -69,16 +70,16 @@ const COPY = {
     complete: "All pages processed", partial: "Partially completed", cancelled: "Cancelled; resumable",
     source: "View source page", empty: "No perception results yet", failed: "failed",
     data: "Somni's configured model reads page images and generates explanations, saved as unreviewed drafts.",
-    exhausted: "This automatic attempt batch has ended. Retry manually for up to 3 more attempts; history is preserved.",
+    exhausted: "Automatic retries for this round have ended. You can start another round manually (up to 3 attempts per round); history is kept.",
     retry: "Retry unfinished content", attention: "Needs attention", details: "Error details",
     saved: "Completed pages and explanations are saved. Continuing processes only unfinished content.",
     formatError: "The model response did not match the required format. Retry without importing the PDF again.",
     otherError: "This step could not finish. Check the details, resolve the issue and continue with saved results.",
-    waiting: "From the original to understanding", waitingDetail: "Transcriptions are saved. Continue to generate the argument, key topics and explanations alongside the originals.",
+    waiting: "Start from the main argument and work through the paper", waitingDetail: "Transcriptions are saved. Continue to generate the argument, key topics and explanations alongside the originals.",
     readingDetail: "Reading the original evidence, then automatically organizing the argument and explanations.",
     figureTitle: "Understand the figures", formulaTitle: "Follow the mathematics", experimentTitle: "Read the evidence",
     figureDetail: "Follow modules and arrows to see how the method works.", formulaDetail: "Build from symbols and assumptions to the central derivation.", experimentDetail: "Compare metrics and baselines to see what results support.",
-    badge: "MULTIMODAL READING", progressTitle: "Reading progress", lessonCount: "Explanations", notPlanned: "Not planned",
+    badge: "MULTIMODAL READING", progressTitle: "Reading progress", lessonCount: "Explanations", notPlanned: "Not outlined yet",
     pending: "pending", blank: "No content identified; check the original page",
     kind: { text: "Text", formula: "Formulas", figure: "Figures", table: "Tables" },
     textLayer: "Read from the text layer", textLayerNote: (count: number) => `${count} pages have a usable PDF text layer and were read directly, without page-by-page model transcription.`,
@@ -93,7 +94,50 @@ const COPY = {
     reReview: "Run independent review",
     status: { preparing: "Preparing", running: "Generating", partial: "Unfinished", cancelled: "Cancelled", page_processing_complete: "Originals read", guide_ready: "Guide ready" },
   },
+  es: {
+    start: "Analizar artículo", results: "Ver la guía del artículo", resume: "Continuar / reintentar lo que falló", explain: "Generar guía del artículo",
+    heading: "Guía del artículo", guideTab: "Explicaciones visuales", rawTab: "Transcripciones", records: "Detalles del procesamiento",
+    intro: "Entiende el artículo a través de sus figuras, fórmulas y experimentos.",
+    introDetail: "Con un clic, Somni lee el original, sigue el argumento del artículo y explica los temas clave con pasos, ejemplos didácticos y las fuentes originales.",
+    outline: "Siguiendo el argumento del artículo", teaching: "Generando explicaciones visuales", guideReady: "Guía del artículo lista",
+    stageRead: "Leer los originales", stageOutline: "Seguir el argumento", stageTeach: "Explicar visualmente",
+    preparing: "Preparando las páginas originales", running: "Procesando páginas", cancel: "Cancelar",
+    hide: "Ocultar resultados", show: "Mostrar resultados", pageCoverage: "Procesamiento de páginas",
+    candidates: "Contenido identificado (candidatos)", completeness: "Integridad del reconocimiento: sin comprobar",
+    notReviewed: "Sin revisión independiente", notTaught: "Comprensión y enseñanza: sin ejecutar",
+    complete: "Todas las páginas procesadas", partial: "Completado en parte", cancelled: "Cancelado; se puede reanudar",
+    source: "Ver la página de origen", empty: "Aún no hay resultados de percepción", failed: "con error",
+    data: "El modelo configurado en Somni lee las imágenes de las páginas y genera explicaciones, que se guardan como borradores sin revisar.",
+    exhausted: "Los reintentos automáticos de esta ronda han terminado. Puedes iniciar otra ronda manualmente (hasta 3 intentos por ronda); el historial se conserva.",
+    retry: "Reintentar lo pendiente", attention: "Requiere atención", details: "Detalles del error",
+    saved: "Las páginas y explicaciones completadas están guardadas. Al continuar solo se procesa lo pendiente.",
+    formatError: "La respuesta del modelo no tenía el formato requerido. Reintenta sin volver a importar el PDF.",
+    otherError: "Este paso no pudo terminar. Revisa los detalles, resuelve el problema y continúa con los resultados guardados.",
+    waiting: "Empieza por el argumento principal y avanza por el artículo", waitingDetail: "Las transcripciones están guardadas. Continúa para generar el argumento, los temas clave y las explicaciones junto a los originales.",
+    readingDetail: "Leyendo la evidencia original; después se organizarán automáticamente el argumento y las explicaciones.",
+    figureTitle: "Entender las figuras", formulaTitle: "Seguir las matemáticas", experimentTitle: "Leer la evidencia",
+    figureDetail: "Sigue los módulos y las flechas para ver cómo funciona el método.", formulaDetail: "Avanza desde los símbolos y supuestos hasta la derivación central.", experimentDetail: "Compara métricas y referencias para ver qué respaldan los resultados.",
+    badge: "LECTURA MULTIMODAL", progressTitle: "Progreso de lectura", lessonCount: "Explicaciones", notPlanned: "Aún sin esbozar",
+    pending: "pendiente", blank: "No se identificó contenido; revisa la página original",
+    kind: { text: "Texto", formula: "Fórmulas", figure: "Figuras", table: "Tablas" },
+    textLayer: "Leído de la capa de texto", textLayerNote: (count: number) => `${count} páginas tienen una capa de texto PDF utilizable y se leyeron directamente, sin transcripción del modelo página por página.`,
+    transcribeAll: "Transcribir estas páginas (reconstruir tablas y fórmulas)", reviewing: "Revisando las explicaciones de forma independiente",
+    legacy: "Esta guía se generó con una versión anterior. Puedes seguir leyéndola; regenérala para obtener lecciones por niveles, de lo simple a lo profundo, con revisión independiente.",
+    regenerateNew: "Regenerar en el nuevo formato", versions: "Versión de la guía", deleteVersion: "Eliminar esta versión",
+    deleteConfirm: "¿Eliminar esta versión de la guía? Se borran sus imágenes de página, preguntas y sesiones de generación; el PDF y las demás versiones se conservan.",
+    oldFormat: "formato anterior",
+    reviewSummary: (counts: { passed: number; needsRevision: number; insufficientEvidence: number; unavailable: number; pending: number }) =>
+      `Revisión independiente: ${counts.passed} aprobadas · ${counts.needsRevision} con problemas · ${counts.insufficientEvidence} con evidencia insuficiente · ${counts.unavailable} sin revisar · ${counts.pending} pendientes`,
+    reviewerMissing: "Algunas explicaciones no se pudieron revisar de forma independiente (por ejemplo, no hay un Reviewer configurado). Configura uno y elige «Ejecutar revisión independiente».",
+    reReview: "Ejecutar revisión independiente",
+    status: { preparing: "Preparando", running: "Generando", partial: "Sin terminar", cancelled: "Cancelado", page_processing_complete: "Originales leídos", guide_ready: "Guía lista" },
+  },
 };
+
+/** The generation language for a new run, following the interface language. */
+function paperReadingLanguage(language: Language): PaperReadingLanguage {
+  return tr<PaperReadingLanguage>(language, "zh", "en", "es");
+}
 
 interface Props {
   id?: string;
@@ -110,7 +154,8 @@ interface Props {
 export default function PaperReadingPanel({ id, paperId, relativePath, document, onJump, hidden = false, onClose, onSaveNote }: Props) {
   const language = useStore(state => state.language);
   const projectId = useStore(state => state.currentProject?.id);
-  const copy = COPY[language === "en" ? "en" : "zh"];
+  const copy = COPY[language];
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const [view, setView] = useState<PaperReadingView | null>(null);
   const [open, setOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
@@ -287,7 +332,7 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
       // Continuing keeps the saved task's own language, even if the interface
       // language changed since; a new task follows the interface language.
       owned = await paperReadingPrepare({ projectId, paperId, relativePath, documentRevision,
-        language: continuing ? continuing.run.language : language === "en" ? "en" : "zh", model: requestedModel || undefined,
+        language: continuing ? continuing.run.language : paperReadingLanguage(language), model: requestedModel || undefined,
         ...(regenerate ? { regenerate: true } : continuing ? { runId: continuing.run.id } : {}),
       });
       controller.signal.throwIfAborted();
@@ -371,15 +416,15 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
     if (value && !modelOptions.some(option => option.value === value)) modelOptions.push({ value, label: value, description: null });
   }
   const modelPicker = <label className="paper-reader-model-picker">
-    <span>{language === "en" ? "Generation model" : "生成模型"}</span>
-    <select title={language === "en" ? "Choose a model that supports image input" : "请选择支持图像输入的模型"} aria-label={language === "en" ? "Generation model" : "生成模型"} value={selectedModel} disabled={busy} onChange={event => { modelTouched.current = true; setSelectedModel(event.target.value); }}>
-      <option value="">{language === "en" ? "Somni current model" : "Somni 当前模型"}{configuredModel ? ` · ${configuredModel}` : ""}</option>
+    <span>{t("生成模型", "Generation model", "Modelo de generación")}</span>
+    <select title={t("请选择支持图像输入的模型", "Choose a model that supports image input", "Elige un modelo que admita entrada de imágenes")} aria-label={t("生成模型", "Generation model", "Modelo de generación")} value={selectedModel} disabled={busy} onChange={event => { modelTouched.current = true; setSelectedModel(event.target.value); }}>
+      <option value="">{t("Somni 当前模型", "Somni's current model", "Modelo actual de Somni")}{configuredModel ? ` · ${configuredModel}` : ""}</option>
       {modelOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
     </select>
   </label>;
   const hasEssay = !!guide?.outline.result;
   const reviewMissing = !!reviewCounts?.unavailable && resumable;
-  const label = modelChanged ? (language === "en" ? "Generate with selected model" : "用所选模型生成")
+  const label = modelChanged ? (t("用所选模型生成", "Generate with selected model", "Generar con el modelo seleccionado"))
     : view && !resumable ? copy.regenerateNew
     : reviewMissing && view?.run.status === "guide_ready" ? copy.reReview
     : view?.run.status === "guide_ready" ? copy.results
@@ -394,16 +439,16 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
         <div className="paper-reader-generation-actions">
           {versions.length > 1 && view && <label className="paper-reader-version-picker"><span>{copy.versions}</span>
             <select aria-label={copy.versions} value={view.run.id} disabled={busy} onChange={event => void openVersion(event.target.value)}>
-              {versions.map(version => <option key={version.id} value={version.id}>{new Date(version.updatedAt).toLocaleString(language === "en" ? "en" : "zh-CN")} · {version.model} · {copy.status[version.status]}{version.resumable ? "" : ` · ${copy.oldFormat}`}</option>)}
+              {versions.map(version => <option key={version.id} value={version.id}>{new Date(version.updatedAt).toLocaleString(languageLocale(language))} · {version.model} · {copy.status[version.status]}{version.resumable ? "" : ` · ${copy.oldFormat}`}</option>)}
             </select></label>}
           {view && <button type="button" disabled={busy || !document || !projectId}
-            title={language === "en" ? "Read the whole paper again; previous results are retained" : "重新阅读全文并生成新版本，旧结果保留"}
-            onClick={() => void start(true)}><SvgIcon name="refresh" size={14} />{language === "en" ? "Regenerate" : "重新生成讲解"}</button>}
+            title={t("重新阅读全文并生成新版本，旧结果保留", "Read the whole paper again; previous results are retained", "Vuelve a leer todo el artículo; los resultados anteriores se conservan")}
+            onClick={() => void start(true)}><SvgIcon name="refresh" size={14} />{t("重新生成讲解", "Regenerate", "Regenerar")}</button>}
           {view && <button type="button" className="paper-guide-delete" disabled={busy} aria-label={copy.deleteVersion} title={copy.deleteVersion}
             onClick={() => void deleteVersion()}><SvgIcon name="trash" size={14} /></button>}
           {onClose && <button type="button" className="paper-guide-close"
-            aria-label={language === "en" ? "Close guide" : "关闭讲解"}
-            title={language === "en" ? "Close guide (Esc)" : "关闭讲解（Esc）"} onClick={onClose}><SvgIcon name="close" size={17} /></button>}
+            aria-label={t("关闭讲解", "Close guide", "Cerrar guía")}
+            title={t("关闭讲解（Esc）", "Close guide (Esc)", "Cerrar guía (Esc)")} onClick={onClose}><SvgIcon name="close" size={17} /></button>}
         </div>
       </header>
       {hasEssay && <header className="paper-reader-toolbar">
@@ -414,12 +459,14 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
             <button type="button" role="tab" aria-selected={tab === "raw"} onClick={() => setTab("raw")}>{copy.rawTab}</button>
           </div>
           <button type="button" className="paper-reader-compare" aria-pressed={webReading}
-            title={language === "en" ? webReading ? "Return to the side-by-side PDF and explanation" : "Hide the PDF and give the explanation a wider reading layout" : webReading ? "返回 PDF 与讲解对照" : "隐藏 PDF，用更宽的版面阅读讲解"}
-            onClick={() => setWebReading(value => !value)}>{language === "en" ? webReading ? "Compare with PDF" : "Focus view" : webReading ? "返回 PDF 对照" : "专注阅读"}</button>
+            title={webReading
+              ? t("返回 PDF 与讲解对照", "Return to the side-by-side PDF and explanation", "Volver a la vista del PDF junto a la explicación")
+              : t("隐藏 PDF，用更宽的版面阅读讲解", "Hide the PDF and give the explanation a wider reading layout", "Oculta el PDF y da a la explicación un diseño de lectura más amplio")}
+            onClick={() => setWebReading(value => !value)}>{webReading ? t("返回 PDF 对照", "Compare with PDF", "Comparar con el PDF") : t("专注阅读", "Focus view", "Vista de lectura")}</button>
         </div>
       </header>}
       {hasEssay && (busy || modelChanged || reviewMissing || view?.run.status !== "guide_ready") && <div className="paper-reader-task-notice" role="status">
-        <span>{modelChanged ? (language === "en" ? "The new model generates a separate result; previous results are retained." : "换模型将单独生成，原有结果保留。") : !busy && reviewMissing && view?.run.status === "guide_ready" ? copy.reviewerMissing : `${busy ? status : copy.partial} · ${copy.stageTeach} ${completedLessons}/${guide?.lessons.length ?? 0}`}</span>
+        <span>{modelChanged ? (t("换模型将单独生成，原有结果保留。", "The new model generates a separate result; previous results are retained.", "El nuevo modelo genera un resultado aparte; los resultados anteriores se conservan.")) : !busy && reviewMissing && view?.run.status === "guide_ready" ? copy.reviewerMissing : `${busy ? status : copy.partial} · ${copy.stageTeach} ${completedLessons}/${guide?.lessons.length ?? 0}`}</span>
         {busy ? <button type="button" onClick={() => void cancel()}>{copy.cancel}</button> : <button type="button" onClick={() => void start()} disabled={!document || !projectId}>{label}</button>}
       </div>}
       {view && !resumable && <p className="lit-paper-analysis-note" role="note">{copy.legacy}</p>}
@@ -433,7 +480,7 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
         <span className={`lit-guide-state${needsAttention ? " attention" : ""}`}>{status}</span>
       </div>}
       {modelPicker}
-      {modelChanged && <p className="lit-paper-analysis-note">{language === "en" ? "The new model generates a separate result; previous results are retained." : "换模型将单独生成，原有结果保留。"}</p>}
+      {modelChanged && <p className="lit-paper-analysis-note">{t("换模型将单独生成，原有结果保留。", "The new model generates a separate result; previous results are retained.", "El nuevo modelo genera un resultado aparte; los resultados anteriores se conservan.")}</p>}
       <div className="lit-paper-analysis-actions">
         <button type="button" className="lit-paper-analysis-start" disabled={!document || !projectId || busy} onClick={() => void start()}>
           <SvgIcon name={busy ? "spinner" : "paperGuide"} size={18} /><span>{busy ? status : label}</span>
@@ -442,8 +489,8 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
         {view && <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? copy.hide : copy.show}</button>}
       </div>
       {(!document || !projectId) && <p className="lit-paper-analysis-note" role="status">{!projectId
-        ? language === "en" ? "Choose a project to generate a paper guide." : "选择项目后即可生成论文讲解。"
-        : language === "en" ? "The PDF must finish loading before a guide can be generated." : "PDF 加载完成后即可生成讲解。"}</p>}
+        ? t("选择项目后即可生成论文讲解。", "Choose a project to generate a paper guide.", "Elige un proyecto para generar una guía del artículo.")
+        : t("PDF 加载完成后即可生成讲解。", "The PDF must finish loading before a guide can be generated.", "El PDF debe terminar de cargarse antes de generar una guía.")}</p>}
       {busy && <p role="status" className="lit-paper-analysis-progress">{status}{preparing ? " " + preparedPages + "/" + (view?.run.totalPages ?? document?.numPages ?? 0) : guideBusy === copy.teaching ? ` ${completedLessons}/${guide?.lessons.length ?? 0}` : view?.active && !guideBusy ? ` ${pagesRead}/${pageCoverage?.total ?? 0}` : ""}</p>}
       {view && <ol className="lit-guide-stages" aria-label={copy.progressTitle}>
         {[{ title: copy.stageRead, done: pagesRead === pageCoverage?.total, active: !!view.active && !guideBusy },
@@ -454,7 +501,7 @@ export default function PaperReadingPanel({ id, paperId, relativePath, document,
           </li>)}
       </ol>}
       </>}
-      {modelsError && <p className="lit-paper-analysis-note">{language === "en" ? "Model list unavailable. The current model remains usable." : "模型列表暂不可用，仍可使用当前模型。"}</p>}
+      {modelsError && <p className="lit-paper-analysis-note">{t("模型列表暂不可用，仍可使用当前模型。", "Model list unavailable. The current model remains usable.", "La lista de modelos no está disponible. Puedes seguir usando el modelo actual.")}</p>}
       {needsAttention && <section className="lit-guide-recovery" role="alert">
         <strong>{guide?.outline.status === "failed" ? copy.stageOutline : copy.heading} · {copy.attention}</strong>
         <p>{failure && /JSON|invalid type|sourcePages|cautions|invalid content/i.test(failure) ? copy.formatError : copy.otherError}</p>

@@ -96,8 +96,13 @@ pub(crate) enum RetrievalAnswerGate {
 /// reaches the reader with its prose intact. The header contradicts it, but the
 /// contradiction has to be stated outright rather than left for the reader to
 /// infer from a status word.
-const UNSUPPORTED_CLAIM_NOTICE: &str =
-    "以下内容未经检索证据支持，其中的确定性表述不代表已核实结论。";
+fn unsupported_claim_notice() -> &'static str {
+    crate::ui_lang::tr_static(
+        "以下内容未经检索证据支持，其中的确定性表述不代表已核实结论。",
+        "The content below is not supported by retrieved evidence; confident wording in it does not mean the conclusion was verified.",
+        "El contenido siguiente no está respaldado por evidencia recuperada; su redacción segura no significa que la conclusión se haya verificado.",
+    )
+}
 
 /// What the evidence table establishes about the candidate an answer names.
 ///
@@ -121,11 +126,14 @@ pub(crate) enum AnswerConfidence {
 }
 
 impl AnswerConfidence {
-    const fn label(self) -> &'static str {
+    /// The status line opening a guarded answer. Every language's
+    /// "unconfirmed" form is recognised by `explicit_unconfirmed_answer` and
+    /// the desktop's title filters.
+    fn label(self) -> &'static str {
         match self {
-            Self::Confirmed => "状态：已确认",
-            Self::High => "状态：高置信",
-            Self::Unconfirmed => "状态：未确认",
+            Self::Confirmed => crate::ui_lang::tr_static("状态：已确认", "Status: confirmed", "Estado: confirmado"),
+            Self::High => crate::ui_lang::tr_static("状态：高置信", "Status: high confidence", "Estado: alta confianza"),
+            Self::Unconfirmed => crate::ui_lang::tr_static("状态：未确认", "Status: unconfirmed", "Estado: sin confirmar"),
         }
     }
 }
@@ -745,8 +753,10 @@ impl RetrievalGuard {
             })
             .collect::<Vec<_>>()
             .join("，");
-        Some(format!(
-            "未完成：本回合有工具调用被门禁拒绝后未重试——{detail}。这些检索没有发生，其结果不在下文依据之内。"
+        Some(crate::tr!(
+            "未完成：本回合有工具调用被门禁拒绝后未重试——{detail}。这些检索没有发生，其结果不在下文依据之内。",
+            "Incomplete: some tool calls this turn were refused by the guard and not retried: {detail}. Those searches did not happen, and their results are not part of the basis below.",
+            "Incompleto: en este turno la protección rechazó algunas llamadas a herramientas y no se reintentaron: {detail}. Esas búsquedas no se hicieron y sus resultados no forman parte de la base de lo que sigue."
         ))
     }
 
@@ -1767,14 +1777,15 @@ impl RetrievalGuard {
         confidence: AnswerConfidence,
         candidate: Option<&CandidateState>,
     ) -> String {
-        use std::fmt::Write as _;
         let mut header = confidence.label().to_string();
         let Some(candidate) = candidate else {
-            let _ = write!(
-                header,
-                "\n证据：本回合未对任何候选建立直接取证（已评估单元格 {}）。{UNSUPPORTED_CLAIM_NOTICE}",
-                self.assessed_cells()
-            );
+            let cells = self.assessed_cells();
+            let notice = unsupported_claim_notice();
+            header.push_str(&crate::tr!(
+                "\n证据：本回合未对任何候选建立直接取证（已评估单元格 {cells}）。{notice}",
+                "\nEvidence: no candidate gained direct support this turn ({cells} cells assessed). {notice}",
+                "\nEvidencia: ningún candidato obtuvo respaldo directo en este turno ({cells} celdas evaluadas). {notice}"
+            ));
             return header;
         };
         let required = self
@@ -1803,19 +1814,28 @@ impl RetrievalGuard {
             })
             .map(|clue| clue.label.clone())
             .collect::<Vec<_>>();
-        let _ = write!(
-            header,
-            "\n候选：{}（{}）\n取证：{} 条必需线索中 {supported} 条已直接取证",
-            candidate.title.as_deref().unwrap_or("未命名"),
-            candidate.id,
-            required.len(),
-        );
+        let title = candidate
+            .title
+            .as_deref()
+            .unwrap_or_else(|| crate::ui_lang::tr_static("未命名", "Untitled", "Sin título"));
+        let id = &candidate.id;
+        let total = required.len();
+        header.push_str(&crate::tr!(
+            "\n候选：{title}（{id}）\n取证：{total} 条必需线索中 {supported} 条已直接取证",
+            "\nCandidate: {title} ({id})\nEvidence: {supported} of {total} required clues directly supported",
+            "\nCandidato: {title} ({id})\nEvidencia: {supported} de {total} pistas obligatorias con respaldo directo"
+        ));
         if !missing.is_empty() {
-            let _ = write!(header, "\n未核实：{}", missing.join("；"));
+            let missing = missing.join(crate::ui_lang::tr_static("；", "; ", "; "));
+            header.push_str(&crate::tr!(
+                "\n未核实：{missing}",
+                "\nNot verified: {missing}",
+                "\nSin verificar: {missing}"
+            ));
         }
         if confidence == AnswerConfidence::Unconfirmed {
             header.push('\n');
-            header.push_str(UNSUPPORTED_CLAIM_NOTICE);
+            header.push_str(unsupported_claim_notice());
         }
         header
     }
@@ -2862,6 +2882,8 @@ fn explicit_unconfirmed_answer(answer: &str) -> bool {
         || trimmed.starts_with("状态:未确认")
         || trimmed.starts_with("status: unconfirmed")
         || trimmed.starts_with("status:unconfirmed")
+        || trimmed.starts_with("estado: sin confirmar")
+        || trimmed.starts_with("estado:sin confirmar")
 }
 
 fn cursor_request_url(raw_cursor: &str) -> Option<String> {

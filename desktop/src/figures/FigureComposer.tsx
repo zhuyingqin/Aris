@@ -1,3 +1,5 @@
+import type { Language } from "../store";
+import { pickCopy, type Copy } from "./figureStyles";
 import { useRef, useState, type DragEvent } from "react";
 import { SvgIcon } from "../SvgIcon";
 import { STYLE_PRESETS } from "./figureModel";
@@ -18,19 +20,23 @@ export interface FigureModelOptions { executor: string[]; reviewer: string[]; im
 export const EMPTY_DRAFT: FigureDraft = { description: "", style: STYLE_PRESETS[0].value, image: null, executorModel: null, reviewerModel: null, imageModel: null };
 const MAX_DESCRIPTION = 40000;
 /** Starting points shown only while the description is empty. */
-const EXAMPLES: { label: [string, string]; text: [string, string] }[] = [
-  { label: ["神经网络架构", "Network architecture"], text: [
+const EXAMPLES: { label: Copy; text: Copy }[] = [
+  { label: ["神经网络架构", "Network architecture", "Arquitectura de red"], text: [
     "Transformer 编码器结构图\n自下而上：输入嵌入 + 位置编码 → N× 编码层（多头自注意力 → Add & Norm → 前馈网络 → Add & Norm）→ 输出表示。每个子层画出残差连接，N× 用虚线框标出。",
-    "Transformer encoder architecture\nBottom to top: input embedding + positional encoding → N× encoder layer (multi-head self-attention → Add & Norm → feed-forward → Add & Norm) → output representation. Draw the residual connection of each sub-layer and mark N× with a dashed box."] },
-  { label: ["训练流程", "Training pipeline"], text: [
+    "Transformer encoder architecture\nBottom to top: input embedding + positional encoding → N× encoder layer (multi-head self-attention → Add & Norm → feed-forward → Add & Norm) → output representation. Draw the residual connection of each sub-layer and mark N× with a dashed box.",
+    "Arquitectura del codificador Transformer\nDe abajo arriba: embedding de entrada + codificación posicional → N× capa del codificador (autoatención multicabeza → Add & Norm → red feed-forward → Add & Norm) → representación de salida. Dibuja la conexión residual de cada subcapa y marca N× con un recuadro discontinuo."] },
+  { label: ["训练流程", "Training pipeline", "Flujo de entrenamiento"], text: [
     "模型训练流程图\n从左到右：数据集 → 预处理与增强 → 模型 → 损失计算 → 优化器更新；损失到模型画反向传播的虚线箭头。下方标注验证集评估与早停。",
-    "Model training pipeline\nLeft to right: dataset → preprocessing and augmentation → model → loss → optimizer update; a dashed back-propagation arrow from loss to model. Validation evaluation and early stopping underneath."] },
-  { label: ["方法对比", "Method comparison"], text: [
+    "Model training pipeline\nLeft to right: dataset → preprocessing and augmentation → model → loss → optimizer update; a dashed back-propagation arrow from loss to model. Validation evaluation and early stopping underneath.",
+    "Flujo de entrenamiento del modelo\nDe izquierda a derecha: conjunto de datos → preprocesamiento y aumento de datos → modelo → pérdida → actualización del optimizador; una flecha discontinua de retropropagación de la pérdida al modelo. Debajo, evaluación en validación y parada temprana."] },
+  { label: ["方法对比", "Method comparison", "Comparación de métodos"], text: [
     "方法对比示意图\n左右两栏：左为基线方法（单阶段直接预测），右为本文方法（检索 → 推理 → 校验三阶段）。共享模块用相同颜色，新增模块用强调色。",
-    "Method comparison\nTwo columns: the baseline on the left (single-stage direct prediction), ours on the right (retrieve → reason → verify). Shared modules use the same color; new modules use an accent color."] },
-  { label: ["系统工作流", "System workflow"], text: [
+    "Method comparison\nTwo columns: the baseline on the left (single-stage direct prediction), ours on the right (retrieve → reason → verify). Shared modules use the same color; new modules use an accent color.",
+    "Comparación de métodos\nDos columnas: a la izquierda, el método base (predicción directa en una sola etapa); a la derecha, el nuestro (recuperar → razonar → verificar). Los módulos compartidos usan el mismo color; los nuevos, un color de acento."] },
+  { label: ["系统工作流", "System workflow", "Flujo del sistema"], text: [
     "多智能体研究系统工作流\n规划者把子任务分给执行者；执行者生成代码并运行实验，结果交给独立审查者；审查者把反馈送回执行者，并向规划者发起复核请求。执行者通过环境（工具、数据集、API）访问数据。",
-    "Multi-agent research workflow\nThe Planner sends sub-tasks to the Executor; the Executor writes code and runs experiments, passing results to an independent Reviewer; the Reviewer sends feedback to the Executor and review requests to the Planner. The Executor reaches data through the Environment (tools, datasets, APIs)."] },
+    "Multi-agent research workflow\nThe Planner sends sub-tasks to the Executor; the Executor writes code and runs experiments, passing results to an independent Reviewer; the Reviewer sends feedback to the Executor and review requests to the Planner. The Executor reaches data through the Environment (tools, datasets, APIs).",
+    "Flujo de un sistema de investigación multiagente\nEl Planner envía subtareas al Executor; el Executor escribe código y ejecuta experimentos, y pasa los resultados a un Reviewer independiente; el Reviewer envía comentarios al Executor y solicitudes de revisión al Planner. El Executor accede a los datos a través del Environment (herramientas, conjuntos de datos, API)."] },
 ];
 
 /** The model each role will use: the user's pick, else the resolved default. */
@@ -43,7 +49,7 @@ export function effectiveModels(draft: FigureDraft, connections: FigureConnectio
 }
 
 interface Props {
-  t: (cn: string, en: string) => string; language: "cn" | "en";
+  t: (cn: string, en: string, es: string) => string; language: Language;
   draft: FigureDraft; onDraft: (patch: Partial<FigureDraft>) => void;
   connections: FigureConnections | null; options: FigureModelOptions;
   busy: boolean; canSubmit: boolean;
@@ -60,7 +66,7 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
   const models = effectiveModels(draft, connections);
   const sameModel = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
   const conflictingModels = !!models.executor && !!models.reviewer && sameModel(models.executor, models.reviewer);
-  const pick = (copy: [string, string]) => copy[language === "cn" ? 0 : 1];
+  const pick = (copy: Copy) => pickCopy(copy, language);
   // Executor and Reviewer must differ; moving the Executor onto the current
   // Reviewer hands the review to the next available model.
   const chooseExecutor = (model: string) => {
@@ -77,17 +83,17 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
   };
 
   return <div className="figure-new">
-    <aside ref={specRef} style={layout.style} className="figure-spec" aria-label={t("图形规格", "Figure specification")}>
+    <aside ref={specRef} style={layout.style} className="figure-spec" aria-label={t("图形规格", "Figure specification", "Especificación de la figura")}>
       <div className="figure-spec-scroll">
         <section className="figure-panel">
-          <h2><b>1</b>{t("描述图形", "Describe the figure")}</h2>
+          <h2><b>1</b>{t("描述图形", "Describe the figure", "Describe la figura")}</h2>
           <div className={`figure-describe${dragging ? " dragging" : ""}`} {...dropHandlers}>
-            <textarea aria-label={t("图形描述", "Figure description")} value={draft.description} onChange={(e) => onDraft({ description: e.target.value })} maxLength={MAX_DESCRIPTION} rows={14}
-              placeholder={t("你想画什么？写清模块、标签、关系和箭头方向，标题会自动简化。数据图请提供真实数据。", "What do you want to create? Name modules, labels, relations and arrow directions. A concise title is created automatically. Use real data for plots.")} />
+            <textarea aria-label={t("图形描述", "Figure description", "Descripción de la figura")} value={draft.description} onChange={(e) => onDraft({ description: e.target.value })} maxLength={MAX_DESCRIPTION} rows={14}
+              placeholder={t("你想画什么？写清模块、标签、关系和箭头方向，标题会自动简化。数据图请提供真实数据。", "What do you want to create? Name modules, labels, relations and arrow directions. A concise title is created automatically. Use real data for plots.", "¿Qué quieres crear? Indica módulos, etiquetas, relaciones y dirección de las flechas. El título breve se genera automáticamente. Para gráficos de datos, usa datos reales.")} />
             <div className="figure-describe-bar">
-              <label className="figure-attach" title={t("PNG / JPEG / WebP，≤ 10 MB", "PNG / JPEG / WebP, ≤ 10 MB")}>
-                <SvgIcon name="attachment" size={13} />{draft.image ? t("替换参考图", "Replace image") : t("添加参考图", "Add reference image")}
-                <input type="file" aria-label={t("上传参考图", "Upload reference image")} accept="image/png,image/jpeg,image/webp" onChange={(e) => { onUpload(e.target.files?.[0]); e.target.value = ""; }} />
+              <label className="figure-attach" title={t("PNG / JPEG / WebP，≤ 10 MB", "PNG / JPEG / WebP, ≤ 10 MB", "PNG / JPEG / WebP, ≤ 10 MB")}>
+                <SvgIcon name="attachment" size={13} />{draft.image ? t("替换参考图", "Replace image", "Reemplazar imagen") : t("添加参考图", "Add reference image", "Añadir imagen de referencia")}
+                <input type="file" aria-label={t("上传参考图", "Upload reference image", "Subir imagen de referencia")} accept="image/png,image/jpeg,image/webp" onChange={(e) => { onUpload(e.target.files?.[0]); e.target.value = ""; }} />
               </label>
               <span className="figure-count">{draft.description.length.toLocaleString("en-US")} / {MAX_DESCRIPTION.toLocaleString("en-US")}</span>
             </div>
@@ -95,67 +101,67 @@ export default function FigureComposer({ t, language, draft, onDraft, connection
           {draft.image ? <div className="figure-attached">
             <img src={draft.image.url} alt="" />
             <span><strong>{draft.image.name}</strong></span>
-            <button type="button" className="figure-icon-button" aria-label={t("移除参考图", "Remove reference image")} title={t("移除，改为生成", "Remove and generate instead")} onClick={() => onDraft({ image: null })}><SvgIcon name="close" size={12} /></button>
-          </div> : imageUnavailable && <p className="figure-hint tone-danger">{t("SomniImage 不可用：请添加参考图，或在模型设置中登录并开启 SomniImage。", "SomniImage is unavailable: add a reference image, or sign in and enable SomniImage in Model settings.")}</p>}
+            <button type="button" className="figure-icon-button" aria-label={t("移除参考图", "Remove reference image", "Quitar la imagen de referencia")} title={t("移除，改为生成", "Remove and generate instead", "Quitarla y generar una nueva")} onClick={() => onDraft({ image: null })}><SvgIcon name="close" size={12} /></button>
+          </div> : imageUnavailable && <p className="figure-hint tone-danger">{t("SomniImage 不可用：请添加参考图，或在模型设置中登录并开启 SomniImage。", "SomniImage is unavailable: add a reference image, or sign in and enable SomniImage in Model settings.", "SomniImage no está disponible: añade una imagen de referencia, o inicia sesión y activa SomniImage en la configuración de modelos.")}</p>}
           {!draft.description && <div className="figure-examples">
-            <span>{t("快速示例", "Quick examples")}</span>
+            <span>{t("快速示例", "Quick examples", "Ejemplos rápidos")}</span>
             <div>{EXAMPLES.map((example) => <button key={example.label[1]} type="button" onClick={() => onDraft({ description: pick(example.text) })}>{pick(example.label)}</button>)}</div>
           </div>}
         </section>
 
         <section className="figure-panel">
-          <h2><b>2</b>{t("设置", "Settings")}</h2>
+          <h2><b>2</b>{t("设置", "Settings", "Configuración")}</h2>
           <FigureStylePicker language={language} value={draft.style} preserveSource={!!draft.image} hasDescription={!!draft.description.trim()}
             onChange={(style) => onDraft({ style })} onUseScenario={(scenario) => onDraft({
               description: pick(scenario.description),
               style: compileFigureStyle({ ...(parseFigureStyle(draft.style) ?? DEFAULT_STYLE_SPEC), family: scenario.family }),
             })} />
           <div className="figure-field">
-            <span className="figure-field-head">{t("模型", "Models")}<button type="button" className="figure-link" onClick={onOpenSettings}><SvgIcon name="settings" size={12} />{t("模型设置", "Model settings")}</button></span>
+            <span className="figure-field-head">{t("模型", "Models", "Modelos")}<button type="button" className="figure-link" onClick={onOpenSettings}><SvgIcon name="settings" size={12} />{t("模型设置", "Model settings", "Configuración de modelos")}</button></span>
             <div className="figure-models">
               <label className="figure-model">
-                <span className="figure-role-tag">Executor · {t("重建 SVG", "Rebuilds SVG")}</span>
-                <select aria-label={t("Executor 模型", "Executor model")} value={models.executor} onChange={(e) => chooseExecutor(e.target.value)}>
-                  {!models.executor && <option value="" disabled>{t("请选择模型", "Choose a model")}</option>}
+                <span className="figure-role-tag">Executor · {t("重建 SVG", "Rebuilds SVG", "Reconstruye el SVG")}</span>
+                <select aria-label={t("Executor 模型", "Executor model", "Modelo Executor")} value={models.executor} onChange={(e) => chooseExecutor(e.target.value)}>
+                  {!models.executor && <option value="" disabled>{t("请选择模型", "Choose a model", "Elige un modelo")}</option>}
                   {withCurrent(options.executor, models.executor).map((model) => <option key={model} value={model}>{model}</option>)}
                 </select>
               </label>
               <label className="figure-model reviewer">
-                <span className="figure-role-tag"><SvgIcon name="shieldCheck" size={11} />Reviewer · {t("独立审查", "Independent")}</span>
-                <select aria-label={t("Reviewer 模型", "Reviewer model")} value={models.reviewer} onChange={(e) => onDraft({ reviewerModel: e.target.value })}>
-                  {!models.reviewer && <option value="" disabled>{t("请选择模型", "Choose a model")}</option>}
+                <span className="figure-role-tag"><SvgIcon name="shieldCheck" size={11} />Reviewer · {t("独立审查", "Independent review", "Revisión independiente")}</span>
+                <select aria-label={t("Reviewer 模型", "Reviewer model", "Modelo Reviewer")} value={models.reviewer} onChange={(e) => onDraft({ reviewerModel: e.target.value })}>
+                  {!models.reviewer && <option value="" disabled>{t("请选择模型", "Choose a model", "Elige un modelo")}</option>}
                   {withCurrent(options.reviewer, models.reviewer).filter((model) => !sameModel(model, models.executor) || model === models.reviewer).map((model) => <option key={model} value={model}>{model}</option>)}
                 </select>
               </label>
               <label className={`figure-model image${generate ? "" : " inactive"}`}>
-                <span className="figure-role-tag"><SvgIcon name="sparkle" size={11} />{t("生图模型", "Image model")}{!generate && <small>{t("已有参考图，不调用", "unused with a reference image")}</small>}</span>
-                <select aria-label={t("生图模型", "Image model")} value={models.image} disabled={!generate || options.image.length === 0} onChange={(e) => onDraft({ imageModel: e.target.value })}>
-                  {options.image.length === 0 && <option value="">{t("未配置", "Not configured")}</option>}
+                <span className="figure-role-tag"><SvgIcon name="sparkle" size={11} />{t("生图模型", "Image model", "Modelo de imagen")}{!generate && <small>{t("已有参考图，不调用", "Not used with a reference image", "No se usa con imagen de referencia")}</small>}</span>
+                <select aria-label={t("生图模型", "Image model", "Modelo de imagen")} value={models.image} disabled={!generate || options.image.length === 0} onChange={(e) => onDraft({ imageModel: e.target.value })}>
+                  {options.image.length === 0 && <option value="">{t("未配置", "Not configured", "Sin configurar")}</option>}
                   {withCurrent(options.image, models.image).map((model) => <option key={model} value={model}>{model}</option>)}
                 </select>
               </label>
             </div>
-            {conflictingModels && <p className="figure-hint tone-danger" role="status">{t("执行模型与审查模型相同，请更换其中一个模型以进行独立审查。", "The Executor and Reviewer use the same model. Change either model for independent review.")}</p>}
+            {conflictingModels && <p className="figure-hint tone-danger" role="status">{t("执行模型与审查模型相同，请更换其中一个模型以进行独立审查。", "The Executor and Reviewer use the same model. Change one of them to keep the review independent.", "El Executor y el Reviewer usan el mismo modelo. Cambia uno de los dos para tener una revisión independiente.")}</p>}
           </div>
         </section>
       </div>
       <footer className="figure-spec-cta">
         <button type="button" className="figure-button primary block" disabled={!canSubmit} onClick={onSubmit}>
-          <SvgIcon name={generate ? "sparkle" : "play"} size={14} />{busy ? t("正在启动…", "Starting…") : generate ? t("生成图形", "Generate figure") : t("预览参考图", "Preview reference")}
+          <SvgIcon name={generate ? "sparkle" : "play"} size={14} />{busy ? t("正在启动…", "Starting…", "Iniciando…") : generate ? t("生成图形", "Generate figure", "Generar figura") : t("预览参考图", "Preview reference", "Previsualizar referencia")}
         </button>
       </footer>
     </aside>
-    <FigureResizeHandle label={t("调整描述与预览区域宽度", "Resize description and preview")} panelRef={specRef}
+    <FigureResizeHandle label={t("调整描述与预览区域宽度", "Resize description and preview", "Cambiar el ancho de la descripción y la vista previa")} panelRef={specRef}
       minWidth={300} reserveWidth={240} onResize={layout.resize} onReset={layout.reset} />
 
     <div className={`figure-preview${dragging ? " dragging" : ""}`} {...dropHandlers}>
       {draft.image ? <figure className="figure-preview-image">
-        <img src={draft.image.url} alt={t("参考图预览", "Reference preview")} />
-        <figcaption><SvgIcon name="image" size={12} />{t("参考图", "Reference image")}</figcaption>
+        <img src={draft.image.url} alt={t("参考图预览", "Reference preview", "Vista previa de la referencia")} />
+        <figcaption><SvgIcon name="image" size={12} />{t("参考图", "Reference image", "Imagen de referencia")}</figcaption>
       </figure> : <div className="figure-preview-empty">
         <svg viewBox="0 0 120 80" aria-hidden><rect x="8" y="10" width="34" height="20" rx="4" /><rect x="78" y="10" width="34" height="20" rx="4" /><rect x="43" y="50" width="34" height="20" rx="4" /><path d="M42 20h36M25 30l22 20M95 30 73 50" /></svg>
-        <strong>{t("图形预览", "Figure preview")}</strong>
-        <small>{t("拖入参考图", "Drop a reference image")}</small>
+        <strong>{t("图形预览", "Figure preview", "Vista previa de la figura")}</strong>
+        <small>{t("拖入参考图", "Drop a reference image", "Suelta aquí una imagen de referencia")}</small>
       </div>}
     </div>
   </div>;

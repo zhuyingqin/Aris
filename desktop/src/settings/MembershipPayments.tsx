@@ -5,7 +5,8 @@ import {
 } from "../api/tauri";
 import { getAccountSessionRevision, writeCachedAccount } from "../accountCache";
 import { formatUserFacingError } from "../errorMessage";
-import type { Language } from "../store";
+import { languageLocale, type Language } from "../language";
+import { siteLang } from "../accountSiteLinks";
 import { SvgIcon } from "../SvgIcon";
 import { accountMenuPlan, isPaidAccountPlan } from "../accountMenuPlan";
 import "./MembershipPayments.css";
@@ -32,18 +33,35 @@ const COPY = {
     title: "Buy a monthly plan", close: "Close purchase", single: "One payment · No auto-renewal", plans: "Choose a plan",
     upgrade: "Upgrade membership", currentPlan: "Current plan", upgradeTerms: "The selected plan is billed for a full month, without a credit for your existing plan.", topPlan: "Pro is the highest tier. Another purchase starts a new monthly period from this payment.",
     loading: "Loading prices for your account…", retry: "Reload prices", account: "Account", month: "1 month",
-    credits: "Model credits for this period", alipay: "Alipay", method: "Payment method", cashier: "Open the Alipay desktop cashier in your browser and pay by QR code.",
+    credits: "Model credits for this period", alipay: "Alipay", method: "Payment method", cashier: "Opens Alipay's desktop checkout in your browser, where you can pay by scanning a QR code.",
     terms: "Your month starts after payment verification. Credits expire with this period. A new purchase starts from this payment and does not extend an existing period.",
     consent: "I have checked the plan and amount and agree to the", agreement: "User Service Agreement", pay: "Confirm and pay with Alipay",
     creating: "Creating order…", unavailable: "Alipay desktop payments are temporarily unavailable. Please check again later.",
     studentUnavailable: "Student eligibility could not be checked. Public prices are shown. You can reload prices later.",
     student: "Student price", promotion: "Special price", total: "Total due", order: "Order number",
-    pending: "After payment, return here and refresh your account to check membership and credits. Opening the cashier does not confirm payment.",
-    reopen: "Reopen current cashier", refresh: "Refresh account", refreshing: "Checking account…", chooseAgain: "Choose a plan again",
-    uncertain: "The order status could not be confirmed. Check your account before purchasing again.", browserFailed: "The browser could not open. Reopen the current cashier to continue.",
+    pending: "After payment, return here and refresh your account to check membership and credits. Opening the checkout page does not mean the payment succeeded.",
+    reopen: "Reopen checkout", refresh: "Refresh account", refreshing: "Checking account…", chooseAgain: "Choose another plan",
+    uncertain: "The order status could not be confirmed. Check your account before purchasing again.", browserFailed: "The browser did not open. Reopen checkout to continue.",
     stale: "Prices or benefits changed. Reload prices and review your purchase again.", studentRequired: "Student eligibility expired. Please reload prices.",
     studentFailed: "Student eligibility could not be checked. Please try again later.", invalid: "Payment details could not be verified. Please reload prices.",
     changed: "The signed-in account changed. Reopen the purchase panel.", busy: "An order is already being created. Please wait.",
+  },
+  es: {
+    title: "Comprar un plan mensual", close: "Cerrar compra", single: "Pago único · Sin renovación automática", plans: "Elige un plan",
+    upgrade: "Mejorar membresía", currentPlan: "Plan actual", upgradeTerms: "El plan seleccionado se cobra por un mes completo, sin descontar tu plan actual.", topPlan: "Pro es el nivel más alto. Una nueva compra inicia un nuevo periodo mensual desde este pago.",
+    loading: "Cargando los precios de tu cuenta…", retry: "Recargar precios", account: "Cuenta", month: "1 mes",
+    credits: "Créditos de modelos de este periodo", alipay: "Alipay", method: "Método de pago", cashier: "Abre la caja de Alipay para escritorio en tu navegador y paga con código QR.",
+    terms: "Tu mes empieza tras verificar el pago. Los créditos caducan con este periodo. Una nueva compra empieza desde este pago y no amplía un periodo existente.",
+    consent: "He revisado el plan y el importe y acepto el", agreement: "Acuerdo de servicio al usuario", pay: "Confirmar y pagar con Alipay",
+    creating: "Creando pedido…", unavailable: "Los pagos de Alipay para escritorio no están disponibles temporalmente. Vuelve a comprobarlo más tarde.",
+    studentUnavailable: "No se pudo comprobar la condición de estudiante. Se muestran los precios públicos. Puedes recargar los precios más tarde.",
+    student: "Precio de estudiante", promotion: "Precio especial", total: "Total a pagar", order: "Número de pedido",
+    pending: "Tras pagar, vuelve aquí y actualiza tu cuenta para comprobar la membresía y los créditos. Abrir la caja no confirma el pago.",
+    reopen: "Reabrir la caja actual", refresh: "Actualizar cuenta", refreshing: "Comprobando cuenta…", chooseAgain: "Elegir otro plan",
+    uncertain: "No se pudo confirmar el estado del pedido. Revisa tu cuenta antes de volver a comprar.", browserFailed: "No se pudo abrir el navegador. Reabre la caja actual para continuar.",
+    stale: "Los precios o las ventajas han cambiado. Recarga los precios y revisa de nuevo tu compra.", studentRequired: "La verificación de estudiante caducó. Recarga los precios.",
+    studentFailed: "No se pudo comprobar la condición de estudiante. Inténtalo de nuevo más tarde.", invalid: "No se pudieron verificar los datos de pago. Recarga los precios.",
+    changed: "La cuenta con sesión iniciada cambió. Vuelve a abrir el panel de compra.", busy: "Ya se está creando un pedido. Espera un momento.",
   },
 };
 
@@ -74,7 +92,7 @@ export default function MembershipPayments({ language, account, active, onClose 
   const sessionRef = useRef(getAccountSessionRevision());
   const headingRef = useRef<HTMLHeadingElement>(null);
   const current = () => mountedRef.current && getAccountSessionRevision() === sessionRef.current;
-  const price = (fen: number) => new Intl.NumberFormat(language === "cn" ? "zh-CN" : "en-US", {
+  const price = (fen: number) => new Intl.NumberFormat(languageLocale(language), {
     style: "currency", currency: "CNY", minimumFractionDigits: 2,
   }).format(fen / 100);
 
@@ -216,7 +234,7 @@ export default function MembershipPayments({ language, account, active, onClose 
             <strong>{planName(item.group)}</strong>
             {item.group === currentPlan.tier && <span className="sp-membership-current">{t.currentPlan}</span>}
             <span className="sp-membership-price">{price(item.priceFen)} <small>/ {t.month}</small></span>
-            <span>{(item.totalAmount / 5_000).toLocaleString(language === "cn" ? "zh-CN" : "en-US")} {t.credits}</span>
+            <span>{(item.totalAmount / 5_000).toLocaleString(languageLocale(language))} {t.credits}</span>
             {item.priceKind !== "original" && <span className="sp-membership-discount">{item.priceKind === "student" ? t.student : t.promotion} <del>{price(item.originalFen)}</del></span>}
           </button>)}
         </div>
@@ -232,7 +250,7 @@ export default function MembershipPayments({ language, account, active, onClose 
         <div className="sp-membership-consent">
           <label><input type="checkbox" checked={consent} disabled={creating} aria-describedby={`${titleId}-terms`}
             onChange={(event) => { setSelected(selected); setConsent(event.target.checked); }} />{t.consent}</label>
-          <a href={`https://ensuanx.com/user-service-agreement.html?lang=${language === "cn" ? "zh" : "en"}`}
+          <a href={`https://ensuanx.com/user-service-agreement.html?lang=${siteLang(language)}`}
             onClick={(event) => { event.preventDefault(); void openExternalUrl(event.currentTarget.href).catch((failure) => setError(message(failure))); }}>
             {t.agreement}
           </a>

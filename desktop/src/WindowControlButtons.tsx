@@ -1,3 +1,4 @@
+import type { Language } from "./language";
 import { isMacOS } from "./platform";
 import { isTauri } from "./api/tauri";
 import { requestWindowAction } from "./windowControls";
@@ -32,11 +33,13 @@ export type WindowControlLabels = {
   close: string;
 };
 
-const DEFAULT_WINDOW_CONTROL_LABELS: WindowControlLabels = {
-  minimize: "最小化窗口",
-  maximize: "最大化窗口",
-  close: "关闭窗口",
+export const WINDOW_CONTROL_LABELS: Record<Language, WindowControlLabels> = {
+  cn: { minimize: "最小化窗口", maximize: "最大化窗口", close: "关闭窗口" },
+  en: { minimize: "Minimize window", maximize: "Maximize window", close: "Close window" },
+  es: { minimize: "Minimizar ventana", maximize: "Maximizar ventana", close: "Cerrar ventana" },
 };
+
+const DEFAULT_WINDOW_CONTROL_LABELS: WindowControlLabels = WINDOW_CONTROL_LABELS.cn;
 
 /**
  * The three frameless-window buttons (minimize / maximize / close), rendered as

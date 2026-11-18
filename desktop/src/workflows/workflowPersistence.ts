@@ -9,6 +9,7 @@ import {
 // The ledger lives in Rust, so these calls follow the backend rather than the
 // webview: `aris-devserver` serves them to a plain browser too.
 import { hasNativeBackend } from "../api/transport";
+import { workflowsCopy } from "./i18n";
 import type {
   ReviewWorkflowCreateInput,
   ReviewWorkflowRun,
@@ -93,7 +94,7 @@ export async function saveWorkflowRun(
   const runs = previewRuns(projectId);
   const previous = runs.find((run) => run.id === input.run.id);
   if (!previous || previous.revision !== input.expectedRevision) {
-    throw new Error("工作流已经更新，请重新加载后再试。");
+    throw new Error(workflowsCopy().engine.persistence.revisionConflict);
   }
   const now = new Date().toISOString();
   const next: ReviewWorkflowRun = {
@@ -123,7 +124,7 @@ export async function renameWorkflowRun(projectId: string, id: string, title: st
 
   const runs = previewRuns(projectId);
   const previous = runs.find((run) => run.id === id);
-  if (!previous) throw new Error("Workflow not found.");
+  if (!previous) throw new Error(workflowsCopy().engine.persistence.notFound);
   const now = new Date().toISOString();
   const next: ReviewWorkflowRun = {
     ...previous,
@@ -152,7 +153,7 @@ export async function deleteWorkflowRun(projectId: string, id: string) {
     return;
   }
   const runs = previewRuns(projectId);
-  if (!runs.some((run) => run.id === id)) throw new Error("Workflow not found.");
+  if (!runs.some((run) => run.id === id)) throw new Error(workflowsCopy().engine.persistence.notFound);
   savePreviewRuns(projectId, runs.filter((run) => run.id !== id));
 }
 
@@ -185,7 +186,7 @@ function createPreviewRun(input: ReviewWorkflowCreateInput): ReviewWorkflowRun {
     templateId: "review-paper-from-topic",
     templateVersion: REVIEW_WORKFLOW_TEMPLATE_VERSION,
     revision: 1,
-    title: `综述：${input.topic.trim()}`,
+    title: workflowsCopy().engine.persistence.previewTitle(input.topic.trim()),
     topic: input.topic.trim(),
     keywords: input.keywords,
     languages: input.languages.length ? input.languages : ["中文", "English"],
@@ -242,7 +243,7 @@ function createPreviewRun(input: ReviewWorkflowCreateInput): ReviewWorkflowRun {
       timestamp: now,
       actor: "user",
       action: "workflow_created",
-      summary: "创建“从主题到可投稿综述论文”工作流。",
+      summary: workflowsCopy().engine.persistence.createdEvent,
       stageId: "scope-and-plan",
     }],
     createdAt: now,
@@ -252,7 +253,7 @@ function createPreviewRun(input: ReviewWorkflowCreateInput): ReviewWorkflowRun {
 
 function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
   const defaults = createPreviewRun({
-    topic: run.topic || "未命名综述",
+    topic: run.topic || workflowsCopy().engine.persistence.untitledTopic,
     keywords: run.keywords ?? [],
     languages: run.languages ?? ["中文", "English"],
     databases: run.databases ?? ["scopus", "openalex", "semantic-scholar", "crossref"],
@@ -292,7 +293,7 @@ function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
               required: true as const,
               status: "skipped" as const,
               reviewer: "Legacy workflow migration",
-              summary: "该阶段在旧版工作流中没有检索回收质量门禁，保留为未经独立审查。",
+              summary: workflowsCopy().engine.persistence.legacySearchGate,
               issues: [],
               reviewedAt: previous.completedAt ?? run.updatedAt,
             }
@@ -316,7 +317,7 @@ function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
     const evidenceStage = stages.find((stage) => stage.id === "evidence-synthesis");
     if (evidenceStage) {
       evidenceStage.status = "waiting_user";
-      evidenceStage.summary = "Zotero 结构化重构已从当前版本移除；当前版本止于论文到章节映射。";
+      evidenceStage.summary = workflowsCopy().engine.persistence.zoteroRemoved;
     }
   }
   const reconnaissanceStages = new Set([
@@ -366,10 +367,10 @@ function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
         || (primaryStage.reviewerGate.status === "approved"
           && primaryStage.reviewerGate.reviewer !== "Coverage target validator");
       primaryStage.summary = targetReached
-        ? `已完成完全无关文献筛除，保留 ${primaryRecordCount} 篇去重原始文献；剩余分页不再阻塞后续分级。`
+        ? workflowsCopy().engine.persistence.primaryTargetReached(primaryRecordCount)
         : hasShortfall
-          ? `筛除完全无关项后保留 ${primaryRecordCount} 篇去重原始文献；部分路径存在数量短口。`
-          : `数据源已耗尽，筛选后保留 ${primaryRecordCount} 篇去重原始文献。`;
+          ? workflowsCopy().engine.persistence.primaryShortfall(primaryRecordCount)
+          : workflowsCopy().engine.persistence.primaryExhausted(primaryRecordCount);
       if (reviewerDisabled || hasRealReview) {
         primaryStage.status = "passed";
         primaryStage.completedAt = primaryStage.completedAt ?? run.updatedAt;
@@ -387,11 +388,11 @@ function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
           required: true,
           status: reviewerDisabled ? "skipped" : hasRealReview ? "approved" : "pending",
           reviewer: reviewerDisabled
-            ? "Executor（无独立审查）"
+            ? workflowsCopy().engine.persistence.actorNoReview
             : hasRealReview ? primaryStage.reviewerGate.reviewer : undefined,
           summary: targetReached
-            ? `已筛除完全无关项并保留 ${primaryTargetResults} 篇去重文献；未读取的提供商分页已保留在覆盖记录中。`
-            : "部分路径未达预算或来源已耗尽；数量短口已如实保留。",
+            ? workflowsCopy().engine.persistence.gateTargetReached(primaryTargetResults)
+            : workflowsCopy().engine.persistence.gateShortfall,
           issues: primaryAdmissions
             .map((admission) => admission.shortfallReason)
             .filter((reason): reason is string => Boolean(reason)),
@@ -416,7 +417,7 @@ function migratePreviewRun(run: ReviewWorkflowRun): ReviewWorkflowRun {
     reviewSearchIteration: run.reviewSearchIteration ?? 1,
     scoutAutomationStatus: run.scoutAutomationStatus ?? inferredScoutStatus,
     scoutPauseReason: run.scoutPauseReason
-      ?? (inferredScoutStatus === "paused" ? "旧版运行在需要人工处理的状态中恢复；确认问题后可继续综述侦察。" : undefined),
+      ?? (inferredScoutStatus === "paused" ? workflowsCopy().engine.persistence.legacyPaused : undefined),
     scoutRevisionLimit: run.scoutRevisionLimit ?? 4,
     reviewEligibility: run.reviewEligibility ?? defaults.reviewEligibility,
     outlineClusters: run.outlineClusters ?? [],

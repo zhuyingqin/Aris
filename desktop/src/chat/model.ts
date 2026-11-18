@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import type { ChatSession } from "./types";
 import { noteTurnActivity } from "./modelWait";
+import { tr, type Language } from "../language";
 
 export const SESSIONS_KEY = "somniq-chat-sessions-v2";
 export const LEGACY_SESSIONS_KEY = "aris-chat-sessions-v2";
@@ -328,6 +329,7 @@ function isUnusableChatTitle(value: string): boolean {
   // paper-search response template can start with "状态：未确认"; treating that
   // as a title makes unrelated conversations indistinguishable in the sidebar.
   if (/^(?:状态)?[:：]?(?:未确认|无法确认|待确认|不确定|未知|证据不足)$/u.test(compact)) return true;
+  if (/^(?:estado\s*[:：]\s*)?sin confirmar$/i.test(lower)) return true;
   if (/^(?:status\s*[:：]\s*)?(?:unconfirmed|not verified|inconclusive|pending|unknown|insufficient evidence)$/i.test(lower)) return true;
   if (lower.startsWith("<think") || lower.includes("</think")) return true;
   return [
@@ -875,6 +877,7 @@ type SessionGroup = { id: string; label: string; sessions: ChatSession[] };
 export function groupSessionsByProject(
   sessions: ChatSession[],
   projects: DesktopProject[],
+  language: Language = "en",
 ): SessionGroup[] {
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const order = new Map(projects.map((project, index) => [project.id, index]));
@@ -888,7 +891,9 @@ export function groupSessionsByProject(
     .sort(([left], [right]) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER))
     .map(([projectId, projectSessions]) => ({
       id: projectId,
-      label: names.get(projectId) ?? (projectId === "default" ? "SomniQ Desktop Workspace" : "Unknown project"),
+      label: names.get(projectId) ?? (projectId === "default"
+        ? "SomniQ Desktop Workspace"
+        : tr(language, "未知项目", "Unknown project", "Proyecto desconocido")),
       sessions: projectSessions.sort((left, right) =>
         Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt),
     }));

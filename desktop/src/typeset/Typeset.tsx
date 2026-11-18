@@ -107,6 +107,7 @@ import { clearLatexProjectSymbols, setLatexProjectSymbols, type LatexSymbol } fr
 import { bibEntryDetail, bibliographyTargets, parseBibEntries } from "../editor/latexBib";
 import { setLatexCompileMarkers, type LatexCompileMarker } from "../editor/latexLint";
 import { useStore } from "../store";
+import { languageLocale, tr } from "../language";
 import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
 import {
   findLatexOffsetForPdfText,
@@ -2111,7 +2112,7 @@ export default function Typeset() {
       const reach = base ? changeSet.createdAtMs - base.createdAtMs : Number.POSITIVE_INFINITY;
       if (unopened.length > 0 && reach > REJECT_REACH_WARNING_MS) {
         const since = base
-          ? new Date(base.createdAtMs).toLocaleString()
+          ? new Date(base.createdAtMs).toLocaleString(languageLocale(language))
           : copy.pendingReviewRejectSinceUnknown;
         if (!window.confirm(copy.pendingReviewRejectConfirm(unopened.length, since))) return;
       }
@@ -4571,9 +4572,9 @@ export default function Typeset() {
               {error && <div className="typeset-error-bar">{error}</div>}
               {pendingChangeSets.length > 1 && (
                 <label className="typeset-review-batch-selector">
-                  {language === "cn" ? "修改批次" : "Change batch"}
+                  {tr(language, "修改批次", "Change batch", "Lote de cambios")}
                   <select
-                    aria-label={language === "cn" ? "修改批次" : "Change batch"}
+                    aria-label={tr(language, "修改批次", "Change batch", "Lote de cambios")}
                     value={pendingChangeSet?.id ?? ""}
                     disabled={externalReviewBusy !== null}
                     onChange={(event) => {
@@ -4592,8 +4593,8 @@ export default function Typeset() {
                   >
                     {pendingChangeSets.map((batch, index) => (
                       <option key={batch.id} value={batch.id}>
-                        {language === "cn" ? `第 ${index + 1} 批` : `Batch ${index + 1}`}
-                        {` · ${copy.pendingReviewActor(batch.actor)} · ${new Date(batch.createdAtMs).toLocaleTimeString()}`}
+                        {tr(language, `第 ${index + 1} 批`, `Batch ${index + 1}`, `Lote ${index + 1}`)}
+                        {` · ${copy.pendingReviewActor(batch.actor)} · ${new Date(batch.createdAtMs).toLocaleTimeString(languageLocale(language))}`}
                       </option>
                     ))}
                   </select>
@@ -4847,7 +4848,7 @@ export default function Typeset() {
                   onKeyDown={(event) => handlePanelResizeKey("pdf", event)}
                 >
                   <span className="typeset-resize-handle-hit" aria-hidden="true" />
-                  <div className="typeset-resizer-sync-bar" role="toolbar" aria-label="SyncTeX navigation">
+                  <div className="typeset-resizer-sync-bar" role="toolbar" aria-label={tr(language, "SyncTeX 跳转", "SyncTeX navigation", "Navegación SyncTeX")}>
                     <button
                       type="button"
                       className="typeset-resizer-sync-btn sync-to-pdf"

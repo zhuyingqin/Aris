@@ -123,7 +123,7 @@ describe("Plugin packages", () => {
     fireEvent.click(screen.getByText("Import local package"));
     fireEvent.change(screen.getByLabelText("Package directory"), { target: { value: preview.source } });
     fireEvent.click(screen.getByText("Preview"));
-    fireEvent.click(await screen.findByText("Install disabled"));
+    fireEvent.click(await screen.findByText("Install, keep disabled"));
     await screen.findByRole("alert");
     expect(screen.getByRole("article", { name: "@lab/evidence" })).toBeTruthy();
     expect(onChanged).not.toHaveBeenCalled();
@@ -273,7 +273,7 @@ describe("Plugin packages", () => {
     await previewSource("en");
     await screen.findByText("This exact version is already installed; there is nothing to upgrade.");
     expect(screen.queryByRole("button", { name: /^Upgrade/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Install disabled" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Install, keep disabled" })).toBeNull();
 
     vi.mocked(api.pluginsPreview).mockResolvedValueOnce({ ...upgradePreview(upgradePlan()), canEnable: false, diagnostics: [{ code: "capability", message: "dsh-goal requires DeepSeek host", severity: "error" }] });
     fireEvent.click(screen.getByText("Preview"));

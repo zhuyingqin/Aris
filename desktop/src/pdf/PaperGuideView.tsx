@@ -6,9 +6,10 @@ import { currentLesson, finalReview } from "./paperGuideModel";
 import PaperReadingContent from "./PaperReadingContent";
 import PaperGuideDiagram, { diagramMarkdown } from "./PaperGuideDiagram";
 import "./PaperGuideView.css";
+import { tr, type Language } from "../language";
 
 const COPY = {
-  zh: {
+  cn: {
     storyline: "先看懂论文主线", topics: "结合原文深入理解", draft: "讲解草稿 · 尚未独立审核",
     source: "对照原文", page: "第", suffix: "页",
     previewFailed: "预览暂不可用，点击查看原页", intuition: "先建立直觉", notation: "符号与图示说明",
@@ -40,20 +41,21 @@ const COPY = {
     },
     saveNote: "保存到笔记", savedNote: "已保存到文献笔记",
     noteSource: (pages: string, status: string) => `来源：SomniQ 论文讲解（PDF 第 ${pages} 页）· ${status}`,
+    colon: "：", listSeparator: "、", quote: ["「", "」"], aside: ["（", "）"],
   },
   en: {
     storyline: "Follow the paper's argument", topics: "Understand with the original evidence", draft: "Explanation draft · Not independently reviewed",
     source: "Read original", page: "Page", suffix: "",
     previewFailed: "Preview unavailable; open the original page", intuition: "Build an intuition", notation: "Symbols and visual legend",
-    assumptions: "Assumptions and scope", steps: "Step by step", paper: "From the paper", teaching: "Teaching addition",
+    assumptions: "Assumptions and scope", steps: "Step by step", paper: "From the paper", teaching: "Added explanation",
     example: "A simple worked problem", exampleNote: "An illustrative teaching example, not a paper experiment", evidence: "What the evidence supports",
     check: "Check your understanding", answer: "Show the answer", caution: "Keep in mind", goal: "What you will learn",
-    pending: "Waiting to explain this topic", running: "Reading the original images to explain this topic…", failed: "This topic could not be generated. Continue above to retry.",
+    pending: "This topic is queued for explanation", running: "Reading the original images to explain this topic…", failed: "This topic could not be generated. Continue above to retry.",
     overview: { problem: "The research problem", method: "Why the method works this way", evidence: "What the experiments show", limitations: "Limits of the conclusions" },
     kind: { figure: "Understand a figure", formula: "Understand a formula", experiment: "Read the experiments", concept: "Clarify a concept" },
     oneSentence: "The paper in one sentence", atGlance: "The paper at a glance", diagram: "See it in a picture", plainSummary: "In plain words", analogy: "An analogy", prerequisites: "Background first",
     misconceptions: "Easy to get wrong", wrong: "Misconception", right: "Correction", glossary: "Key terms to know first",
-    readingPath: "Reading path: simple to deep", relevance: "Why it may matter for your research", prereqLabel: "First understand",
+    readingPath: "Reading path: from basics to details", relevance: "Why it may matter for your research", prereqLabel: "Prerequisite",
     levels: { foundation: "Foundations", core: "Core idea", advanced: "Going deeper" } as Record<TopicLevel, string>,
     depth: "Reading depth", depthBasic: "Essentials", depthFull: "Full",
     goDeeper: "Go deeper: notation, derivation and evidence", goDeeperNote: "That covers the essentials. When ready, continue with the symbols, the step-by-step reasoning and the original evidence.",
@@ -61,7 +63,7 @@ const COPY = {
     severity: { critical: "Critical", major: "Major", minor: "Minor" },
     review: {
       pass: "Passed independent review", revisedPass: "Revised after review · passed re-check", needsRevision: "Independent review found issues",
-      revisedIssues: "Issues remain after revision", revising: "Revising after review…", insufficient: "Original text insufficient to verify",
+      revisedIssues: "Issues remain after revision", revising: "Revising after review…", insufficient: "Not enough source text to verify",
       unavailable: "Not independently reviewed", pending: "Awaiting independent review",
     },
     reviewNote: "The Reviewer sees the original text but not images; check figure-related content against the original page.",
@@ -73,14 +75,50 @@ const COPY = {
     },
     saveNote: "Save to notes", savedNote: "Saved to paper notes",
     noteSource: (pages: string, status: string) => `Source: SomniQ paper guide (PDF pages ${pages}) · ${status}`,
+    colon: ": ", listSeparator: ", ", quote: ["“", "”"], aside: [" (", ")"],
+  },
+  es: {
+    storyline: "Sigue el argumento del artículo", topics: "Entiéndelo con la evidencia original", draft: "Borrador de explicación · Sin revisión independiente",
+    source: "Ver el original", page: "Página", suffix: "",
+    previewFailed: "Vista previa no disponible; abre la página original", intuition: "Construye una intuición", notation: "Símbolos y leyenda visual",
+    assumptions: "Supuestos y alcance", steps: "Paso a paso", paper: "Del artículo", teaching: "Añadido didáctico",
+    example: "Un problema sencillo resuelto", exampleNote: "Un ejemplo didáctico ilustrativo, no un experimento del artículo", evidence: "Qué respalda la evidencia",
+    check: "Comprueba lo que has entendido", answer: "Mostrar la respuesta", caution: "Ten en cuenta", goal: "Qué vas a aprender",
+    pending: "Esperando para explicar este tema", running: "Leyendo las imágenes originales para explicar este tema…", failed: "No se pudo generar este tema. Continúa arriba para reintentarlo.",
+    overview: { problem: "El problema de investigación", method: "Por qué el método funciona así", evidence: "Qué muestran los experimentos", limitations: "Límites de las conclusiones" },
+    kind: { figure: "Entender una figura", formula: "Entender una fórmula", experiment: "Leer los experimentos", concept: "Aclarar un concepto" },
+    oneSentence: "El artículo en una frase", atGlance: "El artículo de un vistazo", diagram: "Míralo en una imagen", plainSummary: "En palabras sencillas", analogy: "Una analogía", prerequisites: "Primero, lo básico",
+    misconceptions: "Errores frecuentes", wrong: "Idea errónea", right: "Corrección", glossary: "Términos clave que conviene conocer primero",
+    readingPath: "Ruta de lectura: de lo simple a lo profundo", relevance: "Por qué puede importar para tu investigación", prereqLabel: "Primero entiende",
+    levels: { foundation: "Fundamentos", core: "Idea central", advanced: "Más a fondo" } as Record<TopicLevel, string>,
+    depth: "Profundidad de lectura", depthBasic: "Lo esencial", depthFull: "Completa",
+    goDeeper: "Profundiza: notación, derivación y evidencia", goDeeperNote: "Con esto cubres lo esencial. Cuando quieras, sigue con los símbolos, el razonamiento paso a paso y la evidencia original.",
+    startLearning: "Empieza por los fundamentos", reviewTitle: "Revisión independiente", reviewer: "Modelo revisor",
+    severity: { critical: "Crítico", major: "Importante", minor: "Menor" },
+    review: {
+      pass: "Aprobado en la revisión independiente", revisedPass: "Revisado tras la revisión · aprobado en la nueva comprobación", needsRevision: "La revisión independiente encontró problemas",
+      revisedIssues: "Quedan problemas tras la revisión", revising: "Revisando según la revisión…", insufficient: "El texto original no basta para verificarlo",
+      unavailable: "Sin revisión independiente", pending: "Pendiente de revisión independiente",
+    },
+    reviewNote: "El Reviewer ve el texto original pero no las imágenes; contrasta el contenido sobre figuras con la página original.",
+    ask: {
+      title: "¿Aún no está claro? Pregunta", simpler: "Explícalo más fácil", example: "Otro ejemplo", why: "¿Por qué se cumple?",
+      placeholder: "Haz una pregunta, p. ej.: ¿qué significa cada símbolo aquí?", send: "Preguntar", asking: "Respondiendo a partir de las páginas originales…",
+      focus: "Sobre", step: "¿Te perdiste aquí?", section: "¿No está claro?", failed: "No se pudo responder: ",
+      note: "Las respuestas se generan a partir de las páginas originales y son borradores de explicación.", you: "Preguntaste", modeLabel: { simpler: "Explícalo más fácil", example: "Otro ejemplo", why: "¿Por qué se cumple?", question: "Pregunta" } as Record<FollowUpMode, string>,
+    },
+    saveNote: "Guardar en notas", savedNote: "Guardado en las notas del artículo",
+    noteSource: (pages: string, status: string) => `Fuente: guía del artículo de SomniQ (páginas ${pages} del PDF) · ${status}`,
+    colon: ": ", listSeparator: ", ", quote: ["«", "»"], aside: [" (", ")"],
   },
 };
-type Copy = typeof COPY.zh;
+type Copy = typeof COPY.cn;
 type AskRequest = { target: string; mode: FollowUpMode; question?: string; focus?: string };
 
-function OriginalPage({ document, page, english, onJump }: {
-  document: PDFDocumentProxy | null; page: number; english: boolean; onJump: (page: number) => void;
+function OriginalPage({ document, page, language, onJump }: {
+  document: PDFDocumentProxy | null; page: number; language: Language; onJump: (page: number) => void;
 }) {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
@@ -101,12 +139,12 @@ function OriginalPage({ document, page, english, onJump }: {
     return () => { disposed = true; task?.cancel(); };
   }, [document, page]);
   return <figure className="paper-essay-original">
-    <div className="paper-essay-original-toolbar"><span>{english ? "ORIGINAL PAGE" : "原始页面"} / {page}</span>
-      <button type="button" onClick={() => onJump(page)}>{english ? "Locate in PDF" : "在 PDF 中定位"} ↗</button>
+    <div className="paper-essay-original-toolbar"><span>{t("原始页面", "ORIGINAL PAGE", "PÁGINA ORIGINAL")} / {page}</span>
+      <button type="button" onClick={() => onJump(page)}>{t("在 PDF 中定位", "Locate in PDF", "Ubicar en el PDF")} ↗</button>
     </div>
-    {state !== "ready" && <p role="status">{state === "loading" ? (english ? "Loading original…" : "正在载入原图…") : COPY[english ? "en" : "zh"].previewFailed}</p>}
-    <div className="paper-essay-page-scroll" hidden={state !== "ready"}><canvas ref={canvas} aria-label={english ? `Original PDF page ${page}` : `PDF 原文第 ${page} 页`} /></div>
-    <figcaption>{english ? "Original PDF page. Scroll to inspect the full page." : "来自原始 PDF，可滚动查看完整页面。"}</figcaption>
+    {state !== "ready" && <p role="status">{state === "loading" ? (t("正在载入原图…", "Loading original…", "Cargando el original…")) : COPY[language].previewFailed}</p>}
+    <div className="paper-essay-page-scroll" hidden={state !== "ready"}><canvas ref={canvas} aria-label={t(`PDF 原文第 ${page} 页`, `Original PDF page ${page}`, `Página ${page} del PDF original`)} /></div>
+    <figcaption>{t("来自原始 PDF，可滚动查看完整页面。", "Original PDF page. Scroll to inspect the full page.", "Página del PDF original. Desplázate para ver la página completa.")}</figcaption>
   </figure>;
 }
 
@@ -129,14 +167,14 @@ function lessonMarkdown(entry: GuideLessonEntry, lesson: GuideLesson, copy: Copy
     `# ${entry.topic.title}`, `> ${entry.topic.learningGoal}`,
     lesson.plainSummary && `## ${copy.plainSummary}\n\n${lesson.plainSummary}`,
     lesson.analogy && `## ${copy.analogy}\n\n${lesson.analogy}`,
-    lesson.prerequisites?.length && `## ${copy.prerequisites}\n\n${lesson.prerequisites.map(item => `- **${item.concept}**：${item.explanation}`).join("\n")}`,
+    lesson.prerequisites?.length && `## ${copy.prerequisites}\n\n${lesson.prerequisites.map(item => `- **${item.concept}**${copy.colon}${item.explanation}`).join("\n")}`,
     `## ${copy.intuition}\n\n${lesson.intuition}`,
     lesson.diagram && `## ${copy.diagram}\n\n${diagramMarkdown(lesson.diagram)}`,
     lesson.notation && `## ${copy.notation}\n\n${lesson.notation}`,
     lesson.assumptions && `## ${copy.assumptions}\n\n${lesson.assumptions}`,
-    `## ${copy.steps}\n\n${lesson.steps.map((step, index) => `### ${index + 1}. ${step.title}（${step.origin === "paper" ? copy.paper : copy.teaching}）\n\n${step.explanation}`).join("\n\n")}`,
+    `## ${copy.steps}\n\n${lesson.steps.map((step, index) => `### ${index + 1}. ${step.title}${copy.aside[0]}${step.origin === "paper" ? copy.paper : copy.teaching}${copy.aside[1]}\n\n${step.explanation}`).join("\n\n")}`,
     lesson.example && `## ${copy.example}\n\n${lesson.example}\n\n_${copy.exampleNote}_`,
-    lesson.misconceptions?.length && `## ${copy.misconceptions}\n\n${lesson.misconceptions.map(item => `- ${copy.wrong}：${item.misconception}\n  ${copy.right}：${item.correction}`).join("\n")}`,
+    lesson.misconceptions?.length && `## ${copy.misconceptions}\n\n${lesson.misconceptions.map(item => `- ${copy.wrong}${copy.colon}${item.misconception}\n  ${copy.right}${copy.colon}${item.correction}`).join("\n")}`,
     `## ${copy.evidence}\n\n${lesson.evidence}`,
     `## ${copy.check}\n\n${lesson.checkQuestion}\n\n${lesson.checkAnswer}`,
     `---\n${copy.noteSource(lesson.sourcePages.join(", "), status)}`,
@@ -147,19 +185,19 @@ function lessonMarkdown(entry: GuideLessonEntry, lesson: GuideLesson, copy: Copy
 function Answers({ items, copy }: { items: PaperFollowUp[]; copy: Copy }) {
   if (!items.length) return null;
   return <ol className="paper-essay-answers">{items.map(item => <li key={item.id}>
-    <p className="paper-essay-question"><span>{copy.ask.you}</span>{item.question || copy.ask.modeLabel[item.mode]}{item.focus && <small> · {copy.ask.focus}「{item.focus}」</small>}</p>
+    <p className="paper-essay-question"><span>{copy.ask.you}</span>{item.question || copy.ask.modeLabel[item.mode]}{item.focus && <small> · {copy.ask.focus}{copy.quote[0]}{item.focus}{copy.quote[1]}</small>}</p>
     <PaperReadingContent content={item.answer} />
   </li>)}</ol>;
 }
 
 export default function PaperGuideView({ guide, document, onJump, language, title, totalPages, followUps = [], onAsk, onSaveNote }: {
-  guide: PaperGuide; document: PDFDocumentProxy | null; onJump: (page: number) => void; language: string; title?: string; totalPages?: number;
+  guide: PaperGuide; document: PDFDocumentProxy | null; onJump: (page: number) => void; language: Language; title?: string; totalPages?: number;
   followUps?: PaperFollowUp[];
   onAsk?: (request: AskRequest) => Promise<unknown>;
   onSaveNote?: (note: { title: string; content: string }) => void;
 }) {
-  const english = language === "en";
-  const copy = COPY[english ? "en" : "zh"];
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
+  const copy = COPY[language];
   const [selected, setSelected] = useState(-1);
   const [sourcePage, setSourcePage] = useState<number | null>(null);
   const [depth, setDepth] = useState<"basic" | "full">("basic");
@@ -210,8 +248,8 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
   const helpButton = (focus: string, label = copy.ask.section) => onAsk ? <button type="button" className="paper-essay-help" disabled={asking !== null} onClick={() => void ask("simpler", focus)}>{asking === focus ? copy.ask.asking : label}</button> : null;
   const inlineAnswers = (focus: string) => <Answers items={targetFollowUps.filter(item => item.focus === focus)} copy={copy} />;
   const sources = (pages: number[]) => <div className="paper-essay-sources">
-    <span>{english ? "SOURCE" : "原文"}</span>
-    {pages.map(page => <button key={page} type="button" onClick={() => onJump(page)} aria-label={`${copy.source} ${page}`}>{english ? `p. ${page}` : `第 ${page} 页`} ↗</button>)}
+    <span>{t("原文", "SOURCE", "FUENTE")}</span>
+    {pages.map(page => <button key={page} type="button" onClick={() => onJump(page)} aria-label={`${copy.source} ${page}`}>{t(`第 ${page} 页`, `p. ${page}`, `p. ${page}`)} ↗</button>)}
   </div>;
   const completed = guide.lessons.filter(item => currentLesson(item)).length;
   const problem = outline?.overview.find(section => section.kind === "problem");
@@ -226,9 +264,9 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
   const review = current ? finalReview(current) : null;
   const inlineFocuses = new Set([copy.plainSummary, copy.analogy, copy.prerequisites, copy.intuition, copy.example, copy.misconceptions, copy.oneSentence, ...(lesson?.steps.map(step => step.title) ?? [])]);
   const navItem = ({ entry, index }: { entry: GuideLessonEntry; index: number }) => {
-    const status = entry.task.status === "failed" && !currentLesson(entry) ? (english ? " · Retry needed" : " · 待重试")
-      : entry.task.status === "running" ? (english ? " · Generating" : " · 生成中")
-      : entry.task.status === "pending" ? (english ? " · Pending" : " · 待生成") : "";
+    const status = entry.task.status === "failed" && !currentLesson(entry) ? (t(" · 待重试", " · Retry needed", " · Hay que reintentar"))
+      : entry.task.status === "running" ? (t(" · 生成中", " · Generating", " · Generando"))
+      : entry.task.status === "pending" ? (t(" · 待生成", " · Pending", " · Pendiente")) : "";
     const mark = reviewBadge(entry, reviewRequired, copy);
     return <button type="button" key={index} className={selected === index ? "is-current" : ""} aria-current={selected === index ? "page" : undefined} onClick={() => changeTopic(index)}>
       <span>{String(index + 1).padStart(2, "0")}</span><div><strong>{entry.topic.title}</strong><small>{copy.kind[entry.topic.kind]}{status}{mark && <i className={`paper-essay-review-dot is-${mark.tone}`} title={mark.label} aria-label={mark.label} />}</small></div>
@@ -236,26 +274,26 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
   };
 
   return <div className="paper-essay">
-    <nav className="paper-essay-contents" aria-label={english ? "Reading contents" : "阅读目录"}>
-      <p className="paper-essay-nav-label">{english ? "READING PATH" : "阅读路线"}</p>
-      <button type="button" className={selected === -1 ? "is-current" : ""} aria-current={selected === -1 ? "page" : undefined} onClick={() => changeTopic(-1)}><span>00</span><strong>{english ? "The paper at a glance" : "先看懂论文主线"}</strong></button>
+    <nav className="paper-essay-contents" aria-label={t("阅读目录", "Reading contents", "Índice de lectura")}>
+      <p className="paper-essay-nav-label">{t("阅读路线", "READING PATH", "RUTA DE LECTURA")}</p>
+      <button type="button" className={selected === -1 ? "is-current" : ""} aria-current={selected === -1 ? "page" : undefined} onClick={() => changeTopic(-1)}><span>00</span><strong>{t("先看懂论文主线", "The paper at a glance", "El artículo de un vistazo")}</strong></button>
       {leveled ? levelGroups.map(group => <div key={group.level} className="paper-essay-nav-group"><p className="paper-essay-nav-level">{copy.levels[group.level]}</p>{group.items.map(navItem)}</div>)
         : guide.lessons.map((entry, index) => navItem({ entry, index }))}
-      <div className="paper-essay-nav-foot"><span>{english ? "EXPLANATIONS" : "主题讲解"}</span><strong>{completed} / {guide.lessons.length}</strong>{totalPages && <p>{totalPages} {english ? "original pages" : "页原文"}</p>}</div>
+      <div className="paper-essay-nav-foot"><span>{t("主题讲解", "EXPLANATIONS", "EXPLICACIONES")}</span><strong>{completed} / {guide.lessons.length}</strong>{totalPages && <p>{totalPages} {t("页原文", "original pages", "páginas originales")}</p>}</div>
     </nav>
-    <label className="paper-essay-mobile-nav">{english ? "Read" : "阅读章节"}<select value={selected} onChange={event => changeTopic(Number(event.target.value))}>
+    <label className="paper-essay-mobile-nav">{t("阅读章节", "Read", "Leer")}<select value={selected} onChange={event => changeTopic(Number(event.target.value))}>
       <option value={-1}>{copy.storyline}</option>{guide.lessons.map(({ topic }, index) => <option key={index} value={index}>{String(index + 1).padStart(2, "0")} · {topic.level ? `${copy.levels[topic.level]} · ` : ""}{topic.title}</option>)}
     </select></label>
     <main ref={main} className="paper-essay-main" tabIndex={-1}>
-      <div className="paper-essay-meta"><span>{selected === -1 ? (english ? "PAPER / OVERVIEW" : "论文导读") : `${String(selected + 1).padStart(2, "0")} / ${current ? copy.kind[current.topic.kind] : ""}`}</span>{badge ? <span className={`paper-essay-review-badge is-${badge.tone}`}>{badge.label}</span> : <span>{copy.draft}</span>}</div>
+      <div className="paper-essay-meta"><span>{selected === -1 ? (t("论文导读", "PAPER / OVERVIEW", "ARTÍCULO / RESUMEN")) : `${String(selected + 1).padStart(2, "0")} / ${current ? copy.kind[current.topic.kind] : ""}`}</span>{badge ? <span className={`paper-essay-review-badge is-${badge.tone}`}>{badge.label}</span> : <span>{copy.draft}</span>}</div>
       {!current && outline && <article className="paper-essay-overview" aria-label={copy.storyline}>
-        <header><h1>{title || (english ? "Understand the argument behind the paper." : "读懂论文，也读懂它的依据。")}</h1>
+        <header><h1>{title || (t("读懂论文，也读懂它的依据。", "Understand the paper and the evidence behind it.", "Entiende el artículo y la evidencia que lo respalda."))}</h1>
           {outline.oneSentence ? <div className="paper-essay-one-sentence"><span className="paper-essay-eyebrow">{copy.oneSentence}</span><PaperReadingContent content={outline.oneSentence} /></div>
             : problem && <><div className="paper-essay-deck"><PaperReadingContent content={problem.content} readableProse /></div>{sources(problem.sourcePages)}</>}
         </header>
         {outline.relevance && <aside className="paper-essay-relevance"><span className="paper-essay-eyebrow">{copy.relevance}</span><PaperReadingContent content={outline.relevance} /></aside>}
-        {outline.diagram && <PaperGuideDiagram diagram={outline.diagram} english={english} eyebrow={copy.atGlance} />}
-        <div className="paper-essay-rule"><span>{english ? "THE ARGUMENT" : "论文脉络"}</span></div>
+        {outline.diagram && <PaperGuideDiagram diagram={outline.diagram} language={language} eyebrow={copy.atGlance} />}
+        <div className="paper-essay-rule"><span>{t("论文脉络", "THE ARGUMENT", "EL ARGUMENTO")}</span></div>
         {outline.overview.filter(section => outline.oneSentence || section.kind !== "problem").map((section, index) => <section className="paper-essay-overview-section" key={section.kind}>
           <span className="paper-essay-section-number">{String(index + 1).padStart(2, "0")}</span><div><h2>{copy.overview[section.kind]}</h2><PaperReadingContent content={section.content} readableProse />{sources(section.sourcePages)}</div>
         </section>)}
@@ -267,33 +305,33 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
           <h2>{copy.readingPath}</h2>
           <ol>{levelGroups.map(group => <li key={group.level}><span className="paper-essay-level">{copy.levels[group.level]}</span>
             <ul>{group.items.map(({ entry, index }) => <li key={index}><button type="button" onClick={() => changeTopic(index)}><strong>{entry.topic.title}</strong><span>{entry.topic.learningGoal}</span></button>
-              {!!entry.topic.prerequisites?.length && <small>{copy.prereqLabel}：{entry.topic.prerequisites.join("、")}</small>}</li>)}</ul>
+              {!!entry.topic.prerequisites?.length && <small>{copy.prereqLabel}{copy.colon}{entry.topic.prerequisites.join(copy.listSeparator)}</small>}</li>)}</ul>
           </li>)}</ol>
         </section>}
         {outline.cautions.length > 0 && <details className="paper-essay-cautions"><summary>{copy.caution}</summary>{outline.cautions.map((text, index) => <PaperReadingContent key={index} content={text} />)}</details>}
-        {guide.lessons.length > 0 && <button type="button" className="paper-essay-next" onClick={() => changeTopic(0)}><span>{leveled ? copy.startLearning : english ? "START READING" : "开始深入理解"}</span><strong>{guide.lessons[0].topic.title}</strong><b aria-hidden="true">→</b></button>}
+        {guide.lessons.length > 0 && <button type="button" className="paper-essay-next" onClick={() => changeTopic(0)}><span>{leveled ? copy.startLearning : t("开始深入理解", "START READING", "EMPEZAR A LEER")}</span><strong>{guide.lessons[0].topic.title}</strong><b aria-hidden="true">→</b></button>}
       </article>}
       {current && <article className="paper-essay-chapter" key={selected}>
         <header><h1>{current.topic.title}</h1><div className="paper-essay-deck"><PaperReadingContent content={current.topic.learningGoal} /></div>
-          {(current.topic.level || !!current.topic.prerequisites?.length) && <p className="paper-essay-topic-path">{current.topic.level && <span className="paper-essay-level">{copy.levels[current.topic.level]}</span>}{!!current.topic.prerequisites?.length && <span>{copy.prereqLabel}：{current.topic.prerequisites.join("、")}</span>}</p>}
+          {(current.topic.level || !!current.topic.prerequisites?.length) && <p className="paper-essay-topic-path">{current.topic.level && <span className="paper-essay-level">{copy.levels[current.topic.level]}</span>}{!!current.topic.prerequisites?.length && <span>{copy.prereqLabel}{copy.colon}{current.topic.prerequisites.join(copy.listSeparator)}</span>}</p>}
           {sources(current.topic.sourcePages)}</header>
         <div className="paper-essay-chapter-tools">
-          <nav aria-label={english ? "On this page" : "本节目录"}>{lesson && <>{sectionLink("intuition", layered ? copy.plainSummary : copy.intuition)}{full && sectionLink("steps", copy.steps)}{sectionLink("check", copy.check)}{onAsk && sectionLink("ask", copy.ask.title)}</>}</nav>
+          <nav aria-label={t("本节目录", "On this page", "En esta página")}>{lesson && <>{sectionLink("intuition", layered ? copy.plainSummary : copy.intuition)}{full && sectionLink("steps", copy.steps)}{sectionLink("check", copy.check)}{onAsk && sectionLink("ask", copy.ask.title)}</>}</nav>
           <div className="paper-essay-chapter-actions">
             {layered && <div className="paper-essay-depth" role="group" aria-label={copy.depth}>
               <button type="button" aria-pressed={depth === "basic"} onClick={() => setDepth("basic")}>{copy.depthBasic}</button>
               <button type="button" aria-pressed={depth === "full"} onClick={() => setDepth("full")}>{copy.depthFull}</button>
             </div>}
             {lesson && onSaveNote && <button type="button" onClick={() => { onSaveNote({ title: current.topic.title, content: lessonMarkdown(current, lesson, copy, badge?.label ?? copy.draft) }); setSavedTarget(target); }}>{savedTarget === target ? copy.savedNote : copy.saveNote}</button>}
-            <button type="button" aria-expanded={sourcePage !== null} onClick={() => setSourcePage(sourcePage === null ? current.topic.sourcePages[0] : null)}>{sourcePage === null ? (english ? "View original image" : "查看原图") : (english ? "Close original image" : "收起原图")}</button>
+            <button type="button" aria-expanded={sourcePage !== null} onClick={() => setSourcePage(sourcePage === null ? current.topic.sourcePages[0] : null)}>{sourcePage === null ? (t("查看原图", "View original image", "Ver imagen original")) : (t("收起原图", "Close original image", "Cerrar imagen original"))}</button>
           </div>
         </div>
-        {sourcePage !== null && <section aria-label={english ? "Original evidence" : "原文对照"} className="paper-essay-evidence-viewer">
+        {sourcePage !== null && <section aria-label={t("原文对照", "Original evidence", "Evidencia original")} className="paper-essay-evidence-viewer">
           {current.topic.sourcePages.length > 1 && <div className="paper-essay-page-picker">{current.topic.sourcePages.map(page => <button key={page} type="button" aria-pressed={sourcePage === page} onClick={() => setSourcePage(page)}>{copy.page} {page} {copy.suffix}</button>)}</div>}
-          <OriginalPage document={document} page={sourcePage} english={english} onJump={onJump} />
+          <OriginalPage document={document} page={sourcePage} language={language} onJump={onJump} />
         </section>}
         {!lesson && <p role="status" className="paper-essay-pending">{current.task.status === "running" ? copy.running : current.task.status === "failed" ? copy.failed : copy.pending}</p>}
-        {current.task.error && !lesson && <details className="paper-essay-cautions"><summary>{english ? "Error details" : "查看错误详情"}</summary><pre>{current.task.error}</pre></details>}
+        {current.task.error && !lesson && <details className="paper-essay-cautions"><summary>{t("查看错误详情", "Error details", "Detalles del error")}</summary><pre>{current.task.error}</pre></details>}
         {lesson && <>
           {layered && <section className="paper-essay-plain" id={`${anchor}-intuition`} data-section="intuition">
             <header className="paper-essay-layer-head"><span className="paper-essay-layer">01</span><h2>{copy.plainSummary}</h2>{helpButton(copy.plainSummary)}</header>
@@ -308,7 +346,7 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
             <dl>{lesson.prerequisites.map(item => <div key={item.concept}><dt>{item.concept}</dt><dd><PaperReadingContent content={item.explanation} /></dd></div>)}</dl>{inlineAnswers(copy.prerequisites)}
           </section>}
           <section className="paper-essay-intuition" {...(layered ? {} : { id: `${anchor}-intuition`, "data-section": "intuition" })}><h2>{copy.intuition}</h2><PaperReadingContent content={lesson.intuition} />{layered && inlineAnswers(copy.intuition)}</section>
-          {lesson.diagram && <PaperGuideDiagram diagram={lesson.diagram} english={english} eyebrow={copy.diagram} />}
+          {lesson.diagram && <PaperGuideDiagram diagram={lesson.diagram} language={language} eyebrow={copy.diagram} />}
           {full && (lesson.notation || lesson.assumptions) && <div className="paper-essay-foundations">
             {lesson.notation && <section><h3>{copy.notation}</h3><PaperReadingContent content={lesson.notation} /></section>}
             {lesson.assumptions && <section><h3>{copy.assumptions}</h3><PaperReadingContent content={lesson.assumptions} /></section>}
@@ -316,23 +354,23 @@ export default function PaperGuideView({ guide, document, onJump, language, titl
           {full && <section className="paper-essay-derivation" id={`${anchor}-steps`} data-section="steps"><h2>{copy.steps}</h2><ol>{lesson.steps.map((step, index) => <li key={index}>
             <div className="paper-essay-step-number">{String(index + 1).padStart(2, "0")}</div><div><header><h3>{step.title}</h3><span>{step.origin === "paper" ? copy.paper : copy.teaching}</span>{helpButton(step.title, copy.ask.step)}</header><PaperReadingContent content={step.explanation} />{inlineAnswers(step.title)}</div>
           </li>)}</ol></section>}
-          {lesson.example && <section className="paper-essay-example"><span className="paper-essay-eyebrow">{english ? "WORKED EXAMPLE" : "推演一个例子"}</span><h2>{copy.example}</h2><PaperReadingContent content={lesson.example} /><p className="paper-essay-caption">{copy.exampleNote}</p>{onAsk && <div className="paper-essay-help-row">{helpButton(copy.example)}</div>}{inlineAnswers(copy.example)}</section>}
+          {lesson.example && <section className="paper-essay-example"><span className="paper-essay-eyebrow">{t("推演一个例子", "WORKED EXAMPLE", "EJEMPLO RESUELTO")}</span><h2>{copy.example}</h2><PaperReadingContent content={lesson.example} /><p className="paper-essay-caption">{copy.exampleNote}</p>{onAsk && <div className="paper-essay-help-row">{helpButton(copy.example)}</div>}{inlineAnswers(copy.example)}</section>}
           {layered && !!lesson.misconceptions?.length && <section className="paper-essay-misconceptions"><h2>{copy.misconceptions}</h2>
             <ul>{lesson.misconceptions.map((item, index) => <li key={index}><div><span className="is-wrong">{copy.wrong}</span><PaperReadingContent content={item.misconception} /></div><div><span className="is-right">{copy.right}</span><PaperReadingContent content={item.correction} /></div></li>)}</ul>
           </section>}
           {!full && <section className="paper-essay-deeper"><p>{copy.goDeeperNote}</p><button type="button" onClick={() => { setDepth("full"); window.setTimeout(() => scrollWithinPanel(main.current?.querySelector('[data-section="steps"]')), 0); }}>{copy.goDeeper} ↓</button></section>}
           {full && <section className="paper-essay-evidence"><h2>{copy.evidence}</h2><PaperReadingContent content={lesson.evidence} readableProse />{sources(lesson.sourcePages)}</section>}
-          <section className="paper-essay-check" id={`${anchor}-check`} data-section="check"><span className="paper-essay-eyebrow">{english ? "PAUSE & THINK" : "停下来，想一想"}</span><h2>{copy.check}</h2><PaperReadingContent content={lesson.checkQuestion} /><details><summary>{copy.answer}</summary><PaperReadingContent content={lesson.checkAnswer} /></details></section>
+          <section className="paper-essay-check" id={`${anchor}-check`} data-section="check"><span className="paper-essay-eyebrow">{t("停下来，想一想", "PAUSE & THINK", "PARA Y PIENSA")}</span><h2>{copy.check}</h2><PaperReadingContent content={lesson.checkQuestion} /><details><summary>{copy.answer}</summary><PaperReadingContent content={lesson.checkAnswer} /></details></section>
           {lesson.cautions.length > 0 && <details className="paper-essay-cautions"><summary>{copy.caution}</summary>{lesson.cautions.map((text, index) => <PaperReadingContent key={index} content={text} />)}</details>}
           {review && <details className="paper-essay-review" open={review.verdict === "needs_revision"}>
             <summary>{copy.reviewTitle} · {badge?.label}</summary>
             <p>{review.summary}</p>
-            {review.reviewer && <p className="paper-essay-caption">{copy.reviewer}：{review.reviewer}</p>}
+            {review.reviewer && <p className="paper-essay-caption">{copy.reviewer}{copy.colon}{review.reviewer}</p>}
             {review.issues.length > 0 && <ul>{review.issues.map((issue, index) => <li key={index} className={`is-${issue.severity}`}><strong>{copy.severity[issue.severity]} · {issue.location}</strong><PaperReadingContent content={issue.problem} />{issue.suggestion && <PaperReadingContent content={issue.suggestion} />}</li>)}</ul>}
             <p className="paper-essay-caption">{copy.reviewNote}</p>
           </details>}
         </>}
-        <footer className="paper-essay-pagination"><button type="button" onClick={() => changeTopic(selected - 1)}>← {selected === 0 ? (english ? "Overview" : "论文主线") : (english ? "Previous topic" : "上一主题")}</button>{selected + 1 < guide.lessons.length && <button type="button" onClick={() => changeTopic(selected + 1)}>{english ? "Next topic" : "下一主题"} →</button>}</footer>
+        <footer className="paper-essay-pagination"><button type="button" onClick={() => changeTopic(selected - 1)}>← {selected === 0 ? (t("论文主线", "Overview", "Resumen")) : (t("上一主题", "Previous topic", "Tema anterior"))}</button>{selected + 1 < guide.lessons.length && <button type="button" onClick={() => changeTopic(selected + 1)}>{t("下一主题", "Next topic", "Tema siguiente")} →</button>}</footer>
       </article>}
       {onAsk && (current ? !!lesson : !!outline) && <section className="paper-essay-ask" id={`${anchor}-ask`} data-section="ask" aria-label={copy.ask.title}>
         <h2>{copy.ask.title}</h2>

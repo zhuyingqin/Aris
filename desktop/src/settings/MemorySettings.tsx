@@ -24,7 +24,7 @@ import type {
   MemoryV2HistoryPreview,
   MemoryV2StatusView,
 } from "../types";
-import { useStore, type Language } from "../store";
+import { tr, useStore, type Language } from "../store";
 import { SETTINGS_COPY } from "./i18n";
 import MemoryExplorer from "./MemoryExplorer";
 import MemoryRecallPreview from "./MemoryRecallPreview";
@@ -75,6 +75,7 @@ interface Props {
 
 export default function MemorySettings({ language }: Props) {
   const copy = SETTINGS_COPY[language].memory;
+  const t = <T,>(cn: T, en: T, es: T) => tr(language, cn, en, es);
   const currentProject = useStore((state) => state.currentProject);
   const [status, setStatus] = useState<MemoryStatusView | null>(
     isTauri() ? null : PREVIEW_STATUS,
@@ -221,9 +222,10 @@ export default function MemorySettings({ language }: Props) {
 
   const importHistory = async () => {
     if (!historyPreview || historyPreview.readyToQueue < 1) return;
-    const confirmed = window.confirm(language === "cn"
-      ? `仅将 ${historyPreview.readyToQueue} 条原始 Session 最终回合加入 v2 待筛队列？后续审核可能消耗模型额度；旧 R1–R3 派生记忆不会被读取或回放。`
-      : `Queue ${historyPreview.readyToQueue} raw Session final turns for v2 screening? Review may use model quota; legacy R1–R3 derived memory will not be read or replayed.`);
+    const confirmed = window.confirm(t(
+      `仅将 ${historyPreview.readyToQueue} 条原始 Session 最终回合加入 v2 待筛队列？后续审核可能消耗模型额度；旧 R1–R3 派生记忆不会被读取或回放。`,
+      `Queue ${historyPreview.readyToQueue} raw Session final turns for v2 screening? Review may use model quota; legacy R1–R3 derived memory will not be read or replayed.`,
+      `¿Añadir ${historyPreview.readyToQueue} turnos finales de Session sin procesar a la cola de cribado de v2? La revisión puede consumir cuota del modelo; la memoria derivada antigua de R1–R3 no se leerá ni se reproducirá.`));
     if (!confirmed) return;
     setBusy("history-import");
     setError("");
@@ -249,9 +251,10 @@ export default function MemorySettings({ language }: Props) {
   // Screening and review policy changes only reach new turns; captures already
   // refused stay refused. This replays the corrected policy over that history.
   const rescreenRejected = async () => {
-    const confirmed = window.confirm(language === "cn"
-      ? "重新筛查此前被拒绝的回合？当前规则仍会拒绝的回合直接跳过，不消耗额度；其余会重新走双重审查并消耗模型额度。已通过的记忆不受影响。"
-      : "Re-screen previously rejected turns? Turns the current rules still reject are skipped without using quota; the rest re-run both review passes and will use model quota. Already-promoted memory is untouched.");
+    const confirmed = window.confirm(t(
+      "重新筛查此前被拒绝的回合？当前规则仍会拒绝的回合直接跳过，不消耗额度；其余会重新走双重审查并消耗模型额度。已通过的记忆不受影响。",
+      "Re-screen previously rejected turns? Turns the current rules still reject are skipped without using quota; the rest re-run both review passes and will use model quota. Already-promoted memory is untouched.",
+      "¿Volver a cribar los turnos rechazados? Los que las reglas actuales sigan rechazando se omiten sin consumir cuota; el resto vuelve a pasar por las dos revisiones y consumirá cuota del modelo. La memoria ya aprobada no cambia."));
     if (!confirmed) return;
     setBusy("rescreen");
     setError("");
@@ -280,9 +283,10 @@ export default function MemorySettings({ language }: Props) {
         return;
       }
       const started = await memoryV2StartBuild(buildModel || undefined);
-      setNotice(language === "cn"
-        ? `已用 ${started.model} 开始构建：重新排队 ${started.requeued} 条，队列共 ${started.pending} 条。`
-        : `Building with ${started.model}: re-queued ${started.requeued}, ${started.pending} in the queue.`);
+      setNotice(t(
+        `已用 ${started.model} 开始构建：重新排队 ${started.requeued} 条，队列共 ${started.pending} 条。`,
+        `Started building with ${started.model}: re-queued ${started.requeued}; ${started.pending} in the queue.`,
+        `Construyendo con ${started.model}: ${started.requeued} reencolados, ${started.pending} en la cola.`));
       setBuild(await memoryV2BuildProgress());
       await refresh();
     } catch (reason) {
@@ -297,18 +301,22 @@ export default function MemorySettings({ language }: Props) {
   const layerCount = (value: number | null | undefined) =>
     value === null || value === undefined ? "—" : value.toLocaleString();
   const modeDetails = {
-    legacy_r0_only: language === "cn"
-      ? ["仅 R0", "停止新捕获与注入；适用于回滚"]
-      : ["R0 only", "Stops new capture and injection; use to roll back"],
-    observe: language === "cn"
-      ? ["观察", "运行筛选与审查，但不注入提示词"]
-      : ["Observe", "Screens and reviews without prompt injection"],
-    canary: language === "cn"
-      ? ["灰度验证", "受控启用 v2 召回并持续观察队列"]
-      : ["Canary", "Enables v2 recall for controlled validation"],
-    active: language === "cn"
-      ? ["正常启用", "在普通对话中使用已审核的 v2 记忆"]
-      : ["Active", "Uses reviewed v2 memory in normal recall"],
+    legacy_r0_only: t(
+      ["仅 R0", "停止新捕获与注入；适用于回滚"],
+      ["R0 only", "Stops new capture and injection; use to roll back"],
+      ["Solo R0", "Detiene la captura y la inyección nuevas; úsalo para revertir"]),
+    observe: t(
+      ["观察", "运行筛选与审查，但不注入提示词"],
+      ["Observe", "Screens and reviews without prompt injection"],
+      ["Observar", "Criba y revisa sin inyectar en el prompt"]),
+    canary: t(
+      ["灰度验证", "受控启用 v2 召回并持续观察队列"],
+      ["Canary", "Enables v2 recall for controlled validation"],
+      ["Canary", "Activa la recuperación v2 para una validación controlada"]),
+    active: t(
+      ["正常启用", "在普通对话中使用已审核的 v2 记忆"],
+      ["Active", "Uses reviewed v2 memory in normal recall"],
+      ["Activo", "Usa la memoria v2 revisada en la recuperación normal"]),
   } as const;
   const modes = ["legacy_r0_only", "observe", "canary", "active"] as const;
   const v2DerivedCount = status
@@ -317,28 +325,30 @@ export default function MemorySettings({ language }: Props) {
     : null;
   const v2Stats = v2Status?.stats;
   const memorySummary = status
-    ? language === "cn"
-      ? `R0 ${layerCount(status.l0Count)} · v2 R1–R3 ${layerCount(v2DerivedCount)}`
-      : `R0 ${layerCount(status.l0Count)} · V2 R1–R3 ${layerCount(v2DerivedCount)}`
+    ? t(
+      `R0 ${layerCount(status.l0Count)} · v2 R1–R3 ${layerCount(v2DerivedCount)}`,
+      `R0 ${layerCount(status.l0Count)} · V2 R1–R3 ${layerCount(v2DerivedCount)}`,
+      `R0 ${layerCount(status.l0Count)} · V2 R1–R3 ${layerCount(v2DerivedCount)}`)
     : error
-      ? language === "cn" ? `记忆库：${copy.unavailable}` : `Memory library: ${copy.unavailable}`
-      : language === "cn" ? "正在读取记忆库…" : "Loading memory library…";
+      ? t(`记忆库：${copy.unavailable}`, `Memory library: ${copy.unavailable}`, `Biblioteca de memoria: ${copy.unavailable}`)
+      : t("正在读取记忆库…", "Loading memory library…", "Cargando la biblioteca de memoria…");
   const v2StatusLabel = v2Status
     ? modeDetails[v2Status.mode][0]
     : error
       ? copy.unavailable
       : copy.loadingStatus;
-  const v2Title = language === "cn" ? "记忆运行模式" : "Memory mode";
-  const v2Subtitle = language === "cn"
-    ? "只使用已审核的记忆，保留原始对话。"
-    : "Uses reviewed memory and preserves source conversations.";
+  const v2Title = t("记忆运行模式", "Memory mode", "Modo de memoria");
+  const v2Subtitle = t(
+    "只使用已审核的记忆，保留原始对话。",
+    "Uses only reviewed memory and keeps source conversations.",
+    "Usa solo memoria revisada y conserva las conversaciones originales.");
 
   return (
     <div className="sp-general-page memory-settings-page">
-      <div className="sp-status-bar memory-status-bar" aria-label={language === "cn" ? "智能记忆状态" : "Smart memory status"}>
+      <div className="sp-status-bar memory-status-bar" aria-label={t("智能记忆状态", "Smart memory status", "Estado de la memoria inteligente")}>
         <div className="sp-status-slot">
           <span className={`memory-health-dot memory-health-${v2Status ? "healthy" : "unknown"}`} />
-          <span className="sp-status-model">{language === "cn" ? "智能记忆 v2" : "Smart memory v2"}</span>
+          <span className="sp-status-model">{t("智能记忆 v2", "Smart memory v2", "Memoria inteligente v2")}</span>
           <span className="sp-status-url">{v2StatusLabel}</span>
           <span className="sp-status-note">{memorySummary}</span>
         </div>
@@ -351,10 +361,10 @@ export default function MemorySettings({ language }: Props) {
         </div>
         <div className="sp-status-sep" />
         <div className="sp-status-slot">
-          <span className="sp-status-tag">{language === "cn" ? "队列" : "Queue"}</span>
+          <span className="sp-status-tag">{t("队列", "Queue", "Cola")}</span>
           <span className="sp-status-model">{layerCount(v2Stats?.pending_outbox)}</span>
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void refresh(true)}>
-            {busy === "refresh" ? (language === "cn" ? "刷新中…" : "Refreshing…") : copy.refresh}
+            {busy === "refresh" ? t("刷新中…", "Refreshing…", "Actualizando…") : copy.refresh}
           </button>
         </div>
       </div>
@@ -369,14 +379,14 @@ export default function MemorySettings({ language }: Props) {
             <div className="sp-section-title">{v2Title}</div>
             <div className="sp-section-sub">{v2Subtitle}</div>
             <div className="sp-section-sub memory-v2-runtime-line">
-              {language === "cn" ? "检索来源" : "Search source"}: {v2Status
+              {t("检索来源", "Search source", "Fuente de búsqueda")}: {v2Status
                 ? v2Status.remoteConfigured
-                  ? language === "cn" ? "已配置远程记忆库" : "Remote memory configured"
-                  : language === "cn" ? "本地记忆库" : "Local memory"
+                  ? t("已配置远程记忆库", "Remote memory configured", "Memoria remota configurada")
+                  : t("本地记忆库", "Local memory", "Memoria local")
                 : v2StatusLabel}
             </div>
           </div>
-          <div className="memory-mode-picker" role="radiogroup" aria-label={language === "cn" ? "v2 运行模式" : "V2 rollout mode"}>
+          <div className="memory-mode-picker" role="radiogroup" aria-label={t("v2 运行模式", "v2 mode", "Modo de ejecución de v2")}>
             {modes.map((mode) => (
               <button
                 className={`memory-mode-option${v2Status?.mode === mode ? " active" : ""}`}
@@ -394,18 +404,18 @@ export default function MemorySettings({ language }: Props) {
           </div>
         </div>
 
-        <div className="memory-v2-stats" aria-label={language === "cn" ? "v2 记忆状态" : "V2 memory status"}>
-          <span>{language === "cn" ? "队列" : "Queue"} <strong>{layerCount(v2Stats?.pending_outbox)}</strong></span>
-          <span>{language === "cn" ? "延迟/失败" : "Deferred/failed"} <strong>{layerCount(v2Stats?.deferred_outbox)}</strong></span>
+        <div className="memory-v2-stats" aria-label={t("v2 记忆状态", "v2 memory status", "Estado de la memoria v2")}>
+          <span>{t("队列", "Queue", "Cola")} <strong>{layerCount(v2Stats?.pending_outbox)}</strong></span>
+          <span>{t("延迟/失败", "Deferred/failed", "Aplazadas/fallidas")} <strong>{layerCount(v2Stats?.deferred_outbox)}</strong></span>
           <span>R1 <strong>{layerCount(v2Stats?.r1_active)}</strong></span>
           <span>R2 <strong>{layerCount(v2Stats?.r2_active)}</strong></span>
-          <span>{language === "cn" ? "待确认 R3" : "R3 pending"} <strong>{layerCount(v2Stats?.r3_pending_confirmation)}</strong></span>
-          <span>{language === "cn" ? "已确认 R3" : "Confirmed R3"} <strong>{layerCount(v2Stats?.r3_confirmed)}</strong></span>
+          <span>{t("待确认 R3", "R3 pending", "R3 pendientes")} <strong>{layerCount(v2Stats?.r3_pending_confirmation)}</strong></span>
+          <span>{t("已确认 R3", "Confirmed R3", "R3 confirmadas")} <strong>{layerCount(v2Stats?.r3_confirmed)}</strong></span>
         </div>
 
         {pendingR3.length > 0 && (
           <div className="memory-r3-confirmations">
-            <strong>{language === "cn" ? "待用户确认的 R3" : "R3 awaiting your confirmation"}</strong>
+            <strong>{t("待用户确认的 R3", "R3 awaiting your confirmation", "R3 pendientes de tu confirmación")}</strong>
             {pendingR3.map((atom) => (
               <div className="memory-r3-confirmation" key={atom.id}>
                 <div>
@@ -413,7 +423,7 @@ export default function MemorySettings({ language }: Props) {
                   <small title={atom.sourceEventIds.join(", ")}>{atom.sourceQuote}</small>
                 </div>
                 <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void confirmR3(atom.id)}>
-                  {language === "cn" ? "确认并允许注入" : "Confirm for injection"}
+                  {t("确认并允许注入", "Confirm and allow injection", "Confirmar y permitir la inyección")}
                 </button>
               </div>
             ))}
@@ -421,9 +431,10 @@ export default function MemorySettings({ language }: Props) {
         )}
 
         <div className="memory-v2-footer">
-          <span>{language === "cn"
-            ? "筛选、审查或同步失败的记忆不会用于对话。"
-            : "Memory with screening, review, or sync failures stays out of conversations."}</span>
+          <span>{t(
+            "筛选、审查或同步失败的记忆不会用于对话。",
+            "Memory with screening, review, or sync failures stays out of conversations.",
+            "La memoria con errores de cribado, revisión o sincronización no se usa en las conversaciones.")}</span>
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void exportMemory()}>{copy.exportMemory}</button>
         </div>
       </section>
@@ -431,38 +442,39 @@ export default function MemorySettings({ language }: Props) {
       <section className="sp-update-section memory-history-section">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
-            <div className="sp-section-title">{language === "cn" ? "补录历史记忆" : "Backfill history"}</div>
+            <div className="sp-section-title">{t("补录历史记忆", "Backfill history", "Completar historial")}</div>
             <div className="sp-section-sub">
-              {language === "cn"
-                ? "本机扫描；补录会调用模型并消耗额度。"
-                : "Scanned locally; backfilling uses model quota."}
+              {t(
+                "本机扫描；补录会调用模型并消耗额度。",
+                "Scanned locally; backfilling uses model quota.",
+                "Se escanea localmente; completar el historial consume cuota del modelo.")}
             </div>
           </div>
         </div>
         <div className="sp-update-actions memory-action-row memory-history-import-actions">
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy)} onClick={() => void previewHistory()}>
-            {busy === "history-preview" ? (language === "cn" ? "扫描中…" : "Scanning…") : language === "cn" ? "扫描历史" : "Scan history"}
+            {busy === "history-preview" ? t("扫描中…", "Scanning…", "Escaneando…") : t("扫描历史", "Scan history", "Escanear historial")}
           </button>
           {historyPreview && historyPreview.readyToQueue > 0 && (
             <button className="sp-btn sp-btn-primary" type="button" disabled={Boolean(busy) || v2Status?.mode === "legacy_r0_only"} onClick={() => void importHistory()}>
-              {busy === "history-import" ? (language === "cn" ? "加入队列中…" : "Queueing…") : language === "cn" ? "加入 v2 队列" : "Queue for v2"}
+              {busy === "history-import" ? t("加入队列中…", "Queueing…", "Añadiendo a la cola…") : t("加入 v2 队列", "Queue for v2", "Añadir a la cola de v2")}
             </button>
           )}
           <button className="sp-btn sp-btn-secondary" type="button" disabled={Boolean(busy) || v2Status?.mode === "legacy_r0_only"} onClick={() => void rescreenRejected()}>
-            {busy === "rescreen" ? (language === "cn" ? "重新筛查中…" : "Re-screening…") : language === "cn" ? "重新筛查被拒回合" : "Re-screen rejected"}
+            {busy === "rescreen" ? t("重新筛查中…", "Re-screening…", "Volviendo a cribar…") : t("重新筛查被拒回合", "Re-screen rejected turns", "Volver a cribar turnos rechazados")}
           </button>
         </div>
 
         <div className="sp-update-actions memory-action-row memory-build-actions">
           <label className="memory-build-model">
-            <span>{language === "cn" ? "构建模型" : "Build model"}</span>
+            <span>{t("构建模型", "Build model", "Modelo de construcción")}</span>
             <select
               className="sp-select"
               value={buildModel}
               disabled={Boolean(busy)}
               onChange={(event) => setBuildModel(event.target.value)}
             >
-              <option value="">{language === "cn" ? "跟随审查模型" : "Follow reviewer model"}</option>
+              <option value="">{t("跟随审查模型", "Same as review model", "Igual que el modelo de revisión")}</option>
               {(v2Status?.availableModels ?? []).map((model) => (
                 <option key={model} value={model}>{model}</option>
               ))}
@@ -475,43 +487,47 @@ export default function MemorySettings({ language }: Props) {
             onClick={() => void startBuild()}
           >
             {busy === "build"
-              ? (language === "cn" ? "启动中…" : "Starting…")
+              ? t("启动中…", "Starting…", "Iniciando…")
               : build?.running
-                ? (language === "cn" ? "补录中…" : "Backfilling…")
-                : (language === "cn" ? "补录历史记忆" : "Backfill from history")}
+                ? t("补录中…", "Backfilling…", "Completando…")
+                : t("补录历史记忆", "Backfill from history", "Completar desde el historial")}
           </button>
         </div>
         {build && (
           <div className="memory-history-import-result" aria-live="polite">
-            {language === "cn"
-              ? `${build.running ? "构建中" : "已停止"} · 模型 ${build.model} · 已处理 ${build.processed}${build.failed ? `，失败 ${build.failed}` : ""} · 队列剩余 ${layerCount(v2Stats?.pending_outbox)}`
-              : `${build.running ? "Building" : "Stopped"} · model ${build.model} · ${build.processed} processed${build.failed ? `, ${build.failed} failed` : ""} · ${layerCount(v2Stats?.pending_outbox)} left in queue`}
+            {t(
+              `${build.running ? "构建中" : "已停止"} · 模型 ${build.model} · 已处理 ${build.processed}${build.failed ? `，失败 ${build.failed}` : ""} · 队列剩余 ${layerCount(v2Stats?.pending_outbox)}`,
+              `${build.running ? "Building" : "Stopped"} · model ${build.model} · ${build.processed} processed${build.failed ? `, ${build.failed} failed` : ""} · ${layerCount(v2Stats?.pending_outbox)} left in queue`,
+              `${build.running ? "Construyendo" : "Detenido"} · modelo ${build.model} · ${build.processed} procesados${build.failed ? `, ${build.failed} fallidos` : ""} · ${layerCount(v2Stats?.pending_outbox)} en cola`)}
             {build.lastError && (
               <div className="memory-build-last-error">
-                {language === "cn" ? "最近错误：" : "Last error: "}{build.lastError}
+                {t("最近错误：", "Last error: ", "Último error: ")}{build.lastError}
               </div>
             )}
           </div>
         )}
         {rescreened !== null && (
           <div className="memory-history-import-result success" aria-live="polite">
-            {language === "cn"
-              ? `已按当前规则重新排队 ${rescreened} 个此前被拒绝的回合。`
-              : `Re-queued ${rescreened} previously rejected turns under the current rules.`}
+            {t(
+              `已按当前规则重新排队 ${rescreened} 个此前被拒绝的回合。`,
+              `Re-queued ${rescreened} previously rejected turns under the current rules.`,
+              `Se reencolaron ${rescreened} turnos rechazados con las reglas actuales.`)}
           </div>
         )}
         {historyPreview && (
           <div className="memory-history-import-result" aria-live="polite">
-            {language === "cn"
-              ? `扫描到 ${historyPreview.sourceSessions} 个 Session、${historyPreview.finalTurns} 个最终回合；已捕获 ${historyPreview.alreadyCaptured}，可加入 ${historyPreview.readyToQueue}。`
-              : `Found ${historyPreview.sourceSessions} Sessions and ${historyPreview.finalTurns} final turns; ${historyPreview.alreadyCaptured} already captured, ${historyPreview.readyToQueue} ready to queue.`}
+            {t(
+              `扫描到 ${historyPreview.sourceSessions} 个 Session、${historyPreview.finalTurns} 个最终回合；已捕获 ${historyPreview.alreadyCaptured}，可加入 ${historyPreview.readyToQueue}。`,
+              `Found ${historyPreview.sourceSessions} Sessions and ${historyPreview.finalTurns} final turns; ${historyPreview.alreadyCaptured} already captured, ${historyPreview.readyToQueue} ready to queue.`,
+              `Se encontraron ${historyPreview.sourceSessions} Sessions y ${historyPreview.finalTurns} turnos finales; ${historyPreview.alreadyCaptured} ya capturados, ${historyPreview.readyToQueue} listos para la cola.`)}
           </div>
         )}
         {historyImport && (
           <div className="memory-history-import-result success" aria-live="polite">
-            {language === "cn"
-              ? `已将 ${historyImport.queued} 个原始回合加入 v2 待筛队列；${historyImport.alreadyCaptured} 个已存在。`
-              : `Queued ${historyImport.queued} raw turns for v2 screening; ${historyImport.alreadyCaptured} were already present.`}
+            {t(
+              `已将 ${historyImport.queued} 个原始回合加入 v2 待筛队列；${historyImport.alreadyCaptured} 个已存在。`,
+              `Queued ${historyImport.queued} raw turns for v2 screening; ${historyImport.alreadyCaptured} were already present.`,
+              `Se añadieron ${historyImport.queued} turnos sin procesar a la cola de cribado de v2; ${historyImport.alreadyCaptured} ya existían.`)}
           </div>
         )}
       </section>

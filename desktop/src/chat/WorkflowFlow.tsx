@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ChatFileChange, ChatTodoItem } from "../types";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { EditedFilesSummary } from "./ChatMessage";
 import LocalFileLabel from "./LocalFileLabel";
 import type { TurnFileChangeSummary } from "./toolSummaries";
@@ -23,11 +24,11 @@ function stepIcon(status: ChatTodoItem["status"], index: number, active: boolean
   return index + 1;
 }
 
-function fileStatusLabel(status: ChatFileChange["status"], isChinese: boolean) {
-  if (status === "added") return isChinese ? "新增" : "Added";
-  if (status === "deleted") return isChinese ? "删除" : "Deleted";
-  if (status === "renamed") return isChinese ? "重命名" : "Renamed";
-  return isChinese ? "修改" : "Modified";
+function fileStatusLabel(status: ChatFileChange["status"], language: Language) {
+  if (status === "added") return tr(language, "新增", "Added", "Añadido");
+  if (status === "deleted") return tr(language, "删除", "Deleted", "Eliminado");
+  if (status === "renamed") return tr(language, "重命名", "Renamed", "Renombrado");
+  return tr(language, "修改", "Modified", "Modificado");
 }
 
 function fileStatusIcon(status: ChatFileChange["status"]): SvgIconName {
@@ -55,7 +56,7 @@ export default function WorkflowFlow({
   active,
   onOpenFile,
 }: Props) {
-  const isChinese = useStore((state) => state.language) === "cn";
+  const language = useStore((state) => state.language);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const chipRef = useRef<HTMLButtonElement>(null);
@@ -96,13 +97,28 @@ export default function WorkflowFlow({
 
   const stepLabel = current
     ? allDone
-      ? (isChinese ? `已完成 ${total} 步` : `${total} ${total === 1 ? "step" : "steps"} complete`)
-      : `${isChinese ? `第 ${stepNo} / ${total} 步` : `Step ${stepNo} / ${total}`}${paused ? (isChinese ? " · 待继续" : " · Paused") : ""}`
+      ? tr(
+        language,
+        `已完成 ${total} 步`,
+        `${total} ${total === 1 ? "step" : "steps"} complete`,
+        `${total} ${total === 1 ? "paso completado" : "pasos completados"}`,
+      )
+      : `${tr(language, `第 ${stepNo} / ${total} 步`, `Step ${stepNo} / ${total}`, `Paso ${stepNo} / ${total}`)}${paused ? tr(language, " · 待继续", " · Paused", " · En pausa") : ""}`
     : "";
-  const fileLabel = isChinese ? `${fileCount} 个文件` : `${fileCount} ${fileCount === 1 ? "file" : "files"}`;
+  const fileLabel = tr(
+    language,
+    `${fileCount} 个文件`,
+    `${fileCount} ${fileCount === 1 ? "file" : "files"}`,
+    `${fileCount} ${fileCount === 1 ? "archivo" : "archivos"}`,
+  );
   const label = stepLabel
     ? `${stepLabel}${fileCount > 0 ? ` · ${fileLabel}` : ""}`
-    : (isChinese ? `已变更 ${fileLabel}` : `${fileLabel} changed`);
+    : tr(
+      language,
+      `已变更 ${fileLabel}`,
+      `${fileLabel} changed`,
+      `${fileCount} ${fileCount === 1 ? "archivo modificado" : "archivos modificados"}`,
+    );
   const titlePaths = [
     ...(fileChangeSummary?.files.map((change) => change.path) ?? []),
     ...fallbackFileChanges.map((change) => change.path),
@@ -119,13 +135,13 @@ export default function WorkflowFlow({
       style={{ bottom: `${bottomOffset}px`, maxHeight: `calc(100% - ${bottomOffset + 16}px)` }}
     >
       {open && (
-        <div id={panelId} className="chat-workflow-panel" role="region" aria-label={isChinese ? "流程与文件" : "Progress and files"}>
+        <div id={panelId} className="chat-workflow-panel" role="region" aria-label={tr(language, "流程与文件", "Progress and files", "Progreso y archivos")}>
           {hasTodos && (
             <div className="chat-workflow-section">
               <div className="chat-workflow-panel-head">
-                <span>{isChinese ? "流程" : "Progress"}</span>
+                <span>{tr(language, "流程", "Progress", "Progreso")}</span>
                 <span className="chat-workflow-panel-meta">
-                  {isChinese ? `已完成 ${completedCount} / ${total} 步` : `${completedCount} / ${total} complete`}
+                  {tr(language, `已完成 ${completedCount} / ${total} 步`, `${completedCount} / ${total} complete`, `${completedCount} / ${total} completados`)}
                 </span>
               </div>
               <div role="list">
@@ -153,7 +169,7 @@ export default function WorkflowFlow({
           {fallbackFileChanges.length > 0 && (
             <div className="chat-workflow-section chat-workflow-files">
               <div className="chat-workflow-panel-head">
-                <span>{isChinese ? "本次文件" : "Changed files"}</span>
+                <span>{tr(language, "本次文件", "Changed files", "Archivos modificados")}</span>
                 <span className="chat-workflow-panel-meta">{fallbackFileChanges.length}</span>
               </div>
               {fallbackFileChanges.map((change) => (
@@ -174,7 +190,7 @@ export default function WorkflowFlow({
                       <LocalFileLabel path={change.path} />
                     </span>
                   )}
-                  <span className="chat-workflow-file-status">{fileStatusLabel(change.status, isChinese)}</span>
+                  <span className="chat-workflow-file-status">{fileStatusLabel(change.status, language)}</span>
                 </div>
               ))}
             </div>

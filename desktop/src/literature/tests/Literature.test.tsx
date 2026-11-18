@@ -1432,10 +1432,10 @@ describe("Literature library", () => {
 
     const log = screen.getByRole("log", { name: "Literature activity log" });
     expect(
-      within(log).getByText(/Agent \(Chat\): refreshing the projection for 3 canonical records/),
+      within(log).getByText(/智能体（对话）：正在刷新 3 条规范记录的投影/),
     ).toBeTruthy();
     expect(
-      within(log).getByText(/Agent refreshed the local literature database for 3 canonical records/),
+      within(log).getByText(/智能体为 3 条规范记录刷新了本地文献数据库/),
     ).toBeTruthy();
   });
 
@@ -2633,10 +2633,10 @@ describe("Literature library", () => {
     ]);
     expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(1);
     expect(mocks.literatureLlmVision.mock.calls[0][0]).toContain(
-      "Write every evidence explanation in Chinese",
+      "Write every evidence explanation in Simplified Chinese (zh-CN)",
     );
     expect(mocks.literatureLlmVision.mock.calls[0][1]).toContain(
-      "Write every note in Chinese",
+      "Write every note in Simplified Chinese (zh-CN)",
     );
   });
 
@@ -2699,10 +2699,10 @@ describe("Literature library", () => {
     expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(2);
     expect(mocks.literatureLlmVision.mock.calls.flatMap((call) => call[2])).toHaveLength(5);
     expect(mocks.literatureLlm.mock.calls[0][0]).toContain(
-      "Write every question and final answer in Chinese",
+      "Write every question and final answer in Simplified Chinese (zh-CN)",
     );
     expect(mocks.literatureLlm.mock.calls[0][1]).toContain(
-      "All question and answer values must be written in Chinese",
+      "All question and answer values must be written in Simplified Chinese (zh-CN)",
     );
   });
 

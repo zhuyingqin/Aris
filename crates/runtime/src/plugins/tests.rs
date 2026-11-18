@@ -1552,8 +1552,20 @@ fn schema_1_documents_cannot_use_what_schema_2_added() {
     })
     .is_empty());
     // Declarations that would not render or would reach outside are refused.
-    let refused: [&dyn Fn(&mut serde_json::Value); 6] = [
+    // A prompt may be written per language, like any other text.
+    assert!(problems(&|v| {
+        v["schemaVersion"] = 2.into();
+        v["panels"][0]["scope"] = "project".into();
+        let mut widget = button.clone();
+        widget["action"]["text"] = serde_json::json!({"en": "Refresh", "cn": "刷新", "es": "Actualizar"});
+        v["panels"][0]["widgets"][0] = widget;
+    })
+    .is_empty());
+    let refused: [&dyn Fn(&mut serde_json::Value); 8] = [
         &|w| w["action"]["text"] = "Use {{missing}}".into(),
+        // Every language is checked, not only the first.
+        &|w| w["action"]["text"] = serde_json::json!({"en": "ok", "cn": "好", "es": "Usa {{missing}}"}),
+        &|w| w["action"]["text"] = serde_json::json!({"en": "ok", "cn": " "}),
         &|w| w["action"] = serde_json::json!({"type":"open-file","path":"../secret.txt"}),
         &|w| w["action"] = serde_json::json!({"type":"tool","name":"shell"}),
         &|w| *w = serde_json::json!({"id":"t","type":"table","title":"T","columns":[]}),
@@ -2461,4 +2473,71 @@ fn an_approval_gate_cannot_approve_past_a_violated_critical_criterion() {
     let mut plain = serde_json::json!({"approved": true, "summary": "ok", "issues": []});
     assert!(!apply_rubrics_to_gate(plain.as_object_mut().unwrap(), &RubricPacket::default()));
     assert!(plain.get("rubrics").is_none());
+}
+
+#[test]
+fn ui_text_accepts_an_optional_spanish_translation() {
+    let parse = |value: serde_json::Value| serde_json::from_value::<UiText>(value).unwrap();
+    let old = parse(serde_json::json!({ "en": "Notes", "cn": "笔记" }));
+    assert!(old.validate(80).is_ok(), "manifests without es keep validating");
+    assert!(!serde_json::to_string(&old).unwrap().contains("\"es\""));
+    let spanish = parse(serde_json::json!({ "en": "Notes", "cn": "笔记", "es": "Notas" }));
+    assert!(spanish.validate(80).is_ok());
+    assert!(serde_json::to_string(&spanish).unwrap().contains("\"es\":\"Notas\""));
+    assert!(parse(serde_json::json!({ "en": "Notes", "cn": "笔记", "es": " " })).validate(80).is_err());
+    assert!(parse(serde_json::json!({ "en": "Notes", "cn": "笔记", "es": "x".repeat(81) })).validate(80).is_err());
+    // Neither a Spanish-only text nor an unknown language counts as localized.
+    assert!(serde_json::from_value::<UiText>(serde_json::json!({ "en": "Notes", "es": "Notas" })).is_err());
+    assert!(serde_json::from_value::<UiText>(serde_json::json!({ "en": "Notes", "cn": "笔记", "fr": "Notes" })).is_err());
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = ui_fixture(temp.path(), "@test/desk-es");
+    let manifest = fs::read_to_string(source.join("ui.json")).unwrap().replace(
+        "\"en\":\"Research checklist\"",
+        "\"en\":\"Research checklist\",\"es\":\"Lista de investigación\"",
+    );
+    assert!(manifest.contains("\"es\""));
+    fs::write(source.join("ui.json"), manifest).unwrap();
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+}
+
+#[test]
+fn research_suite_examples_preview_clean_and_carry_no_project_content() {
+    // Each package solves a class of research work, so none may name a project.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/research-suite");
+    let expected = [
+        ("reading-cards", "skill+ui"),
+        ("comparison-matrix", "ui"),
+        ("literature-watch", "ui"),
+        ("manuscript-hygiene", "mcp"),
+        ("manuscript-gauge", "ui"),
+        ("claim-checker", "ui"),
+        ("submission-profiles", "ui+reviewer"),
+        ("reviewer-response", "ui"),
+        ("review-rubric", "reviewer"),
+    ];
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path());
+    for (dir, kind) in expected {
+        let preview = store.preview(root.join(dir)).unwrap();
+        assert!(preview.can_enable, "{dir}: {:?}", preview.diagnostics);
+        assert!(preview.diagnostics.is_empty(), "{dir}: {:?}", preview.diagnostics);
+        let caps = &preview.capabilities;
+        assert_eq!(kind.contains("skill"), !caps.skills.is_empty(), "{dir} skills");
+        assert_eq!(kind.contains("mcp"), !caps.mcp_servers.is_empty(), "{dir} mcp");
+        assert_eq!(kind.contains("ui"), !caps.ui_panels.is_empty(), "{dir} panels");
+        assert_eq!(kind.contains("reviewer"), !caps.review_rubrics.is_empty(), "{dir} rubrics");
+        for panel in &caps.ui_panels {
+            let spanish = matches!(&panel.title, UiText::Localized(l) if l.es.is_some());
+            assert!(spanish, "{dir}/{} has no Spanish title", panel.id);
+        }
+    }
+    for dir in ["literature-watch", "claim-checker"] {
+        let preview = store.preview(root.join(dir)).unwrap();
+        assert_eq!(preview.capabilities.requires, ["literature"], "{dir}");
+    }
 }

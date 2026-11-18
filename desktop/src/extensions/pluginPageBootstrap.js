@@ -1,5 +1,5 @@
 // Runs first in a plugin page's frame, before any of the page's own code.
-// The host appends the call: (channel, { language, theme, data }).
+// The host appends the call: (channel, { language, locale, theme, data }).
 //
 // The frame has an opaque origin and a CSP with no network, so the page can
 // reach nothing by itself. On Windows, wry also injects Tauri's `ipc`,
@@ -39,7 +39,7 @@
     throw new Error("Native IPC isolation failed");
   }
 
-  var state = { language: initial.language, theme: initial.theme, data: initial.data, files: initial.files || {} };
+  var state = { language: initial.language, locale: initial.locale || initial.language, theme: initial.theme, data: initial.data, files: initial.files || {} };
   var resolve = function (reference) {
     var parts = String(initial.page || "").split("/").slice(0, -1);
     String(reference).split("/").forEach(function (part) {
@@ -113,9 +113,10 @@
   applyTheme(state.theme);
   Object.defineProperty(window, "somniq", {
     value: Object.freeze({
-      /** { language, theme, data }: what the page starts with. */
+      /** { language, locale, theme, data }: what the page starts with. `language` is "en" or
+       * "cn" for pages written before Spanish; `locale` is the app's UI language ("en", "cn", "es"). */
       ready: function () {
-        return Promise.resolve({ language: state.language, theme: state.theme, data: state.data });
+        return Promise.resolve({ language: state.language, locale: state.locale, theme: state.theme, data: state.data });
       },
       /** Re-read every declared widget's value. */
       data: function () {

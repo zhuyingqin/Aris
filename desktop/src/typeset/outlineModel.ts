@@ -7,6 +7,8 @@
  */
 
 import { dirname, normalizePath, sameWorkspacePath, stripInlineMarkup } from "./latexText";
+import { useStore } from "../store";
+import { tr } from "../language";
 import { scanLatexStructure, type LatexEnvironment, type LatexStructureIndex } from "../editor/latex/latexStructure";
 import {
   SECNUMDEPTH_CHAPTERED,
@@ -449,7 +451,9 @@ function beamerSlideForEnvironment(
   return {
     line: structure.lineNumberAt(environment.from),
     endLine: structure.lineNumberAt(environment.to),
-    title: stripInlineMarkup(inlineTitle || frameTitle || (titlePage ? "Title slide" : `Slide ${fallbackNumber}`)),
+    title: stripInlineMarkup(inlineTitle || frameTitle || (titlePage
+      ? tr(useStore.getState().language, "标题页", "Title slide", "Diapositiva de título")
+      : tr(useStore.getState().language, `幻灯片 ${fallbackNumber}`, `Slide ${fallbackNumber}`, `Diapositiva ${fallbackNumber}`))),
   };
 }
 

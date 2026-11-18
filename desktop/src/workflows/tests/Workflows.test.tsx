@@ -28,6 +28,7 @@ import Workflows, {
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({
+    language: "cn",
     tab: "workflows",
     currentProject: {
       id: "workflow-test-project",

@@ -319,9 +319,9 @@ describe("MarkdownContent", () => {
       <MarkdownContent text={"```mermaid\nflowchart LR\n  A -->\n```"} />,
     );
 
-    expect(await screen.findByText("Mermaid syntax error")).toBeTruthy();
+    expect(await screen.findByText("Mermaid 语法错误")).toBeTruthy();
     expect(screen.queryByTestId("mermaid-diagram")).toBeNull();
-    expect(screen.getByText(/The diagram was not rendered/)).toBeTruthy();
+    expect(screen.getByText(/图表未能渲染/)).toBeTruthy();
   });
 });
 

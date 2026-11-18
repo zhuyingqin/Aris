@@ -41,6 +41,16 @@ const COPY = {
     notes: "Capture a lead, an idea, or an open question…", save: "Save notes", saved: "Saved", unsaved: "Unsaved changes", saveHint: "Ctrl / ⌘ + Enter to save",
     startSession: "Send your first message to add todos and notes saved with this conversation.",
   },
+  es: {
+    scope: "Esta conversación", projectScope: "Compartido en este proyecto", projectStorage: "Este panel se guarda con el proyecto: todas sus conversaciones ven el mismo contenido.", local: "Guardado localmente", from: "De", loading: "Cargando panel…", retry: "Recargar", saving: "Guardando…",
+    storage: "Las tareas pendientes y las notas se guardan en este proyecto para la conversación actual.",
+    add: "Añadir tarea", addLabel: "Nueva tarea", addPlaceholder: "Añade un siguiente paso…", empty: "Anota un siguiente paso para que tu investigación siga avanzando.", remove: "Eliminar",
+    completed: "Completadas", allDone: "Todo al día.", limit: "Se alcanzó el límite de 200 elementos. Elimina tareas completadas para hacer sitio.",
+    readOnly: "Solo lectura", planEmpty: "El progreso de ejecución aparece aquí cuando el agente crea un plan.",
+    planStatus: { completed: "Completada", in_progress: "En curso", pending: "Pendiente" },
+    notes: "Anota una pista, una idea o una pregunta abierta…", save: "Guardar notas", saved: "Guardado", unsaved: "Cambios sin guardar", saveHint: "Ctrl / ⌘ + Enter para guardar",
+    startSession: "Envía tu primer mensaje para añadir tareas y notas que se guarden con esta conversación.",
+  },
 };
 
 type Mutate = (action: UiAction) => Promise<boolean>;

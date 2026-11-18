@@ -9,6 +9,8 @@ import {
   type EditorSettings,
 } from "../editor/editorSettings";
 import { useEditorSettings } from "../editor/useEditorSettings";
+import { useStore } from "../store";
+import { tr } from "../language";
 import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import {
@@ -203,6 +205,7 @@ export function TypesetVisualEditor({
   // The page scales with the shared font-size setting; everything else about
   // the Visual surface's typography stays its own.
   const editorSettings = useEditorSettings();
+  const uiLanguage = useStore((state) => state.language);
   const effectiveSpellCheckLanguage = spellCheckLanguage === undefined
     ? spellCheckLanguageAttribute(editorSettings)
     : spellCheckLanguage;
@@ -442,7 +445,7 @@ export function TypesetVisualEditor({
   }, [pdfCursor]);
 
   return (
-    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
+    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label={tr(uiLanguage, "可视化编辑器", "Visual editor", "Editor visual")}>
       <div className="typeset-visual-scroll">
         <div
           className={`typeset-visual-page typeset-visual-cm ${isBeamer ? "beamer-deck" : "latex-paper"}`}

@@ -1,4 +1,5 @@
 import type { Language } from "../store";
+import { languageLocale } from "../language";
 
 /** Zones offered as one-click choices next to the free-text zone field. */
 export const COMMON_TIME_ZONES = [
@@ -33,7 +34,7 @@ export function supportedTimeZones(): string[] {
 }
 
 export function localeFor(language: Language): string {
-  return language === "cn" ? "zh-CN" : "en-US";
+  return languageLocale(language);
 }
 
 function toDate(value: string | number | null | undefined): Date | null {

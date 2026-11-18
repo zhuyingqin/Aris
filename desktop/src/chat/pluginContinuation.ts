@@ -1,6 +1,7 @@
 import type { ChatBlock, ChatTodoItem, ChatTurn } from "../types";
 import type { Language } from "../store";
 import { latestTodoSnapshotFromTurns } from "./model";
+import { tr } from "../language";
 
 /**
  * After the user approves a plugin on a `PluginManager` card, the change only
@@ -87,5 +88,5 @@ export function pluginContinuationPrompt(openSteps: ChatTodoItem[] = []): string
 
 /** The marker shown in place of a user message. */
 export function pluginContinuationLabel(language: Language): string {
-  return language === "cn" ? "插件已启用，继续验证" : "Plugin enabled · verifying it";
+  return tr(language, "插件已启用，继续验证", "Plugin enabled · continuing verification", "Plugin activado · continuando la verificación");
 }

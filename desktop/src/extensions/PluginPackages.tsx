@@ -9,6 +9,7 @@ import {
 } from "../api/plugins";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { useStore, type Language } from "../store";
+import { languageLocale, tr } from "../language";
 import { uiText } from "./useChatPluginPanels";
 import { pluginCreationDraft, pluginNeedsRepair, pluginRepairDraft } from "./pluginAuthoringDrafts";
 import { officialPluginName } from "./officialPlugins";
@@ -70,7 +71,7 @@ const COPY = {
     title: "Plugin packages", scope: "This project", description: "Import local packages to add Skills, MCP and Chat side panels to this project.",
     add: "Import local package", importTitle: "Import a local package", importHint: "Preview the source, version and capabilities before installing.",
     path: "Package directory", placeholder: "Local directory containing package.json", browse: "Choose directory",
-    preview: "Preview", previewKicker: "Install preview", install: "Install disabled", cancel: "Cancel", close: "Close import", refresh: "Refresh packages",
+    preview: "Preview", previewKicker: "Install preview", install: "Install, keep disabled", cancel: "Cancel", close: "Close import", refresh: "Refresh packages",
     loading: "Loading packages…", working: "Working…",
     emptyTitle: "No plugin packages yet", empty: "Packages add Skills, MCP tools and Chat side panels to a research project. You can review the source, version and capabilities before importing.",
     emptyAction: "Import from a folder",
@@ -81,7 +82,7 @@ const COPY = {
     source: "Local source", snapshot: "File snapshot", skills: "Skills", mcp: "MCP", ui: "Chat panels", none: "None",
     noCapabilities: "No capabilities declared",
     compatible: "Compatible", blocked: "Needs adaptation", enabled: "Enabled", disabled: "Disabled", cannotEnable: "Can't enable",
-    approvalPending: "Needs approval", running: "Running", failed: "MCP failed", needsRestart: "Restart needed",
+    approvalPending: "Needs approval", running: "Running", failed: "MCP connection failed", needsRestart: "Restart needed",
     needsOfficial: "Needs an official plugin",
     needsOfficialHint: (names: string) => `The official plugin it depends on (${names}) is off for this project, so it is not running: no Skills, MCP or panels. Turn it on under Official plugins above; it applies from the next run.`,
     requires: "Requires official plugins",
@@ -117,6 +118,57 @@ const COPY = {
     askAiCreate: "Ask AI to create a plugin", askAiCreateHint: "Opens a new chat with a request draft in the composer; you review and send it.",
     askAiFix: "Ask AI to fix", askAiFixHint: "Opens a new chat with this package's source and diagnostics; you review and send it.",
   },
+  es: {
+    title: "Paquetes de plugins", scope: "Este proyecto", description: "Importa paquetes locales para añadir Skills, MCP y paneles laterales del Chat a este proyecto.",
+    add: "Importar paquete local", importTitle: "Importar un paquete local", importHint: "Revisa el origen, la versión y las capacidades antes de instalar.",
+    path: "Carpeta del paquete", placeholder: "Carpeta local que contiene package.json", browse: "Elegir carpeta",
+    preview: "Vista previa", previewKicker: "Vista previa de instalación", install: "Instalar desactivado", cancel: "Cancelar", close: "Cerrar importación", refresh: "Actualizar paquetes",
+    loading: "Cargando paquetes…", working: "Procesando…",
+    emptyTitle: "Aún no hay paquetes de plugins", empty: "Los paquetes añaden Skills, herramientas MCP y paneles laterales del Chat a un proyecto de investigación. Puedes revisar el origen, la versión y las capacidades antes de importar.",
+    emptyAction: "Importar desde una carpeta",
+    enable: "Activar", disable: "Desactivar", remove: "Quitar", details: "Detalles", hideDetails: "Ocultar detalles",
+    history: (n: number) => `Versiones anteriores ${n}`, hideHistory: "Ocultar versiones anteriores", original: "Original", replacedAt: "Reemplazada",
+    rollback: "Volver a esta versión", rollbackNote: (to: string, from: string) => `v${to} reemplaza la v${from} actual. La versión actual se queda en esta lista, así que puedes volver a ella cuando quieras; los datos de los paneles no se ven afectados.`,
+    rollbackStopped: "Se queda desactivado tras volver atrás; actívalo de nuevo cuando estés listo.", confirmRollback: "Volver",
+    source: "Origen local", snapshot: "Instantánea de archivos", skills: "Skills", mcp: "MCP", ui: "Paneles del Chat", none: "Ninguno",
+    noCapabilities: "No declara capacidades",
+    compatible: "Compatible", blocked: "Necesita adaptación", enabled: "Activado", disabled: "Desactivado", cannotEnable: "No se puede activar",
+    approvalPending: "Necesita aprobación", running: "En ejecución", failed: "Fallo de MCP", needsRestart: "Requiere reinicio",
+    needsOfficial: "Necesita un plugin oficial",
+    needsOfficialHint: (names: string) => `El plugin oficial del que depende (${names}) está desactivado en este proyecto, así que no se ejecuta: no carga Skills, MCP ni paneles. Actívalo en Plugins oficiales, arriba; se aplica desde la próxima ejecución.`,
+    requires: "Requiere plugins oficiales",
+    rubrics: "Criterios de revisión",
+    enabledHint: "Se aplica desde la próxima ejecución.",
+    runningHint: (runs: number) => `En uso por ${runs} ${runs === 1 ? "turno o tarea en curso" : "turnos o tareas en curso"}.`,
+    restartHint: (runs: number) => `${runs} ${runs === 1 ? "turno o tarea en curso sigue usando" : "turnos o tareas en curso siguen usando"} el conjunto con el que empezó; el cambio se aplica cuando ${runs === 1 ? "vuelva a empezar" : "vuelvan a empezar"}.`,
+    restartDisabledHint: (runs: number) => `Desactivado, pero ${runs} ${runs === 1 ? "turno o tarea en curso sigue" : "turnos o tareas en curso siguen"} usándolo hasta que ${runs === 1 ? "termine" : "terminen"}.`,
+    failedHint: "La última conexión con sus servidores MCP falló, así que el Chat no recibe sus herramientas. Corrígelo y vuelve a comprobar la conexión.",
+    mcpHealth: "Conexión MCP", mcpConnected: (tools: number) => `Conectado · ${tools} ${tools === 1 ? "herramienta" : "herramientas"}`, mcpFailed: "Falló",
+    mcpUnchecked: "Aún no conectado (se conecta al empezar la próxima conversación)", checkMcp: "Comprobar conexión", checking: "Conectando…",
+    nextRun: "Los paneles del Chat activados aparecen al instante en la cabecera del Chat y en el menú + de la barra lateral. Skills y MCP se aplican desde la próxima ejecución; los turnos y las tareas de trabajo en curso conservan el conjunto con el que empezaron.",
+    previewNote: "Los paquetes se instalan desactivados. Al activarlos los apruebas en este equipo solo para este proyecto. Las Skills locales tienen prioridad y las Skills integradas de SomniQ nunca se reemplazan.",
+    blockedTitle: "Necesita capacidades del host DeepSeek",
+    blockedNote: "Este paquete depende de capacidades o configuración del host que SomniQ aún no ofrece. Resuélvelas antes de activarlo.",
+    blockedLocalTitle: "Aún no se puede activar", blockedLocalNote: "Resuelve los problemas de abajo antes de activar este paquete.",
+    approvalRequired: "Los archivos de este proyecto piden ejecutar este paquete, pero este equipo no ha aprobado esta versión, así que no se ejecutará. Actívalo cuando confíes en el origen para aprobarlo.",
+    confirmRemove: "Este proyecto dejará de cargar sus Skills, MCP y paneles. El contenido de los paneles guardado en las conversaciones se conserva.",
+    confirm: "Quitar paquete",
+    enableMcpTitle: "Al activarlo se ejecutan estos comandos en este equipo",
+    enableMcpNote: "Estos servidores MCP se inician con tu usuario al comienzo de cada conversación y no se ejecutan en el sandbox. Activa solo paquetes de orígenes en los que confíes.",
+    envKeys: "Entorno", confirmEnable: "Activar paquete",
+    upgradeKicker: "Vista previa de actualización", installedVersion: "Instalada",
+    change: { upgrade: "Actualización", downgrade: "Versión anterior", "same-version": "Misma versión, archivos distintos", identical: "Igual que la instalada" },
+    diffApproved: "Comparado con la versión aprobada en este equipo", diffInstalled: "Comparado con la versión instalada",
+    commands: "Comandos", noChanges: "Sin cambios en Skills, paneles, comandos ni variables de entorno.",
+    upgradeApprove: "Actualizar y volver a aprobar", upgradeKeepDisabled: "Actualizar y mantener desactivado", upgradeAndDisable: "Actualizar y desactivar",
+    upgradeApproveNote: "La nueva versión ejecuta los comandos de arriba con tu usuario. La versión instalada y su aprobación siguen vigentes hasta que la nueva esté lista, y cualquier fallo se revierte. Las ejecuciones en curso conservan la versión anterior.",
+    upgradeDisabledNote: "El paquete se queda desactivado; lo apruebas cuando lo actives. Las ejecuciones en curso no se ven afectadas.",
+    upgradeBlockedNote: "La nueva versión aún no se puede activar, así que la actualización desactiva el paquete. Las ejecuciones en curso conservan la versión anterior.",
+    identicalNote: "Esta misma versión ya está instalada; no hay nada que actualizar.",
+    noProject: "Selecciona un proyecto para gestionar paquetes.", retry: "Recargar", loadFailed: "No se pudieron cargar los paquetes",
+    askAiCreate: "Pedir a la IA que cree un plugin", askAiCreateHint: "Abre un chat nuevo con un borrador de la petición en el cuadro de mensaje; tú lo revisas y lo envías.",
+    askAiFix: "Pedir a la IA que lo arregle", askAiFixHint: "Abre un chat nuevo con el origen y los diagnósticos de este paquete; tú lo revisas y lo envías.",
+  },
 };
 type Copy = typeof COPY["cn"];
 
@@ -143,7 +195,8 @@ const STATE_LABEL: Record<PluginState, StateLabel> = {
 };
 
 const officialNames = (ids: string[] | undefined, language: Language) =>
-  (ids ?? []).map((id) => (language === "cn" ? `「${officialPluginName(id, language)}」` : officialPluginName(id, language))).join(language === "cn" ? "" : ", ");
+  (ids ?? []).map((id) => tr(language, `「${officialPluginName(id, language)}」`, officialPluginName(id, language), officialPluginName(id, language)))
+    .join(tr(language, "", ", ", ", "));
 
 function stateHint(item: InstalledPlugin, lifecycle: PluginLifecycle, copy: Copy, language: Language): string | null {
   switch (lifecycle.state) {
@@ -186,10 +239,17 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
   return <dl className="plugin-details" id={id}>
     <div><dt>{copy.skills}</dt><dd>{skills.length ? <span className="plugin-tags">{skills.map((skill) => <code key={skill}>{skill}</code>)}</span> : copy.none}</dd></div>
     <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} /> : copy.none}</dd></div>
-    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? (language === "cn" ? "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）" : " (own page: runs the package's page code, sandboxed, no network)") : "")
-      + (panel.proposeTasks ? (language === "cn" ? "（可提议后台任务，每次都需你确认）" : " (may propose background tasks; you confirm each one)") : "")).join("、") : copy.none}</dd></div>
+    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language)
+      + (panel.page ? tr(language,
+        "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
+        " (own page: runs the package's page code, sandboxed, no network)",
+        " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)") : "")
+      + (panel.proposeTasks ? tr(language,
+        "（可提议后台任务，每次都需你确认）",
+        " (may propose background tasks; you confirm each one)",
+        " (puede proponer tareas en segundo plano; confirmas cada una)") : "")).join(tr(language, "、", ", ", ", ")) : copy.none}</dd></div>
     {(item.capabilities.reviewRubrics?.length ?? 0) > 0 && <div><dt>{copy.rubrics}</dt><dd><ul className="plugin-rubrics">{item.capabilities.reviewRubrics!.map((rubric) => <li key={rubric.id}>
-      <strong>{uiText(rubric.title, language)}</strong>{rubric.appliesWhen?.length ? <span className="plugin-rubric-when"> · {language === "cn" ? "触发词" : "when"}: {rubric.appliesWhen.join(", ")}</span> : null}
+      <strong>{uiText(rubric.title, language)}</strong>{rubric.appliesWhen?.length ? <span className="plugin-rubric-when"> · {tr(language, "触发词", "Triggers", "Activadores")}: {rubric.appliesWhen.join(", ")}</span> : null}
       <ul>{rubric.criteria.map((criterion) => <li key={criterion.id}><code>{criterion.severity}</code> {criterion.check}</li>)}</ul>
     </li>)}</ul></dd></div>}
     {(item.capabilities.requires?.length ?? 0) > 0 && <div><dt>{copy.requires}</dt><dd>{officialNames(item.capabilities.requires, language)}</dd></div>}
@@ -261,7 +321,7 @@ function VersionHistory({ item, copy, language, busy, onRollback }: {
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const history = item.history ?? [];
-  const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(language === "cn" ? "zh-CN" : "en", { dateStyle: "medium", timeStyle: "short" });
+  const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(languageLocale(language), { dateStyle: "medium", timeStyle: "short" });
   return <ol className="plugin-history" aria-label={copy.history(history.length)}>
     {history.map((version) => <li key={version.digest}>
       <div className="plugin-history-row">

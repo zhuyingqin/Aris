@@ -3328,7 +3328,7 @@ async fn run_relay_session(
                 .as_ref()
                 .err()
                 .map(String::as_str)
-                .unwrap_or("对方已关闭加密中继通道"),
+                .unwrap_or(runtime::ui_lang::tr_static("对方已关闭加密中继通道", "The other side closed the encrypted relay channel", "La otra parte cerró el canal de retransmisión cifrado")),
         );
         remove_image_assist_session(app.state::<RemoteAgentState>().inner(), &session_id);
         return;
@@ -5672,7 +5672,7 @@ fn remote_chat_user_text(payload: &Value) -> Option<String> {
     blocks
         .iter()
         .any(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .then(|| "（桌面发送了图片）".to_string())
+        .then(|| runtime::ui_lang::tr_static("（桌面发送了图片）", "(The desktop sent an image)", "(El escritorio envió una imagen)").to_string())
 }
 
 fn truncate_remote_chat_event_text(text: &str, maximum: usize) -> String {

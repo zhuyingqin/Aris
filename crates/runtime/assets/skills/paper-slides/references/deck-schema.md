@@ -59,14 +59,15 @@ gets a warning.
 
 | layout | use for | required fields | optional |
 |---|---|---|---|
-| `title` | cover | (meta.title) | `title`, `subtitle`, `author`, `affiliation`, `date`, `image` |
-| `section` | part divider | `title` | `number` ("01"), `subtitle` |
+| `title` | cover | (meta.title) | `title`, `subtitle`, `author`, `affiliation`, `date`, `image` (fills the right half), `ai_generated` |
+| `section` | part divider | `title` | `number` ("01"), `subtitle`, `image` (fills the left panel), `ai_generated` |
+| `hero` | full-bleed image + one statement: opening hook, motivation scene, application context | `image`, `statement` | `subtitle`, `text_side` (`left`/`right`), `ai_generated`, `source` |
 | `agenda` | outline | `items` (2–10 strings) | `title`, `current` (1-based index to highlight) |
 | `bullets` | argument in 3–6 points | `title`, `bullets` | `lead`, `takeaway` |
 | `figure` | one large figure / plot | `title`, `image` | `caption`, `crop`, `takeaway` |
 | `figure_text` | figure + 3–5 explanatory points | `title`, `image`, `bullets` | `image_side` (`left`/`right`), `image_ratio` (0.4–0.7), `caption`, `crop` |
 | `two_column` | comparison / before-after / problem-solution | `title`, `left`, `right` each `{heading, bullets}` | `highlight` on a side |
-| `cards` | 2–6 parallel ideas, contributions, findings | `title`, `cards: [{title, text}]` | `badge` per card, `muted` |
+| `cards` | 2–6 parallel ideas, contributions, findings | `title`, `cards: [{title, text}]` | per card: `image` (illustration band on top; give all cards one or none), `ai_generated`, `badge`, `muted` |
 | `metrics` | 1–4 headline numbers | `title`, `metrics: [{value, label}]` | `note` per metric |
 | `process` | pipeline, method steps, timeline (2–6) | `title`, `steps: [{title, text}]` | `badge`, `muted` per step |
 | `table` | exact numbers, ablations, comparisons | `title`, `columns`, `rows` | `highlight_row` (1-based data row) or `highlight_rows`, `caption` |
@@ -84,9 +85,14 @@ reports an error if even the minimum overflows — then split the slide.
 
 ### Images
 
-`image` is a path relative to `slides.json` (PNG/JPG). Convert PDF/SVG figures
-to PNG at ≥ 200 dpi first (`pdftoppm -png -r 220 fig.pdf out`, or PyMuPDF).
-Images keep their aspect ratio and are centred in their box. For a multi-panel
+`image` is a path relative to `slides.json`: PNG/JPG, or **SVG**. SVG is embedded
+as vector (crisp at any size, "Convert to Shape" editable in PowerPoint 2016+)
+with an automatic PNG fallback — prefer SVG for diagrams (`/figure-spec`,
+hand-written SVG, matplotlib `savefig('x.svg')`). Convert PDF figures to PNG
+at ≥ 200 dpi (`pdftoppm -png -r 220 fig.pdf out`, or PyMuPDF).
+In `figure`/`figure_text`/`equation` images keep their aspect ratio; in `title`,
+`section`, `hero` and card bands they fill the box and the overflow is cropped
+(`"fit": "contain"` on a card or `figure_text` keeps the whole image). For a multi-panel
 paper figure, show only the panel that supports the slide's claim:
 
 ```json
@@ -94,6 +100,11 @@ paper figure, show only the panel that supports the slide's claim:
 ```
 
 (fractions of the original removed from each side). Missing images are errors.
+
+**AI illustrations** (SomniImage etc.) must carry `"ai_generated": true`; the
+builder then labels them "AI 生成示意图" / "AI-generated illustration". They
+illustrate scenes and concepts only — never results, data, or anything presented
+as evidence. Images saved under `somni-images/` without the flag get a warning.
 
 ### Equations
 

@@ -667,7 +667,7 @@ describe("Chat export action", () => {
     }]);
     changedHandlers.forEach((handler) => handler({ projectId: "default" }));
 
-    await waitFor(() => expect(status.textContent).toContain("Task status: In review"));
+    await waitFor(() => expect(status.textContent).toContain("Task status: Awaiting your review"));
     expect(screen.getByText(/waiting for your confirmation/)).toBeTruthy();
   });
 
@@ -1322,13 +1322,13 @@ describe("Chat export action", () => {
     expect(followUp.text).toContain("approved the plugin change");
     expect(followUp.text).toContain("PluginManager list");
     // The app's turn is a marker, not a user message the user could edit.
-    const marker = (await screen.findByText("Plugin enabled · verifying it")).closest("article");
+    const marker = (await screen.findByText("Plugin enabled · continuing verification")).closest("article");
     expect(marker?.getAttribute("data-origin")).toBe("plugin-continuation");
     // The app's turn is not read as the user's question.
     expect(apiMocks.projectIntentObserve).not.toHaveBeenCalledWith(
       "default",
       session.id,
-      [expect.objectContaining({ text: "Plugin enabled · verifying it" })],
+      [expect.objectContaining({ text: "Plugin enabled · continuing verification" })],
     );
     await screen.findByText("Verified the plugin.");
     // One follow-up per approval: the verification turn starts no other.

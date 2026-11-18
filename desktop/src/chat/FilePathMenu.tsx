@@ -6,6 +6,7 @@ import { isImagePath } from "../imageFiles";
 import { copyImageToClipboard } from "../imageClipboard";
 import { latexWorkspaceOn } from "../extensions/officialPlugins";
 import { useStore } from "../store";
+import { tr } from "../language";
 
 interface Props {
   x: number;
@@ -52,7 +53,9 @@ export default function FilePathMenu({
   const workspaceTarget = workspaceFileOpenTarget(path, { latexWorkspace });
   // PDFs are covered by the side-panel reader below, so only editable sources
   // offer a workspace tab here.
-  const workspaceOpenLabel = workspaceTarget === "code" ? "在 Code 页面打开" : "在 LaTeX 页面打开";
+  const workspaceOpenLabel = workspaceTarget === "code"
+    ? tr(language, "在 Code 页面打开", "Open in Code", "Abrir en Code")
+    : tr(language, "在 LaTeX 页面打开", "Open in LaTeX", "Abrir en LaTeX");
 
   // Clamp to viewport after first paint
   useEffect(() => {
@@ -133,40 +136,40 @@ export default function FilePathMenu({
       className="file-path-menu"
       style={{ left: pos.x, top: pos.y }}
       role="menu"
-      aria-label="File options"
+      aria-label={tr(language, "文件选项", "File options", "Opciones de archivo")}
     >
       {(image || isImagePath(path)) && (
         <>
           <button role="menuitem" disabled={copyingImage} onClick={() => void handleCopyImage()}>
-            {language === "cn"
-              ? copyingImage ? "正在复制图片…" : "复制图片"
-              : copyingImage ? "Copying image…" : "Copy image"}
+            {copyingImage
+              ? tr(language, "正在复制图片…", "Copying image…", "Copiando imagen…")
+              : tr(language, "复制图片", "Copy image", "Copiar imagen")}
           </button>
           {copyImageError && (
             <div className="file-path-menu-error" role="alert">
-              {language === "cn" ? "图片复制失败，请重试。" : "Could not copy image. Try again."}
+              {tr(language, "图片复制失败，请重试。", "Could not copy image. Try again.", "No se pudo copiar la imagen. Inténtalo de nuevo.")}
             </div>
           )}
           <div className="file-path-menu-divider" />
         </>
       )}
       <button role="menuitem" onClick={() => void handleAttach()}>
-        附加为上下文
+        {tr(language, "附加为上下文", "Attach as context", "Adjuntar como contexto")}
       </button>
       <div className="file-path-menu-divider" />
       <button role="menuitem" onClick={() => copy(path)}>
-        复制路径
+        {tr(language, "复制路径", "Copy path", "Copiar ruta")}
       </button>
       <button role="menuitem" onClick={() => copy(relativePath)}>
-        复制相对路径
+        {tr(language, "复制相对路径", "Copy relative path", "Copiar ruta relativa")}
       </button>
       <button role="menuitem" onClick={() => copy(filename)}>
-        复制文件名
+        {tr(language, "复制文件名", "Copy file name", "Copiar nombre de archivo")}
       </button>
       <div className="file-path-menu-divider" />
       {onOpenInSidePanel && (
         <button role="menuitem" onClick={() => { onOpenInSidePanel(path); onClose(); }}>
-          在侧栏阅读
+          {tr(language, "在侧栏阅读", "Read in side panel", "Leer en el panel lateral")}
         </button>
       )}
       {(workspaceTarget === "code" || workspaceTarget === "latex") && (
@@ -180,7 +183,7 @@ export default function FilePathMenu({
         onMouseLeave={() => setOpenInOpen(false)}
       >
         <button role="menuitem">
-          在...中打开
+          {tr(language, "在...中打开", "Open in…", "Abrir en…")}
           <span className="file-path-menu-arrow"><SvgIcon name="chevronRight" size={12} /></span>
         </button>
         {openInOpen && (
@@ -189,13 +192,13 @@ export default function FilePathMenu({
               role="menuitem"
               onClick={() => { void fileOpen(path); onClose(); }}
             >
-              打开文件
+              {tr(language, "打开文件", "Open file", "Abrir archivo")}
             </button>
             <button
               role="menuitem"
               onClick={() => { void fileOpen(parentDir); onClose(); }}
             >
-              在资源管理器中显示
+              {tr(language, "在资源管理器中显示", "Show in file manager", "Mostrar en el explorador de archivos")}
             </button>
           </div>
         )}

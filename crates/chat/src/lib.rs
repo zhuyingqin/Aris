@@ -187,11 +187,16 @@ fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> Stri
 
 #[must_use]
 fn language_preference_section(language: &str) -> String {
-    if language == "cn" || language.eq_ignore_ascii_case("zh") {
-        "Default to the user's current language. If the user's language is unclear, use Chinese. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
+    let fallback = if language == "cn" || language.eq_ignore_ascii_case("zh") {
+        "Chinese"
+    } else if language.eq_ignore_ascii_case("es") {
+        "Spanish"
     } else {
-        "Default to the user's current language. If the user's language is unclear, use English. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
-    }
+        "English"
+    };
+    format!(
+        "Default to the user's current language. If the user's language is unclear, use {fallback}. Keep code, commands, identifiers, file paths, and technical terms in their original form."
+    )
 }
 
 #[must_use]
@@ -818,6 +823,16 @@ fn intent_tool_groups(lowered: &str, catalog: &BTreeSet<String>) -> Vec<ToolGrou
             reason: "ODT document intent",
             required: resolve_named(catalog, &["read_odt", "remove_odt_highlight"]),
             optional: resolve_named(catalog, &["change_get", "change_list", "change_revert"]),
+        });
+    }
+    // Scanned review reports and PDFs with broken font maps are common; the
+    // page view must be at hand before read_file reports an unreadable layer.
+    if terms.contains(&"pdf") || contains_any(lowered, &["扫描件", "扫描版", "scanned"]) {
+        groups.push(ToolGroup {
+            profile: "documents",
+            reason: "PDF reading intent",
+            required: resolve_named(catalog, &["read_pdf_pages"]),
+            optional: vec![],
         });
     }
     let word_document = terms.iter().any(|term| matches!(*term, "doc" | "docx"))

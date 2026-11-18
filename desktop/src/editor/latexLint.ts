@@ -3,6 +3,8 @@ import { StateEffect, StateField, type EditorState, type Extension } from "@code
 import type { EditorView } from "@codemirror/view";
 import { latexProjectSymbols, type LatexSymbol } from "./latexComplete";
 import { scanLatexStructure, updateLatexStructure, type LatexCommand, type LatexStructureIndex } from "./latex/latexStructure";
+import { LATEX_LINT_COPY } from "./latex/latexCopy";
+import { useStore } from "../store";
 
 /**
  * Two kinds of marker on a LaTeX source, both surfaced through CodeMirror's
@@ -76,6 +78,7 @@ function firstArgument(command: LatexCommand): string {
 function referenceDiagnostics(state: EditorState): Diagnostic[] {
   const symbols = latexProjectSymbols();
   const structure = state.field(latexSemanticIndex);
+  const copy = LATEX_LINT_COPY[useStore.getState().language];
   const diagnostics: Diagnostic[] = [];
 
   const knownLabels = new Set(symbols.labels.map((label: LatexSymbol) => label.name));
@@ -94,7 +97,7 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
       to: command.to,
       severity: "warning",
       source: "latex",
-      message: `Label "${name}" is already defined in this file — LaTeX keeps the last one and every \\ref to it becomes ambiguous.`,
+      message: copy.duplicateLabel(name),
     });
   }
   // Labels the project index knows about but that were defined more than once
@@ -109,7 +112,7 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
         to: command.to,
         severity: "warning",
         source: "latex",
-        message: `No \\label{${name}} anywhere in this document — the reference will typeset as "??".`,
+        message: copy.undefinedReference(name),
       });
     }
   }
@@ -127,7 +130,7 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
           to: command.to,
           severity: "warning",
           source: "latex",
-          message: `Citation key "${name}" is not in the project bibliography.`,
+          message: copy.unknownCitation(name),
         });
       }
     }
@@ -140,7 +143,7 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
       to: environment.beginTo,
       severity: "error",
       source: "latex",
-      message: `Environment "${environment.name}" has no matching \\end{${environment.name}}.`,
+      message: copy.unclosedEnvironment(environment.name),
     });
   }
 

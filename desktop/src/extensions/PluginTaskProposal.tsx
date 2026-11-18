@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { workTaskCreate, workTaskCreateAndStart } from "../api/tauri";
 import type { Language } from "../store";
+import { tr } from "../language";
 import "./PluginTaskProposal.css";
 
 export const MAX_TASK_TITLE_CHARS = 120;
@@ -29,15 +30,21 @@ export type TaskOutcome = { status: "started" | "created"; taskId: string } | { 
  * page, so a task always says where it came from.
  */
 export function taskPrompt(proposal: TaskProposal, prompt: string, language: Language): string {
-  const cn = language === "cn";
   const lines = [prompt.trim(), "", "---",
-    cn ? `来源：插件 ${proposal.pluginName} 的页面「${proposal.panelTitle}」提议了这个任务，用户在 SomniQ 中确认创建。`
-      : `Origin: proposed by the page "${proposal.panelTitle}" of plugin ${proposal.pluginName}; the user confirmed it in SomniQ.`];
+    tr(
+      language,
+      `来源：插件 ${proposal.pluginName} 的页面「${proposal.panelTitle}」提议了这个任务，用户在 SomniQ 中确认创建。`,
+      `Origin: proposed by the page "${proposal.panelTitle}" of plugin ${proposal.pluginName}; the user confirmed it in SomniQ.`,
+      `Origen: propuesta por la página "${proposal.panelTitle}" del plugin ${proposal.pluginName}; el usuario la confirmó en SomniQ.`,
+    )];
   if (proposal.report) {
     const { panelId, widgetId, widgetType } = proposal.report;
-    lines.push(cn
-      ? `完成后：先用 PluginPanel 工具的 list 查看插件 ${proposal.pluginName} 面板 ${panelId} 的组件 ${widgetId}（${widgetType}）需要的值形状，再用 write 把本任务的结论写进去。结论要简短、只写有证据支持的内容，并标明未核实的部分。`
-      : `When done: use the PluginPanel tool's list to see the value shape of widget ${widgetId} (${widgetType}) on panel ${panelId} of plugin ${proposal.pluginName}, then write this task's conclusion there with write. Keep it short, state only what the evidence supports, and mark what stayed unverified.`);
+    lines.push(tr(
+      language,
+      `完成后：先用 PluginPanel 工具的 list 查看插件 ${proposal.pluginName} 面板 ${panelId} 的组件 ${widgetId}（${widgetType}）需要的值形状，再用 write 把本任务的结论写进去。结论要简短、只写有证据支持的内容，并标明未核实的部分。`,
+      `When done: use the PluginPanel tool's list to see the value shape of widget ${widgetId} (${widgetType}) on panel ${panelId} of plugin ${proposal.pluginName}, then write this task's conclusion there with write. Keep it short, state only what the evidence supports, and mark what stayed unverified.`,
+      `Al terminar: usa list de la herramienta PluginPanel para ver la forma del valor del widget ${widgetId} (${widgetType}) en el panel ${panelId} del plugin ${proposal.pluginName}, y luego escribe ahí la conclusión de esta tarea con write. Sé breve, indica solo lo que respalda la evidencia y marca lo que quedó sin verificar.`,
+    ));
   }
   return lines.join("\n");
 }
@@ -54,6 +61,12 @@ const COPY = {
     from: "From", title: "Task title", prompt: "Task", report: "Reports back to",
     note: "The task runs in its own working copy: files it changes reach the project only after you accept them on the task board; a conclusion it writes back to this page shows up right away. This page can follow the task's progress, review verdict and list of changes.",
     start: "Create and start", create: "Create only", decline: "Decline", busy: "Creating…",
+  },
+  es: {
+    heading: "Un plugin propone una tarea en segundo plano",
+    from: "De", title: "Título de la tarea", prompt: "Tarea", report: "Informa a",
+    note: "La tarea se ejecuta en su propia copia de trabajo: los archivos que cambie llegan al proyecto solo cuando los aceptes en el tablero de tareas; la conclusión que escriba en esta página aparece al instante. Esta página puede seguir el progreso de la tarea, el veredicto de la revisión y la lista de cambios.",
+    start: "Crear e iniciar", create: "Solo crear", decline: "Rechazar", busy: "Creando…",
   },
 };
 

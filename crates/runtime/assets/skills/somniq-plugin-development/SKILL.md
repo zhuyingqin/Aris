@@ -66,7 +66,9 @@ draws them; the content of the data widgets comes from you, through the
 - **Widgets that act** (`button`, `form`): each has one action. `prompt` puts
   its `text` in the user's composer, with a form's `{{field-key}}` values
   filled in (a checkbox becomes yes/no); `"send": true` also sends it when the
-  composer was empty. `open-file` opens a project-relative file beside the
+  composer was empty. Like titles, `text` may be one string or
+  `{ "en", "cn", "es" }`; write it per language so the message the user sends
+  is in their language. `open-file` opens a project-relative file beside the
   chat. That is the whole list: a click never runs a tool or a command by
   itself. To make a button "do" something, write the prompt that asks you to
   do it, e.g. "Re-read results/ and update the Experiment board panel".
@@ -114,7 +116,9 @@ a pannable idea canvas, a chart dashboard built from modules).
   `PluginPanel` exactly like any other widget. A page may also declare
   `todo-list`, `notes` or the data widgets and read them the same way.
 - **The page talks to SomniQ only through `window.somniq`:**
-  `await somniq.ready()` gives `{ language, theme, data }`;
+  `await somniq.ready()` gives `{ language, locale, theme, data }` (`locale`
+  is the app's UI language, `en`, `cn` or `es`; `language` is only `en` or
+  `cn`, for older pages);
   `await somniq.set(widgetId, value)` saves (it rejects with the reason when
   the value does not fit the widget, so show that to the user);
   `somniq.onData(fn)` is called when you or another view change the data, so
@@ -160,7 +164,8 @@ a pannable idea canvas, a chart dashboard built from modules).
   `data-theme="light"` or `"dark"`. A page that should feel native uses
   them; a page with its own identity may use its own palette and fonts, as
   long as it defines a light and a dark variant keyed on `data-theme`. Write
-  both `en` and `cn` text and pick by `language`.
+  `en` and `cn` text, plus `es` when Spanish readers use it, and pick by
+  `locale ?? language` (anything else falls back to `en`).
 - **Treat stored data as untrusted.** Build DOM with `textContent` and
   `createElement`, never `innerHTML` with widget values, and tolerate missing
   or malformed entries: the data outlives versions of the page.
@@ -226,7 +231,8 @@ Deliver one small working version first; refine after the user has it.
    and write every returned file with `write_file` under
    `.somniq/plugin-drafts/<short-name>/` (or the directory the user names).
    Then make it the user's plugin: a package name like `@local/<short-name>`,
-   a real description, ids, and titles and text in both `en` and `cn`. Never
+   a real description, ids, and titles and text in both `en` and `cn` (add
+   an optional `es` for Spanish readers; without it they see `en`). Never
    leave template wording in a delivered package. To combine contributions,
    merge the templates' `package.json` fields and patch rows into one package.
 4. **For an MCP server**, write the tools in `server.py` with the standard

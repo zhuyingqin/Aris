@@ -73,6 +73,29 @@ const VIEWER_COPY = {
     citedEvidence: "Cited evidence",
     citedEvidenceHint: "Opened at the source page; yellow marks show evidence used by the answer.",
   },
+  es: {
+    loading: "Leyendo el archivo…",
+    failed: (reason: string) => `No se puede abrir aquí: ${reason}`,
+    empty: "Este archivo está vacío.",
+    preview: "Vista previa",
+    source: "Código fuente",
+    viewMode: "Vista de archivo",
+    projectRoot: "Raíz del proyecto",
+    kinds: {
+      pdf: "PDF",
+      image: "Imagen",
+      markdown: "Markdown",
+      text: "Texto",
+    },
+    refresh: "Recargar",
+    openWorkspace: (target: string) => target === "code" ? "Abrir en Code" : "Abrir en LaTeX",
+    openExternal: "Abrir con la app del sistema",
+    reveal: "Mostrar en el explorador de archivos",
+    selectionHint: (count: number) => `${count} caracteres seleccionados · se pueden enviar a la tarea principal`,
+    pdfPage: (page: number) => `Página ${page}`,
+    citedEvidence: "Evidencia citada",
+    citedEvidenceHint: "Abierto en la página de origen; las marcas amarillas muestran la evidencia usada en la respuesta.",
+  },
 } as const;
 
 function fileParent(path: string): string {

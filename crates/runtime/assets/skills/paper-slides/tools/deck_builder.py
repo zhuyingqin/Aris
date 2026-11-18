@@ -825,7 +825,8 @@ def L_title(ctx: Ctx, slide, s: dict, meta: dict):
     if sub:
         paras = [Para(str(sub), bullet=False)]
         spt, sh, _ = fit(ctx, paras, tw, 1.2, 24, 16, "subtitle")
-        textbox(ctx, slide, ML + 0.1, y, tw, sh + 0.05, paras, spt, color="DCE6F5", name="Subtitle")
+        textbox(ctx, slide, ML + 0.1, y, tw, sh + 0.05, paras, spt, color="DCE6F5", bold_color="FFE7A3",
+                name="Subtitle")
         y += sh + 0.25
     lines = [x for x in [s.get("author") or meta.get("author"),
                          s.get("affiliation") or meta.get("affiliation"),
@@ -902,7 +903,8 @@ def L_hero(ctx: Ctx, slide, s: dict, meta: dict):
     textbox(ctx, slide, tx, y, tw, h + 0.05, paras, pt, color="FFFFFF", spacing=1.08, bold_color="FFE7A3",
             name="Statement")
     if sub:
-        textbox(ctx, slide, tx, y + h + 0.45, tw, sh + 0.05, sp, spt, color="DCE6F5", name="Subtitle")
+        textbox(ctx, slide, tx, y + h + 0.45, tw, sh + 0.05, sp, spt, color="DCE6F5", bold_color="FFE7A3",
+                name="Subtitle")
     if s.get("source"):
         textbox(ctx, slide, tx, SLIDE_H - 0.55, tw, 0.3, [Para(str(s["source"]), bullet=False)], 11,
                 color="C9D5E8", name="Source")
@@ -968,7 +970,8 @@ def L_figure(ctx: Ctx, slide, s: dict, meta: dict):
     if not s.get("image"):
         ctx.err("empty_content", "figure layout needs `image`")
         return
-    place_image(ctx, slide, s["image"], ML, top, CW, bottom - top - cap_h, s.get("crop"))
+    place_image(ctx, slide, s["image"], ML, top, CW, bottom - top - cap_h, s.get("crop"),
+                ai_generated=bool(s.get("ai_generated")))
 
 
 def L_figure_text(ctx: Ctx, slide, s: dict, meta: dict):
@@ -990,7 +993,8 @@ def L_figure_text(ctx: Ctx, slide, s: dict, meta: dict):
                 align=PP_ALIGN.CENTER, name="Caption")
     if s.get("image"):
         place_image(ctx, slide, s["image"], ix, top, img_w, bottom - top - cap_h, s.get("crop"),
-                    what="figure_text image")
+                    what="figure_text image", fit=s.get("fit", "contain"),
+                    ai_generated=bool(s.get("ai_generated")))
     else:
         ctx.err("empty_content", "figure_text layout needs `image`")
     paras = as_paras(s.get("bullets"), ctx, "bullets")
@@ -1070,13 +1074,18 @@ def L_cards(ctx: Ctx, slide, s: dict, meta: dict):
     for b in bodies:
         for p in b:
             p.bullet = len(b) > 1
+    with_images = any(c.get("image") for c in cards)
+    if with_images and not all(c.get("image") for c in cards):
+        ctx.warn("schema", "give every card an `image` or none, so the cards line up")
+    img_h = min(cw / 1.55, ch_max * 0.5) if with_images else 0.0
+    head = img_h + 0.22 if with_images else pad + badge + 0.2
     tpt = min(fit(ctx, [t], inner_w, 0.9, 24, 16, f"card {i + 1} title")[0] for i, t in enumerate(titles))
     title_h = max(paras_height(ctx, [t], inner_w, tpt) for t in titles)
-    body_avail = ch_max - pad * 2 - badge - 0.2 - title_h - 0.15
+    body_avail = ch_max - head - pad - title_h - 0.15
     bpt = min((fit(ctx, b, inner_w, body_avail, 20, 13, f"card {i + 1} text")[0] if b else 20)
               for i, b in enumerate(bodies))
     body_h = max((paras_height(ctx, b, inner_w, bpt) if b else 0) for b in bodies)
-    ch = min(ch_max, pad * 2 + badge + 0.2 + title_h + 0.15 + body_h + 0.05)
+    ch = min(ch_max, head + pad + title_h + 0.15 + body_h + 0.05)
     total_h = rows * ch + (rows - 1) * gap_y
     y0 = top + max(0.0, (bottom - top - total_h) * 0.42)
     for i, c in enumerate(cards):
@@ -1086,11 +1095,19 @@ def L_cards(ctx: Ctx, slide, s: dict, meta: dict):
         x = ML + x_off + col * (cw + GAP)
         y = y0 + r * (ch + gap_y)
         rect(slide, x, y, cw, ch, ctx.theme["light"], shape=MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.06)
-        rect(slide, x, y, cw, 0.07, ctx.theme["accent"])
-        b = rect(slide, x + pad, y + pad, badge, badge, ctx.theme["accent"] if not c.get("muted") else ctx.theme["muted"],
-                 shape=MSO_SHAPE.OVAL)
-        shape_label(ctx, b, str(c.get("badge") or (i + 1)), 16, "FFFFFF")
-        ty = y + pad + badge + 0.2
+        if with_images:
+            if c.get("image"):
+                place_image(ctx, slide, c["image"], x, y, cw, img_h, c.get("crop"), what=f"card {i + 1} image",
+                            fit=c.get("fit", "cover"), ai_generated=bool(c.get("ai_generated")))
+            else:
+                rect(slide, x, y, cw, img_h, ctx.theme["line"])
+            rect(slide, x, y + img_h, cw, 0.06, ctx.theme["accent"])
+        else:
+            rect(slide, x, y, cw, 0.07, ctx.theme["accent"])
+            b = rect(slide, x + pad, y + pad, badge, badge,
+                     ctx.theme["accent"] if not c.get("muted") else ctx.theme["muted"], shape=MSO_SHAPE.OVAL)
+            shape_label(ctx, b, str(c.get("badge") or (i + 1)), 16, "FFFFFF")
+        ty = y + head
         textbox(ctx, slide, x + pad, ty, inner_w, title_h + 0.05, [titles[i]], tpt,
                 color=ctx.theme["primary"], name=f"Card{i + 1}Title")
         if bodies[i]:
@@ -1611,8 +1628,14 @@ def lint_slide(ctx: Ctx, s: dict):
             if rx.search(txt):
                 ctx.err(code, f"{msg}: {path} = {txt[:80]!r}")
                 break
+    holders = [s] + [c for c in (s.get("cards") or []) if isinstance(c, dict)]
+    for h in holders:
+        ref = str(h.get("image") or "").replace("\\", "/")
+        if ("somni-images" in ref or "oracle-images" in ref or "/ai-" in ref) and not h.get("ai_generated"):
+            ctx.warn("ai_image_unlabeled", f"{ref} looks AI-generated; set `ai_generated: true` so the slide "
+                                           "labels it as an illustration")
     layout = s.get("layout")
-    if layout not in ("title", "closing", "section") and not str(s.get("notes") or "").strip():
+    if layout not in ("title", "closing", "section", "hero") and not str(s.get("notes") or "").strip():
         ctx.warn("missing_notes", "no speaker notes; every content slide needs `notes` (what to say + transition)")
 
 

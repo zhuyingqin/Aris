@@ -13,6 +13,7 @@ import {
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import OracleWebSettings from "../settings/OracleWebSettings";
 import {
@@ -676,14 +677,14 @@ export default function Extensions() {
                       type="text"
                       value={skillSearch}
                       onChange={(e) => setSkillSearch(e.target.value)}
-                      placeholder={language === "cn" ? `搜索 ${skills.length} 个技能...` : `Search ${skills.length} skills...`}
+                      placeholder={tr(language, `搜索 ${skills.length} 个技能...`, `Search ${skills.length} skills…`, `Buscar en ${skills.length} skills…`)}
                     />
                     {skillSearch && (
                       <button
                         type="button"
                         onClick={() => setSkillSearch("")}
                         className="ext-skills-search-clear"
-                        aria-label="clear"
+                        aria-label={tr(language, "清除", "Clear", "Borrar")}
                       >
                         <SvgIcon name="close" size={12} />
                       </button>
@@ -692,7 +693,7 @@ export default function Extensions() {
                   <div className="ext-skills-list" role="list">
                     {shownSkills.length === 0 ? (
                       <div className="ext-empty" style={{ padding: "20px 12px" }}>
-                        {language === "cn" ? "未找到匹配技能" : "No matching skills"}
+                        {tr(language, "未找到匹配技能", "No matching skills", "No hay skills que coincidan")}
                       </div>
                     ) : (
                       shownSkills.map((skill) => (

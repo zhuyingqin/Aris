@@ -14,6 +14,10 @@ const COPY = {
     enabled: "Draw with your Somni account", quota: "Uses your current account's model service and quota.", model: "Drawing model",
     empty: "Sign in and sync models above to load available drawing models.", ready: "Ready. Describe the image you want in Chat.",
     unavailable: "Drawing is not ready. Sign in and sync models.", saving: "Saving…", saved: "Saved", preview: "Browser preview does not call the drawing service." },
+  es: { title: "Dibujo con Somni", description: "El modelo del chat convierte tu petición en un prompt completo y luego llama al servicio de dibujo. Las imágenes y el historial de generación se guardan en el proyecto actual.",
+    enabled: "Dibujar con tu cuenta de Somni", quota: "Usa el servicio de modelos y la cuota de tu cuenta actual.", model: "Modelo de dibujo",
+    empty: "Inicia sesión y sincroniza los modelos arriba para cargar los modelos de dibujo disponibles.", ready: "Listo. Describe en Chat la imagen que quieres.",
+    unavailable: "El dibujo no está listo. Inicia sesión y sincroniza los modelos.", saving: "Guardando…", saved: "Guardado", preview: "La vista previa en navegador no llama al servicio de dibujo." },
 } as const;
 
 export default function SomniImageSettings({ language, models }: { language: Language; models: string[] }) {

@@ -5,7 +5,14 @@ import { hasNativeBackend } from "../api/transport";
 import type { Language } from "../store";
 import { UiListSlot } from "./uiSlots";
 
-export const uiText = (text: UiText, language: Language) => typeof text === "string" ? text : text[language];
+/**
+ * The language a plugin page is told (`somniq.ready().language`). Pages are written
+ * against `"en" | "cn"`, so every other UI language, Spanish included, reads English there.
+ */
+export const pluginTextLanguage = (language: Language): "cn" | "en" => language === "cn" ? "cn" : "en";
+/** Manifest text: `cn` for Chinese, the optional `es` for Spanish, else `en`. */
+export const uiText = (text: UiText, language: Language) => typeof text === "string" ? text
+  : language === "es" && text.es?.trim() ? text.es : text[pluginTextLanguage(language)];
 /** A panel has no icon of its own; its first interactive widget names it best. */
 export const uiPanelIcon = (panel: Pick<UiPanel, "widgets">): SvgIconName => {
   const widget = panel.widgets.find((item) => item.type !== "text");

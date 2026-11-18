@@ -24,6 +24,8 @@ describe("plugin authoring drafts", () => {
   it("names the plugin skill in the creation draft", () => {
     expect(pluginCreationDraft("cn")).toContain("somniq-plugin-development");
     expect(pluginCreationDraft("en")).toContain("somniq-plugin-development");
+    expect(pluginCreationDraft("es")).toContain("somniq-plugin-development");
+    expect(pluginCreationDraft("es")).toContain("Usa la skill");
   });
 
   it("offers a repair only for a package that cannot run or whose MCP failed", () => {
@@ -55,6 +57,7 @@ describe("plugin authoring drafts", () => {
     const outside = plugin({ source: "D:/downloads/tools" });
     expect(pluginRepairDraft(outside, "F:/work", "cn")).toContain("不在当前项目里");
     expect(pluginRepairDraft(outside, "F:/work", "en")).toContain("outside this project");
+    expect(pluginRepairDraft(outside, "F:/work", "es")).toContain("fuera de este proyecto");
     // A sibling whose name only starts with the project's is still outside.
     expect(pluginRepairDraft(plugin({ source: "F:/work-other/tools" }), "F:/work", "en")).toContain("outside this project");
   });

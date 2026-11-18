@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent, type PointerEvent } from "react";
-import type { Language } from "../store";
+import { languageLocale, type Language } from "../language";
 import type { ProfileActivityPoint } from "./profileHeatmap";
 import type { SettingsProfileCopy } from "./i18n";
 
@@ -20,7 +20,7 @@ export default function ProfileActivityChart({
   if (points.length === 0) return null;
   const index = Math.min(selectedIndex ?? points.length - 1, points.length - 1);
   const selected = points[index];
-  const locale = language === "cn" ? "zh-CN" : "en-US";
+  const locale = languageLocale(language);
   const modeLabel = mode === "weekly" ? copy.modeWeekly : copy.modeCumulative;
   const describe = (point: ProfileActivityPoint) => `${point.date}${point.endDate ? ` – ${point.endDate}` : ""} · ${point.tokens.toLocaleString(locale)} ${copy.tokenUnit}`;
   const max = Math.max(1, ...points.map((point) => point.tokens));

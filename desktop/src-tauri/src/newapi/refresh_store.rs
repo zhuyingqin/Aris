@@ -6,27 +6,27 @@ mod backend {
 
     fn entry(account: &str) -> Result<Entry, String> {
         Entry::new(super::super::NEWAPI_REFRESH_KEYRING_SERVICE, account)
-            .map_err(|error| format!("无法访问系统登录凭据存储: {error}"))
+            .map_err(|error| runtime::tr!("无法访问系统登录凭据存储: {error}", "Could not access the system sign-in credential store: {error}", "No se pudo acceder al almacén de credenciales de sesión del sistema: {error}"))
     }
 
     pub(super) fn read(account: &str) -> Result<Option<Vec<u8>>, String> {
         match entry(account)?.get_secret() {
             Ok(secret) => Ok(Some(secret)),
             Err(Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("无法读取系统登录凭据: {error}")),
+            Err(error) => Err(runtime::tr!("无法读取系统登录凭据: {error}", "Could not read the system sign-in credential: {error}", "No se pudo leer la credencial de sesión del sistema: {error}")),
         }
     }
 
     pub(super) fn write(account: &str, secret: &[u8]) -> Result<(), String> {
         entry(account)?
             .set_secret(secret)
-            .map_err(|error| format!("无法保存系统登录凭据: {error}"))
+            .map_err(|error| runtime::tr!("无法保存系统登录凭据: {error}", "Could not save the system sign-in credential: {error}", "No se pudo guardar la credencial de sesión del sistema: {error}"))
     }
 
     pub(super) fn delete(account: &str) -> Result<(), String> {
         match entry(account)?.delete_credential() {
             Ok(()) | Err(Error::NoEntry) => Ok(()),
-            Err(error) => Err(format!("无法删除系统登录凭据: {error}")),
+            Err(error) => Err(runtime::tr!("无法删除系统登录凭据: {error}", "Could not delete the system sign-in credential: {error}", "No se pudo eliminar la credencial de sesión del sistema: {error}")),
         }
     }
 }

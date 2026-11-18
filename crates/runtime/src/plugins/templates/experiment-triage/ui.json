@@ -4,15 +4,15 @@
     {
       "id": "triage",
       "slot": "nav.page",
-      "title": { "en": "Experiment triage", "cn": "实验排查" },
+      "title": { "en": "Experiment triage", "cn": "实验排查", "es": "Diagnóstico de experimentos" },
       "icon": "lineChart",
       "order": 20,
       "scope": "project",
       "page": "./page.html",
       "proposeTasks": true,
       "widgets": [
-        { "id": "runs", "type": "json", "title": { "en": "Runs", "cn": "实验记录" } },
-        { "id": "findings", "type": "markdown", "title": { "en": "Findings", "cn": "排查结论" } }
+        { "id": "runs", "type": "json", "title": { "en": "Runs", "cn": "实验记录", "es": "Ejecuciones" } },
+        { "id": "findings", "type": "markdown", "title": { "en": "Findings", "cn": "排查结论", "es": "Conclusiones" } }
       ]
     }
   ]

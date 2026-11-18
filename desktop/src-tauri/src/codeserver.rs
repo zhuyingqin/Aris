@@ -1083,8 +1083,10 @@ fn asset_revision(resource_dir: Option<&Path>) -> String {
         }
         // Hashing 1.6 MB of translations on every launch is not worth it; their
         // size moves whenever they are regenerated from a new language pack.
-        if let Ok(meta) = std::fs::metadata(root.join(NLS_DIR).join("zh-cn.i18n.json")) {
-            hasher.update(meta.len().to_le_bytes());
+        for locale in VENDORED_LOCALES {
+            if let Ok(meta) = std::fs::metadata(root.join(NLS_DIR).join(format!("{locale}.i18n.json"))) {
+                hasher.update(meta.len().to_le_bytes());
+            }
         }
     }
     hex_digest(hasher)[..8].to_string()
@@ -1197,6 +1199,13 @@ const NLS_REVISION: u32 = 1;
 /// never eats the match for a longer one containing it.
 const UPSTREAM_PRODUCT_NAMES: &[&str] = &["Visual Studio Code", "VSCodium", "VS Code"];
 
+/// Locales whose language-pack `contents` ship in `resources/code-nls/<locale>.i18n.json`
+/// (taken from `MS-CEINTL.vscode-language-pack-*` 1.126.0 on Open VSX, aligned with
+/// `RUNTIME_VERSION`). `workbench_locale` must only return one of these: without the
+/// file `prepare_locale` yields `None`, `ensure` never sees the wanted locale, and every
+/// visit to the Code page restarts the server.
+const VENDORED_LOCALES: &[&str] = &["zh-cn", "es"];
+
 /// Translate SomniQ's own language into a workbench locale.
 ///
 /// English deliberately maps to nothing. The workbench's compiled strings *are*
@@ -1206,6 +1215,7 @@ const UPSTREAM_PRODUCT_NAMES: &[&str] = &["Visual Studio Code", "VSCodium", "VS 
 pub(crate) fn workbench_locale(language: Option<&str>) -> Option<&'static str> {
     match language.map(str::trim) {
         Some("cn" | "zh" | "zh-cn" | "zh-CN" | "zh-Hans") => Some("zh-cn"),
+        Some("es" | "es-ES" | "es-es") => Some("es"),
         _ => None,
     }
 }

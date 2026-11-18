@@ -38,6 +38,10 @@ pub enum UiText {
 pub struct UiLocales {
     pub en: String,
     pub cn: String,
+    /// Spanish. Optional so manifests written before it keep validating; a
+    /// Spanish reader sees `en` when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub es: Option<String>,
 }
 
 impl UiText {
@@ -45,13 +49,27 @@ impl UiText {
         let valid = |s: &str| !s.trim().is_empty() && s.chars().count() <= max;
         if match self {
             Self::Plain(s) => valid(s),
-            Self::Localized(UiLocales { en, cn }) => valid(en) && valid(cn),
+            Self::Localized(UiLocales { en, cn, es }) => {
+                valid(en) && valid(cn) && es.as_deref().is_none_or(valid)
+            }
         } {
             Ok(())
         } else {
             Err(format!(
                 "UI text must contain 1..{max} characters per language"
             ))
+        }
+    }
+
+    /// Every language's string, for checks that apply to each of them.
+    pub(super) fn variants(&self) -> Vec<&str> {
+        match self {
+            Self::Plain(s) => vec![s.as_str()],
+            Self::Localized(UiLocales { en, cn, es }) => {
+                let mut all = vec![en.as_str(), cn.as_str()];
+                all.extend(es.as_deref());
+                all
+            }
         }
     }
 }
@@ -154,8 +172,9 @@ pub struct UiButton {
 pub enum UiClick {
     /// Put `text` in the Chat composer, with `{{key}}` replaced by the form's
     /// values. With `send`, the click also sends it as the user's message.
+    /// `text` may be one string or `{ en, cn, es? }`, picked by UI language.
     Prompt {
-        text: String,
+        text: UiText,
         #[serde(default)]
         send: bool,
     },
@@ -386,7 +405,7 @@ pub(super) const UI_SCOPES: &[&str] = &["session", "project"];
 pub(super) const UI_INPUT_KINDS: &[&str] = &["text", "textarea", "number", "select", "checkbox"];
 pub(super) const UI_CHART_KINDS: &[&str] = &["bar", "line"];
 pub(super) const UI_CLICK_ACTIONS: &[(&str, &str)] = &[
-    ("prompt", "{ \"type\": \"prompt\", \"text\": string, \"send\"?: boolean }: puts text in the Chat composer; {{key}} is replaced by the form field of that key (a button has no fields); with send true the click sends it as the user's message"),
+    ("prompt", "{ \"type\": \"prompt\", \"text\": string | { \"en\", \"cn\", \"es\"? }, \"send\"?: boolean }: puts text in the Chat composer, in the reader's language when text is localized; {{key}} is replaced by the form field of that key (a button has no fields); with send true the click sends it as the user's message"),
     ("open-file", "{ \"type\": \"open-file\", \"path\": project-relative file }: opens the file in the side panel"),
 ];
 
@@ -410,12 +429,13 @@ fn placeholders(text: &str) -> Vec<&str> {
 fn check_click(action: &UiClick, fields: &[&str]) -> Result<(), String> {
     match action {
         UiClick::Prompt { text, .. } => {
-            if !short(text, MAX_UI_TEXT_CHARS) {
+            if text.validate(MAX_UI_TEXT_CHARS).is_err() {
                 return Err(format!(
-                    "A prompt action's text must contain 1..{MAX_UI_TEXT_CHARS} characters"
+                    "A prompt action's text must contain 1..{MAX_UI_TEXT_CHARS} characters in each language"
                 ));
             }
-            match placeholders(text).into_iter().find(|key| !fields.contains(key)) {
+            let used = text.variants().into_iter().flat_map(placeholders).collect::<Vec<_>>();
+            match used.into_iter().find(|key| !fields.contains(key)) {
                 Some(key) => Err(format!(
                     "{{{{{key}}}}} is not a field of this form; placeholders must name declared field keys"
                 )),

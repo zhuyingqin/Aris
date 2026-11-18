@@ -8,6 +8,9 @@
  * rewritten or presented as if the preview were a faithful TeX compilation.
  */
 
+import { useStore } from "../store";
+import { tr } from "../language";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 const UNIT = 48;
 const PADDING = 34;
@@ -398,7 +401,7 @@ export function renderTikzPreview(source: string): SVGSVGElement | null {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", "cm-vis-diagram-preview");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "TikZ diagram preview");
+  svg.setAttribute("aria-label", tr(useStore.getState().language, "TikZ 图预览", "TikZ diagram preview", "Vista previa del diagrama TikZ"));
   setAttr(svg, "viewBox", `0 0 ${width} ${height}`);
   setAttr(svg, "width", width);
   setAttr(svg, "height", height);

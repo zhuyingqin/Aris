@@ -809,6 +809,35 @@ fn installs_and_starts_the_real_runtime() {
         "the generated bundle still names the upstream product"
     );
 
+    // Spanish shares the alignment contract; count messages that differ from the
+    // runtime's own English table rather than looking for a script.
+    assert_eq!(
+        generate_nls_bundle(&version_dir(), Some(&resources), "es"),
+        Ok(true),
+        "the Spanish message bundle could not be built for {RUNTIME_VERSION}"
+    );
+    let english: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(version_dir().join("out").join("nls.messages.json"))
+            .expect("read the English message table"),
+    )
+    .expect("parse the English message table");
+    let spanish: Vec<String> = serde_json::from_str(
+        std::fs::read_to_string(
+            version_dir().join("nls").join(commit).join(RUNTIME_VERSION).join("es").join("nls.messages.js"),
+        )
+        .expect("read the Spanish bundle")
+        .trim_end_matches(';')
+        .trim_start_matches("globalThis._VSCODE_NLS_MESSAGES="),
+    )
+    .expect("parse the Spanish bundle");
+    assert_eq!(spanish.len(), english.len());
+    let changed = spanish.iter().zip(&english).filter(|(es, en)| es != en).count();
+    assert!(
+        changed * 100 / english.len() >= 85,
+        "only {changed}/{} messages are Spanish; the language pack has drifted from {RUNTIME_VERSION}",
+        english.len()
+    );
+
     let pid = inner.lock().expect("state").pid.expect("a pid");
     inner.lock().expect("state").shutdown();
     std::thread::sleep(std::time::Duration::from_millis(750));
@@ -1187,9 +1216,10 @@ fn every_brand_asset_is_shipped_and_lands_somewhere_distinct() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn only_chinese_asks_for_a_translated_workbench() {
+fn chinese_and_spanish_ask_for_a_translated_workbench() {
     assert_eq!(workbench_locale(Some("cn")), Some("zh-cn"));
     assert_eq!(workbench_locale(Some("zh-CN")), Some("zh-cn"));
+    assert_eq!(workbench_locale(Some("es")), Some("es"));
     // English maps to nothing on purpose: the compiled strings are already
     // English, and the server refuses to look for a bundle for a locale that
     // starts with `en`, so generating one would be dead weight.

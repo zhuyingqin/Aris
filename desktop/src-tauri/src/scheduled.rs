@@ -882,11 +882,11 @@ fn interval_from_rrule(rrule: &str) -> (u32, String) {
 fn schedule_label_from_rrule(rrule: &str) -> String {
     let (value, unit) = interval_from_rrule(rrule);
     let unit_label = match unit.as_str() {
-        "hours" => "小时",
-        "days" => "天",
-        _ => "分钟",
+        "hours" => runtime::ui_lang::tr_static("小时", "hours", "horas"),
+        "days" => runtime::ui_lang::tr_static("天", "days", "días"),
+        _ => runtime::ui_lang::tr_static("分钟", "minutes", "minutos"),
     };
-    format!("每 {value} {unit_label}")
+    runtime::tr!("每 {value} {unit_label}", "Every {value} {unit_label}", "Cada {value} {unit_label}")
 }
 
 fn rrule_field(rrule: &str, key: &str) -> Option<String> {
@@ -908,7 +908,7 @@ fn schedule_label(record: &ArisScheduledRecord) -> String {
     }
     let zone = record_zone(record).name().to_string();
     match rule_kind(record) {
-        rules::RULE_ONCE => format!("一次 · {} · {zone}", record.start_local.replace('T', " ")),
+        rules::RULE_ONCE => runtime::tr!("一次 · {} · {zone}", "Once · {} · {zone}", "Una vez · {} · {zone}", record.start_local.replace('T', " ")),
         rules::RULE_CRON => format!("Cron {} · {zone}", record.cron),
         rules::RULE_RRULE => format!("RRULE {} · {zone}", rrule_body(&record.recurrence)),
         _ => schedule_label_from_rrule(&record.rrule),
@@ -1052,9 +1052,9 @@ fn task_view_with_delivery(record: ArisScheduledRecord, now: i64) -> ScheduledTa
 
 fn mail_schedule_label(keywords: &[String]) -> String {
     if keywords.is_empty() {
-        "收到新邮件时".to_string()
+        runtime::ui_lang::tr_static("收到新邮件时", "When a new email arrives", "Al recibir un correo nuevo").to_string()
     } else {
-        format!("收到含「{}」的新邮件时", keywords.join(" / "))
+        runtime::tr!("收到含「{}」的新邮件时", "When a new email containing \"{}\" arrives", "Al recibir un correo nuevo que contenga \"{}\"", keywords.join(" / "))
     }
 }
 

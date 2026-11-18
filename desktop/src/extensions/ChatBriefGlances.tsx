@@ -16,6 +16,7 @@ import "./ChatBriefGlances.css";
 const COPY = {
   cn: { open: "打开", openTitle: (title: string) => `打开“${title}”页面`, collapse: "收起", expand: "展开", region: "插件小组件" },
   en: { open: "Open", openTitle: (title: string) => `Open the ${title} page`, collapse: "Collapse", expand: "Expand", region: "Plugin glances" },
+  es: { open: "Abrir", openTitle: (title: string) => `Abrir la página ${title}`, collapse: "Contraer", expand: "Expandir", region: "Vistazos de plugins" },
 };
 const FIRST_HEIGHT = 96;
 

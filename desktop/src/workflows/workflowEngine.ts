@@ -1,6 +1,8 @@
 import { jsonrepair } from "jsonrepair";
 
+import { languagePromptName } from "../language";
 import type { LiteraturePaper, LiteratureSearchRecordRank } from "../literature/literatureTypes";
+import { currentWorkflowLanguage, stageTitle, workflowOutputLanguage, workflowsCopy } from "./i18n";
 import type {
   MatrixConcept,
   MatrixSearchPath,
@@ -178,7 +180,7 @@ export function applyStageFailure(
   message: string,
 ): ReviewWorkflowRun {
   const stage = run.stages.find((candidate) => candidate.id === stageId);
-  if (stage) stage.summary = `上一次操作失败：${message}`;
+  if (stage) stage.summary = workflowsCopy().engine.stageFailed(message);
   return run;
 }
 
@@ -267,14 +269,14 @@ export function downstreamStagesWithWork(
  */
 export function reopenStage(run: ReviewWorkflowRun, stageId: string): ReviewWorkflowRun {
   const stage = run.stages.find((candidate) => candidate.id === stageId);
-  if (!stage) throw new Error(`未知的工作流阶段：${stageId}`);
+  if (!stage) throw new Error(workflowsCopy().engine.unknownStage(stageId));
   invalidateDownstream(run, stageId);
   STAGE_REOPEN_CONFIRMATIONS[stageId]?.(run);
   run.activeStageId = stageId;
   run.status = "waiting_user";
   stage.status = "waiting_user";
   stage.completedAt = undefined;
-  stage.summary = "已回到这一步修改；其后的步骤需要重新执行。";
+  stage.summary = workflowsCopy().engine.reopenedSummary;
   // A verdict describes the state that was reviewed. The run has been rewound
   // onto that state to change it, so the gate goes back to pending rather than
   // carrying an approval the next edit invalidates. `skipped` is preserved as
@@ -284,10 +286,10 @@ export function reopenStage(run: ReviewWorkflowRun, stageId: string): ReviewWork
     ? {
       required: true,
       status: run.reviewerDisabled ? "skipped" : "pending",
-      reviewer: run.reviewerDisabled ? "Reviewer disabled by workflow setting" : undefined,
+      reviewer: run.reviewerDisabled ? workflowsCopy().engine.reviewerDisabledLabel : undefined,
       summary: run.reviewerDisabled
-        ? "独立审查已按本工作流设置关闭；重做这一步不会重新进入 Reviewer。"
-        : "阶段已被重新打开，需要重新通过独立 Reviewer 审查。",
+        ? workflowsCopy().engine.reopenedGateSkipped
+        : workflowsCopy().engine.reopenedGatePending,
       issues: [],
     }
     : { required: false, status: "not_required", issues: [] };
@@ -299,7 +301,7 @@ export function reopenStage(run: ReviewWorkflowRun, stageId: string): ReviewWork
     && run.scoutAutomationStatus
     && run.scoutAutomationStatus !== "idle") {
     run.scoutAutomationStatus = "paused";
-    run.scoutPauseReason = `已回到「${stage.title}」修改；完成后可恢复自动侦察。`;
+    run.scoutPauseReason = workflowsCopy().engine.reopenedPause(stageTitle(stage));
   }
   return run;
 }
@@ -450,7 +452,7 @@ export function parseModelJson<T>(raw: string): T {
   // tried on any of them. `jsonrepair` rewrites an abbreviated schema block such
   // as `{"concepts":[ ... ]}` into well-formed empty arrays, so repairing
   // candidates in place would let a decorative block outrank the real answer.
-  let lastCause: unknown = new Error("模型回复中没有可解析的 JSON。");
+  let lastCause: unknown = new Error(workflowsCopy().engine.noJson);
   for (const parse of [
     (candidate: string) => JSON.parse(candidate),
     (candidate: string) => JSON.parse(jsonrepair(escapeJsonStringControlCharacters(candidate))),
@@ -692,6 +694,7 @@ export function eligibilityPrompt(
 
 不得因为标题含 review 就自动纳入；也不得把普通原始研究当成综述。只返回 JSON，且每个输入 index 恰好出现一次：
 {"items":[{"index":0,"eligible":true,"reason":"一句话理由"}]}
+${workflowOutputLanguage()}
 
 文献数据：
 ${JSON.stringify(packets)}`;
@@ -715,6 +718,7 @@ export function landscapeBatchPrompt(
   "gaps":["现有综述未充分覆盖的具体空白"],
   "evidenceRecordIds":["支持这些判断的记录ID"]
 }
+${workflowOutputLanguage()}
 
 文献数据：
 ${JSON.stringify(packets)}`;
@@ -755,6 +759,7 @@ export function landscapeSynthesisPrompt(
     "evidenceRecordIds":["..."]
   }]
 }
+${workflowOutputLanguage()}
 
 分批摘要：
 ${JSON.stringify(batchDigests).slice(0, run.contextPolicy.synthesisInputChars)}`;
@@ -879,10 +884,10 @@ export function scopusReviewQueryIssues(query: string) {
   const normalized = query.trim();
   const issues: string[] = [];
   if (!/\bTITLE-ABS-KEY\s*\(/i.test(normalized)) {
-    issues.push("Scopus 检索式必须使用 TITLE-ABS-KEY(...) 承载主题词族。");
+    issues.push(workflowsCopy().engine.scopus.titleAbsKey);
   }
   if (!hasEnforcedScopusReviewDocumentType(normalized)) {
-    issues.push("Scopus 检索式必须在最外层强制限定 DOCTYPE(re)。");
+    issues.push(workflowsCopy().engine.scopus.doctype);
   }
   let parenthesisDepth = 0;
   let hasInvalidParenthesis = false;
@@ -892,36 +897,36 @@ export function scopusReviewQueryIssues(query: string) {
     if (parenthesisDepth < 0) hasInvalidParenthesis = true;
   }
   if (hasInvalidParenthesis || parenthesisDepth !== 0) {
-    issues.push("Scopus query 结构无效：括号配对失败。");
+    issues.push(workflowsCopy().engine.scopus.parentheses);
   }
   if (!/\b(?:AND|OR)\b/i.test(normalized)) {
-    issues.push("Scopus query 结构无效：缺少布尔运算符。");
+    issues.push(workflowsCopy().engine.scopus.booleanOperator);
   }
   if (/\b(?:TODO|TBD|PLACEHOLDER|\[.*?\]|<.*?>)\b/i.test(normalized)) {
-    issues.push("Scopus query 结构无效：发现占位符。");
+    issues.push(workflowsCopy().engine.scopus.placeholder);
   }
   if ((normalized.match(/"/g)?.length ?? 0) % 2 !== 0) {
-    issues.push("Scopus query 的双引号未成对；请闭合短语引号后重新审查。");
+    issues.push(workflowsCopy().engine.scopus.unbalancedQuotes);
   }
   if (CJK_TEXT.test(normalized)) {
-    issues.push("Scopus query 中不得出现中文；请把中文主题翻译为通行的英文学术术语，中文只写在 rationale 中。");
+    issues.push(workflowsCopy().engine.scopus.chinese);
   }
   if (normalized.length > SCOPUS_REVIEW_QUERY_MAX_CHARS) {
-    issues.push(`Scopus query 过长（${normalized.length} 字符，上限 ${SCOPUS_REVIEW_QUERY_MAX_CHARS}）；请改为 1–3 个概念词族，不要枚举介词、单复数和连字符的组合。`);
+    issues.push(workflowsCopy().engine.scopus.tooLong(normalized.length, SCOPUS_REVIEW_QUERY_MAX_CHARS));
   }
   const orOperators = normalized.match(/\bOR\b/gi)?.length ?? 0;
   if (orOperators > SCOPUS_REVIEW_QUERY_MAX_OR_OPERATORS) {
-    issues.push(`Scopus query 含 ${orOperators} 个 OR（上限 ${SCOPUS_REVIEW_QUERY_MAX_OR_OPERATORS}）；请删除短语排列组合，仅保留真实同义词。`);
+    issues.push(workflowsCopy().engine.scopus.tooManyOr(orOperators, SCOPUS_REVIEW_QUERY_MAX_OR_OPERATORS));
   }
   const quotedPhrases = normalized.match(/"[^"]+"/g)?.length ?? 0;
   if (quotedPhrases > SCOPUS_REVIEW_QUERY_MAX_QUOTED_PHRASES) {
-    issues.push(`Scopus query 含 ${quotedPhrases} 个引号短语（上限 ${SCOPUS_REVIEW_QUERY_MAX_QUOTED_PHRASES}）；请把共同概念拆成 OR 词族后用 AND 连接。`);
+    issues.push(workflowsCopy().engine.scopus.tooManyPhrases(quotedPhrases, SCOPUS_REVIEW_QUERY_MAX_QUOTED_PHRASES));
   }
   const exclusion = normalized.match(/\bAND\s+NOT\s+TITLE\s*\(([^)]*)\)/i)?.[1];
   if (exclusion) {
     const exclusionTerms = (exclusion.match(/\bOR\b/gi)?.length ?? 0) + 1;
     if (exclusionTerms > 5) {
-      issues.push(`AND NOT TITLE 排除了 ${exclusionTerms} 个词（上限 5）；仅保留由上一轮误检样本证明的假阳性词。`);
+      issues.push(workflowsCopy().engine.scopus.tooManyExclusions(exclusionTerms));
     }
   }
   return issues;
@@ -952,21 +957,15 @@ export function deterministicPlan(run: ReviewWorkflowRun): ReviewSearchPlan {
     query: source === "scopus"
       ? `TITLE-ABS-KEY(${joinedOr}) AND DOCTYPE(re)`
       : `(${joinedOr}) AND (${reviewTerms})`,
-    rationale: "覆盖已给出的命名变体并限定综述类型；标题级排除项需要按领域补充。",
+    rationale: workflowsCopy().engine.plan.rationale,
   }));
   return {
     queries,
     inclusionCriteria: [
-      `${run.yearFrom}–${run.yearTo} 年发表`,
-      "文献类型为综述、系统综述、范围综述、荟萃分析或领域调查",
-      "标题或摘要与研究主题直接相关",
-      "至少有标题、年份、来源和摘要信息",
+      workflowsCopy().engine.plan.yearRange(run.yearFrom, run.yearTo),
+      ...workflowsCopy().engine.plan.inclusion,
     ],
-    exclusionCriteria: [
-      "仅为会议摘要、社论、勘误或无实质综合内容的观点文章",
-      "主题仅在背景中被提及",
-      "重复记录保留信息最完整版本",
-    ],
+    exclusionCriteria: [...workflowsCopy().engine.plan.exclusion],
     generatedBy: "Executor fallback planner",
     generatedAt: new Date().toISOString(),
   };
@@ -981,18 +980,18 @@ export function normalizeLandscapeAnalysis(
     .map((item, index) => ({
       id: item.id?.trim() || `direction-${index + 1}`,
       title: item.title.trim(),
-      gap: item.gap?.trim() || "需要在原始研究检索阶段进一步验证该空白。",
-      outline: item.outline?.trim() || "按主题、方法、证据与局限组织。",
-      workload: item.workload?.trim() || "预计 8–12 周。",
+      gap: item.gap?.trim() || workflowsCopy().engine.landscape.gap,
+      outline: item.outline?.trim() || workflowsCopy().engine.landscape.outline,
+      workload: item.workload?.trim() || workflowsCopy().engine.landscape.workload,
       difficulty: item.difficulty?.trim() || "medium",
-      feasibility: item.feasibility?.trim() || "需验证核心原始研究数量。",
+      feasibility: item.feasibility?.trim() || workflowsCopy().engine.landscape.feasibility,
       evidenceRecordIds: stringList(item.evidenceRecordIds, 20),
     }));
   if (directions.length < 3) {
-    throw new Error("选题分析必须返回至少 3 个可比较方向。");
+    throw new Error(workflowsCopy().engine.landscape.tooFewDirections);
   }
   return {
-    developmentStatus: value.developmentStatus?.trim() || "现有摘要不足以形成可靠发展现状判断。",
+    developmentStatus: value.developmentStatus?.trim() || workflowsCopy().engine.landscape.developmentStatus,
     majorProblems: stringList(value.majorProblems, 12),
     newcomerNotes: stringList(value.newcomerNotes, 12),
     temporalTrends: stringList(value.temporalTrends, 12),
@@ -1018,7 +1017,14 @@ export function landscapeReviewPrompt(
 5. 是否存在空泛标题、虚构事实或证据 ID 越界。
 
 只返回 JSON：{"approved":true,"summary":"审查结论","issues":["问题"]}
+${workflowOutputLanguage()}
 分析：${JSON.stringify(analysis)}`;
+}
+
+/** Matrix prompts: the descriptive fields are shown to the user and follow the UI
+ *  language; the search material must stay executable English Scopus syntax. */
+function matrixOutputLanguage() {
+  return `说明性字段（rationale、target、strategicIntent、actionGuide、expectedResults、reviewValue、exclusionAdvice）使用 ${languagePromptName(currentWorkflowLanguage())} 撰写；terms、query、exclusionQuery 保持 Scopus 可执行的英文学术术语，JSON 键名与 id 保持原样。`;
 }
 
 export function matrixStrategyPrompt(
@@ -1052,7 +1058,8 @@ export function matrixStrategyPrompt(
   }],
   "exclusionAdvice":"...",
   "exclusionQuery":"可选完整查询或null"
-}`;
+}
+${matrixOutputLanguage()}`;
 }
 
 export interface MatrixStrategyIterationFeedback {
@@ -1107,7 +1114,8 @@ export function matrixStrategyIterationPrompt(
   }],
   "exclusionAdvice":"...",
   "exclusionQuery":"... 或 null"
-}`;
+}
+${matrixOutputLanguage()}`;
 }
 
 function canonicalScopusQuery(query: string) {
@@ -1164,10 +1172,10 @@ export function assertMatrixStrategyIterationChange(
   const previousPath = previous.paths.find((path) => path.id === feedback.pathId);
   const revisedPath = revised.paths.find((path) => path.id === feedback.pathId);
   if (!previousPath || !revisedPath) {
-    throw new Error(`迭代策略必须保留试检路径 ${feedback.pathId} 的 id，才能审计修订前后的 query。`);
+    throw new Error(workflowsCopy().engine.matrix.pathIdMissing(feedback.pathId));
   }
   if (canonicalScopusQuery(previousPath.query) === canonicalScopusQuery(revisedPath.query)) {
-    throw new Error(`试检路径 ${feedback.pathId} 的 query 未改变；必须依据本轮反馈生成实际修订后的完整检索式。`);
+    throw new Error(workflowsCopy().engine.matrix.queryUnchanged(feedback.pathId));
   }
 }
 
@@ -1187,9 +1195,9 @@ export function deterministicMatrixStrategy(
     terms.filter((_, index) => index % 3 === 2),
   ].map((group, index) => group.length ? group : [terms[index] ?? direction.title]);
   const concepts: MatrixConcept[] = [
-    { role: "A", entity: thirds[0][0], rationale: "研究发生的背景或环境。", terms: thirds[0] },
-    { role: "B", entity: thirds[1][0], rationale: "被研究的核心主体。", terms: thirds[1] },
-    { role: "C", entity: thirds[2][0], rationale: "需要观察的具体过程或现象。", terms: thirds[2] },
+    { role: "A", entity: thirds[0][0], rationale: workflowsCopy().engine.matrix.conceptA, terms: thirds[0] },
+    { role: "B", entity: thirds[1][0], rationale: workflowsCopy().engine.matrix.conceptB, terms: thirds[1] },
+    { role: "C", entity: thirds[2][0], rationale: workflowsCopy().engine.matrix.conceptC, terms: thirds[2] },
   ];
   const byRole = Object.fromEntries(concepts.map((concept) => [concept.role, semanticGroup(concept.terms)]));
   const combinations = [
@@ -1201,18 +1209,18 @@ export function deterministicMatrixStrategy(
   const paths: MatrixSearchPath[] = combinations.map(([id, combination, roles]) => ({
     id,
     combination,
-    target: `${combination} 对应的文献集合`,
-    strategicIntent: roles.length === 3 ? "最高精度核心组合。" : "放宽一个概念以补充召回。",
+    target: workflowsCopy().engine.matrix.target(combination),
+    strategicIntent: roles.length === 3 ? workflowsCopy().engine.matrix.intentCore : workflowsCopy().engine.matrix.intentBroad,
     query: `TITLE-ABS-KEY(${roles.map((role) => byRole[role]).join(" AND ")})`,
-    actionGuide: roles.length === 3 ? "优先试检。" : "核心组合过少或撰写背景时使用。",
-    expectedResults: "与所选实体组合直接相关的研究论文。",
-    reviewValue: roles.length === 3 ? "支持主体分析。" : "支持引言、背景或讨论。",
+    actionGuide: roles.length === 3 ? workflowsCopy().engine.matrix.guideCore : workflowsCopy().engine.matrix.guideBroad,
+    expectedResults: workflowsCopy().engine.matrix.expectedResults,
+    reviewValue: roles.length === 3 ? workflowsCopy().engine.matrix.valueCore : workflowsCopy().engine.matrix.valueBroad,
   }));
   return {
     mode,
     concepts,
     paths,
-    exclusionAdvice: "浏览首轮误检后，再用 AND NOT TITLE 排除明确同名异义词。",
+    exclusionAdvice: workflowsCopy().engine.matrix.exclusionAdvice,
     syntaxChecks: paths.flatMap((path) => validateScopusQuery(path.query)),
     generatedAt: new Date().toISOString(),
     generatedBy: "Deterministic preview fallback",
@@ -1238,7 +1246,7 @@ function matrixCombinationKey(value: string) {
  * boundary provider-enforced and auditable. */
 export function enforceScopusJournalArticleType(query: string) {
   const normalized = query.trim();
-  if (!normalized) throw new Error("期刊论文检索式不能为空。");
+  if (!normalized) throw new Error(workflowsCopy().engine.scopus.journalQueryEmpty);
   if (/\bAND\s+DOCTYPE\s*\(\s*ar\s*\)\s+AND\s+SRCTYPE\s*\(\s*j\s*\)\s*$/i.test(normalized)) {
     return normalized;
   }
@@ -1286,10 +1294,10 @@ export function normalizePrimaryLibraryPathAllocations(
   targetResults: number,
 ): PrimaryLibraryPathAllocation[] {
   const target = Math.max(1, Math.floor(targetResults));
-  if (!Array.isArray(value)) throw new Error("LLM 未返回路径配额列表。");
+  if (!Array.isArray(value)) throw new Error(workflowsCopy().engine.allocation.notList);
   const expected = ["abc", "ab", "bc", "ac"] as const;
   const parsed = value.map((item) => {
-    if (!item || typeof item !== "object") throw new Error("LLM 返回了无效路径配额。");
+    if (!item || typeof item !== "object") throw new Error(workflowsCopy().engine.allocation.invalidItem);
     const candidate = item as Record<string, unknown>;
     const id = candidate.id;
     const maxResults = candidate.maxResults;
@@ -1300,20 +1308,20 @@ export function normalizePrimaryLibraryPathAllocations(
       || maxResults < 1
       || typeof rationale !== "string"
       || !rationale.trim()) {
-      throw new Error("LLM 的路径配额必须包含规范路径、正整数和分配理由。");
+      throw new Error(workflowsCopy().engine.allocation.itemShape);
     }
     return { id, maxResults, rationale: rationale.trim() } as PrimaryLibraryPathAllocation;
   });
   if (parsed.length !== expected.length || new Set(parsed.map((item) => item.id)).size !== expected.length) {
-    throw new Error("LLM 必须且只能为 A+B+C、A+B、B+C、A+C 各分配一次。");
+    throw new Error(workflowsCopy().engine.allocation.eachOnce);
   }
   const total = parsed.reduce((sum, item) => sum + item.maxResults, 0);
-  if (total !== target) throw new Error(`LLM 的路径配额合计为 ${total}，必须等于总目标 ${target}。`);
+  if (total !== target) throw new Error(workflowsCopy().engine.allocation.total(total, target));
   const broadTotal = parsed
     .filter((item) => item.id === "bc" || item.id === "ac")
     .reduce((sum, item) => sum + item.maxResults, 0);
   if (broadTotal > Math.floor(target / 2)) {
-    throw new Error("LLM 将 B+C 与 A+C 分配得过多；它们不能主导默认语料库。");
+    throw new Error(workflowsCopy().engine.allocation.broadTooMuch);
   }
   return expected.map((id) => parsed.find((item) => item.id === id)!);
 }
@@ -1380,7 +1388,7 @@ export function selectPrimaryPathAdmission(
   const shortfallReason = admittedRecordIds.length >= bounded
     ? undefined
     : eligible.length < bounded
-      ? `候选池筛除 ${irrelevant} 篇完全无关文献后保留 ${eligible.length} 篇，少于 ${bounded} 篇路径预算。`
+      ? workflowsCopy().engine.allocation.shortfall(irrelevant, eligible.length, bounded)
       : undefined;
   return {
     pathId,
@@ -1447,7 +1455,7 @@ export function normalizeMatrixStrategy(
     .map((item) => ({
       role: item.role,
       entity: item.entity.trim(),
-      rationale: item.rationale?.trim() || "核心实体",
+      rationale: item.rationale?.trim() || workflowsCopy().engine.matrix.defaultConceptRationale,
       terms: stringList(item.terms, 30),
     }));
   const paths = (Array.isArray(value.paths) ? value.paths : [])
@@ -1456,15 +1464,15 @@ export function normalizeMatrixStrategy(
     .map((item, index) => ({
       id: item.id?.trim() || fallback.paths[index]?.id || `path-${index + 1}`,
       combination: item.combination.trim(),
-      target: item.target?.trim() || "检索相关研究",
-      strategicIntent: item.strategicIntent?.trim() || "补充矩阵覆盖",
+      target: item.target?.trim() || workflowsCopy().engine.matrix.defaultTarget,
+      strategicIntent: item.strategicIntent?.trim() || workflowsCopy().engine.matrix.defaultIntent,
       query: item.query.trim(),
-      actionGuide: item.actionGuide?.trim() || "用于试检比较。",
-      expectedResults: item.expectedResults?.trim() || "相关研究文献。",
-      reviewValue: item.reviewValue?.trim() || "用于综述主体或背景。",
+      actionGuide: item.actionGuide?.trim() || workflowsCopy().engine.matrix.defaultGuide,
+      expectedResults: item.expectedResults?.trim() || workflowsCopy().engine.matrix.defaultExpected,
+      reviewValue: item.reviewValue?.trim() || workflowsCopy().engine.matrix.defaultValue,
     }));
   if (concepts.length !== 3 || paths.length !== 4) {
-    throw new Error("矩阵策略必须包含 A/B/C 三个语义群和四条完整路径。");
+    throw new Error(workflowsCopy().engine.matrix.shape);
   }
   const syntaxChecks = paths.flatMap((path) =>
     validateScopusQuery(path.query).map((check) => `${path.combination}: ${check}`),
@@ -1474,7 +1482,7 @@ export function normalizeMatrixStrategy(
     || (check.includes("发现中文") && !check.includes("未发现中文"))
     || (check.includes("发现占位符") && !check.includes("未发现占位符"));
   if (syntaxChecks.some(failedCheck)) {
-    throw new Error(`Scopus 检索式语法检查未通过：${syntaxChecks.filter(failedCheck).join("；")}`);
+    throw new Error(workflowsCopy().engine.scopus.syntaxFailed(syntaxChecks.filter(failedCheck)));
   }
   return {
     mode,
@@ -1497,6 +1505,7 @@ export function matrixReviewPrompt(strategy: MatrixSearchStrategy) {
 - 排除项是否谨慎。
 
 只返回 JSON：{"approved":true,"summary":"审查结论","issues":["问题"]}
+${workflowOutputLanguage()}
 策略：${JSON.stringify(strategy)}`;
 }
 
@@ -1527,15 +1536,15 @@ export function outlineEditIssues(sections: WorkflowOutlineSection[]) {
   const flat = flattenOutline(sections);
   const seen = new Set<string>();
   for (const section of flat) {
-    if (seen.has(section.id)) issues.push(`章节编号重复：${section.id}`);
+    if (seen.has(section.id)) issues.push(workflowsCopy().engine.outline.duplicateId(section.id));
     seen.add(section.id);
-    const evidenceIsOptional = /引言|综述方法|结论|introduction|review method|conclusion/i.test(section.title);
+    const evidenceIsOptional = /引言|综述方法|结论|introduction|review method|conclusion|introducci[oó]n|metodolog[ií]a|conclusi[oó]n/i.test(section.title);
     if (section.children.length === 0 && !evidenceIsOptional && section.recordIds !== undefined && section.recordIds.length === 0) {
-      issues.push(`Section ${section.id} is missing evidence recordIds.`);
+      issues.push(workflowsCopy().engine.outline.missingEvidence(section.id));
     }
-    if (!section.title.trim()) issues.push(`章节 ${section.id} 缺少标题。`);
-    if (!section.purpose.trim()) issues.push(`章节 ${section.id} 缺少本章论证目的。`);
-    if (section.id.split(".").length > 3) issues.push(`章节 ${section.id} 超过 x.x.x 三级结构。`);
+    if (!section.title.trim()) issues.push(workflowsCopy().engine.outline.missingTitle(section.id));
+    if (!section.purpose.trim()) issues.push(workflowsCopy().engine.outline.missingPurpose(section.id));
+    if (section.id.split(".").length > 3) issues.push(workflowsCopy().engine.outline.tooDeep(section.id));
   }
   return [...issues, ...outlineShapeIssues(sections), ...outlineCoverageIssues(sections)];
 }
@@ -1550,18 +1559,18 @@ export function outlineShapeIssues(sections: WorkflowOutlineSection[]) {
   const issues: string[] = [];
   const topLevelText = sections.map((section) => `${section.title} ${section.purpose}`).join(" ");
   const flat = flattenOutline(sections);
-  if (sections.length > 8) issues.push("顶层章节超过 8 章；请合并重复的背景、应用、挑战或未来方向。");
-  if (flat.length > 45) issues.push("大纲节点超过 45 个；请保留能够支撑中心论点的必要层级。");
-  const applicationChapters = sections.filter((section) => /能源|电力|工业|交通|临床|金融|应用|energy|industrial|transport|clinical|finance|application/i.test(section.title));
-  if (applicationChapters.length > 1) issues.push("应用证据不应按多个领域拆成顶层章节，应放入统一比较或评测章节。");
-  const problemChapters = sections.filter((section) => /幻觉|不确定|检测|量化|校准|缓解|可信|hallucination|uncertainty|detection|quantification|calibration|mitigation|reliab/i.test(section.title));
-  if (problemChapters.length > 4) issues.push("核心问题章节过多；请围绕一个中心问题合并表现、检测、量化、校准与缓解。");
-  const challengeChapters = sections.filter((section) => /挑战|开放问题|证据缺口|challenge|open problem|gap/i.test(section.title));
-  const futureChapters = sections.filter((section) => /未来|研究方向|展望|future|research agenda|outlook/i.test(section.title));
+  if (sections.length > 8) issues.push(workflowsCopy().engine.outline.tooManyChapters);
+  if (flat.length > 45) issues.push(workflowsCopy().engine.outline.tooManyNodes);
+  const applicationChapters = sections.filter((section) => /能源|电力|工业|交通|临床|金融|应用|energy|industrial|transport|clinical|finance|application|energ[ií]a|industria|cl[ií]nic|finanz|aplicaci[oó]n/i.test(section.title));
+  if (applicationChapters.length > 1) issues.push(workflowsCopy().engine.outline.applicationSplit);
+  const problemChapters = sections.filter((section) => /幻觉|不确定|检测|量化|校准|缓解|可信|hallucination|uncertainty|detection|quantification|calibration|mitigation|reliab|alucinaci[oó]n|incertidumbre|detecci[oó]n|cuantificaci[oó]n|calibraci[oó]n|mitigaci[oó]n|fiabilidad/i.test(section.title));
+  if (problemChapters.length > 4) issues.push(workflowsCopy().engine.outline.tooManyProblemChapters);
+  const challengeChapters = sections.filter((section) => /挑战|开放问题|证据缺口|challenge|open problem|gap|desaf[ií]o|\bretos?\b|problemas? abiertos?|vac[ií]o/i.test(section.title));
+  const futureChapters = sections.filter((section) => /未来|研究方向|展望|future|research agenda|outlook|futur[oa]|agenda de investigaci[oó]n|perspectiva/i.test(section.title));
   const challengeIsSeparate = challengeChapters.some((section) => !futureChapters.includes(section));
   const futureIsSeparate = futureChapters.some((section) => !challengeChapters.includes(section));
-  if (challengeIsSeparate && futureIsSeparate) issues.push("挑战、证据缺口与未来方向应合并为一个顶层章节。");
-  if (!topLevelText.trim()) issues.push("大纲必须围绕一个明确的中心论点组织。");
+  if (challengeIsSeparate && futureIsSeparate) issues.push(workflowsCopy().engine.outline.mergeChallengeAndFuture);
+  if (!topLevelText.trim()) issues.push(workflowsCopy().engine.outline.needThesis);
   return issues;
 }
 
@@ -1589,50 +1598,50 @@ export function outlineCoverageIssues(sections: WorkflowOutlineSection[]) {
   ));
   const hasContentSubtree = (patterns: RegExp[]) => nodes.some(({ text }) => patterns.every((pattern) => pattern.test(text)));
 
-  if (!hasTitle(/引言|导论|introduction/i)) {
-    issues.push("必须有独立的“引言”章。");
+  if (!hasTitle(/引言|导论|introduction|introducci[oó]n/i)) {
+    issues.push(workflowsCopy().engine.outline.needIntroduction);
   }
 
   // This is intentionally stricter than accepting a generic “方法” heading:
   // the first thing a reviewer looks for is an explicitly named review method
   // with reproducible search and selection details.
-  if (!hasChapter(/综述方法|系统综述方法|review methodology|review method/i, [
-    /检索式|检索策略|检索方法|search strateg|search string|search quer|query string/i,
-    /数据库|信息源|information source|database/i,
-    /年份|年限|时间范围|检索时间|时间窗|发表年份|出版年份|date range|time window|publication year/i,
-    /纳入|入选|排除|剔除|筛选标准|筛选规则|eligib|inclusion|exclusion/i,
-    /(?:(?:最终|实际|共计)?\s*纳入(?:篇数|文献|研究)?|included studies|final count|study count)[^\d零一二三四五六七八九十百千万]{0,24}(?:\d+|[零一二三四五六七八九十百千万]+)/i,
+  if (!hasChapter(/综述方法|系统综述方法|review methodology|review method|metodolog[ií]a|m[eé]todo de (?:la )?revisi[oó]n/i, [
+    /检索式|检索策略|检索方法|search strateg|search string|search quer|query string|estrategia de b[uú]squeda|cadena de b[uú]squeda|consulta de b[uú]squeda/i,
+    /数据库|信息源|information source|database|base de datos|bases de datos|fuentes? de informaci[oó]n/i,
+    /年份|年限|时间范围|检索时间|时间窗|发表年份|出版年份|date range|time window|publication year|rango de (?:a[nñ]os|fechas)|periodo|per[ií]odo|a[nñ]o de publicaci[oó]n/i,
+    /纳入|入选|排除|剔除|筛选标准|筛选规则|eligib|inclusion|exclusion|elegib|inclusi[oó]n|exclusi[oó]n|cribado/i,
+    /(?:(?:最终|实际|共计)?\s*纳入(?:篇数|文献|研究)?|included studies|final count|study count|estudios incluidos|recuento final|n[uú]mero de estudios)[^\d零一二三四五六七八九十百千万]{0,24}(?:\d+|[零一二三四五六七八九十百千万]+)/i,
   ])) {
-    issues.push("“综述方法”章必须同时交代检索式、数据库、年份范围、纳入/排除标准和真实最终纳入篇数。");
+    issues.push(workflowsCopy().engine.outline.needMethod);
   }
-  if (!hasTitle(/分类体系|分类框架|分类法|taxonomy|taxonomic framework|classification/i)) {
-    issues.push("必须有明确命名的“分类体系”章，并只采用一条主分类轴。");
+  if (!hasTitle(/分类体系|分类框架|分类法|taxonomy|taxonomic framework|classification|taxonom[ií]a|clasificaci[oó]n/i)) {
+    issues.push(workflowsCopy().engine.outline.needTaxonomy);
   }
-  if (!hasChapter(/评测|评估|评价|benchmark|evaluation/i, [
-    /基准|benchmark/i,
-    /数据集|数据资源|dataset/i,
-    /指标|评价指标|metric|measure/i,
+  if (!hasChapter(/评测|评估|评价|benchmark|evaluation|evaluaci[oó]n/i, [
+    /基准|benchmark|puntos? de referencia/i,
+    /数据集|数据资源|dataset|conjuntos? de datos/i,
+    /指标|评价指标|metric|measure|m[eé]trica|medida/i,
   ]) && !hasContentSubtree([
-    /评测|评估|评价|benchmark|evaluation/i,
-    /基准|benchmark/i,
-    /数据集|数据资源|dataset/i,
-    /指标|评价指标|metric|measure/i,
+    /评测|评估|评价|benchmark|evaluation|evaluaci[oó]n/i,
+    /基准|benchmark|puntos? de referencia/i,
+    /数据集|数据资源|dataset|conjuntos? de datos/i,
+    /指标|评价指标|metric|measure|m[eé]trica|medida/i,
   ])) {
-    issues.push("必须在同一章或其子节覆盖评测基准、数据集和指标。");
+    issues.push(workflowsCopy().engine.outline.needEvaluation);
   }
-  if (!hasChapter(/横向比较|综合比较|比较|对比|comparative|cross[- ]study|comparison/i, [
-    /分歧|争议|不一致|结论差异|disagreement|conflict|inconsisten/i,
+  if (!hasChapter(/横向比较|综合比较|比较|对比|comparative|cross[- ]study|comparison|comparaci[oó]n|comparativ[ao]/i, [
+    /分歧|争议|不一致|结论差异|disagreement|conflict|inconsisten|discrepanc|desacuerdo|conflicto|inconsistenc/i,
   ])) {
-    issues.push("必须有“横向比较与结论分歧”内容，不能只逐篇罗列方法。");
+    issues.push(workflowsCopy().engine.outline.needComparison);
   }
-  if (!hasTitle(/挑战|问题|困难|风险|开放问题|局限|瓶颈|challenge|open problem|limitation/i)) {
-    issues.push("必须有“挑战与开放问题”内容。");
+  if (!hasTitle(/挑战|问题|困难|风险|开放问题|局限|瓶颈|challenge|open problem|limitation|desaf[ií]o|\bretos?\b|problema|limitaci[oó]n/i)) {
+    issues.push(workflowsCopy().engine.outline.needChallenges);
   }
-  if (!hasTitle(/未来方向|未来展望|未来趋势|未来工作|研究议程|展望|future direction|research agenda|outlook/i)) {
-    issues.push("必须有“未来方向”内容，并把它与具体挑战、证据缺口或可验证问题配对。");
+  if (!hasTitle(/未来方向|未来展望|未来趋势|未来工作|研究议程|展望|future direction|research agenda|outlook|direcciones futuras|l[ií]neas futuras|agenda de investigaci[oó]n|perspectivas/i)) {
+    issues.push(workflowsCopy().engine.outline.needFuture);
   }
-  if (!hasTitle(/结论|结语|conclusion/i)) {
-    issues.push("必须有独立的“结论”章。");
+  if (!hasTitle(/结论|结语|conclusion|conclusi[oó]n/i)) {
+    issues.push(workflowsCopy().engine.outline.needConclusion);
   }
   return issues;
 }

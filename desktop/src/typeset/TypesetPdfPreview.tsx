@@ -17,6 +17,7 @@ import { fileOpen, typesetOutputFiles, type SyncTexLocation, type TypesetOutputF
 import { isPdfXrefError, openPdfDocumentFromPath, openPdfDocumentWithRebuiltXref } from "../pdf/runtime";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
+import { tr } from "../language";
 import {
   compileStatusText,
   LATEX_ENGINE_CHOICES,
@@ -1340,7 +1341,7 @@ export default function TypesetPdfPreview({
               type="button"
               className="typeset-pdf-step-btn zoom-out"
               title={copy.zoomOut}
-              aria-label="Zoom out PDF preview"
+              aria-label={tr(language, "缩小 PDF 预览", "Zoom out PDF preview", "Reducir la vista previa del PDF")}
               disabled={numPages < 1 || zoom <= PDF_ZOOM_MIN}
               onClick={() => setZoomLevel(zoom - 0.15)}
             >
@@ -1375,7 +1376,7 @@ export default function TypesetPdfPreview({
               type="button"
               className="typeset-pdf-step-btn zoom-in"
               title={copy.zoomIn}
-              aria-label="Zoom in PDF preview"
+              aria-label={tr(language, "放大 PDF 预览", "Zoom in PDF preview", "Ampliar la vista previa del PDF")}
               disabled={numPages < 1 || zoom >= PDF_ZOOM_MAX}
               onClick={() => setZoomLevel(zoom + 0.15)}
             >

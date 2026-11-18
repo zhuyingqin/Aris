@@ -59,7 +59,8 @@ export type Tab =
 
 export type Theme = "dark" | "light";
 export type ThemeMode = Theme | "system";
-export type Language = "cn" | "en";
+export { LANGUAGE_OPTIONS, LANGUAGES, isLanguage, languageLocale, languagePromptName, tr, type Language } from "./language";
+import { isLanguage, languageLocale, tr, type Language } from "./language";
 
 type PreferenceOptions = { requirePersistence?: boolean };
 
@@ -163,13 +164,13 @@ function applyTheme(theme: Theme, persist = true, required = false, nativeTheme:
 }
 
 function normalizeLanguage(value: string | null | undefined): Language {
-  return value === "cn" ? "cn" : "en";
+  return isLanguage(value) ? value : "en";
 }
 
 function readStoredLanguage(): Language | null {
   try {
     const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY);
-    return stored === "cn" || stored === "en" ? stored : null;
+    return isLanguage(stored) ? stored : null;
   } catch {
     return null;
   }
@@ -177,7 +178,7 @@ function readStoredLanguage(): Language | null {
 
 function reflectLanguage(language: Language) {
   if (typeof document !== "undefined") {
-    document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
+    document.documentElement.lang = languageLocale(language);
     document.documentElement.dataset.language = language;
   }
 }
@@ -496,7 +497,7 @@ export const useStore = create<AppState>((set, get) => ({
   authServer: readStoredServer(),
   login: async (server, username, password, twoFactorCode) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
-    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
+    if (!trimmedServer) throw new Error(tr(get().language, "请配置有效的 HTTPS 账号服务器地址", "Configure a valid HTTPS account server address.", "Configura una dirección HTTPS válida para el servidor de cuentas."));
     const config = await configGet();
     const model = config.executorModel?.trim() || DEFAULT_MODEL;
     const result = await newapiLogin(trimmedServer, model, username, password, twoFactorCode);
@@ -519,7 +520,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   register: async (server, username, password, options = {}) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
-    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
+    if (!trimmedServer) throw new Error(tr(get().language, "请配置有效的 HTTPS 账号服务器地址", "Configure a valid HTTPS account server address.", "Configura una dirección HTTPS válida para el servidor de cuentas."));
     await newapiRegister({
       baseUrl: trimmedServer,
       username,

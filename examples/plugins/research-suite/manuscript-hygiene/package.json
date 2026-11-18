@@ -1,0 +1,6 @@
+{
+  "name": "@local/manuscript-hygiene",
+  "version": "0.1.0",
+  "description": "Checks any LaTeX manuscript with file and line for every finding: citations against the .bib, hyphen and acronym consistency, cross references, and prose words per section. A Python standard-library MCP server; it only reads files inside the project.",
+  "dsh": { "manifestVersion": 1, "bundle": { "patch": "./cordis.patch.yml" } }
+}

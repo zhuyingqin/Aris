@@ -1,11 +1,27 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { formatUserFacingError } from "./errorMessage";
+import { useStore, type Language } from "./store";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
   fallback?: (error: Error, reset: () => void) => ReactNode;
   resetKey?: string | number | null;
   onError?: (error: Error, info: ErrorInfo) => void;
+}
+
+const COPY: Record<Language, { title: string; unexpected: string; tryAgain: string }> = {
+  cn: { title: "当前视图出现界面错误。", unexpected: "界面遇到意外的渲染错误。", tryAgain: "重试" },
+  en: { title: "Something went wrong in this view.", unexpected: "The UI hit an unexpected render error.", tryAgain: "Try again" },
+  es: { title: "Algo salió mal en esta vista.", unexpected: "La interfaz encontró un error de renderizado inesperado.", tryAgain: "Reintentar" },
+};
+
+/** The boundary may be showing because the store itself failed; never let that throw again. */
+function boundaryLanguage(): Language {
+  try {
+    return useStore.getState().language;
+  } catch {
+    return "en";
+  }
 }
 
 interface ErrorBoundaryState {
@@ -36,13 +52,15 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 
   render() {
     if (this.state.error) {
+      const language = boundaryLanguage();
+      const copy = COPY[language];
       return this.props.fallback
         ? this.props.fallback(this.state.error, this.reset)
         : (
           <div className="ui-error-boundary" role="alert">
-            <strong>Something went wrong in this view.</strong>
-            <span>{this.state.error.message ? formatUserFacingError(this.state.error, "en") : "The UI hit an unexpected render error."}</span>
-            <button type="button" onClick={this.reset}>Try again</button>
+            <strong>{copy.title}</strong>
+            <span>{this.state.error.message ? formatUserFacingError(this.state.error, language) : copy.unexpected}</span>
+            <button type="button" onClick={this.reset}>{copy.tryAgain}</button>
           </div>
         );
     }

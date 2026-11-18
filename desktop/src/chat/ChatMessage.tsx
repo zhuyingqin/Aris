@@ -4,6 +4,7 @@ import { chatChangeRevert } from "../api/tauri";
 import { chatPluginApprovalRespond, type PluginApprovalCard } from "../api/plugins";
 import PluginUpgradeReview from "../extensions/PluginUpgradeReview";
 import { officialPluginName } from "../extensions/officialPlugins";
+import { uiText } from "../extensions/useChatPluginPanels";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import ChatImageReference from "./ChatImageReference";
@@ -17,7 +18,8 @@ import { AgentSpawnNotice, isAgentSpawn } from "./AgentSpawnNotice";
 import { CHAT_COPY } from "./i18n";
 import { retryNoticeView } from "./modelRetryNotice";
 import { textFromTurn } from "./model";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { useDisclosure } from "./disclosureState";
 import { useOpenChatFile } from "./openChatFile";
 import { displayLocalFilePath } from "./localFileLinks";
@@ -94,9 +96,7 @@ function RetryNotice({
     return () => window.clearInterval(timer);
   }, [active, resumeAt]);
   const view = retryNoticeView(retry, language, { now, settled: !active });
-  const countLabel = language === "cn"
-    ? `本轮自动重试 ${view.count} 次`
-    : `${view.count} automatic retries this turn`;
+  const countLabel = tr(language, `本轮自动重试 ${view.count} 次`, `${view.count} automatic retries this turn`, `${view.count} reintentos automáticos en este turno`);
   return (
     <div className={`chat-context-notice chat-retry-notice${view.settled ? " settled" : ""}`}>
       <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
@@ -109,6 +109,7 @@ function RetryNotice({
 }
 
 function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
+  const language = useStore((state) => state.language);
   const progress = block.progress;
   if (!progress || block.output !== undefined) return null;
   const hasTail = Boolean(progress.stdoutTail || progress.stderrTail);
@@ -116,7 +117,7 @@ function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" 
   return (
     <div className={`chat-tool-progress${progress.nearTimeout ? " near-timeout" : ""}`}>
       <div className="chat-tool-progress-line">
-        <span>{progress.message || "Still running"}</span>
+        <span>{progress.message || tr(language, "仍在运行", "Still running", "Aún en ejecución")}</span>
         <span>{formatElapsed(progress.elapsedMs)}{timeout}</span>
         {progress.pid != null && <span>PID {progress.pid}</span>}
       </div>
@@ -139,6 +140,7 @@ function ToolProgressLog({
   stdoutTail?: string | null;
   stderrTail?: string | null;
 }) {
+  const language = useStore((state) => state.language);
   const logRef = useRef<HTMLPreElement | null>(null);
   const followEndRef = useRef(true);
   const text = [
@@ -159,7 +161,7 @@ function ToolProgressLog({
     <pre
       ref={logRef}
       className="md-view tool-detail tool-progress-tail"
-      aria-label="Live tool output"
+      aria-label={tr(language, "工具实时输出", "Live tool output", "Salida en vivo de la herramienta")}
       onScroll={(event) => {
         const element = event.currentTarget;
         followEndRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 8;
@@ -204,64 +206,42 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
   const evidenceCount = evidenceSearch?.items.length ?? 0;
   const status = somniImage
     ? running
-      ? language === "cn" ? "正在通过 Somni 生成图片" : "Generating through Somni"
+      ? tr(language, "正在通过 Somni 生成图片", "Generating through Somni", "Generando con Somni")
       : block.isError
-        ? language === "cn" ? "Somni 绘图失败" : "Somni drawing failed"
-        : language === "cn" ? `已生成 ${somniImage.imageCount} 张图片` : `Generated ${somniImage.imageCount} image(s)`
+        ? tr(language, "Somni 绘图失败", "Somni drawing failed", "Falló el dibujo con Somni")
+        : tr(language, `已生成 ${somniImage.imageCount} 张图片`, `Generated ${somniImage.imageCount} ${somniImage.imageCount === 1 ? "image" : "images"}`, `Se generaron ${somniImage.imageCount} imagen(es)`)
     : oracleWeb
-    ? language === "cn"
-      ? running
-        ? oracleWeb.kind === "image" ? "正在通过 ChatGPT 网页生成图片" : "正在咨询 ChatGPT 网页"
-        : block.isError
-          ? oracleWeb.kind === "image" ? "网页图片生成失败" : "网页咨询失败"
-          : oracleWeb.kind === "image"
-            ? `已生成 ${oracleWeb.imageCount} 张图片`
-            : "ChatGPT 网页已回复"
-      : running
-        ? oracleWeb.kind === "image" ? "Generating through ChatGPT Web" : "Consulting ChatGPT Web"
-        : block.isError
-          ? oracleWeb.kind === "image" ? "Web image generation failed" : "Web consultation failed"
-          : oracleWeb.kind === "image"
-            ? `Generated ${oracleWeb.imageCount} image(s)`
-            : "ChatGPT Web replied"
+    ? running
+      ? oracleWeb.kind === "image"
+        ? tr(language, "正在通过 ChatGPT 网页生成图片", "Generating through ChatGPT Web", "Generando con ChatGPT Web")
+        : tr(language, "正在咨询 ChatGPT 网页", "Consulting ChatGPT Web", "Consultando ChatGPT Web")
+      : block.isError
+        ? oracleWeb.kind === "image"
+          ? tr(language, "网页图片生成失败", "Web image generation failed", "Falló la generación de la imagen web")
+          : tr(language, "网页咨询失败", "Web consultation failed", "Falló la consulta web")
+        : oracleWeb.kind === "image"
+          ? tr(language, `已生成 ${oracleWeb.imageCount} 张图片`, `Generated ${oracleWeb.imageCount} ${oracleWeb.imageCount === 1 ? "image" : "images"}`, `Se generaron ${oracleWeb.imageCount} imagen(es)`)
+          : tr(language, "ChatGPT 网页已回复", "ChatGPT Web replied", "ChatGPT Web respondió")
     : evidenceSearch
-      ? language === "cn"
       ? running
-        ? "正在检索"
+        ? tr(language, "正在检索", "Searching", "Buscando")
         : block.isError
-          ? "检索失败"
+          ? tr(language, "检索失败", "Search failed", "Falló la búsqueda")
           : evidenceSearch.status === "empty" || evidenceCount === 0
-            ? "未找到证据"
-            : `已定位 ${evidenceCount} 条`
-      : running
-        ? "Searching"
-        : block.isError
-          ? "Search failed"
-          : evidenceSearch.status === "empty" || evidenceCount === 0
-            ? "No evidence"
-            : `Found ${evidenceCount}`
+            ? tr(language, "未找到证据", "No evidence", "Sin evidencia")
+            : tr(language, `已定位 ${evidenceCount} 条`, `Found ${evidenceCount}`, `${evidenceCount} encontradas`)
       : webSearch
-      ? language === "cn"
-        ? running
-          ? "正在检索"
-          : block.isError || webSearch.status === "failed"
-            ? "网页检索失败"
-            : webSearch.coverage.exhausted
-              ? `已完成 · ${webSearch.coverage.unique} 条`
-              : `部分结果 · ${webSearch.coverage.unique} 条`
-        : running
-          ? "Searching"
-          : block.isError || webSearch.status === "failed"
-            ? "Web search failed"
-            : webSearch.coverage.exhausted
-              ? `Completed · ${webSearch.coverage.unique}`
-              : `Partial · ${webSearch.coverage.unique}`
+      ? running
+        ? tr(language, "正在检索", "Searching", "Buscando")
+        : block.isError || webSearch.status === "failed"
+          ? tr(language, "网页检索失败", "Web search failed", "Falló la búsqueda web")
+          : webSearch.coverage.exhausted
+            ? tr(language, `已完成 · ${webSearch.coverage.unique} 条`, `Completed · ${webSearch.coverage.unique}`, `Completada · ${webSearch.coverage.unique}`)
+            : tr(language, `部分结果 · ${webSearch.coverage.unique} 条`, `Partial · ${webSearch.coverage.unique}`, `Parcial · ${webSearch.coverage.unique}`)
         : running
           ? toolCopy.toolRunning
           : refusal
-            ? language === "cn"
-              ? `已拒绝 · ${refusal.code}`
-              : `Refused · ${refusal.code}`
+            ? tr(language, `已拒绝 · ${refusal.code}`, `Refused · ${refusal.code}`, `Rechazada · ${refusal.code}`)
             : block.isError ? toolCopy.toolFailed : change ? toolCopy.toolModified : toolCopy.toolSucceeded;
   // A refusal outranks the generic error styling: the call never ran, and the
   // amber state says "precondition unmet, reissue it" where red would say
@@ -277,7 +257,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
           : change
             ? "tool-change"
             : "tool-done";
-  const evidenceName = language === "cn" ? "本地文献证据" : "Local literature evidence";
+  const evidenceName = tr(language, "本地文献证据", "Local literature evidence", "Evidencia bibliográfica local");
   const toggle = () => {
     if (!running) setOpen((value) => !value);
   };
@@ -314,15 +294,15 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
         ) : (
           <span className="tool-name">
             {somniImage
-              ? language === "cn" ? "Somni 绘图" : "Somni drawing"
+              ? tr(language, "Somni 绘图", "Somni drawing", "Dibujo con Somni")
               : oracleWeb
               ? oracleWeb.kind === "image"
-                ? language === "cn" ? "ChatGPT 网页图片" : "ChatGPT Web image"
-                : language === "cn" ? "ChatGPT 网页咨询" : "ChatGPT Web consultation"
+                ? tr(language, "ChatGPT 网页图片", "ChatGPT Web image", "Imagen de ChatGPT Web")
+                : tr(language, "ChatGPT 网页咨询", "ChatGPT Web consultation", "Consulta en ChatGPT Web")
               : evidenceSearch
               ? `${evidenceName}${evidenceSearch.query ? ` · ${evidenceSearch.query}` : ""}`
               : webSearch
-                ? `${language === "cn" ? "网页检索" : "Web search"}${webSearch.query ? ` · ${webSearch.query}` : ""}`
+                ? `${tr(language, "网页检索", "Web search", "Búsqueda web")}${webSearch.query ? ` · ${webSearch.query}` : ""}`
               : block.name}
           </span>
         )}
@@ -334,16 +314,14 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
         <div className="chat-tool-body">
           {somniImage ? (
             <div className="chat-oracle-web-result">
-              {somniImage.model && <p>{language === "cn" ? "绘图模型" : "Drawing model"}：{somniImage.model}</p>}
+              {somniImage.model && <p>{tr(language, "绘图模型：", "Drawing model: ", "Modelo de dibujo: ")}{somniImage.model}</p>}
               {somniImage.prompt && <p>{somniImage.prompt}</p>}
               {block.isError && <pre>{block.output}</pre>}
             </div>
           ) : oracleWeb ? (
             <div className="chat-oracle-web-result">
               <div className="chat-oracle-web-boundary">
-                {language === "cn"
-                  ? "第三方网页自动化 · 使用已绑定的隔离 ChatGPT 账号"
-                  : "Third-party webpage automation · isolated assigned ChatGPT account"}
+                {tr(language, "第三方网页自动化 · 使用已绑定的隔离 ChatGPT 账号", "Third-party web automation · uses your linked, isolated ChatGPT account", "Automatización web de terceros · usa tu cuenta de ChatGPT vinculada y aislada")}
               </div>
               {oracleWeb.output && <p>{oracleWeb.output}</p>}
               {oracleWeb.sessionId && <code>Oracle session: {oracleWeb.sessionId}</code>}
@@ -361,7 +339,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
           ) : evidenceSearch ? (
             <div className="chat-evidence-search-details">
               {evidenceSearch.items.length === 0 ? (
-                <p>{language === "cn" ? "当前本地索引中没有匹配证据。" : "No matching evidence was found in the local index."}</p>
+                <p>{tr(language, "当前本地索引中没有匹配证据。", "No matching evidence was found in the local index.", "No se encontró evidencia coincidente en el índice local.")}</p>
               ) : (
                 <ol>
                   {evidenceSearch.items.map((item, index) => (
@@ -369,8 +347,8 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
                       <div>
                         <strong>
                           {item.sourceType === "confirmedKnowledge"
-                            ? language === "cn" ? "已确认知识" : "Confirmed knowledge"
-                            : language === "cn" ? "PDF 原文" : "Original PDF"}
+                            ? tr(language, "已确认知识", "Confirmed knowledge", "Conocimiento confirmado")
+                            : tr(language, "PDF 原文", "Original PDF", "PDF original")}
                         </strong>
                         {item.citation && <code>{item.citation}</code>}
                       </div>
@@ -384,29 +362,29 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
             <div className="chat-web-search-details">
               <div className="chat-web-search-coverage">
                 <span>
-                  <strong>{language === "cn" ? "覆盖" : "Coverage"}</strong>
+                  <strong>{tr(language, "覆盖", "Coverage", "Cobertura")}</strong>
                   {webSearch.coverage.exhausted
-                    ? language === "cn" ? "已遍历" : "Exhausted"
-                    : language === "cn" ? "未遍历完" : "Incomplete"}
+                    ? tr(language, "已遍历", "Exhausted", "Agotada")
+                    : tr(language, "未遍历完", "Incomplete", "Incompleta")}
                 </span>
                 <span>
-                  <strong>{language === "cn" ? "获取" : "Fetched"}</strong>
+                  <strong>{tr(language, "获取", "Fetched", "Obtenidos")}</strong>
                   {webSearch.coverage.fetched}
                 </span>
                 <span>
-                  <strong>{language === "cn" ? "去重" : "Unique"}</strong>
+                  <strong>{tr(language, "去重", "Unique", "Únicos")}</strong>
                   {webSearch.coverage.unique}
                 </span>
                 {webSearch.coverage.totalHits !== undefined && (
                   <span>
-                    <strong>{language === "cn" ? "总量" : "Total"}</strong>
+                    <strong>{tr(language, "总量", "Total", "Total")}</strong>
                     {webSearch.coverage.totalHits}
                   </span>
                 )}
                 {webSearch.coverage.totalHits !== undefined
                   && webSearch.coverage.totalHits > 0 && (
                   <span>
-                    <strong>{language === "cn" ? "覆盖率" : "Coverage rate"}</strong>
+                    <strong>{tr(language, "覆盖率", "Coverage rate", "Tasa de cobertura")}</strong>
                     {Math.min(
                       100,
                       Math.round(
@@ -421,21 +399,19 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
                     {webSearch.maxResults}
                   </span>
                 )}
-                {webSearch.cached && <span>{language === "cn" ? "缓存结果" : "Cached"}</span>}
+                {webSearch.cached && <span>{tr(language, "缓存结果", "Cached", "En caché")}</span>}
               </div>
               {webSearch.retrievalControl && (
                 <div className="chat-web-search-adaptive">
                   <strong>
-                    {language === "cn" ? "LLM 自适应检索" : "LLM-adaptive retrieval"}
+                    {tr(language, "LLM 自适应检索", "LLM-adaptive retrieval", "Recuperación adaptativa con LLM")}
                   </strong>
                   <span>
-                    {language === "cn"
-                      ? `本批 ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"} 条；50 条仅是单批上下文保护，不是检索总上限。`
-                      : `This batch is limited to ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"}; 50 is only a per-batch context guard, not a total search cap.`}
+                    {tr(language, `本批 ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"} 条；50 条仅是单批上下文保护，不是检索总上限。`, `This batch is limited to ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"}; 50 is only a per-batch context guard, not a total search cap.`, `Este lote está limitado a ${webSearch.retrievalControl.batchLimit ?? webSearch.maxResults ?? "?"}; 50 es solo un límite de contexto por lote, no un tope total de búsqueda.`)}
                   </span>
                   {webSearch.retrievalControl.availableUnsearchedProviders.length > 0 && (
                     <span>
-                      {language === "cn" ? "尚未检索：" : "Not searched yet: "}
+                      {tr(language, "尚未检索：", "Not searched yet: ", "Aún sin buscar: ")}
                       {webSearch.retrievalControl.availableUnsearchedProviders.join(", ")}
                     </span>
                   )}
@@ -446,9 +422,10 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
               )}
               {!webSearch.coverage.exhausted && (
                 <p className="chat-web-search-warning">
-                  {language === "cn"
-                    ? `覆盖尚未完成${webSearch.coverage.truncatedReason ? `：${webSearch.coverage.truncatedReason}` : ""}。不能据此声称“没有更多结果”。`
-                    : `Coverage is incomplete${webSearch.coverage.truncatedReason ? `: ${webSearch.coverage.truncatedReason}` : ""}. Do not treat this as an exhaustive result set.`}
+                  {tr(language,
+                    `覆盖尚未完成${webSearch.coverage.truncatedReason ? `：${webSearch.coverage.truncatedReason}` : ""}。不能据此声称“没有更多结果”。`,
+                    `Coverage is incomplete${webSearch.coverage.truncatedReason ? `: ${webSearch.coverage.truncatedReason}` : ""}. Do not treat this as an exhaustive result set.`,
+                    `La cobertura está incompleta${webSearch.coverage.truncatedReason ? `: ${webSearch.coverage.truncatedReason}` : ""}. No lo trates como un conjunto de resultados exhaustivo.`)}
                 </p>
               )}
               {webSearch.attempts.length > 0 && (
@@ -467,9 +444,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
               {webSearch.variants.length > 0 && (
                 <details>
                   <summary>
-                    {language === "cn"
-                      ? `查询变体（${webSearch.variants.length}）`
-                      : `Query variants (${webSearch.variants.length})`}
+                    {tr(language, `查询变体（${webSearch.variants.length}）`, `Query variants (${webSearch.variants.length})`, `Variantes de consulta (${webSearch.variants.length})`)}
                   </summary>
                   <ul className="chat-web-search-variants">
                     {webSearch.variants.map((variant, index) => (
@@ -482,7 +457,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
                 </details>
               )}
               {webSearch.hits.length === 0 ? (
-                <p>{language === "cn" ? "当前页没有可用结果。" : "No usable results on this page."}</p>
+                <p>{tr(language, "当前页没有可用结果。", "No usable results on this page.", "No hay resultados utilizables en esta página.")}</p>
               ) : (
                 <ol className="chat-web-search-results">
                   {webSearch.hits.map((hit, index) => (
@@ -492,7 +467,7 @@ function ToolCall({ block, imagePreviews }: { block: Extract<ChatBlock, { kind: 
                         <span>
                           {hit.provider ?? webSearch.provider}
                           {hit.sourceKind === "community"
-                            ? language === "cn" ? " · 社区观点" : " · community view"
+                            ? tr(language, " · 社区观点", " · community view", " · opinión de la comunidad")
                             : ""}
                           {hit.authorName ? ` · ${hit.authorName}` : ""}
                           {hit.rank !== undefined ? ` · #${hit.rank}` : ""}
@@ -523,24 +498,26 @@ interface ChangeRevertState {
   message?: string;
 }
 
-function displayReviewChange(change: CountedFileChange, isChinese: boolean): string {
+function displayReviewChange(change: CountedFileChange, language: Language): string {
   if (change.diff) return displayDiffPaths(change.diff);
   if (change.diffAvailability === "too_large") {
-    return isChinese
-      ? "[精确补丁过大，无法显示；行数统计来自审计记录。]"
-      : "[The exact patch is too large to display; line counts come from the audit record.]";
+    return tr(language,
+      "[精确补丁过大，无法显示；行数统计来自审计记录。]",
+      "[The exact patch is too large to display; line counts come from the audit record.]",
+      "[El parche exacto es demasiado grande para mostrarlo; el recuento de líneas procede del registro de auditoría.]");
   }
-  return isChinese
-    ? "[精确补丁不可用；未根据工具输入推测修改内容。]"
-    : "[The exact patch is unavailable; no changes were guessed from the tool input.]";
+  return tr(language,
+    "[精确补丁不可用；未根据工具输入推测修改内容。]",
+    "[The exact patch is unavailable; no changes were guessed from the tool input.]",
+    "[El parche exacto no está disponible; no se dedujeron cambios a partir de la entrada de la herramienta.]");
 }
 
-function reviewDiffForFile(file: TurnFileSummary, isChinese: boolean): string {
-  if (file.changes.length === 1) return displayReviewChange(file.changes[0], isChinese);
+function reviewDiffForFile(file: TurnFileSummary, language: Language): string {
+  if (file.changes.length === 1) return displayReviewChange(file.changes[0], language);
   return file.changes
     .map((change, index) => {
       const toolId = change.toolUseId ? ` ${change.toolUseId}` : "";
-      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, displayReviewChange(change, isChinese)].join("\n");
+      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, displayReviewChange(change, language)].join("\n");
     })
     .join("\n\n");
 }
@@ -564,14 +541,16 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
   const hiddenCount = Math.max(0, summary.files.length - visibleFiles.length);
   const selectedFile = summary.files.find((file) => file.path === selectedPath) ?? summary.files[0];
   const hasRevertIds = summary.changeIds.length > 0;
-  const isChinese = language === "cn";
-  const title = isChinese
-    ? `已编辑 ${summary.fileCount} 个文件`
-    : `Edited ${summary.fileCount} ${summary.fileCount === 1 ? "file" : "files"}`;
-  const undoLabel = isChinese
-    ? revertState.phase === "reverting" ? "撤销中" : revertState.phase === "reverted" ? "已撤销" : "撤销"
-    : revertState.phase === "reverting" ? "Undoing" : revertState.phase === "reverted" ? "Reverted" : "Undo";
-  const reviewLabel = isChinese ? "审核" : "Review";
+  const title = tr(language,
+    `已编辑 ${summary.fileCount} 个文件`,
+    `Edited ${summary.fileCount} ${summary.fileCount === 1 ? "file" : "files"}`,
+    `${summary.fileCount} ${summary.fileCount === 1 ? "archivo editado" : "archivos editados"}`);
+  const undoLabel = revertState.phase === "reverting"
+    ? tr(language, "撤销中", "Undoing", "Deshaciendo")
+    : revertState.phase === "reverted"
+      ? tr(language, "已撤销", "Reverted", "Revertido")
+      : tr(language, "撤销", "Undo", "Deshacer");
+  const reviewLabel = tr(language, "审核", "Review", "Revisar");
 
   const revertChanges = async () => {
     if (!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted") return;
@@ -579,9 +558,10 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
     let revertedCount = 0;
     const withPartialProgress = (message: string) => {
       if (revertedCount === 0) return message;
-      return isChinese
-        ? `已撤销 ${revertedCount} 项更改；${message}`
-        : `Reverted ${revertedCount} change${revertedCount === 1 ? "" : "s"}; ${message}`;
+      return tr(language,
+        `已撤销 ${revertedCount} 项更改；${message}`,
+        `Reverted ${revertedCount} change${revertedCount === 1 ? "" : "s"}; ${message}`,
+        `${revertedCount} ${revertedCount === 1 ? "cambio revertido" : "cambios revertidos"}; ${message}`);
     };
     try {
       for (const changeId of [...summary.changeIds].reverse()) {
@@ -593,13 +573,13 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
         if (!result.reverted) {
           setRevertState({
             phase: "error",
-            message: withPartialProgress(result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted")),
+            message: withPartialProgress(result.reason ?? tr(language, "该改动无法撤销", "This change could not be reverted", "Este cambio no se pudo revertir")),
           });
           return;
         }
         revertedCount += 1;
       }
-      setRevertState({ phase: "reverted", message: isChinese ? "已回撤本轮文件改动" : "Reverted this turn's file edits" });
+      setRevertState({ phase: "reverted", message: tr(language, "已回撤本轮文件改动", "Reverted this turn's file edits", "Se revirtieron las ediciones de archivos de este turno") });
     } catch (error) {
       setRevertState({
         phase: "error",
@@ -625,7 +605,7 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
           <button
             type="button"
             disabled={!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted"}
-            title={hasRevertIds ? undefined : (isChinese ? "此记录缺少 changeId" : "This record has no changeId")}
+            title={hasRevertIds ? undefined : tr(language, "此记录缺少 changeId", "This record has no changeId", "Este registro no tiene changeId")}
             onClick={() => void revertChanges()}
           >
             {undoLabel}
@@ -661,8 +641,8 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
       {summary.files.length > visibleLimit && (
         <button type="button" className="chat-change-more" onClick={() => setShowAll((value) => !value)}>
           {showAll
-            ? (isChinese ? "收起文件" : "Show fewer files")
-            : (isChinese ? `再显示 ${hiddenCount} 个文件` : `Show ${hiddenCount} more files`)}
+            ? tr(language, "收起文件", "Show fewer files", "Mostrar menos archivos")
+            : tr(language, `再显示 ${hiddenCount} 个文件`, `Show ${hiddenCount} more ${hiddenCount === 1 ? "file" : "files"}`, `Mostrar ${hiddenCount} archivos más`)}
         </button>
       )}
       {revertState.message && (
@@ -673,7 +653,7 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
       {reviewOpen && selectedFile && (
         <div className="chat-change-review">
           {summary.files.length > 1 && (
-            <div className="chat-change-review-tabs" role="tablist" aria-label={isChinese ? "文件 diff" : "File diffs"}>
+            <div className="chat-change-review-tabs" role="tablist" aria-label={tr(language, "文件 diff", "File diffs", "Diffs de archivos")}>
               {summary.files.map((file) => (
                 <button
                   key={file.path}
@@ -688,7 +668,7 @@ export function EditedFilesSummary({ summary, compact = false }: { summary: Turn
               ))}
             </div>
           )}
-          <pre className="tool-diff chat-change-review-diff">{reviewDiffForFile(selectedFile, isChinese)}</pre>
+          <pre className="tool-diff chat-change-review-diff">{reviewDiffForFile(selectedFile, language)}</pre>
         </div>
       )}
     </section>
@@ -766,27 +746,32 @@ function PermissionCall({
   block: Extract<ChatBlock, { kind: "permission" }>;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
 }) {
+  const language = useStore((state) => state.language);
   const [open, setOpen] = useDisclosure(`permission:${block.id}`);
   const pending = !block.status || block.status === "pending";
-  const status = block.status === "allowed" ? "Continued" : block.status === "skipped" ? "Skipped" : "Waiting";
+  const status = block.status === "allowed"
+    ? tr(language, "已继续", "Continued", "Continuado")
+    : block.status === "skipped"
+      ? tr(language, "已跳过", "Skipped", "Omitido")
+      : tr(language, "等待中", "Waiting", "Esperando");
   return (
     <div className={`chat-tool chat-permission-card ${pending ? "tool-running" : block.status === "skipped" ? "tool-error" : "tool-done"}`}>
       <div className="chat-tool-header">
         <span className="tool-status-icon">{pending ? <SvgIcon name="pending" size={11} /> : block.status === "skipped" ? <SvgIcon name="warning" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         <span className="tool-name">{block.toolName}</span>
-        <span className="tool-status-label">{block.currentMode} to {block.requiredMode}</span>
+        <span className="tool-status-label">{block.currentMode}{tr(language, " → ", " to ", " a ")}{block.requiredMode}</span>
       </div>
       <div className="chat-permission-actions">
         <button type="button" disabled={!pending} onClick={() => onPermissionRespond(block.id, true)}>
-          Continue
+          {tr(language, "继续", "Continue", "Continuar")}
         </button>
         <button type="button" disabled={!pending} onClick={() => onPermissionRespond(block.id, false)}>
-          Skip
+          {tr(language, "跳过", "Skip", "Omitir")}
         </button>
         {block.input && (
           <button type="button" onClick={() => setOpen((value) => !value)}>
-            {open ? "Hide input" : "Show input"}
+            {open ? tr(language, "隐藏输入", "Hide input", "Ocultar entrada") : tr(language, "显示输入", "Show input", "Mostrar entrada")}
           </button>
         )}
       </div>
@@ -852,6 +837,7 @@ function QuestionCall({
   active: boolean;
   onQuestionRespond: (toolUseId: string, answer: string) => Promise<void>;
 }) {
+  const language = useStore((state) => state.language);
   const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [custom, setCustom] = useState("");
@@ -884,7 +870,7 @@ function QuestionCall({
       // not-yet-registered serial question locked until it can accept answers.
       submittingRef.current = false;
       setSubmitting(false);
-      setSubmitError("The answer could not be submitted. Please try again.");
+      setSubmitError(tr(language, "回答未能提交，请重试。", "The answer could not be submitted. Please try again.", "No se pudo enviar la respuesta. Inténtalo de nuevo."));
     }
   };
   const sendSelection = () => {
@@ -911,12 +897,12 @@ function QuestionCall({
   const statusClass = answered ? "tool-done" : pending ? "tool-running" : "tool-error";
   const statusIcon = answered ? <SvgIcon name="check" size={11} /> : pending ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
   const statusLabel = answered
-    ? "Answered"
+    ? tr(language, "已回答", "Answered", "Respondida")
     : interactive
-      ? "Awaiting your answer"
+      ? tr(language, "等待你的回答", "Awaiting your answer", "Esperando tu respuesta")
       : waitingForBackend
-        ? "Preparing"
-        : "Unanswered";
+        ? tr(language, "准备中", "Preparing", "Preparando")
+        : tr(language, "未回答", "Unanswered", "Sin respuesta");
 
   return (
     <div className={`chat-tool chat-question-card ${statusClass}`}>
@@ -929,14 +915,14 @@ function QuestionCall({
         <p className="chat-question-text">{spec.question}</p>
         {resolved ? (
           <div className="chat-question-answer">
-            <span className="chat-question-answer-label">{block.isError ? "Not answered" : "You answered"}</span>
+            <span className="chat-question-answer-label">{block.isError ? tr(language, "未回答", "Not answered", "Sin responder") : tr(language, "你的回答", "You answered", "Respondiste")}</span>
             <span className="chat-question-answer-value">{block.output}</span>
           </div>
         ) : !interactive ? (
           <p className="chat-question-stale">
             {waitingForBackend
-              ? "Preparing this question…"
-              : "This question is no longer awaiting an answer."}
+              ? tr(language, "正在准备这个问题…", "Preparing this question…", "Preparando esta pregunta…")
+              : tr(language, "这个问题已不再等待回答。", "This question is no longer awaiting an answer.", "Esta pregunta ya no espera respuesta.")}
           </p>
         ) : (
           <>
@@ -963,7 +949,7 @@ function QuestionCall({
               <input
                 className="chat-question-custom"
                 type="text"
-                placeholder="Or type your own answer…"
+                placeholder={tr(language, "或输入你自己的回答…", "Or type your own answer…", "O escribe tu propia respuesta…")}
                 value={custom}
                 disabled={locked}
                 onChange={(event) => setCustom(event.target.value)}
@@ -983,7 +969,7 @@ function QuestionCall({
                   disabled={locked || !canSubmit}
                   onClick={spec.multiSelect ? sendSelection : () => void send(custom)}
                 >
-                  {submitting ? "Sending…" : "Submit"}
+                  {submitting ? tr(language, "提交中…", "Sending…", "Enviando…") : tr(language, "提交", "Submit", "Enviar")}
                 </button>
               </div>
             )}
@@ -1033,7 +1019,7 @@ const PLUGIN_APPROVAL_COPY = {
     stale: "This request is no longer waiting for your decision.",
     sending: "Sending…",
     approved: { enable: "Approved; available from the next turn", upgrade: "Approved; the new version runs from the next turn", remove: "Removed; it stops from the next turn" },
-    rejected: { enable: "You declined enabling it", upgrade: "You declined; the current version keeps running", remove: "You kept it" },
+    rejected: { enable: "You declined to enable it", upgrade: "You declined; the current version keeps running", remove: "You kept it" },
     failed: "Not completed",
     skills: "Skills",
     panels: "Sidebar panels",
@@ -1052,7 +1038,35 @@ const PLUGIN_APPROVAL_COPY = {
     nothing: "This plugin contributes no skills, panels or commands.",
     submitFailed: "That did not go through. Please try again.",
   },
-} as const;
+  es: {
+    title: { enable: "Activar plugin", upgrade: "Actualizar plugin", remove: "Quitar plugin" },
+    approve: { enable: "Aprobar y activar", upgrade: "Aprobar actualización", remove: "Quitar" },
+    reject: { enable: "Rechazar", upgrade: "Rechazar", remove: "Conservar" },
+    waiting: "Esperando tu decisión",
+    preparing: "Preparando",
+    stale: "Esta solicitud ya no espera tu decisión.",
+    sending: "Enviando…",
+    approved: { enable: "Aprobado; disponible desde el próximo turno", upgrade: "Aprobado; la nueva versión se ejecuta desde el próximo turno", remove: "Quitado; deja de ejecutarse desde el próximo turno" },
+    rejected: { enable: "Rechazaste activarlo", upgrade: "Rechazaste la actualización; la versión actual sigue ejecutándose", remove: "Lo conservaste" },
+    failed: "No se completó",
+    skills: "Skills",
+    panels: "Paneles laterales",
+    ownPage: " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)",
+    proposesTasks: " (puede proponer tareas en segundo plano; confirmas cada una)",
+    rubrics: "Rúbricas de revisión",
+    rubricsNote: "El Revisor independiente las comprueba en cada revisión; el Ejecutor nunca las ve",
+    commands: "Comandos que ejecutará este equipo",
+    envKeys: "Variables de entorno (solo nombres)",
+    requires: "Plugins oficiales que necesita (no se ejecuta mientras alguno esté desactivado)",
+    upgradeFrom: (version: string) => `Actualizar desde ${version}`,
+    executionUnchanged: "Sin cambios en comandos ni variables de entorno",
+    added: "Añadido",
+    removedItems: "Quitado",
+    digest: "Resumen",
+    nothing: "Este plugin no aporta skills, paneles ni comandos.",
+    submitFailed: "No se pudo enviar. Inténtalo de nuevo.",
+  },
+} as const satisfies Record<Language, unknown>;
 
 /** The decision a finished `PluginManager` call reports, from its JSON result. */
 function pluginApprovalApplication(output: string | undefined): string | null {
@@ -1081,7 +1095,7 @@ function PluginApprovalCall({
 }) {
   const language = useStore((state) => state.language);
   const projectPath = useStore((state) => state.currentProject?.path);
-  const copy = PLUGIN_APPROVAL_COPY[language === "cn" ? "cn" : "en"];
+  const copy = PLUGIN_APPROVAL_COPY[language];
   const card = block.pluginApproval;
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -1174,12 +1188,12 @@ function PluginApprovalCall({
           ) : (
             <dl className="chat-plugin-approval-capabilities">
               {skills.length > 0 && <><dt>{copy.skills}</dt><dd>{skills.join(", ")}</dd></>}
-              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => (typeof panel.title === "string" ? panel.title : panel.title[language]) + (panel.page ? copy.ownPage : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
+              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? copy.ownPage : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
               {(card.capabilities.reviewRubrics?.length ?? 0) > 0 && (
                 <>
                   <dt>{copy.rubrics}</dt>
                   <dd>
-                    {card.capabilities.reviewRubrics!.map((rubric) => `${typeof rubric.title === "string" ? rubric.title : rubric.title[language]} (${rubric.criteria})`).join(", ")}
+                    {card.capabilities.reviewRubrics!.map((rubric) => `${uiText(rubric.title, language)} (${rubric.criteria})`).join(", ")}
                     <span className="chat-plugin-approval-muted"> · {copy.rubricsNote}</span>
                   </dd>
                 </>
@@ -1199,7 +1213,7 @@ function PluginApprovalCall({
               {(card.capabilities.requires?.length ?? 0) > 0 && (
                 <>
                   <dt>{copy.requires}</dt>
-                  <dd>{card.capabilities.requires!.map((id) => officialPluginName(id, language === "cn" ? "cn" : "en")).join(", ")}</dd>
+                  <dd>{card.capabilities.requires!.map((id) => officialPluginName(id, language)).join(", ")}</dd>
                 </>
               )}
             </dl>
@@ -1207,7 +1221,7 @@ function PluginApprovalCall({
         )}
         {/* Try the new pages and read every changed file while the decision is open. */}
         {card.kind === "upgrade" && !resolved && projectPath && (
-          <PluginUpgradeReview card={card} projectPath={projectPath} language={language === "cn" ? "cn" : "en"} />
+          <PluginUpgradeReview card={card} projectPath={projectPath} language={language} />
         )}
         <p className="chat-plugin-approval-muted chat-plugin-approval-digest" title={card.digest}>
           {copy.digest} {card.digest.slice(0, 19)}

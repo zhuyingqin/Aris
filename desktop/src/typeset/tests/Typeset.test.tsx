@@ -1725,7 +1725,7 @@ describe("Typeset start page", () => {
 
     await waitFor(() => expect(confirm).toHaveBeenCalled());
     expect(confirm.mock.calls[0][0]).toContain("1 unreviewed file");
-    expect(confirm.mock.calls[0][0]).toContain(new Date(Date.UTC(2026, 8, 4, 1, 33)).toLocaleString());
+    expect(confirm.mock.calls[0][0]).toContain(new Date(Date.UTC(2026, 8, 4, 1, 33)).toLocaleString("en"));
     // Declining leaves the transaction exactly as it was.
     expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
     expect(mocks.typesetChangeSetStageText).not.toHaveBeenCalled();
@@ -4084,7 +4084,7 @@ describe("Typeset start page", () => {
 
     fireEvent.click(within(compiledVisual).getByRole("button", { name: "Exit slide focus" }));
     expect(await screen.findByRole("region", { name: "PDF preview" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Hide Project files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide project files" })).toBeTruthy();
   });
 
   it("stages a direct Beamer text edit and compiles only when Save is clicked", async () => {
@@ -5953,7 +5953,7 @@ describe("Typeset start page", () => {
     await recompileOpenSource();
 
     expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeNull();
-    fireEvent.click(await screen.findByRole("button", { name: "Invert PDF colours" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Invert PDF colors" }));
     await waitFor(() => expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeTruthy());
   });
 
@@ -6862,7 +6862,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
     expect(divider.querySelector(".typeset-resize-handle-hit")).toBeTruthy();
 
@@ -6883,7 +6883,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 260 });
@@ -6906,7 +6906,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 260, clientY: 0 });
@@ -6929,7 +6929,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 204, clientY: 0 });
@@ -6950,7 +6950,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     vi.spyOn(divider, "getBoundingClientRect").mockReturnValue({
       x: 40,
       y: 180,
@@ -7092,7 +7092,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { pointerType: "touch", clientX: 260, clientY: 0 });

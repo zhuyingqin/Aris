@@ -26,6 +26,13 @@ const COPY = {
     change: { added: "Added", removed: "Removed", changed: "Changed" }, binary: (a: number, b: number) => `Binary file · ${size(a)} → ${size(b)}`,
     tooLarge: "Too large to show line by line.", noText: "No text to show.",
   },
+  es: {
+    tryPage: (title: string, where: string) => `Probar "${title}" · ${where}`, hidePage: "Cerrar vista previa",
+    slots: { "nav.page": "página", "chat.sidebar": "barra lateral", "chat.brief": "vistazo del resumen" } as Record<string, string>, trying: "Vista previa: lo que hagas aquí se queda en memoria; no se guarda nada ni se ejecuta ninguna acción.",
+    files: (n: number) => `Ver archivos cambiados (${n})`, hideFiles: "Ocultar cambios de archivos", loading: "Leyendo cambios…",
+    change: { added: "Añadido", removed: "Eliminado", changed: "Modificado" }, binary: (a: number, b: number) => `Archivo binario · ${size(a)} → ${size(b)}`,
+    tooLarge: "Demasiado grande para mostrarlo línea a línea.", noText: "No hay texto que mostrar.",
+  },
 };
 
 function size(bytes: number): string {

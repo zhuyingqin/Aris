@@ -282,7 +282,7 @@ pub async fn figures_prepare(app: AppHandle, input: PrepareInput) -> Result<Figu
         };
         if let Some(reference) = &input.confirmed_raster {
             if active_runs().lock().map_err(|e| e.to_string())?.contains_key(&(input.project_id.clone(), reference.id.clone())) {
-                return Err("请等待当前任务完成。".into());
+                return Err(runtime::ui_lang::tr_static("请等待当前任务完成。", "Wait for the current task to finish.", "Espera a que termine la tarea actual.").into());
             }
             continuation::validate_source(&workspace, reference, source.as_ref().ok_or("A continuation requires an imported image")?)?;
         }
@@ -394,7 +394,7 @@ pub async fn figures_start(
     let mut run = store::load(&workspace, &id)?;
     if let Some(expected) = expected_source_hash {
         if expected_source_index.is_none() || run.source_raster != expected_source_index {
-            return Err("图片版本已变更，请重新确认。".into());
+            return Err(runtime::ui_lang::tr_static("图片版本已变更，请重新确认。", "The image version has changed. Confirm again.", "La versión de la imagen cambió. Vuelve a confirmar.").into());
         }
         run = store::confirm_image(&workspace, &id, &expected)?;
     } else if !run.can_start() {

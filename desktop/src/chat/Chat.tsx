@@ -41,6 +41,7 @@ import {
   type PendingChatHandoff,
   type SidePanelEvidenceTarget,
 } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 import type {
   ChatTurn,
@@ -171,7 +172,7 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "literature",
       label: "Literature search",
       hint: "Find recent papers and map the field",
-      badge: "Deep Search",
+      badge: "Deep search",
       prompt: "Search for highly relevant papers from the last five years on this project's topic, prioritize authoritative sources, and map methods, themes, and open problems.",
     },
     {
@@ -192,8 +193,38 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
       id: "writing",
       label: "Paper writing",
       hint: "Build the outline and key sections",
-      badge: "LaTeX Sync",
+      badge: "LaTeX typesetting",
       prompt: "Use the current project materials to build a paper outline, define the core claim of each section, and identify the next paragraphs to write.",
+    },
+  ],
+  es: [
+    {
+      id: "literature",
+      label: "Búsqueda bibliográfica",
+      hint: "Encuentra artículos recientes y traza el panorama del campo",
+      badge: "Búsqueda profunda",
+      prompt: "Busca artículos muy relevantes de los últimos cinco años sobre el tema de este proyecto, prioriza fuentes reconocidas y traza los métodos, las líneas de investigación y los problemas abiertos.",
+    },
+    {
+      id: "patent",
+      label: "Redactar una patente china",
+      hint: "Convierte materiales técnicos en documentos de solicitud",
+      badge: "Patentes CN",
+      prompt: "/patent-disclosure-skill Elabora una patente china a partir de los materiales técnicos de este proyecto, redactando juntos la divulgación y los documentos de solicitud (交底申请一起做). Identifica la solución técnica y los aspectos patentables, revisa el estado de la técnica relevante y luego prepara en chino la divulgación, las reivindicaciones, la descripción, el resumen y los dibujos. Reutiliza un directorio de divulgación existente si lo hay. Pregúntame por los datos técnicos que falten; no los inventes.",
+    },
+    {
+      id: "review",
+      label: "Revisión del artículo",
+      hint: "Revisa la lógica, los métodos y la claridad",
+      badge: "Revisor",
+      prompt: "Revisa el artículo actual en cuanto a pregunta de investigación, diseño del método, cadena de evidencias, estructura y calidad de la redacción, y luego da sugerencias de revisión concretas.",
+    },
+    {
+      id: "writing",
+      label: "Redacción del artículo",
+      hint: "Construye el esquema y las secciones clave",
+      badge: "Maquetación LaTeX",
+      prompt: "Usa los materiales del proyecto actual para construir un esquema del artículo, definir la afirmación central de cada sección e identificar los próximos párrafos que hay que escribir.",
     },
   ],
 };
@@ -313,7 +344,7 @@ function mergeWorkflowHandoffDraft(session: ChatSession, handoff: PendingChatHan
 }
 
 function workTaskStatusDescription(task: WorkTask | null, language: Language): string {
-  if (!task) return language === "cn" ? "正在读取任务状态…" : "Loading task status...";
+  if (!task) return tr(language, "正在读取任务状态…", "Loading task status…", "Cargando estado de la tarea…");
   if (language === "cn") {
     switch (task.status) {
       case "todo": return "任务尚未开始。";
@@ -331,6 +362,25 @@ function workTaskStatusDescription(task: WorkTask | null, language: Language): s
       case "done": return "任务已完成并合并。";
       case "failed": return task.lastError ? `执行已停止：${task.lastError}` : "执行失败，已停止自动推进。";
       case "canceled": return "任务已停止。";
+    }
+  }
+  if (language === "es") {
+    switch (task.status) {
+      case "todo": return "La tarea aún no ha empezado.";
+      case "queued": return "La tarea está en cola, esperando un hueco de ejecución.";
+      case "preparing": return "Preparando el árbol de trabajo aislado.";
+      case "running": return "La tarea sigue en segundo plano; esta conversación se actualiza en vivo.";
+      case "pausing": return "Se pidió una pausa; el turno se está deteniendo en un punto seguro.";
+      case "paused": return "En pausa, con su árbol de trabajo y su conversación conservados; al reanudar sigue desde aquí.";
+      case "awaiting_input": return "La tarea te hizo una pregunta y liberó su hueco de ejecución; al responder continúa en la misma sesión y árbol de trabajo.";
+      case "reviewing": return "La ejecución terminó; un Revisor independiente está comprobando el resultado entregado.";
+      case "revising": return "El Revisor pidió cambios y el Ejecutor los está aplicando en el mismo árbol de trabajo.";
+      case "review": return "La ejecución terminó y espera tu confirmación antes de fusionar.";
+      case "merging": return "El agente de fusión está resolviendo conflictos e integrando los cambios confirmados.";
+      case "interrupted": return "SomniQ se cerró a mitad de la ejecución; el árbol de trabajo sigue intacto, así que al reanudar continúa.";
+      case "done": return "La tarea está completada y fusionada.";
+      case "failed": return task.lastError ? `La ejecución se detuvo: ${task.lastError}` : "La ejecución falló y se detuvo.";
+      case "canceled": return "La tarea se detuvo.";
     }
   }
   switch (task.status) {
@@ -874,7 +924,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       kind: "task",
       id: makeId("side-task-tab"),
       projectId: currentProject.id,
-      title: language === "cn" ? `侧边任务 ${sideTaskNumber}` : `Side task ${sideTaskNumber}`,
+      title: tr(language, `侧边任务 ${sideTaskNumber}`, `Side task ${sideTaskNumber}`, `Tarea lateral ${sideTaskNumber}`),
       handoff: null,
     };
     setSideTaskTabs((current) => [...current, sideTask]);
@@ -887,7 +937,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     const id = `agent-list:${currentId}`;
     setSideTaskTabs(current => current.some(task => task.id === id) ? current : [...current, {
       kind: "agents", id, projectId: currentProject.id, rootSessionId: currentId,
-      title: language === "cn" ? "子智能体" : "Agents", handoff: null,
+      title: tr(language, "子智能体", "Agents", "Agentes"), handoff: null,
     }]);
     setActiveSideTaskId(id);
     setSideTaskPaneOpen(true);
@@ -936,7 +986,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       kind: "image-workflow",
       id: makeId("side-image-workflow-tab"),
       projectId: currentProject.id,
-      title: language === "cn" ? "图片工作流" : "Image workflow",
+      title: tr(language, "图片工作流", "Image workflow", "Flujo de imágenes"),
       handoff: null,
     };
     setSideTaskTabs((current) => [...current, tab]);
@@ -956,7 +1006,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       kind: "reviewer",
       id: makeId("side-reviewer-tab"),
       projectId: currentProject.id,
-      title: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
+      title: tr(language, "独立 Reviewer", "Independent Reviewer", "Revisor independiente"),
       handoff: null,
     };
     setSideTaskTabs((current) => [...current, tab]);
@@ -1214,15 +1264,16 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   }, [addSideTask, sideTaskPaneOpen, sideTaskTabs]);
 
   const starters = CHAT_STARTERS[language];
-  const welcomeCopy = language === "cn"
-    ? {
+  const welcomeCopy = tr(language, {
       title: <>梦中<span className="chat-welcome-highlight chat-welcome-highlight-cyan">求索</span>，醒时<span className="chat-welcome-highlight chat-welcome-highlight-purple">有获</span></>,
       description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
-    }
-    : {
+    }, {
       title: <>Seek in <span className="chat-welcome-highlight chat-welcome-highlight-cyan">Dreams</span>, harvest on <span className="chat-welcome-highlight chat-welcome-highlight-purple">waking</span></>,
       description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
-    };
+    }, {
+      title: <>Busca en <span className="chat-welcome-highlight chat-welcome-highlight-cyan">sueños</span>, cosecha al <span className="chat-welcome-highlight chat-welcome-highlight-purple">despertar</span></>,
+      description: "SomniQ sigue razonando, buscando, analizando y generando en segundo plano, convirtiendo preguntas en avances.",
+    });
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
   const loadingOmittedTurnKeysRef = useRef<Set<string>>(new Set());
   const [loadingEarlierSessions, setLoadingEarlierSessions] = useState<Set<string>>(() => new Set());
@@ -1281,7 +1332,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     const lock = run.acquireSendLock(session.id);
     if (lock == null) return;
     void run.beginRun(session, session.turns,
-      language === "cn" ? `继续子任务 ${target}，在原有子会话中续派；先核对已完成结果和检查点，不重复交付，也不要重放状态不明的外部操作。` : `Continue child ${target} in its original session. Check completed results and checkpoints first; do not redeliver consumed results or replay uncertain external operations.`, [])
+      tr(language, `继续子任务 ${target}，在原有子会话中续派；先核对已完成结果和检查点，不重复交付，也不要重放状态不明的外部操作。`, `Continue subtask ${target} in its original child session. Check completed results and checkpoints first; do not redeliver work or replay external operations whose outcome is unclear.`, `Continúa la subtarea ${target} en su sesión original. Revisa primero los resultados completados y los puntos de control; no vuelvas a entregar resultados ya consumidos ni repitas operaciones externas de estado incierto.`), [])
       .finally(() => run.releaseSendLock(session.id, lock));
   }, [currentSessionRef, currentChatBusy, language, run.acquireSendLock, run.beginRun, run.releaseSendLock]);
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
@@ -1338,8 +1389,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     [turns],
   );
 
-  const navigationCopy = language === "cn"
-    ? {
+  const navigationCopy = tr(language, {
       label: "侧栏导航",
       add: "新增侧栏标签",
       addTask: "新建侧边任务",
@@ -1354,8 +1404,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       toggle: "显示或隐藏侧栏",
       handoff: "发送到主任务",
       resize: "调整侧栏宽度",
-    }
-    : {
+    }, {
       label: "Side panel navigation",
       add: "Add side panel tab",
       addTask: "New side task",
@@ -1370,12 +1419,27 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       toggle: "Show or hide side panel",
       handoff: "Send to main task",
       resize: "Resize side panel",
-    };
+    }, {
+      label: "Navegación del panel lateral",
+      add: "Añadir pestaña al panel lateral",
+      addTask: "Nueva tarea lateral",
+      addTaskHint: "Desvío de solo lectura que hereda el contexto del proyecto",
+      addReview: "Revisar cambios",
+      addReviewHint: "Inspecciona el árbol de trabajo actual y el diff de la rama",
+      addImage: "Abrir flujo de imágenes",
+      addImageHint: "Organiza nodos de generación y edición de imágenes",
+      addFile: "Abrir archivo…",
+      addFileHint: "Lee PDF, Markdown y código junto al chat",
+      close: "Cerrar pestaña del panel lateral",
+      toggle: "Mostrar u ocultar el panel lateral",
+      handoff: "Enviar a la tarea principal",
+      resize: "Cambiar el ancho del panel lateral",
+    });
   const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
     sideTaskTabs.map((sideTask) => {
       const agent = sideTask.kind === "agent" ? agentTasks.agents.find(item => item.sessionId === sideTask.childSessionId) : undefined;
       const contribution = sideTask.kind === "plugin" ? pluginPanels.panels.find((panel) => uiPanelKey(panel) === sideTask.id) : undefined;
-      const title = contribution ? uiText(contribution.title, language) : sideTask.kind === "agents" ? (language === "cn" ? "子智能体" : "Agents")
+      const title = contribution ? uiText(contribution.title, language) : sideTask.kind === "agents" ? (tr(language, "子智能体", "Agents", "Agentes"))
         : agent ? agentTaskDisplayName(agent, language) : sideTask.title;
       return {
         id: sideTask.id,
@@ -1409,9 +1473,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
     if (currentSession.remoteAgent && composer.attachments.length > 0) {
-      setError(language === "cn"
-        ? "远程 Agent 对话暂不支持附件；请先移除附件再发送。"
-        : "Remote Agent chat does not support attachments yet. Remove them before sending.");
+      setError(tr(language, "远程 Agent 对话暂不支持附件；请先移除附件再发送。", "Remote agent chats don't support attachments yet. Remove them before sending.", "El chat con el agente remoto aún no admite adjuntos. Quítalos antes de enviar."));
       return;
     }
     let sessionId = currentSession.id;
@@ -1467,9 +1529,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     const session = currentSessionRef.current;
     if (!session || run.runningSessionIdsRef.current.has(session.id)) return;
     if (session.remoteAgent) {
-      setError(language === "cn"
-        ? "远程 Agent 的历史轮次不能在本机重写；可以继续发送一条更正消息。"
-        : "Remote Agent history cannot be rewritten locally; send a correction as a new message.");
+      setError(tr(language, "远程 Agent 的历史轮次不能在本机重写；可以继续发送一条更正消息。", "Remote agent history can't be rewritten on this computer; send a correction as a new message.", "El historial del agente remoto no se puede reescribir localmente; envía la corrección como un mensaje nuevo."));
       return;
     }
     setDraft(session.id, textFromTurn(turn));
@@ -1540,7 +1600,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       const raw = await chatUiTurnLoad<Partial<ChatTurn> & Record<string, unknown>>(session.id, turnIndex);
       hydrateOmittedTurn(session.id, turnIndex, migrateTurn(raw));
     } catch (error) {
-      setError(`Failed to load saved turn: ${String(error)}`);
+      setError(tr(language, `加载已保存的回合失败：${String(error)}`, `Failed to load saved turn: ${String(error)}`, `No se pudo cargar el turno guardado: ${String(error)}`));
     } finally {
       loadingOmittedTurnKeysRef.current.delete(key);
       setLoadingOmittedTurns((current) => {
@@ -1549,7 +1609,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         return next;
       });
     }
-  }, [hydrateOmittedTurn, setError]);
+  }, [hydrateOmittedTurn, language, setError]);
 
   const isOmittedTurnLoading = useCallback((turnIndex: number) => (
     loadingOmittedTurns.has(`${currentId}:${turnIndex}`)
@@ -1577,7 +1637,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       );
       prependEarlierTurns(session.id, startIndex, rawTurns.map(migrateTurn));
     } catch (error) {
-      setError(`Failed to load earlier messages: ${String(error)}`);
+      setError(tr(language, `加载更早的消息失败：${String(error)}`, `Failed to load earlier messages: ${String(error)}`, `No se pudieron cargar los mensajes anteriores: ${String(error)}`));
     } finally {
       loadingEarlierSessionsRef.current.delete(session.id);
       setLoadingEarlierSessions((current) => {
@@ -1586,7 +1646,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         return next;
       });
     }
-  }, [prependEarlierTurns, setError]);
+  }, [language, prependEarlierTurns, setError]);
 
   const updateComposerInput = useCallback((value: string) => {
     if (pendingCommandSelection) setPendingCommandSelection(null);
@@ -1741,7 +1801,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             }}
           >
             <span className="chat-drop-full-icon"><SvgIcon name="attachment" size={32} /></span>
-            <span>拖放文件以附加</span>
+            <span>{copy.dropFiles}</span>
           </div>
         )}
 
@@ -1789,8 +1849,8 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
             <div className="chat-head-actions-group">
               {(pluginPanels.panels.length > 0 || pluginPanels.error) && (
-                <button type="button" className="chat-export-btn" aria-label={language === "cn" ? "打开插件面板" : "Open plugin panel"}
-                  title={pluginPanels.error || (language === "cn" ? "打开插件面板" : "Open plugin panel")}
+                <button type="button" className="chat-export-btn" aria-label={tr(language, "打开插件面板", "Open plugin panel", "Abrir panel del plugin")}
+                  title={pluginPanels.error || (tr(language, "打开插件面板", "Open plugin panel", "Abrir panel del plugin"))}
                   onClick={() => { const panel = pluginPanels.panels[0]; if (panel) openPluginPanel(panel); else void pluginPanels.refresh(); }}>
                   <SvgIcon name="grid" size={16} />
                 </button>
@@ -1801,11 +1861,11 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                   className={`chat-project-brief-toggle${projectBriefVisible ? " active" : ""}`}
                   onClick={() => { setSideTaskPaneOpen(false); projectBrief.setHidden(projectBriefVisible); }}
                   title={!projectBriefVisible
-                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                    ? (tr(language, "显示项目摘要", "Show project summary", "Mostrar resumen del proyecto"))
+                    : (tr(language, "收起项目摘要", "Collapse project summary", "Contraer resumen del proyecto"))}
                   aria-label={!projectBriefVisible
-                    ? (language === "cn" ? "显示项目摘要" : "Show project summary")
-                    : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                    ? (tr(language, "显示项目摘要", "Show project summary", "Mostrar resumen del proyecto"))
+                    : (tr(language, "收起项目摘要", "Collapse project summary", "Contraer resumen del proyecto"))}
                   aria-pressed={projectBriefVisible}
                   aria-controls="project-brief-popover"
                 >
@@ -1815,9 +1875,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                   {runningTaskCount > 0 && (
                     <span
                       className="chat-project-brief-badge"
-                      title={language === "cn"
-                        ? `${runningTaskCount} 个任务正在运行`
-                        : `${runningTaskCount} tasks running`}
+                      title={tr(language, `${runningTaskCount} 个任务正在运行`, `${runningTaskCount} ${runningTaskCount === 1 ? "task" : "tasks"} running`, `${runningTaskCount} ${runningTaskCount === 1 ? "tarea" : "tareas"} en curso`)}
                     >
                       {runningTaskCount}
                     </span>
@@ -1920,9 +1978,9 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                 </span>
                 <div className="work-task-chat-texts">
                   <div className="work-task-chat-title">
-                    <strong>{language === "cn" ? "任务状态：" : "Task status: "}</strong>
+                    <strong>{tr(language, "任务状态：", "Task status: ", "Estado de la tarea: ")}</strong>
                     <span className="work-task-chat-badge">
-                      {currentWorkTask ? TASKS_COPY[language].statuses[currentWorkTask.status] : (language === "cn" ? "读取中" : "Loading")}
+                      {currentWorkTask ? TASKS_COPY[language].statuses[currentWorkTask.status] : (tr(language, "读取中", "Loading…", "Cargando…"))}
                     </span>
                   </div>
                   <small className="work-task-chat-desc">{workTaskStatusDescription(currentWorkTask, language)}</small>
@@ -1932,10 +1990,10 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                 type="button"
                 className="work-task-chat-back-btn"
                 onClick={() => setTab("tasks")}
-                aria-label={language === "cn" ? "返回待办任务" : "Back to To-dos"}
+                aria-label={tr(language, "返回待办任务", "Back to To-dos", "Volver a Pendientes")}
               >
                 <SvgIcon name="chevronLeft" size={13} />
-                <span>{language === "cn" ? "返回待办任务" : "Back to To-dos"}</span>
+                <span>{tr(language, "返回待办任务", "Back to To-dos", "Volver a Pendientes")}</span>
               </button>
             </div>
           </div>
@@ -2044,7 +2102,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
                     const panel = pluginPanels.panels.find((item) => uiPanelKey(item) === sideTask.id);
                     return panel && pluginProjectPath
                       ? <ChatPluginPanel panel={panel} projectPath={pluginProjectPath} sessionId={currentId} language={language} agentTodos={workflowTodos} onPrompt={runPanelPrompt} onOpenFile={openPanelFile} />
-                      : <div className="chat-plugin-panel"><p role={pluginPanels.error ? "alert" : "status"}>{pluginPanels.error || (language === "cn" ? "正在读取插件面板…" : "Loading plugin panel…")}</p><button type="button" className="chat-plugin-button" onClick={() => void pluginPanels.refresh()}>{language === "cn" ? "重新加载" : "Reload"}</button></div>;
+                      : <div className="chat-plugin-panel"><p role={pluginPanels.error ? "alert" : "status"}>{pluginPanels.error || (tr(language, "正在读取插件面板…", "Loading plugin panel…", "Cargando panel del plugin…"))}</p><button type="button" className="chat-plugin-button" onClick={() => void pluginPanels.refresh()}>{tr(language, "重新加载", "Reload", "Recargar")}</button></div>;
                   })()
                 ) : sideTask.kind === "file" ? (
                   <SideFileViewer
@@ -2117,7 +2175,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         <aside
           id="project-brief-popover"
           className="chat-project-brief-sidebar"
-          aria-label={language === "cn" ? "项目摘要" : "Project summary"}
+          aria-label={tr(language, "项目摘要", "Project summary", "Resumen del proyecto")}
         >
           <ProjectBriefCard
             brief={projectBrief.brief}

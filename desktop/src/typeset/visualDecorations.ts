@@ -17,6 +17,10 @@ import { openPdfDocumentFromPath } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
+import { tr } from "../language";
+
+/** Copy for widgets built outside React, in the current UI language. */
+const uiText = (cn: string, en: string, es: string) => tr(useStore.getState().language, cn, en, es);
 import { labelTarget } from "../editor/latexTooltips";
 import {
   LatexStructureIndex,
@@ -532,11 +536,15 @@ class PreambleWidget extends WidgetType {
     const el = document.createElement("div");
     el.className = "cm-vis-preamble";
     const label = document.createElement("span");
-    label.textContent = "Document preamble";
+    label.textContent = uiText("文档导言区", "Document preamble", "Preámbulo del documento");
     const count = document.createElement("strong");
-    count.textContent = `${this.lineCount} lines`;
+    count.textContent = uiText(`${this.lineCount} 行`, `${this.lineCount} ${this.lineCount === 1 ? "line" : "lines"}`, `${this.lineCount} ${this.lineCount === 1 ? "línea" : "líneas"}`);
     el.append(label, count);
-    el.title = "Preamble is hidden in the visual view — edit it in Code mode";
+    el.title = uiText(
+      "导言区在可视化视图中隐藏——请在代码模式中编辑",
+      "Preamble is hidden in the visual view — edit it in Code mode",
+      "El preámbulo está oculto en la vista visual; edítalo en el modo Código",
+    );
     return el;
   }
   ignoreEvent() {
@@ -610,7 +618,11 @@ class TheoremLabelWidget extends WidgetType {
     el.textContent = this.number ? `${this.label} ${this.number}` : this.label;
     if (this.onJump) {
       el.classList.add("cm-vis-theorem-editable");
-      el.title = "Double-click to edit theorem source in Code mode";
+      el.title = uiText(
+        "双击在代码模式中编辑定理源码",
+        "Double-click to edit theorem source in Code mode",
+        "Haz doble clic para editar el código del teorema en el modo Código",
+      );
       el.addEventListener("dblclick", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -803,7 +815,7 @@ class FrameKickerWidget extends WidgetType {
     wrapper.className = `cm-vis-frame-header ${BLOCK_TARGET_CLASS}`;
     const kicker = document.createElement("span");
     kicker.className = "cm-vis-frame-kicker";
-    kicker.textContent = `Slide ${this.number}`;
+    kicker.textContent = uiText(`幻灯片 ${this.number}`, `Slide ${this.number}`, `Diapositiva ${this.number}`);
     wrapper.append(kicker);
     if (this.fallbackTitle) {
       const title = document.createElement("strong");
@@ -852,7 +864,11 @@ class CustomMacroWidget extends WidgetType {
     const el = document.createElement("span");
     el.className = "cm-vis-custom-macro";
     el.textContent = this.text;
-    el.title = "User-defined LaTeX macro — edit its source in Visual or Code view";
+    el.title = uiText(
+      "用户自定义 LaTeX 宏——可在可视化或代码视图中编辑源码",
+      "User-defined LaTeX macro — edit its source in Visual or Code view",
+      "Macro de LaTeX definida por el usuario; edita su código en la vista Visual o Código",
+    );
     return el;
   }
   ignoreEvent() {
@@ -960,7 +976,7 @@ class TitleWidget extends WidgetType {
     if (!range || !this.onJump) return;
     const onJump = this.onJump;
     el.classList.add("cm-vis-title-editable");
-    el.title = "Double-click to edit in Code mode";
+    el.title = uiText("双击在代码模式中编辑", "Double-click to edit in Code mode", "Haz doble clic para editar en el modo Código");
     el.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -972,7 +988,7 @@ class TitleWidget extends WidgetType {
     el.className = "cm-vis-title";
     const h = document.createElement("div");
     h.className = "cm-vis-title-name";
-    h.textContent = this.title || "Untitled";
+    h.textContent = this.title || uiText("无标题", "Untitled", "Sin título");
     this.jumpTarget(h, this.titleRange);
     el.append(h);
     if (this.author) {
@@ -2055,7 +2071,7 @@ function buildDecorations(
       );
       let fallbackTitle = structure.commands.some((command) =>
         command.name === "titlepage" && command.from >= beginTo && command.from < endFrom,
-      ) ? "Title slide" : "Untitled slide";
+      ) ? uiText("标题页", "Title slide", "Diapositiva de título") : uiText("无标题幻灯片", "Untitled slide", "Diapositiva sin título");
       if (frameTitle?.requiredArguments[0]) {
         const commandFrom = frameTitle.from;
         const title = frameTitle.requiredArguments[0];
@@ -2239,7 +2255,9 @@ function buildDecorations(
           envTo,
           Decoration.replace({
             widget: new DiagramWidget(
-              drawing.name === "pgfpicture" ? "PGF diagram" : "TikZ diagram",
+              drawing.name === "pgfpicture"
+                ? uiText("PGF 图", "PGF diagram", "Diagrama PGF")
+                : uiText("TikZ 图", "TikZ diagram", "Diagrama TikZ"),
               caption,
               text.slice(drawing.from, drawings[drawings.length - 1].to),
               { from: envFrom, to: envTo },
@@ -2702,7 +2720,7 @@ function buildDecorations(
     // rest reveal on caret so the source stays reachable.
     if (!isEndDoc && touchesSelection(from, to)) continue;
     if (command.name === "tableofcontents") {
-      hide(from, to, Decoration.replace({ widget: new ChipWidget("Table of contents", "toc") }));
+      hide(from, to, Decoration.replace({ widget: new ChipWidget(uiText("目录", "Table of contents", "Índice"), "toc") }));
     } else if (command.name === "newpage" || command.name === "clearpage") {
       hide(from, to, Decoration.replace({
         widget: new PageBreakWidget(command.name),

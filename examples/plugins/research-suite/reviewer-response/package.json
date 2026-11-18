@@ -1,0 +1,6 @@
+{
+  "name": "@local/reviewer-response",
+  "version": "0.1.0",
+  "description": "A project page for answering any round of review: each reviewer comment beside its response, the place the manuscript changed and a status, with pasted review text split into comments, agent drafting per comment and a generated response letter in LaTeX or Markdown.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

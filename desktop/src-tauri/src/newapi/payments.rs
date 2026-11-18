@@ -136,7 +136,7 @@ async fn payment_json(response: reqwest::Response, uncertain: bool) -> Result<Va
     } else {
         "PAYMENT_UNAVAILABLE"
     };
-    let body = parse_json(response, "支付服务")
+    let body = parse_json(response, runtime::ui_lang::tr_static("支付服务", "Payment service", "Servicio de pago"))
         .await
         .map_err(|_| fallback.to_string())?;
     if status == StatusCode::UNAUTHORIZED {

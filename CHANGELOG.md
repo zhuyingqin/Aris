@@ -1,7 +1,31 @@
 # ARIS-Code Changelog
 
-## v0.4.90 (2026-11-16)
+## v0.4.90 (2026-11-17)
 
+- **Spanish** — the interface is available in Chinese, English and Spanish.
+  Every page, the Workflows page (previously Chinese-only), the
+  app's own error and status messages, and the Code tab's VS Code UI follow the
+  language chosen in Settings. Plugin manifests may add `es` text; plugin pages
+  receive `locale` (`en`, `cn` or `es`) from `somniq.ready()`. Manifests that
+  use `es` are not accepted by older app versions.
+- **Scanned and garbled PDFs** — a new `read_pdf_pages` tool renders PDF pages
+  to images the model reads directly, with optional OCR text. It uses the PDF
+  and OCR engines built into Windows (no installation), else Poppler or MuPDF
+  with Tesseract. When `read_file` finds no usable text layer it hands the
+  model this tool instead of leaving it to install libraries or write scripts,
+  and the model is told to report an unreadable document to the user rather
+  than work through failing shell commands.
+- **Requests stay light** — a model request carries only the six most recent
+  images (two when retrying after a timeout); older images stay in the session.
+  Long image-heavy turns no longer grow until the gateway times out.
+- **Slides** — the `paper-slides` deck builder embeds SVG figures, adds a
+  full-bleed illustration layout and illustrated cover, section and card
+  slides.
+- **Research plugin examples** — nine example packages under
+  `examples/plugins/research-suite/` (reading cards, comparison matrix,
+  literature watch, manuscript checks, claim checker, submission profiles,
+  reviewer response, review rubric). Data-panel prompts may be localized.
+- **Sign-in** — the login page links to password recovery.
 - **Reviewer packs** — a plugin can add review criteria (`somniq.reviewer`) to
   the independent Reviewer. They apply by keyword, reach only the Reviewer's
   packet, and are used by Chat review, work-task review and workflow approval
