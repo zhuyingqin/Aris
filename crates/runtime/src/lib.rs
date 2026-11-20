@@ -13,6 +13,7 @@ mod compact;
 mod config;
 mod conversation;
 pub mod docx;
+pub mod document_export;
 pub mod document_safety;
 pub mod event_sink;
 mod evidence_ledger;
@@ -31,11 +32,14 @@ pub mod paper_guide;
 mod managed_job;
 mod mcp;
 mod mcp_client;
+mod mcp_health;
 mod mcp_stdio;
 mod oauth;
 mod paths;
+pub mod pdf_render;
 mod pdf_text;
 mod permissions;
+pub mod plugins;
 mod process;
 mod process_registry;
 mod project_activity;
@@ -53,18 +57,24 @@ pub mod sandbox;
 mod session;
 mod session_index;
 pub mod skill_registry;
+mod task_plan;
 mod tool_outcome;
 mod tool_recovery;
+pub mod ui_lang;
 mod tool_output_artifact;
 mod usage;
 
-pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
+pub use atomic_file::{
+    with_path_lock, write_replace as write_file_atomically,
+    write_replace_unlocked as write_file_atomically_while_locked,
+};
 pub use pdf_text::{
     extract_pdf_text_from_bytes, extract_pdf_text_with_quality, PdfExtractionMetadata,
     PdfTextExtraction, PdfTextQuality,
 };
 pub use bash::{
-    adopted_background_note, background_pipe_note, execute_bash, execute_bash_with_cancel,
+    adopted_background_note, apply_windows_utf8_env, background_pipe_note, execute_bash,
+    execute_bash_with_cancel,
     execute_bash_with_cancel_and_progress, resolve_foreground_shell_timeout_ms, BashCommandInput,
     BashCommandOutput, BACKGROUND_PIPE_NOTE, BACKGROUND_PIPE_TRUNCATED_NOTE,
 };
@@ -168,6 +178,7 @@ pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
     scoped_mcp_config_hash, unwrap_ccr_proxy_url,
 };
+pub use mcp_health::{mcp_server_health, record_mcp_server_health, McpServerHealth};
 pub use mcp_client::{
     McpClaudeAiProxyTransport, McpClientAuth, McpClientBootstrap, McpClientTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,
@@ -311,6 +322,12 @@ pub fn home_dir() -> String {
 
 pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
 pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
+/// Set by the host on a plugin's MCP server: its reviewed snapshot. Its
+/// presence starts the server as a plugin process (cleared environment, its
+/// data directory as working directory). Packages cannot set `SOMNIQ_*` keys.
+pub const PLUGIN_ROOT_ENV: &str = "SOMNIQ_PLUGIN_ROOT";
+/// The plugin's own writable directory, also set by the host.
+pub const PLUGIN_DATA_ENV: &str = "SOMNIQ_PLUGIN_DATA";
 pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
 /// SomniQ user-level skills directory.

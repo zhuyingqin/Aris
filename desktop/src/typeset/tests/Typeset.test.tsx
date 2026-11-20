@@ -568,6 +568,22 @@ describe("Typeset start page", () => {
     expect(await screen.findByRole("button", { name: "Home" })).toBeTruthy();
   });
 
+  it("keeps the source and PDF preview mounted while focusing and restoring the editor", async () => {
+    useStore.setState({ pendingTypesetFilePath: "sections/local.tex" });
+    const { container } = render(<Typeset />);
+    await waitForSourceOpen(container, "sections/local.tex");
+    const source = typesetCodeView();
+    const preview = container.querySelector(".typeset-preview-stack");
+    expect(preview).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Focus editor" }));
+    expect(preview?.hasAttribute("hidden")).toBe(true);
+    expect(typesetCodeView()).toBe(source);
+    fireEvent.click(screen.getByRole("button", { name: "Restore panels" }));
+    expect(preview?.hasAttribute("hidden")).toBe(false);
+    expect(container.querySelector(".typeset-preview-stack")).toBe(preview);
+    expect(typesetCodeView()).toBe(source);
+  });
+
   it("resolves the root document before showing a directly opened child source", async () => {
     useStore.setState({ pendingTypesetFilePath: "chapters/body.tex" });
     const child = "\\section{Body}\nChild text";
@@ -1709,7 +1725,7 @@ describe("Typeset start page", () => {
 
     await waitFor(() => expect(confirm).toHaveBeenCalled());
     expect(confirm.mock.calls[0][0]).toContain("1 unreviewed file");
-    expect(confirm.mock.calls[0][0]).toContain(new Date(Date.UTC(2026, 8, 4, 1, 33)).toLocaleString());
+    expect(confirm.mock.calls[0][0]).toContain(new Date(Date.UTC(2026, 8, 4, 1, 33)).toLocaleString("en"));
     // Declining leaves the transaction exactly as it was.
     expect(mocks.typesetChangeSetResolve).not.toHaveBeenCalled();
     expect(mocks.typesetChangeSetStageText).not.toHaveBeenCalled();
@@ -3504,7 +3520,7 @@ describe("Typeset start page", () => {
     expect(log.querySelectorAll(".typeset-diagnostic-card")).toHaveLength(1);
     expect(within(log).getByText("Overfull \\hbox (12pt too wide)")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Compile log" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Compile log/ }));
     expect(container.querySelector('section[aria-label="Compile log"]')).toBeNull();
   });
 
@@ -3842,7 +3858,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByText("paper.tex"));
     await waitForSourceOpen(container, "paper.tex");
     // The log no longer auto-opens while compiling, so open it to watch progress.
-    fireEvent.click(screen.getByRole("button", { name: "Compile log" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Compile log/ }));
     await recompileOpenSource();
 
     expect(await screen.findByText("Latexmk: processing paper.tex")).toBeTruthy();
@@ -4068,7 +4084,7 @@ describe("Typeset start page", () => {
 
     fireEvent.click(within(compiledVisual).getByRole("button", { name: "Exit slide focus" }));
     expect(await screen.findByRole("region", { name: "PDF preview" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Hide Project files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide project files" })).toBeTruthy();
   });
 
   it("stages a direct Beamer text edit and compiles only when Save is clicked", async () => {
@@ -5937,7 +5953,7 @@ describe("Typeset start page", () => {
     await recompileOpenSource();
 
     expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeNull();
-    fireEvent.click(await screen.findByRole("button", { name: "Invert PDF colours" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Invert PDF colors" }));
     await waitFor(() => expect(container.querySelector(".typeset-pdf-scroll.inverted")).toBeTruthy());
   });
 
@@ -6846,7 +6862,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
     expect(divider.querySelector(".typeset-resize-handle-hit")).toBeTruthy();
 
@@ -6867,7 +6883,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 260 });
@@ -6890,7 +6906,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 260, clientY: 0 });
@@ -6913,7 +6929,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 204, clientY: 0 });
@@ -6934,7 +6950,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     vi.spyOn(divider, "getBoundingClientRect").mockReturnValue({
       x: 40,
       y: 180,
@@ -6966,12 +6982,12 @@ describe("Typeset start page", () => {
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const divider = screen.getByRole("separator", { name: "Resize PDF preview" });
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 900, clientY: 0 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 852 });
 
-    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("808px"));
+    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("688px"));
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 852 });
   });
@@ -7008,12 +7024,12 @@ describe("Typeset start page", () => {
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const preview = container.querySelector<HTMLElement>(".typeset-preview-stack");
     expect(preview).toBeTruthy();
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(preview!, { button: 0, pointerType: "mouse", clientX: 958, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 902, clientY: 200 });
 
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 902, clientY: 200 });
   });
@@ -7041,12 +7057,12 @@ describe("Typeset start page", () => {
       toJSON: () => ({}),
     } as DOMRect);
     expect(editor).toBeTruthy();
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
 
     fireEvent.pointerDown(editor!, { button: 0, pointerType: "mouse", clientX: 918, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 862, clientY: 200 });
 
-    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("640px");
   });
 
   it("restores the PDF preview after hiding it", async () => {
@@ -7076,7 +7092,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
+    const divider = screen.getByRole("separator", { name: "Resize project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(divider, { pointerType: "touch", clientX: 260, clientY: 0 });

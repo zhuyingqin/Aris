@@ -1,0 +1,216 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Manuscript gauge: a glance in the Chat's project summary.
+
+  Data, json widget "gauge" (written by the agent with PluginPanel, budgets and
+  the page limit also by the user here):
+  {
+    "version": 1,
+    "manuscript"?: "project-relative .tex/.md path",
+    "unit"?: "words" | "chars",           // chars for CJK manuscripts
+    "pages"?: number,                      // pages of the compiled PDF
+    "pageLimit"?: number,                  // set by the user
+    "sections": [{ "title": string, "count": number, "budget"?: number, "file"?: string, "line"?: number }],
+    "updatedAt"?: ISO date string
+  }
+  The agent keeps "budget" when it rewrites "count" (matched by title).
+  Nothing here comes from a specific project: an empty widget shows how to fill it.
+-->
+<style>
+  :root {
+    --ink: var(--somniq-text, #e7eaee); --dim: var(--somniq-muted, #8a94a2); --line: var(--somniq-border, #29303a);
+    --accent: var(--somniq-accent, #5b8def); --ok: #3fb27f; --warn: #d99a2b; --over: #e5534b;
+    --soft: color-mix(in srgb, var(--ink) 6%, transparent);
+  }
+  :root[data-theme="light"] { --ok: #1f8a5b; --warn: #b9790b; --over: #cf3a32; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--somniq-surface, #151a21); }
+  body { font: 12px/1.45 var(--somniq-font, system-ui, sans-serif); color: var(--ink); padding: 2px 10px 10px; overflow: hidden; -webkit-font-smoothing: antialiased; }
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .total { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+  .total small { font-size: 11px; font-weight: 500; color: var(--dim); margin-left: 3px; }
+  .pages { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .pages b { color: var(--ink); font-weight: 650; }
+  .pages.over b { color: var(--over); }
+  .num { width: 46px; padding: 1px 3px; -moz-appearance: textfield; appearance: textfield; border: 1px solid transparent; border-radius: 5px; background: none; text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .num::-webkit-outer-spin-button, .num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .num:hover, .num:focus { border-color: var(--line); background: var(--soft); color: var(--ink); outline: none; }
+  ol { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 5px; }
+  li { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; align-items: center; }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; padding: 0; background: none; text-align: left; cursor: pointer; }
+  .name:disabled { cursor: default; }
+  .figures { display: inline-flex; align-items: center; gap: 2px; font-variant-numeric: tabular-nums; color: var(--dim); font-size: 11px; }
+  .figures b { color: var(--ink); font-weight: 600; }
+  li.over .figures b { color: var(--over); }
+  .bar { grid-column: 1 / -1; position: relative; height: 4px; border-radius: 2px; background: var(--soft); overflow: hidden; }
+  .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--ok); transition: width .3s ease; }
+  li.near .bar i { background: var(--warn); }
+  li.over .bar i { background: var(--over); }
+  li.free .bar i { background: color-mix(in srgb, var(--ink) 28%, transparent); }
+  .foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+  .foot .when { flex: 1 1 100%; }
+  .when { color: var(--dim); font-size: 11px; margin-right: auto; }
+  .act { white-space: nowrap; padding: 3px 9px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); cursor: pointer; font-size: 11.5px; }
+  .act:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .empty { margin: 0 0 8px; color: var(--dim); }
+  .error { margin: 6px 0 0; color: var(--over); font-size: 11px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const COPY = {
+  en: {
+    words: "words", chars: "chars", pages: "pages", of: "of", budget: "Budget", limit: "Page limit",
+    noBudget: "no budget", updated: (d) => `counted ${d}`, recount: "↻ Recount", trim: "Trim overruns",
+    empty: "No counts yet. Recount reads the manuscript's sections; then set a budget for each one here.",
+    saveFailed: "Could not save: ",
+    recountPrompt: "Recount the manuscript gauge of @local/manuscript-gauge. Find this project's main manuscript, count the prose of every section and of the abstract (with the manuscript-hygiene section_word_counts tool if it is available; use characters instead of words for a CJK manuscript and set unit to \"chars\"), take the page count from the compiled PDF, and write the gauge widget with PluginPanel. Read it first and keep every budget and the page limit, matching sections by title. Change no project files.",
+    trimPrompt: "Read the manuscript gauge of @local/manuscript-gauge. For every section over its budget, propose cuts that bring it within budget without removing any citation, figure, table or result, show them to me as a diff, and apply them only after I agree. Then recount the gauge.",
+  },
+  cn: {
+    words: "词", chars: "字", pages: "页", of: "/", budget: "预算", limit: "页数上限",
+    noBudget: "未设预算", updated: (d) => `统计于 ${d}`, recount: "↻ 重新统计", trim: "压缩超出部分",
+    empty: "还没有统计。点“重新统计”读取稿件各节字数，然后在这里给每一节设预算。",
+    saveFailed: "保存失败：",
+    recountPrompt: "请重新统计 @local/manuscript-gauge 的稿件篇幅。找到本项目的主稿件，统计摘要和每一节的正文篇幅（有 manuscript-hygiene 的 section_word_counts 工具就用它；中文稿件按字符计并把 unit 设为 \"chars\"），页数取自编译后的 PDF，用 PluginPanel 写入 gauge 组件。写入前先读取，按节标题保留所有预算和页数上限。不要修改项目文件。",
+    trimPrompt: "请读取 @local/manuscript-gauge 的稿件篇幅。对每个超出预算的章节，提出压缩方案，使其回到预算内，且不删除任何引用、图、表或结果；先以 diff 给我看，我同意后再改，然后重新统计。",
+  },
+  es: {
+    words: "palabras", chars: "caract.", pages: "págs.", of: "de", budget: "Presupuesto", limit: "Límite de páginas",
+    noBudget: "sin presupuesto", updated: (d) => `contado ${d}`, recount: "↻ Recalcular", trim: "Recortar excesos",
+    empty: "Aún no hay recuentos. «Recalcular» lee las secciones del manuscrito; después fija aquí el presupuesto de cada una.",
+    saveFailed: "No se pudo guardar: ",
+    recountPrompt: "Recalcula el indicador de @local/manuscript-gauge. Localiza el manuscrito principal del proyecto, cuenta el texto del resumen y de cada sección (con la herramienta section_word_counts de manuscript-hygiene si está disponible; en un manuscrito CJK cuenta caracteres y pon unit en \"chars\"), toma el número de páginas del PDF compilado y escribe el widget gauge con PluginPanel. Léelo antes y conserva todos los presupuestos y el límite de páginas, emparejando las secciones por título. No modifiques archivos del proyecto.",
+    trimPrompt: "Lee el indicador de @local/manuscript-gauge. Para cada sección que supere su presupuesto, propón recortes que la dejen dentro sin eliminar citas, figuras, tablas ni resultados; muéstramelos como diff y aplícalos solo cuando yo lo apruebe. Después recalcula el indicador.",
+  },
+};
+
+let copy = COPY.en, lang = "en", gauge = { version: 1, sections: [] }, error = "", writes = Promise.resolve();
+
+function num(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null; }
+function clean(raw) {
+  const value = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const sections = Array.isArray(value.sections) ? value.sections : [];
+  return {
+    ...value,
+    version: 1,
+    unit: value.unit === "chars" ? "chars" : "words",
+    pages: num(value.pages),
+    pageLimit: num(value.pageLimit),
+    sections: sections
+      .filter((s) => s && typeof s === "object" && typeof s.title === "string" && s.title.trim())
+      .map((s) => ({ ...s, count: num(s.count) ?? num(s.words) ?? 0, budget: num(s.budget) })),
+  };
+}
+function el(tag, attrs = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== null && value !== undefined && value !== false) node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined) node.append(kid instanceof Node ? kid : String(kid));
+  return node;
+}
+function fmt(n) { return Number(n).toLocaleString(lang === "cn" ? "zh-CN" : lang === "es" ? "es" : "en"); }
+function when(iso) {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  return copy.updated(date.toLocaleString(lang === "cn" ? "zh-CN" : lang === "es" ? "es" : "en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+}
+
+function save() {
+  // Store numbers as the user typed them; drop nulls so the widget stays tidy.
+  const value = { ...gauge, sections: gauge.sections.map(({ budget, ...rest }) => (budget === null ? rest : { ...rest, budget })) };
+  if (value.pageLimit === null) delete value.pageLimit;
+  if (value.pages === null) delete value.pages;
+  writes = writes.then(() => somniq.set("gauge", value)).then(
+    () => { if (error) { error = ""; render(); } },
+    (reason) => { error = copy.saveFailed + (reason && reason.message ? reason.message : String(reason)); render(); },
+  );
+}
+
+function numberInput(value, label, onChange) {
+  return el("input", {
+    class: "num", type: "number", min: "0", step: "1", inputmode: "numeric", "aria-label": label,
+    value: value === null ? "" : String(value), placeholder: "—",
+    onchange: (event) => {
+      const text = event.target.value.trim();
+      const next = text === "" ? null : Math.max(0, Math.round(Number(text)));
+      onChange(Number.isFinite(next) ? next : null);
+      save();
+      render();
+    },
+  });
+}
+
+function render() {
+  const root = document.getElementById("root");
+  const unit = gauge.unit === "chars" ? copy.chars : copy.words;
+  const total = gauge.sections.reduce((sum, s) => sum + s.count, 0);
+  // A total budget only means something once every section has one.
+  const budgetTotal = gauge.sections.length && gauge.sections.every((s) => s.budget !== null)
+    ? gauge.sections.reduce((sum, s) => sum + s.budget, 0) : 0;
+  const pagesOver = gauge.pages !== null && gauge.pageLimit !== null && gauge.pages > gauge.pageLimit;
+
+  const head = el("div", { class: "head" },
+    el("span", { class: "total" }, fmt(total), el("small", {}, budgetTotal ? `${copy.of} ${fmt(budgetTotal)} ${unit}` : unit)),
+    el("span", { class: "pages" + (pagesOver ? " over" : ""), title: copy.limit },
+      el("b", {}, gauge.pages === null ? "—" : fmt(gauge.pages)), copy.of,
+      numberInput(gauge.pageLimit, copy.limit, (v) => { gauge.pageLimit = v; }), copy.pages),
+  );
+
+  const body = gauge.sections.length
+    ? el("ol", {}, gauge.sections.map((section, index) => {
+        const ratio = section.budget ? section.count / section.budget : null;
+        const state = ratio === null ? "free" : ratio > 1 ? "over" : ratio > 0.9 ? "near" : "ok";
+        const width = ratio === null ? 100 : Math.min(100, Math.round(ratio * 100));
+        const open = section.file ? () => somniq.openFile(section.file) : null;
+        return el("li", { class: state },
+          el("button", { class: "name", type: "button", title: section.title, disabled: !open, onclick: open }, section.title),
+          el("span", { class: "figures" }, el("b", {}, fmt(section.count)), "/",
+            numberInput(section.budget, `${copy.budget}: ${section.title}`, (v) => { gauge.sections[index].budget = v; })),
+          el("div", { class: "bar", role: "img", "aria-label": ratio === null ? copy.noBudget : `${Math.round(ratio * 100)}%` }, Object.assign(el("i"), { style: `width:${width}%` })),
+        );
+      }))
+    : el("p", { class: "empty" }, copy.empty);
+
+  const anyOver = gauge.sections.some((s) => s.budget && s.count > s.budget) || pagesOver;
+  const foot = el("div", { class: "foot" },
+    el("span", { class: "when" }, when(gauge.updatedAt)),
+    anyOver ? el("button", { class: "act", type: "button", onclick: () => somniq.prompt(copy.trimPrompt) }, copy.trim) : null,
+    el("button", { class: "act", type: "button", onclick: () => somniq.prompt(copy.recountPrompt) }, copy.recount),
+  );
+
+  const focused = document.activeElement && document.activeElement.getAttribute("aria-label");
+  root.replaceChildren(...[head, body, foot, error ? el("p", { class: "error", role: "alert" }, error) : null].filter(Boolean));
+  if (focused) {
+    const again = [...root.querySelectorAll("input")].find((input) => input.getAttribute("aria-label") === focused);
+    if (again) again.focus();
+  }
+}
+
+new ResizeObserver(() => somniq.resize(Math.ceil(document.body.getBoundingClientRect().height))).observe(document.body);
+somniq.ready().then(({ language: legacy, locale, data }) => {
+  const language = locale ?? legacy;
+  lang = language === "cn" ? "cn" : String(language || "").startsWith("es") ? "es" : "en";
+  copy = COPY[lang];
+  gauge = clean(data && data.gauge);
+  render();
+  somniq.onData((next) => {
+    // Never re-render under a number the user is typing.
+    if (document.activeElement && document.activeElement.tagName === "INPUT") return;
+    gauge = clean(next && next.gauge);
+    render();
+  });
+});
+</script>
+</body>
+</html>

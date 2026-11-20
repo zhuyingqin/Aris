@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent
 import type { NewApiAccount } from "../api/tauri";
 import { hasNativeBackend } from "../api/transport";
 import type { ProfileStats } from "../types";
-import type { Language } from "../store";
+import { languageLocale, type Language } from "../language";
 import {
   prepareProfileAvatar,
   ProfileAvatarError,
@@ -20,12 +20,12 @@ function formatTokens(value: number, language: Language, copy: SettingsProfileCo
   if (language === "cn") {
     if (value >= 1e8) return copy.compactHundredMillions((value / 1e8).toFixed(value >= 1e9 ? 0 : 1));
     if (value >= 1e4) return copy.compactTenThousands((value / 1e4).toFixed(value >= 1e6 ? 0 : 1));
-    return Math.round(value).toLocaleString();
+    return Math.round(value).toLocaleString(languageLocale(language));
   }
   if (value >= 1e9) return copy.compactBillions((value / 1e9).toFixed(1));
   if (value >= 1e6) return copy.compactMillions((value / 1e6).toFixed(1));
   if (value >= 1e3) return copy.compactThousands((value / 1e3).toFixed(1));
-  return Math.round(value).toLocaleString();
+  return Math.round(value).toLocaleString(languageLocale(language));
 }
 
 function formatDuration(seconds: number | null, unavailable: string, copy: SettingsProfileCopy): string {
@@ -264,7 +264,7 @@ export default function Profile({
                             className="sp-profile-heatmap-cell"
                             data-level={cell.level}
                             data-future={cell.future || undefined}
-                            title={cell.future ? undefined : `${cell.date} · ${cell.tokens.toLocaleString(language === "cn" ? "zh-CN" : "en-US")} ${copy.tokenUnit}`}
+                            title={cell.future ? undefined : `${cell.date} · ${cell.tokens.toLocaleString(languageLocale(language))} ${copy.tokenUnit}`}
                           />
                         ))}
                       </div>

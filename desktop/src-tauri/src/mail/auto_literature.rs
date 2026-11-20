@@ -290,7 +290,7 @@ fn append_run(run: &MailLiteratureAutomationRun) -> Result<(), String> {
     runs.insert(0, run.clone());
     runs.truncate(MAX_RUN_LOG);
     let body = serde_json::to_string_pretty(&runs).map_err(|error| error.to_string())?;
-    super::atomic_file::write_replace(&run_log_path(), body).map_err(|error| error.to_string())
+    runtime::write_file_atomically(&run_log_path(), body).map_err(|error| error.to_string())
 }
 
 fn run_id(event: &MailNewMessageEvent) -> String {

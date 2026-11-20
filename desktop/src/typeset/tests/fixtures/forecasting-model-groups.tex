@@ -1,0 +1,30 @@
+\begin{table}[!htb]
+\centering
+\caption[Three groups of forecasting models]{The three groups of
+forecasting models.}
+\label{tab:model-groups}
+\small
+\begin{tabular}{@{}L{2.7cm}L{3.25cm}L{3.25cm}L{3.25cm}@{}}
+\toprule
+ & \textbf{Statistical} & \textbf{Non-neural ML} & \textbf{Neural network} \\
+\midrule
+Map from past to future
+ & Specified time structure & Model using chosen features & Learned network \\
+\addlinespace
+Features
+ & Past values and hidden states & Chosen from inputs & Learned or fixed network features \\
+\addlinespace
+Main strength
+ & Easy to interpret & Flexible, easy to add inputs
+ & Learns or constructs features \\
+\addlinespace
+Main limitation
+ & Needs a suitable model structure & Needs feature design and tuning
+ & Costly to design and train \\
+\addlinespace
+Examples
+ & ARIMA, ETS, Kalman filter & SVR, random forest, XGBoost
+ & LSTM, Transformer, ESN \\
+\bottomrule
+\end{tabular}
+\end{table}

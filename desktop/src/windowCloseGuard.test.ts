@@ -72,4 +72,9 @@ describe("window close guards", () => {
     expect(desktopCloseConfirmationMessage("cn", hazards)).toContain("绘图");
     expect(shouldPreventDesktopClose({ ...hazards, hasUnsavedChanges: false }, () => true)).toBe(false);
   });
+  it("words the close confirmation in Spanish", () => {
+    expect(desktopCloseConfirmationMessage("es", { hasUnsavedChanges: true, runningConversationCount: 2 })).toContain("Hay 2 conversaciones en curso");
+    expect(desktopCloseConfirmationMessage("es", { hasUnsavedChanges: true, runningConversationCount: 0 })).toBe("¿Descartar los cambios de LaTeX sin guardar y cerrar SomniQ Studio?");
+    expect(desktopCloseConfirmationMessage("es", { hasUnsavedChanges: false, runningConversationCount: 1, runningFigureCount: 1 })).toContain("Hay 2 tareas en curso");
+  });
 });

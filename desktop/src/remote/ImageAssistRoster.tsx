@@ -59,6 +59,7 @@ const COPY = {
     shareWaiting: "位置已保存；开启“为其他用户生成图片”且本机出图可用后才会发布。",
     locating: "正在请求位置权限…",
     sharedAt: (label: string) => `当前公开：${label}`,
+    gatewayTimeout: "网关没有响应。请确认远程控制已启用，且网关开启了互助出图。",
   },
   en: {
     loading: "Loading online users…",
@@ -69,8 +70,8 @@ const COPY = {
     locations: "locations",
     open: "View online helper details",
     title: "Online helper network",
-    subtitle: "See approximate locations of users who can help generate images. Matching remains automatic and fair; users cannot be selected manually.",
-    map: "Helper distribution",
+    subtitle: "See approximate locations of users who can help generate images. Matching stays automatic and fair; you can't pick a user manually.",
+    map: "Helper locations",
     mapEmpty: "No users are sharing an approximate location",
     me: "You",
     undisclosed: "Location not shared",
@@ -79,7 +80,7 @@ const COPY = {
     idle: "Available",
     search: "Search name, fingerprint, or location",
     all: "All",
-    idleOnly: "Available",
+    idleOnly: "Available only",
     locatedOnly: "Location shared",
     users: "Users",
     noMatch: "No users match these filters.",
@@ -90,9 +91,45 @@ const COPY = {
     page: (current: number, total: number) => `Page ${current} of ${total}`,
     shareTitle: "Share my approximate location",
     shareDesc: "Shared only while you offer help. Coordinates are reduced locally to roughly 11 km precision; the gateway never receives your precise location.",
-    shareWaiting: "Location is saved. It will publish after you enable image help and local generation is available.",
+    shareWaiting: "Location saved. It is published once you turn on “Generate images for other users” and local generation is available.",
     locating: "Requesting location permission…",
     sharedAt: (label: string) => `Currently shared: ${label}`,
+    gatewayTimeout: "The gateway did not respond. Make sure remote control is enabled and the gateway has image assist turned on.",
+  },
+  es: {
+    loading: "Cargando usuarios en línea…",
+    unavailable: "No se pudieron cargar los usuarios en línea: ",
+    noUsers: "Ahora mismo no hay nadie en línea para ayudar a generar imágenes.",
+    online: "en línea",
+    available: "disponibles",
+    locations: "ubicaciones",
+    open: "Ver detalles de los usuarios que ayudan en línea",
+    title: "Red de ayuda en línea",
+    subtitle: "Consulta la ubicación aproximada de los usuarios que pueden ayudar a generar imágenes. El emparejamiento sigue siendo automático y justo; no se puede elegir a un usuario manualmente.",
+    map: "Distribución de quienes ayudan",
+    mapEmpty: "Ningún usuario comparte una ubicación aproximada",
+    me: "Tú",
+    undisclosed: "Ubicación no compartida",
+    anonymous: "Usuario anónimo",
+    busy: "Ocupado",
+    idle: "Disponible",
+    search: "Buscar por nombre, huella o ubicación",
+    all: "Todos",
+    idleOnly: "Solo disponibles",
+    locatedOnly: "Con ubicación compartida",
+    users: "Usuarios",
+    noMatch: "Ningún usuario coincide con estos filtros.",
+    close: "Cerrar",
+    refresh: "Actualizar",
+    previous: "Anterior",
+    next: "Siguiente",
+    page: (current: number, total: number) => `Página ${current} de ${total}`,
+    shareTitle: "Compartir mi ubicación aproximada",
+    shareDesc: "Solo se comparte mientras ofreces ayuda. Las coordenadas se reducen localmente a una precisión de unos 11 km; la pasarela nunca recibe tu ubicación exacta.",
+    shareWaiting: "La ubicación está guardada. Se publicará cuando actives “Generar imágenes para otros usuarios” y la generación local esté disponible.",
+    locating: "Solicitando permiso de ubicación…",
+    sharedAt: (label: string) => `Compartida actualmente: ${label}`,
+    gatewayTimeout: "La pasarela no responde. Comprueba que el control remoto está activado y que la pasarela tiene habilitada la ayuda con imágenes.",
   },
 } as const;
 
@@ -233,7 +270,7 @@ export function ImageAssistRoster({ language = "cn" }: { language?: Language }) 
       });
     refresh();
     const timer = window.setTimeout(() => {
-      if (!disposed) setProblem((current) => current ?? "网关没有响应。请确认远程控制已启用，且网关开启了互助出图。");
+      if (!disposed) setProblem((current) => current ?? copy.gatewayTimeout);
     }, ROSTER_TIMEOUT_MS);
     return () => {
       disposed = true;

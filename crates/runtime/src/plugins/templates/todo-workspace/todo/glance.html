@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  The Tasks glance in the Chat's project summary. It shows the "tasks" panel's
+  data (ui.json: "dataPanel": "tasks"), so a task checked here is checked on
+  the full page too. It asks the host for its height with somniq.resize().
+-->
+<style>
+  :root {
+    --ink: var(--somniq-text, #e7eaee); --dim: var(--somniq-muted, #8a94a2); --line: var(--somniq-border, #29303a);
+    --accent: var(--somniq-accent, #e8a33d); --soft: color-mix(in srgb, var(--ink) 6%, transparent);
+    --high: #e5534b; --medium: #d99a2b; --low: #5b8def; --late: #e5534b;
+  }
+  :root[data-theme="light"] { --high: #d1362e; --medium: #b9790b; --low: #3a6fd8; --late: #cf3a32; }
+  * { box-sizing: border-box; }
+  /* The surface the summary card draws glances on; a transparent frame can be painted opaque by the browser. */
+  html, body { margin: 0; background: var(--somniq-surface, #151a21); }
+  body { font: 12px/1.45 var(--somniq-font, system-ui, sans-serif); color: var(--ink); padding: 2px 10px 10px; -webkit-font-smoothing: antialiased; overflow: hidden; }
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .stat { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .ring { position: relative; flex: none; display: grid; place-items: center; }
+  .ring b { position: absolute; font-size: 9.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ring-track { stroke: var(--line); } .ring-value { stroke: var(--accent); transition: stroke-dasharray .35s ease; }
+  .stat strong { display: block; font-size: 12.5px; font-weight: 650; }
+  .stat small { display: flex; flex-wrap: wrap; gap: 0 8px; color: var(--dim); font-size: 11px; }
+  .stat small .late { color: var(--late); font-weight: 600; }
+  .stat small .today { color: var(--accent); font-weight: 600; }
+  ul { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  li { display: flex; align-items: center; gap: 8px; padding: 4px 4px; margin: 0 -4px; border-radius: 7px; }
+  li:hover { background: var(--soft); }
+  li.leaving { animation: leave .28s ease forwards; }
+  @keyframes leave { to { opacity: 0; transform: translateX(6px); } }
+  .check { width: 15px; height: 15px; flex: none; padding: 0; border-radius: 50%; border: 1.5px solid var(--dim); background: none; cursor: pointer; display: grid; place-items: center; }
+  .check[data-priority="high"] { border-color: var(--high); } .check[data-priority="medium"] { border-color: var(--medium); } .check[data-priority="low"] { border-color: var(--low); }
+  .check svg { width: 9px; height: 9px; opacity: 0; } .check:hover svg { opacity: .6; }
+  .check:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  li.leaving .check { background: var(--accent); border-color: var(--accent); } li.leaving .check svg { opacity: 1; color: #fff; }
+  .title { flex: 1; min-width: 0; border: 0; padding: 0; background: none; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li.leaving .title { text-decoration: line-through; color: var(--dim); }
+  .due { flex: none; font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .due.late { color: var(--late); font-weight: 600; } .due.today { color: var(--accent); font-weight: 600; }
+  .doing { width: 5px; height: 5px; border-radius: 50%; background: var(--low); flex: none; }
+  .more { border: 0; padding: 0; margin: 0 0 6px; background: none; color: var(--dim); font-size: 11px; cursor: pointer; }
+  .more:hover { color: var(--ink); }
+  form { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line); background: color-mix(in srgb, var(--ink) 3%, transparent); }
+  form:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+  form span { width: 12px; height: 12px; border-radius: 50%; border: 1.3px dashed var(--dim); flex: none; }
+  form input { flex: 1; min-width: 0; border: 0; background: none; outline: none; font-size: 11.5px; }
+  form input::placeholder { color: var(--dim); }
+  .empty { margin: 0 0 8px; color: var(--dim); }
+  .ask { display: inline-flex; align-items: center; gap: 5px; margin: 0 0 8px; padding: 4px 9px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); cursor: pointer; font-size: 11.5px; }
+  .ask:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .ask svg { width: 12px; height: 12px; }
+  .error { margin: 4px 0 0; color: var(--late); font-size: 11px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import { COPY, clean, dueLabel, el, newId, parseQuick, rank, ring, stats, today, withStatus } from "pkg:todo/model.mjs";
+
+const SHOW = 4;
+let copy = COPY.en, language = "en", tasks = [], error = "", writes = Promise.resolve();
+const root = document.getElementById("root");
+const svg = (d) => {
+  const ns = "http://www.w3.org/2000/svg", node = document.createElementNS(ns, "svg"), path = document.createElementNS(ns, "path");
+  node.setAttribute("viewBox", "0 0 24 24"); node.setAttribute("fill", "none"); node.setAttribute("stroke", "currentColor");
+  node.setAttribute("stroke-width", "2.2"); node.setAttribute("stroke-linecap", "round"); node.setAttribute("stroke-linejoin", "round");
+  path.setAttribute("d", d); node.append(path); return node;
+};
+const CHECK = "M5 12.5l4.2 4.2L19 7", SPARKLE = "M12 3.5l1.9 5 5 1.9-5 1.9-1.9 5-1.9-5-5-1.9 5-1.9z";
+
+function save(next) {
+  const before = tasks;
+  tasks = next; error = ""; render();
+  writes = writes.then(() => somniq.set("tasks", tasks)).catch((failure) => { tasks = before; error = copy.failed + failure.message; render(); });
+}
+
+function render() {
+  const base = today(), s = stats(tasks, base), g = copy.glance;
+  const open = rank(tasks.filter((task) => task.status !== "done"), base);
+  const parts = [];
+  if (!tasks.length) {
+    parts.push(el("p", { className: "empty", textContent: g.empty }),
+      el("button", { type: "button", className: "ask", onclick: () => somniq.prompt(copy.planPrompt) }, svg(SPARKLE), g.ask));
+  } else {
+    const fraction = s.done / s.total;
+    const ringBox = el("span", { className: "ring" }, ring(fraction, 30, 3.2), el("b", { textContent: `${Math.round(fraction * 100)}` }));
+    const notes = [s.overdue ? el("span", { className: "late", textContent: g.overdue(s.overdue) }) : null,
+      s.today ? el("span", { className: "today", textContent: g.dueToday(s.today) }) : null];
+    parts.push(el("div", { className: "stat" }, ringBox, el("div", {}, el("strong", { textContent: g.done(s.done, s.total) }),
+      el("small", {}, ...(notes.some(Boolean) ? notes : [open.length ? g.clear : g.allDone])))));
+    if (open.length) parts.push(el("ul", {}, ...open.slice(0, SHOW).map((task) => {
+      const label = task.due ? dueLabel(task.due, copy, language, base) : null;
+      const item = el("li", {},
+        el("button", { type: "button", className: "check", role: "checkbox", ariaChecked: false, ariaLabel: task.title, dataset: { priority: task.priority ?? "" },
+          onclick: () => { item.classList.add("leaving"); setTimeout(() => save(tasks.map((t) => t.id === task.id ? withStatus(t, "done", base) : t)), 260); } }, svg(CHECK)),
+        task.status === "doing" ? el("span", { className: "doing", title: copy.status.doing }) : null,
+        el("button", { type: "button", className: "title", textContent: task.title, title: task.title, onclick: () => somniq.openPanel("tasks") }),
+        label ? el("span", { className: `due ${label.tone === "late" ? "late" : label.tone === "today" ? "today" : ""}`, textContent: label.text }) : null);
+      return item;
+    })));
+    if (open.length > SHOW) parts.push(el("button", { type: "button", className: "more", textContent: copy.more(open.length - SHOW), onclick: () => somniq.openPanel("tasks") }));
+  }
+  const input = el("input", { placeholder: g.add, maxLength: 300, ariaLabel: g.add });
+  parts.push(el("form", { onsubmit: (event) => {
+    event.preventDefault();
+    const parsed = parseQuick(input.value, base);
+    if (!parsed.title) return;
+    const task = { id: newId(), title: parsed.title, status: "todo", created: base };
+    if (parsed.priority) task.priority = parsed.priority;
+    if (parsed.due) task.due = parsed.due;
+    if (parsed.tags.length) task.tags = parsed.tags;
+    save([task, ...tasks]);
+    requestAnimationFrame(() => root.querySelector("input")?.focus());
+  } }, el("span", { ariaHidden: "true" }), input));
+  if (error) parts.push(el("p", { className: "error", role: "alert", textContent: error }));
+  const focused = document.activeElement === root.querySelector("input");
+  root.replaceChildren(...parts.filter(Boolean));
+  if (focused) input.focus();
+}
+
+// Ask the host for exactly the height the content needs.
+new ResizeObserver(() => somniq.resize(Math.ceil(document.body.getBoundingClientRect().height))).observe(document.body);
+somniq.ready().then(({ language: lang, data }) => {
+  language = lang === "cn" ? "cn" : "en"; copy = COPY[language];
+  tasks = clean(data.tasks);
+  render();
+  somniq.onData((next) => { tasks = clean(next.tasks); render(); });
+});
+</script>
+</body>
+</html>

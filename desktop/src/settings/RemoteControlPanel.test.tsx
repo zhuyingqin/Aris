@@ -216,9 +216,9 @@ describe("RemoteControlPanel", () => {
 
     await user.click(await screen.findByRole("button", { name: "Add" }));
     const dialog = await screen.findByRole("alertdialog", {
-      name: "The gateway no longer recognises this device",
+      name: "The gateway no longer recognizes this device",
     });
-    expect(dialog.textContent).toContain("0 device(s) paired today");
+    expect(dialog.textContent).toContain("0 currently paired devices");
 
     await user.click(within(dialog).getByRole("button", { name: "Reset identity and re-pair" }));
     await waitFor(() => expect(apiMocks.remoteControlResetIdentity).toHaveBeenCalledTimes(1));
@@ -267,7 +267,7 @@ describe("RemoteControlPanel", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(
       "https://remote.example.test/pair#p=one-time-code",
     ));
-    expect(screen.getByRole("status").textContent).toContain("approval on this computer");
+    expect(screen.getByRole("status").textContent).toContain("approve on this computer");
   });
 
   it("removes a paired device after an explicit second confirmation", async () => {
@@ -302,7 +302,7 @@ describe("RemoteControlPanel", () => {
     expect(screen.queryByRole("button", { name: "Check for phone request" })).toBeNull();
 
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.getByText(/Project status.*Desktop conversations and tasks.*Review conclusions/)).toBeTruthy();
+    expect(screen.getByText(/Project status.*View, continue, and run desktop chat tasks.*Review conclusions/)).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Approve pairing" }));
 
@@ -377,7 +377,7 @@ describe("RemoteControlPanel", () => {
     render(<RemoteControlPanel language="en" />);
 
     const remoteTab = await screen.findByRole("tab", { name: "Remote control" });
-    const capabilitiesTab = screen.getByRole("tab", { name: "This device capabilities" });
+    const capabilitiesTab = screen.getByRole("tab", { name: "This device's capabilities" });
 
     expect(remoteTab.getAttribute("aria-selected")).toBe("true");
     expect(capabilitiesTab.getAttribute("aria-selected")).toBe("false");
@@ -405,7 +405,7 @@ describe("RemoteControlPanel", () => {
     expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Remote control" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "This device capabilities" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "This device's capabilities" })).toBeTruthy();
     expect(screen.getByText("Pairing requires explicit approval on this device")).toBeTruthy();
     expect(screen.queryByText("Computer capabilities")).toBeNull();
     expect(screen.queryByText("Pair computers")).toBeNull();
@@ -441,7 +441,7 @@ describe("RemoteControlPanel", () => {
     apiMocks.isTauri.mockReturnValue(true);
     render(<RemoteControlPanel language="en" />);
 
-    const capabilitiesTab = await screen.findByRole("tab", { name: "This device capabilities" });
+    const capabilitiesTab = await screen.findByRole("tab", { name: "This device's capabilities" });
     await user.click(capabilitiesTab);
 
     await screen.findByLabelText("Maximum parallel jobs");

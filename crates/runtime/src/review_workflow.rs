@@ -493,6 +493,9 @@ pub struct ReviewerGate {
     #[serde(default)]
     pub issues: Vec<String>,
     pub reviewed_at: Option<String>,
+    /// The controller's record of the plugin review rubrics this gate used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubrics: Option<crate::plugins::ReviewRubricRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -805,7 +808,7 @@ pub fn create_review_workflow(
         template_id: REVIEW_WORKFLOW_TEMPLATE_ID.to_string(),
         template_version: REVIEW_WORKFLOW_TEMPLATE_VERSION,
         revision: 1,
-        title: format!("综述：{topic}"),
+        title: crate::tr!("综述：{topic}", "Review: {topic}", "Revisión: {topic}"),
         topic,
         keywords: clean_list(input.keywords, 40, 120),
         languages: clean_list_or_default(input.languages, 8, 40, &["中文", "English"]),
@@ -872,7 +875,7 @@ pub fn create_review_workflow(
         &mut run,
         "user",
         "workflow_created",
-        "创建“从主题到可投稿综述论文”工作流。",
+        crate::ui_lang::tr_static("创建“从主题到可投稿综述论文”工作流。", "Created the \"from topic to submission-ready review paper\" workflow.", "Se creó el flujo \"del tema a un artículo de revisión listo para enviar\"."),
         Some("scope-and-plan"),
     );
     save_run(workspace, &run)?;
@@ -957,7 +960,7 @@ pub fn rename_review_workflow(
         &mut run,
         "user",
         "workflow_renamed",
-        "用户更新了工作流名称。",
+        crate::ui_lang::tr_static("用户更新了工作流名称。", "The user renamed the workflow.", "El usuario cambió el nombre del flujo."),
         Some(&stage_id),
     );
     save_run(workspace, &run)?;
@@ -1695,6 +1698,7 @@ fn default_review_stages() -> Vec<ReviewWorkflowStage> {
                 summary: None,
                 issues: Vec::new(),
                 reviewed_at: None,
+                rubrics: None,
             },
             started_at: None,
             completed_at: None,
@@ -1773,7 +1777,7 @@ fn migrate_run(mut run: ReviewWorkflowRun) -> Result<ReviewWorkflowRun, String> 
         {
             stage.status = ReviewWorkflowStageStatus::WaitingUser;
             stage.summary =
-                Some("Zotero 结构化重构已从当前版本移除；当前版本止于论文到章节映射。".to_string());
+                Some(crate::ui_lang::tr_static("Zotero 结构化重构已从当前版本移除；当前版本止于论文到章节映射。", "Zotero structured rebuilding was removed from this version; this version ends at mapping papers to sections.", "La reestructuración con Zotero se eliminó de esta versión; esta versión termina en la asignación de artículos a secciones.").to_string());
         }
         run.status = ReviewWorkflowStatus::WaitingUser;
     }
@@ -1874,13 +1878,13 @@ fn normalize_primary_library_target(run: &mut ReviewWorkflowRun) {
     }
 
     let summary = if target_reached {
-        format!(
-            "已达到目标，形成 {} 篇去重原始文献库；Scopus 剩余分页不阻塞后续分级。",
+        crate::tr!(
+            "已达到目标，形成 {} 篇去重原始文献库；Scopus 剩余分页不阻塞后续分级。", "Target reached: a deduplicated primary-literature library of {} records. The remaining Scopus pages do not block grading.", "Objetivo alcanzado: una biblioteca de literatura primaria sin duplicados de {} registros. Las páginas restantes de Scopus no bloquean la clasificación.",
             run.primary_record_ids.len()
         )
     } else {
-        format!(
-            "Scopus 已遍历完全部分页，形成 {} 篇去重原始文献库（低于目标 {} 篇）。",
+        crate::tr!(
+            "Scopus 已遍历完全部分页，形成 {} 篇去重原始文献库（低于目标 {} 篇）。", "All Scopus pages were read, giving a deduplicated primary-literature library of {} records (below the target of {}).", "Se recorrieron todas las páginas de Scopus y se obtuvo una biblioteca sin duplicados de {} registros (por debajo del objetivo de {}).",
             run.primary_record_ids.len(),
             run.primary_target_results
         )
@@ -1926,12 +1930,12 @@ fn normalize_primary_library_target(run: &mut ReviewWorkflowRun) {
         }
         if !rejected {
             stage.reviewer_gate.summary = Some(if target_reached {
-                format!(
-                    "去重文献数已达到目标 {} 篇；未读取的提供商分页已保留在覆盖记录中。",
+                crate::tr!(
+                    "去重文献数已达到目标 {} 篇；未读取的提供商分页已保留在覆盖记录中。", "The deduplicated count reached the target of {}; unread provider pages are kept in the coverage record.", "El recuento sin duplicados alcanzó el objetivo de {}; las páginas del proveedor sin leer quedan en el registro de cobertura.",
                     run.primary_target_results
                 )
             } else {
-                "所有矩阵检索路径均已耗尽；现有记录构成可获得的完整结果。".to_string()
+                crate::ui_lang::tr_static("所有矩阵检索路径均已耗尽；现有记录构成可获得的完整结果。", "Every matrix search path is exhausted; the current records are the complete obtainable result.", "Todas las rutas de búsqueda de la matriz están agotadas; los registros actuales son el resultado completo que se puede obtener.").to_string()
             });
             stage.reviewer_gate.issues.clear();
         }
@@ -2003,7 +2007,7 @@ fn normalize_scout_automation_status(run: &mut ReviewWorkflowRun) {
         match run.status {
             ReviewWorkflowStatus::WaitingUser | ReviewWorkflowStatus::RevisionRequired => {
                 run.scout_pause_reason.get_or_insert_with(|| {
-                    "旧版运行在需要人工处理的状态中恢复；确认问题后可继续综述侦察。".to_string()
+                    crate::ui_lang::tr_static("旧版运行在需要人工处理的状态中恢复；确认问题后可继续综述侦察。", "A run from an older version was restored in a state that needs your attention; confirm the issue to continue review scouting.", "Se restauró una ejecución de una versión anterior en un estado que requiere tu intervención; confirma el problema para continuar la exploración.").to_string()
                 });
                 ScoutAutomationStatus::Paused
             }
@@ -2032,12 +2036,12 @@ fn normalize_retrieval_quality_gate(run: &mut ReviewWorkflowRun) {
         stage.reviewer_gate.status = ReviewerGateStatus::Skipped;
         stage.reviewer_gate.reviewer = Some("Legacy workflow migration".to_string());
         stage.reviewer_gate.summary =
-            Some("该阶段在旧版工作流中没有检索回收质量门禁，保留为未经独立审查。".to_string());
+            Some(crate::ui_lang::tr_static("该阶段在旧版工作流中没有检索回收质量门禁，保留为未经独立审查。", "In the older workflow this stage had no recall-quality gate, so it stays marked as not independently reviewed.", "En el flujo anterior esta etapa no tenía control de calidad de recuperación, así que queda marcada como no revisada de forma independiente.").to_string());
         stage.reviewer_gate.reviewed_at = stage.completed_at.clone().or(Some(updated_at));
     } else {
         stage.reviewer_gate.status = ReviewerGateStatus::Pending;
         stage.reviewer_gate.reviewer = None;
-        stage.reviewer_gate.summary = Some("等待独立 Reviewer 审查检索回收质量。".to_string());
+        stage.reviewer_gate.summary = Some(crate::ui_lang::tr_static("等待独立 Reviewer 审查检索回收质量。", "Waiting for the independent Reviewer to check recall quality.", "Esperando que el Reviewer independiente evalúe la calidad de la recuperación.").to_string());
         stage.reviewer_gate.reviewed_at = None;
     }
     stage.reviewer_gate.issues.clear();

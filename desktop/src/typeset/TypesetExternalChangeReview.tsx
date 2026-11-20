@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TypesetProposalDecision } from "../api/tauri";
-import { externalTextDiff, type ExternalDiffChange } from "./externalChangeDiff";
+import { externalTextDiff, type ExternalDiffChange } from "../diff/externalChangeDiff";
 
 export type ExternalWholeFileDecision = "incoming" | "local";
 

@@ -13,6 +13,7 @@ import {
   type ProjectIntentStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 import { subscribeGitWorkspaceStatus } from "../git/workspaceStatusEvents";
 import ChatImagePreview from "./ChatImagePreview";
@@ -28,18 +29,21 @@ interface ProjectBriefPreference {
   hidden: boolean;
 }
 
+// v2: the summary starts collapsed and opens only when the user clicks the
+// toggle. Bumping the key drops v1 records, which were mostly the old
+// open-by-default state rather than a deliberate choice.
 function preferenceKey(projectId: string) {
-  return `somniq-project-brief-v1:${projectId}`;
+  return `somniq-project-brief-v2:${projectId}`;
 }
 
 function loadPreference(projectId: string): ProjectBriefPreference {
   try {
     const raw = localStorage.getItem(preferenceKey(projectId));
-    if (!raw) return { hidden: false };
+    if (!raw) return { hidden: true };
     const parsed = JSON.parse(raw) as Partial<ProjectBriefPreference>;
-    return { hidden: Boolean(parsed.hidden) };
+    return { hidden: parsed.hidden !== false };
   } catch {
-    return { hidden: false };
+    return { hidden: true };
   }
 }
 
@@ -258,7 +262,7 @@ const COPY = {
     criteria: "Success criteria",
     status: "Recent status",
     noGoal: "After the first substantive request, SomniQ will summarize the current goal from your question.",
-    hide: "Retract project summary",
+    hide: "Hide project summary",
     collapse: "Collapse project summary",
     expand: "Expand project summary",
     active: "Active",
@@ -271,11 +275,11 @@ const COPY = {
     reviewHintOn: "An independent Reviewer checks substantive completed work",
     reviewHintOff: "Future chat turns will skip the automatic Reviewer",
     running: "Running in background",
-    runningHint: "Started by the agent; stopped along with its children when the app quits",
+    runningHint: "Started by the agent; stops with its child processes when the app quits",
     runningStop: "Stop",
-    runningStopping: "Stopping",
+    runningStopping: "Stopping…",
     runningLog: "Log",
-    runningNoLog: "No output log (forked by the shell with &, never redirected)",
+    runningNoLog: "No output log (started in the background with & and not redirected)",
     runningAdopted: "left by the shell",
     repository: "Version status",
     branch: "Branch",
@@ -285,11 +289,46 @@ const COPY = {
     changes: "changes",
     conflicts: "conflicts",
   },
+  es: {
+    title: "Resumen del proyecto",
+    mission: "Misión",
+    goal: "Objetivo actual",
+    criteria: "Criterios de éxito",
+    status: "Estado reciente",
+    noGoal: "Tras la primera solicitud sustantiva, SomniQ resumirá el objetivo actual a partir de tu pregunta.",
+    hide: "Ocultar el resumen del proyecto",
+    collapse: "Contraer el resumen del proyecto",
+    expand: "Expandir el resumen del proyecto",
+    active: "Activo",
+    paused: "En pausa",
+    complete: "Completado",
+    review: "Revisión automática",
+    reviewOn: "Activada",
+    reviewOff: "Desactivada",
+    reviewToggle: "Activar o desactivar la revisión automática",
+    reviewHintOn: "Un Revisor independiente verifica el trabajo sustantivo completado",
+    reviewHintOff: "Los próximos turnos del chat omitirán el Revisor automático",
+    running: "En ejecución en segundo plano",
+    runningHint: "Iniciado por el agente; se detiene junto con sus procesos hijos al cerrar la app",
+    runningStop: "Detener",
+    runningStopping: "Deteniendo…",
+    runningLog: "Registro",
+    runningNoLog: "Sin registro de salida (lanzado por la shell con &, sin redirigir)",
+    runningAdopted: "dejado por la shell",
+    repository: "Estado de versiones",
+    branch: "Rama",
+    detached: "HEAD separado",
+    noUpstream: "Sin rama upstream",
+    clean: "Árbol de trabajo limpio",
+    changes: "cambios",
+    conflicts: "conflictos",
+  },
 } satisfies Record<Language, Record<string, string>>;
 
 function intentStatusLabel(status: ProjectIntentStatus | undefined, language: Language) {
-  if (language === "cn") return status === "established" ? "已形成" : "识别中";
-  return status === "established" ? "Established" : "Emerging";
+  return status === "established"
+    ? tr(language, "已形成", "Established", "Consolidado")
+    : tr(language, "识别中", "Emerging", "En formación");
 }
 
 function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | "running" | "git" }) {
@@ -312,21 +351,21 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" | 
   return <svg {...common}><path d="M4 18V6M4 18h16" /><path d="m7 14 4-4 3 2 5-6" /></svg>;
 }
 
-const IMAGE_ASSIST_STAGE_LABELS: Record<string, { cn: string; en: string }> = {
-  matching: { cn: "正在匹配互助用户", en: "Matching a helper" },
-  sent: { cn: "已发送，等待接受", en: "Sent, awaiting acceptance" },
-  awaiting_approval: { cn: "等待对方接受", en: "Awaiting approval" },
-  awaiting_acceptance: { cn: "等待你确认", en: "Awaiting your approval" },
-  accepted: { cn: "已接受，正在建立会话", en: "Accepted, connecting" },
-  connecting: { cn: "正在建立临时会话", en: "Connecting temporary session" },
-  connected: { cn: "临时会话已连接", en: "Temporary session connected" },
-  requesting: { cn: "请求已送达", en: "Request delivered" },
-  generating: { cn: "正在生成图片", en: "Generating image" },
-  transferring: { cn: "正在安全回传图片", en: "Returning image securely" },
-  completed: { cn: "图片已传回", en: "Image received" },
-  declined: { cn: "请求被拒绝", en: "Request declined" },
-  failed: { cn: "图片互助失败", en: "Image assist failed" },
-  closed: { cn: "图片互助已结束", en: "Image assist ended" },
+const IMAGE_ASSIST_STAGE_LABELS: Record<string, Record<Language, string>> = {
+  matching: { cn: "正在匹配互助用户", en: "Matching a helper", es: "Buscando a alguien que ayude" },
+  sent: { cn: "已发送，等待接受", en: "Sent, awaiting acceptance", es: "Enviado, esperando aceptación" },
+  awaiting_approval: { cn: "等待对方接受", en: "Waiting for the helper to accept", es: "Esperando a que la otra persona acepte" },
+  awaiting_acceptance: { cn: "等待你确认", en: "Awaiting your approval", es: "Esperando tu aprobación" },
+  accepted: { cn: "已接受，正在建立会话", en: "Accepted, connecting", es: "Aceptado, conectando" },
+  connecting: { cn: "正在建立临时会话", en: "Setting up a temporary session", es: "Conectando la sesión temporal" },
+  connected: { cn: "临时会话已连接", en: "Temporary session connected", es: "Sesión temporal conectada" },
+  requesting: { cn: "请求已送达", en: "Request delivered", es: "Solicitud entregada" },
+  generating: { cn: "正在生成图片", en: "Generating image", es: "Generando imagen" },
+  transferring: { cn: "正在安全回传图片", en: "Returning image securely", es: "Devolviendo la imagen de forma segura" },
+  completed: { cn: "图片已传回", en: "Image received", es: "Imagen recibida" },
+  declined: { cn: "请求被拒绝", en: "Request declined", es: "Solicitud rechazada" },
+  failed: { cn: "图片互助失败", en: "Image assist failed", es: "Image Assist falló" },
+  closed: { cn: "图片互助已结束", en: "Image assist ended", es: "Image Assist finalizado" },
 };
 
 function imageName(path: string) {
@@ -335,8 +374,8 @@ function imageName(path: string) {
 }
 
 function transferSize(bytes: number, language: Language) {
-  if (bytes < 1024) return language === "cn" ? `${bytes} 字节` : `${bytes} B`;
-  const units = language === "cn" ? ["KB", "MB", "GB"] : ["KB", "MB", "GB"];
+  if (bytes < 1024) return tr(language, `${bytes} 字节`, `${bytes} B`, `${bytes} B`);
+  const units = ["KB", "MB", "GB"];
   let value = bytes / 1024;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
@@ -356,6 +395,7 @@ export default function ProjectBriefCard({
   reviewError,
   onReviewEnabledChange,
   agentTasks,
+  glances,
   backgroundProcesses = [],
   stoppingBackgroundPids = [],
   onStopBackgroundProcess,
@@ -374,6 +414,8 @@ export default function ProjectBriefCard({
   reviewError?: string | null;
   onReviewEnabledChange: (enabled: boolean) => void;
   agentTasks?: ReactNode;
+  /** Plugin glances (the `chat.brief` slot). */
+  glances?: ReactNode;
   backgroundProcesses?: BackgroundProcessView[];
   stoppingBackgroundPids?: number[];
   onStopBackgroundProcess?: (pid: number) => void;
@@ -382,8 +424,7 @@ export default function ProjectBriefCard({
   onDismissImageAssistActivity?: () => void;
 }) {
   const copy = COPY[language];
-  const labels = language === "cn"
-    ? {
+  const labels = tr(language, {
       goal: "长期目标",
       milestone: "当前里程碑",
       status: "最近进展",
@@ -393,8 +434,7 @@ export default function ProjectBriefCard({
       reviewCoverage: (conversations: number, questions: number, messages: number) =>
         `Reviewer 按上下文 Token 增量复核 · 已覆盖 ${conversations} 个对话、${questions} 次提问，共 ${messages} 条可见消息`,
       noGoal: "SomniQ 正在从持续对话中识别本项目的长期目标。",
-    }
-    : {
+    }, {
       goal: "Long-term goal",
       milestone: "Current milestone",
       status: "Recent progress",
@@ -404,7 +444,17 @@ export default function ProjectBriefCard({
       reviewCoverage: (conversations: number, questions: number, messages: number) =>
         `Incremental Reviewer update by context tokens · ${conversations} conversations, ${questions} questions, ${messages} visible messages`,
       noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
-    };
+    }, {
+      goal: "Objetivo a largo plazo",
+      milestone: "Hito actual",
+      status: "Progreso reciente",
+      coreFocus: "Trabajo principal actual",
+      relatedWork: "Trabajo relacionado",
+      drift: "Fuera de la línea principal",
+      reviewCoverage: (conversations: number, questions: number, messages: number) =>
+        `Revisión incremental del Revisor por tokens de contexto · ${conversations} conversaciones, ${questions} preguntas, ${messages} mensajes visibles`,
+      noGoal: "SomniQ está identificando el objetivo a largo plazo de este proyecto a partir de tus conversaciones.",
+    });
   const intent = brief?.intent ?? null;
   const activity = brief?.activity ?? null;
   const milestone = brief?.goal ?? null;
@@ -451,24 +501,25 @@ export default function ProjectBriefCard({
           <span>{reviewSaving ? "…" : reviewEnabled ? copy.reviewOn : copy.reviewOff}</span>
         </button>
       </div>
+      {glances}
       <div className="project-brief-body">
         {agentTasks}
         {imageAssistActivity && (
-          <section className={`project-brief-image-assist is-${imageAssistActivity.stage}`} aria-label={language === "cn" ? "图片互助" : "Image assist"}>
+          <section className={`project-brief-image-assist is-${imageAssistActivity.stage}`} aria-label={tr(language, "图片互助", "Image assist", "Image Assist")}>
             <div className="project-brief-image-assist-head">
               <span className="project-brief-image-assist-icon" aria-hidden="true">
                 <SvgIcon name={imageAssistActivity.stage === "completed" ? "check" : "image"} size={14} />
               </span>
               <div>
-                <strong>{IMAGE_ASSIST_STAGE_LABELS[imageAssistActivity.stage]?.[language] ?? (language === "cn" ? "图片互助处理中" : "Image assist in progress")}</strong>
+                <strong>{IMAGE_ASSIST_STAGE_LABELS[imageAssistActivity.stage]?.[language] ?? (tr(language, "图片互助处理中", "Image assist in progress", "Image Assist en curso"))}</strong>
                 {imageAssistActivity.detail && <small>{imageAssistActivity.detail}</small>}
               </div>
               <button
                 type="button"
                 className="project-brief-image-assist-dismiss"
                 onClick={onDismissImageAssistActivity}
-                aria-label={language === "cn" ? "关闭图片互助记录" : "Dismiss image assist record"}
-                title={language === "cn" ? "关闭记录，不会中断传输" : "Dismiss record without interrupting transfer"}
+                aria-label={tr(language, "关闭图片互助记录", "Dismiss image assist record", "Cerrar registro de Image Assist")}
+                title={tr(language, "关闭记录，不会中断传输", "Dismiss record without interrupting transfer", "Cerrar el registro sin interrumpir la transferencia")}
               >
                 <SvgIcon name="close" size={14} />
               </button>
@@ -479,33 +530,29 @@ export default function ProjectBriefCard({
               </p>
             )}
             <div className="project-brief-image-assist-meta">
-              {imageAssistActivity.aspectRatio && <span>{language === "cn" ? `比例 ${imageAssistActivity.aspectRatio}` : imageAssistActivity.aspectRatio}</span>}
+              {imageAssistActivity.aspectRatio && <span>{tr(language, `比例 ${imageAssistActivity.aspectRatio}`, imageAssistActivity.aspectRatio, imageAssistActivity.aspectRatio)}</span>}
               {imageAssistActivity.matchId && <code>{`#${imageAssistActivity.matchId.slice(0, 8)}`}</code>}
             </div>
             {isTransferring && (
               <div className="project-brief-image-assist-transfer">
-                <progress value={transferReceived} max={transferTotal} aria-label={language === "cn" ? "图片回传进度" : "Image return progress"} />
+                <progress value={transferReceived} max={transferTotal} aria-label={tr(language, "图片回传进度", "Image return progress", "Progreso de devolución de imágenes")} />
                 <div>
-                  <span>{language === "cn"
-                    ? `${transferIsSending ? "已发送" : "已接收"} ${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} · ${transferProgress}%`
-                    : `${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} ${transferIsSending ? "sent" : "received"} · ${transferProgress}%`}</span>
+                  <span>{tr(language, `${transferIsSending ? "已发送" : "已接收"} ${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} · ${transferProgress}%`, `${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} ${transferIsSending ? "sent" : "received"} · ${transferProgress}%`, `${transferSize(transferReceived, language)} / ${transferSize(transferTotal, language)} ${transferIsSending ? "enviados" : "recibidos"} · ${transferProgress}%`)}</span>
                   {imageAssistActivity.transferArtifactCount != null && imageAssistActivity.transferCompletedArtifacts != null && (
-                    <small>{language === "cn"
-                      ? `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} 张`
-                      : `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} images`}</small>
+                    <small>{tr(language, `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} 张`, `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} images`, `${imageAssistActivity.transferCompletedArtifacts} / ${imageAssistActivity.transferArtifactCount} imágenes`)}</small>
                   )}
                 </div>
               </div>
             )}
             {imageAssistActivity.images && imageAssistActivity.images.length > 0 && (
-              <div className="project-brief-image-assist-results" aria-label={language === "cn" ? "已传回图片" : "Received images"}>
+              <div className="project-brief-image-assist-results" aria-label={tr(language, "已传回图片", "Received images", "Imágenes recibidas")}>
                 {imageAssistActivity.images.map((path) => (
                   <ChatImagePreview
                     key={path}
                     src={path}
                     openPath={path}
-                    title={language === "cn" ? `打开 ${imageName(path)}` : `Open ${imageName(path)}`}
-                    alt={language === "cn" ? "已传回的图片" : "Received image"}
+                    title={tr(language, `打开 ${imageName(path)}`, `Open ${imageName(path)}`, `Abrir ${imageName(path)}`)}
+                    alt={tr(language, "已传回的图片", "Received image", "Imagen recibida")}
                     className="project-brief-image-assist-thumbnail"
                   />
                 ))}
@@ -650,7 +697,7 @@ export default function ProjectBriefCard({
                     })}
                   </ul>
                 ) : (
-                  <p>{language === "cn" ? "尚未记录可核验的成功标准" : "No verifiable success criteria recorded"}</p>
+                  <p>{tr(language, "尚未记录可核验的成功标准", "No verifiable success criteria recorded", "No hay criterios de éxito verificables registrados")}</p>
                 )}
               </div>
             </div>

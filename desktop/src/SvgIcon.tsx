@@ -36,6 +36,8 @@ export type SvgIconName =
   | "fit"
   | "folder"
   | "graph"
+  | "barChart"
+  | "lineChart"
   | "helpCircle"
   | "image"
   | "inbox"
@@ -73,7 +75,24 @@ export type SvgIconName =
   | "target"
   | "trash"
   | "user"
-  | "warning";
+  | "warning"
+  | "sprout"
+  | "leaf"
+  | "droplet"
+  | "flask"
+  | "database"
+  | "calendar"
+  | "bell"
+  | "flag"
+  | "globe"
+  | "cpu"
+  | "map"
+  | "home"
+  | "heart"
+  | "cloud"
+  | "tag"
+  | "box"
+  | "users";
 
 type IconElement = "circle" | "path" | "rect";
 
@@ -174,6 +193,10 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M6.3 2.8H2.8v3.5M9.7 2.8h3.5v3.5M13.2 9.7v3.5H9.7M2.8 9.7v3.5h3.5", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "folder":
       return [node("path", { d: "M2.4 4.2h4l1.1 1.4h6.1v6.2a1 1 0 0 1-1 1H3.4a1 1 0 0 1-1-1z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "barChart":
+      return [node("path", { d: "M3.5 13V8.5M8 13V3.5M12.5 13V6.5", strokeLinecap: "round" })];
+    case "lineChart":
+      return [node("path", { d: "M2.5 12 6 7.5l3 2.5 4.5-6", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "graph":
       return [node("circle", { cx: 4, cy: 5, r: 1.25 }), node("circle", { cx: 12, cy: 4, r: 1.25 }), node("circle", { cx: 9.5, cy: 12, r: 1.25 }), node("path", { d: "m5.1 5.4 5.7-1M4.8 6l4 4.9m2.1-5.8-1 5.6", strokeLinecap: "round" })];
     case "helpCircle":
@@ -265,6 +288,40 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M3.3 4.5h9.4M6.1 2.6h3.8M4.4 4.5l.5 8.6h6.2l.5-8.6M6.5 6.4v4.7m3-4.7v4.7", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "user":
       return [node("circle", { cx: 8, cy: 5.4, r: 2.3 }), node("path", { d: "M3.7 13.3v-.9c0-2.2 1.7-3.7 4.3-3.7s4.3 1.5 4.3 3.7v.9", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "sprout":
+      return [node("path", { d: "M8 14V7.5M8 9C8 6.5 6.3 5 3.5 5c0 2.6 1.8 4 4.5 4ZM8 7.5c0-2.6 1.8-4.2 4.5-4.2 0 2.7-1.8 4.2-4.5 4.2ZM4.5 14h7", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "leaf":
+      return [node("path", { d: "M3 13C3 7 6.5 3 13 3c0 6.5-4 10-10 10ZM3 13l5.5-5.5", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "droplet":
+      return [node("path", { d: "M8 2.3s4.3 4.6 4.3 7.5a4.3 4.3 0 0 1-8.6 0C3.7 6.9 8 2.3 8 2.3Z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "flask":
+      return [node("path", { d: "M6.3 2.5h3.4M6.8 2.5v3.8L3.2 12.4a1 1 0 0 0 .9 1.4h7.8a1 1 0 0 0 .9-1.4L9.2 6.3V2.5M4.8 9.7h6.4", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "database":
+      return [node("path", { d: "M3 4c0-1 2.2-1.7 5-1.7S13 3 13 4s-2.2 1.7-5 1.7S3 5 3 4ZM3 4v8c0 1 2.2 1.7 5 1.7s5-.7 5-1.7V4M3 8c0 1 2.2 1.7 5 1.7S13 9 13 8", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "calendar":
+      return [node("rect", { x: 2.5, y: 3.3, width: 11, height: 10, rx: 1.2 }), node("path", { d: "M2.5 6.5h11M5.5 2v2.6M10.5 2v2.6", strokeLinecap: "round" })];
+    case "bell":
+      return [node("path", { d: "M4 11V7.3a4 4 0 0 1 8 0V11l1 1.3H3zM6.6 13.8a1.5 1.5 0 0 0 2.8 0", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "flag":
+      return [node("path", { d: "M3.5 14V2.5M3.5 3h8L9.7 5.8l1.8 2.8h-8", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "globe":
+      return [node("circle", { cx: 8, cy: 8, r: 5.3 }), node("path", { d: "M2.7 8h10.6M8 2.7c1.6 1.5 2.4 3.3 2.4 5.3S9.6 11.8 8 13.3C6.4 11.8 5.6 10 5.6 8S6.4 4.2 8 2.7Z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "cpu":
+      return [node("rect", { x: 4.3, y: 4.3, width: 7.4, height: 7.4, rx: 1 }), node("rect", { x: 6.4, y: 6.4, width: 3.2, height: 3.2, rx: .4 }), node("path", { d: "M6.5 2v2.3M9.5 2v2.3M6.5 11.7V14M9.5 11.7V14M2 6.5h2.3M2 9.5h2.3M11.7 6.5H14M11.7 9.5H14", strokeLinecap: "round" })];
+    case "map":
+      return [node("path", { d: "M2.5 4.2 6 2.8l4 1.5 3.5-1.4v9l-3.5 1.4-4-1.5-3.5 1.4zM6 2.8v9M10 4.3v9", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "home":
+      return [node("path", { d: "M2.5 7.5 8 2.8l5.5 4.7M4 6.3v6.9h3V10h2v3.2h3V6.3", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "heart":
+      return [node("path", { d: "M8 13.2S2.4 9.8 2.4 6.1A2.9 2.9 0 0 1 8 4.8a2.9 2.9 0 0 1 5.6 1.3C13.6 9.8 8 13.2 8 13.2Z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "cloud":
+      return [node("path", { d: "M4.6 12.3h6.6a2.6 2.6 0 0 0 .3-5.2A3.7 3.7 0 0 0 4.4 6.4a3 3 0 0 0 .2 5.9Z", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "tag":
+      return [node("path", { d: "M2.5 2.5h5l6 6-5 5-6-6zM5.3 5.3h.01", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "box":
+      return [node("path", { d: "M8 2.3 13.3 5v6L8 13.7 2.7 11V5zM2.7 5 8 7.7 13.3 5M8 7.7v6", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "users":
+      return [node("circle", { cx: 6, cy: 5.5, r: 2 }), node("path", { d: "M2.3 13v-.6c0-1.9 1.5-3.2 3.7-3.2s3.7 1.3 3.7 3.2v.6M10.3 3.6a2 2 0 0 1 0 3.8M11.6 9.4c1.3.4 2.1 1.4 2.1 2.9v.7", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "warning":
       return [node("path", { d: "m8 2.6 5.3 9.4H2.7zM8 5.8v3M8 10.8h.01", strokeLinecap: "round", strokeLinejoin: "round" })];
   }

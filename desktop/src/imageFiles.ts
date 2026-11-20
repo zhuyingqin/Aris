@@ -42,3 +42,15 @@ export function isImagePath(path: string): boolean {
 export function imageMimeType(path: string, fallback = "application/octet-stream"): string {
   return IMAGE_MIME[imageExtension(path)] ?? fallback;
 }
+
+/** Raster formats a chat attachment may be sent to a model as. */
+const CHAT_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
+
+/**
+ * MIME type for a chat image attachment, or null when the extension is not one
+ * a model accepts (SVG, TIFF, ICO, ... are displayable but not sendable).
+ */
+export function chatImageMimeType(path: string): string | null {
+  const extension = imageExtension(path);
+  return CHAT_IMAGE_EXTENSIONS.has(extension) ? IMAGE_MIME[extension] : null;
+}

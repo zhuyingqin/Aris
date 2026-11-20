@@ -233,10 +233,10 @@ backend reads/writes them locally and never returns raw secrets to the frontend.
 | Provider | Executor | Reviewer | Key Models |
 |----------|:--------:|:--------:|-----------|
 | 🟣 Anthropic Claude | ✅ | — | claude-opus, claude-sonnet, claude-haiku |
-| 🟢 OpenAI | ✅ | ✅ | gpt-5.x, o-series |
-| 🔵 Google Gemini | ✅ | ✅ | gemini-2.5-pro, gemini-2.5-flash |
-| 🔶 Zhipu GLM | ✅ | ✅ | GLM-5, GLM-5-Turbo |
-| 🔷 MiniMax | ✅ | ✅ | MiniMax-M2.x |
+| 🟢 OpenAI | ✅ | ✅ | gpt-6.x, gpt-5.5 |
+| 🔵 Google Gemini | ✅ | ✅ | gemini-4-argon, gemini-3.8-flash |
+| 🔶 Zhipu GLM | ✅ | ✅ | GLM-5.3, GLM-5-Turbo |
+| 🔷 MiniMax | ✅ | ✅ | MiniMax-M3, MiniMax-M3.1-Flash |
 | ⚙️ OpenAI-compatible | ✅ | ✅ | custom base URL — DeepSeek, Kimi, Qwen, LM Studio / Ollama, proxies |
 | ⚙️ Anthropic-compatible | ✅ | — | custom base URL — Claude proxies / relays |
 

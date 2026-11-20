@@ -24,6 +24,7 @@ use crate::retrieval_guard::{
     RetrievalAnswerGate, RetrievalGuard, RetrievalGuardCheckpoint, RetrievalPreflight,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use crate::task_plan::{is_plan_continuation_request, TaskPlanCompletion};
 use crate::usage::{TokenUsage, UsageTracker};
 use sha2::{Digest, Sha256};
 
@@ -101,6 +102,15 @@ const SOFT_CHECKPOINT_TOKEN_GROWTH_RATIO_ENV_VAR: &str = "ARIS_SOFT_CHECKPOINT_T
 /// irreducible oversized turn surfaces the error instead of looping forever.
 const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
 const MAX_TRANSIENT_REQUEST_RETRIES: usize = 3;
+/// Images a model request carries, newest first. Every image a tool returned
+/// used to ride along on every later request: a deck review that viewed 16
+/// page renders sent 1 MB per call, the provider slowed past the gateway's
+/// upstream timeout, and each identical resend timed out again (HTTP 408,
+/// 2026-11-16, deepseek-v4.1-flash). Older images are viewed already; the
+/// request keeps a note in their place and the session keeps the pixels.
+const MAX_REQUEST_IMAGES: usize = 6;
+/// After a timeout the same request would time out again: retry lighter.
+const TIMEOUT_RETRY_REQUEST_IMAGES: usize = 2;
 /// Fraction of the compaction budget a request must reach before an opaque
 /// gateway 5xx is treated as an unlabelled context-window rejection rather than
 /// a transient fault. See the escalation in the conversation loop.
@@ -1229,6 +1239,14 @@ where
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // A bare "continue" resumes the earlier task, so its unfinished plan
+        // is this turn's plan until the executor writes a new one. Read the
+        // history before this message joins it.
+        let carried_plan = if is_plan_continuation_request(&user_message) {
+            TaskPlanCompletion::carried_from(&self.session.messages)
+        } else {
+            TaskPlanCompletion::default()
+        };
         self.session.messages.push(user_message);
 
         if self.resume_retrieval_on_next_user_message {
@@ -1265,7 +1283,9 @@ where
         let mut output_limit_continuations = 0;
         let mut context_overflow_retries = 0;
         let mut transient_request_retries = 0;
+        let mut request_image_limit = MAX_REQUEST_IMAGES;
         let mut blank_response_continuations = 0;
+        let mut task_plan_completion = carried_plan;
         let mut auto_compaction = None;
         let mut turn_tool_calls = 0_usize;
         let mut last_soft_checkpoint_tool_calls = 0_usize;
@@ -1376,9 +1396,11 @@ where
                 merge_auto_compaction_event(&mut auto_compaction, event);
             }
 
+            let mut messages = self.session.messages.clone();
+            limit_request_images(&mut messages, request_image_limit);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
-                messages: self.session.messages.clone(),
+                messages,
             };
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
@@ -1433,6 +1455,9 @@ where
                             }
                         }
                         return Err(error);
+                    }
+                    if is_timeout_runtime_error(&error) {
+                        request_image_limit = request_image_limit.min(TIMEOUT_RETRY_REQUEST_IMAGES);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(350));
                     continue;
@@ -1513,6 +1538,15 @@ where
                         blank_response_continuation_prompt(),
                     ));
                     continue;
+                }
+                if !delivery_checkpoint_active {
+                    if let Some(check) = task_plan_completion.next_check() {
+                        self.session.messages.push(ConversationMessage::user_text(format!(
+                            "{CONTINUATION_PROMPT_PREFIX} (incomplete_task_plan).\n{check}",
+                        )));
+                        accepts_turn_input = true;
+                        continue;
+                    }
                 }
                 let answer_text = assistant_message_text(
                     assistant_messages
@@ -1857,6 +1891,9 @@ where
                 }
             }
             if !turn_tool_results.is_empty() {
+                for block in &turn_tool_results {
+                    task_plan_completion.observe(block);
+                }
                 // Carried on the last tool result rather than as its own
                 // message: a `Tool` message converts to an Anthropic `user`
                 // message, so a separate user message here would send two in a
@@ -2108,6 +2145,8 @@ where
             // Surfaces that already classified (desktop Chat converts before
             // returning) arrive on the `Err` arm and are unaffected.
             Ok(tool_output) => {
+                let tool_output =
+                    crate::pdf_render::lift_pdf_page_media(&tool_name, tool_output);
                 let is_error = tool_output.reported_error
                     || crate::tool_outcome::tool_output_reports_failure(
                         &tool_name,
@@ -2177,6 +2216,15 @@ where
         );
         if tool_name == "ToolSearch" && !is_error {
             output = self.activate_tool_search_matches(output);
+        }
+        // A PDF whose text layer is missing or damaged names `read_pdf_pages`
+        // as the way forward; publish that tool's schema now so the model can
+        // follow the hint instead of improvising with the shell.
+        if !is_error
+            && matches!(tool_name.as_str(), "read_file" | "read_files")
+            && crate::pdf_text::output_needs_page_view(&output)
+        {
+            self.activate_tools(vec![crate::pdf_render::READ_PDF_PAGES_TOOL.to_string()]);
         }
         self.observe_tool_evidence(&tool_name, &input, &evidence_output, is_error);
         self.evidence_observed_tool_uses.insert(tool_use_id.clone());
@@ -2269,10 +2317,33 @@ where
         Ok(blocks)
     }
 
-    fn activate_tool_search_matches(&mut self, output: String) -> String {
+    /// Publish catalog tools' schemas for the following requests. Returns
+    /// `(activated, evicted)`; empty when dynamic routing is off.
+    fn activate_tools(&mut self, names: Vec<String>) -> (Vec<String>, Vec<String>) {
         let Some(routing) = self.dynamic_tool_routing.as_mut() else {
-            return output;
+            return (Vec::new(), Vec::new());
         };
+        let (activated, evicted) = routing.activate(names);
+        self.api_client.set_active_tools(Some(&routing.active));
+        let active_tool_count = routing.active.len();
+        if !activated.is_empty() || !evicted.is_empty() {
+            self.event_sink.emit(&RuntimeEvent {
+                timestamp: now_iso8601(),
+                session_id: String::new(),
+                event_type: EventType::ToolRoutingChanged {
+                    activated: activated.clone(),
+                    deactivated: evicted.clone(),
+                    active_tool_count,
+                },
+            });
+        }
+        (activated, evicted)
+    }
+
+    fn activate_tool_search_matches(&mut self, output: String) -> String {
+        if self.dynamic_tool_routing.is_none() {
+            return output;
+        }
         let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&output) else {
             return output;
         };
@@ -2284,20 +2355,7 @@ where
             .filter_map(serde_json::Value::as_str)
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let (activated, evicted) = routing.activate(matches);
-        self.api_client.set_active_tools(Some(&routing.active));
-        let active_tool_count = routing.active.len() as u64;
-        if !activated.is_empty() || !evicted.is_empty() {
-            self.event_sink.emit(&RuntimeEvent {
-                timestamp: now_iso8601(),
-                session_id: String::new(),
-                event_type: EventType::ToolRoutingChanged {
-                    activated: activated.clone(),
-                    deactivated: evicted.clone(),
-                    active_tool_count: active_tool_count as usize,
-                },
-            });
-        }
+        let (activated, evicted) = self.activate_tools(matches);
 
         let Some(object) = value.as_object_mut() else {
             return output;
@@ -2322,6 +2380,10 @@ where
                 ),
             );
         }
+        let active_tool_count = self
+            .dynamic_tool_routing
+            .as_ref()
+            .map_or(0, |routing| routing.active.len() as u64);
         object.insert(
             "active_tool_count".to_string(),
             serde_json::Value::Number(active_tool_count.into()),
@@ -3658,6 +3720,56 @@ fn merge_auto_compaction_event(
         }
         None => *target = Some(event),
     }
+}
+
+/// A provider or gateway gave up waiting on this request (HTTP 408/504, or a
+/// local header/stream timeout). Resending it unchanged usually times out again.
+fn is_timeout_runtime_error(error: &RuntimeError) -> bool {
+    let lower = error.to_string().to_ascii_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || contains_http_status(&lower, 408)
+        || contains_http_status(&lower, 504)
+}
+
+/// Keep only the newest `keep` images in an outgoing request. An omitted image
+/// leaves a note in the tool result it belonged to (or in its place inside a
+/// user message), so the model knows it saw that image and how to see it again.
+/// Only the request copy changes; the session keeps every image.
+fn limit_request_images(messages: &mut [ConversationMessage], keep: usize) -> usize {
+    let mut seen = 0_usize;
+    let mut omitted = 0_usize;
+    for message in messages.iter_mut().rev() {
+        let mut idx = message.blocks.len();
+        while idx > 0 {
+            idx -= 1;
+            let ContentBlock::Image { media_type, .. } = &message.blocks[idx] else {
+                continue;
+            };
+            seen += 1;
+            if seen <= keep {
+                continue;
+            }
+            let note = format!(
+                "[An earlier {media_type} image here was already viewed and is omitted from this request to keep it fast. Re-open the file (ReadMediaFile) if you need to look at it again.]"
+            );
+            let owner = message.blocks[..idx]
+                .iter()
+                .rposition(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            match owner {
+                Some(owner) => {
+                    if let ContentBlock::ToolResult { output, .. } = &mut message.blocks[owner] {
+                        output.push_str("\n\n");
+                        output.push_str(&note);
+                    }
+                    message.blocks.remove(idx);
+                }
+                None => message.blocks[idx] = ContentBlock::Text { text: note },
+            }
+            omitted += 1;
+        }
+    }
+    omitted
 }
 
 fn is_transient_runtime_error(error: &RuntimeError) -> bool {

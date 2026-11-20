@@ -65,8 +65,8 @@ fn settings_from_object(obj: &Map<String, Value>) -> SomniImageSettings {
 }
 
 fn managed_credentials(obj: &Map<String, Value>) -> Result<(String, String), String> {
-    let base = config::managed_executor_base_url(obj).ok_or("请先登录 Somni 账号。")?;
-    let url = reqwest::Url::parse(&base).map_err(|_| "Somni 网关配置无效。")?;
+    let base = config::managed_executor_base_url(obj).ok_or(runtime::ui_lang::tr_static("请先登录 Somni 账号。", "Sign in to your Somni account first.", "Primero inicia sesión en tu cuenta de Somni."))?;
+    let url = reqwest::Url::parse(&base).map_err(|_| runtime::ui_lang::tr_static("Somni 网关配置无效。", "The Somni gateway configuration is invalid.", "La configuración del gateway de Somni no es válida."))?;
     if url.path().trim_end_matches('/') != "/v1"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -74,9 +74,9 @@ fn managed_credentials(obj: &Map<String, Value>) -> Result<(String, String), Str
         || url.fragment().is_some()
         || !newapi::is_approved_managed_base(&url.origin().ascii_serialization())
     {
-        return Err("绘图工具只能使用当前客户端配置的 Somni 网关。".into());
+        return Err(runtime::ui_lang::tr_static("绘图工具只能使用当前客户端配置的 Somni 网关。", "The drawing tool can only use the Somni gateway configured in this client.", "La herramienta de dibujo solo puede usar el gateway de Somni configurado en este cliente.").into());
     }
-    let key = config::managed_executor_api_key(obj).ok_or("请先登录 Somni 账号。")?;
+    let key = config::managed_executor_api_key(obj).ok_or(runtime::ui_lang::tr_static("请先登录 Somni 账号。", "Sign in to your Somni account first.", "Primero inicia sesión en tu cuenta de Somni."))?;
     Ok((base, key))
 }
 
@@ -97,7 +97,7 @@ pub fn somni_image_settings_set(
             .iter()
             .any(|candidate| candidate == model.trim())
         {
-            return Err("所选绘图模型不在当前账号的可用模型列表中，请先同步模型。".into());
+            return Err(runtime::ui_lang::tr_static("所选绘图模型不在当前账号的可用模型列表中，请先同步模型。", "The selected drawing model is not available to this account. Sync your models first.", "El modelo de dibujo elegido no está disponible para esta cuenta. Sincroniza primero los modelos.").into());
         }
     }
     config::set_somni_image_preferences(enabled, model)?;
@@ -145,7 +145,7 @@ impl PreparedFigureImage {
         runtime.block_on(async {
             tokio::select! {
                 biased;
-                () = wait_for_cancel(&cancelled) => Err("图片修改已取消；服务器可能仍在处理，请先核对账户用量。".into()),
+                () = wait_for_cancel(&cancelled) => Err(runtime::ui_lang::tr_static("图片修改已取消；服务器可能仍在处理，请先核对账户用量。", "The image edit was canceled; the server may still be processing it. Check your account usage first.", "Se canceló la edición de la imagen; es posible que el servidor siga procesándola. Revisa primero el uso de tu cuenta.").into()),
                 result = self.client.edit(&self.request, reference, mask) => result,
             }
         })
@@ -190,25 +190,25 @@ pub(crate) fn execute_tool(
     cancelled: Arc<AtomicBool>,
 ) -> Result<String, String> {
     let input: ImageToolInput =
-        serde_json::from_str(input).map_err(|error| format!("绘图参数无效：{error}"))?;
+        serde_json::from_str(input).map_err(|error| runtime::tr!("绘图参数无效：{error}", "Invalid drawing parameters: {error}", "Parámetros de dibujo no válidos: {error}"))?;
     let obj = config::load_object();
     let settings = settings_from_object(&obj);
     if !settings.enabled {
-        return Err("Somni 绘图已关闭，请在设置 > 模型中开启。".into());
+        return Err(runtime::ui_lang::tr_static("Somni 绘图已关闭，请在设置 > 模型中开启。", "Somni drawing is turned off. Turn it on in Settings > Models.", "El dibujo de Somni está desactivado. Actívalo en Ajustes > Modelos.").into());
     }
     let model = input
         .model
         .or(settings.model)
-        .ok_or("请在设置 > 模型中同步并选择绘图模型。")?;
+        .ok_or(runtime::ui_lang::tr_static("请在设置 > 模型中同步并选择绘图模型。", "Sync and choose a drawing model in Settings > Models.", "Sincroniza y elige un modelo de dibujo en Ajustes > Modelos."))?;
     if !settings.models.contains(&model) {
-        return Err("绘图模型不可用，请在设置 > 模型中重新同步。".into());
+        return Err(runtime::ui_lang::tr_static("绘图模型不可用，请在设置 > 模型中重新同步。", "Drawing model unavailable. Sync again in Settings > Models.", "Modelo no disponible para dibujar. Vuelve a sincronizar en Ajustes > Modelos.").into());
     }
     let (base, key) = managed_credentials(&obj)?;
     let workspace = workspace
         .canonicalize()
-        .map_err(|_| "当前项目目录不可用。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("当前项目目录不可用。", "The current project folder is unavailable.", "La carpeta del proyecto actual no está disponible."))?;
     if !workspace.is_dir() {
-        return Err("绘图需要有效的当前项目目录。".into());
+        return Err(runtime::ui_lang::tr_static("绘图需要有效的当前项目目录。", "Drawing needs a valid current project folder.", "Para dibujar hace falta una carpeta de proyecto actual válida.").into());
     }
     let request = ImageGenerationRequest {
         model,
@@ -223,12 +223,12 @@ pub(crate) fn execute_tool(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("无法启动绘图请求：{error}"))?;
+        .map_err(|error| runtime::tr!("无法启动绘图请求：{error}", "Could not start the drawing request: {error}", "No se pudo iniciar la solicitud de dibujo: {error}"))?;
     let result = runtime.block_on(generate_with_cancel(
         &client, &request, references, &cancelled,
     ))?;
     if cancelled.load(Ordering::SeqCst) {
-        return Err("绘图任务已取消。".into());
+        return Err(runtime::ui_lang::tr_static("绘图任务已取消。", "The drawing task was canceled.", "Se canceló la tarea de dibujo.").into());
     }
     let run_id: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -247,7 +247,7 @@ async fn generate_with_cancel(
 ) -> Result<api::ImageGenerationResult, String> {
     tokio::select! {
         biased;
-        () = wait_for_cancel(cancelled) => Err("绘图请求已取消；服务器可能仍在生成，请先核对账户用量再重新提交。".into()),
+        () = wait_for_cancel(cancelled) => Err(runtime::ui_lang::tr_static("绘图请求已取消；服务器可能仍在生成，请先核对账户用量再重新提交。", "The drawing request was canceled; the server may still be generating. Check your account usage before submitting again.", "Se canceló la solicitud de dibujo; es posible que el servidor siga generando. Revisa el uso de tu cuenta antes de volver a enviarla.").into()),
         result = client.generate(request, references) => result,
     }
 }
@@ -260,7 +260,7 @@ async fn wait_for_cancel(cancelled: &AtomicBool) {
 
 fn reference_images(workspace: &Path, files: &[String]) -> Result<Vec<ImageReference>, String> {
     if files.len() > 16 {
-        return Err("每次最多使用 16 张项目内参考图片。".into());
+        return Err(runtime::ui_lang::tr_static("每次最多使用 16 张项目内参考图片。", "Use at most 16 reference images from the project at a time.", "Usa como máximo 16 imágenes de referencia del proyecto cada vez.").into());
     }
     let mut total = 0_u64;
     files
@@ -269,16 +269,16 @@ fn reference_images(workspace: &Path, files: &[String]) -> Result<Vec<ImageRefer
             let path = workspace
                 .join(file)
                 .canonicalize()
-                .map_err(|_| format!("参考图片不存在：{file}"))?;
+                .map_err(|_| runtime::tr!("参考图片不存在：{file}", "Reference image not found: {file}", "No se encontró la imagen de referencia: {file}"))?;
             if !path.starts_with(workspace) || !path.is_file() {
-                return Err("参考图片必须位于当前项目内。".into());
+                return Err(runtime::ui_lang::tr_static("参考图片必须位于当前项目内。", "Reference images must be inside the current project.", "Las imágenes de referencia deben estar dentro del proyecto actual.").into());
             }
             let size = fs::metadata(&path)
                 .map_err(|error| error.to_string())?
                 .len();
             total = total.saturating_add(size);
             if size > api::MAX_IMAGE_BYTES as u64 || total > 64 * 1024 * 1024 {
-                return Err("参考图片过大；单张最多 32 MB，总计最多 64 MB。".into());
+                return Err(runtime::ui_lang::tr_static("参考图片过大；单张最多 32 MB，总计最多 64 MB。", "Reference images are too large: at most 32 MB each and 64 MB in total.", "Las imágenes de referencia son demasiado grandes: como máximo 32 MB cada una y 64 MB en total.").into());
             }
             let image =
                 api::validate_image_bytes(fs::read(&path).map_err(|error| error.to_string())?)?;
@@ -301,7 +301,7 @@ fn artifact_directory(workspace: &Path, run_id: &str) -> Result<PathBuf, String>
             .canonicalize()
             .map_err(|error| error.to_string())?;
         if !canonical.starts_with(workspace) {
-            return Err("图片保存目录不能指向项目外部。".into());
+            return Err(runtime::ui_lang::tr_static("图片保存目录不能指向项目外部。", "The image save folder must not point outside the project.", "La carpeta donde se guardan las imágenes no puede estar fuera del proyecto.").into());
         }
         directory = canonical;
     }
@@ -330,7 +330,7 @@ fn save_result_in_directory(
     let mut images = Vec::new();
     for (index, image) in result.images.into_iter().enumerate() {
         let path = directory.join(format!("image-{}.{}", index + 1, image.extension));
-        fs::write(&path, &image.bytes).map_err(|error| format!("保存生成图片失败：{error}"))?;
+        fs::write(&path, &image.bytes).map_err(|error| runtime::tr!("保存生成图片失败：{error}", "Saving the generated image failed: {error}", "No se pudo guardar la imagen generada: {error}"))?;
         images.push(json!({ "path": path.strip_prefix(workspace).map_err(|error| error.to_string())?.to_string_lossy().replace('\\', "/"),
             "width": image.width, "height": image.height, "sizeBytes": image.bytes.len(),
             "mimeType": image.mime_type, "sha256": format!("{:x}", Sha256::digest(&image.bytes)),
@@ -344,7 +344,7 @@ fn save_result_in_directory(
         &directory.join("generation.json"),
         &serde_json::to_vec_pretty(&output).map_err(|error| error.to_string())?,
     )
-    .map_err(|error| format!("图片已保存，但生成记录保存失败：{error}"))?;
+    .map_err(|error| runtime::tr!("图片已保存，但生成记录保存失败：{error}", "The image was saved, but saving its generation record failed: {error}", "La imagen se guardó, pero no se pudo guardar su registro de generación: {error}"))?;
     Ok(output)
 }
 

@@ -15,8 +15,8 @@ export type SettingsNavId =
   | "models"
   | "memory"
   | "mail"
+  | "literature"
   | "remote"
-  | "extensions"
   | "environment"
   | "update"
   | "about";
@@ -66,9 +66,6 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
       <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
     </>,
   ),
-  extensions: svg(
-    <path d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
-  ),
   account: svg(
     <>
       <rect x="2.2" y="3" width="11.6" height="10" rx="1.6" />
@@ -86,6 +83,11 @@ const NAV_ICONS: Record<SettingsNavId, ReactNode> = {
     <>
       <ellipse cx="8" cy="4" rx="4.8" ry="2" />
       <path d="M3.2 4v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V4M3.2 8v4c0 1.1 2.1 2 4.8 2s4.8-.9 4.8-2V8" />
+    </>,
+  ),
+  literature: svg(
+    <>
+      <path d="M2.5 3.2h4a1.5 1.5 0 0 1 1.5 1.5v8.3a1.2 1.2 0 0 0-1.2-1.2H2.5zM13.5 3.2h-4A1.5 1.5 0 0 0 8 4.7v8.3a1.2 1.2 0 0 1 1.2-1.2h4.3z" />
     </>,
   ),
   mail: svg(
@@ -132,8 +134,8 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
     items: [
       { id: "models", icon: NAV_ICONS.models },
       { id: "memory", icon: NAV_ICONS.memory },
-      { id: "extensions", icon: NAV_ICONS.extensions },
       { id: "mail", icon: NAV_ICONS.mail },
+      { id: "literature", icon: NAV_ICONS.literature },
       { id: "remote", icon: NAV_ICONS.remote },
     ],
   },
@@ -148,11 +150,13 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
 export const SETTINGS_NAV_LABELS: Record<Language, Record<SettingsNavId, string>> = {
   cn: SETTINGS_COPY.cn.nav.labels,
   en: SETTINGS_COPY.en.nav.labels,
+  es: SETTINGS_COPY.es.nav.labels,
 };
 
 export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroupId, string>> = {
   cn: SETTINGS_COPY.cn.nav.groupLabels,
   en: SETTINGS_COPY.en.nav.groupLabels,
+  es: SETTINGS_COPY.es.nav.groupLabels,
 };
 
 const SETTINGS_NAV_ID_SET = new Set<SettingsNavId>([

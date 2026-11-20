@@ -1,0 +1,22 @@
+{
+  "reviewRubricRecord": {
+    "delivered": ["@lab/review/evidence"],
+    "omitted": ["@lab/review/long"],
+    "checks": [
+      {
+        "criterion": "@lab/review/evidence#numbers",
+        "severity": "critical",
+        "result": "violated",
+        "note": "0.91 is in no result file"
+      }
+    ],
+    "unknownCriteria": ["@lab/review/evidence#ghost"],
+    "verdictCorrected": true
+  },
+  "workTaskOrigin": {
+    "pluginName": "@local/experiment-triage",
+    "panelId": "triage",
+    "reportPanel": "triage",
+    "reportWidget": "findings"
+  }
+}

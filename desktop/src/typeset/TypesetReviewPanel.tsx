@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 import { ToolIcon } from "./ToolIcon";
 import { SvgIcon } from "../SvgIcon";
@@ -36,22 +37,28 @@ export default function TypesetReviewPanel({
     {
       id: "demo-note-1",
       line: 18,
-      content: language === "cn"
-        ? "检查摘要与引言中关于基线比较的数据一致性"
-        : "Verify data consistency on baseline speedup between abstract and intro.",
-      author: "Reviewer 1",
+      content: tr(
+        language,
+        "检查摘要与引言中关于基线比较的数据一致性",
+        "Check that the baseline comparison figures agree between the abstract and the introduction.",
+        "Comprueba que los datos de mejora frente a la línea base coincidan entre el resumen y la introducción.",
+      ),
+      author: tr(language, "审稿人 1", "Reviewer 1", "Revisor 1"),
       resolved: false,
-      createdAt: "10 min ago",
+      createdAt: tr(language, "10 分钟前", "10 min ago", "hace 10 min"),
     },
     {
       id: "demo-note-2",
       line: 28,
-      content: language === "cn"
-        ? "公式 (3) 的下标符号与正文定义存在歧义，建议统一"
-        : "Notation index in Eq. (3) is ambiguous; recommend harmonizing with text.",
-      author: "Peer Reviewer",
+      content: tr(
+        language,
+        "公式 (3) 的下标符号与正文定义存在歧义，建议统一",
+        "The subscript notation in Eq. (3) conflicts with its definition in the text; consider unifying them.",
+        "El subíndice de la ecuación (3) es ambiguo respecto a la definición del texto; conviene unificarlo.",
+      ),
+      author: tr(language, "同行审稿人", "Peer reviewer", "Revisor par"),
       resolved: false,
-      createdAt: "Just now",
+      createdAt: tr(language, "刚刚", "Just now", "Justo ahora"),
     },
   ]);
   const [newNoteContent, setNewNoteContent] = useState("");
@@ -65,9 +72,9 @@ export default function TypesetReviewPanel({
       id: `note-${Date.now()}`,
       line: currentLine,
       content: newNoteContent.trim(),
-      author: "Local Reviewer",
+      author: tr(language, "本地审稿人", "Local reviewer", "Revisor local"),
       resolved: false,
-      createdAt: "Just now",
+      createdAt: tr(language, "刚刚", "Just now", "Justo ahora"),
     };
     setNotes((prev) => [note, ...prev]);
     setNewNoteContent("");
@@ -90,9 +97,12 @@ export default function TypesetReviewPanel({
     setTimeout(() => {
       setPeerReviewRunning(false);
       setPeerReviewResult(
-        language === "cn"
-          ? `✅ 独立审阅评估完成（针对 ${sourcePath ? sourcePath.split("/").pop() : "文稿"}）：\n• 论据与支撑：实验数据完整，引言部分有 2 处缺少引用。\n• 方法学严谨度：公式推导与假设表述清晰，符号定义统一。\n• 编译与排版规范：未发现严重语法溢出，建议补充图表说明。`
-          : `✅ Independent Peer Review Complete for ${sourcePath ? sourcePath.split("/").pop() : "document"}:\n• Claim & Evidence: Strong empirical validation; 2 assertions in Intro lack citations.\n• Methodology: Mathematical formulations are sound and hypotheses stated clearly.\n• LaTeX Standards: No critical overflows; recommend expanding caption descriptions.`,
+        tr(
+          language,
+          `✅ 独立审阅评估完成（针对 ${sourcePath ? sourcePath.split("/").pop() : "文稿"}）：\n• 论据与支撑：实验数据完整，引言部分有 2 处缺少引用。\n• 方法学严谨度：公式推导与假设表述清晰，符号定义统一。\n• 编译与排版规范：未发现严重语法溢出，建议补充图表说明。`,
+          `✅ Independent review complete for ${sourcePath ? sourcePath.split("/").pop() : "the manuscript"}:\n• Claims and evidence: The experimental data are complete; 2 statements in the introduction lack citations.\n• Methodological rigor: Derivations and assumptions are clearly stated, and notation is consistent.\n• Compilation and formatting: No serious overflow found; consider adding figure and table captions.`,
+          `✅ Revisión independiente completada para ${sourcePath ? sourcePath.split("/").pop() : "el documento"}:\n• Afirmaciones y evidencia: los datos experimentales están completos; 2 afirmaciones de la introducción no tienen referencias.\n• Rigor metodológico: las derivaciones y los supuestos están bien planteados y la notación es coherente.\n• Compilación y formato: sin desbordamientos graves; conviene añadir descripciones a las figuras y tablas.`,
+        ),
       );
     }, 900);
   };
@@ -150,7 +160,7 @@ export default function TypesetReviewPanel({
         <div className="typeset-review-section">
           <div className="typeset-peer-review-card">
             <div className="typeset-peer-review-head">
-              <span className="typeset-peer-review-badge">Independent Reviewer</span>
+              <span className="typeset-peer-review-badge">{tr(language, "独立审稿人", "Independent Reviewer", "Revisor independiente")}</span>
               <strong className="typeset-peer-review-title">{copy.peerReviewTitle}</strong>
             </div>
             <p className="typeset-peer-review-desc">{copy.peerReviewDesc}</p>

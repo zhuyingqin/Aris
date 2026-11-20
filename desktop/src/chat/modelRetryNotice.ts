@@ -1,5 +1,6 @@
 import type { ChatModelRetryEvent } from "../api/tauri";
 import type { ErrorMessageLanguage } from "../errorMessage";
+import { tr } from "../language";
 import type { ChatBlock, NoticeRetryState } from "../types";
 
 type NoticeBlock = Extract<ChatBlock, { kind: "notice" }>;
@@ -24,9 +25,12 @@ function countdownFrom(resumeAt: number | undefined, now: number): number | null
 }
 
 function adjustingMessage(language: ErrorMessageLanguage): string {
-  return language === "cn"
-    ? "模型正在使用兼容参数重新请求，本轮上下文会保留。"
-    : "Retrying the model with compatible request settings; this turn's context is retained.";
+  return tr(
+    language,
+    "模型正在使用兼容参数重新请求，本轮上下文会保留。",
+    "Retrying the model with compatible request settings; this turn's context is retained.",
+    "Reintentando el modelo con ajustes de solicitud compatibles; se conserva el contexto de este turno.",
+  );
 }
 
 function retryMessage(
@@ -35,31 +39,50 @@ function retryMessage(
   countdownSeconds: number | null,
   settled: boolean,
 ): string {
-  const chinese = language === "cn";
   if (settled) {
-    return chinese
-      ? `模型连接曾不稳定，本轮已自动重试 ${retry.count} 次。`
-      : `The model connection was unstable; retried ${retry.count} ${retry.count === 1 ? "time" : "times"} this turn.`;
+    return tr(
+      language,
+      `模型连接曾不稳定，本轮已自动重试 ${retry.count} 次。`,
+      `The model connection was unstable; retried ${retry.count} ${retry.count === 1 ? "time" : "times"} this turn.`,
+      `La conexión con el modelo fue inestable; se reintentó ${retry.count} ${retry.count === 1 ? "vez" : "veces"} en este turno.`,
+    );
   }
   if (retry.attempt != null && retry.maxAttempts != null) {
-    const scope = chinese
-      ? `第 ${retry.attempt}/${retry.maxAttempts} 次`
-      : `${retry.attempt}/${retry.maxAttempts}`;
+    const scope = tr(
+      language,
+      `第 ${retry.attempt}/${retry.maxAttempts} 次`,
+      `${retry.attempt}/${retry.maxAttempts}`,
+      `${retry.attempt}/${retry.maxAttempts}`,
+    );
     if (countdownSeconds != null) {
-      return chinese
-        ? `模型连接暂时不稳定，正在重试（${scope}，约 ${countdownSeconds} 秒后继续）。`
-        : `The model connection is temporarily unstable; retrying (${scope}, continuing in about ${countdownSeconds}s).`;
+      return tr(
+        language,
+        `模型连接暂时不稳定，正在重试（${scope}，约 ${countdownSeconds} 秒后继续）。`,
+        `The model connection is temporarily unstable; retrying (${scope}, continuing in about ${countdownSeconds}s).`,
+        `La conexión con el modelo es inestable por ahora; reintentando (${scope}, se reanuda en unos ${countdownSeconds} s).`,
+      );
     }
-    return chinese
-      ? `模型连接暂时不稳定，正在重新连接（${scope}）。`
-      : `The model connection is temporarily unstable; reconnecting (${scope}).`;
+    return tr(
+      language,
+      `模型连接暂时不稳定，正在重新连接（${scope}）。`,
+      `The model connection is temporarily unstable; reconnecting (${scope}).`,
+      `La conexión con el modelo es inestable por ahora; reconectando (${scope}).`,
+    );
   }
   if (retry.remaining != null) {
-    return chinese
-      ? `模型流式响应已中断，正在重新连接（剩余 ${retry.remaining} 次自动重试）。`
-      : `The model stream was interrupted; reconnecting (${retry.remaining} automatic retries remain).`;
+    return tr(
+      language,
+      `模型流式响应已中断，正在重新连接（剩余 ${retry.remaining} 次自动重试）。`,
+      `The model stream was interrupted; reconnecting (${retry.remaining} automatic ${retry.remaining === 1 ? "retry" : "retries"} left).`,
+      `Se interrumpió la respuesta en streaming del modelo; reconectando (quedan ${retry.remaining} reintentos automáticos).`,
+    );
   }
-  return chinese ? "模型正在自动重试，请稍候。" : "The model is retrying automatically; please wait.";
+  return tr(
+    language,
+    "模型正在自动重试，请稍候。",
+    "The model is retrying automatically; please wait.",
+    "El modelo está reintentando automáticamente; espera un momento.",
+  );
 }
 
 /** Projects retry state into everything the notice needs to render. Callers

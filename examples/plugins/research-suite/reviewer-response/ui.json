@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "reviewer-response",
+      "slot": "nav.page",
+      "title": { "en": "Reviewer response", "cn": "审稿回复", "es": "Respuesta a revisores" },
+      "icon": "inbox",
+      "order": 40,
+      "scope": "project",
+      "page": "./response/index.html",
+      "widgets": [
+        { "id": "rounds", "type": "json", "title": { "en": "Review rounds", "cn": "审稿轮次", "es": "Rondas de revisión" } }
+      ]
+    }
+  ]
+}

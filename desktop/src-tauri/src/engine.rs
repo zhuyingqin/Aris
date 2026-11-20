@@ -21,6 +21,8 @@ use std::{
 
 #[path = "collaboration.rs"]
 pub(crate) mod collaboration;
+#[path = "question_input.rs"]
+mod question_input;
 
 use crate::slash_commands::{slash_command_specs, SlashCommand};
 use crate::system_prompt::{
@@ -62,6 +64,15 @@ pub struct ChatState {
     // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
     // `chat_question_respond` can deliver the user's answer to the blocked tool.
     question_prompts: QuestionPromptRegistry,
+    // `PluginManager` calls waiting on an approval card, keyed by tool-use id.
+    // Only `chat_plugin_approval_respond` (a click in the main window) answers.
+    plugin_approvals: crate::plugins::PluginApprovalRegistry,
+}
+
+impl ChatState {
+    pub(crate) fn plugin_approvals(&self) -> crate::plugins::PluginApprovalRegistry {
+        self.plugin_approvals.clone()
+    }
 }
 
 struct RunningTurn {
@@ -351,7 +362,7 @@ fn chat_project_binding(
 /// Compatibility validation for callers that need to validate an opaque
 /// session id before its Chat UI projection has been persisted. A real remote
 /// chat read/send must use [`remote_chat_session_validate`] instead.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn validate_remote_chat_target(
     project_id: &str,
     session_id: &str,
@@ -587,6 +598,7 @@ impl Default for ChatState {
             project_switching: AtomicBool::new(false),
             permission_prompts: Arc::new(Mutex::new(HashMap::new())),
             question_prompts: Arc::new(Mutex::new(HashMap::new())),
+            plugin_approvals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1077,6 +1089,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 struct KernelToolExecutor {
     session_id: String,
     turn_id: String,
+    turn_agent: Option<crate::agent_threads::TurnAgent>,
     extra_blocked_tools: &'static [&'static str],
     cancelled: Option<Arc<AtomicBool>>,
     progress_sink: Option<ToolProgressSink>,
@@ -1234,6 +1247,8 @@ fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
         "bash"
             | "PowerShell"
             | ASK_USER_QUESTION_TOOL
+            // Waiting on an approval card is not progress to animate.
+            | crate::plugins::PLUGIN_MANAGER_TOOL
             | CHATGPT_WEB_IMAGE_TOOL
             | SOMNI_IMAGE_TOOL
             | LATEX_COMPILE_TOOL
@@ -1328,12 +1343,31 @@ impl ToolExecutor for KernelToolExecutor {
         if let Some(message) = crate::membership::denied_tool_message(tool_name) {
             return Err(ToolError::new(message));
         }
+        if !crate::official_plugins::tool_allowed_in(&self.project_execution_context, tool_name) {
+            return Err(ToolError::new(crate::official_plugins::disabled_tool_message(tool_name)));
+        }
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         if tools::collaboration::is_tool(tool_name) {
             return collaboration::execute(&self.session_id, &self.turn_id, _tool_use_id, tool_name, input).map_err(ToolError::new);
+        }
+        if tool_name == "LlmReview" {
+            return run_llm_review_tool(
+                self.turn_agent.as_ref(),
+                &self.session_id,
+                _tool_use_id,
+                self.project_execution_context.current_dir(),
+                self.cancelled.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+                &value,
+            ).map_err(|message| {
+                if self.is_cancelled() || message == "interrupted by user" {
+                    ToolError::interrupted_by_user()
+                } else {
+                    ToolError::new(message)
+                }
+            });
         }
         if crate::mail::is_mail_tool(tool_name) {
             return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
@@ -1490,6 +1524,94 @@ fn browser_pdf_download_fallback(
     })
 }
 
+#[derive(Deserialize)]
+struct LlmReviewToolInput {
+    prompt: String,
+    model: Option<String>,
+}
+
+fn run_llm_review_tool(
+    agent: Option<&crate::agent_threads::TurnAgent>,
+    session_id: &str,
+    tool_use_id: &str,
+    workspace: &Path,
+    cancelled: Arc<AtomicBool>,
+    input: &Value,
+) -> Result<String, String> {
+    let input: LlmReviewToolInput = serde_json::from_value(input.clone())
+        .map_err(|error| format!("invalid LlmReview input: {error}"))?;
+    if input.prompt.trim().is_empty() {
+        return Err("LlmReview prompt must not be empty".to_string());
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("interrupted by user".to_string());
+    }
+    let oracle = configured_reviewer_identity()
+        .is_some_and(|(provider, _)| provider.eq_ignore_ascii_case("oracle-web"));
+    if oracle {
+        return crate::oracle_web::run_bound_reviewer(input.prompt, cancelled);
+    }
+    // The turn/configuration already installed the Reviewer environment. Freeze
+    // that connection before starting the child; never use the Executor client.
+    let prepared = tools::prepare_llm_review(input.model)?;
+    let identity = prepared.figure_identity();
+    let mode = if review_runs_in_thread(
+        crate::config::review_mode(),
+        agent.is_some(),
+        Some(&identity.provider),
+    ) {
+        "subagent"
+    } else {
+        "oneshot"
+    };
+    let started = Instant::now();
+    crate::chat_events::record_wire_event(
+        session_id,
+        "reviewer.request",
+        json!({
+            "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+            "role": "reviewer", "mode": mode, "model": prepared.model(),
+            "provider": identity.provider, "prompt": input.prompt,
+        }),
+    );
+    let run = if mode == "subagent" {
+        let agent = agent.expect("subagent mode requires a bound turn");
+        crate::review_thread::run_tool_review(
+            &crate::review_thread::ConfiguredBackend(prepared), agent, &cancelled,
+            &crate::review_thread::ToolReviewRequest {
+                prompt: &input.prompt, tool_use_id, workspace,
+                provider: &identity.provider, model: &identity.model,
+            },
+        ).map(|round| {
+            crate::chat_events::record_wire_event(session_id, "reviewer.tools", json!({
+                "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+                "reviewerSessionId": round.reviewer_session_id,
+                "toolCalls": round.tool_calls.iter().map(|call| json!({
+                    "call": call.label, "ok": call.ok, "outputChars": call.output_chars,
+                })).collect::<Vec<_>>(),
+            }));
+            tools::LlmReviewRun { text: round.text, usages: round.usages }
+        }).map_err(|error| match error {
+            crate::review_thread::RoundError::Cancelled => "interrupted by user".to_string(),
+            crate::review_thread::RoundError::Failed(message) => format!(
+                "LlmReview sub-agent failed: {message}. No one-shot retry was sent. If this Reviewer cannot call tools, use review_mode=oneshot."
+            ),
+        })
+    } else {
+        prepared.run(&input.prompt, cancelled)
+    };
+    crate::chat_events::record_wire_event(
+        session_id,
+        "reviewer.response",
+        json!({
+            "sessionId": session_id, "toolUseId": tool_use_id, "stage": "llm_review",
+            "role": "reviewer", "mode": mode, "durationMs": started.elapsed().as_millis(),
+            "text": run.as_ref().ok().map(|run| &run.text), "error": run.as_ref().err(),
+        }),
+    );
+    run.map(|run| run.text)
+}
+
 struct DesktopToolExecutor<T> {
     app: AppHandle,
     session_id: String,
@@ -1505,6 +1627,10 @@ struct DesktopToolExecutor<T> {
     work_task: Option<WorkTaskTurnBinding>,
     cancelled: Arc<AtomicBool>,
     questions: QuestionPromptRegistry,
+    plugin_approvals: crate::plugins::PluginApprovalRegistry,
+    /// The turn's permission mode. Most tools are gated by the runtime's
+    /// policy; `PluginManager` gates per action, so it needs the mode itself.
+    permission_mode: PermissionMode,
     latex_repair_guard: LatexRepairGuard,
     /// Probes already spent by this turn. The executor is rebuilt per turn, so
     /// the budget resets with it.
@@ -1779,52 +1905,7 @@ fn latex_compile_input_path(input: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn validate_question_input(input: &str) -> Result<Value, ToolError> {
-    // Naming the expected shape matters as much as reporting the parse
-    // position. The observed failure is a payload carrying the flat fields but
-    // the closing punctuation of a `{"questions": [...]}` wrapper, and a bare
-    // "must be valid JSON" invites a retry that adds the wrapper instead of
-    // dropping the stray closers.
-    let value = serde_json::from_str::<Value>(input).map_err(|error| {
-        ToolError::new(format!(
-            "AskUserQuestion input must be valid JSON: {error}. Expected one object shaped \
-             {{\"question\": \"...\", \"options\": [{{\"label\": \"...\"}}]}}, not an array of \
-             questions."
-        ))
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        ToolError::new("AskUserQuestion input must be an object with `question` and `options`.")
-    })?;
-    let question = object
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if question.is_empty() {
-        return Err(ToolError::new(
-            "AskUserQuestion input must include a non-empty `question` string.",
-        ));
-    }
-    let options = object
-        .get("options")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::new("AskUserQuestion input must include an `options` array."))?;
-    let has_labeled_option = options.iter().any(|option| {
-        option
-            .get("label")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .is_some_and(|label| !label.is_empty())
-    });
-    if !has_labeled_option {
-        return Err(ToolError::new(
-            "AskUserQuestion input must include at least one option with a non-empty `label`.",
-        ));
-    }
-    Ok(value)
-}
-
-/// Project a validated `AskUserQuestion` input onto the board's pending-action
+/// Project a canonical `AskUserQuestion` input onto the board's pending-action
 /// shape.
 ///
 /// Flattens the tool's `{label, description}` options to their labels: the card
@@ -1869,6 +1950,71 @@ fn work_task_question_action(
 }
 
 impl<T> DesktopToolExecutor<T> {
+    /// `PluginManager`: the store operations plus the approval card, which is
+    /// shown from here and answered only by `chat_plugin_approval_respond`.
+    fn run_plugin_manager(&self, tool_use_id: &str, input: &str) -> Result<String, ToolError> {
+        // Plugins belong to the registered project; a work task's worktree
+        // previews drafts in its own workspace against them.
+        let plugin_root = crate::state::plugin_project_root(&self.workspace, &self.project_id);
+        // Nobody is present to click a card in these runs. Scheduled runs are
+        // work tasks too.
+        let unattended = if self.work_task.is_some() {
+            Some("work task or scheduled run")
+        } else if self.workflow.is_some() {
+            Some("review workflow")
+        } else {
+            None
+        };
+        let (delivery, app, session_id) = (self.event_delivery, &self.app, self.session_id.as_str());
+        let show_card = |card: Value| {
+            publish_chat_event(
+                delivery,
+                app,
+                "chat-tool",
+                session_id,
+                "tool_call",
+                json!({
+                    "sessionId": session_id,
+                    "id": tool_use_id,
+                    "name": crate::plugins::PLUGIN_MANAGER_TOOL,
+                    "input": tool_input_for_ui(crate::plugins::PLUGIN_MANAGER_TOOL, input),
+                    // Emitted after the card is registered: the UI may answer.
+                    "ready": true,
+                    "pluginApproval": card,
+                }),
+            );
+        };
+        let changed = || crate::plugins::emit_plugins_changed(app, &plugin_root);
+        let call = crate::plugins::PluginToolCall {
+            workspace: &self.workspace,
+            plugin_root: &plugin_root,
+            session_id,
+            tool_use_id,
+            permission_mode: self.permission_mode,
+            unattended,
+            approvals: &self.plugin_approvals,
+            cancelled: &self.cancelled,
+            show_card: &show_card,
+            changed: &changed,
+        };
+        crate::plugins::run_plugin_manager_tool(&call, input)
+    }
+
+    /// `PluginPanel`: the agent reads and fills the panels plugins declare.
+    fn run_plugin_panel(&self, input: &str) -> Result<String, ToolError> {
+        let plugin_root = crate::state::plugin_project_root(&self.workspace, &self.project_id);
+        let (output, change) = crate::plugins::run_plugin_panel_tool(
+            &plugin_root,
+            &self.session_id,
+            self.permission_mode,
+            input,
+        )?;
+        if let Some(change) = change {
+            crate::plugins::emit_plugin_panel_changed(&self.app, &plugin_root, &change);
+        }
+        Ok(output)
+    }
+
     fn emit_question_tool_card(&self, tool_use_id: &str, input: &str) {
         let payload = json!({
             "sessionId": self.session_id,
@@ -1903,15 +2049,16 @@ impl<T> DesktopToolExecutor<T> {
                 "AskUserQuestion is unavailable: the tool call has no id to answer.",
             ));
         }
-        // Fail fast on malformed or non-renderable input rather than blocking
-        // on a card the UI cannot answer.
-        let parsed = validate_question_input(input)?;
+        // Fail fast on input with no renderable question rather than blocking
+        // on a card the UI cannot answer. Recoverable shapes are read as-is;
+        // the cards below render the canonical form via `tool_input_for_ui`.
+        let read = question_input::read_question_input(input).map_err(ToolError::new)?;
         // A work task must not keep a model request or execution slot alive
         // while nobody is present to answer. Persist the question on its card,
         // then interrupt this turn. `work_task_reply` starts a fresh turn in
         // the same checkout and session with the answer as its user message.
         if let Some(binding) = self.work_task.as_ref() {
-            let action = work_task_question_action(tool_use_id, &parsed);
+            let action = work_task_question_action(tool_use_id, &read.question);
             if !crate::work_task::engine::question_raised(
                 &self.app,
                 &self.project_id,
@@ -1955,7 +2102,7 @@ impl<T> DesktopToolExecutor<T> {
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(answer) => {
                     cleanup();
-                    return Ok(answer);
+                    return Ok(read.tool_result(answer));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if self.cancelled.load(Ordering::SeqCst) || runtime::is_interrupted() {
@@ -1985,6 +2132,9 @@ where
     ) -> Result<ToolOutput, ToolError> {
         match inner_result {
             Ok(output) => {
+                // Rendered PDF pages become media blocks before the text is
+                // measured, spilled or truncated below.
+                let output = runtime::pdf_render::lift_pdf_page_media(tool_name, output);
                 // An image result is not text that happens to be long: the
                 // conversation runtime lifts this exact JSON into an image
                 // content block and replaces the text with a one-line summary,
@@ -2121,6 +2271,8 @@ fn is_desktop_tool(tool_name: &str) -> bool {
             | REVIEW_WORKFLOW_STATE_TOOL
             | WORKFLOW_SCOPUS_PROBE_TOOL
             | PROJECT_EVIDENCE_SEARCH_TOOL
+            | crate::plugins::PLUGIN_MANAGER_TOOL
+            | crate::plugins::PLUGIN_PANEL_TOOL
             | COMPUTE_NODES_TOOL
             | COMPUTE_JOB_SUBMIT_TOOL
             | SOMNI_IMAGE_TOOL
@@ -2204,6 +2356,10 @@ where
         } else if tool_name == PROJECT_EVIDENCE_SEARCH_TOOL {
             crate::knowledge::project_evidence_search_tool_at(&self.workspace, input)
                 .map_err(ToolError::new)
+        } else if tool_name == crate::plugins::PLUGIN_MANAGER_TOOL {
+            self.run_plugin_manager(tool_use_id, input)
+        } else if tool_name == crate::plugins::PLUGIN_PANEL_TOOL {
+            self.run_plugin_panel(input)
         } else if tool_name == COMPUTE_NODES_TOOL {
             crate::compute::tool_nodes(&self.app)
                 .and_then(|value| {
@@ -2856,15 +3012,30 @@ pub struct BuiltinToolAvailability {
     pub reason: String,
 }
 
+/// Every tool with every official plugin on: what a turn offers when all
+/// switches are on, and what tests that do not exercise switches read.
+#[cfg(test)]
 fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
+    all_tool_specs_with(extra_blocked_tools, |_| true)
+}
+
+/// The tool registry, minus tools whose official plugin `enabled` says is off.
+/// Plugin-owned tools are dropped as one block each, so switching a plugin
+/// off never reorders the tools that stay.
+fn all_tool_specs_with(
+    extra_blocked_tools: &'static [&'static str],
+    enabled: impl Fn(&str) -> bool,
+) -> Vec<tools::ToolSpec> {
     let mut specs = tools::mvp_tool_specs()
         .into_iter()
         .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
+        .filter(|spec| crate::official_plugins::tool_allowed(spec.name, &enabled))
         .collect::<Vec<_>>();
     specs.extend(
         crate::mail::mail_tool_specs()
             .into_iter()
-            .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools)),
+            .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
+            .filter(|spec| crate::official_plugins::tool_allowed(spec.name, &enabled)),
     );
     // Desktop-only: the interactive surface can pause a turn to ask the user a
     // question. Never registered for autonomous runs (no user to answer).
@@ -2873,6 +3044,15 @@ fn all_tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools
     }
     if !is_blocked_tool(PROJECT_EVIDENCE_SEARCH_TOOL, extra_blocked_tools) {
         specs.push(project_evidence_search_tool_spec());
+    }
+    // An agent writing a plugin previews, installs and asks for approval here;
+    // only the user's click on the card enables anything.
+    if !is_blocked_tool(crate::plugins::PLUGIN_MANAGER_TOOL, extra_blocked_tools) {
+        specs.push(crate::plugins::plugin_manager_tool_spec());
+    }
+    // The data side of a plugin panel: what its widgets show.
+    if !is_blocked_tool(crate::plugins::PLUGIN_PANEL_TOOL, extra_blocked_tools) {
+        specs.push(crate::plugins::plugin_panel_tool_spec());
     }
     if !is_blocked_tool(COMPUTE_NODES_TOOL, extra_blocked_tools) {
         specs.push(compute_nodes_tool_spec());
@@ -2929,8 +3109,11 @@ pub async fn chat_research_provider_availability() -> Result<Vec<BuiltinToolAvai
     .map_err(|error| format!("research provider availability check failed: {error}"))
 }
 
-fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
-    all_tool_specs_for(extra_blocked_tools)
+fn tool_specs_for(
+    extra_blocked_tools: &'static [&'static str],
+    plugins: &runtime::plugins::PluginSet,
+) -> Vec<tools::ToolSpec> {
+    all_tool_specs_with(extra_blocked_tools, |id| plugins.builtin_enabled(id))
 }
 
 fn review_workflow_state_tool_spec() -> tools::ToolSpec {
@@ -3250,7 +3433,7 @@ fn project_evidence_search_tool_spec() -> tools::ToolSpec {
 fn ask_user_question_tool_spec() -> tools::ToolSpec {
     tools::ToolSpec {
         name: ASK_USER_QUESTION_TOOL,
-        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
+        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Ask one question per call, with `question` and `options` at the top level of the input; there is no `questions` array. Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -3352,6 +3535,13 @@ const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 const MAX_TOOL_EVENT_CHARS: usize = 4_000;
 
 fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
+    // The question card renders only the strict flat shape, so give it the
+    // form the executor will actually ask rather than what the model wrote.
+    if tool_name == ASK_USER_QUESTION_TOOL {
+        if let Ok(read) = question_input::read_question_input(input) {
+            return read.question.to_string();
+        }
+    }
     if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
         return input.to_string();
     }
@@ -5739,7 +5929,7 @@ fn infer_project_intent(
     }))
 }
 
-fn extract_json_object(raw: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(raw: &str) -> Option<&str> {
     let mut start = None;
     let mut depth = 0_u32;
     let mut in_string = false;
@@ -6039,6 +6229,8 @@ fn is_unusable_generated_title(title: &str) -> bool {
             | "unknown"
             | "status:insufficientevidence"
             | "insufficientevidence"
+            | "estado:sinconfirmar"
+            | "sinconfirmar"
     ) {
         return true;
     }
@@ -6546,6 +6738,27 @@ pub(crate) struct WorkTaskRuntimeContext {
 pub(crate) struct WorkTaskTurnBinding {
     pub(crate) task_id: String,
     pub(crate) run_seq: u32,
+    /// The plugin set the task's run froze when it started. Every executor
+    /// and revision turn of that run uses it, so toggling a plugin while the
+    /// task runs cannot change what it can use. `None` freezes per turn.
+    pub(crate) plugin_run: Option<Arc<runtime::plugins::PluginRun>>,
+}
+
+/// Put the plugin set a turn runs with into its session's event log (the
+/// Chat audit trail), stamped with the turn by the caller's [`TurnTag`].
+/// A turn that uses no plugins records nothing, so the log of a project
+/// without plugins does not grow by one entry per turn.
+///
+/// [`TurnTag`]: crate::chat_events::TurnTag
+pub(crate) fn record_turn_plugin_set(session_id: &str, run: &runtime::plugins::PluginRun) {
+    let set = run.set();
+    if set.plugins.is_empty() && set.error.is_none() {
+        return;
+    }
+    match serde_json::to_value(set) {
+        Ok(payload) => crate::chat_events::record_event(session_id, "plugin_set", payload),
+        Err(error) => eprintln!("SomniQ desktop: could not record the turn's plugin set: {error}"),
+    }
 }
 
 impl ChatTurnRuntime {
@@ -6694,6 +6907,10 @@ struct IndependentReviewIssue {
     evidence: String,
     #[serde(default)]
     recommendation: String,
+    /// The installed review criterion this issue reports a violation of,
+    /// `<package>/<rubric>#<criterion>`, when it came from a Reviewer pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    criterion: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -6735,6 +6952,14 @@ struct IndependentReviewResult {
     /// omitted) for a one-shot review, which has no tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tool_checks: Vec<String>,
+    /// The Reviewer's own per-criterion account (`rubricChecks`). Input to
+    /// the controller's record below, never shown as the record itself.
+    #[serde(default, skip_serializing)]
+    rubric_checks: Vec<runtime::plugins::ReportedRubricCheck>,
+    /// What this round's packet carried and left out, and what the review
+    /// found per criterion, as the controller reconciled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rubrics: Option<runtime::plugins::ReviewRubricRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7592,6 +7817,73 @@ PASS is allowed when claims material to the current request are supported by the
     )
 }
 
+/// Put the installed review rubrics in a Reviewer packet, ahead of its
+/// answer-format instructions so those stay the last thing it reads. Only
+/// Reviewer packets get this section: the Executor never sees the rubrics.
+/// Record what `packet` carried against what the review said about it, and
+/// hold the verdict to the packet's rules rather than to the Reviewer's word:
+/// an issue citing a criterion carries at least that criterion's severity, a
+/// reported violation always becomes an issue, a key nobody was sent is
+/// cleared, and a violated critical criterion turns a pass into a revision.
+fn apply_review_rubric_record(
+    review: &mut IndependentReviewResult,
+    packet: &runtime::plugins::RubricPacket,
+) {
+    use runtime::plugins::{reconcile_rubric_checks, severity_below, ReviewRubricRecord, CRITICAL_RUBRIC_OVERRIDE_NOTE};
+    let reported = std::mem::take(&mut review.rubric_checks);
+    if packet.is_empty() {
+        for issue in &mut review.issues {
+            issue.criterion = None;
+        }
+        return;
+    }
+    if review.verdict == IndependentReviewVerdict::Unavailable {
+        review.rubrics = Some(ReviewRubricRecord::unanswered(packet));
+        return;
+    }
+    let cited = review.issues.iter().map(|issue| issue.criterion.as_deref()).collect::<Vec<_>>();
+    let reconciled = reconcile_rubric_checks(packet, &reported, &cited);
+    let cleared = reconciled
+        .unknown_issue_criteria
+        .iter()
+        .filter_map(|&index| review.issues[index].criterion.take())
+        .collect::<Vec<_>>();
+    for (issue, floor) in review.issues.iter_mut().zip(&reconciled.issue_floor) {
+        if let Some(floor) = floor {
+            if severity_below(&issue.severity, *floor) {
+                issue.severity = floor.as_str().to_string();
+            }
+        }
+    }
+    for check in &reconciled.violated_without_issue {
+        review.issues.push(IndependentReviewIssue {
+            severity: check.severity.as_str().to_string(),
+            // Title and detail reach the Executor's revision prompt, which never
+            // carries rubric keys or text: the Reviewer's evidence note only.
+            title: "A required review check failed".to_string(),
+            detail: check.note.clone(),
+            evidence: String::new(),
+            recommendation: "Bring the answer in line with this installed review criterion.".to_string(),
+            criterion: Some(check.criterion.clone()),
+        });
+    }
+    let verdict_corrected = review.verdict == IndependentReviewVerdict::Pass && reconciled.forbids_pass();
+    if verdict_corrected {
+        review.verdict = IndependentReviewVerdict::Revise;
+        review.revision_instructions.push(
+            "Resolve the critical findings above before this answer can be accepted.".to_string(),
+        );
+        review.summary = format!("{} {CRITICAL_RUBRIC_OVERRIDE_NOTE}", review.summary.trim())
+            .trim()
+            .to_string();
+    }
+    review.rubrics = Some(reconciled.into_record(packet, cleared, verdict_corrected));
+}
+
+/// Where the rubric section goes in a review packet: before the answer
+/// format, so the format stays the last thing the Reviewer reads.
+const REVIEW_ANSWER_FORMAT_MARKER: &str = "Return exactly one JSON object";
+
 /// Largest incremental review packet, in characters. The first packet of a
 /// Reviewer thread carries the whole case and can run past a hundred thousand;
 /// every later one carries only what changed, and this bound holds however many
@@ -7765,6 +8057,7 @@ pub(crate) fn run_work_task_review(
     prompt: String,
     cancelled: Arc<AtomicBool>,
     executor_model_override: Option<&str>,
+    rubrics: &runtime::plugins::RubricPacket,
 ) -> crate::work_task::model::WorkTaskReviewState {
     use crate::work_task::model::{WorkTaskReviewIssue, WorkTaskReviewState, WorkTaskVerdict};
 
@@ -7786,7 +8079,8 @@ pub(crate) fn run_work_task_review(
         &executor_provider,
         &executor_model,
     );
-    let result = run.result;
+    let mut result = run.result;
+    apply_review_rubric_record(&mut result, rubrics);
     let verdict = match result.verdict {
         IndependentReviewVerdict::Pass => WorkTaskVerdict::Pass,
         IndependentReviewVerdict::Revise => WorkTaskVerdict::Revise,
@@ -7806,11 +8100,13 @@ pub(crate) fn run_work_task_review(
                 title: issue.title,
                 detail: issue.detail,
                 recommendation: issue.recommendation,
+                criterion: issue.criterion,
             })
             .collect(),
         reviewer_model: result.reviewer_model,
         exhausted: false,
         checked_at: crate::work_task::store::now_ms(),
+        rubrics: result.rubrics,
     }
 }
 
@@ -9016,6 +9312,7 @@ async fn run_chat_turn_with_context(
     // A paired device continues the selected desktop session rather than
     // getting an independent permission profile. The session's local policy
     // remains the authority for every tool call.
+    let worker_plugin_approvals = state.plugin_approvals.clone();
     let (permission_mode, permission_prompts, question_prompts) = if autonomous_workflow {
         // An autonomous action has no user to answer a permission prompt, and
         // `DesktopPermissionPrompter` blocks until one arrives. Read-only is
@@ -9092,22 +9389,38 @@ async fn run_chat_turn_with_context(
     let capture_workspace = worker_workspace.clone();
     let worker_work_task = work_task_runtime.clone();
     let worker_sessions_dir = sessions_dir.clone();
-    let worker_project_context =
-        match crate::state::project_execution_context(&worker_workspace, &worker_project_id) {
-            Ok(context) => context,
-            Err(error) => {
-                let error = error.to_string();
-                emit_turn_chat_error(
-                    &app,
-                    &session_id,
-                    &audit_turn_id,
-                    &error,
-                    emit_desktop_chat_events,
-                    &cancelled,
-                );
-                return Err(error);
-            }
-        };
+    // The plugin set this turn may use, fixed now. A work task's turns share
+    // the set its run froze; any other turn freezes its own. The worker owns
+    // it, so it stays registered until the turn has fully unwound.
+    let worker_plugin_run = work_task_runtime
+        .as_ref()
+        .and_then(|task| task.binding.plugin_run.clone())
+        .unwrap_or_else(|| {
+            Arc::new(crate::state::begin_plugin_run(
+                &worker_workspace,
+                &worker_project_id,
+                format!("chat {session_id} {audit_turn_id}"),
+            ))
+        });
+    let worker_project_context = match crate::state::project_run_execution_context(
+        &worker_workspace,
+        &worker_project_id,
+        &worker_plugin_run,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            let error = error.to_string();
+            emit_turn_chat_error(
+                &app,
+                &session_id,
+                &audit_turn_id,
+                &error,
+                emit_desktop_chat_events,
+                &cancelled,
+            );
+            return Err(error);
+        }
+    };
     let joined = tauri::async_runtime::spawn_blocking(move || {
         runtime::with_project_execution_context(&worker_project_context.clone(), || {
         // Every event this thread records for the session from here on is
@@ -9116,6 +9429,7 @@ async fn run_chat_turn_with_context(
         // session's next turn has begun keeps writing under its own, older id.
         let _turn_scope =
             crate::chat_events::TurnTag::new(&worker_session_id, &worker_audit_turn_id).enter();
+        record_turn_plugin_set(&worker_session_id, &worker_plugin_run);
         let feature_config = if worker_paper_reading.is_some() {
             runtime::RuntimeFeatureConfig::default()
         } else { match crate::mcp::config_loader(&worker_workspace)
@@ -9130,9 +9444,20 @@ async fn run_chat_turn_with_context(
         }
         };
         let tool_specs = if worker_paper_reading.is_some() { Vec::new() } else { match worker_workflow.as_ref().filter(|_| autonomous_workflow) {
-            Some(workflow) => aris_chat::chat_tool_specs(workflow_tool_specs(&workflow.stage_id)),
+            // A stage allow-list may name a tool whose official plugin is off
+            // for this run; the frozen set wins over the list.
+            Some(workflow) => aris_chat::chat_tool_specs(
+                workflow_tool_specs(&workflow.stage_id)
+                    .into_iter()
+                    .filter(|spec| {
+                        crate::official_plugins::tool_allowed(spec.name, |id| {
+                            worker_plugin_run.set().builtin_enabled(id)
+                        })
+                    })
+                    .collect(),
+            ),
             None => {
-                let mut specs = tool_specs_for(extra_blocked_tools);
+                let mut specs = tool_specs_for(extra_blocked_tools, worker_plugin_run.set());
                 if worker_retrieval_follow_up == InterruptedResearchFollowUp::Summarize {
                     specs.retain(|spec| spec.name == "RetrievalLedger");
                 }
@@ -9175,6 +9500,7 @@ async fn run_chat_turn_with_context(
             KernelToolExecutor {
                 session_id: worker_session_id.clone(),
                 turn_id: worker_audit_turn_id.clone(),
+                turn_agent: worker_turn_agent.clone(),
                 extra_blocked_tools,
                 cancelled: Some(worker_cancelled.clone()),
                 progress_sink: Some(progress_sink),
@@ -9293,6 +9619,8 @@ async fn run_chat_turn_with_context(
                 .map(|task| task.binding.clone()),
             cancelled: worker_cancelled.clone(),
             questions: question_prompts,
+            plugin_approvals: worker_plugin_approvals,
+            permission_mode,
             latex_repair_guard: LatexRepairGuard::default(),
             scopus_probes_spent: 0,
             inner: mcp_bundle.executor,
@@ -9583,6 +9911,11 @@ async fn run_chat_turn_with_context(
             let mut evidence_sections =
                 vec![review_materialized_evidence(&summary, &worker_workspace)];
             let review_attempt_base = persisted_review_memory.last_attempt;
+            // From the plugin set this turn froze, like every other capability.
+            let review_rubrics = runtime::plugins::PluginStore::for_workspace(
+                &worker_plugin_run.set().project,
+            )
+            .review_rubrics_for(worker_plugin_run.set());
             let mut prior_reviews = persisted_review_memory
                 .rounds
                 .iter()
@@ -9616,10 +9949,15 @@ async fn run_chat_turn_with_context(
                 let delegation_evidence = worker_turn_agent.as_ref().map(|agent|
                     collaboration::review_evidence(agent, &worker_sessions_dir)).unwrap_or_default();
                 let round_tool_evidence = format!("{}\n\n{}", trace_sections.last().map_or("", String::as_str), delegation_evidence);
+                // Which rubrics apply can change with each revised answer.
+                let rubric_packet = runtime::plugins::rubric_packet_for(
+                    &review_rubrics,
+                    &format!("{worker_user_text}\n{text}"),
+                );
                 // The whole case, as the one-shot path has always sent it. A
                 // Reviewer thread asks for it only on first contact.
                 let full_prompt = || {
-                    independent_review_prompt(
+                    rubric_packet.place_in(independent_review_prompt(
                         &worker_user_text,
                         &text,
                         &format!("{}\n\n{}", cumulative_review_sections(
@@ -9634,7 +9972,7 @@ async fn run_chat_turn_with_context(
                         &worker_workspace,
                         &worker_executor_provider,
                         &worker_executor_model,
-                    )
+                    ), Some(REVIEW_ANSWER_FORMAT_MARKER))
                 };
                 // Chat only: a work task's own review of what it committed
                 // stays the one-shot review it has always been.
@@ -9650,7 +9988,7 @@ async fn run_chat_turn_with_context(
                             // Only this round's material: the sections the
                             // Executor produced since the Reviewer last looked.
                             incremental: &|| {
-                                incremental_review_packet(&IncrementalReviewInput {
+                                rubric_packet.place_in(incremental_review_packet(&IncrementalReviewInput {
                                     kind: if review_revision_count == 0 {
                                         IncrementalReviewKind::NewRequest
                                     } else {
@@ -9669,7 +10007,7 @@ async fn run_chat_turn_with_context(
                                     workspace: &worker_workspace,
                                     executor_provider: &worker_executor_provider,
                                     executor_model: &worker_executor_model,
-                                })
+                                }), Some(REVIEW_ANSWER_FORMAT_MARKER))
                             },
                         },
                         &worker_workspace,
@@ -9703,6 +10041,7 @@ async fn run_chat_turn_with_context(
                 }
                 reviewer_usages.extend(review_run.usages);
                 let mut review = review_run.result;
+                apply_review_rubric_record(&mut review, &rubric_packet);
                 let should_revise = review.verdict == IndependentReviewVerdict::Revise
                     && review_revision_count < MAX_INDEPENDENT_REVISIONS;
                 if review.verdict == IndependentReviewVerdict::Revise && !should_revise {
@@ -10863,48 +11202,49 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
         ),
     ];
     let openai_compat_choices = [
-        ("gpt-6-astra", "gpt-6-astra", "OpenAI - GPT-6 Astra"),
-        ("gpt-5.5", "gpt-5.5", "OpenAI - best intelligence at scale"),
-        ("gpt-5.4", "gpt-5.4", "OpenAI - previous flagship"),
-        ("gpt-5.4-mini", "gpt-5.4-mini", "OpenAI - strong mini model"),
+        ("gpt-6.2-astra", "gpt-6.2-astra", "OpenAI - GPT-6.2 Astra"),
+        ("gpt-6.1-sol", "gpt-6.1-sol", "OpenAI - GPT-6.1 Sol"),
+        ("gpt-6.1-terra", "gpt-6.1-terra", "OpenAI - GPT-6.1 Terra"),
+        ("gpt-6-luna", "gpt-6-luna", "OpenAI - GPT-6 Luna"),
+        ("gpt-5.5", "gpt-5.5", "OpenAI - GPT-5.5"),
         (
-            "gpt-5.4-nano",
-            "gpt-5.4-nano",
-            "OpenAI - cheapest high-volume model",
+            "gemini-4-argon",
+            "gemini-4-argon",
+            "Google - Gemini 4 Argon",
         ),
         (
-            "gemini-2.5-pro",
-            "gemini-2.5-pro",
-            "Google - most capable Gemini",
+            "gemini-3.8-flash",
+            "gemini-3.8-flash",
+            "Google - Gemini 3.8 Flash",
         ),
-        (
-            "gemini-2.5-flash",
-            "gemini-2.5-flash",
-            "Google - fast Gemini",
-        ),
-        ("GLM-5", "GLM-5", "Zhipu - GLM 5 latest"),
+        ("glm-5.3", "GLM-5.3", "Zhipu - GLM 5.3, 1M context"),
         ("MiniMax-M3", "MiniMax-M3", "MiniMax - M3"),
-        ("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax - M2.7 latest"),
-        ("kimi-k2.5", "kimi-k2.5", "Kimi - K2.5 reasoning"),
+        (
+            "MiniMax-M3.1-Flash",
+            "MiniMax-M3.1-Flash",
+            "MiniMax - M3.1 Flash",
+        ),
+        ("kimi-k3.1-pro", "kimi-k3.1-pro", "Kimi - K3.1 Pro"),
+        ("kimi-k3", "kimi-k3", "Kimi - K3"),
         ("deepseek-v4-pro", "deepseek-v4-pro", "DeepSeek - V4 Pro"),
-        ("mimo-v2.5-pro", "mimo-v2.5-pro", "Xiaomi - MiMo v2.5 Pro"),
-        ("mimo-v2.5", "mimo-v2.5", "Xiaomi - MiMo v2.5"),
-        ("qwen3.6-plus", "qwen3.6-plus", "Alibaba - Qwen 3.6 Plus"),
-        ("qwen3.6-flash", "qwen3.6-flash", "Alibaba - Qwen 3.6 Flash"),
+        ("mimo-v2.6-pro", "mimo-v2.6-pro", "Xiaomi - MiMo v2.6 Pro"),
         (
-            "qwen3.6-max-preview",
-            "qwen3.6-max-preview",
-            "Alibaba - Qwen 3.6 Max Preview",
+            "mimo-v2.6-flash",
+            "mimo-v2.6-flash",
+            "Xiaomi - MiMo v2.6 Flash",
+        ),
+        ("qwen3.8-max", "qwen3.8-max", "Alibaba - Qwen 3.8 Max"),
+        ("qwen3.7-plus", "qwen3.7-plus", "Alibaba - Qwen 3.7 Plus"),
+        ("qwen3.8-flash", "qwen3.8-flash", "Alibaba - Qwen 3.8 Flash"),
+        (
+            "doubao-seed-2-1-pro-260915",
+            "doubao-seed-2-1-pro-260915",
+            "ByteDance - Doubao Seed 2.1 Pro",
         ),
         (
-            "doubao-pro-4k",
-            "doubao-pro-4k",
-            "ByteDance - Doubao Pro 4K",
-        ),
-        (
-            "doubao-lite-4k",
-            "doubao-lite-4k",
-            "ByteDance - Doubao Lite 4K",
+            "doubao-seed-2-1-lite-260915",
+            "doubao-seed-2-1-lite-260915",
+            "ByteDance - Doubao Seed 2.1 Lite",
         ),
     ];
     let choices = if provider == "anthropic" {
@@ -10932,44 +11272,31 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
 
 fn reviewer_model_selection(provider: &str, current: &str) -> ChatCommandSelection {
     let reviewer_choices = [
-        ("gpt-6-astra", "gpt-6-astra", "OpenAI - GPT-6 Astra"),
+        ("gpt-6.2-astra", "gpt-6.2-astra", "OpenAI - GPT-6.2 Astra"),
+        ("gpt-6.1-sol", "gpt-6.1-sol", "OpenAI - GPT-6.1 Sol"),
+        ("gpt-6.1-terra", "gpt-6.1-terra", "OpenAI - GPT-6.1 Terra"),
+        ("gpt-6-luna", "gpt-6-luna", "OpenAI - GPT-6 Luna"),
+        ("gpt-5.5", "gpt-5.5", "OpenAI - GPT-5.5"),
         (
-            "gpt-5.5",
-            "gpt-5.5",
-            "OpenAI - best intelligence for reviews",
-        ),
-        ("gpt-5.4", "gpt-5.4", "OpenAI - previous flagship"),
-        (
-            "gpt-5.4-mini",
-            "gpt-5.4-mini",
-            "OpenAI - strong and affordable",
+            "gemini-4-argon",
+            "gemini-4-argon",
+            "Google - Gemini 4 Argon",
         ),
         (
-            "gpt-5.4-nano",
-            "gpt-5.4-nano",
-            "OpenAI - cheapest high-volume model",
+            "gemini-3.8-flash",
+            "gemini-3.8-flash",
+            "Google - Gemini 3.8 Flash",
         ),
-        ("gpt-4o", "gpt-4o", "OpenAI - older stable model"),
-        (
-            "gemini-2.5-pro",
-            "gemini-2.5-pro",
-            "Google - deep reasoning",
-        ),
-        (
-            "gemini-2.5-flash",
-            "gemini-2.5-flash",
-            "Google - fast and efficient",
-        ),
-        ("GLM-5", "GLM-5", "Zhipu - most capable"),
-        ("GLM-5-Turbo", "GLM-5-Turbo", "Zhipu - fast"),
+        ("glm-5.3", "GLM-5.3", "Zhipu - most capable"),
+        ("glm-5-turbo", "GLM-5-Turbo", "Zhipu - fast"),
         ("MiniMax-M3", "MiniMax-M3", "MiniMax - M3"),
-        ("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax - latest"),
         (
-            "MiniMax-M2.7-highspeed",
-            "MiniMax-M2.7-highspeed",
-            "MiniMax - fast inference",
+            "MiniMax-M3.1-Flash",
+            "MiniMax-M3.1-Flash",
+            "MiniMax - M3.1 Flash",
         ),
-        ("kimi-k2.5", "kimi-k2.5", "Kimi - K2.5 reasoning"),
+        ("kimi-k3.1-pro", "kimi-k3.1-pro", "Kimi - K3.1 Pro"),
+        ("kimi-k3", "kimi-k3", "Kimi - K3"),
         (
             "claude-sonnet-4-6",
             "claude-sonnet-4-6",

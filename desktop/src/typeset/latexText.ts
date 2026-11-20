@@ -5,7 +5,7 @@
  * everything.
  */
 
-import { scanLatexStructure, type LatexStructureIndex } from "./latexStructure";
+import { scanLatexStructure, type LatexStructureIndex } from "../editor/latex/latexStructure";
 
 const IS_WINDOWS_RUNTIME = typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
 

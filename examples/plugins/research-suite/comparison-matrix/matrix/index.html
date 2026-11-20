@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Comparison matrix: papers (rows) × dimensions (columns) for the current project.
+  Files: style.css (the look), app.mjs (the page), model.mjs (data model, coverage),
+  copy.mjs (en / cn / es text and the prompts handed to the agent). Modules import
+  each other as "pkg:matrix/<file>.mjs".
+
+  The package holds no content of its own: everything shown comes from the json
+  widget "matrix", written by the agent with PluginPanel (plugin
+  @local/comparison-matrix, panel comparison-matrix) or by the user on this page
+  (the user edits the dimensions; the agent fills papers and cells).
+
+  Widget "matrix":
+  {
+    "version": 1,
+    "dimensions": [{ "id": string, "name": string, "hint"?: string }],
+    "papers":     [{ "id": string, "title": string, "year"?: number, "path"?: project-relative file }],
+    "cells": {
+      "<paperId>": {
+        "<dimensionId>": { "value": string, "evidence"?: string /* e.g. "papers/x.pdf p.4" */, "path"?: string }
+      }
+    },
+    "updatedAt"?: ISO 8601 string
+  }
+
+  Tolerated: a missing or malformed value (drawn as an empty matrix), entries without
+  a name/title (skipped), missing or duplicate ids (generated / made unique), a cell
+  given as a bare string (a value without evidence), numeric strings for "year".
+  Fields this page does not know are kept when it saves. A cell counts as evidenced
+  only when it has both a value and evidence; anything else is drawn as "no evidence".
+  Deleting a dimension deletes its cells; every other cell is kept.
+-->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="titles">
+    <p class="kicker" id="summary"></p>
+    <h1 id="title"></h1>
+    <p class="updated" id="updated"></p>
+  </div>
+  <div class="tools">
+    <button id="fill" type="button" class="primary"></button>
+    <button id="edit" type="button" aria-controls="editor" aria-expanded="false"></button>
+    <form id="export-form" class="export">
+      <input id="export-path" maxlength="240" spellcheck="false">
+      <button id="export" type="submit"></button>
+    </form>
+  </div>
+</header>
+<section id="editor" class="editor" hidden></section>
+<p id="status" role="status" aria-live="polite"></p>
+<main>
+  <div id="body"></div>
+  <aside id="detail" class="detail idle" aria-live="polite"></aside>
+</main>
+<section id="coverage" class="coverage" hidden></section>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

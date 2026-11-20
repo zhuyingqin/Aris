@@ -151,9 +151,9 @@ fn candidate(
     let candidate = run
         .pending_raster_edit
         .as_ref()
-        .ok_or("图片结果已处理，请刷新。")?;
+        .ok_or(runtime::ui_lang::tr_static("图片结果已处理，请刷新。", "The image result has already been handled. Refresh.", "El resultado de la imagen ya se procesó. Actualiza."))?;
     if candidate.request_id.as_deref() != Some(request_id) || candidate.hash != expected_hash {
-        return Err("图片结果已变更，请刷新后重新选择。".into());
+        return Err(runtime::ui_lang::tr_static("图片结果已变更，请刷新后重新选择。", "The image result has changed. Refresh and choose again.", "El resultado de la imagen cambió. Actualiza y vuelve a elegir.").into());
     }
     Ok(candidate.clone())
 }
@@ -166,7 +166,7 @@ fn application_image(
 ) -> Result<api::GeneratedImage, String> {
     let bytes = store::read_artifact(workspace, &run.id, &candidate.path, store::MAX_SOURCE_BYTES)?;
     if store::hash(&bytes) != candidate.hash {
-        return Err("返回图片完整性检查失败。".into());
+        return Err(runtime::ui_lang::tr_static("返回图片完整性检查失败。", "The returned image failed its integrity check.", "La imagen devuelta no superó la comprobación de integridad.").into());
     }
     let returned = api::validate_image_bytes(bytes)?;
     if choice == "returned" {
@@ -295,7 +295,7 @@ pub async fn figures_resolve_edit_result(
     let run = tauri::async_runtime::spawn_blocking(move || {
         let jobs = active_runs().lock().map_err(|e| e.to_string())?;
         if jobs.contains_key(&(project_id, id.clone())) {
-            return Err("请等待当前任务完成。".into());
+            return Err(runtime::ui_lang::tr_static("请等待当前任务完成。", "Wait for the current task to finish.", "Espera a que termine la tarea actual.").into());
         }
         resolve_once(&workspace, &id, &request_id, &expected_hash, &choice)
     })

@@ -2117,3 +2117,21 @@ fn url_host_strips_scheme_userinfo_and_port() {
     assert_eq!(url_host("https://example.com"), Some("example.com"));
     assert_eq!(url_host("not-a-url"), None);
 }
+
+#[test]
+fn every_language_status_line_reads_as_an_explicit_unconfirmed_answer() {
+    use crate::ui_lang::{scoped, UiLanguage};
+    for (language, header) in [
+        (UiLanguage::Cn, "状态：未确认"),
+        (UiLanguage::En, "Status: unconfirmed"),
+        (UiLanguage::Es, "Estado: sin confirmar"),
+    ] {
+        let _language = scoped(language);
+        let label = AnswerConfidence::Unconfirmed.label();
+        assert_eq!(label, header);
+        assert!(explicit_unconfirmed_answer(&format!("{label}\n\n...")));
+        assert!(unsupported_claim_notice().len() > 20);
+    }
+    let _language = scoped(UiLanguage::Es);
+    assert!(AnswerConfidence::Confirmed.label().starts_with("Estado:"));
+}

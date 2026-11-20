@@ -25,7 +25,7 @@ describe("DeepSeek relative prices", () => {
     expect(modelPriceView("image", state, "cn")?.label).toBe("0.1");
     expect(modelPriceView("image", state, "cn")?.title).toContain("按次计费");
     expect(modelPriceView("image", state, "en")?.label).toBe("0.1");
-    expect(modelPriceView("tiered", state, "en")?.label).toBe("Variable pricing");
+    expect(modelPriceView("tiered", state, "en")?.label).toBe("Tiered pricing");
     expect(modelPriceView("model", null, "cn")).toBeNull();
   });
 

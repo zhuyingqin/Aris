@@ -1,0 +1,12 @@
+{
+  "name": "@local/claim-checker",
+  "version": "0.1.0",
+  "description": "A project page that lists every cited sentence of a manuscript and checks, one background task per sentence, whether the cited source actually supports it, with the exact quote and page.",
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json",
+    "requires": [
+      "literature"
+    ]
+  }
+}

@@ -19,7 +19,7 @@ const pdfMocks = vi.hoisted(() => ({
 
 vi.mock("../../api/tauri", () => apiMocks);
 
-vi.mock("../../literature/PdfReader", () => ({
+vi.mock("../../pdf/PdfReader", () => ({
   default: (props: Record<string, unknown>) => {
     pdfMocks.props.push(props);
     return <div data-testid="pdf-reader" />;

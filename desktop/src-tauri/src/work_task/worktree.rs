@@ -44,19 +44,26 @@ fn git(workspace: &Path) -> std::process::Command {
     command
 }
 
-fn run(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    if !workspace.is_dir() {
-        return Err(format!("directory does not exist: {}", workspace.display()));
+/// Shown when the `git` executable cannot be started at all. Work tasks need
+/// it in every project, a plain folder included (see [`super::shadow`]).
+pub(crate) const GIT_MISSING: &str = "Git is not installed or is not available on PATH. Work \
+     tasks and scheduled tasks use Git to keep their changes in an isolated copy until you \
+     accept them; install Git (https://git-scm.com) and try again";
+
+fn output_of(mut command: std::process::Command, dir: &Path) -> Result<Output, String> {
+    if !dir.is_dir() {
+        return Err(format!("directory does not exist: {}", dir.display()));
     }
-    git(workspace)
-        .args(args)
-        .output()
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                "Git is not installed or is not available on PATH".to_string()
-            }
-            _ => format!("could not run Git: {error}"),
-        })
+    command.output().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => GIT_MISSING.to_string(),
+        _ => format!("could not run Git: {error}"),
+    })
+}
+
+fn run(workspace: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut command = git(workspace);
+    command.args(args);
+    output_of(command, workspace)
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -64,10 +71,10 @@ fn text(bytes: &[u8]) -> String {
 }
 
 fn checked(workspace: &Path, args: &[&str], action: &str) -> Result<String, String> {
-    let output = run(workspace, args)?;
-    if output.status.success() {
-        return Ok(text(&output.stdout));
-    }
+    success_text(run(workspace, args)?, action)
+}
+
+fn failure(output: &Output, action: &str) -> String {
     let detail = {
         let stderr = text(&output.stderr);
         if stderr.is_empty() {
@@ -76,11 +83,118 @@ fn checked(workspace: &Path, args: &[&str], action: &str) -> Result<String, Stri
             stderr
         }
     };
-    Err(if detail.is_empty() {
+    if detail.is_empty() {
         format!("Git could not {action}")
     } else {
         format!("Git could not {action}: {detail}")
-    })
+    }
+}
+
+fn success_text(output: Output, action: &str) -> Result<String, String> {
+    if output.status.success() {
+        Ok(text(&output.stdout))
+    } else {
+        Err(failure(&output, action))
+    }
+}
+
+/// Where the project side of a task's Git commands runs.
+///
+/// The task's own checkout is always a real Git worktree and is driven by path
+/// (`commit_all`, the review snapshot, the patch). The *project* side — the
+/// branch a task is cut from and lands on — is either the user's own
+/// repository or, for a plain folder, the private repository SomniQ keeps for
+/// it ([`super::shadow`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectRepo {
+    /// The project is (inside) a Git checkout of its own.
+    Checkout(PathBuf),
+    /// The project is a plain folder, used as the working tree of a bare
+    /// repository that lives outside it.
+    Shadow { git_dir: PathBuf, work_tree: PathBuf },
+}
+
+impl ProjectRepo {
+    /// The repository a task's project-side commands use: the one recorded
+    /// with its checkout when there is one, otherwise the project itself.
+    pub(crate) fn for_task(project: &Path, tree: Option<&WorkTaskWorktree>) -> Self {
+        match tree.and_then(|tree| tree.shadow_git_dir.as_deref()) {
+            Some(git_dir) => Self::Shadow {
+                git_dir: PathBuf::from(git_dir),
+                work_tree: project.to_path_buf(),
+            },
+            None => Self::Checkout(project.to_path_buf()),
+        }
+    }
+
+    pub(crate) fn is_shadow(&self) -> bool {
+        matches!(self, Self::Shadow { .. })
+    }
+
+    fn work_tree(&self) -> &Path {
+        match self {
+            Self::Checkout(path) => path,
+            Self::Shadow { work_tree, .. } => work_tree,
+        }
+    }
+
+    fn command(&self) -> std::process::Command {
+        match self {
+            Self::Checkout(path) => git(path),
+            Self::Shadow { git_dir, work_tree } => {
+                let mut command = git(work_tree);
+                let mut git_dir_arg = std::ffi::OsString::from("--git-dir=");
+                git_dir_arg.push(git_dir);
+                let mut work_tree_arg = std::ffi::OsString::from("--work-tree=");
+                work_tree_arg.push(work_tree);
+                command.arg(git_dir_arg).arg(work_tree_arg);
+                command
+            }
+        }
+    }
+
+    pub(crate) fn run(&self, args: &[&str]) -> Result<Output, String> {
+        let mut command = self.command();
+        command.args(args);
+        output_of(command, self.work_tree())
+    }
+
+    pub(crate) fn checked(&self, args: &[&str], action: &str) -> Result<String, String> {
+        success_text(self.run(args)?, action)
+    }
+
+    /// Like [`Self::checked`], but the raw stdout: NUL-separated listings
+    /// must not be trimmed or lossily re-joined.
+    pub(crate) fn checked_bytes(&self, args: &[&str], action: &str) -> Result<Vec<u8>, String> {
+        let output = self.run(args)?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(failure(&output, action))
+        }
+    }
+
+    /// Hold the shadow lock for the duration of a project-side operation. A
+    /// real checkout needs none: its operations were already serialised by
+    /// the callers before shadows existed.
+    fn guard(&self) -> Option<std::sync::MutexGuard<'static, ()>> {
+        self.is_shadow().then(super::shadow::lock)
+    }
+}
+
+/// Whether tasks can run in this project at all.
+///
+/// Any folder can host one since plain folders got a private repository; what
+/// remains is Git itself being installed. Checked before a card moves, so a
+/// refusal is shown where the user queued the task rather than as a failed run.
+pub(crate) fn ensure_can_host_tasks(project: &Path) -> Result<(), String> {
+    if !project.is_dir() {
+        return Err(format!(
+            "the project folder does not exist: {}",
+            project.display()
+        ));
+    }
+    run(project, &["--version"]).map(|_| ())
 }
 
 fn nul_paths(bytes: &[u8]) -> BTreeSet<String> {
@@ -140,11 +254,16 @@ pub(crate) fn worktree_path(project_id: &str, task_id: &str) -> PathBuf {
 
 /// The branch a task should be cut from, and land back on: whatever the user
 /// currently has checked out.
+#[cfg(test)]
 pub(crate) fn current_branch(project: &Path) -> Result<String, String> {
+    current_branch_in(&ProjectRepo::Checkout(project.to_path_buf()))
+}
+
+fn current_branch_in(repo: &ProjectRepo) -> Result<String, String> {
     // `rev-parse --abbrev-ref HEAD` fails for a perfectly valid repository
     // before its first commit. `symbolic-ref` reads the branch name directly,
     // so an unborn branch remains distinguishable from a detached HEAD.
-    let symbolic = run(project, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let symbolic = repo.run(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if symbolic.status.success() {
         let branch = text(&symbolic.stdout);
         if !branch.is_empty() {
@@ -152,10 +271,7 @@ pub(crate) fn current_branch(project: &Path) -> Result<String, String> {
         }
     }
 
-    let head = run(
-        project,
-        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-    )?;
+    let head = repo.run(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
     if head.status.success() {
         // Detached HEAD has no branch to merge back into, and picking one for
         // the user would land work somewhere they did not ask for.
@@ -177,9 +293,9 @@ pub(crate) fn current_branch(project: &Path) -> Result<String, String> {
 /// that ordinary state as an "ambiguous argument", which is accurate for the
 /// CLI but not actionable in the app. Worktrees genuinely require a commit,
 /// so report the missing prerequisite without exposing Git's fatal output.
-fn branch_tip(project: &Path, branch: &str) -> Result<String, String> {
+fn branch_tip(repo: &ProjectRepo, branch: &str) -> Result<String, String> {
     let reference = format!("refs/heads/{branch}^{{commit}}");
-    let output = run(project, &["rev-parse", "--verify", "--quiet", &reference])?;
+    let output = repo.run(&["rev-parse", "--verify", "--quiet", &reference])?;
     let commit = text(&output.stdout);
     if output.status.success() && !commit.is_empty() {
         return Ok(commit);
@@ -205,28 +321,35 @@ fn branch_tip(project: &Path, branch: &str) -> Result<String, String> {
 /// rather than letting it default to HEAD: between reading the branch and
 /// creating the worktree the user may switch branches, and an implicit HEAD
 /// would silently cut the task from wherever they landed.
+///
+/// A plain folder gets the same checkout, cut from a fresh snapshot of the
+/// folder in its private repository ([`super::shadow`]).
 pub(crate) fn create(
     project: &Path,
     project_id: &str,
     task_id: &str,
 ) -> Result<WorkTaskWorktree, String> {
-    if !is_git_repository(project) {
-        return Err(
-            "work tasks need a Git repository: this project is not one, so there is no branch to isolate the work on"
-                .to_string(),
-        );
+    let repo = if is_git_repository(project) {
+        ProjectRepo::Checkout(project.to_path_buf())
+    } else {
+        ensure_can_host_tasks(project)?;
+        super::shadow::prepare(project)?
+    };
+    let _guard = repo.guard();
+    if repo.is_shadow() {
+        super::shadow::snapshot(&repo)?;
     }
-    let base_branch = current_branch(project)?;
-    let base_sha = branch_tip(project, &base_branch)?;
+    let base_branch = current_branch_in(&repo)?;
+    let base_sha = branch_tip(&repo, &base_branch)?;
     let branch = branch_name(task_id);
     let path = worktree_path(project_id, task_id);
 
     // Both leftovers are removed rather than reported: a task that failed
     // before recording its worktree leaves exactly this pair behind, and
     // refusing here would strand the card forever with no way back.
-    remove_if_present(project, &path)?;
-    if branch_exists(project, &branch) {
-        let _ = checked(project, &["branch", "-D", &branch], "delete a stale branch");
+    remove_if_present(&repo, &path)?;
+    if branch_exists(&repo, &branch) {
+        let _ = repo.checked(&["branch", "-D", &branch], "delete a stale branch");
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -234,8 +357,7 @@ pub(crate) fn create(
     }
 
     let path_text = path.to_string_lossy().to_string();
-    checked(
-        project,
+    repo.checked(
         &["worktree", "add", "-b", &branch, &path_text, &base_sha],
         "create the task worktree",
     )?;
@@ -244,6 +366,10 @@ pub(crate) fn create(
         branch,
         base_branch,
         base_sha,
+        shadow_git_dir: match &repo {
+            ProjectRepo::Shadow { git_dir, .. } => Some(git_dir.to_string_lossy().into_owned()),
+            ProjectRepo::Checkout(_) => None,
+        },
     })
 }
 
@@ -253,19 +379,16 @@ pub(crate) fn create(
 /// base move": the user may have committed on the base themselves while the app
 /// was closed, which moves it without landing anything of ours.
 pub(crate) fn branch_is_merged_into(
-    project: &Path,
+    repo: &ProjectRepo,
     branch: &str,
     base_branch: &str,
 ) -> Result<bool, String> {
-    if !branch_exists(project, branch) {
+    if !branch_exists(repo, branch) {
         return Err(format!(
             "the task's branch '{branch}' no longer exists, so whether its work landed cannot be established"
         ));
     }
-    let output = run(
-        project,
-        &["merge-base", "--is-ancestor", branch, base_branch],
-    )?;
+    let output = repo.run(&["merge-base", "--is-ancestor", branch, base_branch])?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -278,35 +401,37 @@ pub(crate) fn branch_is_merged_into(
     }
 }
 
-/// Resolve a ref to a commit id.
+/// Resolve a ref to a commit id, in a checkout (a task's, or the user's own).
 pub(crate) fn resolve(project: &Path, reference: &str) -> Result<String, String> {
     checked(project, &["rev-parse", reference], "resolve a revision")
 }
 
-fn branch_exists(project: &Path, branch: &str) -> bool {
-    run(
-        project,
-        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
-    )
-    .map(|output| output.status.success())
-    .unwrap_or(false)
+/// Resolve a ref on the project side of a task.
+pub(crate) fn resolve_in(repo: &ProjectRepo, reference: &str) -> Result<String, String> {
+    repo.checked(&["rev-parse", reference], "resolve a revision")
 }
 
-fn remove_if_present(project: &Path, path: &Path) -> Result<(), String> {
+fn branch_exists(repo: &ProjectRepo, branch: &str) -> bool {
+    repo.run(&["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn remove_if_present(repo: &ProjectRepo, path: &Path) -> Result<(), String> {
     if !path.exists() {
         // Still prune: a directory deleted outside Git leaves the worktree
         // registered, and `worktree add` then refuses the same path.
-        let _ = run(project, &["worktree", "prune"]);
+        let _ = repo.run(&["worktree", "prune"]);
         return Ok(());
     }
     let path_text = path.to_string_lossy().to_string();
-    let forced = run(project, &["worktree", "remove", "--force", &path_text])?;
+    let forced = repo.run(&["worktree", "remove", "--force", &path_text])?;
     if !forced.status.success() {
         // Git refuses paths it does not know about; the directory is ours
         // either way, and leaving it would block every later attempt.
         std::fs::remove_dir_all(path)
             .map_err(|error| format!("could not remove {}: {error}", path.display()))?;
-        let _ = run(project, &["worktree", "prune"]);
+        let _ = repo.run(&["worktree", "prune"]);
     }
     Ok(())
 }
@@ -321,10 +446,32 @@ pub(crate) fn discard(
     worktree: &WorkTaskWorktree,
     keep_branch: bool,
 ) -> Result<(), String> {
-    remove_if_present(project, Path::new(&worktree.path))?;
-    if !keep_branch && branch_exists(project, &worktree.branch) {
-        checked(
-            project,
+    let repo = ProjectRepo::for_task(project, Some(worktree));
+    let _guard = repo.guard();
+    if let ProjectRepo::Shadow { git_dir, work_tree } = &repo {
+        if !work_tree.is_dir() {
+            // The folder was moved or deleted, so commands that need it as a
+            // working tree cannot run. The repository itself does not need
+            // it to forget the checkout and the branch.
+            let _ = std::fs::remove_dir_all(&worktree.path);
+            let shadow_git = |args: &[&str]| {
+                let mut git_dir_arg = std::ffi::OsString::from("--git-dir=");
+                git_dir_arg.push(git_dir);
+                let _ = crate::process::hidden_command("git")
+                    .arg(git_dir_arg)
+                    .args(args)
+                    .output();
+            };
+            shadow_git(&["worktree", "prune"]);
+            if !keep_branch {
+                shadow_git(&["branch", "-D", &worktree.branch]);
+            }
+            return Ok(());
+        }
+    }
+    remove_if_present(&repo, Path::new(&worktree.path))?;
+    if !keep_branch && branch_exists(&repo, &worktree.branch) {
+        repo.checked(
             &["branch", "-D", &worktree.branch],
             "delete the task branch",
         )?;
@@ -436,9 +583,18 @@ pub(crate) fn preserve_untracked_collisions(
     worktree: &WorkTaskWorktree,
     task_id: &str,
 ) -> Result<Vec<String>, String> {
+    // A plain folder has nothing to preserve this way. The snapshot taken at
+    // accept tracks every file the snapshot rules allow; whatever is still
+    // untracked was left out on purpose (too large, unreadable, a cache), and
+    // committing it here would copy exactly what the rules keep out. Git then
+    // refuses the fast-forward rather than overwrite such a file, which is the
+    // outcome wanted: the merge stops with the path named.
+    if worktree.shadow_git_dir.is_some() {
+        return Ok(Vec::new());
+    }
     // Never create the preservation commit on whichever unrelated branch the
     // user happens to have switched to since the task was cut.
-    let current = current_branch(project)?;
+    let current = current_branch_in(&ProjectRepo::Checkout(project.to_path_buf()))?;
     if current != worktree.base_branch {
         return Err(format!(
             "this task was cut from '{}' but the project is on '{current}'; switch back before accepting it",
@@ -704,6 +860,12 @@ pub(crate) enum MergeOutcome {
 /// already contains the base is fast-forwarded onto the base branch. The user's
 /// own checkout therefore never ends up in a conflicted state because of a
 /// background task.
+///
+/// For a plain folder the base is its snapshot branch. A fresh snapshot is
+/// taken first, so whatever the user changed in the folder while the task ran
+/// is part of the base that stage A merges, and stage B — which is what writes
+/// the accepted files into the folder — refuses to overwrite anything the
+/// snapshot does not track, ignored files included.
 pub(crate) fn merge_into_base(
     project: &Path,
     worktree: &WorkTaskWorktree,
@@ -715,10 +877,15 @@ pub(crate) fn merge_into_base(
             worktree.path
         ));
     }
+    let repo = ProjectRepo::for_task(project, Some(worktree));
+    let _guard = repo.guard();
+    if repo.is_shadow() {
+        super::shadow::snapshot(&repo)?;
+    }
     // Refuse to write a base branch the user is not on any more: they may have
     // switched, and merging into a branch that is not checked out here would
     // need a different mechanism than the one below.
-    let current = current_branch(project)?;
+    let current = current_branch_in(&repo)?;
     if current != worktree.base_branch {
         return Err(format!(
             "this task was cut from '{}' but the project is on '{current}'; switch back before accepting it",
@@ -730,7 +897,7 @@ pub(crate) fn merge_into_base(
     }
 
     // Stage A — bring the base into the task branch. A conflict lands here.
-    let head = checked(project, &["rev-parse", "HEAD"], "resolve the base branch")?;
+    let head = repo.checked(&["rev-parse", "HEAD"], "resolve the base branch")?;
     let merge = run(
         &path,
         &[
@@ -753,12 +920,16 @@ pub(crate) fn merge_into_base(
 
     // Stage B — fast-forward the base onto the task branch. Guaranteed to be a
     // fast-forward because stage A just made the task branch contain the base.
-    checked(
-        project,
-        &["merge", "--ff-only", &worktree.branch],
-        "land the task on its base branch",
-    )?;
-    let commit = checked(project, &["rev-parse", "HEAD"], "resolve the merge commit")?;
+    let mut land = vec!["merge", "--ff-only"];
+    if repo.is_shadow() {
+        // Git treats ignored files as expendable by default. In a plain folder
+        // "ignored" means left out of the snapshot — a dataset, an open
+        // document's lock file — and none of that is the merge's to replace.
+        land.push("--no-overwrite-ignore");
+    }
+    land.push(&worktree.branch);
+    repo.checked(&land, "land the task on its base branch")?;
+    let commit = repo.checked(&["rev-parse", "HEAD"], "resolve the merge commit")?;
     Ok(MergeOutcome::Merged { commit })
 }
 
@@ -991,14 +1162,66 @@ mod tests {
         assert_eq!(deleted.byte_size, None);
     }
 
+    /// A plain folder used to be refused here. It now gets a checkout from
+    /// its private repository, recorded on the worktree so every later
+    /// project-side command goes there — and the folder itself stays plain.
     #[test]
-    fn a_non_repository_is_refused_with_a_reason_naming_git() {
+    fn a_plain_folder_gets_a_checkout_from_its_private_repository() {
         let fixture = Fixture::new();
-        let temp = fixture.temp.path().join("plain");
-        std::fs::create_dir_all(&temp).expect("dir");
-        assert!(!is_git_repository(&temp));
-        let error = create(&temp, "p", "t").expect_err("must refuse");
-        assert!(error.contains("Git repository"), "unhelpful error: {error}");
+        let folder = fixture.temp.path().join("plain");
+        std::fs::create_dir_all(&folder).expect("dir");
+        std::fs::write(folder.join("notes.md"), "notes\n").expect("seed");
+        assert!(!is_git_repository(&folder));
+
+        let tree = create(&folder, "p", "t").expect("checkout");
+
+        assert!(tree.shadow_git_dir.is_some());
+        assert_eq!(tree.base_branch, super::super::shadow::SNAPSHOT_BRANCH);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&tree.path).join("notes.md")).expect("copied"),
+            "notes\n"
+        );
+        assert!(!folder.join(".git").exists());
+        assert!(!is_git_repository(&folder), "the folder stays a plain folder");
+
+        discard(&folder, &tree, false).expect("discard");
+        assert!(!Path::new(&tree.path).exists());
+        let repo = ProjectRepo::for_task(&folder, Some(&tree));
+        assert!(!branch_exists(&repo, &tree.branch));
+    }
+
+    /// A plain folder that was moved or deleted cannot serve as a working
+    /// tree any more; dropping the card must still clear its checkout and
+    /// branch rather than fail and leave them behind.
+    #[test]
+    fn discarding_after_the_folder_is_gone_still_tidies_up() {
+        let fixture = Fixture::new();
+        let folder = fixture.temp.path().join("moved");
+        std::fs::create_dir_all(&folder).expect("dir");
+        std::fs::write(folder.join("a.md"), "a\n").expect("seed");
+        let tree = create(&folder, "p", "gone").expect("checkout");
+        std::fs::remove_dir_all(&folder).expect("delete the folder");
+
+        discard(&folder, &tree, false).expect("discard");
+
+        assert!(!Path::new(&tree.path).exists());
+        let git_dir = tree.shadow_git_dir.clone().expect("shadow");
+        let branches = crate::process::hidden_command("git")
+            .arg(format!("--git-dir={git_dir}"))
+            .args(["branch", "--list", &tree.branch])
+            .output()
+            .expect("git");
+        assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    /// Without Git there is nothing to isolate a task with, in any project.
+    /// The reason has to say so in words a user can act on.
+    #[test]
+    fn a_missing_git_is_reported_as_something_to_install() {
+        assert!(GIT_MISSING.contains("install Git"));
+        let missing = std::path::PathBuf::from("Z:/somniq-no-such-folder/for-a-test");
+        let error = ensure_can_host_tasks(&missing).expect_err("must refuse");
+        assert!(error.contains("does not exist"), "unhelpful error: {error}");
     }
 
     /// `git init` creates a symbolic branch but not a commit. Worktrees cannot
@@ -1055,7 +1278,10 @@ mod tests {
 
         discard(&project, &worktree, false).expect("discard");
         assert!(!Path::new(&worktree.path).exists());
-        assert!(!branch_exists(&project, &worktree.branch));
+        assert!(!branch_exists(
+            &ProjectRepo::Checkout(project.clone()),
+            &worktree.branch
+        ));
     }
 
     /// SomniQ creates its own runtime directory inside whatever workspace a

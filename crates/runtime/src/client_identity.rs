@@ -22,8 +22,13 @@ pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// generic failure.
 pub const CLIENT_OUTDATED_CODE: &str = "client_outdated";
 
-const CLIENT_OUTDATED_FALLBACK_MESSAGE: &str =
-    "当前客户端版本已停止服务，请更新到最新版本后再试";
+fn client_outdated_fallback_message() -> String {
+    crate::ui_lang::tr(
+        "当前客户端版本已停止服务，请更新到最新版本后再试",
+        "This client version is no longer supported. Update to the latest version and try again.",
+        "Esta versión del cliente ya no tiene soporte. Actualiza a la última versión y vuelve a intentarlo.",
+    )
+}
 
 /// `aris/<version> (SomniQ Studio; <os>; <arch>)`.
 #[must_use]
@@ -56,7 +61,7 @@ pub fn client_outdated_message(status: u16, body: &str) -> Option<String> {
                 .filter(|message| !message.is_empty())
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| CLIENT_OUTDATED_FALLBACK_MESSAGE.to_string());
+        .unwrap_or_else(client_outdated_fallback_message);
     Some(message)
 }
 

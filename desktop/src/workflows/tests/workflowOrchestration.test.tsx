@@ -233,6 +233,7 @@ beforeEach(() => {
   ledger.executorReplies.length = 0;
   ledger.reviewerReplies.length = 0;
   useStore.setState({
+    language: "cn",
     tab: "workflows",
     currentProject: {
       id: "default",

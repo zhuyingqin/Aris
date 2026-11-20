@@ -46,6 +46,13 @@ function renderTable(element: Element): string {
 function renderNode(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return escapeLatexText(node.textContent ?? "");
   if (!(node instanceof Element)) return "";
+  // Chat's rich clipboard keeps the same delimited TeX as its plain-text
+  // payload. Preserve it when pasting into the visual LaTeX editor.
+  const math = node.getAttribute("data-somniq-math");
+  if (math === "inline" || math === "display") {
+    const source = node.textContent ?? "";
+    return math === "display" ? `\n${source}\n` : source;
+  }
   const tag = node.tagName.toLowerCase();
   const content = () => renderChildren(node);
   switch (tag) {

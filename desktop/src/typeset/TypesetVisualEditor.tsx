@@ -9,6 +9,8 @@ import {
   type EditorSettings,
 } from "../editor/editorSettings";
 import { useEditorSettings } from "../editor/useEditorSettings";
+import { useStore } from "../store";
+import { tr } from "../language";
 import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import {
@@ -27,12 +29,14 @@ import {
   visualForwardSearchClick,
   visualNumbering as visualNumberingFacet,
   visualSourcePath,
+  visualCompiledDocument as visualCompiledDocumentFacet,
   visualTheorems as visualTheoremsFacet,
 } from "./visualDecorations";
 import type { SectionNumberingPrefix } from "./outlineModel";
 import type { TheoremDefinition } from "./theoremEnvironments";
+import type { VisualCompiledDocument } from "./compiledDiagramPreview";
 import type { VisualPdfCursor } from "./visualModel";
-import { scanLatexStructure } from "./latexStructure";
+import { scanLatexStructure } from "../editor/latex/latexStructure";
 import { latexHtmlPaste, latexImagePaste } from "./latexHtmlPaste";
 
 declare global {
@@ -122,6 +126,7 @@ function spellCheckAttributes(enabled: boolean, language: string | null): Extens
 export function TypesetVisualEditor({
   path,
   draft,
+  compiledDocument = null,
   numbering,
   theorems = null,
   pdfCursor,
@@ -140,6 +145,8 @@ export function TypesetVisualEditor({
 }: {
   path: string | null;
   draft: string;
+  /** The current PDF and the exact source snapshot it was built from. */
+  compiledDocument?: VisualCompiledDocument | null;
   /** Where this file sits in the document's heading numbering, so an `\input`
    * chapter shows the numbers its compiled PDF shows. Null while the project
    * graph is still loading, or for a file that has no headings of its own. */
@@ -179,6 +186,7 @@ export function TypesetVisualEditor({
   const handleRef = useRef<SharedEditorHandle | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const sourcePathCompartmentRef = useRef(new Compartment());
+  const compiledDocumentCompartmentRef = useRef(new Compartment());
   const numberingCompartmentRef = useRef(new Compartment());
   const theoremsCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
@@ -188,6 +196,7 @@ export function TypesetVisualEditor({
   const documentSyncRef = useRef({
     draft,
     path,
+    compiledDocument,
     numbering,
     theorems,
     onOpenCodeRange,
@@ -196,6 +205,7 @@ export function TypesetVisualEditor({
   // The page scales with the shared font-size setting; everything else about
   // the Visual surface's typography stays its own.
   const editorSettings = useEditorSettings();
+  const uiLanguage = useStore((state) => state.language);
   const effectiveSpellCheckLanguage = spellCheckLanguage === undefined
     ? spellCheckLanguageAttribute(editorSettings)
     : spellCheckLanguage;
@@ -255,6 +265,7 @@ export function TypesetVisualEditor({
       extensions: [
         EditorView.lineWrapping,
         sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
+        compiledDocumentCompartmentRef.current.of(visualCompiledDocumentFacet.of(compiledDocument)),
         numberingCompartmentRef.current.of(visualNumberingFacet.of(numbering)),
         theoremsCompartmentRef.current.of(visualTheoremsFacet.of(theorems)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
@@ -353,6 +364,7 @@ export function TypesetVisualEditor({
     const next = {
       draft,
       path,
+      compiledDocument,
       numbering,
       theorems,
       onOpenCodeRange,
@@ -361,6 +373,9 @@ export function TypesetVisualEditor({
     const effects: StateEffect<unknown>[] = [];
     if (previous.path !== path) {
       effects.push(sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)));
+    }
+    if (previous.compiledDocument !== compiledDocument) {
+      effects.push(compiledDocumentCompartmentRef.current.reconfigure(visualCompiledDocumentFacet.of(compiledDocument)));
     }
     // The prefix moves when the project graph resolves, when another chapter
     // gains or loses a heading, or when the compile root changes.
@@ -389,7 +404,7 @@ export function TypesetVisualEditor({
       ...(replacement ? { changes: replacement, annotations: Transaction.addToHistory.of(false) } : {}),
       effects,
     });
-  }, [draft, numbering, onForwardSearch, onOpenCodeRange, path, theorems]);
+  }, [compiledDocument, draft, numbering, onForwardSearch, onOpenCodeRange, path, theorems]);
 
   useEffect(() => {
     const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
@@ -430,7 +445,7 @@ export function TypesetVisualEditor({
   }, [pdfCursor]);
 
   return (
-    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
+    <section className="typeset-visual-pane ide-redesign-editor-content" aria-label={tr(uiLanguage, "可视化编辑器", "Visual editor", "Editor visual")}>
       <div className="typeset-visual-scroll">
         <div
           className={`typeset-visual-page typeset-visual-cm ${isBeamer ? "beamer-deck" : "latex-paper"}`}
@@ -979,6 +994,13 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
     overflowY: "hidden",
     padding: "4px 0",
   },
+  ".cm-vis-diagram-canvas canvas.cm-vis-diagram-compiled": {
+    display: "block",
+    maxWidth: "none",
+    maxHeight: "none",
+    margin: "0 auto",
+    backgroundColor: "white",
+  },
   ".cm-vis-diagram-canvas .cm-vis-diagram-preview": {
     margin: "0 auto",
   },
@@ -1005,7 +1027,7 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
     textAlign: "center",
   },
   // TikZ/PGF drawing fallback hint. Graph-shaped TikZ is rendered as an SVG
-  // preview; this text only appears when no supported graph primitives exist.
+  // preview; complex drawings need the actual compiled PDF.
   ".cm-vis-diagram-hint": {
     fontSize: "11.5px",
     color: "var(--visual-muted-2)",
@@ -1030,6 +1052,13 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
     // explicit, even though the cell text is ordinary HTML.
     userSelect: "text",
     WebkitUserSelect: "text",
+  },
+  ".cm-vis-table-wrap > .cm-vis-caption": {
+    textAlign: "center",
+    whiteSpace: "normal",
+    boxShadow: "none",
+    padding: "4px 0 10px",
+    lineHeight: "1.35",
   },
   ".cm-vis-table-wrap ::selection": {
     color: "inherit",
@@ -1088,6 +1117,7 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   // Marks the cell the toolbar acts on, so "insert row below" is unambiguous.
   ".cm-vis-table-cell[data-vis-table-active]": { boxShadow: "inset 0 0 0 1px var(--visual-border-strong)" },
   ".cm-vis-table": {
+    "--cm-vis-table-cell-padding": "clamp(6px, 1.5vw, 14px)",
     borderCollapse: "collapse",
     width: "max-content",
     maxWidth: "100%",
@@ -1097,15 +1127,17 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   ".cm-vis-table th, .cm-vis-table td": {
     minWidth: "0",
     maxWidth: "32ch",
-    padding: "4px clamp(6px, 1.5vw, 14px)",
+    padding: "4px var(--cm-vis-table-cell-padding)",
+    verticalAlign: "top",
     textAlign: "left",
     overflowWrap: "anywhere",
     whiteSpace: "normal",
   },
-  ".cm-vis-table thead, .cm-vis-table tr:first-child th": { fontWeight: "700" },
+  ".cm-vis-table-spaced-row > td": { paddingTop: "10px" },
+  ".cm-vis-table thead, .cm-vis-table tr:first-of-type th": { fontWeight: "700" },
   ".cm-vis-table th": { borderBottom: "1.5px solid var(--visual-border-strong)", fontWeight: "700" },
   ".cm-vis-table tr:last-child td": { borderBottom: "1px solid var(--visual-border-strong)" },
-  ".cm-vis-table tr:first-child td, .cm-vis-table tr:first-child th": { borderTop: "1.5px solid var(--visual-border-strong)" },
+  ".cm-vis-table tr:first-of-type td, .cm-vis-table tr:first-of-type th": { borderTop: "1.5px solid var(--visual-border-strong)" },
 
   // Caption line: a restrained warm tone keeps figures and tables easy to find
   // without competing with the hierarchy colors used by headings.

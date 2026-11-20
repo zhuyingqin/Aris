@@ -153,7 +153,7 @@ describe("MemorySettings against the native backend", () => {
     expect(screen.getByText("Memory library: unavailable")).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Observe/ }).getAttribute("aria-checked")).toBe("true");
     expect(Array.from(
-      screen.getByLabelText("V2 memory status").querySelectorAll("strong"),
+      screen.getByLabelText("v2 memory status").querySelectorAll("strong"),
       (node) => node.textContent,
     )).toEqual(["2", "0", "3", "1", "1", "2"]);
   });
@@ -221,7 +221,7 @@ describe("MemorySettings against the native backend", () => {
 
     fireEvent.click(await screen.findByRole("tab", { name: /R1/i }));
     expect(await screen.findByText("Current")).toBeTruthy();
-    expect(screen.getByText("Recall only")).toBeTruthy();
+    expect(screen.getByText("Recalled on demand")).toBeTruthy();
     expect(screen.getByText("file:final/main.pdf")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: /R3/i }));
@@ -281,7 +281,7 @@ describe("MemorySettings against the native backend", () => {
 
     render(<MemorySettings language="en" />);
     await screen.findByText("R3 awaiting your confirmation");
-    fireEvent.click(screen.getByRole("button", { name: "Confirm for injection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm and allow injection" }));
 
     await waitFor(() => expect(memoryV2ConfirmR3).toHaveBeenCalledWith("r3-preference"));
     await waitFor(() => expect(screen.queryByText("Use Chinese for product settings.")).toBeNull());
@@ -323,7 +323,7 @@ describe("MemorySettings against the native backend", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<MemorySettings language="en" />);
-    fireEvent.click(screen.getByRole("button", { name: "Re-screen rejected" }));
+    fireEvent.click(screen.getByRole("button", { name: "Re-screen rejected turns" }));
 
     await waitFor(() => expect(memoryV2RescreenRejected).toHaveBeenCalledTimes(1));
     expect(confirm).toHaveBeenCalledTimes(1);
@@ -336,7 +336,7 @@ describe("MemorySettings against the native backend", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(<MemorySettings language="en" />);
-    fireEvent.click(screen.getByRole("button", { name: "Re-screen rejected" }));
+    fireEvent.click(screen.getByRole("button", { name: "Re-screen rejected turns" }));
 
     await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
     expect(memoryV2RescreenRejected).not.toHaveBeenCalled();

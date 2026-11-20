@@ -6,7 +6,8 @@ import {
   isTauri,
   type GitWorkspaceSnapshot,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { useAppearance } from "../appearance";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
@@ -18,10 +19,13 @@ import { groupChatModels } from "./modelGroups";
 import { modelPriceView, type ModelPricingState } from "../modelPricing";
 import { reasoningLevelName } from "./reasoningLevels";
 import { useMacImeGuard } from "./useMacImeGuard";
+import { NO_QUEUED_MESSAGES, type QueuedMessage } from "./useMessageQueue";
 import "../modelPricing.css";
 import "./ChatComposerGit.css";
 import "./ChatComposerModel.css";
 import "./ChatComposerLayout.css";
+import "./ChatComposerQueue.css";
+import { chatImageMimeType } from "../imageFiles";
 
 interface ContextStatusView {
   kind: "warning" | "compacted";
@@ -166,9 +170,13 @@ function bytesFromFile(file: File): Promise<Uint8Array> {
   });
 }
 
-async function persistPathlessAttachment(file: File): Promise<ChatAttachment> {
+async function persistPathlessAttachment(file: File, language: Language): Promise<ChatAttachment> {
   if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-    throw new Error(`Attachment exceeds the ${MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024} MB limit.`);
+    const limit = MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024;
+    throw new Error(tr(language,
+      `附件超过 ${limit} MB 上限。`,
+      `Attachment exceeds the ${limit} MB limit.`,
+      `El adjunto supera el límite de ${limit} MB.`));
   }
   const imported = await chatImportAttachmentData(
     file.name,
@@ -183,7 +191,7 @@ async function persistPathlessAttachment(file: File): Promise<ChatAttachment> {
   };
 }
 
-export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
+export async function attachmentFromFile(file: File, language: Language = "en"): Promise<ChatAttachment> {
   const selectedPath = pathFromDraggedFile(file);
   if (file.type.startsWith("image/")) {
     if (file.size > MAX_IMAGE_BYTES) {
@@ -204,7 +212,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
         kind: "image",
         name: imported.name,
         path: imported.path,
-        mimeType: file.type || imageMimeTypeFromPath(imported.path) || "image/png",
+        mimeType: file.type || chatImageMimeType(imported.path) || "image/png",
       };
     }
     const preview = await dataUrlFromFile(file);
@@ -218,7 +226,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
   }
   if (selectedPath && isTauri()) return attachmentFromPath(selectedPath);
   const isPdf = file.type === "application/pdf" || PDF_FILE_EXTENSION.test(file.name);
-  if (isPdf && isTauri()) return persistPathlessAttachment(file);
+  if (isPdf && isTauri()) return persistPathlessAttachment(file, language);
   if (isPdf && selectedPath) {
     return {
       id: makeId("attachment"),
@@ -233,7 +241,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
     || file.type === "application/xml"
     || TEXT_FILE_EXTENSION.test(file.name);
   if (!isText) {
-    if (isTauri()) return persistPathlessAttachment(file);
+    if (isTauri()) return persistPathlessAttachment(file, language);
     return {
       id: makeId("attachment"),
       kind: "file",
@@ -257,7 +265,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
 
 export async function attachmentFromPath(path: string): Promise<ChatAttachment> {
   const imported = await chatImportAttachment(path);
-  const mimeType = imageMimeTypeFromPath(imported.path);
+  const mimeType = chatImageMimeType(imported.path);
   return {
     id: makeId("attachment"),
     kind: mimeType ? "image" : "file",
@@ -265,19 +273,6 @@ export async function attachmentFromPath(path: string): Promise<ChatAttachment> 
     path: imported.path,
     mimeType: mimeType ?? undefined,
   };
-}
-
-function imageMimeTypeFromPath(path: string): string | null {
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  switch (extension) {
-    case "jpg":
-    case "jpeg": return "image/jpeg";
-    case "png": return "image/png";
-    case "gif": return "image/gif";
-    case "webp": return "image/webp";
-    case "bmp": return "image/bmp";
-    default: return null;
-  }
 }
 
 const PERMISSION_OPTIONS = [
@@ -288,6 +283,7 @@ const PERMISSION_OPTIONS = [
 ];
 
 function ContextRing({ used, max }: { used: number; max: number }) {
+  const language = useStore((state) => state.language);
   const rawPct = max > 0 ? used / max : 0;
   const pct = Math.min(1, Math.max(0, rawPct));
   const radius = 9;
@@ -298,7 +294,7 @@ function ContextRing({ used, max }: { used: number; max: number }) {
   const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
   const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
   return (
-    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens)`}>
+    <div className="ctx-ring" title={tr(language, `上下文已用 ${label}（${usedK} / ${maxK} tokens）`, `Context window: ${label} used (${usedK} / ${maxK} tokens)`, `Ventana de contexto: ${label} usado (${usedK} / ${maxK} tokens)`)}>
       <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
         <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
         {pct > 0 && (
@@ -328,6 +324,13 @@ interface Props {
   onAttachmentsChange: (attachments: ChatAttachment[]) => void;
   onSubmit: () => void;
   onStop: () => void;
+  /** Messages lined up while this chat is answering, oldest first. */
+  queuedMessages?: readonly QueuedMessage[];
+  /** The last turn was stopped or failed, so the queue waits for the user. */
+  queuePaused?: boolean;
+  onEditQueued?: (id: string) => void;
+  onRemoveQueued?: (id: string) => void;
+  onResumeQueue?: () => void;
   onCancelEdit: () => void;
   onHeightChange: (height: number) => void;
   focusRequest?: number;
@@ -373,6 +376,11 @@ function ChatComposer({
   onAttachmentsChange,
   onSubmit,
   onStop,
+  queuedMessages = NO_QUEUED_MESSAGES,
+  queuePaused = false,
+  onEditQueued,
+  onRemoveQueued,
+  onResumeQueue,
   onCancelEdit,
   onHeightChange,
   focusRequest = 0,
@@ -414,7 +422,7 @@ function ChatComposer({
       const priceSortValues = new Map(options.map(({ value }) => [
         value, modelPriceView(value, modelPricing, language)?.sortValue ?? Infinity,
       ]));
-      return groupChatModels(options, language === "cn" ? "其他模型" : "Other models", priceSortValues);
+      return groupChatModels(options, tr(language, "其他模型", "Other models", "Otros modelos"), priceSortValues);
     },
     [modelOptions, modelPricing, language],
   );
@@ -454,24 +462,24 @@ function ChatComposer({
   const [gitMenuLayout, setGitMenuLayout] = useState({ left: 0, maxHeight: 430 });
   const fileSearchVersion = useRef(0);
   const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
-  const dismissContextLabel = language === "cn" ? "关闭上下文提示" : "Dismiss context notice";
-  const modelSettingsLabel = language === "cn" ? "模型与思考强度" : "Model and reasoning effort";
+  const dismissContextLabel = tr(language, "关闭上下文提示", "Dismiss context notice", "Cerrar aviso de contexto");
+  const modelSettingsLabel = tr(language, "模型与思考强度", "Model and reasoning effort", "Modelo y esfuerzo de razonamiento");
   const canChooseModel = Boolean(canSwitchModel && modelOptions?.length && onModelChange);
   const activePrice = modelName ? modelPriceView(modelName, modelPricing, language) : null;
   const canAdjustReasoning = Boolean(reasoningSupported && reasoningApplied && reasoningOptions.length && onReasoningEffortChange);
   const reasoningLabel = reasoningApplied
     ? reasoningLevelName(reasoningEffort, language)
-    : (language === "cn" ? "服务端默认" : "Provider default");
+    : (tr(language, "服务端默认", "Provider default", "Predeterminado del proveedor"));
   const repository = gitWorkspace ?? null;
   const gitLabel = repository
     ? !repository.gitAvailable
-      ? (language === "cn" ? "Git 不可用" : "Git unavailable")
+      ? (tr(language, "Git 不可用", "Git unavailable", "Git no disponible"))
       : !repository.isRepository
-        ? (language === "cn" ? "未初始化 Git" : "No Git repository")
+        ? (tr(language, "未初始化 Git", "No Git repository", "Sin repositorio Git"))
         : repository.detached
           ? "Detached HEAD"
-          : (repository.branch ?? (language === "cn" ? "未知分支" : "Unknown branch"))
-    : (language === "cn" ? "正在读取 Git…" : "Reading Git…");
+          : (repository.branch ?? (tr(language, "未知分支", "Unknown branch", "Rama desconocida")))
+    : (tr(language, "正在读取 Git…", "Reading Git…", "Leyendo Git…"));
   const gitChangeCount = repository?.isRepository ? repository.files.length : 0;
   const filteredGitBranches = (repository?.branches ?? []).filter((branch) => (
     branch.name.toLowerCase().includes(gitSearch.trim().toLowerCase())
@@ -548,9 +556,12 @@ function ChatComposer({
   );
   const activeItems = pickerMode === "skill" ? slashItems : fileItems;
   const isCommandInput = input.trim().startsWith("/");
+  const hasContent = input.trim().length > 0 || attachments.length > 0;
   const canSubmit = !busy
     && (ready || (isCommandInput && attachments.length === 0))
-    && (input.trim().length > 0 || attachments.length > 0);
+    && hasContent;
+  // While answering, Enter lines the message up for after this turn.
+  const canQueue = busy && !editing && hasContent;
 
   useLayoutEffect(() => {
     if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
@@ -730,13 +741,16 @@ function ChatComposer({
   const addFiles = async (files: File[]) => {
     setAttachmentError(null);
     const selected = files.slice(0, MAX_DROPPED_FILES);
-    const results = await Promise.allSettled(selected.map(attachmentFromFile));
+    const results = await Promise.allSettled(selected.map((file) => attachmentFromFile(file, language)));
     const next = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
     const errors = results.flatMap((result, index) => result.status === "rejected"
       ? [`${selected[index].name}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
       : []);
     if (files.length > MAX_DROPPED_FILES) {
-      errors.push(`${files.length - MAX_DROPPED_FILES} additional files were not added.`);
+      errors.push(tr(language,
+        `另有 ${files.length - MAX_DROPPED_FILES} 个文件未添加。`,
+        `${files.length - MAX_DROPPED_FILES} more ${files.length - MAX_DROPPED_FILES === 1 ? "file was" : "files were"} not added.`,
+        `No se añadieron ${files.length - MAX_DROPPED_FILES} archivos más.`));
     }
     if (errors.length > 0) setAttachmentError(errors.join(" "));
     if (next.length > 0) onAttachmentsChange([...attachments, ...next]);
@@ -760,7 +774,10 @@ function ChatComposer({
         ? [`${basename(selectedPaths[index])}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
         : []);
       if (paths.length > MAX_DROPPED_FILES) {
-        errors.push(`${paths.length - MAX_DROPPED_FILES} additional files were not added.`);
+        errors.push(tr(language,
+          `另有 ${paths.length - MAX_DROPPED_FILES} 个文件未添加。`,
+          `${paths.length - MAX_DROPPED_FILES} more ${paths.length - MAX_DROPPED_FILES === 1 ? "file was" : "files were"} not added.`,
+          `No se añadieron ${paths.length - MAX_DROPPED_FILES} archivos más.`));
       }
       if (errors.length > 0) setAttachmentError(errors.join(" "));
       if (next.length > 0) onAttachmentsChange([...attachments, ...next]);
@@ -799,7 +816,7 @@ function ChatComposer({
             {activeItems.length === 0 && <div className="picker-empty">{copy.noMatches}</div>}
             {pickerMode === "skill" && slashItems.map((item, index) => (
               <div key={`${item.kind}-${item.kind === "command" ? item.command.name : item.skill.name}`}>
-                {(index === 0 || slashItems[index - 1].group !== item.group) && <div className="picker-group-label">{item.group}</div>}
+                {(index === 0 || slashItems[index - 1].group !== item.group) && <div className="picker-group-label">{copy.slashGroups[item.group]}</div>}
                 <button
                   className={`skill-picker-item${index === pickerIndex ? " active" : ""}`}
                   ref={index === pickerIndex ? activePickerItemRef : undefined}
@@ -901,7 +918,59 @@ function ChatComposer({
         )}
         {attachmentError && (
           <div className="chat-model-error" role="alert">
-            {language === "cn" ? "附件添加失败：" : "Attachment could not be added: "}{attachmentError}
+            {tr(language, "附件添加失败：", "Attachment could not be added: ", "No se pudo añadir el adjunto: ")}{attachmentError}
+          </div>
+        )}
+        {queuedMessages.length > 0 && (
+          <div className="chat-queue" aria-label={tr(language, "排队中的消息", "Queued messages", "Mensajes en cola")}>
+            <div className="chat-queue-head">
+              <span>
+                {queuePaused
+                  ? tr(language, "上一轮已停止或失败，队列已暂停", "The last turn stopped or failed; the queue is paused", "El último turno se detuvo o falló; la cola está en pausa")
+                  : tr(language, `${queuedMessages.length} 条消息将在本轮结束后依次发送`, `${queuedMessages.length} queued — sent in order after this turn`, `${queuedMessages.length} en cola: se enviarán en orden al terminar este turno`)}
+              </span>
+              {queuePaused && onResumeQueue && (
+                <button type="button" className="chat-queue-resume" onClick={onResumeQueue}>
+                  {tr(language, "发送下一条", "Send next", "Enviar siguiente")}
+                </button>
+              )}
+            </div>
+            <ol className="chat-queue-list">
+              {queuedMessages.map((item) => {
+                const preview = item.text.trim().replace(/\s+/g, " ")
+                  || tr(language, `${item.attachments.length} 个附件`, `${item.attachments.length} attachment(s)`, `${item.attachments.length} adjunto(s)`);
+                return (
+                  <li key={item.id} className="chat-queue-item">
+                    <span className="chat-queue-text" title={item.text}>{preview}</span>
+                    {item.attachments.length > 0 && item.text.trim() && (
+                      <span className="chat-queue-meta"><SvgIcon name="attachment" size={12} />{item.attachments.length}</span>
+                    )}
+                    {onEditQueued && (
+                      <button
+                        type="button"
+                        className="chat-queue-btn"
+                        onClick={() => onEditQueued(item.id)}
+                        aria-label={`${tr(language, "编辑排队消息", "Edit queued message", "Editar mensaje en cola")}: ${preview}`}
+                        title={tr(language, "取回输入框修改", "Move back to the composer to edit", "Volver al cuadro de texto para editar")}
+                      >
+                        <SvgIcon name="edit" size={12} />
+                      </button>
+                    )}
+                    {onRemoveQueued && (
+                      <button
+                        type="button"
+                        className="chat-queue-btn"
+                        onClick={() => onRemoveQueued(item.id)}
+                        aria-label={`${tr(language, "移除排队消息", "Remove queued message", "Quitar mensaje en cola")}: ${preview}`}
+                        title={tr(language, "移除", "Remove", "Quitar")}
+                      >
+                        <SvgIcon name="close" size={12} />
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
           </div>
         )}
         {editing && (
@@ -983,7 +1052,7 @@ function ChatComposer({
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              if (canSubmit) onSubmit();
+              if (canSubmit || canQueue) onSubmit();
             }
           }}
         />
@@ -1026,13 +1095,13 @@ function ChatComposer({
               disabled={busy || !attachmentsEnabled}
               title={attachmentsEnabled
                 ? copy.attachFiles
-                : (language === "cn" ? "远程 Agent 暂不支持附件" : "Remote Agent attachments are not supported yet")}
+                : (tr(language, "远程 Agent 暂不支持附件", "Remote agents don't support attachments yet", "El agente remoto aún no admite adjuntos"))}
               aria-label={copy.attachFiles}
             >
               <SvgIcon name="plus" size={16} />
             </button>
             {gitWorkspace !== undefined && (
-              <div className="chat-workspace-bar" aria-label={language === "cn" ? "Git 工作区" : "Git workspace"}>
+              <div className="chat-workspace-bar" aria-label={tr(language, "Git 工作区", "Git workspace", "Espacio de trabajo Git")}>
                 <div className="chat-git-menu-anchor" ref={gitMenuRef}>
                   <button
                     type="button"
@@ -1043,7 +1112,7 @@ function ChatComposer({
                     }}
                     aria-haspopup="menu"
                   aria-expanded={gitMenuOpen}
-                  aria-label={language === "cn" ? `Git 菜单，${gitLabel}` : `Git menu, ${gitLabel}`}
+                  aria-label={tr(language, `Git 菜单，${gitLabel}`, `Git menu, ${gitLabel}`, `Menú de Git, ${gitLabel}`)}
                   title={gitLabel}
                   >
                     <SvgIcon name="branch" size={14} />
@@ -1052,15 +1121,15 @@ function ChatComposer({
                     <SvgIcon name="chevronDown" size={11} className="chat-workspace-chevron" />
                   </button>
                   {gitMenuOpen && (
-                  <div className="chat-git-menu" ref={gitPopupRef} style={gitMenuLayout} role="menu" aria-label={language === "cn" ? "Git 操作" : "Git actions"}>
+                  <div className="chat-git-menu" ref={gitPopupRef} style={gitMenuLayout} role="menu" aria-label={tr(language, "Git 操作", "Git actions", "Acciones de Git")}>
                       <label className="chat-git-menu-search">
                         <SvgIcon name="search" size={14} />
                         <input
                           type="search"
                           value={gitSearch}
                           autoFocus
-                          placeholder={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
-                          aria-label={language === "cn" ? "搜索分支和操作" : "Search branches and actions"}
+                          placeholder={tr(language, "搜索分支和操作", "Search branches and actions", "Buscar ramas y acciones")}
+                          aria-label={tr(language, "搜索分支和操作", "Search branches and actions", "Buscar ramas y acciones")}
                           onChange={(event) => setGitSearch(event.target.value)}
                         />
                       </label>
@@ -1072,7 +1141,7 @@ function ChatComposer({
                           onClick={() => void runGitAction(onRefreshGit)}
                         >
                           <SvgIcon name="refresh" size={14} />
-                          <span>{language === "cn" ? "刷新 Git 状态" : "Refresh Git status"}</span>
+                          <span>{tr(language, "刷新 Git 状态", "Refresh Git status", "Actualizar estado de Git")}</span>
                         </button>
                         {repository?.isRepository ? (
                           <>
@@ -1086,7 +1155,7 @@ function ChatComposer({
                               }}
                             >
                               <SvgIcon name="modified" size={14} />
-                              <span>{language === "cn" ? "查看更改与提交…" : "View changes and commit…"}</span>
+                              <span>{tr(language, "查看更改与提交…", "View changes and commit…", "Ver cambios y hacer commit…")}</span>
                             </button>
                             <button
                               type="button"
@@ -1095,7 +1164,7 @@ function ChatComposer({
                               onClick={() => setGitCreatingBranch((open) => !open)}
                             >
                               <SvgIcon name="branch" size={14} />
-                              <span>{language === "cn" ? "新建分支…" : "New branch…"}</span>
+                              <span>{tr(language, "新建分支…", "New branch…", "Nueva rama…")}</span>
                             </button>
                           </>
                         ) : repository?.gitAvailable ? (
@@ -1106,7 +1175,7 @@ function ChatComposer({
                             onClick={() => void runGitAction(onInitializeGit)}
                           >
                             <SvgIcon name="plus" size={14} />
-                            <span>{language === "cn" ? "初始化 Git 仓库" : "Initialize Git repository"}</span>
+                            <span>{tr(language, "初始化 Git 仓库", "Initialize Git repository", "Inicializar repositorio Git")}</span>
                           </button>
                         ) : null}
                       </div>
@@ -1114,8 +1183,8 @@ function ChatComposer({
                         <div className="chat-git-new-branch">
                           <input
                             value={gitNewBranch}
-                            placeholder={language === "cn" ? "新分支名称" : "New branch name"}
-                            aria-label={language === "cn" ? "新分支名称" : "New branch name"}
+                            placeholder={tr(language, "新分支名称", "New branch name", "Nombre de la nueva rama")}
+                            aria-label={tr(language, "新分支名称", "New branch name", "Nombre de la nueva rama")}
                             disabled={gitActionBusy}
                             onChange={(event) => setGitNewBranch(event.target.value)}
                             onKeyDown={(event) => {
@@ -1123,7 +1192,7 @@ function ChatComposer({
                             }}
                           />
                           <button type="button" disabled={gitActionBusy || !gitNewBranch.trim()} onClick={submitNewGitBranch}>
-                            {language === "cn" ? "创建" : "Create"}
+                            {tr(language, "创建", "Create", "Crear")}
                           </button>
                         </div>
                       )}
@@ -1136,7 +1205,7 @@ function ChatComposer({
                             onClick={() => setGitBranchesOpen((open) => !open)}
                           >
                             <SvgIcon name={gitBranchesOpen || gitSearch.trim() ? "chevronDown" : "chevronRight"} size={12} />
-                            <span>{language === "cn" ? "本地分支" : "Local branches"}</span>
+                            <span>{tr(language, "本地分支", "Local branches", "Ramas locales")}</span>
                             <small>{repository.branches.length}</small>
                           </button>
                           {(gitBranchesOpen || Boolean(gitSearch.trim())) && (
@@ -1156,7 +1225,7 @@ function ChatComposer({
                                 </button>
                               ))}
                               {filteredGitBranches.length === 0 && (
-                                <p>{language === "cn" ? "没有匹配的本地分支" : "No matching local branches"}</p>
+                                <p>{tr(language, "没有匹配的本地分支", "No matching local branches", "No hay ramas locales que coincidan")}</p>
                               )}
                             </div>
                           )}
@@ -1184,13 +1253,13 @@ function ChatComposer({
                     setModelMenuOpen((value) => !value);
                   }}
                   disabled={modelBusy || reasoningBusy || (!canChooseModel && (!canAdjustReasoning || busy))}
-                  title={`${modelName ?? (language === "cn" ? "模型" : "Model")}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}${activePrice ? `\n${activePrice.title}` : ""}`}
-                  aria-label={reasoningSupported ? `${modelName ?? (language === "cn" ? "模型" : "Model")} · ${reasoningLabel}` : undefined}
+                  title={`${modelName ?? (tr(language, "模型", "Model", "Modelo"))}${reasoningSupported ? ` · ${reasoningLabel}` : ""}\n${reasoningSupported ? modelSettingsLabel : (canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel)}${activePrice ? `\n${activePrice.title}` : ""}`}
+                  aria-label={`${modelName ?? (tr(language, "模型", "Model", "Modelo"))}${reasoningSupported ? ` · ${reasoningLabel}` : ""}`}
                   aria-description={activePrice?.title}
                   aria-haspopup="dialog"
                   aria-expanded={modelMenuOpen}
                 >
-                  <span className="chat-model-pill-name">{modelName ?? (language === "cn" ? "模型" : "Model")}</span>
+                  <span className="chat-model-pill-name">{modelName ?? (tr(language, "模型", "Model", "Modelo"))}</span>
                   {activePrice && <span className={`model-price-badge chat-model-price is-${activePrice.kind}`} aria-hidden="true">{activePrice.label}</span>}
                   {reasoningSupported && (
                     <>
@@ -1202,7 +1271,7 @@ function ChatComposer({
                 </button>
                 {modelMenuOpen && (
                   <div className="chat-model-settings-panel" role="dialog" aria-label={modelSettingsLabel}>
-                    {canChooseModel && <div className="chat-model-settings-label">{language === "cn" ? "选择模型" : "Choose model"}</div>}
+                    {canChooseModel && <div className="chat-model-settings-label">{tr(language, "选择模型", "Choose model", "Elegir modelo")}</div>}
                     {canChooseModel && <div className="chat-model-menu" role="menu" aria-label={copy.switchModel}>
                       {modelGroups.map((group) => (
                         <div key={group.series} className="chat-model-group" role="group" aria-label={group.label}>
@@ -1246,7 +1315,7 @@ function ChatComposer({
                     </div>}
                     {reasoningSupported && (
                       <div className={`chat-model-settings-reasoning${canChooseModel ? " has-models" : ""}`}>
-                        <div className="chat-model-settings-label">{language === "cn" ? "思考强度" : "Reasoning effort"}</div>
+                        <div className="chat-model-settings-label">{tr(language, "思考强度", "Reasoning effort", "Esfuerzo de razonamiento")}</div>
                         {canAdjustReasoning && onReasoningEffortChange ? (
                           <ChatReasoningPanel
                             embedded
@@ -1259,12 +1328,22 @@ function ChatComposer({
                         ) : (
                           <div className="chat-model-settings-note" title={reasoningMessage ?? undefined}>{reasoningMessage || reasoningLabel}</div>
                         )}
-                        {busy && canAdjustReasoning && <div className="chat-model-settings-note">{language === "cn" ? "回答完成后可调整" : "Adjust after the response finishes"}</div>}
+                        {busy && canAdjustReasoning && <div className="chat-model-settings-note">{tr(language, "回答完成后可调整", "Adjust after the response finishes", "Ajústalo cuando termine la respuesta")}</div>}
                       </div>
                     )}
                   </div>
                 )}
               </div>
+            )}
+            {busy && canQueue && (
+              <button
+                className="chat-send-btn chat-queue-send-btn"
+                onClick={onSubmit}
+                aria-label={tr(language, "加入队列", "Add to queue", "Añadir a la cola")}
+                title={tr(language, "本轮结束后发送 (Enter)", "Send after this turn (Enter)", "Enviar al terminar este turno (Enter)")}
+              >
+                <SvgIcon name="send" size={15} />
+              </button>
             )}
             {busy ? (
               <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}><SvgIcon name="stop" size={15} /></button>

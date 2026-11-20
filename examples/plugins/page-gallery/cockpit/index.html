@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Experiment cockpit, built from several package files:
+    cockpit.css            the look
+    main.mjs + charts.mjs  the logic, as modules (main imports "pkg:cockpit/charts.mjs")
+    seed.json              sample runs, read with somniq.text() until the agent writes real ones
+    mark.svg               the logo, read with somniq.asset()
+  Widget "runs": { "budget": hours, "runs": [{ "id", "name", "status": "running" | "done" | "failed" | "queued", "accuracy": 0..1 | null, "gpuHours", "loss": [number] }] }
+-->
+<link rel="stylesheet" href="cockpit.css">
+</head>
+<body>
+<header><img id="mark" alt=""><h1 id="title"></h1><span id="sample" hidden></span><button id="ask" type="button"></button></header>
+<div class="grid">
+  <div id="gauges"></div>
+  <section class="card runs"><h2 id="runs-title"></h2><ul id="runs"></ul></section>
+  <section class="card chart"><h2 id="chart-title"></h2><div id="chart"></div><div id="legend"></div></section>
+</div>
+<script type="module" src="main.mjs"></script>
+</body>
+</html>

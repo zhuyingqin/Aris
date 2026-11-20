@@ -288,10 +288,10 @@ async fn fetch_pricing(
     let response = with_session(client.get(format!("{base}/api/pricing")), session)
         .send()
         .await
-        .map_err(|error| format!("获取模型价格失败: {error}"))?;
-    let body = parse_json(response, "模型价格").await?;
+        .map_err(|error| runtime::tr!("获取模型价格失败: {error}", "Fetching model prices failed: {error}", "No se pudieron obtener los precios de los modelos: {error}"))?;
+    let body = parse_json(response, runtime::ui_lang::tr_static("模型价格", "Model prices", "Precios de los modelos")).await?;
     if !api_ok(&body) {
-        return Err(session_api_error(&body, "获取模型价格失败"));
+        return Err(session_api_error(&body, runtime::ui_lang::tr_static("获取模型价格失败", "Fetching model prices failed", "No se pudieron obtener los precios de los modelos")));
     }
     Ok(body)
 }
@@ -301,7 +301,7 @@ async fn fetch_pricing(
 pub async fn newapi_model_pricing() -> Result<ModelPricingCatalog, String> {
     let client = account_http_client_builder(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
+        .map_err(|error| runtime::tr!("HTTP 客户端创建失败: {error}", "Creating the HTTP client failed: {error}", "No se pudo crear el cliente HTTP: {error}"))?;
     let (account, prices) = with_authenticated_session(&client, |client, base, session| async move {
         tokio::try_join!(
             user_self(&client, &base, &session),

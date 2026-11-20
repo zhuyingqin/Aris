@@ -34,6 +34,7 @@ import {
   type UiFontMode,
 } from "./uiTypography";
 import { applyUiColor, parseUiColor, readUiColor, saveUiColor, type UiColor } from "./uiColors";
+import { officialPluginEnabled, officialPluginsSet, officialTabHidden, switchTarget, type OfficialPluginState } from "./extensions/officialPlugins";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -58,7 +59,8 @@ export type Tab =
 
 export type Theme = "dark" | "light";
 export type ThemeMode = Theme | "system";
-export type Language = "cn" | "en";
+export { LANGUAGE_OPTIONS, LANGUAGES, isLanguage, languageLocale, languagePromptName, tr, type Language } from "./language";
+import { isLanguage, languageLocale, tr, type Language } from "./language";
 
 type PreferenceOptions = { requirePersistence?: boolean };
 
@@ -162,13 +164,13 @@ function applyTheme(theme: Theme, persist = true, required = false, nativeTheme:
 }
 
 function normalizeLanguage(value: string | null | undefined): Language {
-  return value === "cn" ? "cn" : "en";
+  return isLanguage(value) ? value : "en";
 }
 
 function readStoredLanguage(): Language | null {
   try {
     const stored = localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY);
-    return stored === "cn" || stored === "en" ? stored : null;
+    return isLanguage(stored) ? stored : null;
   } catch {
     return null;
   }
@@ -176,7 +178,7 @@ function readStoredLanguage(): Language | null {
 
 function reflectLanguage(language: Language) {
   if (typeof document !== "undefined") {
-    document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
+    document.documentElement.lang = languageLocale(language);
     document.documentElement.dataset.language = language;
   }
 }
@@ -376,9 +378,16 @@ interface AppState {
   languagePreferenceSet: boolean;
   setLanguage: (language: Language, options?: PreferenceOptions & { syncRuntime?: boolean }) => void;
 
-  /** When true, Mail is hidden from the primary navigation and switcher. */
+  /**
+   * When true, Mail is hidden from the primary navigation and switcher. In the
+   * desktop app this mirrors the official Mail plugin: off also removes its
+   * tools and watchers. The browser preview keeps it as a local preference.
+   */
   hideMail: boolean;
-  setHideMail: (hide: boolean, options?: PreferenceOptions) => void;
+  setHideMail: (hide: boolean, options?: PreferenceOptions) => void | Promise<void>;
+  /** The official plugins of the current project, once the backend answered. */
+  officialPlugins: OfficialPluginState[] | null;
+  applyOfficialPlugins: (states: OfficialPluginState[]) => void;
 
   /** When true, Workflows is hidden from the primary navigation and switcher. */
   hideWorkflows: boolean;
@@ -387,6 +396,12 @@ interface AppState {
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
+
+  /** One-shot request for a new chat whose composer starts with this draft.
+   * Nothing is sent: the user reviews and sends it (e.g. Plugins → "Ask AI
+   * to create a plugin"). */
+  pendingNewChatDraft: string | null;
+  setPendingNewChatDraft: (value: string | null) => void;
 
   /** Attachments queued for the composer from outside Chat — currently the
    * global-hotkey region screenshot, which can land while any tab is open. */
@@ -482,7 +497,7 @@ export const useStore = create<AppState>((set, get) => ({
   authServer: readStoredServer(),
   login: async (server, username, password, twoFactorCode) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
-    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
+    if (!trimmedServer) throw new Error(tr(get().language, "请配置有效的 HTTPS 账号服务器地址", "Configure a valid HTTPS account server address.", "Configura una dirección HTTPS válida para el servidor de cuentas."));
     const config = await configGet();
     const model = config.executorModel?.trim() || DEFAULT_MODEL;
     const result = await newapiLogin(trimmedServer, model, username, password, twoFactorCode);
@@ -505,7 +520,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   register: async (server, username, password, options = {}) => {
     const trimmedServer = approvedManagedNewApiBaseUrl(server.trim() || DEFAULT_AUTH_SERVER);
-    if (!trimmedServer) throw new Error("请配置有效的 HTTPS 账号服务器地址");
+    if (!trimmedServer) throw new Error(tr(get().language, "请配置有效的 HTTPS 账号服务器地址", "Configure a valid HTTPS account server address.", "Configura una dirección HTTPS válida para el servidor de cuentas."));
     await newapiRegister({
       baseUrl: trimmedServer,
       username,
@@ -620,11 +635,32 @@ export const useStore = create<AppState>((set, get) => ({
 
   hideMail: readStoredHideMail(),
   setHideMail: (hide, options) => {
+    const projectPath = get().currentProject?.path;
+    if (isTauri() && projectPath && get().officialPlugins) {
+      // The switch is the backend's; the local key only caches it for the
+      // first paint. A failed write rejects so the settings row reports it.
+      const mail = get().officialPlugins?.find((state) => state.id === "mail");
+      const target = mail ? switchTarget(mail) : "global";
+      return officialPluginsSet(projectPath, "mail", target, !hide).then((states) => get().applyOfficialPlugins(states));
+    }
     if (options?.requirePersistence) persistPreference(HIDE_MAIL_STORAGE_KEY, String(hide), true);
     else applyHideMail(hide);
     set((state) => ({
       hideMail: hide,
       tab: hide && state.tab === "mail" ? "chat" : state.tab,
+    }));
+  },
+
+  officialPlugins: null,
+  applyOfficialPlugins: (states) => {
+    const mail = officialPluginEnabled(states, "mail");
+    const hide = mail === null ? get().hideMail : !mail;
+    applyHideMail(hide);
+    set((state) => ({
+      officialPlugins: states,
+      hideMail: hide,
+      // A page whose plugin went off goes with it.
+      tab: officialTabHidden(state.tab, states, hide) ? "chat" : state.tab,
     }));
   },
 
@@ -640,6 +676,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),
+  pendingNewChatDraft: null,
+  setPendingNewChatDraft: (value) => set({ pendingNewChatDraft: value }),
 
   pendingChatAttachments: [],
   addPendingChatAttachment: (attachment) =>

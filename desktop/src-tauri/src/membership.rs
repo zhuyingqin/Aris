@@ -44,6 +44,14 @@ struct Tier {
 #[derive(Deserialize)]
 struct TierName {
     zh: String,
+    en: String,
+    es: String,
+}
+
+impl TierName {
+    fn localized(&self) -> &str {
+        runtime::ui_lang::ui_language().pick(&self.zh, &self.en, &self.es)
+    }
 }
 
 fn catalog() -> &'static Catalog {
@@ -80,10 +88,12 @@ fn external_literature_denial_for(group: &str) -> Option<String> {
         .tiers
         .iter()
         .find(|tier| tier.group != catalog.free_group)
-        .map_or("Go", |tier| tier.name.zh.as_str());
-    Some(format!(
-        "外部文献检索（含系统检索与综述工作流）需要 {lowest_paid} 及以上会员，当前是{}；免费版可使用本地文献库。",
-        tier.name.zh
+        .map_or("Go", |tier| tier.name.localized());
+    let current = tier.name.localized();
+    Some(runtime::tr!(
+        "外部文献检索（含系统检索与综述工作流）需要 {lowest_paid} 及以上会员，当前是{current}；免费版可使用本地文献库。",
+        "External literature search (including systematic search and the review workflow) needs {lowest_paid} membership or higher; you are on {current}. The free plan can use the local literature library.",
+        "La búsqueda de literatura externa (incluidas la búsqueda sistemática y el flujo de revisión) requiere la membresía {lowest_paid} o superior; tienes {current}. El plan gratuito puede usar la biblioteca de literatura local."
     ))
 }
 
@@ -128,12 +138,25 @@ mod tests {
 
     #[test]
     fn external_literature_search_starts_at_go() {
+        let _language = runtime::ui_lang::scoped(runtime::ui_lang::UiLanguage::Cn);
         let refusal = external_literature_denial_for("default").expect("Free is refused");
         assert!(refusal.contains("Go"), "{refusal}");
         assert!(refusal.contains("免费版"), "{refusal}");
         for group in ["go", "plus", "pro"] {
             assert!(external_literature_denial_for(group).is_none(), "{group}");
         }
+    }
+
+    #[test]
+    fn the_refusal_names_tiers_in_the_ui_language() {
+        use runtime::ui_lang::{scoped, UiLanguage};
+        let _language = scoped(UiLanguage::Es);
+        let refusal = external_literature_denial_for("default").expect("Free is refused");
+        assert!(refusal.contains("Gratis") && refusal.contains("Go"), "{refusal}");
+        drop(_language);
+        let _language = scoped(UiLanguage::En);
+        let refusal = external_literature_denial_for("default").expect("Free is refused");
+        assert!(refusal.contains("you are on Free"), "{refusal}");
     }
 
     #[test]

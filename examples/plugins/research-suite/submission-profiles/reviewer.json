@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "rubrics": [
+    {
+      "id": "submission-ready",
+      "title": { "en": "Submission readiness", "cn": "投稿就绪", "es": "Listo para enviar" },
+      "appliesWhen": ["submit", "submission", "camera-ready", "camera ready", "final version", "venue", "enviar", "envío", "versión final", "投稿", "提交", "终稿", "定稿"],
+      "criteria": [
+        { "id": "measured-not-assumed", "severity": "critical", "check": "When the answer says the manuscript meets a venue requirement (page limit, abstract length, anonymity, format), the evidence shows that requirement measured from the project files in this turn (for example the compiled PDF's page count or a word count), not assumed from an earlier answer." },
+        { "id": "every-requirement", "severity": "high", "check": "An answer that calls the manuscript ready to submit reports every requirement of the active submission profile, each as met, not met or not checkable. Leaving a requirement out is a violation." },
+        { "id": "anonymity", "severity": "high", "check": "For an anonymous submission, the answer states that author names, affiliations, acknowledgements, self-identifying citations and file metadata were checked, or says which of them were not." },
+        { "id": "no-silent-cuts", "severity": "medium", "check": "If the answer shortened the manuscript to meet a limit, it lists what was removed or moved, and no citation, figure or result was dropped without being named." }
+      ]
+    }
+  ]
+}

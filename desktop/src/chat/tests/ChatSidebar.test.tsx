@@ -557,7 +557,7 @@ describe("ChatSidebar project drag", () => {
     });
 
     renderProjectDragSidebar();
-    const alphaLabel = screen.getByRole("heading", { name: "Alpha, 1 chats" })
+    const alphaLabel = screen.getByRole("heading", { name: "Alpha, 1 chat" })
       .closest<HTMLElement>("[data-chat-project-label-id]")!;
     const alphaGroup = document.querySelector<HTMLElement>("[data-chat-project-id='project-a']")!;
 

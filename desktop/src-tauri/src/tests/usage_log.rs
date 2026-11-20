@@ -50,6 +50,30 @@ fn debug_export_usage_filter_keeps_only_the_requested_session() {
     assert!(lines[0].contains("\"sessionId\":\"chat-b\""));
 }
 
+#[test]
+fn last_executor_model_ignores_other_sessions_reviewers_and_bad_rows() {
+    let row = |session: &str, role: &str, model: &str| {
+        format!(
+            "{{\"createdAt\":1,\"sessionId\":\"{session}\",\"role\":\"{role}\",\"server\":\"\",\"model\":\"{model}\",\"provider\":\"p\",\"inputTokens\":1,\"outputTokens\":1,\"cacheCreationInputTokens\":0,\"cacheReadInputTokens\":0}}\n"
+        )
+    };
+    let content = [
+        row("chat-a", "executor", "deepseek-v4"),
+        row("chat-a", "executor", "claude-opus"),
+        row("chat-a", "reviewer", "reviewer-model"),
+        "{broken chat-a row\n".to_string(),
+        // A later chat switching to GPT must not leak into chat-a.
+        row("chat-b", "executor", "gpt-5"),
+        // Session ids that merely contain another id are not that session.
+        row("chat-a-2", "executor", "gpt-5"),
+    ]
+    .concat();
+
+    assert_eq!(last_executor_model_in(&content, "chat-a").as_deref(), Some("claude-opus"));
+    assert_eq!(last_executor_model_in(&content, "chat-b").as_deref(), Some("gpt-5"));
+    assert_eq!(last_executor_model_in(&content, "chat-missing"), None);
+}
+
 fn usage(input: u32) -> TokenUsage {
     TokenUsage {
         input_tokens: input,

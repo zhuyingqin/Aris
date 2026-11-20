@@ -1,6 +1,6 @@
 import { StateEffect } from "@codemirror/state";
 import { ViewPlugin } from "@codemirror/view";
-import { LATEX_ANALYSIS_IDLE_MS } from "./latexStructure";
+import { LATEX_ANALYSIS_IDLE_MS } from "../editor/latex/latexStructure";
 
 /** Requests a structural/decorative refresh after the editor has been idle. */
 export const reparseVisualLatex = StateEffect.define<void>();

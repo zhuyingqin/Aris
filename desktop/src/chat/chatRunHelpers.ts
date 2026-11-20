@@ -20,9 +20,22 @@ import type {
 } from "../types";
 import { makeId, textFromTurn } from "./model";
 import { noteTurnActivity } from "./modelWait";
+import { chatImageMimeType } from "../imageFiles";
+import { tr, useStore, type Language } from "../store";
 
-export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
-const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
+// Shown to the user (turn error / fallback text), so localized at creation time.
+export function emptyAssistantResponse(language: Language = useStore.getState().language): string {
+  return tr(language, "模型返回了空回复。", "Model returned an empty response.", "El modelo devolvió una respuesta vacía.");
+}
+
+function unexpectedResponseStop(language: Language = useStore.getState().language): string {
+  return tr(
+    language,
+    "回复在完成前意外中止。",
+    "Response stopped unexpectedly before completion.",
+    "La respuesta se detuvo inesperadamente antes de terminar.",
+  );
+}
 
 // Rough token estimate. Latin/code text is ~3.5 chars/token, but CJK characters
 // are far denser (~1 token per character), so the old flat `chars / 3.5`
@@ -137,7 +150,7 @@ export function completedAssistantBlocks(turn: ChatTurn, reply: string): ChatBlo
   }
 
   if (hasRenderableBlock(turn)) return turn.blocks;
-  return [{ kind: "text", text: EMPTY_ASSISTANT_RESPONSE }];
+  return [{ kind: "text", text: emptyAssistantResponse() }];
 }
 
 export function isExpectedStopError(message: string): boolean {
@@ -158,7 +171,7 @@ export function visibleTurnError(error: string, stopped: boolean): string | unde
   // An abnormal stop can arrive without an error body (for example, when a
   // provider closes the stream before sending a terminal event). Keep the
   // turn visibly failed instead of silently turning it into a stopped card.
-  if (!message) return stopped ? undefined : UNEXPECTED_RESPONSE_STOP;
+  if (!message) return stopped ? undefined : unexpectedResponseStop();
   if (stopped && isExpectedStopError(message)) return undefined;
   return message;
 }
@@ -169,19 +182,6 @@ function mimeTypeFromDataUrl(value: string): string | null {
 }
 
 const MAX_PATH_IMAGE_BYTES = 8 * 1024 * 1024;
-
-function imageMimeTypeFromPath(path: string): string | null {
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  switch (extension) {
-    case "jpg":
-    case "jpeg": return "image/jpeg";
-    case "png": return "image/png";
-    case "gif": return "image/gif";
-    case "webp": return "image/webp";
-    case "bmp": return "image/bmp";
-    default: return null;
-  }
-}
 
 function dataUrlFromBytes(bytes: ArrayBuffer, mimeType: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -195,7 +195,7 @@ function dataUrlFromBytes(bytes: ArrayBuffer, mimeType: string): Promise<string>
 function isImageAttachment(attachment: ChatAttachment): boolean {
   return attachment.kind === "image"
     || Boolean(attachment.mimeType?.startsWith("image/"))
-    || Boolean(attachment.path && imageMimeTypeFromPath(attachment.path));
+    || Boolean(attachment.path && chatImageMimeType(attachment.path));
 }
 
 async function imageInputFromAttachment(attachment: ChatAttachment): Promise<ChatImageInput | null> {
@@ -207,7 +207,7 @@ async function imageInputFromAttachment(attachment: ChatAttachment): Promise<Cha
     };
   }
   if (!attachment.path) return null;
-  const mimeType = attachment.mimeType || imageMimeTypeFromPath(attachment.path);
+  const mimeType = attachment.mimeType || chatImageMimeType(attachment.path);
   if (!mimeType) return null;
   const bytes = await fileReadBytes(attachment.path);
   if (bytes.byteLength > MAX_PATH_IMAGE_BYTES) return null;
@@ -340,12 +340,14 @@ export function needsBackendContextReset(
   return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }
 
-export function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn {
+export function userTurn(text: string, attachments: ChatAttachment[], origin?: ChatTurn["origin"]): ChatTurn {
   return {
     id: makeId("turn"),
     role: "user",
     blocks: [{ kind: "text", text: text.trim() || "Attached context" }],
     attachments,
+    // An app-inserted turn is a marker, not something the user can edit.
+    ...(origin ? { origin, readOnly: true } : {}),
   };
 }
 
@@ -360,11 +362,21 @@ export function assistantTextTurn(text: string): ChatTurn {
   return { id: makeId("turn"), role: "assistant", blocks: [{ kind: "text", text }] };
 }
 
-export const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
-  { name: "help", description: "Show available slash commands" },
-  { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
-  { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
-];
+export function fallbackSlashCommands(language: Language): DesktopCommandSpec[] {
+  return [
+    { name: "help", description: tr(language, "显示可用的斜杠命令", "Show available slash commands", "Muestra los comandos de barra disponibles") },
+    {
+      name: "model",
+      description: tr(language, "查看或切换执行模型", "Show or switch the executor model", "Muestra o cambia el modelo ejecutor"),
+      argumentHint: "[model]",
+    },
+    {
+      name: "permissions",
+      description: tr(language, "查看或切换当前权限模式", "Show or switch the active permission mode", "Muestra o cambia el modo de permisos activo"),
+      argumentHint: "[mode]",
+    },
+  ];
+}
 export interface PendingCommandSelection {
   sessionId: string;
   selection: ChatCommandSelection;

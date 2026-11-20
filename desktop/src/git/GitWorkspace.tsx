@@ -26,6 +26,7 @@ import {
 } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import { useStore, type Language } from "../store";
+import { tr } from "../language";
 import { highlightReviewLine } from "./reviewSyntax";
 import { publishGitWorkspaceStatus } from "./workspaceStatusEvents";
 import "./GitWorkspace.css";
@@ -191,13 +192,68 @@ const COPY: Record<Language, GitCopy> = {
     resetFilesWidth: "Double-click to reset width",
     collapseFiles: "Collapse file changes",
     expandFiles: "Expand file changes",
-    openInCode: "Open Diff in Code",
-    nativeDiffHint: "Use the embedded VSCodium native Diff viewer",
-    largeReview: "This diff is large. Reviewing one file at a time.",
+    openInCode: "Open diff in Code",
+    nativeDiffHint: "Use the built-in VSCodium diff viewer",
+    largeReview: "This diff is large, so only one file is shown at a time.",
     unchangedLines: (count) => `${count} unmodified lines`,
     ledgerTitle: "SomniQ local change ledger",
     ledgerBody: "Recorded AI and editor changes remain visible here when Git is unavailable or ignores a file.",
     aiChange: "Local record",
+  },
+  es: {
+    title: "Review",
+    subtitle: "Revisa y confirma todos los cambios del proyecto actual",
+    refresh: "Actualizar",
+    initialize: "Inicializar repositorio Git",
+    gitMissing: "No se detectó Git. La app sigue funcionando con los registros de cambios locales; instala Git más adelante cuando necesites ramas, staging o commits.",
+    notRepository: "Este proyecto no es un repositorio Git. Al inicializarlo solo se crea un directorio .git local.",
+    noLedgerChanges: "No hay registros de cambios locales para este proyecto.",
+    changes: "Cambios en archivos",
+    noChanges: "El árbol de trabajo está limpio. No hay cambios para hacer commit.",
+    workingTree: "Árbol de trabajo",
+    staged: "En staging",
+    diffEmpty: "No hay diff de texto disponible para esta selección.",
+    selectFile: "Selecciona un archivo para ver su diff.",
+    truncated: "Este diff es grande y se ha truncado en la vista actual.",
+    commit: "Crear commit",
+    commitPlaceholder: "Describe este cambio…",
+    createCommit: "Hacer commit de los cambios en staging",
+    branches: "Ramas locales",
+    switchBranch: "Cambiar",
+    newBranchPlaceholder: "Nombre de la nueva rama",
+    createBranch: "Crear y cambiar",
+    detached: "HEAD separado",
+    noUpstream: "Sin upstream",
+    conflicted: "Conflicto",
+    modified: "Modificado",
+    deleted: "Eliminado",
+    renamed: "Renombrado",
+    added: "Añadido",
+    stagedBadge: "En staging",
+    providerGit: "Worktree de Git",
+    providerLedger: "Registro de cambios local",
+    providerUnavailable: "Sin fuente de cambios",
+    filterAll: "Todos",
+    filterConflicted: "Conflictos",
+    searchFiles: "Buscar archivos modificados",
+    clearSearch: "Borrar búsqueda",
+    noMatches: "Ningún archivo coincide con la búsqueda y los filtros actuales.",
+    expandAll: "Expandir todas las carpetas",
+    collapseAll: "Contraer todas las carpetas",
+    previousFile: "Archivo modificado anterior",
+    nextFile: "Siguiente archivo modificado",
+    rootFiles: "Raíz del proyecto",
+    resizeFiles: "Cambiar el tamaño del panel de archivos modificados",
+    resetFilesWidth: "Doble clic para restablecer el ancho",
+    collapseFiles: "Contraer cambios en archivos",
+    expandFiles: "Expandir cambios en archivos",
+    openInCode: "Abrir diff en Code",
+    nativeDiffHint: "Usar el visor de diff nativo de VSCodium integrado",
+    largeReview: "Este diff es grande. Se revisa un archivo cada vez.",
+    unchangedLines: (count) => `${count} líneas sin modificar`,
+    ledgerTitle: "Registro de cambios local de SomniQ",
+    ledgerBody: "Los cambios registrados de la IA y del editor siguen visibles aquí cuando Git no está disponible o ignora un archivo.",
+    aiChange: "Registro local",
   },
 };
 
@@ -356,7 +412,7 @@ function DiffViewer({ diff, copy, language }: { diff: GitDiffView; copy: GitCopy
     <div className="git-diff-scroll">
       {diff.truncated && <div className="git-diff-warning">{copy.truncated}</div>}
       <div className="review-code-frame">
-        <div className="review-diff-lines" role="table" aria-label="File diff">
+        <div className="review-diff-lines" role="table" aria-label={tr(language, "文件差异", "File diff", "Diferencias del archivo")}>
           {rows.map((row, index) => row.kind === "collapsed" ? (
             <div className="review-diff-collapsed" role="row" key={`collapsed-${index}`}>
               <span className="review-diff-fold-icon" aria-hidden="true">
@@ -475,6 +531,7 @@ const REVIEW_PATH_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensi
 const REVIEW_NUMBER_FORMATTERS: Record<Language, Intl.NumberFormat> = {
   cn: new Intl.NumberFormat("zh-CN"),
   en: new Intl.NumberFormat("en-US"),
+  es: new Intl.NumberFormat("es-ES"),
 };
 
 function storedReviewFilesWidth(): number {

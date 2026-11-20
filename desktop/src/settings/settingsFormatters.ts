@@ -1,10 +1,10 @@
-import type { Language } from "../store";
+import { isLanguage, type Language } from "../language";
 import type { NewApiAccount } from "../api/tauri";
 import { epochToDate } from "../timestamp";
 import { SETTINGS_COPY } from "./i18n";
 
 export function normalizeLanguage(value: string | null | undefined): Language {
-  return value === "en" ? "en" : "cn";
+  return isLanguage(value) ? value : "cn";
 }
 
 export function formatQuota(credits: number): string {

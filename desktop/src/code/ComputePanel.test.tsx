@@ -136,7 +136,7 @@ describe("ComputePanel", () => {
 
     const target = await screen.findByRole("combobox");
     fireEvent.change(target, { target: { value: remotePeer.nodeId } });
-    fireEvent.click(screen.getByRole("button", { name: "Run current file on target" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run current file on selected target" }));
 
     await waitFor(() => expect(mocks.computeSubmit).toHaveBeenCalledWith(expect.objectContaining({
       targetNodeId: remotePeer.nodeId,

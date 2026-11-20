@@ -12,7 +12,7 @@ import {
   remoteControlRevokeDevice,
   remoteControlStatus,
 } from "../api/tauri";
-import type { Language } from "../store";
+import { languageLocale, type Language } from "../language";
 import { epochToDate } from "../timestamp";
 import { SETTINGS_COPY } from "./i18n";
 import { usePairingCeremony } from "./usePairingCeremony";
@@ -45,7 +45,7 @@ const PREVIEW_QR_CODE_DATA_URL = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0
 
 function formatTimestamp(value: number | null | undefined, language: Language, fallback: string): string {
   const date = epochToDate(value);
-  return date ? date.toLocaleString(language === "cn" ? "zh-CN" : "en-US") : fallback;
+  return date ? date.toLocaleString(languageLocale(language)) : fallback;
 }
 
 function deviceScopeLabel(scope: RemoteScope, language: Language): string {

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  language: "cn" as "cn" | "en" | "es",
   listen: vi.fn(),
   pending: vi.fn(),
   approve: vi.fn(),
@@ -17,12 +18,17 @@ vi.mock("../api/tauri", () => ({
   remoteControlDiscardPairing: mocks.discard,
 }));
 
+vi.mock("../store", () => ({
+  useStore: <T,>(selector: (state: { language: "cn" | "en" | "es" }) => T) => selector({ language: mocks.language }),
+}));
+
 import { RemoteAccountConnectionApproval } from "./RemoteAccountConnectionApproval";
 
 type Listener = (event: { payload: unknown }) => void;
 const listeners = new Map<string, Listener>();
 
 beforeEach(() => {
+  mocks.language = "cn";
   listeners.clear();
   mocks.listen.mockReset().mockImplementation((event: string, handler: Listener) => {
     listeners.set(event, handler);
@@ -64,6 +70,18 @@ describe("RemoteAccountConnectionApproval", () => {
     fireEvent.click(screen.getByRole("button", { name: "允许连接" }));
     await waitFor(() => expect(mocks.approve).toHaveBeenCalledWith({ pairingId: "pairing-1" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("asks for approval in Spanish", async () => {
+    mocks.language = "es";
+    render(<RemoteAccountConnectionApproval />);
+    listeners.get("remote-account-pairing-started")?.({
+      payload: { requestId: "request-1", clientLabel: "SomniQ Web · Chrome", pairingId: "pairing-1", expiresAt: Date.now() + 60_000 },
+    });
+
+    await waitFor(() => expect(screen.getByText("Una página web quiere conectarse a este cliente")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Permitir conexión" })).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Rechazar" })).toBeTruthy();
   });
 
   it("discards the one-time invitation when the desktop user refuses", async () => {

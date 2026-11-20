@@ -11,6 +11,8 @@
  */
 import { useRef, useState } from "react";
 import { TypesetPopover } from "./TypesetPopover";
+import { useStore } from "../store";
+import { tr } from "../language";
 
 export interface ChangeSetMenuFile {
   path: string;
@@ -79,6 +81,7 @@ export default function TypesetChangeSetMenu({
   onRejectAll,
   onApply,
 }: TypesetChangeSetMenuProps) {
+  const language = useStore((state) => state.language);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
   const active = files.find((file) => file.active) ?? null;
@@ -101,7 +104,7 @@ export default function TypesetChangeSetMenu({
   );
 
   return (
-    <section className="typeset-changeset-review" aria-label="Review project change set">
+    <section className="typeset-changeset-review" aria-label={tr(language, "审阅项目修改集", "Review project change set", "Revisar el conjunto de cambios del proyecto")}>
       <button
         ref={triggerRef}
         type="button"

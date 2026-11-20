@@ -655,3 +655,44 @@ fn prompts_ask_for_a_diagram_and_the_reviewer_checks_it() {
     let review = review_prompt("zh", &outline.topics[0], &lesson(), &[]);
     assert!(review.contains("Diagram:"));
 }
+
+#[test]
+fn spanish_runs_ask_for_spanish_and_unknown_languages_keep_the_chinese_default() {
+    let outline = outline();
+    let prompts = [
+        outline_prompt("es", 12, None),
+        teaching_preamble("es", Some(&outline)),
+        lesson_task("es", &outline.topics[0], &[]),
+        review_prompt("es", &outline.topics[0], &lesson(), &[]),
+        follow_up_task("es", FollowUpMode::Question, "¿Por qué?", None, "{}", &[]),
+    ];
+    for prompt in &prompts {
+        assert!(prompt.contains("Spanish"), "a Spanish run prompt does not name Spanish");
+        assert!(!prompt.contains("Simplified Chinese"));
+    }
+    assert!(outline_prompt("en", 12, None).contains("in English."));
+    assert!(outline_prompt("fr", 12, None).contains("Simplified Chinese"));
+    assert!(crate::paper_reading::page_perception_instructions("es").contains("Output language: Spanish"));
+    assert!(PaperReadingRun::new(
+        "paper-1".into(),
+        "A paper".into(),
+        "papers/paper.pdf".into(),
+        content_sha256(b"original PDF"),
+        2,
+        "vision-model".into(),
+        content_sha256(b"model connection"),
+        "es".into(),
+    )
+    .is_ok());
+    assert!(PaperReadingRun::new(
+        "paper-1".into(),
+        "A paper".into(),
+        "papers/paper.pdf".into(),
+        content_sha256(b"original PDF"),
+        2,
+        "vision-model".into(),
+        content_sha256(b"model connection"),
+        "fr".into(),
+    )
+    .is_err());
+}

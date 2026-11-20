@@ -24,7 +24,7 @@ describe("MemorySettings", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Research episodes/ }));
     await screen.findByText(/Compare Top-5 recall/);
 
-    fireEvent.click(screen.getByRole("tab", { name: /Research constitution/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Research profile/ }));
     await screen.findByText(/The user values reproducible evidence/);
   });
 
@@ -78,13 +78,13 @@ describe("MemorySettings", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Preview recall" }));
 
-    await screen.findByText("5,182 / 6,000 chars");
+    await screen.findByText("5,182 / 6,000 chars injected");
     // R0 receives the shared remaining budget rather than a fixed quota.
     expect(screen.getByText("Shared remaining budget")).toBeTruthy();
     expect(screen.getByText("/ 300 chars")).toBeTruthy();
     expect(screen.getAllByText("Duplicate").length).toBe(2);
-    expect(screen.getByText("Not standing")).toBeTruthy();
-    expect(screen.getByText("Over quota")).toBeTruthy();
+    expect(screen.getByText("Not resident")).toBeTruthy();
+    expect(screen.getByText("Over budget")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raw" }));
     await screen.findByText(/SomniQ recalled research memory/);
@@ -94,7 +94,7 @@ describe("MemorySettings", () => {
     render(<MemorySettings language="en" />);
 
     expect(screen.getByText("Memory mode")).toBeTruthy();
-    expect(screen.getByText("Uses reviewed memory and preserves source conversations.")).toBeTruthy();
+    expect(screen.getByText("Uses only reviewed memory and keeps source conversations.")).toBeTruthy();
     expect(screen.getByText("Memory with screening, review, or sync failures stays out of conversations.")).toBeTruthy();
     for (const label of ["Backfill history", "Re-derive R1–R3", "Requeue"]) {
       expect(screen.queryByRole("button", { name: label })).toBeNull();

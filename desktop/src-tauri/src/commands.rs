@@ -45,6 +45,21 @@ fn allowed_external_url(url: &str) -> bool {
     )
 }
 
+/// Every new-window request of an app webview (`target="_blank"`,
+/// `window.open`, from the app or from a frame it embeds, such as a plugin's
+/// web panel) goes to the system browser; the webview itself never opens a
+/// second window. Without a handler WebView2 drops these requests silently.
+pub fn route_new_windows_to_browser<R: tauri::Runtime>(
+    builder: tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>>,
+) -> tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>> {
+    builder.on_new_window(|url, _features| {
+        if let Err(error) = open_external_url(url.to_string()) {
+            eprintln!("SomniQ refused to open a new window for {}: {error}", url.scheme());
+        }
+        tauri::webview::NewWindowResponse::Deny
+    })
+}
+
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();

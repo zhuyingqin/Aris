@@ -42,7 +42,7 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     language,
     memoryWriteApproval: true,
     memoryV2Mode: "legacy_r0_only",
-    managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+    managedModels: ["MiniMax-M3", "MiniMax-M3.1-Flash", "gpt-5.5", "glm-5.3", "deepseek-v4-pro"],
   // Transports mirror what the gateway actually serves: OpenAI-family
   // reasoning models get `/v1/responses`, everything else chat/completions.
     verifiedExecutors: [
@@ -74,7 +74,7 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
     groupRatio: "1",
     quota: 1_250_000,
     usedQuota: 750_000,
-    models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+    models: ["MiniMax-M3", "MiniMax-M3.1-Flash", "gpt-5.5", "glm-5.3", "deepseek-v4-pro"],
     model: "MiniMax-M3",
   };
   const usageLogs: NewApiUsageLogPage = {
@@ -151,4 +151,5 @@ function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy)
 export const PREVIEW_SETTINGS_DATA: Record<Language, PreviewSettingsData> = {
   cn: buildPreviewSettingsData("cn", SETTINGS_COPY.cn.general),
   en: buildPreviewSettingsData("en", SETTINGS_COPY.en.general),
+  es: buildPreviewSettingsData("es", SETTINGS_COPY.es.general),
 };

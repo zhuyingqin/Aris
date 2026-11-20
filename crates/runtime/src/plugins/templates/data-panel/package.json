@@ -1,0 +1,6 @@
+{
+  "name": "@local/experiment-board",
+  "version": "0.1.0",
+  "description": "A project-wide board the agent keeps up to date with experiment results.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

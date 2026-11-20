@@ -92,7 +92,7 @@ pub fn save(account_id: &str, folder: &str, cache: &FolderCache) -> Result<(), S
     let mut cache = cache.clone();
     cache.version = CURRENT_VERSION;
     let body = serde_json::to_string(&cache).map_err(|e| e.to_string())?;
-    super::atomic_file::write_replace(&path, body).map_err(|e| e.to_string())
+    runtime::write_file_atomically(&path, body).map_err(|e| e.to_string())
 }
 
 pub fn load_message(account_id: &str, message_id: &str) -> Option<MailMessageFull> {
@@ -107,7 +107,7 @@ pub fn save_message(
     message: &MailMessageFull,
 ) -> Result<(), String> {
     let body = serde_json::to_string(message).map_err(|e| e.to_string())?;
-    super::atomic_file::write_replace(&message_cache_path(account_id, message_id), body)
+    runtime::write_file_atomically(&message_cache_path(account_id, message_id), body)
         .map_err(|e| e.to_string())
 }
 

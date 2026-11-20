@@ -128,7 +128,7 @@ pub(crate) fn first_successful_probe(
                 available: true,
                 version,
                 path,
-                message: "已检测到可用环境".to_string(),
+                message: runtime::ui_lang::tr_static("已检测到可用环境", "Available environment detected", "Se detectó un entorno disponible").to_string(),
                 detail: Some(program.to_string()),
             };
         }
@@ -141,7 +141,7 @@ pub(crate) fn first_successful_probe(
                 available: true,
                 version,
                 path,
-                message: "已找到可执行文件，但版本查询未完成".to_string(),
+                message: runtime::ui_lang::tr_static("已找到可执行文件，但版本查询未完成", "The executable was found, but the version check did not finish", "Se encontró el ejecutable, pero la consulta de versión no terminó").to_string(),
                 detail: Some(output.message),
             };
         }
@@ -180,10 +180,10 @@ pub(crate) fn latex_check() -> LocalEnvironmentCheck {
     first_successful_probe(
         "latex",
         "LaTeX",
-        "论文排版",
+        runtime::ui_lang::tr_static("论文排版", "Typesetting", "Maquetación"),
         &borrowed,
         Duration::from_secs(3),
-        "未检测到 TeX Live LaTeX 工具链。请安装 TeX Live，并确保 latexmk/xelatex/pdflatex/lualatex 位于 PATH。",
+        runtime::ui_lang::tr_static("未检测到 TeX Live LaTeX 工具链。请安装 TeX Live，并确保 latexmk/xelatex/pdflatex/lualatex 位于 PATH。", "No TeX Live LaTeX toolchain was found. Install TeX Live and make sure latexmk/xelatex/pdflatex/lualatex are on PATH.", "No se encontró la cadena de herramientas LaTeX de TeX Live. Instala TeX Live y asegúrate de que latexmk/xelatex/pdflatex/lualatex estén en el PATH."),
     )
 }
 
@@ -366,10 +366,10 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
         first_successful_probe(
             "python",
             "Python",
-            "运行环境",
+            runtime::ui_lang::tr_static("运行环境", "Runtime", "Entorno de ejecución"),
             &python_borrowed,
             Duration::from_secs(2),
-            "未检测到 Python，可安装 Python 3 并加入 PATH。",
+            runtime::ui_lang::tr_static("未检测到 Python，可安装 Python 3 并加入 PATH。", "Python was not found. Install Python 3 and add it to PATH.", "No se encontró Python. Instala Python 3 y agrégalo al PATH."),
         ),
         first_successful_probe(
             "jupyter",
@@ -377,15 +377,15 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             "Notebook",
             &[("jupyter", &["--version"]), ("jupyter-lab", &["--version"])],
             Duration::from_secs(3),
-            "未检测到 Jupyter，Python Notebook 功能可能无法启动内核。",
+            runtime::ui_lang::tr_static("未检测到 Jupyter，Python Notebook 功能可能无法启动内核。", "Jupyter was not found; Python notebooks may not be able to start a kernel.", "No se encontró Jupyter; es posible que los notebooks de Python no puedan iniciar un kernel."),
         ),
         first_successful_probe(
             "matlab",
             "MATLAB",
-            "数值计算",
+            runtime::ui_lang::tr_static("数值计算", "Numerical computing", "Cálculo numérico"),
             &matlab_borrowed,
             Duration::from_secs(30),
-            "未检测到 MATLAB，可安装 MATLAB 并加入 PATH。",
+            runtime::ui_lang::tr_static("未检测到 MATLAB，可安装 MATLAB 并加入 PATH。", "MATLAB was not found. Install MATLAB and add it to PATH.", "No se encontró MATLAB. Instala MATLAB y agrégalo al PATH."),
         ),
         first_successful_probe(
             "node",
@@ -393,7 +393,7 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             "MCP",
             &[("node", &["--version"])],
             Duration::from_secs(2),
-            "未检测到 Node.js，部分 MCP 服务无法启动。",
+            runtime::ui_lang::tr_static("未检测到 Node.js，部分 MCP 服务无法启动。", "Node.js was not found; some MCP services cannot start.", "No se encontró Node.js; algunos servicios MCP no podrán iniciarse."),
         ),
         first_successful_probe(
             "uv",
@@ -401,23 +401,23 @@ pub(crate) fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             "MCP / Python",
             &[("uv", &["--version"])],
             Duration::from_secs(2),
-            "未检测到 uv，使用 uvx 的 MCP 服务需要安装 uv。",
+            runtime::ui_lang::tr_static("未检测到 uv，使用 uvx 的 MCP 服务需要安装 uv。", "uv was not found; MCP services that use uvx need uv installed.", "No se encontró uv; los servicios MCP que usan uvx necesitan uv instalado."),
         ),
         first_successful_probe(
             "tesseract",
             "Tesseract OCR",
-            "文献识别",
+            runtime::ui_lang::tr_static("文献识别", "Document recognition", "Reconocimiento de documentos"),
             &[("tesseract", &["--version"])],
             Duration::from_secs(2),
-            "未检测到 Tesseract，扫描件 OCR 需要安装 Tesseract 及对应语言包。",
+            runtime::ui_lang::tr_static("未检测到 Tesseract，扫描件 OCR 需要安装 Tesseract 及对应语言包。", "Tesseract was not found; OCR of scanned documents needs Tesseract and its language packs.", "No se encontró Tesseract; el OCR de documentos escaneados necesita Tesseract y sus paquetes de idioma."),
         ),
         first_successful_probe(
             "pdftoppm",
             "PDF rasterizer",
-            "文献识别",
+            runtime::ui_lang::tr_static("文献识别", "Document recognition", "Reconocimiento de documentos"),
             &[("pdftoppm", &["-v"])],
             Duration::from_secs(2),
-            "未检测到 pdftoppm，扫描 PDF 的 OCR 需要安装 Poppler。",
+            runtime::ui_lang::tr_static("未检测到 pdftoppm，扫描 PDF 的 OCR 需要安装 Poppler。", "pdftoppm was not found; OCR of scanned PDFs needs Poppler installed.", "No se encontró pdftoppm; el OCR de PDF escaneados necesita Poppler instalado."),
         ),
         latex_check(),
     ]

@@ -9,7 +9,7 @@
 import { hoverTooltip, type Tooltip } from "@codemirror/view";
 import type { EditorState } from "@codemirror/state";
 import katex from "katex";
-import { scanLatexStructure, type LatexStructureIndex } from "../typeset/latexStructure";
+import { scanLatexStructure, type LatexStructureIndex } from "./latex/latexStructure";
 
 /** Environments whose whole body is maths. */
 const MATH_ENVIRONMENTS = new Set([

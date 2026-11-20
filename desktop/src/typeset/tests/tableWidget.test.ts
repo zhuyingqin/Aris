@@ -150,7 +150,7 @@ describe("visual table grid", () => {
     const harness = mount(TABLE_DOC);
     try {
       harness.cells()[0].focus();
-      harness.tool("Align centre")!.click();
+      harness.tool("Align center")!.click();
       expect(harness.view.state.doc.toString()).toContain("\\begin{tabular}{cc}");
     } finally {
       harness.dispose();

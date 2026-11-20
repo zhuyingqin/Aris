@@ -1,0 +1,12 @@
+{
+  "name": "@local/literature-watch",
+  "version": "0.1.1",
+  "description": "Keeps watch for new papers on the project's topic: an editable search query, the newest relevant papers with why they matter, and a weekly scheduled search that only updates this panel.",
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json",
+    "requires": [
+      "literature"
+    ]
+  }
+}

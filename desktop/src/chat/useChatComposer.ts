@@ -56,6 +56,7 @@ export function useChatComposer({
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
 
+  const language = useStore((state) => state.language);
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
   // One-shot composer prefill from other views (e.g. Literature → /arxiv).
@@ -95,13 +96,13 @@ export function useChatComposer({
     const sessionId = currentSession.id;
     const next = await Promise.all(
       files.slice(0, 20).map(async (file) => {
-        try { return await attachmentFromFile(file); }
+        try { return await attachmentFromFile(file, language); }
         catch { return { id: makeId("att"), kind: "file" as const, name: file.name, mimeType: file.type || "application/octet-stream", content: "(File content could not be read.)" }; }
       }),
     );
     updateSession(sessionId, (s) => ({ ...s, draftAttachments: [...(s.draftAttachments ?? []), ...next] }));
     focusComposer();
-  }, [currentSession, focusComposer, updateSession]);
+  }, [currentSession, focusComposer, language, updateSession]);
 
   const addPathsToChat = useCallback((paths: string[]) => {
     if (!currentSession || paths.length === 0) return;

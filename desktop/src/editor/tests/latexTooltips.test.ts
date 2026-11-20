@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scanLatexStructure } from "../../typeset/latexStructure";
+import { scanLatexStructure } from "../latex/latexStructure";
 import { labelTarget, mathSpanAt, referenceAt } from "../latexTooltips";
 
 const DOC = [

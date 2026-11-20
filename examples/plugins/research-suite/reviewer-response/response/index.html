@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Reviewer response: a correspondence desk for answering one round of review at a time.
+    style.css   the look (light and dark, keyed on data-theme, built on the --somniq-* colors)
+    app.mjs     the page: rendering, editing, saving, agent prompts
+    model.mjs   reading and writing the data, splitting pasted review text into comments
+    copy.mjs    the text in en / cn / es and the prompts the buttons put in the composer
+
+  Widget "rounds" (json), written by this page with somniq.set and by the agent with PluginPanel
+  (plugin "@local/reviewer-response", panel "reviewer-response", widget "rounds"):
+  {
+    "version": 1,
+    "activeRound"?: string,                  // id of the round the page opens on
+    "rounds": [{
+      "id": string,
+      "name": string,                        // e.g. "Round 1"
+      "source"?: string,                     // journal, conference, internal Reviewer
+      "comments": [{
+        "id": string,                        // unique within its round
+        "reviewer": string,                  // e.g. "Reviewer 2"
+        "text": string,                      // the comment, verbatim
+        "kind"?: "major" | "minor" | "typo",
+        "response"?: string,
+        "change"?: { "file": string, "line"?: number, "summary"?: string },  // where the manuscript changed
+        "status": "pending" | "answered" | "declined",
+        "justification"?: string             // required when status is "declined"
+      }]
+    }]
+  }
+  The page tolerates missing or malformed entries and keeps fields it does not know.
+-->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+<p id="save" class="save" role="status" aria-live="polite"></p>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

@@ -646,11 +646,32 @@ export function imagePathsFromTool(
 
   if (change) addImagePath(change.path, paths, seen);
 
+  // Reading source can mention images inside LaTeX commands, JSON strings or
+  // search excerpts. Those references are document content, not image results.
+  // Only the image discriminator identifies an actual file read to preview.
+  if (["read_file", "read_files", "read_docx", "ReadMediaFile"].includes(block.name)) {
+    const output = parseToolBlockObject(block, "output");
+    const addReadImage = (value: unknown) => {
+      const result = objectValue(value);
+      const path = nonEmptyString(result?.filePath);
+      if (result?.type === "image" && path) addImagePath(path, paths, seen);
+    };
+    if (block.name === "read_files") {
+      for (const item of Array.isArray(output?.results) ? output.results : []) {
+        const read = objectValue(item);
+        if (read?.ok === true) addReadImage(read.result);
+      }
+    } else {
+      addReadImage(output);
+    }
+    return paths;
+  }
+
   // Shell output often repeats paths from a preceding structured image tool
   // (for example when copying the generated artifact into a figures folder).
   // Keep the path in the auditable tool body, but do not create another image
   // preview from incidental command/log text.
-  if (block.name === "bash") return paths;
+  if (["bash", "grep_search", "glob_search", "list_dir"].includes(block.name)) return paths;
 
   collectImagePathsFromValue(parseToolBlockJson(block, "output"), paths, seen);
   if (block.output) collectImagePathsFromText(block.output, paths, seen);

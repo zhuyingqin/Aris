@@ -89,6 +89,7 @@ fn approved_gate() -> ReviewerGate {
         summary: Some("通过".to_string()),
         issues: Vec::new(),
         reviewed_at: Some(crate::now_iso8601()),
+        rubrics: None,
     }
 }
 

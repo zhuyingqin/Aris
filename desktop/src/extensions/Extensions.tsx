@@ -13,6 +13,7 @@ import {
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import OracleWebSettings from "../settings/OracleWebSettings";
 import {
@@ -22,6 +23,8 @@ import {
   pptMasterFixLabel,
 } from "./i18n";
 import PptMasterPreview from "./PptMasterPreview";
+import OfficialPluginsSection from "./OfficialPluginsSection";
+import PluginPackages from "./PluginPackages";
 import type {
   McpConfigView,
   ManagedMcpServerSummary,
@@ -121,7 +124,7 @@ function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
   ];
 }
 
-export default function Extensions({ embedded = false }: { embedded?: boolean } = {}) {
+export default function Extensions() {
   const setError = useStore((state) => state.setError);
   const currentProject = useStore((state) => state.currentProject);
   const language = useStore((state) => state.language);
@@ -411,10 +414,10 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
     <div className="ext-page">
       <header className="ext-head">
         <div className="ext-head-inner">
-          {!embedded && <div className="ext-headline">
+          <div className="ext-headline">
             <h1>{copy.title}</h1>
             <p>{copy.subtitle}</p>
-          </div>}
+          </div>
           <div className="ext-head-controls">
             <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
               <button
@@ -452,6 +455,16 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
       </header>
 
       <div className="ext-scroll">
+        {extTab === "plugins" && <OfficialPluginsSection language={language} />}
+        {extTab === "plugins" && <PluginPackages
+          projectPath={currentProject?.path}
+          language={language}
+          onChanged={() => {
+            skillsList().then(setSkills).catch((error) => setError(String(error)));
+            mcpConfigGet().then(setView).catch((error) => setError(String(error)));
+            setTestResult(null);
+          }}
+        />}
         {extTab === "plugins" ? (
           !view ? (
             <div className="ext-empty">{copy.loadingMcp}</div>
@@ -664,14 +677,14 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
                       type="text"
                       value={skillSearch}
                       onChange={(e) => setSkillSearch(e.target.value)}
-                      placeholder={language === "cn" ? `搜索 ${skills.length} 个技能...` : `Search ${skills.length} skills...`}
+                      placeholder={tr(language, `搜索 ${skills.length} 个技能...`, `Search ${skills.length} skills…`, `Buscar en ${skills.length} skills…`)}
                     />
                     {skillSearch && (
                       <button
                         type="button"
                         onClick={() => setSkillSearch("")}
                         className="ext-skills-search-clear"
-                        aria-label="clear"
+                        aria-label={tr(language, "清除", "Clear", "Borrar")}
                       >
                         <SvgIcon name="close" size={12} />
                       </button>
@@ -680,7 +693,7 @@ export default function Extensions({ embedded = false }: { embedded?: boolean } 
                   <div className="ext-skills-list" role="list">
                     {shownSkills.length === 0 ? (
                       <div className="ext-empty" style={{ padding: "20px 12px" }}>
-                        {language === "cn" ? "未找到匹配技能" : "No matching skills"}
+                        {tr(language, "未找到匹配技能", "No matching skills", "No hay skills que coincidan")}
                       </div>
                     ) : (
                       shownSkills.map((skill) => (
