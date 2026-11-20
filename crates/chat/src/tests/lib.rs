@@ -870,7 +870,7 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
         base_url: "https://example.test/v1".into(),
         send_routing_session_header: false,
         transport: aris_executor::OpenAiTransport::Auto,
-        // Unknown catalogue: the historical optimistic guess still applies.
+        // Unknown catalogue: only the executor's own model is known to exist.
         known_models: Vec::new(),
     };
 
@@ -894,17 +894,27 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
         resolve_summarizer_model(&anthropic, "claude-haiku-4-5-20251001", Some("auto")),
         Some("claude-haiku-4-5-20251001".to_string())
     );
-    // OpenAI-compatible "auto" uses a cheap sibling when the model family is
-    // known; unknown gateway model names use deterministic fallback rather
-    // than silently sending the main model a second large request.
+    // OpenAI-compatible "auto" never infers a sibling from the family name.
+    // With no catalogue a flagship uses the deterministic fallback rather than
+    // a guessed model or a second large request to the main one.
     assert_eq!(
         resolve_summarizer_model(&openai, "MiniMax-M3", Some("default")),
         None
     );
-    assert_eq!(
-        resolve_summarizer_model(&openai, "gpt-5", Some("default")),
-        Some("gpt-5-mini".to_string())
-    );
+    for flagship in ["gpt-5", "gpt-5.5", "gpt-4o", "gpt-4.1", "gpt-6.1-sol"] {
+        assert_eq!(
+            resolve_summarizer_model(&openai, flagship, Some("default")),
+            None,
+            "{flagship}: no model name may be guessed"
+        );
+    }
+    // The executor's own model is known to exist, so a cheap one summarizes.
+    for cheap in ["gpt-6-luna", "gpt-5.4-mini", "MiniMax-M3.1-Flash"] {
+        assert_eq!(
+            resolve_summarizer_model(&openai, cheap, Some("default")),
+            Some(cheap.to_string())
+        );
+    }
 }
 
 /// A model family name is not a promise that the gateway carries the family.
@@ -914,15 +924,15 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
 /// on *every* compaction — the LLM summary never ran there at all.
 #[test]
 fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
-    let gateway_without_mini = ChatExecutorConfig::OpenAiCompatible {
+    let gateway_without_cheap_gpt = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://gateway.test/v1".into(),
         send_routing_session_header: false,
         transport: aris_executor::OpenAiTransport::Auto,
-        known_models: vec!["gpt-5.6-luna".into(), "MiniMax-M3".into()],
+        known_models: vec!["gpt-5.6-sol".into(), "MiniMax-M3".into()],
     };
     assert_eq!(
-        resolve_summarizer_model(&gateway_without_mini, "gpt-5.6-luna", Some("auto")),
+        resolve_summarizer_model(&gateway_without_cheap_gpt, "gpt-5.6-sol", Some("auto")),
         None,
         "a sibling the gateway does not serve must not be attempted"
     );
@@ -936,19 +946,111 @@ fn a_cheap_sibling_is_only_used_when_the_gateway_actually_serves_it() {
     };
     assert_eq!(
         resolve_summarizer_model(&gateway_with_mini, "gpt-5", Some("auto")),
-        Some("gpt-5-mini".to_string()),
-        "a served sibling is still used, and the match is case-insensitive"
+        Some("GPT-5-Mini".to_string()),
+        "a served sibling is used, spelled the way the gateway lists it"
     );
 
     // An explicit choice still overrides the catalogue check: the operator may
     // know something the persisted list does not.
     assert_eq!(
         resolve_summarizer_model(
-            &gateway_without_mini,
-            "gpt-5.6-luna",
+            &gateway_without_cheap_gpt,
+            "gpt-5.6-sol",
             Some("some-small-model")
         ),
         Some("some-small-model".to_string())
+    );
+}
+
+/// The managed gateway's GPT tiers are named Sol and Luna, with no `-mini`.
+/// Luna is the cheap one, so it summarizes for itself and for Sol.
+#[test]
+fn the_managed_gateway_summarizes_gpt_sessions_with_its_luna_tier() {
+    let managed = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec![
+            "MiniMax-M3".into(),
+            "deepseek-v4.1-flash".into(),
+            "gpt-5.6-luna".into(),
+            "gpt-6-sol".into(),
+            "kimi-k3".into(),
+            "qwen3.8-flash".into(),
+        ],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&managed, "gpt-5.6-luna", Some("auto")),
+        Some("gpt-5.6-luna".to_string())
+    );
+    assert_eq!(
+        resolve_summarizer_model(&managed, "gpt-6-sol", Some("auto")),
+        Some("gpt-5.6-luna".to_string())
+    );
+    // Flagships with no cheap relative on the gateway stay on the fallback.
+    for flagship in ["MiniMax-M3", "kimi-k3"] {
+        assert_eq!(
+            resolve_summarizer_model(&managed, flagship, Some("auto")),
+            None,
+            "{flagship}"
+        );
+    }
+}
+
+/// With several same-vendor cheap models on offer, the closest relative of the
+/// executor wins instead of whichever name sorts first.
+#[test]
+fn the_closest_cheap_relative_in_the_catalogue_is_preferred() {
+    let catalogue = ChatExecutorConfig::OpenAiCompatible {
+        api_key: "k".into(),
+        base_url: "https://gateway.test/v1".into(),
+        send_routing_session_header: false,
+        transport: aris_executor::OpenAiTransport::Auto,
+        known_models: vec![
+            "gpt-4.1-mini".into(),
+            "gpt-4o-mini".into(),
+            "gpt-5.4-mini".into(),
+            "gpt-5.4-nano".into(),
+            "gpt-5.5".into(),
+            "gpt-6-luna".into(),
+            "gpt-6.1-sol".into(),
+        ],
+    };
+    assert_eq!(
+        resolve_summarizer_model(&catalogue, "gpt-5.5", Some("auto")),
+        Some("gpt-5.4-mini".to_string())
+    );
+    assert_eq!(
+        resolve_summarizer_model(&catalogue, "gpt-6.1-sol", Some("auto")),
+        Some("gpt-6-luna".to_string())
+    );
+}
+
+/// An Anthropic-compatible endpoint can front another vendor entirely. Haiku
+/// exists only where the executor is itself a Claude model.
+#[test]
+fn an_anthropic_compatible_endpoint_does_not_get_a_haiku_it_cannot_serve() {
+    let compat = ChatExecutorConfig::Anthropic {
+        auth: AuthSource::BearerToken("k".into()),
+        base_url: "https://api.minimaxi.com/anthropic".into(),
+        send_betas: false,
+    };
+    for flagship in ["MiniMax-M3", "deepseek-v4-pro"] {
+        assert_eq!(
+            resolve_summarizer_model(&compat, flagship, Some("auto")),
+            None,
+            "{flagship}"
+        );
+    }
+    assert_eq!(
+        resolve_summarizer_model(&compat, "MiniMax-M3.1-Flash", Some("auto")),
+        Some("MiniMax-M3.1-Flash".to_string())
+    );
+    // Claude models keep Haiku, on the official endpoint or a proxy.
+    assert_eq!(
+        resolve_summarizer_model(&compat, "claude-fable-5.1", Some("auto")),
+        Some("claude-haiku-4-5-20251001".to_string())
     );
 }
 
@@ -1088,6 +1190,33 @@ fn context_budget_scales_with_model_window() {
         350_000
     );
     assert_eq!(context_window_for_model("gpt-6-astra"), 400_000);
+    // The current catalogue ids resolve through the same family rules.
+    for model in [
+        "gpt-6.2-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+    ] {
+        assert_eq!(context_window_for_model(model), 400_000, "{model}");
+        assert_eq!(
+            context_compaction_threshold_for_model(model),
+            350_000,
+            "{model}"
+        );
+    }
+    for model in ["gemini-4-argon", "gemini-3.8-flash", "kimi-k3.1-pro"] {
+        assert_eq!(context_window_for_model(model), 1_000_000, "{model}");
+        assert_eq!(
+            context_compaction_threshold_for_model(model),
+            850_000,
+            "{model}"
+        );
+    }
+    assert_eq!(context_window_for_model("MiniMax-M3.1-Flash"), 1_000_000);
+    assert_eq!(
+        context_compaction_threshold_for_model("MiniMax-M3.1-Flash"),
+        800_000
+    );
     assert_eq!(context_compaction_threshold_for_model("kimi-k3"), 850_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),
@@ -1147,8 +1276,24 @@ fn context_window_never_below_compaction_budget() {
         "claude-fable-5.1",
         "claude-haiku-4-5-20251001",
         "glm-4.6",
+        "GLM-5",
+        "GLM-5-Turbo",
+        "glm-5.2",
+        "GLM-5.3",
+        "glm-5.3-flash",
+        "qwen3.6-plus",
+        "qwen3.6-flash",
+        "qwen3.6-max-preview",
+        "qwen3.8-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2-omni",
+        "doubao-seed-2-1-pro-260915",
+        "doubao-seed-2-0-pro-260215",
+        "deepseek-flash",
+        "deepseek-v4.1-flash",
         "o3-pro",
         "gpt-4o",
+        "gpt-4o-mini",
         "some-unknown-gateway-model",
     ] {
         let budget = context_compaction_threshold_for_model(model);
@@ -1168,6 +1313,70 @@ fn context_window_never_below_compaction_budget() {
     assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);
     // Kimi K3 keeps its genuine 1M window.
     assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
+}
+
+#[test]
+fn million_token_generations_are_not_capped_at_their_family_floor() {
+    // Each of these shipped a 1M window inside a family whose older models are
+    // 64k–256k. Matching on the family name alone compacted them at a fifth of
+    // their real window (GLM-5.3 at 160k, the managed `qwen3.8-flash` at 200k,
+    // `deepseek-flash` at 40k, MiMo at the unknown-model 100k).
+    for model in [
+        "GLM-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "z-ai/glm-5.3",
+        "glm-5.2",
+        "qwen3.6-plus",
+        "qwen3.6-flash",
+        "qwen3.7-plus",
+        "qwen3.8-flash",
+        "Qwen3.8-Flash-Next",
+        "qwen3.8-max",
+        "mimo-v2-pro",
+        "mimo-v2.5-pro",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-flash",
+        "doubao-seed-2-1-pro-260915",
+        "doubao-seed-2-1-lite-260915",
+        "doubao-seed-evolving",
+        "deepseek-flash",
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-pro",
+    ] {
+        assert_eq!(context_window_for_model(model), 1_000_000, "{model}");
+        assert_eq!(
+            context_compaction_threshold_for_model(model),
+            850_000,
+            "{model}"
+        );
+    }
+
+    // The rest of each family keeps its documented, smaller window.
+    for (model, window, budget) in [
+        ("GLM-5", 200_000, 160_000),
+        ("GLM-5-Turbo", 200_000, 160_000),
+        ("glm-5.1", 200_000, 160_000),
+        ("glm-4.6", 200_000, 160_000),
+        ("qwen3.6-max-preview", 256_000, 200_000),
+        ("qwen-max", 256_000, 200_000),
+        ("mimo-v2-omni", 256_000, 200_000),
+        // Same model family, earlier snapshot: only the 260915 Pro is 1024K.
+        ("doubao-seed-2-1-pro-260628", 256_000, 200_000),
+        ("doubao-seed-2-0-pro-260215", 256_000, 200_000),
+        ("deepseek-chat", 64_000, 40_000),
+        // 128k models must compact below 128k, not at the o-series 160k.
+        ("gpt-4o", 128_000, 100_000),
+        ("gpt-4o-mini", 128_000, 100_000),
+        ("o3-pro", 200_000, 160_000),
+    ] {
+        assert_eq!(context_window_for_model(model), window, "{model}");
+        assert_eq!(
+            context_compaction_threshold_for_model(model),
+            budget,
+            "{model}"
+        );
+    }
 }
 
 #[test]

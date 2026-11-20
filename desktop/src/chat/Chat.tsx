@@ -75,12 +75,14 @@ import { fileChangeSummaryFromTurns } from "./toolSummaries";
 import WorkflowFlow from "./WorkflowFlow";
 import ChatPluginPanel from "../extensions/ChatPluginPanel";
 import ChatBriefGlances from "../extensions/ChatBriefGlances";
-import { PLUGIN_PAGE_ACTION_EVENT, uiPanelIcon, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "../extensions/useChatPluginPanels";
+import PluginPanelIcon from "../extensions/PluginPanelIcon";
+import { PLUGIN_PAGE_ACTION_EVENT, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "../extensions/useChatPluginPanels";
 import type { ActiveUiPanel } from "../api/plugins";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
+import { NO_QUEUED_MESSAGES, queuePausedByTurns, useMessageQueue, type QueuedMessage } from "./useMessageQueue";
 import { useModelPricing } from "../useModelPricing";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
@@ -1446,11 +1448,12 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
         label: title,
         icon: sideTask.kind === "agent"
           ? <AgentTaskIdentity agent={agent ?? { sessionId: sideTask.childSessionId, status: { state: "pending_init" } }} size={18} showStatus={Boolean(agent)} />
+          : sideTask.kind === "plugin" && contribution ? <PluginPanelIcon panel={contribution} size={13} />
           : <SvgIcon name={
             sideTask.kind === "file" ? "document"
               : sideTask.kind === "agents" ? "branch"
                 : sideTask.kind === "reviewer" || sideTask.kind === "review" ? "target"
-                  : sideTask.kind === "image-workflow" ? "graph" : sideTask.kind === "plugin" ? (contribution ? uiPanelIcon(contribution) : "grid") : "sparkle"
+                  : sideTask.kind === "image-workflow" ? "graph" : sideTask.kind === "plugin" ? "grid" : "sparkle"
           } size={13} />,
         title: sideTask.kind === "file" ? sideTask.path : agent ? `${title} · ${agent.path}` : title,
         closable: true,
@@ -1470,10 +1473,45 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     focusComposer();
   }, [focusComposer, setDraft]);
 
+  // A queued message runs as the same ordinary user turn a direct send would.
+  const dispatchQueued = useCallback(async (session: ChatSession, item: QueuedMessage) => {
+    if (await commands.runSlashCommand(session, item.text, item.attachments)) return;
+    await run.beginRun(session, session.turns, item.text, item.attachments);
+  }, [commands.runSlashCommand, run.beginRun]);
+  const statusReadyRef = useRef(Boolean(status?.ready));
+  statusReadyRef.current = Boolean(status?.ready);
+  const canRunQueued = useCallback((session: ChatSession, item: QueuedMessage) => (
+    statusReadyRef.current
+    || Boolean(session.remoteAgent)
+    || (item.text.trim().startsWith("/") && item.attachments.length === 0)
+  ), []);
+  const messageQueue = useMessageQueue({
+    allSessionsRef,
+    runningSessionIds: run.runningSessionIds,
+    runningSessionIdsRef: run.runningSessionIdsRef,
+    sendLocks: run.sendLocks,
+    acquireSendLock: run.acquireSendLock,
+    releaseSendLock: run.releaseSendLock,
+    canRun: canRunQueued,
+    dispatch: dispatchQueued,
+  });
+  const currentQueue = (currentSession && messageQueue.queues[currentSession.id]) || NO_QUEUED_MESSAGES;
+  const queuePaused = currentQueue.length > 0 && !currentChatBusy && queuePausedByTurns(turns);
+
   const send = async () => {
-    if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
+    if (!currentSession || (!composer.input.trim() && composer.attachments.length === 0)) return;
     if (currentSession.remoteAgent && composer.attachments.length > 0) {
       setError(tr(language, "远程 Agent 对话暂不支持附件；请先移除附件再发送。", "Remote agent chats don't support attachments yet. Remove them before sending.", "El chat con el agente remoto aún no admite adjuntos. Quítalos antes de enviar."));
+      return;
+    }
+    // While this chat is still answering, line the message up instead of
+    // dropping it; it goes out as soon as the current turn finishes.
+    if (currentChatBusy || run.sendLocks.current.has(currentSession.id)) {
+      if (editingTurnId) return;
+      const sessionId = currentSession.id;
+      messageQueue.enqueue(sessionId, composer.input, composer.attachments);
+      updateSession(sessionId, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      window.setTimeout(() => messageQueue.drain(sessionId), 0);
       return;
     }
     let sessionId = currentSession.id;
@@ -1516,6 +1554,28 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
       run.releaseSendLock(sessionId, sendLock);
     }
   };
+
+  // Pull a queued message back into the composer to change it before it goes.
+  const editQueued = useCallback((id: string) => {
+    const session = currentSessionRef.current;
+    if (!session) return;
+    const item = messageQueue.take(session.id, id);
+    if (!item) return;
+    updateSession(session.id, (current) => ({
+      ...current,
+      draft: current.draft.trim() ? `${current.draft.trim()}\n\n${item.text}` : item.text,
+      draftAttachments: [...(current.draftAttachments ?? []), ...item.attachments],
+    }));
+    focusComposer();
+  }, [currentSessionRef, focusComposer, messageQueue.take, updateSession]);
+  const removeQueued = useCallback((id: string) => {
+    const session = currentSessionRef.current;
+    if (session) messageQueue.remove(session.id, id);
+  }, [currentSessionRef, messageQueue.remove]);
+  const resumeQueue = useCallback(() => {
+    const session = currentSessionRef.current;
+    if (session) messageQueue.resume(session.id);
+  }, [currentSessionRef, messageQueue.resume]);
 
   // Keep the composer's submit prop stable while its latest implementation
   // continues to read the current stream/session state.
@@ -2036,6 +2096,11 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           onInitializeGit={initializeGitWorkspace}
           onSwitchGitBranch={switchGitBranch}
           onCreateGitBranch={createGitBranch}
+          queuedMessages={currentQueue}
+          queuePaused={queuePaused}
+          onEditQueued={editQueued}
+          onRemoveQueued={removeQueued}
+          onResumeQueue={resumeQueue}
           onSubmit={submitComposer}
           onStop={stopComposer}
           onCancelEdit={cancelEdit}
@@ -2070,7 +2135,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
               { id: "review", label: navigationCopy.addReview, hint: navigationCopy.addReviewHint, icon: <SvgIcon name="target" size={13} />, onSelect: addCodeReview },
               { id: "image-workflow", label: navigationCopy.addImage, hint: navigationCopy.addImageHint, icon: <SvgIcon name="graph" size={13} />, onSelect: addImageWorkflow },
               { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
-              ...pluginPanels.panels.map((panel) => ({ id: uiPanelKey(panel), label: uiText(panel.title, language), hint: panel.pluginName, icon: <SvgIcon name={uiPanelIcon(panel)} size={13} />, onSelect: () => openPluginPanel(panel) })),
+              ...pluginPanels.panels.map((panel) => ({ id: uiPanelKey(panel), label: uiText(panel.title, language), hint: panel.pluginName, icon: <PluginPanelIcon panel={panel} size={13} />, onSelect: () => openPluginPanel(panel) })),
             ]}
             action={activeSideTask?.handoff
               ? {

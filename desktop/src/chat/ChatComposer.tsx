@@ -19,10 +19,12 @@ import { groupChatModels } from "./modelGroups";
 import { modelPriceView, type ModelPricingState } from "../modelPricing";
 import { reasoningLevelName } from "./reasoningLevels";
 import { useMacImeGuard } from "./useMacImeGuard";
+import { NO_QUEUED_MESSAGES, type QueuedMessage } from "./useMessageQueue";
 import "../modelPricing.css";
 import "./ChatComposerGit.css";
 import "./ChatComposerModel.css";
 import "./ChatComposerLayout.css";
+import "./ChatComposerQueue.css";
 import { chatImageMimeType } from "../imageFiles";
 
 interface ContextStatusView {
@@ -322,6 +324,13 @@ interface Props {
   onAttachmentsChange: (attachments: ChatAttachment[]) => void;
   onSubmit: () => void;
   onStop: () => void;
+  /** Messages lined up while this chat is answering, oldest first. */
+  queuedMessages?: readonly QueuedMessage[];
+  /** The last turn was stopped or failed, so the queue waits for the user. */
+  queuePaused?: boolean;
+  onEditQueued?: (id: string) => void;
+  onRemoveQueued?: (id: string) => void;
+  onResumeQueue?: () => void;
   onCancelEdit: () => void;
   onHeightChange: (height: number) => void;
   focusRequest?: number;
@@ -367,6 +376,11 @@ function ChatComposer({
   onAttachmentsChange,
   onSubmit,
   onStop,
+  queuedMessages = NO_QUEUED_MESSAGES,
+  queuePaused = false,
+  onEditQueued,
+  onRemoveQueued,
+  onResumeQueue,
   onCancelEdit,
   onHeightChange,
   focusRequest = 0,
@@ -542,9 +556,12 @@ function ChatComposer({
   );
   const activeItems = pickerMode === "skill" ? slashItems : fileItems;
   const isCommandInput = input.trim().startsWith("/");
+  const hasContent = input.trim().length > 0 || attachments.length > 0;
   const canSubmit = !busy
     && (ready || (isCommandInput && attachments.length === 0))
-    && (input.trim().length > 0 || attachments.length > 0);
+    && hasContent;
+  // While answering, Enter lines the message up for after this turn.
+  const canQueue = busy && !editing && hasContent;
 
   useLayoutEffect(() => {
     if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
@@ -904,6 +921,58 @@ function ChatComposer({
             {tr(language, "附件添加失败：", "Attachment could not be added: ", "No se pudo añadir el adjunto: ")}{attachmentError}
           </div>
         )}
+        {queuedMessages.length > 0 && (
+          <div className="chat-queue" aria-label={tr(language, "排队中的消息", "Queued messages", "Mensajes en cola")}>
+            <div className="chat-queue-head">
+              <span>
+                {queuePaused
+                  ? tr(language, "上一轮已停止或失败，队列已暂停", "The last turn stopped or failed; the queue is paused", "El último turno se detuvo o falló; la cola está en pausa")
+                  : tr(language, `${queuedMessages.length} 条消息将在本轮结束后依次发送`, `${queuedMessages.length} queued — sent in order after this turn`, `${queuedMessages.length} en cola: se enviarán en orden al terminar este turno`)}
+              </span>
+              {queuePaused && onResumeQueue && (
+                <button type="button" className="chat-queue-resume" onClick={onResumeQueue}>
+                  {tr(language, "发送下一条", "Send next", "Enviar siguiente")}
+                </button>
+              )}
+            </div>
+            <ol className="chat-queue-list">
+              {queuedMessages.map((item) => {
+                const preview = item.text.trim().replace(/\s+/g, " ")
+                  || tr(language, `${item.attachments.length} 个附件`, `${item.attachments.length} attachment(s)`, `${item.attachments.length} adjunto(s)`);
+                return (
+                  <li key={item.id} className="chat-queue-item">
+                    <span className="chat-queue-text" title={item.text}>{preview}</span>
+                    {item.attachments.length > 0 && item.text.trim() && (
+                      <span className="chat-queue-meta"><SvgIcon name="attachment" size={12} />{item.attachments.length}</span>
+                    )}
+                    {onEditQueued && (
+                      <button
+                        type="button"
+                        className="chat-queue-btn"
+                        onClick={() => onEditQueued(item.id)}
+                        aria-label={`${tr(language, "编辑排队消息", "Edit queued message", "Editar mensaje en cola")}: ${preview}`}
+                        title={tr(language, "取回输入框修改", "Move back to the composer to edit", "Volver al cuadro de texto para editar")}
+                      >
+                        <SvgIcon name="edit" size={12} />
+                      </button>
+                    )}
+                    {onRemoveQueued && (
+                      <button
+                        type="button"
+                        className="chat-queue-btn"
+                        onClick={() => onRemoveQueued(item.id)}
+                        aria-label={`${tr(language, "移除排队消息", "Remove queued message", "Quitar mensaje en cola")}: ${preview}`}
+                        title={tr(language, "移除", "Remove", "Quitar")}
+                      >
+                        <SvgIcon name="close" size={12} />
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        )}
         {editing && (
           <div className="chat-edit-banner">
             <span className="chat-edit-banner-text">
@@ -983,7 +1052,7 @@ function ChatComposer({
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              if (canSubmit) onSubmit();
+              if (canSubmit || canQueue) onSubmit();
             }
           }}
         />
@@ -1265,6 +1334,16 @@ function ChatComposer({
                   </div>
                 )}
               </div>
+            )}
+            {busy && canQueue && (
+              <button
+                className="chat-send-btn chat-queue-send-btn"
+                onClick={onSubmit}
+                aria-label={tr(language, "加入队列", "Add to queue", "Añadir a la cola")}
+                title={tr(language, "本轮结束后发送 (Enter)", "Send after this turn (Enter)", "Enviar al terminar este turno (Enter)")}
+              >
+                <SvgIcon name="send" size={15} />
+              </button>
             )}
             {busy ? (
               <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}><SvgIcon name="stop" size={15} /></button>

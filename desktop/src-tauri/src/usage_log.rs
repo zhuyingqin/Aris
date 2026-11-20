@@ -226,6 +226,36 @@ pub(crate) fn session_usage_log(session_id: &str) -> Result<String, String> {
     Ok(filter_usage_log_for_session(&content, session_id))
 }
 
+/// The executor model this chat session last ran on, from the usage ledger.
+///
+/// Sessions created before a chat remembered its own model carry no `model`
+/// field, so they followed the app-wide default and silently switched model
+/// whenever another conversation changed that default. The ledger is the only
+/// durable record of what such a session actually used.
+pub(crate) fn session_last_executor_model(session_id: &str) -> Result<Option<String>, String> {
+    let content = match fs::read_to_string(usage_log_path()) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(last_executor_model_in(&content, session_id))
+}
+
+fn last_executor_model_in(content: &str, session_id: &str) -> Option<String> {
+    content
+        .lines()
+        .rev()
+        // Cheap substring gate first: the ledger holds every conversation.
+        .filter(|line| line.contains(session_id))
+        .filter_map(|line| serde_json::from_str::<UsageLogEntry>(line).ok())
+        .find(|entry| {
+            entry.session_id == session_id
+                && entry.role == "executor"
+                && !entry.model.trim().is_empty()
+        })
+        .map(|entry| entry.model.trim().to_string())
+}
+
 fn filter_usage_log_for_session(content: &str, session_id: &str) -> String {
     let mut filtered = String::new();
     for line in content.lines() {

@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import {
   bridgeBackendPluginChanges, PLUGINS_CHANGED_EVENT, samePluginProject,
-  pluginsCheckMcp, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsRollback, pluginsSetEnabled, pluginsUpgrade,
+  pluginsCheckMcp, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsRollback, pluginsSetEnabled, pluginsSetGlobal, pluginsUpgrade,
   type InstalledPlugin, type ListChange, type PluginImportPreview, type PluginLifecycle, type PluginMcpStatus,
   type PluginPreview, type PluginState, type PluginUpgradePlan, type PluginVersion,
 } from "../api/plugins";
@@ -64,6 +64,13 @@ const COPY = {
     upgradeBlockedNote: "新版本暂时不能启用，升级后这个包会停用。正在运行的回合继续使用旧版本。",
     identicalNote: "已经安装了完全相同的版本，无需升级。",
     noProject: "选择项目后管理插件包。", retry: "重新加载", loadFailed: "插件包读取失败",
+    allProjects: "所有项目", allProjectsBadge: "所有项目",
+    globalOnAria: (name: string) => `在所有项目中启用 ${name}`, globalOffAria: (name: string) => `只在本项目启用 ${name}`,
+    globalHint: "已对本机所有项目启用；左边的开关只影响本项目。要升级、回退或移除，先关闭“所有项目”。",
+    globalOnTitle: "在本机所有项目中启用", globalOnNote: "所有项目都会加载它的 Skills、MCP 和面板，不需要逐个安装和批准；每个项目仍可单独关闭。",
+    globalOffTitle: "只在本项目保留", globalOffNote: "它会留在本项目并保持启用，其他项目不再加载它。",
+    confirmGlobalOn: "对所有项目启用", confirmGlobalOff: "只在本项目保留",
+    globalNeedsEnabled: "先在本项目启用，才能对所有项目启用。",
     askAiCreate: "让 AI 创建插件", askAiCreateHint: "新开一个对话，把需求草稿放进输入框，由你确认后发送。",
     askAiFix: "让 AI 修复", askAiFixHint: "新开一个对话，带上这个包的来源和诊断，由你确认后发送。",
   },
@@ -115,6 +122,13 @@ const COPY = {
     upgradeBlockedNote: "The new version can't be enabled yet, so the package is disabled by the upgrade. Runs in progress keep the old version.",
     identicalNote: "This exact version is already installed; there is nothing to upgrade.",
     noProject: "Select a project to manage packages.", retry: "Reload", loadFailed: "Couldn't load packages",
+    allProjects: "All projects", allProjectsBadge: "All projects",
+    globalOnAria: (name: string) => `Enable ${name} for all projects`, globalOffAria: (name: string) => `Keep ${name} in this project only`,
+    globalHint: "On for every project on this computer; the switch on the left affects this project only. To upgrade, roll back or remove it, turn off All projects first.",
+    globalOnTitle: "Enable for every project on this computer", globalOnNote: "Every project loads its Skills, MCP and panels without installing or approving it again; each project can still turn it off.",
+    globalOffTitle: "Keep it in this project only", globalOffNote: "It stays installed and enabled here; other projects stop loading it.",
+    confirmGlobalOn: "Enable for all projects", confirmGlobalOff: "Keep in this project",
+    globalNeedsEnabled: "Enable it in this project first.",
     askAiCreate: "Ask AI to create a plugin", askAiCreateHint: "Opens a new chat with a request draft in the composer; you review and send it.",
     askAiFix: "Ask AI to fix", askAiFixHint: "Opens a new chat with this package's source and diagnostics; you review and send it.",
   },
@@ -166,6 +180,13 @@ const COPY = {
     upgradeBlockedNote: "La nueva versión aún no se puede activar, así que la actualización desactiva el paquete. Las ejecuciones en curso conservan la versión anterior.",
     identicalNote: "Esta misma versión ya está instalada; no hay nada que actualizar.",
     noProject: "Selecciona un proyecto para gestionar paquetes.", retry: "Recargar", loadFailed: "No se pudieron cargar los paquetes",
+    allProjects: "Todos los proyectos", allProjectsBadge: "Todos los proyectos",
+    globalOnAria: (name: string) => `Activar ${name} en todos los proyectos`, globalOffAria: (name: string) => `Mantener ${name} solo en este proyecto`,
+    globalHint: "Activado en todos los proyectos de este equipo; el interruptor de la izquierda solo afecta a este proyecto. Para actualizarlo, volver atrás o quitarlo, desactiva antes Todos los proyectos.",
+    globalOnTitle: "Activar en todos los proyectos de este equipo", globalOnNote: "Todos los proyectos cargan sus Skills, MCP y paneles sin instalarlo ni aprobarlo de nuevo; cada proyecto puede seguir desactivándolo.",
+    globalOffTitle: "Mantenerlo solo en este proyecto", globalOffNote: "Se queda instalado y activado aquí; los demás proyectos dejan de cargarlo.",
+    confirmGlobalOn: "Activar en todos", confirmGlobalOff: "Mantener en este proyecto",
+    globalNeedsEnabled: "Actívalo antes en este proyecto.",
     askAiCreate: "Pedir a la IA que cree un plugin", askAiCreateHint: "Abre un chat nuevo con un borrador de la petición en el cuadro de mensaje; tú lo revisas y lo envías.",
     askAiFix: "Pedir a la IA que lo arregle", askAiFixHint: "Abre un chat nuevo con el origen y los diagnósticos de este paquete; tú lo revisas y lo envías.",
   },
@@ -244,6 +265,10 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
         "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
         " (own page: runs the package's page code, sandboxed, no network)",
         " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)") : "")
+      + (panel.web ? tr(language,
+        `（嵌入网页：${panel.web}）`,
+        ` (embeds the web page ${panel.web})`,
+        ` (incrusta la página web ${panel.web})`) : "")
       + (panel.proposeTasks ? tr(language,
         "（可提议后台任务，每次都需你确认）",
         " (may propose background tasks; you confirm each one)",
@@ -277,8 +302,8 @@ function Diagnostics({ item, copy }: { item: PluginPreview; copy: Copy }) {
   </div>;
 }
 
-function PackageHeading({ item, copy, badge, children }: {
-  item: PluginPreview; copy: Copy; badge?: "compatible" | "blocked"; children?: ReactNode;
+function PackageHeading({ item, copy, badge, global, children }: {
+  item: PluginPreview; copy: Copy; badge?: "compatible" | "blocked"; global?: boolean; children?: ReactNode;
 }) {
   const { scope, base } = splitName(item.name);
   return <div className="plugin-card-copy">
@@ -286,6 +311,7 @@ function PackageHeading({ item, copy, badge, children }: {
       <strong title={item.name}>{scope && <span className="plugin-scope">{scope}</span>}{base}</strong>
       <span className="plugin-version">v{item.version}</span>
       {badge && <span className={`plugin-badge ${badge === "blocked" ? "is-warning" : "is-ok"}`}>{copy[badge]}</span>}
+      {global && <span className="plugin-badge is-global"><SvgIcon name="desktop" size={11} />{copy.allProjectsBadge}</span>}
     </div>
     {item.description && <p className="plugin-card-desc">{item.description}</p>}
     <div className="plugin-card-meta"><CapabilityChips item={item} copy={copy} />{children}</div>
@@ -345,14 +371,18 @@ function VersionHistory({ item, copy, language, busy, onRollback }: {
   </ol>;
 }
 
-function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemove, onCheck, onRepair, onRollback }: {
+function InstalledCard({ item, copy, language, busy, checking, onToggle, onSetGlobal, onRemove, onCheck, onRepair, onRollback }: {
   item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; checking: boolean;
-  onToggle: () => void; onRemove: () => void; onCheck: () => void; onRepair: () => void; onRollback: (version: PluginVersion) => void;
+  onToggle: () => void; onSetGlobal: (global: boolean) => void; onRemove: () => void; onCheck: () => void; onRepair: () => void;
+  onRollback: (version: PluginVersion) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const earlier = item.history?.length ?? 0;
-  const [confirming, setConfirming] = useState<"remove" | "enable" | null>(null);
+  const [confirming, setConfirming] = useState<"remove" | "enable" | "global" | null>(null);
+  const global = item.global === true;
+  // Becoming global needs a package already approved and running here.
+  const canSetGlobal = global || (item.enabled && item.canEnable);
   const detailsId = useId();
   const lifecycle = lifecycleOf(item);
   const blocked = item.status === "blocked";
@@ -369,11 +399,11 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
   return <article className={`plugin-card is-${item.enabled ? "enabled" : blocked ? "blocked" : "disabled"} is-state-${lifecycle.state}`} aria-label={item.name}>
     <div className="plugin-card-main">
       <span className="plugin-card-mark" aria-hidden="true">{blocked && !item.enabled ? <SvgIcon name="warning" size={16} /> : monogram(item.name)}</span>
-      <PackageHeading item={item} copy={copy} badge={blocked ? "blocked" : undefined}>
+      <PackageHeading item={item} copy={copy} badge={blocked ? "blocked" : undefined} global={global}>
         <button type="button" className="plugin-details-toggle" aria-expanded={detailsOpen} aria-controls={detailsId} onClick={() => setDetailsOpen((value) => !value)}>
           {detailsOpen ? copy.hideDetails : copy.details}<SvgIcon name={detailsOpen ? "chevronUp" : "chevronDown"} size={12} />
         </button>
-        {earlier > 0 && <button type="button" className="plugin-details-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)}>
+        {earlier > 0 && !global && <button type="button" className="plugin-details-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)}>
           {historyOpen ? copy.hideHistory : copy.history(earlier)}<SvgIcon name={historyOpen ? "chevronUp" : "chevronDown"} size={12} />
         </button>}
       </PackageHeading>
@@ -382,11 +412,32 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
         <button type="button" role="switch" className="plugin-switch" aria-checked={item.enabled}
           aria-label={`${item.enabled ? copy.disable : copy.enable} ${item.name}`}
           disabled={busy || !canToggle} onClick={requestToggle}><span /></button>
-        <button type="button" className="plugin-icon-btn is-danger" aria-label={`${copy.remove} ${item.name}`} title={copy.remove}
-          disabled={busy} aria-expanded={confirming === "remove"} onClick={() => setConfirming((value) => value === "remove" ? null : "remove")}><SvgIcon name="trash" size={14} /></button>
+        <button type="button" role="switch" className="plugin-global-switch" aria-checked={global}
+          aria-label={global ? copy.globalOffAria(item.name) : copy.globalOnAria(item.name)}
+          title={canSetGlobal ? (global ? copy.globalOffTitle : copy.globalOnTitle) : copy.globalNeedsEnabled}
+          disabled={busy || !canSetGlobal} aria-expanded={confirming === "global"}
+          onClick={() => setConfirming((value) => value === "global" ? null : "global")}>
+          <SvgIcon name="desktop" size={12} />{copy.allProjects}
+        </button>
+        {!global && <button type="button" className="plugin-icon-btn is-danger" aria-label={`${copy.remove} ${item.name}`} title={copy.remove}
+          disabled={busy} aria-expanded={confirming === "remove"} onClick={() => setConfirming((value) => value === "remove" ? null : "remove")}><SvgIcon name="trash" size={14} /></button>}
       </div>
     </div>
     {hint && <p className={`plugin-state-hint is-${lifecycle.state}`}>{hint}</p>}
+    {global && <p className="plugin-state-hint is-global">{copy.globalHint}</p>}
+    {confirming === "global" && <div className="plugin-confirm is-caution" role="group" aria-label={global ? copy.globalOffTitle : copy.globalOnTitle}>
+      <div className="plugin-confirm-body">
+        <strong><SvgIcon name="desktop" size={14} />{global ? copy.globalOffTitle : copy.globalOnTitle}</strong>
+        {!global && servers.length > 0 && <><p>{copy.enableMcpTitle}</p><McpServers servers={servers} copy={copy} /></>}
+        <p>{global ? copy.globalOffNote : copy.globalOnNote}</p>
+      </div>
+      <div className="plugin-confirm-actions">
+        <button type="button" className="ext-secondary-btn" onClick={() => setConfirming(null)}>{copy.cancel}</button>
+        <button type="button" className="ext-primary-btn" disabled={busy} onClick={() => { setConfirming(null); onSetGlobal(!global); }}>
+          {global ? copy.confirmGlobalOff : copy.confirmGlobalOn}
+        </button>
+      </div>
+    </div>}
     {item.enabled && lifecycle.mcpServers.length > 0 && <McpHealth name={item.name} servers={lifecycle.mcpServers} copy={copy}
       canCheck={item.canEnable} checking={checking} onCheck={onCheck} />}
     {confirming === "enable" && <div className="plugin-confirm is-caution" role="group" aria-label={`${copy.enable} ${item.name}`}>
@@ -414,7 +465,7 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onRemov
       </button>
     </div>}
     {detailsOpen && <PackageDetails item={item} copy={copy} language={language} id={detailsId} />}
-    {historyOpen && earlier > 0 && <VersionHistory item={item} copy={copy} language={language} busy={busy} onRollback={onRollback} />}
+    {historyOpen && earlier > 0 && !global && <VersionHistory item={item} copy={copy} language={language} busy={busy} onRollback={onRollback} />}
   </article>;
 }
 
@@ -577,7 +628,17 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
     if (!projectPath) return;
     const request = epoch.current;
     bound(async () => {
-      const result = await pluginsSetEnabled(projectPath, item.name, !item.enabled);
+      const result = await pluginsSetEnabled(projectPath, item.name, !item.enabled, item.digest);
+      if (epoch.current !== request) return;
+      replace(result); onChanged();
+    });
+  }
+
+  function setGlobal(item: InstalledPlugin, global: boolean) {
+    if (!projectPath) return;
+    const request = epoch.current;
+    bound(async () => {
+      const result = await pluginsSetGlobal(projectPath, item.name, global, item.digest);
       if (epoch.current !== request) return;
       replace(result); onChanged();
     });
@@ -587,7 +648,7 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
     if (!projectPath) return;
     const request = epoch.current;
     bound(async () => {
-      await pluginsRemove(projectPath, item.name);
+      await pluginsRemove(projectPath, item.name, item.digest);
       if (epoch.current !== request) return;
       setPackages((items) => items.filter((entry) => entry.name !== item.name)); onChanged();
     });
@@ -707,7 +768,8 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
         </div>
       </div> : <div className="plugin-list">
         {packages.map((item) => <InstalledCard key={item.name} item={item} copy={copy} language={language} busy={busy}
-          checking={checking === item.name} onToggle={() => toggle(item)} onRemove={() => remove(item)} onCheck={() => checkMcp(item)}
+          checking={checking === item.name} onToggle={() => toggle(item)} onSetGlobal={(global) => setGlobal(item, global)}
+          onRemove={() => remove(item)} onCheck={() => checkMcp(item)}
           onRepair={() => askAi(pluginRepairDraft(item, projectPath, language))} onRollback={(version) => rollback(item, version)} />)}
       </div>}
       {packages.length > 0 && <p className="plugin-footnote"><SvgIcon name="info" size={13} />{copy.nextRun}</p>}

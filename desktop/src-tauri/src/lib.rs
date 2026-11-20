@@ -127,7 +127,7 @@ fn open_chat_companion_window(
         *pending = Some(handoff);
     }
 
-    let window = WebviewWindowBuilder::new(
+    let window = commands::route_new_windows_to_browser(WebviewWindowBuilder::new(
         &app,
         "chat-companion",
         // `WebviewUrl::App` accepts an asset path, not a URL-with-query. A
@@ -141,7 +141,7 @@ fn open_chat_companion_window(
     .resizable(true)
     .decorations(cfg!(target_os = "macos"))
     .shadow(true)
-    .always_on_top(true)
+    .always_on_top(true))
     .build()
     .map_err(|error| error.to_string())?;
 
@@ -713,6 +713,13 @@ pub fn run() {
         .manage(codebridge::CodeBridgeState::default())
         .manage(screenshot::ScreenshotState::default())
         .setup(|app| {
+            // The main window is declared in tauri.conf.json but built here, so
+            // it can route new-window requests to the system browser.
+            let main = app.config().app.windows.iter().find(|window| window.label == "main" && !window.create).cloned();
+            if let (Some(main), None) = (main, app.get_webview_window("main")) {
+                commands::route_new_windows_to_browser(WebviewWindowBuilder::from_config(app.handle(), &main)?)
+                    .build()?;
+            }
             register_screenshot_shortcut(app.handle());
             // Retire the old HTTP account before bundled settings can be
             // merged; this also removes its URL-scoped Keyring refresh cookie.
@@ -1013,6 +1020,7 @@ pub fn run() {
             plugins::plugins_preview,
             plugins::plugins_install,
             plugins::plugins_set_enabled,
+            plugins::plugins_set_global,
             plugins::plugins_upgrade,
             plugins::plugins_rollback,
             plugins::plugins_draft_changes,
@@ -1046,6 +1054,7 @@ pub fn run() {
             sessions::sessions_list,
             sessions::chat_ui_sessions_list,
             sessions::chat_ui_session_load,
+            sessions::chat_session_last_model,
             sessions::chat_ui_turn_load,
             sessions::chat_ui_session_save,
             sessions::chat_ui_session_delete,

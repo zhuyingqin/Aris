@@ -161,9 +161,32 @@ pub async fn plugins_set_enabled(
     project_path: String,
     name: String,
     enabled: bool,
+    expected_digest: Option<String>,
 ) -> Result<InstalledPlugin, String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || store.set_enabled(&name, enabled)).await
+    // The page sends the digest it showed; enabling then approves exactly that.
+    off_main_thread(move || match expected_digest {
+        Some(digest) => store.set_enabled_shown(&name, enabled, &digest),
+        None => store.set_enabled(&name, enabled),
+    })
+    .await
+}
+
+/// Turn "all projects" on or off for a package of this project.
+#[tauri::command]
+pub async fn plugins_set_global(
+    projects: State<'_, ProjectState>,
+    project_path: String,
+    name: String,
+    global: bool,
+    expected_digest: Option<String>,
+) -> Result<InstalledPlugin, String> {
+    let store = bound_store(&current_project_path(&projects)?, &project_path)?;
+    off_main_thread(move || match expected_digest {
+        Some(digest) => store.set_global_shown(&name, global, &digest),
+        None => store.set_global(&name, global),
+    })
+    .await
 }
 
 #[tauri::command]
@@ -171,9 +194,14 @@ pub async fn plugins_remove(
     projects: State<'_, ProjectState>,
     project_path: String,
     name: String,
+    expected_digest: Option<String>,
 ) -> Result<(), String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || store.remove(&name)).await
+    off_main_thread(move || match expected_digest {
+        Some(digest) => store.remove_confirmed(&name, &digest),
+        None => store.remove(&name),
+    })
+    .await
 }
 
 #[tauri::command]
@@ -590,6 +618,19 @@ fn checkout(
     input: &PluginManagerInput,
 ) -> Result<Value, ToolError> {
     let name = required(&input.name, "checkout", "name")?;
+    // A package that gives the independent Reviewer criteria keeps them out
+    // of the conversation: checking it out would put them in the workspace,
+    // where the Executor reads files.
+    if store
+        .list()
+        .map_err(ToolError::new)?
+        .iter()
+        .any(|plugin| plugin.package.name == name && !plugin.package.capabilities.review_rubrics.is_empty())
+    {
+        return Err(ToolError::new(
+            "This package gives the independent Reviewer its criteria, which the Executor must not see, so it cannot be checked out into a conversation. The user can edit its source folder outside SomniQ and import it again from the plugin page.",
+        ));
+    }
     // The draft lives in the project the plugins belong to.
     let out = store.checkout(name, input.replace).map_err(ToolError::new)?;
     let next = match out.status {
@@ -1101,7 +1142,19 @@ pub async fn chat_plugin_approval_respond(
 /// What a package would contribute. MCP environment variables are listed by
 /// name only: their values may be credentials and must not enter the
 /// conversation.
+/// What a package would contribute, as the user's approval card shows it.
 fn capabilities_output(capabilities: &runtime::plugins::PluginCapabilities) -> Value {
+    capabilities_view(capabilities, true)
+}
+
+/// What a package would contribute, as the model may see it: the Reviewer's
+/// criteria are counted, never named. Their titles and trigger words would
+/// tell the Executor what to avoid saying for a rubric not to apply.
+fn capabilities_for_model(capabilities: &runtime::plugins::PluginCapabilities) -> Value {
+    capabilities_view(capabilities, false)
+}
+
+fn capabilities_view(capabilities: &runtime::plugins::PluginCapabilities, rubric_text: bool) -> Value {
     json!({
         "skills": capabilities.skills,
         "uiPanels": capabilities.ui_panels.iter().map(|panel| json!({
@@ -1112,17 +1165,23 @@ fn capabilities_output(capabilities: &runtime::plugins::PluginCapabilities) -> V
             "widgets": panel.widgets.len(),
             // The panel runs the package's own HTML and JavaScript (sandboxed).
             "page": panel.page.is_some(),
+            // The host embeds this web address as the panel; the user sees it before approving.
+            "web": panel.web,
             "dataPanel": panel.data_panel,
             // The page may propose background work tasks; each needs the user's click.
             "proposeTasks": panel.propose_tasks,
         })).collect::<Vec<_>>(),
         // Criteria the independent Reviewer will check; the Executor never sees them.
-        "reviewRubrics": capabilities.review_rubrics.iter().map(|rubric| json!({
-            "id": rubric.id,
-            "title": rubric.title,
-            "criteria": rubric.criteria.len(),
-            "appliesWhen": rubric.applies_when,
-        })).collect::<Vec<_>>(),
+        "reviewRubrics": capabilities.review_rubrics.iter().map(|rubric| if rubric_text {
+            json!({
+                "id": rubric.id,
+                "title": rubric.title,
+                "criteria": rubric.criteria.len(),
+                "appliesWhen": rubric.applies_when,
+            })
+        } else {
+            json!({ "criteria": rubric.criteria.len() })
+        }).collect::<Vec<_>>(),
         "mcpServers": capabilities.mcp_servers.iter().map(|server| json!({
             "name": server.name,
             "command": server.command,
@@ -1146,7 +1205,7 @@ fn preview_output(source: &Path, preview: &PluginImportPreview) -> Value {
         "description": package.description,
         "digest": package.digest,
         "canEnable": package.can_enable,
-        "capabilities": capabilities_output(&package.capabilities),
+        "capabilities": capabilities_for_model(&package.capabilities),
         "diagnostics": package.diagnostics,
         "upgrade": preview.upgrade,
         "nextStep": match (clean, preview.upgrade.is_some()) {
@@ -1168,7 +1227,7 @@ fn installed_output(plugin: &InstalledPlugin) -> Value {
         "enabled": plugin.enabled,
         "status": plugin.status,
         "lifecycle": plugin.lifecycle,
-        "capabilities": capabilities_output(&package.capabilities),
+        "capabilities": capabilities_for_model(&package.capabilities),
         "diagnostics": package.diagnostics,
     })
 }
@@ -1385,6 +1444,26 @@ pub(crate) fn run_plugin_panel_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_model_counts_reviewer_criteria_but_never_reads_them() {
+        use runtime::plugins::{ReviewCriterion, ReviewRubric, ReviewSeverity, UiText};
+        let capabilities = runtime::plugins::PluginCapabilities {
+            review_rubrics: vec![ReviewRubric {
+                id: "evidence".into(),
+                title: UiText::Plain("Secret rubric title".into()),
+                applies_when: vec!["p-value".into()],
+                criteria: vec![ReviewCriterion { id: "numbers".into(), check: "Trace every number.".into(), severity: ReviewSeverity::Critical }],
+            }],
+            ..Default::default()
+        };
+        let model = capabilities_for_model(&capabilities).to_string();
+        assert!(!model.contains("Secret rubric title") && !model.contains("p-value") && !model.contains("evidence"), "{model}");
+        assert!(model.contains("\"criteria\":1"), "{model}");
+        // The user's approval card still names them.
+        let card = capabilities_output(&capabilities).to_string();
+        assert!(card.contains("Secret rubric title") && card.contains("p-value"), "{card}");
+    }
 
     fn write(dir: &Path, file: &str, content: &str) {
         let path = dir.join(file);

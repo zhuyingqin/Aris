@@ -153,7 +153,7 @@ struct RunEntry {
     label: String,
     started_at_ms: u64,
     set: Arc<PluginSet>,
-    snapshot_dirs: Arc<[PathBuf]>,
+    readable_dirs: Arc<[PathBuf]>,
 }
 
 fn runs() -> &'static Mutex<BTreeMap<String, RunEntry>> {
@@ -190,7 +190,7 @@ fn new_token() -> String {
 pub struct PluginRun {
     token: String,
     set: Arc<PluginSet>,
-    snapshot_dirs: Arc<[PathBuf]>,
+    readable_dirs: Arc<[PathBuf]>,
 }
 
 impl std::fmt::Debug for PluginRun {
@@ -220,10 +220,12 @@ impl PluginRun {
                     store.builtin_disabled_now(),
                 )
             });
-        let snapshot_dirs: Arc<[PathBuf]> = set
+        // Only the frozen packages' skill directories become readable; the
+        // rest of a snapshot (rubrics, server code) stays out of reach.
+        let readable_dirs: Arc<[PathBuf]> = set
             .plugins
             .iter()
-            .map(|plugin| store.snapshot_path(&plugin.digest))
+            .flat_map(|plugin| store.readable_dirs_of(&store.inspect_frozen(plugin)))
             .collect();
         let set = Arc::new(set);
         let token = new_token();
@@ -233,13 +235,13 @@ impl PluginRun {
                 label: label.into(),
                 started_at_ms: now_ms(),
                 set: set.clone(),
-                snapshot_dirs: snapshot_dirs.clone(),
+                readable_dirs: readable_dirs.clone(),
             },
         );
         Self {
             token,
             set,
-            snapshot_dirs,
+            readable_dirs,
         }
     }
 
@@ -248,10 +250,10 @@ impl PluginRun {
         &self.set
     }
 
-    /// Snapshot directories of the frozen packages: the run's read-only roots.
+    /// Skill directories of the frozen packages: the run's read-only roots.
     #[must_use]
-    pub fn snapshot_dirs(&self) -> &[PathBuf] {
-        &self.snapshot_dirs
+    pub fn readable_dirs(&self) -> &[PathBuf] {
+        &self.readable_dirs
     }
 
     /// `context`, resolving plugins from this run's frozen set.
@@ -265,7 +267,7 @@ impl PluginRun {
     pub fn binding(&self) -> PluginRunBinding {
         PluginRunBinding {
             token: self.token.clone(),
-            snapshot_dirs: self.snapshot_dirs.clone(),
+            readable_dirs: self.readable_dirs.clone(),
         }
     }
 
@@ -288,14 +290,14 @@ impl PluginRun {
 #[derive(Debug, Clone)]
 pub struct PluginRunBinding {
     token: String,
-    snapshot_dirs: Arc<[PathBuf]>,
+    readable_dirs: Arc<[PathBuf]>,
 }
 
 impl PluginRunBinding {
-    /// The frozen packages' snapshot directories; empty once the run ended.
+    /// The frozen packages' skill directories; empty once the run ended.
     #[must_use]
-    pub fn snapshot_dirs(&self) -> &[PathBuf] {
-        &self.snapshot_dirs
+    pub fn readable_dirs(&self) -> &[PathBuf] {
+        &self.readable_dirs
     }
 
     #[must_use]
@@ -313,13 +315,13 @@ pub fn current_plugin_run() -> Option<PluginRunBinding> {
     let token =
         crate::execution_env_var_os(ARIS_PLUGIN_RUN_ENV).filter(|value| !value.is_empty())?;
     let token = token.to_string_lossy().into_owned();
-    let snapshot_dirs = lock_runs().get(&token).map_or_else(
+    let readable_dirs = lock_runs().get(&token).map_or_else(
         || Arc::from(Vec::new()),
-        |entry| entry.snapshot_dirs.clone(),
+        |entry| entry.readable_dirs.clone(),
     );
     Some(PluginRunBinding {
         token,
-        snapshot_dirs,
+        readable_dirs,
     })
 }
 
@@ -438,6 +440,7 @@ pub struct PluginLifecycle {
 
 /// Where `view` stands given this project's in-flight `runs`.
 pub(super) fn assess(
+    store: &super::PluginStore,
     view: &InstalledPlugin,
     runs: &[Arc<PluginSet>],
     disabled: &[String],
@@ -454,7 +457,7 @@ pub(super) fn assess(
     } else {
         active_runs
     };
-    let mcp_servers: Vec<_> = mcp_entries(&view.package)
+    let mcp_servers: Vec<_> = mcp_entries(store, &view.package)
         .into_iter()
         .map(|entry| {
             let health = crate::mcp_server_health(

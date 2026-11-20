@@ -10,7 +10,7 @@
 use std::path::{Component, Path};
 
 /// What a refused tool tells the model.
-pub const PLUGIN_STORE_REFUSAL: &str = "`.somniq/plugins` is SomniQ's plugin store; only the app writes it. \
+pub const PLUGIN_STORE_REFUSAL: &str = "`.somniq/plugins` and the `plugins` folder of SomniQ's configuration are SomniQ's plugin store; only the app writes them. \
 Install, enable, disable or remove packages with PluginManager, and leave official plugin \
 switches to the user (Plugins page). Draft packages under `.somniq/plugin-drafts` instead.";
 
@@ -39,6 +39,15 @@ pub fn is_plugin_store_path(path: &Path, workspace: &Path) -> bool {
     )
 }
 
+/// Whether `path` is inside `<SomniQ config>/plugins`: the reviewed
+/// snapshots, this computer's approvals and the global plugin list. Writing
+/// there would approve a package without the user.
+#[must_use]
+pub fn is_trust_store_path(path: &Path) -> bool {
+    let store = crate::somniq_config_dir_from_env().join("plugins");
+    strip_prefix_insensitive(path, &store).is_ok()
+}
+
 fn strip_prefix_insensitive<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, ()> {
     if let Ok(rest) = path.strip_prefix(base) {
         return Ok(rest);
@@ -60,11 +69,29 @@ fn strip_prefix_insensitive<'a>(path: &'a Path, base: &Path) -> Result<&'a Path,
 #[must_use]
 pub fn command_names_plugin_store(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase().replace('\\', "/");
-    let needle = format!("{}/plugins", crate::SOMNIQ_PROJECT_DIR_NAME);
-    normalized.match_indices(&needle).any(|(at, _)| {
-        normalized[at + needle.len()..]
-            .chars()
+    let ends_there = |rest: &str| {
+        rest.chars()
             .next()
             .is_none_or(|next| !(next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '.')))
-    })
+    };
+    // `.somniq/plugins` in a project, or `SomniQ/plugins` in the configuration
+    // (where the approvals live), however the path is spelled before it.
+    let needle = "somniq/plugins";
+    let named = normalized.match_indices(needle).any(|(at, _)| {
+        let before_ok = normalized[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_ascii_alphanumeric());
+        before_ok && ends_there(&normalized[at + needle.len()..])
+    });
+    // A configuration moved elsewhere (ARIS_CONFIG_ROOT), by its real path.
+    let store = crate::somniq_config_dir_from_env()
+        .join("plugins")
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    named
+        || normalized
+            .match_indices(store.as_str())
+            .any(|(at, _)| ends_there(&normalized[at + store.len()..]))
 }

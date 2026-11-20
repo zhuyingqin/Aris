@@ -515,3 +515,21 @@ desktop：
   Desktop Chat 回合确实用合并后的钩子构造 `HookRunner`。
 - **没有采纳的：** schema 2 只在需要时才写（为了让旧开发版还能读）。插件未发布，这点兼容
   不值得增加分支。
+
+## 已落地的部分（2026-11-18，P0 安全修复）
+
+不含清单（schema 2）、`workspaceFiles` 副本、网络隔离和用户变量透传，这些仍按上文分期做：
+
+- **插件进程的环境与工作目录**：宿主给插件的 MCP 条目加上 `SOMNIQ_PLUGIN_ROOT`（快照）和
+  `SOMNIQ_PLUGIN_DATA`（`<SomniQ 配置>/plugin-data/<项目键哈希>/<包名哈希>`）。`mcp_stdio.rs`
+  见到前者就按插件进程启动：`env_clear`，只放平台基础变量（`PATH` 去掉相对段）、
+  `TEMP/TMP/TMPDIR`（指向数据目录下的 `tmp`）、`PYTHONUTF8`、`PYTHONIOENCODING`、Windows 上的
+  `NoDefaultCurrentDirectoryInExePath`，再加包自己的 `env`；工作目录恒为数据目录，进程恒归
+  SomniQ 的进程树。暂时没有改成类型化字段：包的 `env` 不许用 `SOMNIQ_*`，所以这两个键只有宿主能写。
+- **保留名**：`dsh.rs` 对包 `env` 做键名语法、大小写重复和保留名检查（上文列表，外加 `CLAWD_*`）。
+- **包内文件必须写 `./`**：命令或参数正好是包内文件却没写 `./` 时预览报错，避免从工作目录找到别的同名文件。
+- **审稿细则不进执行方**：运行的只读根从整个快照缩小为各包的 Skill 目录；审稿文档放在 Skill
+  目录里会被拒绝；PluginManager 给模型的 `list`/`preview` 只报细则条数，标题和触发词只出现在
+  用户的批准卡片上；带审稿细则的包不能 `checkout` 进对话。
+- **插件页的操作绑定摘要**：启用、停用、移除、“所有项目”都带上页面显示的摘要，版本已变就拒绝。
+- **信任库防护**：文件工具和 Shell 命令检查都覆盖 `<SomniQ 配置>/plugins`（批准、快照、全局列表）。

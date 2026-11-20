@@ -57,10 +57,10 @@ function inferExecutorProvider(baseUrl) {
 function defaultModel(provider) {
   if (provider === "anthropic") return "claude-opus-4-7";
   if (provider === "anthropic-compat") return "claude-sonnet-4-6";
-  if (provider === "gemini") return "gemini-2.5-pro";
-  if (provider === "glm") return "GLM-5";
-  if (provider === "minimax") return "MiniMax-M2.7";
-  if (provider === "kimi") return "kimi-k2.5";
+  if (provider === "gemini") return "gemini-3.8-flash";
+  if (provider === "glm") return "glm-5.3";
+  if (provider === "minimax") return "MiniMax-M3";
+  if (provider === "kimi") return "kimi-k3.1-pro";
   if (provider === "deepseek") return "deepseek-v4-pro";
   return "gpt-5.5";
 }

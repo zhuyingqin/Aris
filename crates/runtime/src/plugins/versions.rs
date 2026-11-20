@@ -262,6 +262,7 @@ impl PluginStore {
         expected_current_digest: &str,
         approve: bool,
     ) -> Result<InstalledPlugin, String> {
+        self.reject_global_only(name)?;
         let record = self
             .registry()?
             .packages

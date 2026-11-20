@@ -151,10 +151,12 @@ fn diff(
             .ui_panels
             .iter()
             // A panel gaining or losing its own page is a change to review.
-            .map(|panel| match (&panel.page, panel.propose_tasks) {
-                (Some(_), true) => format!("{} (page, tasks)", panel.id),
-                (Some(_), false) => format!("{} (page)", panel.id),
-                (None, _) => panel.id.clone(),
+            // So is a web panel's address: a different site is a different panel.
+            .map(|panel| match (&panel.page, panel.propose_tasks, &panel.web) {
+                (_, _, Some(web)) => format!("{} (web: {web})", panel.id),
+                (Some(_), true, None) => format!("{} (page, tasks)", panel.id),
+                (Some(_), false, None) => format!("{} (page)", panel.id),
+                (None, _, None) => panel.id.clone(),
             })
             .collect()
     };
@@ -360,6 +362,7 @@ impl PluginStore {
         if candidate.digest != expected_digest {
             return Err("Package changed after preview; preview the upgrade again".into());
         }
+        self.reject_global_only(&candidate.name)?;
         if approve && !candidate.can_enable {
             return Err(
                 "This version cannot be enabled; resolve its diagnostics or upgrade it without approval"
@@ -384,7 +387,7 @@ impl PluginStore {
             }
             if approve {
                 if let Some(other) =
-                    self.skill_conflict(&registry, &record.name, &candidate.capabilities)
+                    self.skill_conflict(&registry, &record.name, &candidate.capabilities)?
                 {
                     return Err(format!("Skill name conflicts with enabled plugin {other}"));
                 }
@@ -416,6 +419,7 @@ impl PluginStore {
                         enabled: approve,
                         history: super::versions::history_after(&record, &candidate.digest),
                         original: super::versions::original_of(&record),
+                        global: false,
                     },
                 );
                 self.save(&next)?;

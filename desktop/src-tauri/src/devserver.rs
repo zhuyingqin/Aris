@@ -42,6 +42,7 @@ const COMMANDS: &[&str] = &[
     "plugins_preview",
     "plugins_install",
     "plugins_set_enabled",
+    "plugins_set_global",
     "plugins_upgrade",
     "plugins_rollback",
     "plugins_draft_changes",
@@ -294,7 +295,7 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
             let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
             encode(crate::plugins::check_mcp(store, parse::<String>(&args, "name")?).await?)
         }
-        "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_upgrade" | "plugins_set_enabled" | "plugins_remove"
+        "plugins_list" | "plugins_preview" | "plugins_install" | "plugins_upgrade" | "plugins_set_enabled" | "plugins_set_global" | "plugins_remove"
         | "plugins_ui_list" | "plugins_ui_state_get" | "plugins_ui_state_update" | "plugins_ui_page"
         | "plugins_rollback" | "plugins_draft_changes" | "plugins_draft_page" => {
             let store = crate::plugins::bound_store(&ctx.workspace, &parse::<String>(&args, "projectPath")?)?;
@@ -307,12 +308,22 @@ async fn dispatch(ctx: &ServerCtx, command: &str, args: Value) -> Result<Value, 
                 "plugins_rollback" => encode(store.rollback(&parse::<String>(&args, "name")?, &parse::<String>(&args, "digest")?, &parse::<String>(&args, "expectedCurrentDigest")?, parse(&args, "approve")?)?),
                 "plugins_draft_changes" => encode(store.draft_changes(parse::<String>(&args, "source")?, &parse::<String>(&args, "digest")?)?),
                 "plugins_draft_page" => encode(store.draft_page(parse::<String>(&args, "source")?, &parse::<String>(&args, "digest")?, &parse::<String>(&args, "panelId")?)?),
-                "plugins_set_enabled" => encode(store.set_enabled(&parse::<String>(&args, "name")?, parse(&args, "enabled")?)?),
+                "plugins_set_enabled" => encode(match args.get("expectedDigest").and_then(Value::as_str) {
+                    Some(digest) => store.set_enabled_shown(&parse::<String>(&args, "name")?, parse(&args, "enabled")?, digest)?,
+                    None => store.set_enabled(&parse::<String>(&args, "name")?, parse(&args, "enabled")?)?,
+                }),
+                "plugins_set_global" => encode(match args.get("expectedDigest").and_then(Value::as_str) {
+                    Some(digest) => store.set_global_shown(&parse::<String>(&args, "name")?, parse(&args, "global")?, digest)?,
+                    None => store.set_global(&parse::<String>(&args, "name")?, parse(&args, "global")?)?,
+                }),
                 "plugins_ui_list" => encode(store.active_ui_panels()?),
                 "plugins_ui_state_get" => encode(store.ui_state_get(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?)?),
                 "plugins_ui_page" => encode(store.ui_page(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?)?),
                 "plugins_ui_state_update" => encode(store.ui_state_update(&parse::<String>(&args, "name")?, &parse::<String>(&args, "panelId")?, &parse::<String>(&args, "sessionId")?, parse(&args, "expectedRevision")?, parse(&args, "action")?)?),
-                _ => encode(store.remove(&parse::<String>(&args, "name")?)?),
+                _ => encode(match args.get("expectedDigest").and_then(Value::as_str) {
+                    Some(digest) => store.remove_confirmed(&parse::<String>(&args, "name")?, digest)?,
+                    None => store.remove(&parse::<String>(&args, "name")?)?,
+                }),
             }).await
         }
         "somni_image_settings" => encode(crate::image_api::somni_image_settings()),

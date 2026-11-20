@@ -16,6 +16,7 @@ import { useUiTypography } from "./useUiTypography";
 import { useUiColors } from "./useUiColors";
 import { useAppearanceEffects } from "./useAppearance";
 import { installMathClipboard } from "./math/mathClipboard";
+import { installExternalLinkRouting } from "./externalLinks";
 import "./styles.css";
 import "./AppNavigationRail.css";
 import "./AppAccountMenu.css";
@@ -67,6 +68,7 @@ function AuthenticatedRoot() {
 
 function Root() {
   useEffect(() => installMathClipboard(), []);
+  useEffect(() => installExternalLinkRouting(), []);
   useUiTypography();
   useUiColors();
   useAppearanceEffects();

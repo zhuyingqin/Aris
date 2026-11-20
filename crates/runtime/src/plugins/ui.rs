@@ -84,6 +84,12 @@ pub struct UiPanel {
     /// image of its own: workspace bytes never reach the app chrome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// The panel's own outline instead of a host icon: SVG path data on the
+    /// host's 16 x 16 icon grid, drawn by the host as a stroke in the theme's
+    /// colour. Only path commands and numbers are accepted, so it is a shape,
+    /// not markup; it never carries an image, script or address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
     #[serde(default)]
     pub order: i32,
     /// Whose data the panel shows: this conversation's, or one copy for the
@@ -95,6 +101,11 @@ pub struct UiPanel {
     /// page reads and writes them through the host bridge, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+    /// A web page the host embeds as the whole panel. The host draws the frame
+    /// itself; no package code runs, and the embedded site gets no bridge and
+    /// no plugin data. The address is shown on the approval card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<String>,
     /// Another panel of the same package whose data this panel's page reads
     /// and writes, instead of keeping its own: a glance in the summary and
     /// the full page it summarizes then show one store.
@@ -319,12 +330,42 @@ pub const UI_SLOT_BRIEF: &str = "chat.brief";
 /// The widgets small enough for a glance in the project summary.
 pub(super) const UI_BRIEF_WIDGETS: &[&str] =
     &["text", "metrics", "progress", "list", "markdown", "button", "todo-list", "json"];
-/// The icons a panel may name. Each one is drawn by the host.
+/// The icons a panel may name. Each one is drawn by the host. The desktop's
+/// `PANEL_ICONS` (desktop/src/extensions/panelIcons.ts) must list the same
+/// names in the same order; its test reads this list.
 pub(super) const UI_ICONS: &[&str] = &[
     "grid", "list", "target", "barChart", "lineChart", "graph", "document", "notebook", "folder",
     "clock", "star", "sparkle", "lightning", "library", "bookOpen", "code", "image", "search",
     "inbox", "collection", "memory", "diagram", "pin", "check",
+    "sprout", "leaf", "droplet", "flask", "database", "calendar", "bell", "flag", "globe", "cpu",
+    "map", "home", "heart", "cloud", "tag", "box", "users",
+    "settings", "user", "sun", "moon", "play", "quote", "messageCircle", "branch", "edit",
+    "desktop", "phone", "shieldCheck", "refresh", "warning", "info", "filter", "attachment", "send",
 ];
+/// The longest `iconPath`: one outline is a few hundred characters.
+pub(super) const MAX_UI_ICON_PATH_CHARS: usize = 1024;
+
+/// Whether `path` is SVG path data and nothing else: path commands, numbers,
+/// separators. No element, attribute, URL or entity can be spelled with these.
+fn icon_path_error(path: &str) -> Option<String> {
+    if path.chars().count() > MAX_UI_ICON_PATH_CHARS {
+        return Some(format!("iconPath is longer than {MAX_UI_ICON_PATH_CHARS} characters"));
+    }
+    if !path.starts_with(['M', 'm']) {
+        return Some("iconPath must start with a moveto (M or m)".into());
+    }
+    if let Some(bad) = path.chars().find(|c| {
+        !(c.is_ascii_digit() || c.is_ascii_whitespace() || ",.+-eE".contains(*c) || "MmLlHhVvCcSsQqTtAaZz".contains(*c))
+    }) {
+        return Some(format!(
+            "iconPath may hold only SVG path commands (M L H V C S Q T A Z), numbers, spaces and commas; found {bad:?}"
+        ));
+    }
+    if !path.chars().any(|c| c.is_ascii_digit()) {
+        return Some("iconPath has no coordinates".into());
+    }
+    None
+}
 pub(super) const UI_MANIFEST_VERSION: u32 = 1;
 /// The newest `schemaVersion`. Older documents keep loading; each may use
 /// only what its own version had.
@@ -569,6 +610,52 @@ fn check_page(files: &PackageFiles, file: &str, schema: bool) -> Result<(), Stri
         .map_err(|_| "A panel page must be UTF-8 text".into())
 }
 
+/// The longest web panel address.
+pub(super) const MAX_UI_WEB_ADDRESS_CHARS: usize = 2048;
+
+fn loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    }
+}
+
+/// A web panel's address: https anywhere, plain http only on this machine
+/// (where nothing crosses a network to tamper with it), never the app's own
+/// origins and never credentials in the URL.
+pub(super) fn check_web_address(address: &str) -> Result<(), String> {
+    if address.chars().count() > MAX_UI_WEB_ADDRESS_CHARS {
+        return Err(format!("A web panel address can be at most {MAX_UI_WEB_ADDRESS_CHARS} characters"));
+    }
+    let url = url::Url::parse(address)
+        .map_err(|error| format!("A web panel needs an absolute http(s) address: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("A web panel address must be http or https, not {}", url.scheme()));
+    }
+    let host = url.host().ok_or("A web panel address needs a host")?;
+    if let url::Host::Domain(name) = host {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        // On Windows every app protocol is `http://<scheme>.localhost`
+        // (tauri, ipc, asset, somniq-figure, ...) and Tauri treats it as the
+        // app's own origin, so no subdomain of localhost may be embedded.
+        if name.ends_with(".localhost") {
+            return Err(format!("A web panel cannot load the app's own address: {name}"));
+        }
+    }
+    if url.scheme() == "http" && !loopback_host(&host) {
+        return Err("Plain http is only allowed for localhost / 127.0.0.1; use https".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("A web panel address must not carry a user name or password".into());
+    }
+    // The desktop's development server is the app itself.
+    if loopback_host(&host) && url.port_or_known_default() == Some(1420) {
+        return Err("A web panel cannot load the app's own development address (port 1420)".into());
+    }
+    Ok(())
+}
+
 /// The page `file` of a package's `files` and every file it can use, as the
 /// frame receives them. `files` must already be verified to be `digest`.
 pub(super) fn page_from_files(files: &PackageFiles, file: &str, digest: &str) -> Result<UiPage, String> {
@@ -720,6 +807,18 @@ pub(super) fn inspect_ui(
                 );
             }
         }
+        if let Some(path) = &panel.icon_path {
+            let error = if schema_1 {
+                Some(format!("iconPath needs schemaVersion {UI_SCHEMA_DATA}"))
+            } else if panel.icon.is_some() {
+                Some("Set icon or iconPath, not both".into())
+            } else {
+                icon_path_error(path)
+            };
+            if let Some(error) = error {
+                problem(format!("{at}/iconPath"), error);
+            }
+        }
         let brief = panel.slot == UI_SLOT_BRIEF;
         if brief && !pages {
             problem(
@@ -785,8 +884,24 @@ pub(super) fn inspect_ui(
                 problem(format!("{at}/page"), error);
             }
         }
+        if let Some(address) = &panel.web {
+            let error = if !pages {
+                Some(format!("A web panel needs schemaVersion {UI_SCHEMA_PAGE}"))
+            } else if brief {
+                Some(format!("A web panel cannot sit in {UI_SLOT_BRIEF}; use chat.sidebar or {UI_SLOT_NAV_PAGE}"))
+            } else if panel.page.is_some() || panel.data_panel.is_some() || panel.propose_tasks {
+                Some("A web panel shows only the web page: it takes no page, dataPanel or proposeTasks".into())
+            } else if !panel.widgets.is_empty() {
+                Some("A web panel keeps no data: remove its widgets".into())
+            } else {
+                check_web_address(address).err()
+            };
+            if let Some(error) = error {
+                problem(format!("{at}/web"), error);
+            }
+        }
         // A panel that draws itself may keep no data at all.
-        let fewest = usize::from(panel.page.is_none());
+        let fewest = usize::from(panel.page.is_none() && panel.web.is_none());
         if panel.widgets.len() < fewest || panel.widgets.len() > MAX_UI_WIDGETS {
             problem(
                 format!("{at}/widgets"),
@@ -1140,12 +1255,10 @@ impl PluginStore {
 
     /// The declaration of an enabled package's panel.
     pub fn ui_panel(&self, name: &str, panel_id: &str) -> Result<UiPanel, String> {
-        let registry = self.registry()?;
-        let record = registry
-            .packages
-            .get(name)
+        let record = self
+            .effective_record(name)?
             .ok_or("UI plugin is not installed")?;
-        let plugin = self.inspect_record(record);
+        let plugin = self.inspect_record(&record);
         if !plugin.enabled || !plugin.package.can_enable {
             return Err("UI plugin is disabled or blocked; reload the plugin panels".into());
         }
@@ -1163,10 +1276,8 @@ impl PluginStore {
     /// the host hands to a frame, and it is handed over as text.
     pub fn ui_page(&self, name: &str, panel_id: &str) -> Result<UiPage, String> {
         self.mutate(|| {
-            let registry = self.registry()?;
-            let record = registry
-                .packages
-                .get(name)
+            let record = self
+                .effective_record(name)?
                 .ok_or("UI plugin is not installed")?;
             let file = self
                 .ui_panel(name, panel_id)?

@@ -4522,7 +4522,7 @@ fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathB
 /// Both normalizers above serve only the model's mutating file tools, so the
 /// project's plugin store is refused here once for all of them.
 fn ensure_outside_plugin_store(path: &Path, root: &Path) -> io::Result<()> {
-    if crate::plugins::is_plugin_store_path(path, root) {
+    if crate::plugins::is_plugin_store_path(path, root) || crate::plugins::is_trust_store_path(path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             crate::plugins::PLUGIN_STORE_REFUSAL,

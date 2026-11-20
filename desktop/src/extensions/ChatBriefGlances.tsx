@@ -10,7 +10,8 @@ import type { Language } from "../store";
 import { PanelBody } from "./ChatPluginPanel";
 import PluginEditButton from "./PluginEditButton";
 import PluginPageFrame from "./PluginPageFrame";
-import { pluginPageIcon, requestPluginPage, uiPanelKey, uiText } from "./useChatPluginPanels";
+import PluginPanelIcon from "./PluginPanelIcon";
+import { requestPluginPage, uiPanelKey, uiText } from "./useChatPluginPanels";
 import "./ChatBriefGlances.css";
 
 const COPY = {
@@ -72,7 +73,7 @@ export default function ChatBriefGlances({ panels, all, projectPath, language, o
       return <section key={key} className={`project-brief-glance${open ? "" : " is-folded"}`} aria-label={title}>
         <header className="project-brief-glance-head">
           <button type="button" className="project-brief-glance-toggle" aria-expanded={open} title={open ? copy.collapse : copy.expand} onClick={() => toggle(key)}>
-            <SvgIcon name={pluginPageIcon(page ?? panel)} size={13} />
+            <PluginPanelIcon panel={page ?? panel} size={13} />
             <span>{title}</span>
             <SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} />
           </button>

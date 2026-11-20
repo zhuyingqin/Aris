@@ -6,6 +6,7 @@ import type { ChatTodoItem } from "../types";
 import { DataWidgetView, isDataWidget, type PanelActions } from "./ChatPluginDataWidgets";
 import PluginEditButton from "./PluginEditButton";
 import PluginPageFrame from "./PluginPageFrame";
+import PluginWebFrame, { PluginWebControls, useWebPanelReload } from "./PluginWebFrame";
 import { WidgetSection } from "./ChatPluginSection";
 import { requestPluginPage, uiText } from "./useChatPluginPanels";
 import "./ChatPluginPanel.css";
@@ -232,7 +233,17 @@ function OwnPage({ panel, projectPath, sessionId, language, onPrompt, onOpenFile
   </div>;
 }
 
+/** An embedded web page, in the sidebar. It keeps no data, so it needs no conversation. */
+function WebPage({ panel, language, onPrompt }: Props) {
+  const web = useWebPanelReload();
+  return <div className="chat-plugin-panel chat-plugin-own-page chat-plugin-web-page" aria-label={uiText(panel.title, language)}>
+    <PluginWebFrame panel={panel} language={language} reloadKey={web.reloadKey} />
+    <footer className="chat-plugin-panel-footer"><span className="chat-plugin-source" title={panel.pluginName}><SvgIcon name="grid" size={11} />{COPY[language].from} {panel.pluginName}</span>{panel.web && <PluginWebControls url={panel.web} language={language} onReload={web.reload} />}<PluginEditButton panel={panel} language={language} compact onPrompt={(text) => onPrompt?.(text, false)} /></footer>
+  </div>;
+}
+
 export default function ChatPluginPanel(props: Props) {
+  if (props.panel.web) return <WebPage key={JSON.stringify([props.panel.pluginName, props.panel.id, props.panel.packageDigest])} {...props} />;
   // A project panel has one copy whatever the conversation, so it is neither
   // remounted when the conversation changes nor held back on the home draft.
   const Body = props.panel.page ? OwnPage : PanelBody;

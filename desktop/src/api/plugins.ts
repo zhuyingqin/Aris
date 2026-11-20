@@ -58,6 +58,9 @@ export interface InstalledPlugin extends PluginPreview {
   history?: PluginVersion[];
   /** The digest the package was first installed with, when known. */
   originalDigest?: string | null;
+  /** On for every project of this computer; `enabled` is this project's own
+   *  switch for it. Absent from older backends. */
+  global?: boolean;
 }
 /** A version an upgrade replaced; its snapshot stays on this computer. */
 export interface PluginVersion { version: string; digest: string; source: string; replacedAt: number }
@@ -177,10 +180,16 @@ export const pluginsRollback = (projectPath: string, name: string, digest: strin
 /** Every file an upgrade card's draft changes; refused if the draft changed since the card. */
 export const pluginsDraftChanges = (projectPath: string, source: string, digest: string) =>
   invoke<PackageFileChange[]>("plugins_draft_changes", { projectPath, source, digest });
-export const pluginsSetEnabled = (projectPath: string, name: string, enabled: boolean) =>
-  changed(projectPath, invoke<InstalledPlugin>("plugins_set_enabled", { projectPath, name, enabled }));
-export const pluginsRemove = (projectPath: string, name: string) =>
-  changed(projectPath, invoke<void>("plugins_remove", { projectPath, name }));
+/** `expectedDigest`: the version the page showed. A click then acts on exactly
+ *  that version and is refused if it changed since (say, an agent upgraded it). */
+export const pluginsSetEnabled = (projectPath: string, name: string, enabled: boolean, expectedDigest?: string) =>
+  changed(projectPath, invoke<InstalledPlugin>("plugins_set_enabled", { projectPath, name, enabled, expectedDigest: expectedDigest ?? null }));
+/** Turn "all projects" on (the package then runs in every project) or off
+ *  (it stays enabled in this project only). */
+export const pluginsSetGlobal = (projectPath: string, name: string, global: boolean, expectedDigest?: string) =>
+  changed(projectPath, invoke<InstalledPlugin>("plugins_set_global", { projectPath, name, global, expectedDigest: expectedDigest ?? null }));
+export const pluginsRemove = (projectPath: string, name: string, expectedDigest?: string) =>
+  changed(projectPath, invoke<void>("plugins_remove", { projectPath, name, expectedDigest: expectedDigest ?? null }));
 
 /** Plugin-authored text: one string, or per language. `es` is optional; Spanish falls back to `en`. */
 export type UiText = string | { en: string; cn: string; es?: string };
@@ -211,12 +220,18 @@ export interface UiPanel {
   title: UiText;
   /** A host icon name; only names the backend's contract lists get here. */
   icon?: string;
+  /** The panel's own outline instead of `icon`: SVG path data on the host's
+   *  16 x 16 icon grid, checked by the backend to hold only path commands. */
+  iconPath?: string;
   order: number;
   /** `project`: one copy for every conversation of the project. Absent on
    *  panels listed by an older backend, which are all `session`. */
   scope?: "session" | "project";
   /** The package's own HTML draws this panel, in a sandboxed frame. */
   page?: string;
+  /** A web address the host embeds as the whole panel. No package code runs
+   *  and the site gets no bridge or plugin data. */
+  web?: string;
   /** Another panel of the same package whose data this panel's page reads
    *  and writes; this panel then keeps none of its own. */
   dataPanel?: string;
@@ -284,7 +299,7 @@ export interface PluginApprovalCard {
   capabilities: {
     skills: string[];
     /** `page`: the panel runs the package's own HTML and JavaScript, sandboxed. */
-    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean; proposeTasks?: boolean }[];
+    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean; web?: string | null; proposeTasks?: boolean }[];
     /** Criteria the independent Reviewer will check; the Executor never sees them. */
     reviewRubrics?: { id: string; title: UiText; criteria: number; appliesWhen: string[] }[];
     /** Environment variable names only; values never leave the backend. */

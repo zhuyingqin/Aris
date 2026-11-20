@@ -4,6 +4,7 @@ import type { SvgIconName } from "../SvgIcon";
 import { hasNativeBackend } from "../api/transport";
 import type { Language } from "../store";
 import { UiListSlot } from "./uiSlots";
+import { PANEL_ICONS } from "./panelIcons";
 
 /**
  * The language a plugin page is told (`somniq.ready().language`). Pages are written
@@ -20,9 +21,6 @@ export const uiPanelIcon = (panel: Pick<UiPanel, "widgets">): SvgIconName => {
     : widget?.type === "agent-plan" || widget?.type === "metrics" ? "target" : widget?.type === "chart" ? (widget.chart === "bar" ? "barChart" : "lineChart")
     : widget?.type === "markdown" ? "document" : widget?.type === "form" ? "edit" : "grid";
 };
-/** The icons a panel may name (the backend's `UI_ICONS`); anything else falls back. */
-const PANEL_ICONS: readonly SvgIconName[] = ["grid", "list", "target", "barChart", "lineChart", "graph", "document", "notebook", "folder",
-  "clock", "star", "sparkle", "lightning", "library", "bookOpen", "code", "image", "search", "inbox", "collection", "memory", "diagram", "pin", "check"];
 export const pluginPageIcon = (panel: Pick<UiPanel, "widgets" | "icon">): SvgIconName =>
   PANEL_ICONS.find((icon) => icon === panel.icon) ?? uiPanelIcon(panel);
 /** A click on a plugin page, handed to Chat: the page itself runs nothing. */

@@ -22,7 +22,8 @@ import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./extensions/officialPluginNav";
 import { OFFICIAL_PLUGIN_PAGES, officialPluginPage } from "./extensions/officialPluginPages";
 import { officialTabHidden } from "./extensions/officialPlugins";
 import { ModuleIcon } from "./ModuleIcon";
-import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, pluginPageIcon, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
+import PluginPanelIcon from "./extensions/PluginPanelIcon";
+import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
 import AppNavigationRail from "./AppNavigationRail";
@@ -976,7 +977,7 @@ export default function App() {
   const pluginPage = renderedTab === "extensions" && currentProject
     ? pluginPages.panels.find((panel) => uiPanelKey(panel) === pluginPageKey) : undefined;
   const pluginNavigationItems = pluginPages.panels.map((panel) => ({
-    id: uiPanelKey(panel), label: uiText(panel.title, language), icon: <SvgIcon name={pluginPageIcon(panel)} size={20} />,
+    id: uiPanelKey(panel), label: uiText(panel.title, language), icon: <PluginPanelIcon panel={panel} size={20} />,
   }));
 
   const codeShellReady = useCodeShell({

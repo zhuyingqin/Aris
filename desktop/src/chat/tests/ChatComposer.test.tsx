@@ -196,6 +196,37 @@ describe("ChatComposer textarea and attachments", () => {
     expect(onContextStatusDismiss).toHaveBeenCalledOnce();
   });
 
+  it("queues with Enter while answering and lets queued messages be edited, removed or resumed", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onEditQueued = vi.fn();
+    const onRemoveQueued = vi.fn();
+    const onResumeQueue = vi.fn();
+    const props = {
+      commands: [], skills: [], attachments: [], ready: true, editing: false,
+      queuedMessages: [{ id: "q1", text: "Queued follow-up", attachments: [] }],
+      onEditQueued, onRemoveQueued, onResumeQueue,
+      onInputChange: () => undefined, onAttachmentsChange: () => undefined, onSubmit,
+      onStop: () => undefined, onCancelEdit: () => undefined, onHeightChange: () => undefined,
+    };
+    const { rerender } = render(<ChatComposer {...props} input="Next question" busy />);
+
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add to queue" }));
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("1 queued — sent in order after this turn")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Edit queued message: Queued follow-up" }));
+    await user.click(screen.getByRole("button", { name: "Remove queued message: Queued follow-up" }));
+    expect(onEditQueued).toHaveBeenCalledWith("q1");
+    expect(onRemoveQueued).toHaveBeenCalledWith("q1");
+
+    rerender(<ChatComposer {...props} input="" busy={false} queuePaused />);
+    expect(screen.queryByRole("button", { name: "Add to queue" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Send next" }));
+    expect(onResumeQueue).toHaveBeenCalledOnce();
+  });
+
   it("disables attachments for a remote Agent session", () => {
     render(
       <ChatComposer
@@ -675,7 +706,7 @@ describe("ChatComposer picker keyboard operation", () => {
     expect(onSubmit).toHaveBeenCalledOnce();
   });
 
-  it("allows drafting while the current response finishes without submitting another turn", async () => {
+  it("allows drafting while the current response finishes and hands Enter to the queue", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     const onStop = vi.fn();
@@ -689,8 +720,9 @@ describe("ChatComposer picker keyboard operation", () => {
     await user.type(textbox, "question for the next turn");
     await user.keyboard("{Enter}");
 
-    expect(textbox.value).toBe("question for the next turn");
-    expect(onSubmit).not.toHaveBeenCalled();
+    // Enter while answering queues the draft (the parent clears it); Stop stays.
+    expect(onSubmit).toHaveBeenCalledOnce();
+    onSubmit.mockClear();
     const stopButton = screen.getByRole("button", { name: "Stop response" });
     await user.click(stopButton);
     expect(onStop).toHaveBeenCalledOnce();

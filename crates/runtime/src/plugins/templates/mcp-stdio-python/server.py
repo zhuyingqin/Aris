@@ -3,7 +3,10 @@
 SomniQ starts this file with the command in cordis.patch.yml. Every line on
 stdin is one JSON-RPC message and every reply is one line on stdout. Write
 diagnostics to stderr only: anything else printed to stdout breaks the
-protocol. The working directory is the project.
+protocol. The working directory is this plugin's own data directory
+(SOMNIQ_PLUGIN_DATA), never the project; this package's files are under
+SOMNIQ_PLUGIN_ROOT. The environment holds only platform variables and the
+package's own `env`: no tokens or settings leak in from SomniQ.
 
 To add a tool, write a function that takes the arguments dict and returns
 text, then add an entry to TOOLS with a description and a JSON Schema.

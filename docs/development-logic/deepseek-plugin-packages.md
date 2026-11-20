@@ -104,6 +104,26 @@ HTTP transport 均须后续适配，不能静默丢弃配置。
 插件根目录也不会被拿来查找内置名字。启用包之间的 Skill 同名冲突会被拒绝，
 已激活别名的保留名也会被拒绝。
 
+### 所有项目（全局包）
+
+`<SomniQ 配置>/plugins/global.json`（`global.rs`）列出对本机所有项目启用的包：
+`packages`（与注册表记录同形）和 `optOut`（项目规范路径 → 在该项目关掉的包名），
+同目录 `global.lock` 做跨进程锁，进程内锁并入 `mutate` 一次取得的路径组。它和
+`approvals.json` 一样在工作区之外，**列在这里本身就是批准**（批准的就是记录里的
+摘要）；`Record.global` 只在内存里标记来源、从不落盘，所以工作区注册表写
+`"global": true` 不起任何作用（`workspace_files_cannot_make_a_package_global`）。
+
+- 每个项目看到的记录 = 自己的注册表 + 未被同名遮住的全局记录（`effective_records`）；
+  列表、运行集、冻结、面板查找都用它，升级/回退/安装/移除仍只读项目注册表。
+- 只有在本项目已批准并启用的包能设为全局；设为全局后项目副本移入全局表、撤回本
+  项目批准。关掉“所有项目”时反过来：先写本项目批准和注册表（保持启用），再从全局
+  表删除，其他项目不再加载。
+- 项目里的开关对全局包只写 `optOut`。全局包与本项目已启用包的 Skill 重名时，全局包
+  在该项目自动让位（`global-skill-conflict` 警告），项目自己的选择优先。
+- 全局包不能在项目里直接升级、回退、移除或同名安装（`GLOBAL_PLUGIN_CHANGE_IN_PROJECT`）：
+  先关掉“所有项目”，它回到当前项目后再改。
+- Desktop 命令 `plugins_set_global`；插件卡片上是“所有项目”开关，打开前列出将运行的 MCP 命令。
+
 插件归属于登记的项目，不跟着回合实际运行的目录走。工作任务（以及走同一内核的
 定时任务）在自己的 worktree 里运行；Desktop 的执行上下文会设置
 `ARIS_PLUGIN_PROJECT_ROOT`，指向登记的项目根。`ConfigLoader`、Skill

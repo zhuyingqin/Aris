@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SomniQ Studio",
-  "version": "0.4.90",
+  "version": "0.4.91",
   "identifier": "com.aris.studio",
   "build": {
     "frontendDist": "../dist",
@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "SomniQ Studio",
         "width": 1440,
         "height": 920,

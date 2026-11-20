@@ -214,15 +214,18 @@ fn friendly_model_name(model_name: &str) -> &str {
         "claude-fable-5" => "Claude Fable 5",
         "claude-haiku-4-5-20251001" => "Claude Haiku 4.5",
         "deepseek-v4-pro" => "DeepSeek V4 Pro",
-        "mimo-v2.5-pro" => "Xiaomi MiMo v2.5 Pro",
-        "mimo-v2.5" => "Xiaomi MiMo v2.5",
-        "mimo-v2-pro" => "Xiaomi MiMo v2 Pro",
-        "mimo-v2-omni" => "Xiaomi MiMo v2 Omni",
+        "glm-5.3" => "GLM-5.3",
+        "glm-5-turbo" => "GLM-5-Turbo",
+        "mimo-v2.6-pro" => "Xiaomi MiMo v2.6 Pro",
+        "mimo-v2.6-flash" => "Xiaomi MiMo v2.6 Flash",
+        "qwen3.8-max" => "Qwen 3.8 Max",
+        "qwen3.7-plus" => "Qwen 3.7 Plus",
+        "qwen3.8-flash" => "Qwen 3.8 Flash",
         "qwen3.6-plus" => "Qwen 3.6 Plus",
         "qwen3.6-flash" => "Qwen 3.6 Flash",
         "qwen3.6-max-preview" => "Qwen 3.6 Max Preview",
-        "doubao-pro-4k" => "Doubao Pro 4K",
-        "doubao-lite-4k" => "Doubao Lite 4K",
+        "doubao-seed-2-1-pro-260915" => "Doubao Seed 2.1 Pro",
+        "doubao-seed-2-1-lite-260915" => "Doubao Seed 2.1 Lite",
         other => other,
     }
 }
@@ -271,6 +274,38 @@ fn max_tokens_for_model(model: &str) -> u32 {
     }
 }
 
+/// Model generations whose vendor documents a ~1M-token window even though
+/// the rest of their family is smaller. Shared by the budget and the advertised
+/// window below so the two cannot drift apart. Matched on a lowercased name.
+///
+/// Verified against vendor docs on 2026-11-19:
+/// - Gemini and DeepSeek V4/V4.1 (`deepseek-v4*`, plus `deepseek-flash`, the
+///   current DeepSeek API id for V4.1 Flash): 1M.
+/// - GLM-5.2 and GLM-5.3 (including 5.3 Flash/FlashX): 1M context, 128K
+///   output. GLM-5, GLM-5.1, GLM-5-Turbo and the 4.x line remain 200K.
+/// - Qwen 3.6 Plus/Flash and the 3.7/3.8 lines (the managed gateway serves
+///   `qwen3.8-flash`): 1M. `qwen3.6-max-preview` and older Qwen stay ~256K.
+/// - Xiaomi MiMo V2 Pro, V2.5 and V2.6: 1M.
+/// - Doubao Seed 2.1 Pro (the `260915` snapshot), 2.1 Lite and Seed Evolving:
+///   1024K. Earlier Seed snapshots, including 2.1 Pro `260628`, are 256K.
+fn has_documented_million_token_window(m: &str) -> bool {
+    m.contains("gemini")
+        || m.contains("deepseek-v4")
+        || m.contains("deepseek-flash")
+        || m.contains("glm-5.2")
+        || m.contains("glm-5.3")
+        || m.contains("qwen3.6-plus")
+        || m.contains("qwen3.6-flash")
+        || m.contains("qwen3.7")
+        || m.contains("qwen3.8")
+        || m.contains("mimo-v2-pro")
+        || m.contains("mimo-v2.5")
+        || m.contains("mimo-v2.6")
+        || m.contains("doubao-seed-2-1-pro-260915")
+        || m.contains("doubao-seed-2-1-lite")
+        || m.contains("doubao-seed-evolving")
+}
+
 /// Token budget at which the conversation should start compacting, per model
 /// family. This must sit comfortably below the model's *guaranteed* usable
 /// context window, leaving headroom for the system prompt + tool schemas
@@ -298,7 +333,7 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
         // tool diagnostics turn a repair loop into multi-minute model calls.
         return 320_000;
     }
-    if m.contains("gemini") || m.contains("deepseek-v4") {
+    if has_documented_million_token_window(&m) {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
     } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
@@ -311,13 +346,27 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
         // than the 330k request that passed (1.4 MB). Budget sits below the
         // measured pass point, leaving room for `max_tokens_for_model` (16,384),
         // reasoning tokens, and the ~4.4k prefix this route injects per request.
+        //
+        // OpenAI's own API documents 1.05M for gpt-5.4+ and the gpt-6 line
+        // (checked 2026-11-19). The budget deliberately stays at the gateway
+        // figure: the model name alone cannot tell the two routes apart, a
+        // budget above the gateway's wall turns every long session into a
+        // rejected request, and above 272k input the official route bills the
+        // whole request at a surcharge.
         350_000
     } else if m.contains("kimi-k3") {
         // Kimi K3 exposes a 1M-token window. Reserve sufficient room for the
         // system prompt, tool schemas, and a long completion.
         850_000
-    } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
-        // ~256k window.
+    } else if m.contains("kimi")
+        || m.contains("moonshot")
+        || m.contains("qwen")
+        || m.contains("mimo")
+        || m.contains("doubao-seed")
+    {
+        // ~256k window (non-K3 Kimi/Moonshot, pre-3.6 Qwen and Qwen Max
+        // Preview, MiMo V2 Omni, older Doubao Seed snapshots). The 1M
+        // generations are matched above.
         200_000
     } else if m.contains("deepseek") {
         // ~64k window — small, so the fixed prompt/output reserve bites harder.
@@ -330,11 +379,15 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
         // continuity.
         850_000
     } else if m.contains("claude") || m.contains("glm") {
-        // Older Claude and GLM models have a ~200k context floor. Keep a
-        // stable reserve for prompt and output.
+        // Older Claude and GLM (GLM-5, 5.1, 5-Turbo, 4.x) have a ~200k
+        // context floor. Keep a stable reserve for prompt and output.
         160_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
+        // 128k total window. The generic GPT budget below (160k) sat above
+        // it, so these models hit the provider's limit before compacting.
+        100_000
     } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
-        // Older GPT / o-series ~128–200k.
+        // o-series ~200k.
         160_000
     } else {
         100_000
@@ -360,7 +413,7 @@ pub fn context_window_for_model(model: &str) -> usize {
     } else if m.contains("minimax-m2") || m.contains("minimax_m2") {
         // MiniMax M2.x hosted API context window.
         204_800
-    } else if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
+    } else if m.contains("minimax") || has_documented_million_token_window(&m) {
         // ~1M window.
         1_000_000
     } else if m.contains("gpt-5") || m.contains("gpt-6") || m.contains("gpt-4.1") {
@@ -370,8 +423,14 @@ pub fn context_window_for_model(model: &str) -> usize {
     } else if m.contains("kimi-k3") {
         // Kimi K3 exposes a 1M-token window.
         1_000_000
-    } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
-        // ~256k window (non-K3 Kimi/Moonshot and Qwen).
+    } else if m.contains("kimi")
+        || m.contains("moonshot")
+        || m.contains("qwen")
+        || m.contains("mimo")
+        || m.contains("doubao-seed")
+    {
+        // ~256k window (non-K3 Kimi/Moonshot, pre-3.6 Qwen and Qwen Max
+        // Preview, MiMo V2 Omni, older Doubao Seed snapshots).
         256_000
     } else if m.contains("deepseek") {
         // ~64k window.
@@ -385,10 +444,13 @@ pub fn context_window_for_model(model: &str) -> usize {
             200_000
         }
     } else if m.contains("glm") {
-        // GLM is ~200k.
+        // GLM-5, 5.1, 5-Turbo and 4.x are ~200k; GLM-5.2/5.3 are matched as
+        // 1M above.
         200_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
+        128_000
     } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
-        // Older GPT / o-series ~128–200k; advertise the upper bound.
+        // o-series ~200k.
         200_000
     } else {
         128_000
@@ -2612,8 +2674,10 @@ fn build_executor_client_with_trace(
 /// back to the deterministic text-assembly summary. Precedence:
 /// 1. `configured` — the explicit Settings value (`summarizer_model`).
 /// 2. `ARIS_SUMMARIZER_MODEL` env var.
-/// 3. a per-provider default (Haiku for larger Anthropic chats; a known small
-///    sibling for OpenAI models, otherwise deterministic fallback).
+/// 3. a default drawn only from models known to exist on this connection: the
+///    executor itself when it is a cheap tier, Haiku for larger Claude chats,
+///    or a same-vendor cheap model the gateway lists. Otherwise the
+///    deterministic fallback; a model name is never guessed.
 ///
 /// At any layer, a value of `off`/`none`/`disabled` turns the LLM summary off,
 /// and `auto`/`default` forces the per-provider default. A specific model id is
@@ -2693,49 +2757,34 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
     if model.is_empty() {
         return None;
     }
+    // The default is only ever a model known to exist on this connection: the
+    // executor's own model, or one the gateway listed. It is never a name
+    // inferred from the family. `gpt-5*` used to imply `gpt-5-mini`, which the
+    // managed gateway never served (three retries and a degraded summary on
+    // every compaction) and which OpenAI retires on its own schedule; any such
+    // table goes stale the same way. An explicit setting can still name
+    // whatever the operator knows to be there.
     match config {
         ChatExecutorConfig::Anthropic { .. } => {
-            if model.contains("haiku") {
+            if advertises_cheap_tier(model) {
                 Some(model.to_string())
-            } else {
+            } else if model.to_ascii_lowercase().contains("claude") {
                 Some("claude-haiku-4-5-20251001".to_string())
+            } else {
+                // An Anthropic-compatible endpoint serving another vendor
+                // (MiniMax, DeepSeek) has no Haiku to call.
+                None
             }
         }
         ChatExecutorConfig::OpenAiCompatible { known_models, .. } => {
-            // There is no portable "small model" name across arbitrary
-            // OpenAI-compatible gateways. Use a cheap sibling only where the
-            // model family makes the name unambiguous; unknown providers use
-            // the deterministic compact summary instead of accidentally
-            // spending the main model on a 120k-character summarization call.
-            let sibling = if model_lower_starts_with(model, "gpt-5") {
-                Some("gpt-5-mini")
-            } else if model_lower_starts_with(model, "gpt-4o") {
-                Some("gpt-4o-mini")
-            } else if model_lower_starts_with(model, "gpt-4.1") {
-                Some("gpt-4.1-mini")
-            } else {
-                None
-            };
-            // A family name is not a promise that the gateway carries the whole
-            // family. The managed gateway serves gpt-5.x without any `-mini`,
-            // so guessing there cost three retries and a degraded summary on
-            // *every* compaction. Where the served models are known, the
-            // sibling has to be among them.
-            if let Some(sibling) = sibling {
-                if known_models.is_empty()
-                    || known_models
-                        .iter()
-                        .any(|candidate| candidate.trim().eq_ignore_ascii_case(sibling))
-                {
-                    return Some(sibling.to_string());
-                }
-            }
-            // No guessable sibling — but the gateway told us what it serves, so
-            // look instead of giving up. Returning `None` here is not a neutral
-            // default: it disables LLM summarization for the whole session
-            // without a single request or log line, and every compaction then
-            // silently ships the deterministic summary, which is the one that
-            // lists ANSI-coloured build output as "key files".
+            // With no catalog the executor's own model is the only one known
+            // to exist, so a flagship gets the deterministic summary rather
+            // than a second large call. Where the gateway told us what it
+            // serves, look there: returning `None` is not a neutral default.
+            // It disables LLM summarization for the whole session without a
+            // single request or log line, and every compaction then ships the
+            // deterministic summary, which is the one that lists ANSI-coloured
+            // build output as "key files".
             cheap_model_from_catalog(model, known_models)
         }
     }
@@ -2747,7 +2796,10 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
 /// `MiniMax-M3` is a flagship that happens to start with the letters of "mini",
 /// and `gemini-*` contains them too. A substring test picks both as the cheap
 /// tier and quietly routes summarization to an expensive model.
-const CHEAP_MODEL_MARKERS: &[&str] = &["mini", "flash", "lite", "small", "nano", "haiku"];
+///
+/// `luna` is OpenAI's name for the tier `nano` used to be (`gpt-5.6-luna`,
+/// `gpt-6-luna`); the mid tier `terra` is deliberately absent.
+const CHEAP_MODEL_MARKERS: &[&str] = &["mini", "flash", "lite", "small", "nano", "haiku", "luna"];
 
 fn advertises_cheap_tier(name: &str) -> bool {
     name.to_ascii_lowercase()
@@ -2759,22 +2811,37 @@ fn advertises_cheap_tier(name: &str) -> bool {
 ///
 /// Preference order: the executor itself when it is already a cheap tier, then
 /// a cheap model from the same vendor. A cross-vendor catalog entry is not
-/// evidence that the executor endpoint accepts it.
+/// evidence that the executor endpoint accepts it. Among several same-vendor
+/// candidates the closest relative wins (`gpt-5.4-mini` over `gpt-4.1-mini` for
+/// `gpt-5.5`), then the name, so the choice is stable. The name is returned as
+/// the catalog spells it.
 fn cheap_model_from_catalog(model: &str, known_models: &[String]) -> Option<String> {
     if advertises_cheap_tier(model) {
         return Some(model.to_string());
     }
     let vendor = model_vendor_prefix(model);
-    let mut candidates = known_models
+    if vendor.is_empty() {
+        return None;
+    }
+    known_models
         .iter()
         .map(|name| name.trim())
-        .filter(|name| !name.is_empty() && advertises_cheap_tier(name))
-        .collect::<Vec<_>>();
-    candidates.sort_unstable();
-    candidates
-        .iter()
-        .find(|name| !vendor.is_empty() && model_vendor_prefix(name) == vendor)
-        .map(|name| (*name).to_string())
+        .filter(|name| {
+            !name.is_empty() && advertises_cheap_tier(name) && model_vendor_prefix(name) == vendor
+        })
+        .min_by(|left, right| {
+            shared_prefix_len(model, right)
+                .cmp(&shared_prefix_len(model, left))
+                .then_with(|| left.cmp(right))
+        })
+        .map(ToString::to_string)
+}
+
+fn shared_prefix_len(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+        .count()
 }
 
 /// The leading vendor-ish token of a model name: `deepseek` from
@@ -2786,10 +2853,6 @@ fn model_vendor_prefix(model: &str) -> String {
         .chars()
         .take_while(char::is_ascii_alphabetic)
         .collect()
-}
-
-fn model_lower_starts_with(model: &str, prefix: &str) -> bool {
-    model.to_ascii_lowercase().starts_with(prefix)
 }
 
 /// The interactive turn budgets, resolved once per process.

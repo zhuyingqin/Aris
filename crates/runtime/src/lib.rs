@@ -322,6 +322,12 @@ pub fn home_dir() -> String {
 
 pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
 pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
+/// Set by the host on a plugin's MCP server: its reviewed snapshot. Its
+/// presence starts the server as a plugin process (cleared environment, its
+/// data directory as working directory). Packages cannot set `SOMNIQ_*` keys.
+pub const PLUGIN_ROOT_ENV: &str = "SOMNIQ_PLUGIN_ROOT";
+/// The plugin's own writable directory, also set by the host.
+pub const PLUGIN_DATA_ENV: &str = "SOMNIQ_PLUGIN_DATA";
 pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
 /// SomniQ user-level skills directory.

@@ -23,7 +23,7 @@ declares. It can contribute three things, alone or together:
 What a package cannot do: run its own HTML, CSS or JavaScript anywhere except
 a panel's `page` (sandboxed, below), add UI anywhere except the Chat
 sidebar, the Chat's project summary and a page in the navigation rail, bring
-its own rail icon image, load
+its own icon image file (an `iconPath` outline is the exception, below), load
 anything from the network into a page, or connect to an HTTP MCP server. If the request needs one of these, say so and offer the closest
 supported version.
 
@@ -43,7 +43,10 @@ draws them; the content of the data widgets comes from you, through the
   the prompt in the composer. The rail shows a project's first three pages
   and lists the rest under More, so prefer one page with several widgets to
   several pages. To turn the `data-panel` template into a page, change its
-  `slot` and add an `icon`.
+  `slot` and add an `icon`. Any panel may name an `icon`; when none of the
+  listed names fits, set `"iconPath"` instead (never both): one SVG path's
+  data on a 16 x 16 grid, which the host strokes in the theme colour. Only
+  path commands and numbers are accepted; draw an outline, not a filled shape.
 - **A glance in the project summary.** `"slot": "chat.brief"`
   (`schemaVersion` 3) puts a small card at the top of the project summary
   beside the chat, about 280-340 px wide, for what the user wants to see at

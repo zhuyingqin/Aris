@@ -1,5 +1,56 @@
 # ARIS-Code Changelog
 
+## v0.4.91 (2026-11-19)
+
+- **Context windows** — models that ship a 1M-token window inside a smaller
+  family are no longer compacted at the family's floor: GLM-5.2 and GLM-5.3
+  (was 200k), Qwen 3.6 Plus/Flash and the 3.7/3.8 lines including the managed
+  `qwen3.8-flash` (was 256k), MiMo V2 Pro/V2.5/V2.6 and Doubao Seed 2.1 (were
+  treated as unknown, 128k), and `deepseek-flash` (was 64k). `gpt-4o` and
+  `gpt-4-turbo` now compact below their 128k window; the previous 160k budget
+  sat above it. GPT-5.x and GPT-6 keep the 400k figure measured on the
+  account gateway.
+- **Model lists** — the model pickers and provider defaults list models that
+  are currently served: GLM-5.3, MiMo v2.6, Qwen 3.7/3.8, Doubao Seed 2.1,
+  Kimi K3.1 Pro, Gemini 4 Argon and 3.8 Flash, MiniMax M3.1 Flash, and the
+  GPT-6 line. Retired or deprecated ids (Kimi K2.5, MiniMax M2.7, Gemini 2.5,
+  MiMo v2.5, the 4k Doubao models, GPT-5.4 and GPT-4o) are removed. A model
+  already saved in Settings is left as it is.
+- **Compaction summaries** — the default summary model is only ever a model
+  known to exist: the conversation's own model when it is a cheap tier, or a
+  same-vendor cheap model the account gateway lists. Names are no longer
+  inferred from the family (`gpt-5*` used to imply `gpt-5-mini`), and an
+  Anthropic-compatible endpoint serving another vendor is no longer sent a
+  Claude Haiku request. GPT sessions on the account gateway now get a model
+  summary from its Luna tier. A directly configured flagship without a model
+  list uses the built-in summary unless a summary model is set in Settings.
+- **Queued messages** — a message sent while a chat is still answering waits
+  in a queue and starts when the chat is idle. A stopped or failed turn pauses
+  the queue until the user resumes it. The queue is not kept across restarts.
+- **Chats keep their model** — a chat saved before chats remembered their own
+  model is pinned to the model it last ran on, instead of following whichever
+  default another conversation last selected.
+- **Web panels** — a plugin panel can embed a web page (`ui.json` schema 3,
+  `"web": "<address>"`): `https`, or `http` on localhost only. The host draws
+  the frame, no package code runs, and the page gets no plugin bridge or data.
+  The approval card shows the address; changing it needs approval again.
+- **Links open in the browser** — `target="_blank"` links and `window.open`
+  now open in the system browser. They were silently dropped on Windows.
+- **Plugins for all projects** — an approved, enabled package can be turned on
+  for every project on this computer and switched off per project. A global
+  package is upgraded, rolled back or removed from the project it came from.
+- **Panel icons** — 59 built-in panel icons (was 24), and a package may supply
+  one SVG path (`iconPath`, schema 2) that the host draws itself. Navigation,
+  the plugin page header, the Chat side panel and project glances show the
+  same icon.
+- **Plugin process isolation** — a plugin's MCP server starts with a cleared
+  environment (base platform variables and the package's own `env` only), its
+  own data directory as working directory, and temp files under it. Packages
+  cannot set `SOMNIQ_*` variables, must write `./` for files they ship, and
+  cannot place reviewer criteria where the Executor can read them. Actions on
+  the plugin page are refused when the package changed since the page loaded.
+  File and shell tools cannot write the plugin trust store.
+
 ## v0.4.90 (2026-11-17)
 
 - **Spanish** — the interface is available in Chinese, English and Spanish.

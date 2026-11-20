@@ -19,6 +19,7 @@
 mod authoring;
 mod builtin;
 mod dsh;
+mod global;
 mod lifecycle;
 mod reviewer;
 mod store_guard;
@@ -28,6 +29,7 @@ mod versions;
 
 pub use authoring::*;
 pub use builtin::*;
+pub use global::*;
 pub use lifecycle::*;
 pub use reviewer::*;
 pub use store_guard::*;
@@ -161,6 +163,8 @@ pub struct InstalledPlugin {
     pub history: Vec<PluginVersion>,
     /// The digest the package was first installed with, when known.
     pub original_digest: Option<String>,
+    /// On for every project of this computer ([`global`]), not just this one.
+    pub global: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +184,10 @@ struct Record {
     /// whether it is running now or in the history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     original: Option<String>,
+    /// Came from the global list rather than this project's registry. Never
+    /// stored: which file a record is read from is what makes it global.
+    #[serde(skip)]
+    global: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -546,7 +554,7 @@ impl PluginStore {
     /// [`Self::freeze`] takes the registry stripe too, so a run never starts
     /// from a half-applied mutation.
     fn mutate<T>(&self, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let paths = [self.registry_path(), self.approvals_path()];
+        let paths = [self.registry_path(), self.approvals_path(), self.global_path()];
         crate::atomic_file::with_paths_locked(&paths, || {
             // Validate state paths before creating or opening anything there.
             self.registry()?;
@@ -695,6 +703,7 @@ impl PluginStore {
                         .into(),
                 );
             }
+            self.reject_global_only(&preview.name)?;
             self.publish_snapshot(&files, &preview.digest)?;
             let record = Record {
                 name: preview.name.clone(),
@@ -705,6 +714,7 @@ impl PluginStore {
                 enabled: false,
                 history: vec![],
                 original: Some(preview.digest.clone()),
+                global: false,
             };
             registry
                 .packages
@@ -781,6 +791,7 @@ impl PluginStore {
             lifecycle: PluginLifecycle::default(),
             history: vec![],
             original_digest: None,
+            global: false,
         }
     }
 
@@ -790,6 +801,14 @@ impl PluginStore {
     /// starts anything.
     fn inspect_record(&self, record: &Record) -> InstalledPlugin {
         let mut package = self.inspect_snapshot(record);
+        if record.global {
+            // Being on the global list is the approval (see [`global`]).
+            let mut view = Self::installed(package, record.enabled);
+            view.history = record.history.clone();
+            view.original_digest = record.original.clone();
+            view.global = true;
+            return view;
+        }
         let approval = self.approved_digest(&record.name);
         let approved = matches!(&approval, Ok(Some(digest)) if digest == &record.digest);
         match approval {
@@ -852,12 +871,16 @@ impl PluginStore {
     pub fn list(&self) -> Result<Vec<InstalledPlugin>, String> {
         let runs = lifecycle::project_runs(&self.project_key());
         let disabled = self.builtin_disabled();
-        Ok(self
-            .registry()?
-            .packages
-            .values()
-            .map(|record| self.assessed(record, &runs, &disabled))
-            .collect())
+        let mut views: Vec<_> = self
+            .effective_records()?
+            .iter()
+            .map(|record| self.inspect_record(record))
+            .collect();
+        Self::resolve_global_conflicts(&mut views);
+        for view in &mut views {
+            view.lifecycle = lifecycle::assess(self, view, &runs, &disabled);
+        }
+        Ok(views)
     }
 
     /// One package as the plugin page shows it.
@@ -876,7 +899,7 @@ impl PluginStore {
         disabled: &[String],
     ) -> InstalledPlugin {
         let mut view = self.inspect_record(record);
-        view.lifecycle = lifecycle::assess(&view, runs, disabled);
+        view.lifecycle = lifecycle::assess(self, &view, runs, disabled);
         view
     }
 
@@ -887,15 +910,15 @@ impl PluginStore {
         registry: &Registry,
         name: &str,
         capabilities: &PluginCapabilities,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, String> {
         let names: BTreeSet<_> = capabilities
             .skills
             .iter()
             .map(|v| v.to_ascii_lowercase())
             .collect();
-        registry
-            .packages
-            .values()
+        Ok(self
+            .effective_records_of(registry)?
+            .iter()
             .filter(|r| r.name != name)
             .map(|other| self.inspect_record(other))
             .find(|other| {
@@ -908,11 +931,24 @@ impl PluginStore {
                         .iter()
                         .any(|v| names.contains(&v.to_ascii_lowercase()))
             })
-            .map(|other| other.package.name)
+            .map(|other| other.package.name))
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<InstalledPlugin, String> {
         self.set_enabled_checked(name, enabled, None)
+    }
+
+    /// [`Self::set_enabled`] for exactly the version the user's view showed:
+    /// refused when the installed digest changed since (an agent's upgrade
+    /// between the page load and the click), so a click never approves bytes
+    /// the user did not see.
+    pub fn set_enabled_shown(
+        &self,
+        name: &str,
+        enabled: bool,
+        shown_digest: &str,
+    ) -> Result<InstalledPlugin, String> {
+        self.set_enabled_checked(name, enabled, Some(shown_digest))
     }
 
     /// Enable exactly the version a user was shown and approved. Refused when
@@ -934,6 +970,33 @@ impl PluginStore {
     ) -> Result<InstalledPlugin, String> {
         self.mutate(|| {
             let mut registry = self.registry()?;
+            if !registry.packages.contains_key(name) {
+                // A global package is switched for this project only.
+                let record = self
+                    .effective_record(name)?
+                    .filter(|record| record.global)
+                    .ok_or("Plugin is not installed")?;
+                if expected_digest.is_some_and(|expected| expected != record.digest) {
+                    return Err(PACKAGE_CHANGED_SINCE_SHOWN.into());
+                }
+                if enabled {
+                    let view = self.inspect_record(&Record { enabled: true, ..record.clone() });
+                    if !view.package.can_enable {
+                        return Err(
+                            "Resolve the plugin compatibility or integrity diagnostics before enabling"
+                                .into(),
+                        );
+                    }
+                    if let Some(other) =
+                        self.skill_conflict(&registry, name, &view.package.capabilities)?
+                    {
+                        return Err(format!("Skill name conflicts with enabled plugin {other}"));
+                    }
+                }
+                self.set_global_opt_out(name, !enabled)?;
+                let record = self.effective_record(name)?.ok_or("Plugin is not installed")?;
+                return Ok(self.view(&record));
+            }
             let record = registry
                 .packages
                 .get(name)
@@ -951,7 +1014,7 @@ impl PluginStore {
                     );
                 }
                 if let Some(other) =
-                    self.skill_conflict(&registry, name, &view.package.capabilities)
+                    self.skill_conflict(&registry, name, &view.package.capabilities)?
                 {
                     return Err(format!("Skill name conflicts with enabled plugin {other}"));
                 }
@@ -977,6 +1040,7 @@ impl PluginStore {
     }
 
     fn remove_checked(&self, name: &str, expected_digest: Option<&str>) -> Result<(), String> {
+        self.reject_global_only(name)?;
         self.mutate(|| {
             let mut registry = self.registry()?;
             let Some(record) = registry.packages.get(name) else {
@@ -1010,13 +1074,18 @@ impl PluginStore {
                 .map(|plugin| self.inspect_frozen(plugin))
                 .filter(|p| p.package.can_enable)
                 .collect(),
-            None => self
-                .registry()?
-                .packages
-                .values()
-                .map(|record| self.inspect_record(record))
-                .filter(|p| p.enabled && p.package.can_enable)
-                .collect(),
+            None => {
+                let mut views: Vec<_> = self
+                    .effective_records()?
+                    .iter()
+                    .map(|record| self.inspect_record(record))
+                    .collect();
+                Self::resolve_global_conflicts(&mut views);
+                views
+                    .into_iter()
+                    .filter(|p| p.enabled && p.package.can_enable)
+                    .collect()
+            }
         };
         Ok(plugins
             .into_iter()
@@ -1034,32 +1103,32 @@ impl PluginStore {
             enabled: true,
             history: vec![],
             original: None,
+            global: false,
         };
         Self::installed(self.inspect_snapshot(&record), true)
     }
 
-    /// Snapshot directories of the packages that would run here, for callers
-    /// that must let the model read a plugin skill's own files.
-    pub fn active_snapshot_dirs(&self) -> Result<Vec<PathBuf>, String> {
-        Ok(self
-            .running()?
-            .into_iter()
-            .map(|p| self.snapshot_path(&p.package.digest))
-            .collect())
+    /// The skill directories of the packages that would run here: what the
+    /// model may read of a package. Never the whole snapshot, which also holds
+    /// the Reviewer's rubrics, MCP server code and page sources.
+    pub(super) fn readable_dirs_of(&self, plugin: &InstalledPlugin) -> Vec<PathBuf> {
+        let root = self.snapshot_path(&plugin.package.digest);
+        plugin
+            .package
+            .capabilities
+            .skill_roots
+            .iter()
+            .map(|path| root.join(path))
+            .collect()
     }
 
+    /// Skill directories of the packages that would run here. These are also
+    /// the only package files the model may read (its read-only roots).
     pub fn active_skill_roots(&self) -> Result<Vec<PathBuf>, String> {
         Ok(self
             .running()?
-            .into_iter()
-            .flat_map(|p| {
-                let root = self.snapshot_path(&p.package.digest);
-                p.package
-                    .capabilities
-                    .skill_roots
-                    .into_iter()
-                    .map(move |path| root.join(path))
-            })
+            .iter()
+            .flat_map(|p| self.readable_dirs_of(p))
             .collect())
     }
 
@@ -1067,7 +1136,7 @@ impl PluginStore {
         Ok(self
             .running()?
             .iter()
-            .flat_map(|plugin| mcp_entries(&plugin.package))
+            .flat_map(|plugin| mcp_entries(self, &plugin.package))
             .map(|entry| (entry.runtime_name, entry.config))
             .collect())
     }
@@ -1082,7 +1151,7 @@ impl PluginStore {
             .running()?
             .iter()
             .filter(|plugin| plugin.package.name == name)
-            .flat_map(|plugin| mcp_entries(&plugin.package))
+            .flat_map(|plugin| mcp_entries(self, &plugin.package))
             .map(|entry| (entry.runtime_name, entry.config))
             .collect())
     }
@@ -1097,26 +1166,51 @@ struct McpEntry {
 
 /// Each package gets a stable MCP name prefix, so its servers never collide
 /// with another package's or a manually configured one.
-fn mcp_entries(package: &PluginPreview) -> Vec<McpEntry> {
+fn mcp_entries(store: &PluginStore, package: &PluginPreview) -> Vec<McpEntry> {
     let hash = format!("{:x}", Sha256::digest(package.name.as_bytes()));
+    let snapshot = store.snapshot_path(&package.digest);
+    let data = store.plugin_data_dir(&package.name);
     package
         .capabilities
         .mcp_servers
         .iter()
-        .map(|server| McpEntry {
-            declared: server.name.clone(),
-            runtime_name: format!("p{}_{}", &hash[..8], server.name),
-            config: ScopedMcpServerConfig {
-                scope: ConfigSource::Project,
-                config: McpServerConfig::Stdio(McpStdioServerConfig {
-                    command: server.command.clone(),
-                    args: server.args.clone(),
-                    env: server.env.clone(),
-                    request_timeout_secs: server.request_timeout_secs,
-                }),
-            },
+        .map(|server| {
+            // Host-only keys (a package's own `env` may not use SOMNIQ_*):
+            // they make the server start as a plugin process, with a cleared
+            // environment and its data directory as the working directory.
+            let mut env = server.env.clone();
+            env.insert(crate::PLUGIN_ROOT_ENV.into(), snapshot.to_string_lossy().into_owned());
+            env.insert(crate::PLUGIN_DATA_ENV.into(), data.to_string_lossy().into_owned());
+            McpEntry {
+                declared: server.name.clone(),
+                runtime_name: format!("p{}_{}", &hash[..8], server.name),
+                config: ScopedMcpServerConfig {
+                    scope: ConfigSource::Project,
+                    config: McpServerConfig::Stdio(McpStdioServerConfig {
+                        command: server.command.clone(),
+                        args: server.args.clone(),
+                        env,
+                        request_timeout_secs: server.request_timeout_secs,
+                    }),
+                },
+            }
         })
         .collect()
+}
+
+impl PluginStore {
+    /// `<SomniQ config>/plugin-data/<project hash>/<package hash>`: the one
+    /// directory a plugin process may treat as its own. Kept outside
+    /// `plugins/`, so the trust store and writable data never mix.
+    pub(super) fn plugin_data_dir(&self, name: &str) -> PathBuf {
+        let short = |value: &str| format!("{:x}", Sha256::digest(value.as_bytes()))[..16].to_string();
+        self.user_root
+            .parent()
+            .map_or_else(|| self.user_root.join("data"), Path::to_path_buf)
+            .join("plugin-data")
+            .join(short(&self.project_key()))
+            .join(short(name))
+    }
 }
 
 #[cfg(test)]

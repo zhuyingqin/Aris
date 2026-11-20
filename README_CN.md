@@ -269,10 +269,10 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 | Provider | Executor | Reviewer | 主要模型 |
 |----------|:--------:|:--------:|---------|
 | 🟣 Anthropic Claude | ✅ | — | claude-opus、claude-sonnet、claude-haiku |
-| 🟢 OpenAI | ✅ | ✅ | gpt-5.x、o 系列 |
-| 🔵 Google Gemini | ✅ | ✅ | gemini-2.5-pro、gemini-2.5-flash |
-| 🔶 智谱 GLM | ✅ | ✅ | GLM-5、GLM-5-Turbo |
-| 🔷 MiniMax | ✅ | ✅ | MiniMax-M2.x |
+| 🟢 OpenAI | ✅ | ✅ | gpt-6.x、gpt-5.5 |
+| 🔵 Google Gemini | ✅ | ✅ | gemini-4-argon、gemini-3.8-flash |
+| 🔶 智谱 GLM | ✅ | ✅ | GLM-5.3、GLM-5-Turbo |
+| 🔷 MiniMax | ✅ | ✅ | MiniMax-M3、MiniMax-M3.1-Flash |
 | ⚙️ OpenAI 兼容 | ✅ | ✅ | 自定义 base URL —— DeepSeek、Kimi、Qwen、LM Studio / Ollama、代理 |
 | ⚙️ Anthropic 兼容 | ✅ | — | 自定义 base URL —— Claude 代理 / 中转站 |
 

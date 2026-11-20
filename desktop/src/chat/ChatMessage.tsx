@@ -996,6 +996,7 @@ const PLUGIN_APPROVAL_COPY = {
     skills: "Skill",
     panels: "侧栏面板",
     ownPage: "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
+    webPage: (url: string) => `（嵌入网页：${url}）`,
     proposesTasks: "（可提议后台任务，每次都需你确认）",
     rubrics: "审查细则",
     rubricsNote: "独立 Reviewer 每次审查都会检查这些条目，Executor 看不到它们",
@@ -1024,6 +1025,7 @@ const PLUGIN_APPROVAL_COPY = {
     skills: "Skills",
     panels: "Sidebar panels",
     ownPage: " (own page: runs the package's page code, sandboxed, no network)",
+    webPage: (url: string) => ` (embeds the web page ${url})`,
     proposesTasks: " (may propose background tasks; you confirm each one)",
     rubrics: "Review rubrics",
     rubricsNote: "The independent Reviewer checks these on every review; the Executor never sees them",
@@ -1052,6 +1054,7 @@ const PLUGIN_APPROVAL_COPY = {
     skills: "Skills",
     panels: "Paneles laterales",
     ownPage: " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)",
+    webPage: (url: string) => ` (incrusta la página web ${url})`,
     proposesTasks: " (puede proponer tareas en segundo plano; confirmas cada una)",
     rubrics: "Rúbricas de revisión",
     rubricsNote: "El Revisor independiente las comprueba en cada revisión; el Ejecutor nunca las ve",
@@ -1188,7 +1191,7 @@ function PluginApprovalCall({
           ) : (
             <dl className="chat-plugin-approval-capabilities">
               {skills.length > 0 && <><dt>{copy.skills}</dt><dd>{skills.join(", ")}</dd></>}
-              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? copy.ownPage : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
+              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? copy.ownPage : "") + (panel.web ? copy.webPage(panel.web) : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
               {(card.capabilities.reviewRubrics?.length ?? 0) > 0 && (
                 <>
                   <dt>{copy.rubrics}</dt>

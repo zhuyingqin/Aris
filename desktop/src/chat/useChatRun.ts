@@ -19,6 +19,7 @@ import {
   chatReasoningEffortGet,
   chatReasoningEffortSet,
   chatRewindToUserMessage,
+  chatSessionLastModel,
   chatSetContext,
   chatStatus,
   chatSuggestTitle,
@@ -684,6 +685,31 @@ export function useChatRun({
     refreshStatus(currentSessionRef.current?.model ?? null);
   }), [refreshModelOptions, refreshStatus, currentSessionRef]);
 
+  // Chats saved before sessions pinned their model have none, and would keep
+  // following the app-wide default that other chats change. Recover the model
+  // each one actually last ran on from the usage ledger, once per session.
+  const legacyModelLookups = useRef(new Set<string>());
+  const legacySessionId = currentSession
+    && !currentSession.model
+    && !currentSession.remoteAgent
+    && ((currentSession.turnCount ?? 0) > 0 || currentSession.turns.length > 0)
+    ? currentSession.id
+    : null;
+  useEffect(() => {
+    if (!legacySessionId || !isTauri() || legacyModelLookups.current.has(legacySessionId)) return;
+    legacyModelLookups.current.add(legacySessionId);
+    void Promise.resolve()
+      .then(() => chatSessionLastModel(legacySessionId))
+      .then((model) => {
+        if (!model) return;
+        // Not a user edit, so the sidebar order (updatedAt) stays put.
+        updateSession(legacySessionId, (session) => (session.model ? session : { ...session, model }));
+      })
+      .catch(() => {
+        // Without a ledger row the chat keeps the default; its next send pins it.
+      });
+  }, [legacySessionId, updateSession]);
+
   const activeModel = currentSession?.model || status?.model || configuredModel || null;
 
   // Reasoning capability belongs to the model the session actually runs, which
@@ -877,7 +903,15 @@ export function useChatRun({
       const basePrompt = typeof promptOverride === "string"
         ? { text: promptOverride }
         : promptOverride ?? (await outgoingMessage(text, attached));
-      const selectedModel = session.model || status?.model || undefined;
+      // A chat keeps the model it first ran on. Without a pin it would follow
+      // the app-wide default, which changes whenever *another* chat picks a
+      // model — an old DeepSeek conversation would silently continue on GPT.
+      // The configured default is read before `status`, which can still hold
+      // the previous chat's model while a session switch is resolving.
+      const selectedModel = session.model || configuredModel || status?.model || undefined;
+      if (!session.model && selectedModel) {
+        updateSession(session.id, (item) => (item.model ? item : { ...item, model: selectedModel }));
+      }
       const workflowRunId = workflowRunIdForSession(session);
       if (workflowRunId) {
         if (attached.length > 0 || basePrompt.images?.length) {
@@ -965,7 +999,7 @@ export function useChatRun({
         false,
       );
     }
-  }, [applyContextTokens, copy.previewResponse, language, markBackendContextSynced, onError, patchAssistant, patchTurns, prepareEditorContext, run, status?.model, updateSession, setEditingTurnId]);
+  }, [applyContextTokens, configuredModel, copy.previewResponse, language, markBackendContextSynced, onError, patchAssistant, patchTurns, prepareEditorContext, run, status?.model, updateSession, setEditingTurnId]);
 
   // Resume a stopped OR failed turn without discarding its work: append a
   // continuation on top of the current transcript and let the backend reuse its

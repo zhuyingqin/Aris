@@ -250,8 +250,24 @@ Agent 自建的插件可以在左侧导航栏里有自己的图标，点开是�
 
 - 面板的 `slot` 新增取值 `nav.page`（`chat.sidebar` 不变）。
 - 面板新增可选字段 `icon`，只能取契约 `ui.icons` 列出的宿主图标名
-  （`runtime::plugins::ui::UI_ICONS`，24 个）。包不能带自己的图标文件：
-  工作区里的字节不进应用外壳。未声明时按第一个组件的类型取图标。
+  （`runtime::plugins::ui::UI_ICONS`，0.4.91 起 59 个，含 sprout、leaf、
+  flask、database、calendar 等）。包不能带自己的图标文件：工作区里的字节
+  不进应用外壳。未声明时按第一个组件的类型取图标。
+  - 前端 `desktop/src/extensions/panelIcons.ts` 的 `PANEL_ICONS` 必须与
+    `UI_ICONS` 同名同序；`panelIcons.test.tsx` 直接读 `ui.rs` 比对，任一边漏改即失败。
+  - 品牌标志（claude/openai/playwright）、箭头、关闭/加减等控件图形不开放：
+    面板图标说明“它是什么”，不是一个动作。
+- 可选字段 `iconPath`（schemaVersion ≥ 2，与 `icon` 互斥）：一条 SVG path 的
+  `d` 数据，画在宿主 16×16 图标网格上，由宿主以 1.45 线宽、圆头、
+  `currentColor` 描边、不填充。这是“字节不进外壳”的唯一窄口子，成立的前提：
+  - 只接受 path 命令字母（M L H V C S Q T A Z 大小写）、数字、空白、逗号、
+    `.+-eE`，必须以 M/m 开头、至少一个数字、≤ 1024 字符
+    （`MAX_UI_ICON_PATH_CHARS`）。这个字符集拼不出元素、属性、URL 或实体。
+  - 宿主自己生成 `<svg><path d>`，包给的只是形状数据；前端
+    `panelIconPath` 再校验一次，不合格时回落到 `icon` / 组件推断图标。
+- 所有出现插件面板图标的地方（导航栏、插件页页头、Chat 侧栏标签与添加菜单、
+  项目摘要 glance）统一走 `PluginPanelIcon`。此前 Chat 侧栏只按组件类型推断、
+  忽略 `icon`，已一并改正。
 - `nav.page` 的约束，预览阶段即报错并阻止启用：
   - 需要 `schemaVersion` 2；
   - 必须 `"scope": "project"`（页面不从某个会话打开，没有会话可归属）；
@@ -607,3 +623,46 @@ M1 之后的反馈是"还是三列"：三列只是示例模板的设计，但单
 - 声明式按钮的 `task` 动作（目前只有自绘页面能提议任务）。
 - 宿主不会把任务结果自动写进某个组件：结构化结果经 `tasks()` 交给页面，由页面决定
   是否用 `somniq.set` 持久化。
+
+## 网页面板（`web`，2026-11-18）
+
+用户需要把已有的网页（例如本机工具的 Web 界面 `http://localhost:3007`）放进插件面板。
+插件页面的沙箱保持不变：给插件代码开网络，等于让它把面板数据和对话内容发到任意地址。
+所以另加一种**由宿主绘制**的面板：
+
+- `ui.json`（schemaVersion 3）的面板声明 `"web": "<地址>"`，可放 `nav.page` 或
+  `chat.sidebar`，不能放 `chat.brief`；不得同时有 `page`、`dataPanel`、`proposeTasks`、
+  `widgets`。没有包代码运行，嵌入的网站拿不到 `somniq` 桥和任何插件数据。
+- 地址校验（`ui.rs::check_web_address`）：
+  - 只收 `https`，明文 `http` 只限 localhost、127.0.0.1、[::1]；
+  - 不得带用户名或密码，长度不超过 2048；
+  - 拒绝任何 `*.localhost` 子域名：Windows 上每个应用协议都是
+    `http://<scheme>.localhost`（tauri、ipc、asset、somniq-figure），Tauri 的
+    `is_local_url` 会把它们当作应用自己的来源；
+  - 拒绝本机 1420 端口（开发版前端）。
+- 批准卡片（对话里的批准卡片和插件页）显示“嵌入网页：<地址>”。升级差异把面板
+  记为 `<id> (web: <地址>)`，换地址就是一项要重新批准的变更。
+- 框架：`PluginWebFrame.tsx`。sandbox 为
+  `allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads`，
+  不带 `allow-top-navigation`，`referrerpolicy=no-referrer`。`allow-same-origin`
+  让网站保有**它自己的**来源（Cookie、存储照常），不会变成应用的来源。宿主页头始终
+  显示主机名、“重新加载”和“在浏览器中打开”。很多公共网站用 `X-Frame-Options`
+  或 `frame-ancestors` 拒绝被嵌入，而框架察觉不到，所以始终保留去浏览器的出口。
+- Windows 上 wry 会把 Tauri IPC 全局注入每个子框架，嵌入的网站也拿得到。挡住命令的
+  是 Tauri 的来源检查：没有任何 capability 配置 `remote`
+  （`no_capability_opens_commands_to_remote_origins`），而应用来源已在地址校验里排除。
+  升级 Tauri 时要复核这两点。
+
+### 新窗口一律交给系统浏览器
+
+WebView2 收到新窗口请求时，如果没有处理器，wry 会静默 `SetHandled(true)` 丢掉它。
+所以应用里的 `target="_blank"` 链接一直点不开，嵌入网站的 `window.open` 也是一样。
+
+- 主窗口在 `tauri.conf.json` 与 `tauri.macos.conf.json` 里设 `"create": false`，改由
+  `setup` 第一步用 `WebviewWindowBuilder::from_config` 创建，同时挂上
+  `commands::route_new_windows_to_browser`。伴随窗口也挂上了。
+- 处理器把 http/https/mailto/tel 交给 `open_external_url`，其余拒绝，并且永远不在
+  应用里开第二个 webview 窗口。
+- 主文档里的外链点击另由 `desktop/src/externalLinks.ts` 在冒泡阶段接管，没有组件
+  先认领的才处理。这样同窗口导航的外链也不会把应用窗口带走。
+- 插件自绘页面的沙箱没有 `allow-popups`，`window.open` 在框架内就被拦截，不受影响。

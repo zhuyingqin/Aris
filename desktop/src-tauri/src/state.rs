@@ -229,9 +229,9 @@ fn build_project_execution_context(
         )
         .with_env("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
     let plugin_dirs = match &run {
-        Some(run) => run.snapshot_dirs().to_vec(),
+        Some(run) => run.readable_dirs().to_vec(),
         None => runtime::plugins::PluginStore::for_workspace(&plugin_root)
-            .active_snapshot_dirs()
+            .active_skill_roots()
             .unwrap_or_default(),
     };
     context = match readonly_roots_value(&agent_store, plugin_dirs)? {

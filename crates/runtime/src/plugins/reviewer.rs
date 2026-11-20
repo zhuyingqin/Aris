@@ -135,6 +135,14 @@ pub(super) fn inspect_reviewer(
         Ok(path) => path,
         Err(error) => return diagnostics.push(in_manifest(error)),
     };
+    // Skill directories are what the Executor may read, so criteria kept
+    // there would reach the side they are meant to check.
+    if capabilities.skill_roots.iter().any(|skill_root| path.starts_with(skill_root)) {
+        return diagnostics.push(in_manifest(
+            "The somniq.reviewer document must not be inside a skill directory: the Executor can read skill files"
+                .into(),
+        ));
+    }
     let Some(file) = files.get(&path) else {
         return diagnostics.push(in_manifest("Missing somniq.reviewer document".into()));
     };

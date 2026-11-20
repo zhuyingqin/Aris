@@ -143,6 +143,8 @@ pub struct UiRules {
     pub slot: &'static str,
     /// The values a panel's optional `icon` may take.
     pub icons: &'static [&'static str],
+    /// A panel's optional `iconPath`: its own outline instead of a host icon.
+    pub icon_path: &'static str,
     pub widgets: Vec<UiWidgetRule>,
     pub max_panels: usize,
     pub max_widgets_per_panel: usize,
@@ -154,6 +156,8 @@ pub struct UiRules {
     /// A panel's optional `page`: HTML of the package that draws the panel.
     pub page: &'static str,
     pub max_page_bytes: usize,
+    /// A panel's optional `web`: a web page the host embeds as the panel.
+    pub web: &'static str,
     /// Panel `scope` values: whose data the panel shows.
     pub scopes: &'static [&'static str],
     pub scope: &'static str,
@@ -298,7 +302,7 @@ pub fn authoring_contract() -> AuthoringContract {
                     rules: vec![
                         format!("transport must be one of: {}.", dsh::MCP_TRANSPORTS.join(", ")),
                         format!("serverName must match [A-Za-z0-9_-]{{1,{}}} and be unique in the package.", dsh::MAX_MCP_SERVER_NAME),
-                        "command is required. A command or argument starting with ./ resolves inside the installed snapshot; anything else is passed as written and runs with the project as its working directory.".into(),
+                        "command is required. A command or argument starting with ./ resolves inside the installed snapshot; a bare name that is a package file is refused (write ./name). The server runs in its own data directory (SOMNIQ_PLUGIN_DATA, never the project) with a cleared environment: platform variables plus the package env, whose keys must not be reserved (PATH, PYTHONPATH, NODE_OPTIONS, SOMNIQ_*, ARIS_* and the like).".into(),
                         "env values are literal strings: never put secrets in the package; ${} credential templates are not supported.".into(),
                         format!("toolCallTimeoutMs, when set, must be 1..{}.", dsh::MAX_TOOL_CALL_TIMEOUT_MS),
                     ],
@@ -318,6 +322,7 @@ pub fn authoring_contract() -> AuthoringContract {
             slots: ui::UI_SLOTS,
             slot: "chat.sidebar: a tab beside the conversation (a page there is about 320-480 px wide). chat.brief (schemaVersion 3): a small glance at the top of the Chat's project summary, about 280-340 px wide; it must set \"scope\": \"project\", takes only small widgets (text, metrics, progress, list, markdown, button, todo-list, json), and a page there is as tall as it asks with somniq.resize (40-320 px); the user can fold it, and its header offers Open when its dataPanel is a nav.page panel. nav.page: a page of its own, opened from an icon in the app's navigation rail and laid out in columns; it must set \"scope\": \"project\", cannot hold an agent-plan widget, and its buttons and forms take the user back to Chat with the prompt in the composer. The rail shows the first three pages of a project and lists the rest under More.",
             icons: ui::UI_ICONS,
+            icon_path: "Optional, schemaVersion 2, instead of icon (never both): the panel's own outline as SVG path data, e.g. \"M8 14V7.5M8 9C8 6.5 6.3 5 3.5 5c0 2.6 1.8 4 4.5 4Z\". It is drawn on the host's 16 x 16 icon grid (coordinates 0-16, keep about 1.5 from the edges) as a 1.45-wide round stroke in the theme's text colour, never filled, so draw outlines, not solid shapes. Only path commands (M L H V C S Q T A Z, either case), numbers, spaces and commas are accepted; it must start with M or m and be at most 1024 characters. Use it only when no name in icons fits.",
             widgets: ui::UI_WIDGET_TYPES
                 .iter()
                 .map(|(kind, fields)| UiWidgetRule {
@@ -334,7 +339,8 @@ pub fn authoring_contract() -> AuthoringContract {
             max_title_chars: ui::MAX_UI_TITLE_CHARS,
             max_text_chars: ui::MAX_UI_TEXT_CHARS,
             text: "A string, or { \"en\": \"...\", \"cn\": \"...\", \"es\": \"...\" }: en and cn are required, es (Spanish) is optional and Spanish readers see en without it. Shown as plain text with line breaks kept.",
-            panel_fields: &["id", "slot", "title", "icon", "order", "scope", "page", "dataPanel", "proposeTasks", "widgets"],
+            panel_fields: &["id", "slot", "title", "icon", "iconPath", "order", "scope", "page", "web", "dataPanel", "proposeTasks", "widgets"],
+            web: "Optional, schemaVersion 3, chat.sidebar or nav.page (not chat.brief): an absolute address (https, or plain http only for localhost / 127.0.0.1 / [::1]; no user name or password; at most 2048 characters) the host embeds as the whole panel, e.g. a local tool's web UI such as \"http://localhost:3007\". The host draws the frame; the panel takes no page, dataPanel, proposeTasks or widgets. The embedded site runs as itself, with no window.somniq bridge, no plugin data and no access to the app; links it opens in a new window go to the system browser. The user sees the address on the approval card, and changing it is a change to review. Many public sites refuse to be embedded (X-Frame-Options / frame-ancestors); the panel header always offers Open in browser. Prefer this over a page when the content already lives at a URL.",
             page: "Optional, schemaVersion 3, in either slot: a package-relative .html file (UTF-8, at most 1 MiB) that draws the whole panel itself, with its own HTML, CSS and JavaScript, instead of the host drawing the widgets. It may link other package files by relative path and they are inlined before it loads: <link rel=stylesheet> (with @import and url()), <script src>, <img src>/srcset, poster and CSS fonts; vendor libraries as package files. ES modules are .mjs files imported as \"pkg:<package-relative path>\" (relative module imports do not resolve). Scripts read other files with somniq.asset(path) (a data: URL) and somniq.text(path) (text), path relative to the page. These files together (js, mjs, css, html, json, txt, csv, md, images, fonts, audio, video, wasm) may be up to 12 MiB. It runs in a sandboxed frame with no network, no storage and no access to the app; anything it loads from a URL is blocked. The panel's widgets are then its data stores (usually one or more json widgets; none is allowed for a page that keeps no data). The page talks to the host only through window.somniq: `await somniq.ready()` gives { language: \"en\" | \"cn\", theme: { mode, colors }, data: { <widget id>: value } }; `await somniq.set(widgetId, value)` saves one widget's value in that widget's shape and rejects with the reason when it does not fit; `await somniq.data()` re-reads; `somniq.onData(fn)` and `somniq.onTheme(fn)` are called on changes, including the agent's PluginPanel writes; `somniq.prompt(text)` puts text in the Chat composer for the user to send (a page never sends a message itself); `somniq.openFile(path)` opens a project-relative file beside the chat; `somniq.openPanel(panelId)` opens a nav.page panel of the same package; `somniq.resize(px)` sets the height of a chat.brief glance (ignored elsewhere); `await somniq.task({ title, prompt, reportTo? })` proposes a background work task, and only on a panel that sets \"proposeTasks\": true: the app shows the proposal to the user, who may edit it and then starts it, only creates it, or declines, and the call resolves to { status: \"started\" | \"created\" | \"declined\", taskId? } (one proposal at a time; title up to 120 characters, prompt up to 8000). The task runs on the task board in its own working copy, with a line naming the plugin added to its prompt. reportTo, allowed only on a \"scope\": \"project\" panel, names one of the panel's widgets: the finished task is asked to write its conclusion there with PluginPanel, so the page shows the result through onData. That write is a request the task may not follow; what the page can rely on is `await somniq.tasks()` and `somniq.onTasks(fn)`: the tasks this page proposed, newest first, as the task board records them, { taskId, title, status, state: \"todo\" | \"active\" | \"waiting\" | \"ready\" | \"done\" | \"failed\" | \"canceled\", phase?, reportTo?, review?: { verdict, summary, round, exhausted, issues, rubrics? }, result?: { summary, filesChanged, files, artifacts, merged }, error? }, pushed again whenever one of them changes. Draw a task's row from its state, not from what the page saved when it asked. A panel with a page may set `dataPanel` to the id of another panel of the same package with the same scope: it then declares no widgets and its page reads and writes that panel's widgets, so a glance and the full page show one store, and a save in either reaches the other through onData. Theme colors are set on <html> as CSS variables --somniq-bg, --somniq-surface, --somniq-raised, --somniq-border, --somniq-text, --somniq-muted, --somniq-accent and --somniq-font, with data-theme=\"light\" | \"dark\"; use them so the page follows the app's theme. Treat widget values as untrusted input: build DOM with textContent, never innerHTML.",
             max_page_bytes: ui::MAX_UI_PAGE_BYTES,
             scopes: ui::UI_SCOPES,
@@ -821,6 +827,23 @@ mod tests {
         assert_eq!(pointers(&ui), ["/panels/0/icon"]);
         ui["panels"][0]["icon"] = "barChart".into();
 
+        // Or the panel's own outline: path data the host strokes, never markup.
+        let object = ui["panels"][0].as_object_mut().unwrap();
+        object.remove("icon");
+        object.insert("iconPath".into(), "M8 14V7.5M4.5 14h7".into());
+        assert!(pointers(&ui).is_empty());
+        let panel = &preview(&store, &dir).capabilities.ui_panels[0];
+        assert_eq!(panel.icon_path.as_deref(), Some("M8 14V7.5M4.5 14h7"));
+        for bad in ["<svg/>", "M0 0\"/><script>", "url(#a)", "L1 1", "M", &format!("M{}", "1 ".repeat(600))] {
+            ui["panels"][0]["iconPath"] = bad.into();
+            assert_eq!(pointers(&ui), ["/panels/0/iconPath"], "{bad}");
+        }
+        ui["panels"][0]["iconPath"] = "M1 1h2".into();
+        ui["panels"][0]["icon"] = "grid".into();
+        assert_eq!(pointers(&ui), ["/panels/0/iconPath"]);
+        ui["panels"][0].as_object_mut().unwrap().remove("iconPath");
+        ui["panels"][0]["icon"] = "barChart".into();
+
         // A page belongs to the project, not to whichever chat is open.
         ui["panels"][0]["scope"] = "session".into();
         assert_eq!(pointers(&ui), ["/panels/0/scope"]);
@@ -836,6 +859,10 @@ mod tests {
             "widgets": [{"id": "n", "type": "notes", "title": "N"}],
         }]});
         assert_eq!(pointers(&old), ["/panels/0/icon", "/panels/0/slot"]);
+        old["panels"][0]["iconPath"] = "M1 1h2".into();
+        old["panels"][0].as_object_mut().unwrap().remove("icon");
+        assert_eq!(pointers(&old), ["/panels/0/iconPath", "/panels/0/slot"]);
+        old["panels"][0].as_object_mut().unwrap().remove("iconPath");
         old["panels"][0]["slot"] = "chat.sidebar".into();
         old["panels"][0].as_object_mut().unwrap().remove("icon");
         assert!(pointers(&old).is_empty());

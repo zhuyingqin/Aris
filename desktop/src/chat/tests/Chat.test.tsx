@@ -46,6 +46,7 @@ const apiMocks = vi.hoisted(() => ({
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatContextTokens: vi.fn(() => Promise.resolve<number | null>(null)),
+  chatSessionLastModel: vi.fn((_id: string) => Promise.resolve<string | null>(null)),
   chatTasksGet: vi.fn<(_sessionId: string) => Promise<ChatTodoItem[]>>(() => Promise.resolve([])),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
@@ -218,7 +219,15 @@ vi.mock("../ChatComposer", () => ({
     reasoningApplied,
     reasoningEffort,
     onReasoningEffortChange,
+    queuedMessages,
+    queuePaused,
+    onRemoveQueued,
+    onResumeQueue,
   }: {
+    queuedMessages?: ReadonlyArray<{ id: string; text: string }>;
+    queuePaused?: boolean;
+    onRemoveQueued?: (id: string) => void;
+    onResumeQueue?: () => void;
     input: string;
     busy: boolean;
     ready?: boolean;
@@ -234,6 +243,13 @@ vi.mock("../ChatComposer", () => ({
   }) => (
     <div data-testid="chat-composer" data-busy={String(busy)} data-ready={String(ready)}>
       {modelName && <div>Model: {modelName}</div>}
+      {queuedMessages?.map((item) => (
+        <div key={item.id} data-testid="queued-message">
+          {item.text}
+          <button onClick={() => onRemoveQueued?.(item.id)}>Remove queued: {item.text}</button>
+        </div>
+      ))}
+      {queuePaused && <button onClick={onResumeQueue}>Resume queue</button>}
       {modelOptions?.map((option) => (
         <button key={option.value} onClick={() => onModelChange?.(option.value)}>
           Model option: {option.label}
@@ -403,7 +419,11 @@ describe("Chat export action", () => {
       provider: "anthropic-compat", current: CONFIGURED_EXECUTOR_MODEL,
       options: [{ value: CONFIGURED_EXECUTOR_MODEL, label: CONFIGURED_EXECUTOR_MODEL, description: null }],
     });
-    apiMocks.chatModelSet.mockImplementation(async (model) => ({ ready: true, model, provider: "anthropic-compat" }));
+    // Mirrors the backend: a non-persistent switch still reports the model's
+    // context budget, which chats pinned to a model rely on.
+    apiMocks.chatModelSet.mockImplementation(async (model) => ({
+      ready: true, model, provider: "anthropic-compat", contextWindow: 120_000, compactionBudget: 100_000,
+    }));
     apiMocks.chatPermissionGet.mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
@@ -420,6 +440,7 @@ describe("Chat export action", () => {
     apiMocks.reviewWorkflowTranscript.mockResolvedValue({ sessionId: "wf", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.reviewWorkflowDiscuss.mockResolvedValue({ text: "Workflow discussion reply", model: "MiniMax-M3", sessionId: "wf" });
     apiMocks.chatContextTokens.mockResolvedValue(null);
+    apiMocks.chatSessionLastModel.mockResolvedValue(null);
     let storedEffort = "high";
     apiMocks.chatReasoningEffortGet.mockImplementation((model) =>
       Promise.resolve(reasoningViewFor(model, storedEffort)));
@@ -1602,6 +1623,143 @@ describe("Chat export action", () => {
     expect(screen.queryByText("Second chat answer")).toBeNull();
     expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false");
     expect(useStore.getState().currentProject?.id).toBe(defaultProject.id);
+  });
+
+  it("queues messages sent while answering and sends them in order afterwards", async () => {
+    const finishers: Array<(reply: string) => void> = [];
+    for (let index = 0; index < 3; index += 1) {
+      apiMocks.chatSend.mockImplementationOnce(() => new Promise<string>((resolve) => { finishers.push(resolve); }));
+    }
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    const box = () => screen.getByRole("textbox", { name: "Message SomniQ" });
+    await userEvent.type(box(), "First question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const sessionId = apiMocks.chatSend.mock.calls[0][0];
+
+    await userEvent.type(box(), "Second question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await userEvent.type(box(), "Third question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getAllByTestId("queued-message").map((item) => item.firstChild?.textContent))
+      .toEqual(["Second question", "Third question"]);
+    expect((box() as HTMLTextAreaElement).value).toBe("");
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => finishers[0]?.("First answer"));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    expect(apiMocks.chatSend).toHaveBeenLastCalledWith(sessionId, expect.objectContaining({ text: "Second question" }));
+    expect(screen.getAllByTestId("queued-message")).toHaveLength(1);
+
+    await act(async () => finishers[1]?.("Second answer"));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(3));
+    expect(apiMocks.chatSend).toHaveBeenLastCalledWith(sessionId, expect.objectContaining({ text: "Third question" }));
+    expect(screen.queryByTestId("queued-message")).toBeNull();
+    await act(async () => finishers[2]?.("Third answer"));
+    expect(await screen.findByText("Third answer")).toBeTruthy();
+  });
+
+  it("drops a removed queued message", async () => {
+    let finish: ((reply: string) => void) | undefined;
+    apiMocks.chatSend.mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Never mind");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove queued: Never mind" }));
+    await act(async () => finish?.("First answer"));
+    expect(await screen.findByText("First answer")).toBeTruthy();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses the queue after a failed turn until the user resumes it", async () => {
+    let fail: ((error: Error) => void) | undefined;
+    apiMocks.chatSend
+      .mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { fail = reject; }))
+      .mockResolvedValueOnce("Queued answer");
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "First question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Follow-up");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await act(async () => fail?.(new Error("upstream exploded")));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect(apiMocks.chatSend).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId("queued-message")).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Resume queue" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    expect(apiMocks.chatSend).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ text: "Follow-up" }));
+    expect(await screen.findByText("Queued answer")).toBeTruthy();
+  });
+
+  it("keeps a chat on its first model after another chat switches the default", async () => {
+    const savedModel = mockModelPreference();
+    apiMocks.chatSuggestTitle
+      .mockResolvedValueOnce("Old model chat")
+      .mockResolvedValueOnce("New model chat");
+    render(<Chat />);
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Old chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(1));
+    const oldId = apiMocks.chatSend.mock.calls[0][0];
+    expect(apiMocks.chatSend.mock.calls[0][1]).toEqual(expect.objectContaining({ model: CONFIGURED_EXECUTOR_MODEL }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+
+    // A different chat picks GPT, which also becomes the app-wide default.
+    await userEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.ready).toBe("true"));
+    await userEvent.click(await screen.findByRole("button", { name: "Model option: gpt-6.1-sol" }));
+    await waitFor(() => expect(savedModel()).toBe("gpt-6.1-sol"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "New chat question");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(2));
+    expect(apiMocks.chatSend.mock.calls[1][1]).toEqual(expect.objectContaining({ model: "gpt-6.1-sol" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").dataset.busy).toBe("false"));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Old model chat" }));
+    await waitFor(() => expect(screen.getByText(`Model: ${CONFIGURED_EXECUTOR_MODEL}`)).toBeTruthy());
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Old chat follow-up");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledTimes(3));
+    expect(apiMocks.chatSend).toHaveBeenLastCalledWith(oldId, expect.objectContaining({
+      text: "Old chat follow-up", model: CONFIGURED_EXECUTOR_MODEL,
+    }));
+  });
+
+  it("pins a legacy chat without a saved model to the model it last ran on", async () => {
+    mockModelPreference("gpt-6.1-sol");
+    const legacy = {
+      ...makeSession(defaultProject.id),
+      id: "chat-legacy-model",
+      title: "Legacy chat",
+      titleSource: "user" as const,
+      model: null,
+    };
+    legacy.turns = [{ id: "legacy-history", role: "assistant", blocks: [{ kind: "text", text: "Legacy history" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([legacy]));
+    localStorage.setItem(CURRENT_KEY, legacy.id);
+    apiMocks.chatSessionLastModel.mockResolvedValue(CONFIGURED_EXECUTOR_MODEL);
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: legacy.title }));
+    await waitFor(() => expect(apiMocks.chatSessionLastModel).toHaveBeenCalledWith(legacy.id));
+    await waitFor(() => expect(screen.getByText(`Model: ${CONFIGURED_EXECUTOR_MODEL}`)).toBeTruthy());
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "Legacy follow-up");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(legacy.id, expect.objectContaining({
+      text: "Legacy follow-up", model: CONFIGURED_EXECUTOR_MODEL,
+    })));
   });
 
   it("sends new home chats concurrently across project switches and preserves their owning projects", async () => {

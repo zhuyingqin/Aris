@@ -8,7 +8,7 @@ import { useStore } from "../store";
 vi.mock("../api/plugins", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/plugins")>()),
   pluginsList: vi.fn(), pluginsPreview: vi.fn(), pluginsInstall: vi.fn(),
-  pluginsSetEnabled: vi.fn(), pluginsRemove: vi.fn(), pluginsUpgrade: vi.fn(), pluginsCheckMcp: vi.fn(),
+  pluginsSetEnabled: vi.fn(), pluginsSetGlobal: vi.fn(), pluginsRemove: vi.fn(), pluginsUpgrade: vi.fn(), pluginsCheckMcp: vi.fn(),
   bridgeBackendPluginChanges: vi.fn(),
 }));
 
@@ -81,13 +81,13 @@ describe("Plugin packages", () => {
     expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
     fireEvent.click(within(enableConfirm).getByRole("button", { name: "确认启用" }));
     await screen.findByText("已启用");
-    expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, true);
+    expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, true, preview.digest);
     // Removal asks first.
     fireEvent.click(screen.getByRole("button", { name: "移除 @lab/evidence" }));
     expect(api.pluginsRemove).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
     await waitFor(() => expect(screen.queryByRole("article", { name: "@lab/evidence" })).toBeNull());
-    expect(api.pluginsRemove).toHaveBeenCalledWith(projectPath, preview.name);
+    expect(api.pluginsRemove).toHaveBeenCalledWith(projectPath, preview.name, preview.digest);
     expect(onChanged).toHaveBeenCalledTimes(3);
   });
 
@@ -97,7 +97,7 @@ describe("Plugin packages", () => {
     render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
     await screen.findByText("dsh-goal requires DeepSeek host");
     fireEvent.click(screen.getByRole("switch", { name: "Disable @lab/evidence" }));
-    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, false));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, false, preview.digest));
     await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("switch", { name: "Enable @lab/evidence" }).disabled).toBe(true));
   });
 
@@ -137,7 +137,7 @@ describe("Plugin packages", () => {
     expect(within(card).getByText("1 Skills")).toBeTruthy();
     expect(within(card).queryByText(/MCP/)).toBeNull();
     fireEvent.click(within(card).getByRole("switch", { name: "Enable @somniq/panels" }));
-    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true, installed.digest));
     expect(screen.queryByRole("group", { name: "Enable @somniq/panels" })).toBeNull();
   });
 
@@ -316,6 +316,31 @@ describe("Plugin packages", () => {
     expect(draft).toContain("transport http is not supported");
     expect(useStore.getState().tab).toBe("chat");
     expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("turns an enabled package on for all projects after showing what that runs", async () => {
+    const global: api.InstalledPlugin = { ...enabled, global: true };
+    vi.mocked(api.pluginsList).mockResolvedValue([enabled]);
+    vi.mocked(api.pluginsSetGlobal).mockResolvedValue(global);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    const toggle = await screen.findByRole("switch", { name: "Enable @lab/evidence for all projects" });
+    fireEvent.click(toggle);
+    const confirm = screen.getByRole("group", { name: "Enable for every project on this computer" });
+    expect(within(confirm).getByText("python server.py")).toBeTruthy();
+    expect(api.pluginsSetGlobal).not.toHaveBeenCalled();
+    fireEvent.click(within(confirm).getByText("Enable for all projects"));
+    await waitFor(() => expect(api.pluginsSetGlobal).toHaveBeenCalledWith(projectPath, "@lab/evidence", true, enabled.digest));
+    expect(await screen.findByText(/the switch on the left affects this project only/)).toBeTruthy();
+    // A global package is changed in a project, so it has no remove button here.
+    expect(screen.queryByRole("button", { name: "Remove @lab/evidence" })).toBeNull();
+    expect(screen.getByRole("switch", { name: "Keep @lab/evidence in this project only" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("only offers all projects for a package already enabled here", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([installed]);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    const toggle = await screen.findByRole("switch", { name: "Enable @lab/evidence for all projects" });
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("offers plugin creation from the empty state too", async () => {

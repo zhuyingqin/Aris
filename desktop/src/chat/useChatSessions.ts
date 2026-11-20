@@ -114,7 +114,11 @@ function mergeSessions(...lists: ChatSession[][]): ChatSession[] {
 }
 
 function mergeLoadedSession(current: ChatSession, loaded: ChatSession): ChatSession {
-  if (current.updatedAt <= loaded.updatedAt) return loaded;
+  if (current.updatedAt <= loaded.updatedAt) {
+    // A model pinned without a user edit (legacy chat recovery) leaves
+    // updatedAt alone; the stored copy without one must not erase it.
+    return loaded.model || !current.model ? loaded : { ...loaded, model: current.model };
+  }
   return {
     ...loaded,
     title: current.title,

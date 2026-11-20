@@ -1993,6 +1993,18 @@ pub async fn chat_ui_session_load(id: String) -> Result<Value, String> {
         .map_err(|error| error.to_string())?
 }
 
+/// The model a legacy chat (saved before sessions pinned their own model) last
+/// ran on, so the UI can pin it instead of following the app-wide default.
+#[tauri::command]
+pub async fn chat_session_last_model(id: String) -> Result<Option<String>, String> {
+    validate_chat_ui_session_id(&id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::usage_log::session_last_executor_model(&id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn chat_ui_turn_load_blocking(id: String, turn_index: usize) -> Result<Value, String> {
     validate_chat_ui_session_id(&id)?;
     ensure_chat_ui_migrated()?;

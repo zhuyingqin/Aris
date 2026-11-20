@@ -71,8 +71,8 @@ describe("Settings against a native backend", () => {
     render(<Settings />);
     const executor = await screen.findByRole("combobox", { name: "执行模型" });
     await waitFor(() => expect((executor as HTMLSelectElement).value).toBe("MiniMax-M3"));
-    fireEvent.change(executor, { target: { value: "MiniMax-M2.7" } });
-    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M2.7" }));
+    fireEvent.change(executor, { target: { value: "MiniMax-M3.1-Flash" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M3.1-Flash" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Reviewer 模型" }), { target: { value: "gpt-5.5" } });
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewerProvider: "custom", reviewerModel: "gpt-5.5" }));
   });

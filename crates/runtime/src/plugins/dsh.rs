@@ -349,7 +349,7 @@ fn translate_rows(
             .unwrap_or_else(|| serde_json::json!({}));
         let translated = match row["name"].as_str() {
             Some(SKILL_FILESYSTEM) => translate_skills(&config, files, result),
-            Some(MCP_CLIENT) => translate_mcp(&config, root, result),
+            Some(MCP_CLIENT) => translate_mcp(&config, root, files, result),
             Some(name) => Err(format!("{name} requires the DeepSeek/Cordis host")),
             None => Err("Entry requires a plugin name".into()),
         };
@@ -436,6 +436,7 @@ fn translate_skills(
 fn translate_mcp(
     config: &Value,
     root: &Path,
+    files: &PackageFiles,
     result: &mut PluginCapabilities,
 ) -> Result<(), String> {
     allowed_keys(config, MCP_CONFIG_KEYS)?;
@@ -464,6 +465,13 @@ fn translate_mcp(
         if value.contains("${") {
             return Err("Runtime template expansion requires the DeepSeek host".into());
         }
+        // A package file named without `./` would be looked up from the
+        // process's working directory, not the reviewed snapshot.
+        if !value.starts_with("./") && files.contains_key(Path::new(value)) {
+            return Err(format!(
+                "MCP command or argument `{value}` names a package file; write it as `./{value}` so the reviewed snapshot runs"
+            ));
+        }
         if value.starts_with("./") {
             return Ok(root
                 .join(relative_path(value)?)
@@ -489,6 +497,20 @@ fn translate_mcp(
     if env.values().any(|v| v.contains("${")) {
         return Err("Credential templates require the DeepSeek host".into());
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for key in env.keys() {
+        if !valid_env_key(key) {
+            return Err(format!("MCP env key `{key}` must match [A-Za-z_][A-Za-z0-9_]*"));
+        }
+        if !seen.insert(key.to_ascii_uppercase()) {
+            return Err(format!("MCP env key `{key}` repeats another key that differs only in case"));
+        }
+        if reserved_env_key(key) {
+            return Err(format!(
+                "MCP env key `{key}` is reserved: the host sets the platform, interpreter and SOMNIQ_/ARIS_ variables itself"
+            ));
+        }
+    }
     let timeout = match config.get("toolCallTimeoutMs") {
         Some(value) => Some(
             value
@@ -509,9 +531,60 @@ fn translate_mcp(
     Ok(())
 }
 
+fn valid_env_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    bytes.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+        && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// Keys a package must not set (case-insensitive): host controls, the platform
+/// variables the host passes itself, and interpreter or loader switches that
+/// would run code from outside the snapshot.
+pub(crate) fn reserved_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    const RESERVED: &[&str] = &[
+        // Platform variables the host forwards.
+        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "PATH", "USERPROFILE",
+        "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ALLUSERSPROFILE",
+        "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)", "PSMODULEPATH", "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE", "OS", "USERNAME", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL",
+        "LC_CTYPE", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+        // Host variables.
+        "TEMP", "TMP", "TMPDIR", "PYTHONUTF8", "PYTHONIOENCODING",
+        "NODEFAULTCURRENTDIRECTORYINEXEPATH",
+        // Proxy and certificate variables.
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+        // Interpreter and loader controls.
+        "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT",
+        "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV",
+    ];
+    upper.starts_with("SOMNIQ_")
+        || upper.starts_with("ARIS_")
+        || upper.starts_with("CLAWD_")
+        || upper.starts_with("DYLD_")
+        || RESERVED.contains(&upper.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_env_cannot_reach_host_controls_or_interpreter_switches() {
+        for key in ["PATH", "path", "NODE_OPTIONS", "PythonPath", "SOMNIQ_MCP_WORKING_DIRECTORY",
+            "aris_mcp_stdio_framing", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "TEMP"] {
+            assert!(reserved_env_key(key), "{key}");
+        }
+        for key in ["CROSSREF_MAILTO", "MY_TOOL_MODE", "LOG_LEVEL"] {
+            assert!(!reserved_env_key(key), "{key}");
+        }
+        assert!(!valid_env_key("1BAD"));
+        assert!(!valid_env_key("BAD-KEY"));
+        assert!(valid_env_key("_OK1"));
+    }
 
     #[test]
     fn cordis_layers_replace_config_and_append_into_groups() {

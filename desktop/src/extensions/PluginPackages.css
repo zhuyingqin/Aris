@@ -286,3 +286,22 @@
   color: var(--accent);
 }
 .plugin-rubric-when { color: var(--text-dim); font-size: 11.5px; }
+
+/* "All projects": a pill switch beside the project switch. */
+.plugin-badge.is-global {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.plugin-global-switch {
+  display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; flex: none;
+  border: 1px solid var(--border); border-radius: 99px; background: transparent;
+  color: var(--text-dim); font-size: 11px; font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+.plugin-global-switch:hover:not(:disabled) { color: var(--text); background: var(--bg-2); }
+.plugin-global-switch[aria-checked="true"] {
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.plugin-global-switch:disabled { opacity: .5; cursor: default; }
+.plugin-state-hint.is-global { color: var(--text-dim); }

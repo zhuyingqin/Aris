@@ -1289,7 +1289,7 @@ fn resolve_plugins(project: &Path, home: &Path) -> Resolved {
         .keys()
         .map(|name| name.rsplit('_').next().unwrap().to_string())
         .collect();
-    (skills, servers, store.active_snapshot_dirs().unwrap())
+    (skills, servers, store.active_skill_roots().unwrap())
 }
 
 #[test]
@@ -1315,11 +1315,12 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
             digest: first.digest.clone(),
         }]
     );
-    assert_eq!(run.snapshot_dirs(), [store.snapshot_path(&first.digest)]);
+    // Only the skill directory is readable, never the whole snapshot.
+    assert_eq!(run.readable_dirs(), [store.snapshot_path(&first.digest).join("skills")]);
     let frozen: Resolved = (
         vec!["plugin-evidence".to_string()],
         vec!["evidence".to_string()],
-        vec![store.snapshot_path(&first.digest)],
+        vec![store.snapshot_path(&first.digest).join("skills")],
     );
     assert_eq!(
         in_run(&project, &run, || resolve_plugins(&project, &home)),
@@ -1346,7 +1347,7 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
     // The review step enters the same run and sees the same set.
     assert_eq!(
         run.enter(|| PluginStore::for_execution(&project)
-            .active_snapshot_dirs()
+            .active_skill_roots()
             .unwrap()),
         frozen.2
     );
@@ -1354,7 +1355,7 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
     // inherits the run instead of falling back to the live configuration.
     let rebound = in_run(&project, &run, || {
         let binding = current_plugin_run().expect("inside a run");
-        assert_eq!(binding.snapshot_dirs(), frozen.2.as_slice());
+        assert_eq!(binding.readable_dirs(), frozen.2.as_slice());
         binding.bind(
             crate::ProjectExecutionContext::new(&project)
                 .with_env(ARIS_PLUGIN_PROJECT_ROOT_ENV, project.as_os_str()),
@@ -1379,7 +1380,7 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
     let next: Resolved = (
         vec!["plugin-second".to_string()],
         vec!["second".to_string()],
-        vec![store.snapshot_path(&second.digest)],
+        vec![store.snapshot_path(&second.digest).join("skills")],
     );
     let context = crate::ProjectExecutionContext::new(&project)
         .with_env(ARIS_PLUGIN_PROJECT_ROOT_ENV, project.as_os_str());
@@ -1399,7 +1400,7 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
     // ... and so does work re-bound inside a run that has ended.
     let leftover = crate::with_project_execution_context(&ended, || {
         let binding = current_plugin_run().expect("the token is still there");
-        assert!(binding.snapshot_dirs().is_empty());
+        assert!(binding.readable_dirs().is_empty());
         binding.bind(context.clone())
     });
     assert_eq!(
@@ -1963,7 +1964,7 @@ fn an_upgrade_keeps_the_version_it_replaced_and_any_of_them_comes_back() {
 fn the_history_is_capped_but_keeps_the_original() {
     let record = |history: Vec<PluginVersion>| Record {
         name: "p".into(), version: "9".into(), description: String::new(), source: String::new(),
-        digest: "current".into(), enabled: true, history, original: Some("d0".into()),
+        digest: "current".into(), enabled: true, history, original: Some("d0".into()), global: false,
     };
     let version = |n: usize| PluginVersion { version: n.to_string(), digest: format!("d{n}"), source: String::new(), replaced_at: 1 };
     let full: Vec<_> = (0..MAX_PLUGIN_HISTORY).rev().map(version).collect();
@@ -2173,11 +2174,16 @@ fn the_plugin_store_guard_matches_the_store_and_nothing_else() {
         "Set-Content .somniq\\plugins\\official.json '{}'",
         "cat .SOMNIQ/PLUGINS/registry.json",
         "rm -rf .somniq/plugins",
+        // The approvals and snapshots in SomniQ's configuration.
+        "Set-Content $env:USERPROFILE\\.config\\SomniQ\\plugins\\approvals.json '{}'",
+        "cat ~/.config/SomniQ/plugins/global.json",
     ] {
         assert!(command_names_plugin_store(command), "{command}");
     }
     for command in [
         "ls .somniq/plugin-drafts",
+        "ls ~/.config/SomniQ/plugin-data",
+        "cat notes/mysomniq/plugins.md",
         "cat .somniq/plugins-backup/notes.txt",
         "python build.py",
     ] {
@@ -2414,6 +2420,90 @@ fn a_changed_criterion_is_an_upgrade_change_to_review() {
     assert_eq!(plan.diff.review_rubrics.removed.len(), 1);
 }
 
+fn web_fixture(root: &Path, name: &str, version: &str, web: &str) -> PathBuf {
+    let source = ui_fixture(&root.join(version), name);
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest["version"] = version.into();
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    fs::write(source.join("ui.json"), serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 3,
+        "panels": [{ "id": "tool", "slot": "nav.page", "title": "Tool", "scope": "project", "web": web }]
+    })).unwrap()).unwrap();
+    source
+}
+
+#[test]
+fn a_web_panel_embeds_only_a_checked_address_and_nothing_else() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = web_fixture(temp.path(), "@lab/tool", "1.0.0", "http://localhost:3007");
+    let base: serde_json::Value = serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    let problems = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        let preview = store.preview(&source).unwrap();
+        assert_eq!(preview.can_enable, preview.diagnostics.is_empty());
+        preview.diagnostics.into_iter().map(|d| (d.path.unwrap_or_default(), d.message)).collect::<Vec<_>>()
+    };
+    assert!(problems(&|_| ()).is_empty());
+    let preview = store.preview(&source).unwrap();
+    assert_eq!(preview.capabilities.ui_panels[0].web.as_deref(), Some("http://localhost:3007"));
+
+    for good in ["https://example.org/app?x=1", "http://127.0.0.1:8888/lab", "http://[::1]:3000/"] {
+        assert!(problems(&|v| v["panels"][0]["web"] = good.into()).is_empty(), "{good}");
+    }
+    assert!(problems(&|v| {
+        v["panels"][0]["slot"] = "chat.sidebar".into();
+        v["panels"][0]["scope"] = "session".into();
+    })
+    .is_empty());
+
+    for (bad, expected) in [
+        ("http://example.org", "only allowed for localhost"),
+        ("file:///C:/x.html", "http or https"),
+        ("javascript:alert(1)", "http or https"),
+        ("/relative", "absolute"),
+        ("https://user:pw@example.org", "user name or password"),
+        ("http://tauri.localhost/index.html", "app's own"),
+        ("https://ipc.localhost/plugins_set_enabled", "app's own"),
+        ("http://127.0.0.1:1420", "development address"),
+        ("http://somniq-figure.localhost/editor", "app's own"),
+    ] {
+        let found = problems(&|v| v["panels"][0]["web"] = bad.into());
+        assert_eq!(found.len(), 1, "{bad}: {found:?}");
+        assert_eq!(found[0].0, "/panels/0/web");
+        assert!(found[0].1.contains(expected), "{bad}: {found:?}");
+    }
+    let long = format!("https://example.org/{}", "a".repeat(2048));
+    assert!(problems(&|v| v["panels"][0]["web"] = long.clone().into())[0].1.contains("at most"));
+
+    // A web panel is only the web page: no package code, no data.
+    let found = problems(&|v| v["panels"][0]["widgets"] = serde_json::json!([{"id":"n","type":"notes","title":"N"}]));
+    assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("keeps no data")), "{found:?}");
+    let found = problems(&|v| v["panels"][0]["page"] = "./ui.json".into());
+    assert!(found.iter().any(|(at, _)| at == "/panels/0/web"), "{found:?}");
+    let found = problems(&|v| v["panels"][0]["slot"] = "chat.brief".into());
+    assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("chat.brief")), "{found:?}");
+    let found = problems(&|v| v["schemaVersion"] = 2.into());
+    assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("schemaVersion 3")), "{found:?}");
+}
+
+#[test]
+fn changing_a_web_panels_address_is_an_upgrade_change_to_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("web-upgrade");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &web_fixture(temp.path(), "@lab/tool", "1.0.0", "http://localhost:3007"));
+    let next = web_fixture(temp.path(), "@lab/tool", "1.1.0", "https://tool.example.org");
+    let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
+    assert!(plan.diff.changed);
+    assert_eq!(plan.diff.ui_panels.added, ["tool (web: https://tool.example.org)"]);
+    assert_eq!(plan.diff.ui_panels.removed, ["tool (web: http://localhost:3007)"]);
+}
+
 #[test]
 fn propose_tasks_is_only_for_a_panel_with_its_own_page() {
     let temp = tempfile::tempdir().unwrap();
@@ -2540,4 +2630,200 @@ fn research_suite_examples_preview_clean_and_carry_no_project_content() {
         let preview = store.preview(root.join(dir)).unwrap();
         assert_eq!(preview.capabilities.requires, ["literature"], "{dir}");
     }
+}
+
+#[test]
+fn a_global_plugin_runs_in_every_project_and_each_project_can_switch_it_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let a = test_store(&temp, &first);
+    let b = test_store(&temp, &second);
+    let source = fixture(temp.path(), "@test/evidence");
+    let digest = a.preview(&source).unwrap().digest;
+    a.install(&source, &digest).unwrap();
+
+    // Only an enabled, approved package can become global.
+    assert!(a.set_global("@test/evidence", true).is_err());
+    a.set_enabled("@test/evidence", true).unwrap();
+    let global = a.set_global("@test/evidence", true).unwrap();
+    assert!(global.global && global.enabled, "{global:?}");
+    assert!(a.registry().unwrap().packages.is_empty(), "the project copy moved to the global list");
+
+    // The other project gets it without installing or approving anything.
+    let listed = b.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].global && listed[0].enabled);
+    assert_eq!(b.active_skill_roots().unwrap().len(), 1);
+
+    // Switching it off in one project leaves the other untouched.
+    let off = b.set_enabled("@test/evidence", false).unwrap();
+    assert!(off.global && !off.enabled);
+    assert!(b.active_skill_roots().unwrap().is_empty());
+    assert_eq!(a.active_skill_roots().unwrap().len(), 1);
+    b.set_enabled("@test/evidence", true).unwrap();
+    assert_eq!(b.active_skill_roots().unwrap().len(), 1);
+
+    // Version changes happen in a project, not on the global copy.
+    assert_eq!(b.remove("@test/evidence").unwrap_err(), GLOBAL_PLUGIN_CHANGE_IN_PROJECT);
+    assert_eq!(b.install(&source, &digest).unwrap_err(), GLOBAL_PLUGIN_CHANGE_IN_PROJECT);
+
+    // Turning "all projects" off keeps it running where it was turned off.
+    let back = b.set_global("@test/evidence", false).unwrap();
+    assert!(!back.global && back.enabled);
+    assert_eq!(b.active_skill_roots().unwrap().len(), 1);
+    assert!(a.list().unwrap().is_empty(), "other projects lose it");
+    b.remove("@test/evidence").unwrap();
+}
+
+#[test]
+fn workspace_files_cannot_make_a_package_global() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/evidence");
+    let digest = store.preview(&source).unwrap().digest;
+    store.install(&source, &digest).unwrap();
+    // A registry written into the workspace cannot claim `global`: the flag is
+    // never read from disk (the field is ignored), and without this computer's
+    // approval the request to run does nothing either.
+    let path = store.registry_path();
+    let mut registry: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    registry["packages"]["@test/evidence"]["enabled"] = true.into();
+    registry["packages"]["@test/evidence"]["global"] = true.into();
+    fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();
+    let listed = store.list().unwrap();
+    assert!(!listed[0].global && !listed[0].enabled, "{listed:?}");
+    assert!(store.active_skill_roots().unwrap().is_empty());
+}
+
+#[test]
+fn a_project_plugin_wins_over_a_global_one_with_the_same_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let a = test_store(&temp, &first);
+    let b = test_store(&temp, &second);
+    let global_source = fixture(temp.path(), "@test/evidence");
+    let digest = a.preview(&global_source).unwrap().digest;
+    a.install(&global_source, &digest).unwrap();
+    a.set_enabled("@test/evidence", true).unwrap();
+    a.set_global("@test/evidence", true).unwrap();
+
+    // The second project already runs its own package with the same skill.
+    b.set_enabled("@test/evidence", false).unwrap();
+    let local_source = fixture(&temp.path().join("local"), "@test/local-evidence");
+    let local_digest = b.preview(&local_source).unwrap().digest;
+    b.install(&local_source, &local_digest).unwrap();
+    b.set_enabled("@test/local-evidence", true).unwrap();
+    assert!(b.set_enabled("@test/evidence", true).unwrap_err().contains("@test/local-evidence"));
+
+    // Even if the opt-out is cleared behind its back, the global one stands down.
+    b.mutate(|| b.set_global_opt_out("@test/evidence", false)).unwrap();
+    let global = b.list().unwrap().into_iter().find(|p| p.global).unwrap();
+    assert!(!global.enabled);
+    assert!(global.package.diagnostics.iter().any(|d| d.code == "global-skill-conflict"));
+    assert_eq!(b.active_skill_roots().unwrap().len(), 1);
+}
+
+#[test]
+fn a_reviewer_document_inside_a_skill_directory_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/evidence");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest["somniq"] = serde_json::json!({ "manifestVersion": 1, "reviewer": "./skills/reviewer.json" });
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    fs::write(source.join("skills/reviewer.json"), "{}").unwrap();
+    let preview = store.preview(&source).unwrap();
+    assert!(!preview.can_enable);
+    assert!(preview.diagnostics.iter().any(|d| d.code == "reviewer" && d.message.contains("skill directory")), "{:?}", preview.diagnostics);
+}
+
+#[test]
+fn a_plugin_mcp_server_is_marked_for_a_clean_process_outside_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let plugin = install_enabled(&store, &fixture(temp.path(), "@test/evidence"));
+    let servers = store.active_mcp_servers().unwrap();
+    let (_, server) = servers.iter().next().unwrap();
+    let crate::McpServerConfig::Stdio(stdio) = &server.config else { panic!("stdio") };
+    assert_eq!(
+        stdio.env.get(crate::PLUGIN_ROOT_ENV).map(PathBuf::from),
+        Some(store.snapshot_path(&plugin.digest))
+    );
+    let data = PathBuf::from(&stdio.env[crate::PLUGIN_DATA_ENV]);
+    assert!(!data.starts_with(&workspace) && !data.starts_with(test_user_root(&temp)), "{data:?}");
+}
+
+#[test]
+fn a_package_cannot_set_reserved_env_or_run_a_bare_package_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    for (overlay, expect) in [
+        ("    env:\n      NODE_OPTIONS: --require ./x.js\n", "reserved"),
+        ("    env:\n      SOMNIQ_MCP_WORKING_DIRECTORY: C:/\n", "reserved"),
+    ] {
+        let source = fixture(&temp.path().join(expect).join(overlay.len().to_string()), "@test/evidence");
+        let path = source.join("overlay.yml");
+        let base = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{base}{overlay}")).unwrap();
+        let preview = store.preview(&source).unwrap();
+        assert!(!preview.can_enable, "{overlay}");
+        assert!(preview.diagnostics.iter().any(|d| d.message.contains(expect)), "{:?}", preview.diagnostics);
+    }
+    let source = fixture(&temp.path().join("bare"), "@test/evidence");
+    let path = source.join("overlay.yml");
+    let text = fs::read_to_string(&path).unwrap().replace("['./server.py', '--safe']", "['server.py', '--safe']");
+    fs::write(&path, text).unwrap();
+    let preview = store.preview(&source).unwrap();
+    assert!(!preview.can_enable);
+    assert!(preview.diagnostics.iter().any(|d| d.message.contains("./server.py")), "{:?}", preview.diagnostics);
+}
+
+#[test]
+fn a_page_click_acts_only_on_the_version_it_showed() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/evidence");
+    let shown = store.preview(&source).unwrap().digest;
+    store.install(&source, &shown).unwrap();
+    let stale = "f".repeat(64);
+    assert_eq!(store.set_enabled_shown("@test/evidence", true, &stale).unwrap_err(), PACKAGE_CHANGED_SINCE_SHOWN);
+    assert!(store.active_skill_roots().unwrap().is_empty(), "a stale click approves nothing");
+    store.set_enabled_shown("@test/evidence", true, &shown).unwrap();
+    assert_eq!(store.set_global_shown("@test/evidence", true, &stale).unwrap_err(), PACKAGE_CHANGED_SINCE_SHOWN);
+    assert!(store.remove_confirmed("@test/evidence", &stale).is_err());
+    assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[test]
+fn the_configuration_trust_store_is_refused_but_plugin_data_is_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let config = temp.path().join("somniq-config");
+    assert!(is_trust_store_path(&config.join("plugins").join("approvals.json")));
+    assert!(is_trust_store_path(&config.join("PLUGINS").join("packages")) == cfg!(any(windows, target_os = "macos")));
+    assert!(!is_trust_store_path(&config.join("plugin-data").join("x")));
+    let moved = format!("echo {{}} > {}", config.join("plugins").join("global.json").display());
+    assert!(command_names_plugin_store(&moved), "{moved}");
 }

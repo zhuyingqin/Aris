@@ -1471,7 +1471,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Optional model override. Prefer omitting this — SomniQ will use the user's configured reviewer (`ARIS_REVIEWER_MODEL`). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-2.5-pro, GLM-5, MiniMax-M2.7, kimi-k2.5, claude-sonnet-4-6. If the specified model's API key is missing, SomniQ falls back to the configured reviewer."
+                        "description": "Optional model override. Prefer omitting this — SomniQ will use the user's configured reviewer (`ARIS_REVIEWER_MODEL`). Only specify a model if you have a specific reason and know the corresponding API key is set. Examples: gpt-5.5, gemini-3.8-flash, glm-5.3, MiniMax-M3, kimi-k3.1-pro, claude-sonnet-4-6. If the specified model's API key is missing, SomniQ falls back to the configured reviewer."
                     }
                 },
                 "required": ["prompt"],

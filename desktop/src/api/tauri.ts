@@ -2350,6 +2350,8 @@ export const latexInverseSearch = (pdfPath: string, page: number, x: number, y: 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+/** The model a chat last ran on according to the usage ledger, or null. */
+export const chatSessionLastModel = (id: string) => invoke<string | null>("chat_session_last_model", { id });
 export const systemPromptView = () => invoke<SystemPromptView>("system_prompt_view");
 export const userPromptView = () => invoke<UserPromptView | null>("user_prompt_view");
 export const chatModelOptions = () =>
