@@ -15,6 +15,9 @@
 | `scripts/eval_trigger.py` | 送达门槛：词法覆盖率 / 小模型概率 能否区分“该送”和“不该送” |
 | `scripts/eval_cache.py` | 每轮 system 注入的缓存代价（`memory_recall` 事件 × `usage-log.jsonl`） |
 | `scripts/make_report.py` | 读 `results/*.json` 生成 `report/tree.json` 与 `report/index.html` |
+| `scripts/prep_replay.py` | 为 `crates/runtime/examples/memory_replay.rs` 准备真实数据副本（输出在仓库外，用完即删） |
+| `scripts/usage_report.py` | 第 1 步起的真实使用统计：召回块是否被用上、按放置位置分的缓存占比、教训是否帮上忙（只出汇总；`--selftest`、`--all-sessions`） |
+| `scripts/eval_promotion.py` | 第 4 步：L3"用户规则"晋升门槛的离线回放（候选与标注在仓库外） |
 | `results/` | 只含汇总数字 |
 | `agents/prompts/` | 给 Claude / Codex / 出题子 agent 的任务说明 |
 | `agents/outputs/` | Claude、Codex 的独立设计方案与 Codex 的独立审查 |

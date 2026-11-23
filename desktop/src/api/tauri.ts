@@ -251,6 +251,7 @@ import type {
   MemoryGovernanceHit,
   MemoryExplorerSnapshot,
   MemoryStatusView,
+  MemoryLessonsView,
   MemoryV2AtomView,
   MemoryV2BuildProgress,
   MemoryV2BuildStart,
@@ -644,6 +645,14 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
 export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
+export const memoryLessonsStatus = () =>
+  invoke<MemoryLessonsView>("memory_lessons_status");
+export const memoryLessonsSetEnabled = (enabled: boolean) =>
+  invoke<void>("memory_lessons_set_enabled", { enabled });
+export const memoryLessonDelete = (lessonId: string) =>
+  invoke<boolean>("memory_lesson_delete", { lessonId });
+export const memoryLessonSetActive = (lessonId: string, active: boolean) =>
+  invoke<boolean>("memory_lesson_set_active", { lessonId, active });
 export const memoryV2ConfirmR3 = (atomId: string) =>
   invoke<boolean>("memory_v2_confirm_r3", { atomId });
 export const memoryV2PendingR3 = () =>

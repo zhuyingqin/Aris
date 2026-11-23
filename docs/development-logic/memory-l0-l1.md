@@ -119,6 +119,110 @@ different file.
   a recovery (it was treated as a flake), and every turn end wakes the writer so
   a batch that became due by waiting is not stranded until a restart.
 
+## Step 1: measuring real use (2026-11-23)
+
+What changed:
+
+- `memory_recall` rows (one per turn) are durable like `lesson_recall`, and
+  name what reached the prompt instead of only sizes: `delivered` lists each R0
+  line's `session_id` + `message_index`, `query_digest` is the first 16 hex
+  digits of SHA-256 over the trimmed question. No recalled text is logged.
+  `lesson_recall` rows add `lessonIds`.
+- `chat_delete` removes the Session's rows from the search index at once
+  (`forget_indexed_session`). Before, a deleted chat stayed searchable, and
+  could be injected into later turns, until the next project activation ran the
+  background repair.
+- Message times: a compaction or rewind re-appends the Session behind a
+  `session_reset`, which re-stamped every surviving message with the rewrite
+  time; rows without a time fell back to the Session file's mtime at query
+  time. Now the k-th row with a given text keeps the earliest time the index
+  gave it, and rows without a time inherit the previous live message's time or
+  the Session start encoded in its id (`chat-<13-digit ms>-…`).
+
+How to read it: `experiments/memory/scripts/usage_report.py` (aggregates only,
+read-only). "Used" = the answer contains an 8-character fragment found in the
+delivered history but not in the question or earlier in the session; it is a
+floor (paraphrase is missed). Lesson adoption = the next call of the same tool
+in the turn succeeds, with vs without lessons attached.
+
+Baseline from history before this change (`--all-sessions`, 995 sessions):
+433 older `memory_recall` rows survived compaction; a block was sent on 98.6%
+of those turns, 5,347 characters on average; recall latency p50 414 ms, p95
+4.1 s (the old LIKE path). After a failed tool call, the next call of the same
+tool succeeded 65.7% of the time (n = 1,211).
+
+## Step 2: stop the expensive part, compare placements (2026-11-23)
+
+- v2 background screening is **off by default**
+  (`memory_v2_background_screening`). Captures are still queued for a manual
+  build and existing atoms stay readable. Reason: on local history the atoms
+  answered 2-3% of both probe sets, at ~3,300 Reviewer input tokens per
+  surviving atom.
+- `memory_recall_placement` decides where the per-turn recall block goes:
+  `system` (the old placement, last system section), `user` (appended to this
+  turn's user message in the request only, via
+  `ConversationRuntime::set_turn_context`; never persisted), `off`, or
+  `alternate` (default while measuring: each Session gets `system` or `user`
+  by an FNV-1a hash of its id). Each `memory_recall` row records its
+  `placement`; `usage_report.py` reports, per arm, the "used" rate and the
+  executor's cache-read share from `run-state/usage-log.jsonl`.
+- Why `user` should cache better: a block that changes every turn at the end of
+  the system prompt invalidates the cached prefix for the whole history on
+  every turn; on the user side only the last turn's message changes.
+- Decision rule after 1-2 weeks: if fewer than 5% of delivered blocks are used,
+  deliver only above a reranker threshold; if `user` is not worse on use and
+  better on cache, make it the default.
+
+## Step 3: lesson quality and lifecycle (2026-11-23)
+
+- The fix of a failure is now the identical rerun after any successful step
+  (edit, install...), else the same-tool success whose input is closest to the
+  failed one -- no longer the first different call, which in-app was a byte
+  dump. The writer sees the steps between failure and fix ("then ..."), edit
+  contents included (`new_string`/`content` in the input digest), and is told
+  to name the concrete cause and change rather than the diagnosis.
+- `ungrounded` rejection: a lesson must share a word with the error and one
+  with the fixing call or a step before it.
+- Small stores (< 20 active lessons) need one more shared word.
+- Lifecycle (schema v2, migrated in place): each delivery counts (`recalled`);
+  at turn end a delivered lesson whose failure was fixed resets its unhelpful
+  streak, otherwise the streak grows, and two in a row make it `stale` (not
+  recalled). `lesson_sources` records every chat that taught a lesson; deleting
+  a chat deletes lessons no other chat taught, and its queued turns. Hourly
+  cleanup: finished jobs after 7 days, dropped jobs after 30, stale lessons 90
+  days after going stale; active lessons unused for 180 days, and any beyond
+  2,000, are archived.
+- Settings > Memory > "踩坑教训": the switch, every lesson with its counts and
+  status, turn off / restore, two-step delete.
+
+Replay on real data after the change: right lesson 67.3% dev / 65.4% test,
+unchanged; unrelated failures with a lesson attached 22.9%, unchanged. A floor
+of 3 shared words left the 8 wrong attachments in place and cost a dev hit;
+the shared-word counts of right and wrong attachments overlap (wrong: 2-8,
+mostly 6), so word overlap cannot reach the 15% target. Next lever: whether the
+lesson's tool matches the failing tool, which the v7 replay notes cannot test
+(they carry no tool); real lessons do.
+
+L0 replay with the step-1 time fixes, indexes rebuilt from scratch, top 2
+sessions, only history before the question: 50.7% dev / 45.8% test (36-37%
+test before L0). Top 3 sessions would give 54.8% / 50.8%, but this replay does
+not model the 6,000-character budget, so that is left for production data.
+
+## Step 4: always-on memory (2026-11-23)
+
+- MEMORY.md / USER.md limits are UTF-8 bytes and are now labelled so. Counting
+  characters would triple the per-turn token cost of Chinese memory; bytes give
+  English and Chinese about the same token budget.
+- L3 promotion, offline (`experiments/memory/scripts/eval_promotion.py`): over
+  ~21 weeks of local history (3,396 user sentences) only 19 carried a
+  persistence marker ("以后/一律/不要再/记住/always/never..."), none was said
+  again in another session 2+ days later (the designed gate never fired), and
+  4 of the 19 were real lasting rules (21% precision; the bar was 80%). All 4
+  were writing preferences and half said "记住" explicitly. Decision: no
+  automatic L3 proposals; explicit "remember this" stays with the memory tool
+  and its confirmation. L2 project cards were not built for the same reason:
+  project facts are already found in the raw sessions.
+
 ## Not in this change
 
 - The per-turn system-prompt recall block still exists (it now ranks with the

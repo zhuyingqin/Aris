@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { useStore } from "../store";
@@ -53,10 +53,29 @@ describe("MemorySettings", () => {
       target: { value: "preferred method" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    await screen.findByText("Preview memory result");
+    const result = await screen.findByText("Preview memory result");
     expect(screen.queryByText("Legacy · read-only")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // v2 atoms are inspect-only. (The lessons list further down the page has
+    // its own delete, which is the point of that section.)
+    const card = result.closest(".memory-entry-card") as HTMLElement;
+    expect(within(card).queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("lists lessons with off and two-step delete controls", async () => {
+    render(<MemorySettings language="en" />);
+    const section = screen.getByRole("region", { name: "Lessons from errors" });
+    expect(within(section).getByText(/encoding='gbk'/)).toBeTruthy();
+    expect(within(section).getByText(/2 lessons, 1 active/)).toBeTruthy();
+
+    const deletes = within(section).getAllByRole("button", { name: "Delete" });
+    fireEvent.click(deletes[0]);
+    const confirm = within(section).getByRole("button", { name: "Confirm delete" });
+    fireEvent.click(confirm);
+    expect(within(section).queryByText(/encoding='gbk'/)).toBeNull();
+
+    fireEvent.click(within(section).getByRole("button", { name: "Restore" }));
+    expect(within(section).getByText(/Active ·/)).toBeTruthy();
   });
 
   it("drops the provider, extraction model, and sidecar lifecycle controls", () => {

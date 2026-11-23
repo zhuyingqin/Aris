@@ -244,3 +244,249 @@ fn cause_keys_ignore_paths_and_numbers() {
         cause_key("REPL", "UnicodeEncodeError: 'gbk' codec can't encode character '\\u2206' in position 940")
     );
 }
+
+fn call(id: &str, name: &str, input: &str, failed: bool, error: &str) -> LessonCall {
+    LessonCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        input: input.to_string(),
+        failed,
+        error: error.to_string(),
+    }
+}
+
+fn gbk_csv_turn() -> LessonTurn {
+    // The in-app shape: fail, dump bytes (a probe), edit the script, rerun.
+    LessonTurn {
+        user: "统计 data/report.csv 每个类别的平均分".to_string(),
+        assistant: "统计完成。".to_string(),
+        calls: vec![
+            call("run1", "PowerShell", "python -m src.report_stats", true,
+                 "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb1 in position 0"),
+            call("probe", "PowerShell", "[System.IO.File]::ReadAllBytes('data/report.csv')[0..3]", false, ""),
+            call("edit", "edit_file", "src/report_stats.py | open(path, encoding='gbk')", false, ""),
+            call("run2", "PowerShell", "python -m src.report_stats", false, ""),
+        ],
+    }
+}
+
+#[test]
+fn the_fix_is_the_rerun_after_the_edit_not_the_probe_and_the_edit_is_shown() {
+    let turn = gbk_csv_turn();
+    let rendered = render_lesson_turn("t1", &turn);
+    assert!(rendered.contains("then edit edit_file(src/report_stats.py | open(path, encoding='gbk'))"), "{rendered}");
+    assert!(rendered.contains("fixed by run2 PowerShell(python -m src.report_stats)"), "{rendered}");
+    let reply = "- [lesson] 本机中文 CSV 多为 GBK，读取报 UnicodeDecodeError 'utf-8' codec can't decode 时用 encoding='gbk' 打开 @t1 tool:run1";
+    let (accepted, rejected) = parse_lesson_reply(reply, &[job(turn)]);
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert_eq!(accepted[0].fix_tool_use_id.as_deref(), Some("run2"));
+}
+
+#[test]
+fn among_different_inputs_the_closest_to_the_failed_call_is_the_fix() {
+    let turn = LessonTurn {
+        user: "跑一下评估".to_string(),
+        assistant: String::new(),
+        calls: vec![
+            call("run1", "bash", "python src/run_eval.py", true, "ModuleNotFoundError: No module named 'src'"),
+            call("probe", "bash", "ls src", false, ""),
+            call("run2", "bash", "python -m src.run_eval", false, ""),
+        ],
+    };
+    let rendered = render_lesson_turn("t1", &turn);
+    assert!(rendered.contains("fixed by run2 bash(python -m src.run_eval)"), "{rendered}");
+}
+
+#[test]
+fn generic_advice_that_names_neither_the_error_nor_the_fix_is_rejected() {
+    let reply = "- [lesson] 遇到报错时先仔细检查脚本再重新运行一次即可解决问题 @t1 tool:run1";
+    let (accepted, rejected) = parse_lesson_reply(reply, &[job(gbk_csv_turn())]);
+    assert!(accepted.is_empty());
+    assert_eq!(rejected[0].1, "ungrounded");
+}
+
+#[test]
+fn a_small_store_needs_more_overlap_before_attaching_a_lesson() {
+    let store = temp_store("small-floor");
+    let turn = gbk_csv_turn();
+    let drafts = vec![
+        LessonDraft {
+            job_index: 0,
+            statement: "读 CSV 报 UnicodeDecodeError 'utf-8' codec can't decode：文件是 GBK，用 encoding='gbk' 打开".to_string(),
+            tool: "PowerShell".to_string(),
+            tool_use_id: "run1".to_string(),
+            fix_tool_use_id: Some("run2".to_string()),
+            cause_key: "gbk".to_string(),
+        },
+        LessonDraft {
+            job_index: 0,
+            statement: "json.load 报 Expecting property name enclosed in double quotes：删掉最后一个键后的逗号".to_string(),
+            tool: "PowerShell".to_string(),
+            tool_use_id: "run1".to_string(),
+            fix_tool_use_id: Some("run2".to_string()),
+            cause_key: "json".to_string(),
+        },
+    ];
+    store.insert_lessons(&[job(turn)], &drafts).expect("insert");
+    // A traceback that shares only generic words ("line", "file") with the
+    // JSON lesson must not drag it in.
+    let output = "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nUnicodeDecodeError: 'utf-8' codec can't decode byte 0xb1 in position 0: invalid start byte";
+    let recalled = store
+        .recall_for_failure("PowerShell", r#"{"command":"python stats.py"}"#, output)
+        .expect("recall");
+    assert_eq!(recalled.len(), 1, "{recalled:?}");
+    assert!(recalled[0].statement.contains("GBK"));
+    let _ = std::fs::remove_file(store.path());
+}
+
+fn lesson_draft(statement: &str, cause: &str) -> LessonDraft {
+    LessonDraft {
+        job_index: 0,
+        statement: statement.to_string(),
+        tool: "PowerShell".to_string(),
+        tool_use_id: "run1".to_string(),
+        fix_tool_use_id: Some("run2".to_string()),
+        cause_key: cause.to_string(),
+    }
+}
+
+fn job_in(session_id: &str) -> LessonJob {
+    LessonJob {
+        session_id: session_id.to_string(),
+        ..job(gbk_csv_turn())
+    }
+}
+
+const GBK_LESSON: &str = "读 CSV 报 UnicodeDecodeError 'utf-8' codec can't decode：文件是 GBK，用 encoding='gbk' 打开";
+const GBK_OUTPUT: &str = "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb1 in position 0: invalid start byte";
+
+#[test]
+fn an_older_store_gains_the_new_columns_and_its_lessons_get_a_source() {
+    let store = temp_store("migrate");
+    {
+        let connection = Connection::open(store.path()).expect("open");
+        connection
+            .execute_batch(
+                "CREATE TABLE lessons(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                   tool TEXT NOT NULL, tool_use_id TEXT NOT NULL, fix_tool_use_id TEXT, statement TEXT NOT NULL,
+                   cause_key TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 1, first_seen_at INTEGER NOT NULL,
+                   last_seen_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active');
+                 CREATE TABLE lesson_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL, turn_key TEXT NOT NULL UNIQUE, turn_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                   last_error TEXT);
+                 INSERT INTO lessons VALUES ('lesson_old', 'p', 'chat-old', 'bash', 't', NULL, 'old lesson text', 'k', 1, 1, 1, 'active');",
+            )
+            .expect("v1 schema");
+    }
+    let views = store.list_views(10).expect("list");
+    assert_eq!(views.len(), 1);
+    assert_eq!((views[0].recalled, views[0].sources), (0, 1));
+    let _ = std::fs::remove_file(store.path());
+}
+
+#[test]
+fn deleting_every_chat_that_taught_a_lesson_deletes_it_and_one_of_two_keeps_it() {
+    let store = temp_store("forget");
+    store
+        .insert_lessons(&[job_in("chat-a")], &[lesson_draft(GBK_LESSON, "gbk")])
+        .expect("first");
+    // The same cause learned again in another chat merges as a second source.
+    store
+        .insert_lessons(&[job_in("chat-b")], &[lesson_draft(GBK_LESSON, "gbk")])
+        .expect("second");
+    store.enqueue_job("project-a", "chat-a", "chat-a:t9", &gbk_csv_turn()).expect("job");
+
+    assert_eq!(store.forget_session("chat-a").expect("forget a"), 0);
+    let views = store.list_views(10).expect("list");
+    assert_eq!((views.len(), views[0].sources), (1, 1));
+    assert!(store.due_batches(i64::MAX, 1, 4, 0).expect("jobs").is_empty(), "chat-a's queued turn is gone");
+
+    assert_eq!(store.forget_session("chat-b").expect("forget b"), 1);
+    assert!(store.list_views(10).expect("list").is_empty());
+    assert!(store.recall_for_failure("PowerShell", "{}", GBK_OUTPUT).expect("recall").is_empty());
+
+    let missing = LessonStore::new(std::env::temp_dir().join("aris-lessons-never-created.sqlite3"));
+    assert_eq!(missing.forget_session("chat-x").expect("no store"), 0);
+    assert!(!missing.path().exists());
+    let _ = std::fs::remove_file(store.path());
+}
+
+#[test]
+fn two_unhelpful_deliveries_in_a_row_make_a_lesson_stale_and_a_fix_resets_the_streak() {
+    let store = temp_store("stale");
+    store
+        .insert_lessons(&[job_in("chat-a")], &[lesson_draft(GBK_LESSON, "gbk")])
+        .expect("insert");
+    let id = store.list_views(1).expect("list")[0].id.clone();
+    let ids = vec![id.clone()];
+
+    store.record_recalled(&ids).expect("recalled");
+    store.record_outcome(&ids, false).expect("unhelpful once");
+    store.record_outcome(&ids, true).expect("then it helped");
+    store.record_outcome(&ids, false).expect("unhelpful again");
+    assert_eq!(store.list_views(1).expect("list")[0].status, "active");
+    assert_eq!(store.list_views(1).expect("list")[0].recalled, 1);
+
+    store.record_outcome(&ids, false).expect("second in a row");
+    assert_eq!(store.list_views(1).expect("list")[0].status, "stale");
+    assert!(store.recall_for_failure("PowerShell", "{}", GBK_OUTPUT).expect("recall").is_empty());
+
+    // Turning it back on in Settings makes it recallable again.
+    assert!(store.set_status(&id, true).expect("reactivate"));
+    assert_eq!(store.recall_for_failure("PowerShell", "{}", GBK_OUTPUT).expect("recall").len(), 1);
+    let _ = std::fs::remove_file(store.path());
+}
+
+#[test]
+fn cleanup_applies_the_retention_rules() {
+    let store = temp_store("cleanup");
+    store
+        .insert_lessons(
+            &[job_in("chat-a")],
+            &[
+                lesson_draft(GBK_LESSON, "gbk"),
+                lesson_draft("json.load 报 Expecting property name：删掉最后一个键后的逗号", "json"),
+                lesson_draft("ModuleNotFoundError: No module named 'src'：用 python -m src.x 运行", "module"),
+            ],
+        )
+        .expect("insert");
+    store.enqueue_job("project-a", "chat-a", "chat-a:done", &gbk_csv_turn()).expect("job");
+    let now = now_ms();
+    let day = DAY_MS;
+    {
+        let connection = store.open().expect("open");
+        connection.execute("UPDATE lesson_jobs SET status = 'done', finished_at = ?1", [now - 8 * day]).expect("old job");
+        connection
+            .execute("UPDATE lessons SET status = 'stale', status_changed_at = ?1 WHERE cause_key = 'json'", [now - 91 * day])
+            .expect("old stale");
+        connection
+            .execute(
+                "UPDATE lessons SET last_seen_at = ?1, last_recalled_at = ?1 WHERE cause_key = 'module'",
+                [now - 181 * day],
+            )
+            .expect("unused");
+    }
+    let report = store.cleanup(now).expect("cleanup");
+    assert_eq!(
+        report,
+        LessonCleanup { jobs_deleted: 1, stale_deleted: 1, archived_unused: 1, archived_over_cap: 0 }
+    );
+    let views = store.list_views(10).expect("list");
+    let status = |needle: &str| views.iter().find(|view| view.statement.contains(needle)).map(|view| view.status.clone());
+    assert_eq!(status("GBK").as_deref(), Some("active"));
+    assert_eq!(status("ModuleNotFoundError").as_deref(), Some("archived"));
+    assert_eq!(status("json.load"), None);
+    // A second pass changes nothing.
+    assert_eq!(store.cleanup(now).expect("again"), LessonCleanup::default());
+    let _ = std::fs::remove_file(store.path());
+}
+
+#[test]
+fn only_failures_fixed_in_the_turn_count_as_fixed() {
+    let mut messages = gbk_turn();
+    let fixed = fixed_failure_ids(&messages);
+    assert_eq!(fixed.into_iter().collect::<Vec<_>>(), vec!["call_fail".to_string()]);
+    messages.truncate(3);
+    assert!(fixed_failure_ids(&messages).is_empty());
+}

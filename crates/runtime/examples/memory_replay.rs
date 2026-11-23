@@ -145,6 +145,7 @@ fn l1(path: &str) {
     let mut by_statement: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut next = 0usize;
     let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut shared: BTreeMap<(&str, usize), usize> = BTreeMap::new();
     let started = Instant::now();
     for event in &events {
         let start = event["session_start"].as_i64().unwrap_or_default();
@@ -197,9 +198,20 @@ fn l1(path: &str) {
                     .is_some_and(|ids| ids.iter().any(|id| gold.contains(id.as_str())))
             })
         };
+        if std::env::var_os("MEMORY_REPLAY_SHARED").is_some() {
+            // Diagnostic: shared distinctive words of the top lesson, for a
+            // correct hit vs a wrong attachment.
+            if let Some(top) = recalled.first() {
+                let kind = if split == "neg" { "wrong" } else if positive { "right" } else { "miss" };
+                *shared.entry((kind, top.shared_words.min(8))).or_default() += 1;
+            }
+        }
         let entry = table.entry(split).or_default();
         entry.0 += usize::from(positive);
         entry.1 += 1;
+    }
+    if !shared.is_empty() {
+        println!("top lesson shared words (capped at 8): {shared:?}");
     }
     for (split, (hits, total)) in &table {
         let label = if split == "neg" { "attached (should be low)" } else { "found the right lesson" };

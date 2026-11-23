@@ -568,9 +568,15 @@ fn render_prompt_section(
         .map(|entry| entry.content.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("# {title} [{chars}/{limit} chars]\n{body}")
+    format!("# {title} [{chars}/{limit} bytes]\n{body}")
 }
 
+/// The budget unit is UTF-8 bytes, on purpose. It was labelled "characters",
+/// which told the model a Chinese MEMORY.md had three times the room it has.
+/// Counting real characters instead would triple what Chinese memory costs on
+/// every turn: a CJK character is about one token, an English one about a
+/// quarter, while bytes give both languages roughly the same token budget
+/// (2,200 bytes: ~550 tokens of English, ~730 CJK characters, ~500-730 tokens).
 fn joined_chars(entries: &[HotMemoryEntry]) -> usize {
     entries
         .iter()
@@ -595,7 +601,7 @@ fn ensure_within_limit(target: HotMemoryTarget, entries: &[HotMemoryEntry]) -> R
             .collect::<Vec<_>>();
         if joined_chars(&visible) > target.limit() {
             return Err(format!(
-                "{} hot memory would exceed its {} character limit for scope `{}`; replace or remove stale entries first",
+                "{} hot memory would exceed its {}-byte limit for scope `{}` (UTF-8 bytes: a CJK character counts 3); replace or remove stale entries first",
                 target.as_str(),
                 target.limit(),
                 project_scope.unwrap_or("global")

@@ -271,9 +271,10 @@ pub use research_memory_v2::{
     ResearchMemoryV2Store, ToolEpisode, RESEARCH_MEMORY_V2_VERSION, TOOL_TRACE_FAILURE_MARKER,
 };
 pub use lesson_memory::{
-    failure_is_informative, last_turn_messages, lesson_request_body, lesson_turn_from_messages,
-    parse_lesson_reply, render_recalled_lessons, LessonDraft, LessonJob, LessonStore, LessonTurn,
-    RecalledLesson, LESSON_SYSTEM_PROMPT,
+    failure_is_informative, fixed_failure_ids, last_turn_messages, lesson_request_body,
+    lesson_turn_from_messages, parse_lesson_reply, render_recalled_lessons, LessonCleanup,
+    LessonDraft, LessonJob, LessonStore, LessonTurn, LessonView, RecalledLesson,
+    LESSON_SYSTEM_PROMPT,
 };
 pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{
@@ -299,7 +300,7 @@ pub use session::{
     MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
-    index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
+    forget_indexed_session, index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
     search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
     session_index_stats, session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
     upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
