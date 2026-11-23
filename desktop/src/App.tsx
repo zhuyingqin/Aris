@@ -1,10 +1,9 @@
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Fragment, lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, chatRunningTurnCount, fileReveal, isTauri, onChatError, onChatRunState, openChatCompanion, type NewApiAccount } from "./api/tauri";
-import { figuresRunningCount, onFigureUpdated } from "./figures/figureApi";
-import { useStore, type Language, type Tab } from "./store";
+import { tr, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import { useAccountRefresh } from "./useAccountRefresh";
 import { SETTINGS_TAB_REQUEST_EVENT, SETTINGS_TAB_REQUEST_KEY, type SettingsTabRequest } from "./settingsTabRequest";
@@ -16,6 +15,15 @@ import Chat from "./chat/Chat";
 import { clientRunningConversationCount } from "./chat/chatActivity";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
+import PluginPage from "./extensions/PluginPage";
+import { useOfficialPluginsSync } from "./extensions/useOfficialPluginsSync";
+import { officialPluginCloseHazards, officialPluginsHaveUnsavedWork, projectSwitchBlocker, startOfficialPluginWatchers } from "./extensions/officialPluginGuards";
+import { OFFICIAL_PLUGIN_NAV_ITEMS } from "./extensions/officialPluginNav";
+import { OFFICIAL_PLUGIN_PAGES, officialPluginPage } from "./extensions/officialPluginPages";
+import { officialTabHidden } from "./extensions/officialPlugins";
+import { ModuleIcon } from "./ModuleIcon";
+import PluginPanelIcon from "./extensions/PluginPanelIcon";
+import { PLUGIN_OPEN_PAGE_EVENT, PLUGIN_PAGE_ACTION_EVENT, RAIL_PLUGIN_PAGES, requestPluginPage, uiPanelKey, uiText, useChatPluginPanels, type PluginPageAction } from "./extensions/useChatPluginPanels";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
 import AppNavigationRail from "./AppNavigationRail";
@@ -40,16 +48,10 @@ import { usePendingScreenshot } from "./screenshot/usePendingScreenshot";
 import "./tasks/Tasks.css";
 
 const loadLiterature = () => import("./literature/Literature");
-const loadMail = () => import("./mail/Mail");
-const loadTypeset = () => import("./typeset/Typeset");
-const loadFigures = () => import("./figures/FigureStudio");
 const loadCode = () => import("./code/CodePane");
 const loadWorkflows = () => import("./workflows/Workflows");
 
 const Literature = lazy(loadLiterature);
-const Mail = lazy(loadMail);
-const Typeset = lazy(loadTypeset);
-const FigureStudio = lazy(loadFigures);
 const CodePane = lazy(loadCode);
 const Workflows = lazy(loadWorkflows);
 const ChatPane = memo(Chat);
@@ -140,23 +142,23 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       settings: "Settings",
       scheduled: "Scheduled",
     },
-    loading: (label) => `Loading ${label}...`,
-    viewErrorTitle: "This view hit a UI error.",
-    viewErrorBody: "The current screen could not render.",
+    loading: (label) => `Loading ${label}…`,
+    viewErrorTitle: "Something went wrong in this view.",
+    viewErrorBody: "This page couldn't be displayed.",
     tryAgain: "Try again",
     userFallback: "User",
     accountInfo: "Account info",
     back: "Back",
     forward: "Forward",
-    toggleSidebar: "Show or hide the conversation sidebar",
-    findConversations: "Find conversations in the sidebar",
+    toggleSidebar: "Show or hide the chat sidebar",
+    findConversations: "Find chats in the sidebar",
     productMenuLabel: "SomniQ modules",
-    switchProduct: (name) => `Current module: ${name}. Switch module`,
+    switchProduct: (name) => `Current module: ${name}. Click to switch`,
     moreModules: "More modules",
     minimizeWindow: "Minimize window",
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
-    openChatCompanion: "Open writing companion",
+    openChatCompanion: "Open the floating paper-writing companion",
     currentProject: "Current project",
     noProject: "No project",
     projects: "Local projects",
@@ -164,12 +166,57 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     addProject: "Add local project…",
     openProjectFolder: "Open project folder",
     projectEmptyHint: "Choose a folder to add a project",
-    runStateDir: "run-state directory",
+    runStateDir: "Run state directory",
     openWorkspace: "Open workspace folder in file manager",
     dismiss: "Dismiss",
-    updateReady: (version) => `Update${version} installed. Restart SomniQ Studio.`,
+    updateReady: (version) => `Update${version} installed. Click to restart SomniQ Studio.`,
     updateDownloading: (version, percent) => percent != null ? `Installing update${version}: ${percent}%` : `Installing update${version}`,
     updateAvailable: (version) => `Update${version} available. Click to install.`,
+  },
+  es: {
+    nav: {
+      chat: "Chat",
+      lab: "Código",
+      typeset: "LaTeX",
+      figures: "Figuras",
+      literature: "Literatura",
+      workflows: "Flujos de trabajo",
+      mail: "Correo",
+      tasks: "Tareas de trabajo",
+      extensions: "Plugins",
+      settings: "Configuración",
+      scheduled: "Programadas",
+    },
+    loading: (label) => `Cargando ${label}…`,
+    viewErrorTitle: "Esta vista ha tenido un error de interfaz.",
+    viewErrorBody: "No se pudo mostrar la pantalla actual.",
+    tryAgain: "Reintentar",
+    userFallback: "Usuario",
+    accountInfo: "Información de la cuenta",
+    back: "Atrás",
+    forward: "Adelante",
+    toggleSidebar: "Mostrar u ocultar la barra lateral de conversaciones",
+    findConversations: "Buscar conversaciones en la barra lateral",
+    productMenuLabel: "Módulos de SomniQ",
+    switchProduct: (name) => `Módulo actual: ${name}. Haz clic para cambiar`,
+    moreModules: "Más módulos",
+    minimizeWindow: "Minimizar ventana",
+    maximizeWindow: "Maximizar ventana",
+    closeWindow: "Cerrar ventana",
+    openChatCompanion: "Abrir el asistente flotante de redacción de artículos",
+    currentProject: "Proyecto actual",
+    noProject: "Sin proyecto",
+    projects: "Proyectos locales",
+    dragToReorder: "Arrastra para reordenar",
+    addProject: "Añadir proyecto local…",
+    openProjectFolder: "Abrir carpeta del proyecto",
+    projectEmptyHint: "Elige una carpeta para añadir un proyecto",
+    runStateDir: "Directorio de estado de ejecución",
+    openWorkspace: "Abrir la carpeta de trabajo en el explorador de archivos",
+    dismiss: "Cerrar",
+    updateReady: (version) => `Actualización${version} instalada. Haz clic para reiniciar SomniQ Studio.`,
+    updateDownloading: (version, percent) => percent != null ? `Instalando actualización${version}: ${percent}%` : `Instalando actualización${version}`,
+    updateAvailable: (version) => `Actualización${version} disponible. Haz clic para instalar.`,
   },
 };
 
@@ -195,10 +242,8 @@ function useSidebarIsOverlay(): boolean {
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "workflows") void loadWorkflows();
-  else if (tabId === "mail") void loadMail();
-  else if (tabId === "typeset") void loadTypeset();
-  else if (tabId === "figures") void loadFigures();
   else if (tabId === "lab") void loadCode();
+  else void officialPluginPage(tabId)?.load();
 }
 
 function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
@@ -226,6 +271,8 @@ interface NavItem {
   icon: ReactNode;
 }
 
+type OrderedNavItem = NavItem & { order: number };
+
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -233,13 +280,6 @@ const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 // Settings also resolves legacy category links to their current sidebar page.
 type RequestedSettingsTab = SettingsTabRequest;
 
-const ModuleIcon = ({ children }: { children: ReactNode }) => (
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-    aria-hidden="true">
-    {children}
-  </svg>
-);
 
 // Titlebar glyphs. All share an 18px box with 1.5 strokes and round caps so the
 // left cluster reads as one row of evenly weighted icons.
@@ -280,59 +320,46 @@ const GearIcon = () => (
   </svg>
 );
 
-const PRIMARY_NAV_ITEMS: NavItem[] = [
+/** Core modules: always present. Official plugins add theirs from
+ * `extensions/officialPluginNav.tsx`; `order` merges the two lists. */
+const CORE_NAV_ITEMS: OrderedNavItem[] = [
   {
-    id: "chat", label: "Chat",
+    id: "chat", order: 10, label: "Chat",
     icon: <ModuleIcon>
       <path d="M5 3.5h14a2.5 2.5 0 0 1 2.5 2.5v9a2.5 2.5 0 0 1-2.5 2.5h-6.5L7 21v-3.5H5A2.5 2.5 0 0 1 2.5 15V6A2.5 2.5 0 0 1 5 3.5Z" />
       <path d="M7 8.5h10M7 12.5h6" />
     </ModuleIcon>,
   },
   {
-    id: "figures", label: "Figures",
-    icon: <ModuleIcon><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m5 17 5-6 4 3 3-5 3 8" /><circle cx="8" cy="7" r="1" /></ModuleIcon>,
-  },
-  {
-    id: "typeset", label: "LaTeX",
-    icon: <ModuleIcon>
-      {/* TeX's lowered E makes the editor recognizable without relying on a font. */}
-      <g fill="currentColor" stroke="none">
-        <path d="M.8 4.5h8.5v3.2H8V6H5.9v10.2h1.5v1.4H2.8v-1.4h1.5V6H2.1v1.7H.8Z" />
-        <path d="M8 7.5h7v2.8h-1.2V9h-3.3v3.9h2.6v-1.2h1.1v3.8h-1.1v-1.2h-2.6v4.3h3.3v-1.4H15V20H8v-1.4h1V9H8Z" />
-        <path d="M15 4.5h3.6v1.4h-1l2.2 4.2L22 5.9h-1V4.5h3v1.4h-.6l-2.7 5 2.8 5.3h.5v1.4h-3.6v-1.4h1.1l-2.1-4.1-2.2 4.1h1.1v1.4H15v-1.4h.8l2.8-5.3-2.7-5H15Z" />
-      </g>
-    </ModuleIcon>,
-  },
-  {
-    id: "lab", label: "Code",
+    id: "lab", order: 40, label: "Code",
     icon: <ModuleIcon>
       <rect x="2.5" y="3" width="19" height="18" rx="2.5" />
       <path d="m6.5 8.5 3.5 3.5-3.5 3.5M13 15.5h4.5" />
     </ModuleIcon>,
   },
   {
-    id: "literature", label: "Literature",
+    id: "extensions", order: 60, label: "Plugins",
     icon: <ModuleIcon>
-      <path d="M12 5.5C9.5 3.5 5.5 3.2 2.5 4.3v15C6 18.1 9.5 18.5 12 20.5c2.5-2 6-2.4 9.5-1.2v-15C18.5 3.2 14.5 3.5 12 5.5Zm0 0v15" />
-      <path d="m5.5 8 3.5.7M15 8.7l3.5-.7" />
+      {/* A puzzle piece: one tab on top, one on the right. */}
+      <path d="M4 6.5h5a2 2 0 1 1 4 0h5V11a2 2 0 1 1 0 4v4.5H4Z" />
     </ModuleIcon>,
   },
   {
-    id: "workflows", label: "Workflows",
+    id: "workflows", order: 70, label: "Workflows",
     icon: <ModuleIcon>
       <rect x="3" y="3" width="6" height="6" rx="1.5" />
       <rect x="15" y="15" width="6" height="6" rx="1.5" />
       <path d="M9 6h5a4 4 0 0 1 4 4v5M6 9v5a4 4 0 0 0 4 4h5" />
     </ModuleIcon>,
   },
-  {
-    id: "mail", label: "Mail",
-    icon: <ModuleIcon>
-      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
-      <path d="m3.5 6 8.5 6.5L20.5 6" />
-    </ModuleIcon>,
-  },
 ];
+
+const PRIMARY_NAV_ITEMS: OrderedNavItem[] = [...CORE_NAV_ITEMS, ...OFFICIAL_PLUGIN_NAV_ITEMS]
+  .sort((left, right) => left.order - right.order);
+
+/** How many of `PRIMARY_NAV_ITEMS` get their own rail button; the rest go
+ * under "More". */
+const RAIL_PRIMARY_COUNT = 6;
 
 const UTILITY_NAV_ITEMS: NavItem[] = [
   {
@@ -431,13 +458,14 @@ export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const typesetDirty = useStore((s) => s.typesetDirty);
-  const figureDirty = useStore((s) => s.figureDirty);
   const chatSidebarOpen = useStore((s) => s.chatSidebarOpen);
   const setChatSidebarOpen = useStore((s) => s.setChatSidebarOpen);
   const chatSidebarCollapsed = useStore((s) => s.chatSidebarCollapsed);
   const setChatSidebarCollapsed = useStore((s) => s.setChatSidebarCollapsed);
   const sidebarIsOverlay = useSidebarIsOverlay();
+  useOfficialPluginsSync();
   const hideMail = useStore((s) => s.hideMail);
+  const officialPlugins = useStore((s) => s.officialPlugins);
   const hideWorkflows = useStore((s) => s.hideWorkflows);
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
@@ -467,8 +495,8 @@ export default function App() {
   // workbench iframe and restart its extension host on every tab switch.
   const [codeMounted, setCodeMounted] = useState(false);
   const [codeWorkbenchReady, setCodeWorkbenchReady] = useState(false);
-  const [typesetMounted, setTypesetMounted] = useState(false);
-  const [figuresMounted, setFiguresMounted] = useState(false);
+  // Official plugin pages declared `mount: "keep"` that have been opened.
+  const [keptPages, setKeptPages] = useState<ReadonlySet<string>>(() => new Set());
   const [workflowsMounted, setWorkflowsMounted] = useState(false);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
@@ -487,14 +515,38 @@ export default function App() {
   // ref keeps the latest backend-wide count available in the close callback,
   // including turns started from the Writing Companion window.
   const runningConversationCountRef = useRef(0);
-  const runningFigureCountRef = useRef(0);
 
+  // Pages that enabled plugins add to the rail. One is shown in the Plugins
+  // module's place, so it needs no module of its own.
+  const pluginPages = useChatPluginPanels(currentProject?.path, "nav.page");
+  const [pluginPageKey, setPluginPageKey] = useState<string | null>(null);
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
+    setPluginPageKey(null);
     startTabTransition(() => setTab(nextTab));
     setProjectMenuOpen(false);
     setUserMenuOpen(false);
   }, [setTab, startTabTransition]);
+  const openPluginPage = useCallback((key: string) => {
+    selectTab("extensions");
+    setPluginPageKey(key);
+  }, [selectTab]);
+  // A page's button or form does its work in Chat, as an ordinary turn.
+  const runPluginPageAction = useCallback((action: PluginPageAction) => {
+    if (action.type === "open-panel") return requestPluginPage(action.pluginName, action.panelId);
+    selectTab("chat");
+    window.dispatchEvent(new CustomEvent<PluginPageAction>(PLUGIN_PAGE_ACTION_EVENT, { detail: action }));
+  }, [selectTab]);
+
+  // A glance or another page asks for a page; only a page the rail has opens.
+  useEffect(() => {
+    const open = (event: Event) => {
+      const key = (event as CustomEvent<string>).detail;
+      if (pluginPages.panels.some((panel) => uiPanelKey(panel) === key)) openPluginPage(key);
+    };
+    window.addEventListener(PLUGIN_OPEN_PAGE_EVENT, open);
+    return () => window.removeEventListener(PLUGIN_OPEN_PAGE_EVENT, open);
+  }, [pluginPages.panels, openPluginPage]);
 
   const setProjectSwitcherOpen = useCallback((open: boolean) => {
     if (open) setUserMenuOpen(false);
@@ -502,7 +554,8 @@ export default function App() {
   }, []);
 
   const chooseProject = async () => {
-    if (figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
+    const blocked = projectSwitchBlocker(language);
+    if (blocked) { setError(blocked); return; }
     setProjectMenuOpen(false);
     const selected = await open({
       directory: true,
@@ -510,7 +563,7 @@ export default function App() {
       title: copy.addProject.replace(/…$/, ""),
     });
     if (typeof selected === "string") {
-      if (typesetDirty && !window.confirm("Discard the unsaved LaTeX changes and open the added project?")) {
+      if (typesetDirty && !window.confirm(tr(language, "放弃未保存的 LaTeX 修改并打开新添加的项目？", "Discard the unsaved LaTeX changes and open the added project?", "¿Descartar los cambios de LaTeX sin guardar y abrir el proyecto añadido?"))) {
         return;
       }
       try {
@@ -522,12 +575,13 @@ export default function App() {
   };
 
   const selectProject = (id: string) => {
-    if (id !== currentProject?.id && figureDirty) { setError(language === "cn" ? "请等待科研绘图草稿保存完成，或放弃编辑，再切换项目。" : "Wait for figure draft autosave or discard edits before switching projects."); return; }
+    const blocked = id !== currentProject?.id ? projectSwitchBlocker(language) : null;
+    if (blocked) { setError(blocked); return; }
     setProjectMenuOpen(false);
     if (
       id !== currentProject?.id
       && typesetDirty
-      && !window.confirm("Discard the unsaved LaTeX changes and switch projects?")
+      && !window.confirm(tr(language, "放弃未保存的 LaTeX 修改并切换项目？", "Discard the unsaved LaTeX changes and switch projects?", "¿Descartar los cambios de LaTeX sin guardar y cambiar de proyecto?"))
     ) {
       return;
     }
@@ -633,13 +687,14 @@ export default function App() {
   useEffect(() => init(), [init]);
   useEffect(() => {
     if (tab === "lab") setCodeMounted(true);
-    if (tab === "typeset") setTypesetMounted(true);
-    if (tab === "figures") setFiguresMounted(true);
+    if (officialPluginPage(tab)?.mount === "keep") {
+      setKeptPages((current) => (current.has(tab) ? current : new Set(current).add(tab)));
+    }
     if (tab === "workflows") setWorkflowsMounted(true);
   }, [tab]);
   useEffect(() => installBrowserUnsavedChangesGuard(
     isTauri(),
-    () => useStore.getState().typesetDirty || useStore.getState().figureDirty,
+    () => useStore.getState().typesetDirty || officialPluginsHaveUnsavedWork(),
   ), []);
   useEffect(() => {
     if (!isTauri()) return;
@@ -666,10 +721,10 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void getCurrentWindow().onCloseRequested((event) => {
+      const plugins = officialPluginCloseHazards();
       const hazards = {
-        hasUnsavedChanges: useStore.getState().typesetDirty || useStore.getState().figureDirty,
-        hasUnsavedFigureChanges: useStore.getState().figureDirty,
-        runningFigureCount: runningFigureCountRef.current,
+        hasUnsavedChanges: useStore.getState().typesetDirty || plugins.hasUnsavedFigureChanges,
+        ...plugins,
         runningConversationCount: Math.max(
           runningConversationCountRef.current,
           clientRunningConversationCount(),
@@ -691,11 +746,7 @@ export default function App() {
   }, [language]);
   useEffect(() => {
     if (!isTauri()) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void figuresRunningCount().then((count) => { if (!disposed) runningFigureCountRef.current = count; }).catch(() => undefined);
-    void onFigureUpdated((next) => { if (!disposed) runningFigureCountRef.current = next.activeCount ?? 0; }).then((fn) => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); };
+    return startOfficialPluginWatchers();
   }, []);
   useEffect(() => {
     let disposed = false;
@@ -835,7 +886,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const chatShell = renderedTab === "chat" || renderedTab === "scheduled" || renderedTab === "tasks";
-  const navigationShell = chatShell || renderedTab === "settings" || renderedTab === "figures";
+  const navigationShell = chatShell || renderedTab === "settings" || officialPluginPage(renderedTab)?.navigationShell === true || renderedTab === "extensions";
   const chatSidebarShown = sidebarIsOverlay ? chatSidebarOpen : !chatSidebarCollapsed;
   const showChatSidebar = (shown: boolean) => {
     if (sidebarIsOverlay) setChatSidebarOpen(shown);
@@ -914,10 +965,20 @@ export default function App() {
     setUserMenuOpen(false);
     userMenuTriggerRef.current?.focus();
   });
-  const navigationItems = PRIMARY_NAV_ITEMS.slice(0, 5).map((item) => ({ ...item, label: copy.nav[item.id] }));
-  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...PRIMARY_NAV_ITEMS.slice(5), ...UTILITY_NAV_ITEMS]
-    .filter((item) => (item.id !== "mail" || !hideMail) && (item.id !== "workflows" || !hideWorkflows))
+  // A switched-off official plugin leaves the rail before it is split, so
+  // the next module moves up instead of leaving a gap.
+  const visiblePrimaryItems = PRIMARY_NAV_ITEMS.filter((item) =>
+    !officialTabHidden(item.id, officialPlugins, hideMail) && (item.id !== "workflows" || !hideWorkflows));
+  const navigationItems = visiblePrimaryItems.slice(0, RAIL_PRIMARY_COUNT).map((item) => ({ ...item, label: copy.nav[item.id] }));
+  const moreNavigationItems = [...CHAT_DESTINATION_ITEMS, ...visiblePrimaryItems.slice(RAIL_PRIMARY_COUNT), ...UTILITY_NAV_ITEMS]
     .map((item) => ({ ...item, label: copy.nav[item.id] }));
+
+  // Disabling the plugin, or switching project, takes the page away with it.
+  const pluginPage = renderedTab === "extensions" && currentProject
+    ? pluginPages.panels.find((panel) => uiPanelKey(panel) === pluginPageKey) : undefined;
+  const pluginNavigationItems = pluginPages.panels.map((panel) => ({
+    id: uiPanelKey(panel), label: uiText(panel.title, language), icon: <PluginPanelIcon panel={panel} size={20} />,
+  }));
 
   const codeShellReady = useCodeShell({
     enabled: codeMounted,
@@ -930,7 +991,7 @@ export default function App() {
       projectBusy,
       account: {
         name: userName, plan: userPlan.label,
-        allowance: userPlan.remaining === null ? (language === "cn" ? "额度信息暂不可用" : "Allowance unavailable") : formatQuota(userPlan.remaining),
+        allowance: userPlan.remaining === null ? tr(language, "额度信息暂不可用", "Allowance unavailable", "Cuota no disponible") : formatQuota(userPlan.remaining),
         remainingPercent: userPlan.remainingPercent,
       },
     },
@@ -1003,6 +1064,11 @@ export default function App() {
         onStart: startProjectDrag, onMove: moveProjectDrag,
         onEnd: finishProjectDrag, onCancel: cancelProjectDrag }}
     />
+  );
+  // Every page gets its own boundary, so a render error or a failed lazy chunk
+  // in one page leaves the always-mounted Chat and Code panes untouched.
+  const renderViewFallback = (viewError: Error, reset: () => void) => (
+    <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />
   );
 
   return (
@@ -1082,6 +1148,10 @@ export default function App() {
         items={navigationItems}
         moreItems={moreNavigationItems}
         activeTab={renderedTab}
+        pluginItems={pluginNavigationItems}
+        pluginRailCount={RAIL_PLUGIN_PAGES}
+        activePlugin={pluginPage ? pluginPageKey : null}
+        onSelectPlugin={openPluginPage}
         update={renderUpdateIndicator()}
         account={accountControl}
         onSelect={selectTab}
@@ -1110,12 +1180,12 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+          fallback={renderViewFallback}
         >
           <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled" && renderedTab !== "tasks"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+              fallback={renderViewFallback}
             >
               <ChatPane />
             </ErrorBoundary>
@@ -1124,7 +1194,7 @@ export default function App() {
             <div className="app-code-pane" hidden={renderedTab !== "lab"}>
               <ErrorBoundary
                 resetKey="code"
-                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
+                fallback={renderViewFallback}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
                   <CodePane onWorkbenchReadyChange={setCodeWorkbenchReady} />
@@ -1132,37 +1202,48 @@ export default function App() {
               </ErrorBoundary>
             </div>
           )}
-          {typesetMounted && (
-            <div className="app-typeset-pane" hidden={renderedTab !== "typeset"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.typeset} />}>
-                <Typeset />
-              </Suspense>
-            </div>
-          )}
           {renderedTab === "literature" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
-              <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
-            </Suspense>
-          )}
-          {figuresMounted && (
-            <div className="app-figures-pane" hidden={renderedTab !== "figures"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.figures} />}><FigureStudio visible={renderedTab === "figures"} /></Suspense>
-            </div>
+            <ErrorBoundary resetKey="literature" fallback={renderViewFallback}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
+                <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
+              </Suspense>
+            </ErrorBoundary>
           )}
           {workflowsMounted && (
             <div className="app-workflows-pane" hidden={renderedTab !== "workflows"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.workflows} />}>
-                <Workflows />
-              </Suspense>
+              <ErrorBoundary resetKey="workflows" fallback={renderViewFallback}>
+                <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.workflows} />}>
+                  <Workflows />
+                </Suspense>
+              </ErrorBoundary>
             </div>
           )}
-          {renderedTab === "mail" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.mail} />}>
-              <Mail />
-            </Suspense>
+          {OFFICIAL_PLUGIN_PAGES.map(({ tab: pageTab, Component, mount, paneClassName }) => {
+            const visible = renderedTab === pageTab;
+            if (mount === "keep" ? !keptPages.has(pageTab) : !visible) return null;
+            const body = (
+              <ErrorBoundary resetKey={pageTab} fallback={renderViewFallback}>
+                <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav[pageTab as keyof typeof copy.nav] ?? pageTab} />}>
+                  <Component visible={visible} />
+                </Suspense>
+              </ErrorBoundary>
+            );
+            return mount === "keep"
+              ? <div key={pageTab} className={paneClassName} hidden={!visible}>{body}</div>
+              : <Fragment key={pageTab}>{body}</Fragment>;
+          })}
+          {renderedTab === "extensions" && (
+            <ErrorBoundary resetKey={pluginPage ? "plugin-page" : "extensions"} fallback={renderViewFallback}>
+              {pluginPage && currentProject
+                ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
+                : <Extensions />}
+            </ErrorBoundary>
           )}
-          {renderedTab === "extensions" && <Extensions />}
-          {renderedTab === "settings" && <Settings />}
+          {renderedTab === "settings" && (
+            <ErrorBoundary resetKey="settings" fallback={renderViewFallback}>
+              <Settings />
+            </ErrorBoundary>
+          )}
         </ErrorBoundary>
 
         {clientOutdated && (

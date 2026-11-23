@@ -1,4 +1,5 @@
 use super::{
+    bigram_index_text, bigram_query_terms, recency_weight, BIGRAM_READY_FLAG,
     open_index, pending_session_embedding_inputs, recent_session_messages, search_sessions,
     search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
     session_index_stats, set_metadata_flag, sync_sessions_dir, upsert_session_message_embeddings,
@@ -430,4 +431,135 @@ fn status_reads_never_trigger_a_rebuild() {
     );
 
     fs::remove_dir_all(base).expect("remove sessions dir");
+}
+
+fn temp_sessions_dir(label: &str) -> std::path::PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("aris-{label}-{suffix}"));
+    fs::create_dir_all(&dir).expect("sessions dir");
+    dir
+}
+
+fn save_text_session(dir: &std::path::Path, name: &str, user: &str, assistant: &str) {
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text(user));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: assistant.to_string(),
+        }]));
+    session
+        .save_to_path(&dir.join(format!("{name}.json")))
+        .expect("save session");
+}
+
+fn search_session_ids(dir: &std::path::Path, query: &str, limit: usize) -> Vec<String> {
+    match search_sessions(dir, Some(query), None, limit, 0).expect("search") {
+        SessionSearchResult::Search { results, .. } => {
+            results.into_iter().map(|hit| hit.session_id).collect()
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn bigram_projection_splits_cjk_runs_and_keeps_words() {
+    assert_eq!(
+        bigram_index_text("第三章用ESN模型，main.tex 编译"),
+        "第三 三章 章用 esn 模型 main.tex 编译"
+    );
+    assert_eq!(bigram_index_text("图"), "图");
+    assert_eq!(
+        bigram_query_terms("数据集 数据集 dataset"),
+        vec!["数据".to_string(), "据集".to_string(), "dataset".to_string()]
+    );
+    assert!(bigram_query_terms("？！ 。").is_empty());
+}
+
+#[test]
+fn recency_weight_halves_the_bonus_every_half_life() {
+    assert!((recency_weight(0, 30.0) - 1.0).abs() < 1e-9);
+    assert!((recency_weight(30 * 86_400_000, 30.0) - 0.75).abs() < 1e-9);
+    let old = recency_weight(3650 * 86_400_000, 30.0);
+    assert!((0.5..0.51).contains(&old), "a decade-old hit keeps half its relevance");
+    assert!((recency_weight(-5, 30.0) - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn two_character_chinese_words_are_found_and_rare_terms_outrank_common_ones() {
+    let dir = temp_sessions_dir("bigram-rank");
+    // The common session repeats words that also appear in the query; the
+    // answer session shares the rare word 期刊 (journal) and the venue name.
+    save_text_session(
+        &dir,
+        "chat-common",
+        "我们讨论一下论文论文论文的写作安排，论文先写引言。",
+        "好的，论文写作按章节推进。",
+    );
+    save_text_session(
+        &dir,
+        "chat-answer",
+        "投稿目标定为 TNNLS 期刊。",
+        "已记录：目标期刊 TNNLS。",
+    );
+    let ids = search_session_ids(&dir, "这篇论文最后定的投稿期刊是哪个？", 2);
+    assert_eq!(ids.first().map(String::as_str), Some("chat-answer"));
+    let ids = search_session_ids(&dir, "期刊", 2);
+    assert_eq!(ids, vec!["chat-answer".to_string()]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_older_index_uses_like_until_the_repair_backfills_bigrams() {
+    let dir = temp_sessions_dir("bigram-backfill");
+    save_text_session(&dir, "chat-a", "章节目录改成 Final/Ch1 到 Ch6。", "收到。");
+    // First search builds a fresh index, which is born bigram-ready.
+    assert_eq!(search_session_ids(&dir, "章节目录", 3), vec!["chat-a".to_string()]);
+    // Simulate an index written by an older build: no bigram rows, flag off.
+    {
+        let connection = open_index(&dir).expect("open");
+        connection
+            .execute(
+                "INSERT INTO messages_bigram_fts(messages_bigram_fts) VALUES('delete-all')",
+                [],
+            )
+            .expect("clear bigrams");
+        set_metadata_flag(&connection, BIGRAM_READY_FLAG, false).expect("flag");
+    }
+    assert!(session_index_reindex_state(&dir).expect("state").pending);
+    // LIKE still answers while the backfill is owed.
+    assert_eq!(search_session_ids(&dir, "章节目录", 3), vec!["chat-a".to_string()]);
+    sync_sessions_dir(&dir).expect("repair");
+    assert!(!session_index_reindex_state(&dir).expect("state").pending);
+    let connection = open_index(&dir).expect("open");
+    let rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM messages_bigram_fts WHERE messages_bigram_fts MATCH '\"目录\"'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count");
+    assert_eq!(rows, 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn removed_sessions_and_rewritten_messages_leave_no_stale_bigram_rows() {
+    let dir = temp_sessions_dir("bigram-prune");
+    save_text_session(&dir, "chat-a", "数据集用 SCADA 风机数据。", "好的。");
+    save_text_session(&dir, "chat-b", "图表统一用 matplotlib。", "好的。");
+    sync_sessions_dir(&dir).expect("index");
+    assert_eq!(search_session_ids(&dir, "风机数据", 3), vec!["chat-a".to_string()]);
+    // Rewriting a message replaces its bigram row instead of adding one.
+    save_text_session(&dir, "chat-a", "数据集改为光伏数据。", "好的。");
+    sync_sessions_dir(&dir).expect("reindex");
+    assert!(search_session_ids(&dir, "风机", 3).is_empty());
+    assert_eq!(search_session_ids(&dir, "光伏", 3), vec!["chat-a".to_string()]);
+    fs::remove_file(dir.join("chat-a.json")).expect("remove");
+    sync_sessions_dir(&dir).expect("prune");
+    assert!(search_session_ids(&dir, "光伏", 3).is_empty());
+    let _ = fs::remove_dir_all(dir);
 }

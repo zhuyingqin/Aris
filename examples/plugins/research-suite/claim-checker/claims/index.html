@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Claim checker: every cited sentence of a manuscript, checked against the
+  source it cites, one background task per sentence.
+
+  Files:  index.html (this page) · style.css (the look)
+          app.mjs (drawing and actions) · model.mjs (data model) · copy.mjs (texts and prompts, en/cn/es)
+
+  Widget "claims" (json). Filled by the agent with PluginPanel; the page only adds taskId.
+  Every field may be missing or malformed; the page skips what it cannot read.
+  {
+    "version": 1,
+    "manuscript"?: "project-relative path of the main manuscript file",
+    "extractedAt"?: "ISO time of the last extraction",
+    "claims": [{
+      "id": "stable id, never reused",            // tasks find their entry by it
+      "text": "the cited sentence",
+      "file": "project-relative file the sentence is in",
+      "line"?: 123,
+      "section"?: "heading the sentence falls under",  // optional, groups rows inside a file
+      "cites": ["bibKey", ...],
+      "source"?: "project-relative path of the cited PDF",
+      "taskId"?: "id of the last background task sent for this claim",
+      "verdict"?: "supported" | "partial" | "unsupported" | "no-source",
+      "quote"?: "the deciding passage, word for word",
+      "page"?: "page of the quote",
+      "note"?: "why, in one or two sentences",
+      "checkedAt"?: "ISO time"
+    }]
+  }
+  Widget "summary" (markdown): which claims to fix, written by the agent; shown here as plain text.
+
+  Task bridge (the panel sets "proposeTasks": true):
+    somniq.task({ title, prompt, reportTo: "claims" }) -> { status: "started" | "created" | "declined", taskId? };
+      rejects while another proposal waits for the user.
+    somniq.tasks() / somniq.onTasks(list) -> [{ taskId, title, state, phase?, review?, result?, error? }],
+      state: "todo" | "active" | "waiting" | "ready" | "done" | "failed" | "canceled".
+    A row's task status always comes from the board, never from the stored value.
+-->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="mast-text">
+    <h1 id="title"></h1>
+    <p class="lede" id="lede"></p>
+    <p class="meta" id="meta" hidden></p>
+  </div>
+  <div class="mast-actions">
+    <button type="button" id="extract" class="action primary"></button>
+    <button type="button" id="summarize" class="action"></button>
+  </div>
+</header>
+<section class="tally" id="tally" hidden>
+  <div class="progress-row">
+    <div class="bar" id="bar" role="img"></div>
+    <span class="progress" id="progress"></span>
+  </div>
+  <div class="filters" id="filters" role="toolbar"></div>
+</section>
+<p class="error" id="error" role="alert"></p>
+<div class="desk">
+  <main class="galley" id="galley"></main>
+  <aside class="notes">
+    <h2 id="notes-title"></h2>
+    <div class="summary" id="summary"></div>
+  </aside>
+</div>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

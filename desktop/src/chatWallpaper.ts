@@ -1,3 +1,5 @@
+import { tr, type Language } from "./language";
+
 export interface WallpaperAsset { blob: Blob; name: string }
 const DB_NAME = "somniq-appearance-assets";
 const ASSET_KEY = "chat-wallpaper";
@@ -21,24 +23,25 @@ async function assetStore(mode: IDBTransactionMode, operation: (store: IDBObject
 export const readWallpaperAsset = () => assetStore("readonly", (store) => store.get(ASSET_KEY));
 export const writeWallpaperAsset = (asset?: WallpaperAsset) => assetStore("readwrite", (store) => asset ? store.put(asset, ASSET_KEY) : store.delete(ASSET_KEY));
 
-export async function prepareWallpaper(file: File): Promise<WallpaperAsset> {
-  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("Please use a PNG, JPEG, or WebP image.");
-  if (file.size > 12 * 1024 * 1024) throw new Error("Image must be smaller than 12 MB.");
+export async function prepareWallpaper(file: File, language: Language = "en"): Promise<WallpaperAsset> {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error(t("请使用 PNG、JPEG 或 WebP 图片。", "Use a PNG, JPEG, or WebP image.", "Usa una imagen PNG, JPEG o WebP."));
+  if (file.size > 12 * 1024 * 1024) throw new Error(t("图片必须小于 12 MB。", "The image must be smaller than 12 MB.", "La imagen debe ocupar menos de 12 MB."));
   const url = URL.createObjectURL(file);
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image(); image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error("Could not read the image.")); image.src = url;
+      image.onerror = () => reject(new Error(t("无法读取该图片。", "Could not read the image.", "No se pudo leer la imagen."))); image.src = url;
     });
     const scale = Math.min(1, 2560 / Math.max(image.naturalWidth, image.naturalHeight));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
     const context = canvas.getContext("2d");
-    if (!context) throw new Error("Could not prepare image.");
+    if (!context) throw new Error(t("无法处理该图片。", "Could not process the image.", "No se pudo procesar la imagen."));
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
     // Re-encode the local raster image, keeping large originals out of preferences.
-    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not prepare image.")), "image/webp", .88));
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error(t("无法处理该图片。", "Could not process the image.", "No se pudo procesar la imagen."))), "image/webp", .88));
     return { blob, name: file.name };
   } finally { URL.revokeObjectURL(url); }
 }

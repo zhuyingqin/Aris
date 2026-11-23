@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 import { createPortal } from "react-dom";
 import type { ComputePeer } from "../types";
 import type { Language } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 
 interface Props {
@@ -25,7 +26,7 @@ export default function ChatWorkspaceSwitcher({ language, visible, workspaceName
   const menuRef = useRef<HTMLDivElement>(null);
   const remoteMode = selectedNodeId !== null;
   const selectedPeer = peers.find((peer) => peer.nodeId === selectedNodeId);
-  const label = language === "cn" ? "切换本机或远程电脑" : "Switch local or remote computer";
+  const label = tr(language, "切换本机或远程电脑", "Switch local or remote computer", "Cambiar entre este equipo o uno remoto");
 
   // Chat owns the selected computer, while the shell owns the title row.
   useLayoutEffect(() => {
@@ -122,14 +123,14 @@ export default function ChatWorkspaceSwitcher({ language, visible, workspaceName
           <span
             className={`chat-workspace-connection${selectedPeer?.connected ? " is-online" : " is-connecting"}`}
             title={selectedPeer?.connected
-              ? (language === "cn" ? "在线" : "Online")
-              : (language === "cn" ? "正在自动连接" : "Reconnecting automatically")}
+              ? (tr(language, "在线", "Online", "En línea"))
+              : (tr(language, "正在自动连接", "Reconnecting automatically", "Reconectando automáticamente"))}
           />
         )}
       </button>
       {open && (
         <div id="chat-workspace-menu" ref={menuRef} className="chat-workspace-menu" role="menu" aria-label={label} style={menuPosition} onKeyDown={onMenuKeyDown}>
-          <div className="chat-workspace-menu-label">{language === "cn" ? "运行位置" : "Run on"}</div>
+          <div className="chat-workspace-menu-label">{tr(language, "运行位置", "Run on", "Ejecutar en")}</div>
           <button
             className={`chat-workspace-option${!remoteMode ? " active" : ""}`}
             type="button"
@@ -137,7 +138,7 @@ export default function ChatWorkspaceSwitcher({ language, visible, workspaceName
             onClick={() => { onSelect?.(null); closeAndFocus(); }}
           >
             <span className="chat-workspace-option-icon"><SvgIcon name="desktop" size={14} /></span>
-            <span><strong>{language === "cn" ? "本机" : "This computer"}</strong><small>{language === "cn" ? "本机项目、模型与工具" : "Local projects, models, and tools"}</small></span>
+            <span><strong>{tr(language, "本机", "This computer", "Este equipo")}</strong><small>{tr(language, "本机项目、模型与工具", "Local projects, models, and tools", "Proyectos, modelos y herramientas locales")}</small></span>
             {!remoteMode && <SvgIcon name="check" size={13} />}
           </button>
           {peers.map((peer) => (
@@ -154,10 +155,10 @@ export default function ChatWorkspaceSwitcher({ language, visible, workspaceName
                 <strong>{peer.displayName}</strong>
                 <small>
                   {!peer.agentChatAuthorized
-                    ? (language === "cn" ? "需重新配对以启用 Agent" : "Re-pair to enable Agent")
+                    ? (tr(language, "需重新配对以启用 Agent", "Re-pair to enable the agent", "Vuelve a emparejar para activar el agente"))
                     : peer.connected
-                      ? (language === "cn" ? "在线 · 远程项目" : "Online · Remote projects")
-                      : (language === "cn" ? "正在自动连接，可先进入等待" : "Reconnecting automatically · Open to wait")}
+                      ? (tr(language, "在线 · 远程项目", "Online · remote projects", "En línea · Proyectos remotos"))
+                      : (tr(language, "正在自动连接，可先进入等待", "Reconnecting automatically · you can open it and wait", "Reconectando automáticamente · puedes abrirlo y esperar"))}
                 </small>
               </span>
               {selectedNodeId === peer.nodeId && <SvgIcon name="check" size={13} />}
@@ -166,8 +167,8 @@ export default function ChatWorkspaceSwitcher({ language, visible, workspaceName
           {peers.length === 0 && (
             <div className="chat-workspace-empty">
               {busy
-                ? (language === "cn" ? "正在查找已配对电脑…" : "Looking for paired computers…")
-                : (language === "cn" ? "没有可用的远程电脑" : "No remote computers available")}
+                ? (tr(language, "正在查找已配对电脑…", "Looking for paired computers…", "Buscando equipos emparejados…"))
+                : (tr(language, "没有可用的远程电脑", "No remote computers available", "No hay equipos remotos disponibles"))}
             </div>
           )}
         </div>

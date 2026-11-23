@@ -1,0 +1,9 @@
+{
+  "name": "@local/comparison-matrix",
+  "version": "0.1.1",
+  "description": "A literature comparison matrix for the current project: papers as rows, user-defined dimensions as columns, every cell carrying its value and the evidence (file and page) it comes from, with a coverage view that shows where the evidence is thin.",
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json"
+  }
+}

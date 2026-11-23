@@ -207,6 +207,7 @@ fn pass_stage(
             summary: Some("approved".to_string()),
             issues: Vec::new(),
             reviewed_at: Some(now_iso8601()),
+            rubrics: None,
         })
     } else {
         None
@@ -300,6 +301,7 @@ fn approved_gate() -> ReviewerGate {
         summary: Some("approved".to_string()),
         issues: Vec::new(),
         reviewed_at: Some(now_iso8601()),
+        rubrics: None,
     }
 }
 
@@ -775,6 +777,7 @@ fn a_rejected_search_quality_returns_to_plan_revision_and_clears_coverage() {
             summary: Some("coverage too thin".to_string()),
             issues: vec!["only 1 review".to_string()],
             reviewed_at: Some(now_iso8601()),
+            rubrics: None,
         }),
         summary: Some("rejected".to_string()),
         advance: false,
@@ -810,6 +813,7 @@ fn a_rejected_search_quality_returns_to_plan_revision_and_clears_coverage() {
             summary: None,
             issues: Vec::new(),
             reviewed_at: None,
+            rubrics: None,
         }),
         summary: Some("back to plan".to_string()),
         advance: false,
@@ -932,6 +936,7 @@ fn a_rejected_pilot_pauses_for_user_not_a_re_review() {
                 summary: Some("no".to_string()),
                 issues: vec!["too broad".to_string()],
                 reviewed_at: Some(now_iso8601()),
+                rubrics: None,
             }),
             summary: Some("rejected".to_string()),
             advance: false,
@@ -1134,6 +1139,7 @@ fn reviewing_a_finished_outline_does_not_skip_the_user_edit_handoff() {
             summary: Some("outline too thin".to_string()),
             issues: vec!["missing methods chapter".to_string()],
             reviewed_at: Some(now_iso8601()),
+            rubrics: None,
         }),
         summary: Some("rejected".to_string()),
         advance: false,

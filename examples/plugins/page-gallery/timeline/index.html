@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Research roadmap: an editorial page with its own palette (paper by day, ink by night).
+  Widget "milestones": [{ "id", "title", "date": "YYYY-MM-DD", "status": "done" | "active" | "planned", "note"? }]
+-->
+<style>
+  :root { --paper: #f5efe3; --card: #fffaf0; --ink: #2a2620; --soft: #7b7262; --rule: #d9cfbd; --accent: #b4532a; --ok: #3f7d4e; }
+  :root[data-theme="dark"] { --paper: #17140f; --card: #201b15; --ink: #efe6d6; --soft: #a39883; --rule: #3a3227; --accent: #e07a4b; --ok: #79b48a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--paper); color: var(--ink); }
+  body { font: 15px/1.6 Georgia, "Songti SC", "SimSun", serif; padding: 56px clamp(24px, 7vw, 120px) 80px; }
+  .kicker { font: 600 11px/1 system-ui, sans-serif; letter-spacing: .22em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: clamp(34px, 5vw, 56px); line-height: 1.05; margin: 14px 0 10px; font-weight: 400; letter-spacing: -.01em; }
+  h1 em { color: var(--accent); }
+  .lede { max-width: 640px; color: var(--soft); font-style: italic; margin: 0; }
+  .phases { display: flex; gap: 4px; margin: 40px 0 8px; height: 10px; }
+  .phases span { flex: 1; border-radius: 2px; background: var(--rule); }
+  .phases span.done { background: var(--ok); } .phases span.active { background: var(--accent); }
+  .legend { font: 12px system-ui, sans-serif; color: var(--soft); display: flex; justify-content: space-between; }
+  ol { list-style: none; padding: 0; margin: 48px 0 0; position: relative; }
+  ol::before { content: ""; position: absolute; left: 132px; top: 6px; bottom: 6px; width: 1px; background: var(--rule); }
+  li { display: grid; grid-template-columns: 116px 32px 1fr; align-items: start; margin-bottom: 30px; }
+  time { font: 600 12px/1.9 system-ui, sans-serif; color: var(--soft); text-align: right; letter-spacing: .04em; }
+  .dot { width: 13px; height: 13px; border-radius: 50%; margin: 6px 0 0 10px; background: var(--paper); border: 2px solid var(--rule); position: relative; z-index: 1; }
+  li.done .dot { background: var(--ok); border-color: var(--ok); }
+  li.active .dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .entry h2 { font-size: 21px; font-weight: 400; margin: 0; }
+  li.done .entry h2 { color: var(--soft); text-decoration: line-through; text-decoration-color: var(--rule); }
+  .entry p { margin: 4px 0 0; color: var(--soft); }
+  .entry button { font: 600 11px system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 6px 0 0; margin-right: 14px; }
+  .empty { margin: 48px 0; font-style: italic; color: var(--soft); }
+  form { margin-top: 56px; padding: 22px 24px; background: var(--card); border: 1px solid var(--rule); border-radius: 3px; display: grid; grid-template-columns: 1fr 160px 140px auto; gap: 12px; align-items: end; }
+  label { font: 600 11px system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: var(--soft); display: grid; gap: 6px; }
+  input, select { font: 15px Georgia, serif; color: var(--ink); background: transparent; border: 0; border-bottom: 1px solid var(--rule); padding: 6px 0; outline: none; }
+  input:focus, select:focus { border-color: var(--accent); }
+  form button, .ask { font: 600 12px system-ui, sans-serif; letter-spacing: .1em; text-transform: uppercase; background: var(--ink); color: var(--paper); border: 0; padding: 12px 18px; cursor: pointer; border-radius: 2px; }
+  .ask { background: none; color: var(--accent); border: 1px solid var(--accent); margin-top: 24px; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  @media (max-width: 760px) { form { grid-template-columns: 1fr; } ol::before { left: 92px; } li { grid-template-columns: 76px 32px 1fr; } }
+</style>
+</head>
+<body>
+<div class="kicker" id="kicker"></div>
+<h1 id="title"></h1>
+<p class="lede" id="lede"></p>
+<div class="phases" id="phases"></div>
+<div class="legend"><span id="start"></span><span id="end"></span></div>
+<ol id="list"></ol>
+<form id="form">
+  <label><span id="l-title"></span><input id="f-title" maxlength="160" required></label>
+  <label><span id="l-date"></span><input id="f-date" type="date" required></label>
+  <label><span id="l-status"></span><select id="f-status"></select></label>
+  <button id="f-add"></button>
+</form>
+<button class="ask" id="ask"></button>
+<script>
+const COPY = {
+  en: { kicker: "Research roadmap", title: "From question to <em>submission</em>", lede: "Every milestone this project has passed, and the ones still ahead.", empty: "No milestones yet. Add the first one below, or ask the agent to draft the roadmap.",
+        title_: "Milestone", date: "Date", status: "Status", add: "Add", done: "Mark done", active: "Start", remove: "Remove", statuses: { planned: "Planned", active: "In progress", done: "Done" },
+        ask: "Draft the roadmap with the agent", prompt: "Read this project and draft a research roadmap from now to submission. Write it to the Research roadmap panel (widget \"milestones\") with PluginPanel, keeping existing milestones." },
+  cn: { kicker: "研究路线图", title: "从问题走到<em>投稿</em>", lede: "这个项目走过的每个里程碑，以及前面还要走的路。", empty: "还没有里程碑。在下面添加第一个，或请 AI 起草路线图。",
+        title_: "里程碑", date: "日期", status: "状态", add: "添加", done: "标为完成", active: "开始", remove: "删除", statuses: { planned: "计划中", active: "进行中", done: "已完成" },
+        ask: "请 AI 起草路线图", prompt: "阅读这个项目，起草一份从现在到投稿的研究路线图。用 PluginPanel 写入“研究路线图”面板（组件 \"milestones\"），保留已有的里程碑。" },
+};
+let copy = COPY.en, items = [];
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const clean = (v) => (Array.isArray(v) ? v : []).filter((m) => m && typeof m.title === "string")
+  .map((m, i) => ({ id: String(m.id ?? "m" + i), title: m.title, date: typeof m.date === "string" ? m.date : "", status: ["done", "active", "planned"].includes(m.status) ? m.status : "planned", note: typeof m.note === "string" ? m.note : "" }))
+  .sort((a, b) => a.date.localeCompare(b.date));
+const save = (next) => { items = clean(next); render(); somniq.set("milestones", items).catch((e) => alert(e.message)); };
+function render() {
+  $("phases").replaceChildren(...items.map((m) => el("span", { className: m.status, title: m.title })));
+  $("start").textContent = items[0]?.date ?? ""; $("end").textContent = items.at(-1)?.date ?? "";
+  if (!items.length) { $("list").replaceChildren(el("p", { className: "empty", textContent: copy.empty })); return; }
+  $("list").replaceChildren(...items.map((m) => {
+    const entry = el("div", { className: "entry" }, el("h2", { textContent: m.title }));
+    if (m.note) entry.append(el("p", { textContent: m.note }));
+    if (m.status !== "done") entry.append(el("button", { type: "button", textContent: m.status === "active" ? copy.done : copy.active, onclick: () => save(items.map((x) => x.id === m.id ? { ...x, status: m.status === "active" ? "done" : "active" } : x)) }));
+    entry.append(el("button", { type: "button", textContent: copy.remove, onclick: () => save(items.filter((x) => x.id !== m.id)) }));
+    return el("li", { className: m.status }, el("time", { textContent: m.date }), el("span", { className: "dot", title: copy.statuses[m.status] }), entry);
+  }));
+}
+somniq.ready().then(({ language, data }) => {
+  copy = COPY[language] ?? COPY.en;
+  $("kicker").textContent = copy.kicker; $("title").innerHTML = copy.title; $("lede").textContent = copy.lede;
+  $("l-title").textContent = copy.title_; $("l-date").textContent = copy.date; $("l-status").textContent = copy.status; $("f-add").textContent = copy.add; $("ask").textContent = copy.ask;
+  $("f-status").replaceChildren(...Object.entries(copy.statuses).map(([value, label]) => el("option", { value, textContent: label })));
+  $("f-date").value = new Date().toISOString().slice(0, 10);
+  items = clean(data.milestones); render();
+  somniq.onData((next) => { items = clean(next.milestones); render(); });
+});
+$("form").onsubmit = (event) => { event.preventDefault(); save([...items, { id: "m" + Date.now().toString(36), title: $("f-title").value.trim(), date: $("f-date").value, status: $("f-status").value }]); $("f-title").value = ""; };
+$("ask").onclick = () => somniq.prompt(copy.prompt);
+</script>
+</body>
+</html>

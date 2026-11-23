@@ -479,9 +479,9 @@ pub fn save_raster(workspace: &Path, id: &str, version: FigureRasterVersion, byt
 pub fn resolve_raster_edit(workspace: &Path, id: &str, request_id: &str, expected_hash: &str,
     choice: &str, result: Option<(FigureRasterVersion, &[u8])>) -> Result<FigureRun, String> {
     update(workspace, id, |run| {
-        let candidate = run.pending_raster_edit.as_ref().ok_or("图片结果已处理，请刷新。")?.clone();
+        let candidate = run.pending_raster_edit.as_ref().ok_or(crate::ui_lang::tr_static("图片结果已处理，请刷新。", "The image result has already been handled. Refresh.", "El resultado de la imagen ya se procesó. Actualiza."))?.clone();
         if candidate.request_id.as_deref() != Some(request_id) || candidate.hash != expected_hash {
-            return Err("图片结果已变更，请刷新后重新选择。".into());
+            return Err(crate::ui_lang::tr_static("图片结果已变更，请刷新后重新选择。", "The image result has changed. Refresh and choose again.", "El resultado de la imagen cambió. Actualiza y vuelve a elegir.").into());
         }
         if !run.requests.iter().enumerate().any(|(index, request)| request.id == request_id
             && request_id == format!("request-{:02}", index + 1) && request.kind == "manual_image_edit" && request.status == "completed") {
@@ -489,7 +489,7 @@ pub fn resolve_raster_edit(workspace: &Path, id: &str, request_id: &str, expecte
         }
         if !matches!(choice, "returned" | "selection" | "keep" | "aligned") || (choice == "keep") != result.is_none()
             || run.requests.iter().any(|r| matches!(r.status.as_str(), "submitted" | "unknown")) {
-            return Err("当前无法采用图片结果。".into());
+            return Err(crate::ui_lang::tr_static("当前无法采用图片结果。", "The image result cannot be used right now.", "Ahora no se puede usar el resultado de la imagen.").into());
         }
         if let Some((version, bytes)) = result {
             if version.request_id.as_deref() != Some(request_id) || version.parent_index != candidate.parent_index || version.parent_hash != candidate.parent_hash {
@@ -538,7 +538,7 @@ pub fn select_raster(workspace: &Path, id: &str, index: usize, expected_hash: &s
 pub fn confirm_image(workspace: &Path, id: &str, expected_hash: &str) -> Result<FigureRun, String> {
     update(workspace, id, |run| {
         if !run.can_confirm_image() || run.source_hash.as_deref() != Some(expected_hash) {
-            return Err("图片已变更或重建已经启动，请重新确认当前图片。".into());
+            return Err(crate::ui_lang::tr_static("图片已变更或重建已经启动，请重新确认当前图片。", "The image has changed or a rebuild has started. Confirm the current image again.", "La imagen cambió o ya empezó una reconstrucción. Vuelve a confirmar la imagen actual.").into());
         }
         run.image_confirmed = true; run.error = None; run.status = "probing".into();
         Ok(())

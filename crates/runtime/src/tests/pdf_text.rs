@@ -72,7 +72,8 @@ fn scanned_or_empty_pdf_directs_the_reader_to_page_view_or_ocr() {
     let pdf = encoded_pdf(b"", "/WinAnsiEncoding");
     let extracted = extract_pdf_text_with_quality(&pdf).expect("PDF");
     assert_eq!(extracted.metadata.quality, PdfTextQuality::NoText);
-    assert!(extracted.text_for_reading().contains("local OCR"));
+    assert!(extracted.text_for_reading().contains("read_pdf_pages"));
+    assert!(output_needs_page_view(&extracted.text_for_reading()));
     assert_eq!(extract_pdf_text_with_quality(b"not a PDF"), None);
 }
 

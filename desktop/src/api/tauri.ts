@@ -2,6 +2,7 @@
 // app or `aris-devserver` from a plain browser. See `transport.ts`.
 import { Channel, convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { hasNativeBackend, invoke, listen } from "./transport";
+import type { PluginApprovalCard } from "./plugins";
 
 import { notifyChatModelsUpdated } from "../modelEvents";
 import { getAccountSessionRevision } from "../accountCache";
@@ -268,6 +269,7 @@ import type {
   PermissionModeView,
   PptMasterDeck,
   WorkTask,
+  WorkTaskOrigin,
   WorkTaskReviewSnapshot,
   WorkTaskSnapshot,
   ProfileStats,
@@ -284,8 +286,10 @@ import type {
   RemoteP2pOfferInput,
   RemoteP2pPendingSnapshot,
   RemoteP2pSessionInput,
+  ScheduledDeliveryHistory,
   ScheduledTask,
   ScheduledTaskInput,
+  ScheduledTaskPreview,
   SessionSummary,
   PptMasterStatus,
   SkillMeta,
@@ -860,6 +864,17 @@ export const scheduledTaskSetStatus = (id: string, status: "active" | "paused") 
   invoke<ScheduledTask>("scheduled_task_set_status", { id, status });
 export const scheduledTaskDelete = (id: string) =>
   invoke<void>("scheduled_task_delete", { id });
+/** What a rule would do, without saving it — the editor's live preview. */
+export const scheduledTaskPreview = (input: ScheduledTaskInput) =>
+  invoke<ScheduledTaskPreview>("scheduled_task_preview", { input });
+/** Delivery records joined to the work-task cards they produced. */
+export const scheduledTaskHistory = (id: string, limit?: number) =>
+  invoke<ScheduledDeliveryHistory>("scheduled_task_history", { id, limit: limit ?? null });
+/** Queue one run now, outside the rule; refused while a run is in flight. */
+export const scheduledTaskRunNow = (id: string) =>
+  invoke<ScheduledTask>("scheduled_task_run_now", { id });
+export const onScheduledTasksChanged = (handler: () => void) =>
+  listen("scheduled-tasks-changed", () => handler());
 export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
@@ -1004,19 +1019,21 @@ export interface WorkTaskChangedEvent {
 }
 export const onWorkTaskChanged = (handler: (event: WorkTaskChangedEvent) => void) =>
   listen<WorkTaskChangedEvent>("work-task-changed", (event) => handler(event.payload));
-export const workTaskCreate = (title: string, prompt: string, model?: string | null) =>
-  invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null });
+export const workTaskCreate = (title: string, prompt: string, model?: string | null, origin?: WorkTaskOrigin | null) =>
+  invoke<WorkTask>("work_task_create", { title, prompt, model: model ?? null, origin: origin ?? null });
 /** Create and queue in one step — the board's default, because a task someone
  *  just described is meant to run. */
 export const workTaskCreateAndStart = (
   title: string,
   prompt: string,
   model?: string | null,
+  origin?: WorkTaskOrigin | null,
 ) =>
   invoke<WorkTask>("work_task_create_and_start", {
     title,
     prompt,
     model: model ?? null,
+    origin: origin ?? null,
   });
 export const workTaskUpdate = (
   taskId: string,
@@ -1244,8 +1261,9 @@ export const literatureExportBibliography = <T>(input: {
 }) => invoke<T>("literature_export_bibliography", { input });
 export const literatureWriteBibliographyExport = (destinationPath: string, content: string) =>
   invoke<void>("literature_write_bibliography_export", { destinationPath, content });
-export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: string) =>
-  invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null });
+/** Import a PDF as a record. Pass `requestId` to make it stoppable with `literatureOcrCancel`. */
+export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: string, requestId?: string) =>
+  invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null, requestId: requestId ?? null });
 export const literatureAddIdentifier = <T>(identifier: string) =>
   invoke<T>("literature_add_identifier", { identifier });
 export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
@@ -1427,10 +1445,17 @@ export const literatureRagSearch = (
     query,
     limit: limit ?? null,
   });
-export const literaturePdfBytes = (relativePath: string) =>
-  invoke<number[]>("literature_pdf_bytes", { relativePath });
+/** A library file's bytes. The app sends raw bytes (an ArrayBuffer); a number
+ *  array (an older host, a test double) is accepted too. */
+export const literaturePdfBytes = async (relativePath: string): Promise<Uint8Array> => {
+  const raw = await invoke<ArrayBuffer | number[]>("literature_pdf_bytes", { relativePath });
+  return Array.isArray(raw) ? Uint8Array.from(raw) : new Uint8Array(raw);
+};
 export const literatureImageOcr = (image: number[]) =>
   invoke<string>("literature_image_ocr", { image });
+/** Stop an in-flight PDF import and its OCR; `false` when it already finished. */
+export const literatureOcrCancel = (requestId: string) =>
+  invoke<boolean>("literature_ocr_cancel", { requestId });
 export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 export const literatureAttachmentOpen = (relativePath: string) =>
@@ -2325,6 +2350,8 @@ export const latexInverseSearch = (pdfPath: string, page: number, x: number, y: 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+/** The model a chat last ran on according to the usage ledger, or null. */
+export const chatSessionLastModel = (id: string) => invoke<string | null>("chat_session_last_model", { id });
 export const systemPromptView = () => invoke<SystemPromptView>("system_prompt_view");
 export const userPromptView = () => invoke<UserPromptView | null>("user_prompt_view");
 export const chatModelOptions = () =>
@@ -2471,6 +2498,8 @@ export interface IndependentReviewIssue {
   detail: string;
   evidence: string;
   recommendation: string;
+  /** `<package>/<rubric>#<criterion>`: the installed review criterion this issue reports. */
+  criterion?: string;
 }
 
 export interface IndependentReviewResult {
@@ -2491,6 +2520,22 @@ export interface IndependentReviewResult {
   exhausted: boolean;
   /** What a Reviewer thread opened with its own read-only tools, as the controller recorded the calls. Absent for a one-shot review. */
   toolChecks?: string[];
+  /** The controller's record of this round's plugin review rubrics: what the packet carried and left out, and the result per criterion. */
+  rubrics?: ReviewRubricRecord;
+}
+
+export type RubricCheckResult = "met" | "violated" | "not_applicable" | "unverified" | "unreported";
+
+export interface ReviewRubricRecord {
+  /** Rubrics (`<package>/<rubric>`) whose criteria were in the packet. */
+  delivered?: string[];
+  /** Rubrics that applied but were left out for length: never sent, so never checked. */
+  omitted?: string[];
+  checks?: { criterion: string; severity: string; result: RubricCheckResult; note?: string }[];
+  /** Criterion keys the Reviewer cited that the packet never carried. */
+  unknownCriteria?: string[];
+  /** The controller turned a pass into a revision because a critical criterion was violated. */
+  verdictCorrected?: boolean;
 }
 
 export interface IndependentReviewEvent {
@@ -2638,8 +2683,18 @@ export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
   listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { sessionId: string; id?: string; name: string; input: string; ready?: boolean }) => void,
-) => listen<{ sessionId: string; id?: string; name: string; input: string; ready?: boolean }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: ChatToolCallEvent) => void,
+) => listen<ChatToolCallEvent>("chat-tool", (e) => handler(e.payload));
+/** A streamed or re-announced tool call. `ready` and `pluginApproval` come
+ *  only once the backend is waiting on the call. */
+export interface ChatToolCallEvent {
+  sessionId: string;
+  id?: string;
+  name: string;
+  input: string;
+  ready?: boolean;
+  pluginApproval?: PluginApprovalCard;
+}
 export const onChatToolProgress = (
   handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
 ) =>

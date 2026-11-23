@@ -1108,11 +1108,14 @@ pub fn parse_review(text: &str) -> Result<(ReviewVerdict, String, Vec<ReviewIssu
     Ok((verdict, output.summary, output.issues))
 }
 
-fn language_name(language: &str) -> &'static str {
-    if language == "en" {
-        "English"
-    } else {
-        "Simplified Chinese (zh-CN)"
+/// The model-facing name of a run's reading language. Unknown codes keep the
+/// historical Chinese default.
+#[must_use]
+pub fn language_name(language: &str) -> &'static str {
+    match language {
+        "en" => "English",
+        "es" => "Spanish (español)",
+        _ => "Simplified Chinese (zh-CN)",
     }
 }
 

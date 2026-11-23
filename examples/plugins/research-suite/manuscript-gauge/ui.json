@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 3,
+  "panels": [
+    {
+      "id": "gauge",
+      "slot": "chat.brief",
+      "title": { "en": "Manuscript gauge", "cn": "稿件篇幅", "es": "Indicador del manuscrito" },
+      "order": 20,
+      "scope": "project",
+      "page": "./gauge/glance.html",
+      "widgets": [
+        { "id": "gauge", "type": "json", "title": { "en": "Sections, budgets and pages", "cn": "章节、预算与页数", "es": "Secciones, presupuestos y páginas" } }
+      ]
+    }
+  ]
+}

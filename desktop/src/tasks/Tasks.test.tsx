@@ -246,7 +246,7 @@ describe("Tasks", () => {
     // Said out loud: accepting the merge does nothing to these.
     expect(screen.getByText(/not in the repository/)).toBeTruthy();
     expect(screen.getByText(/No repository files changed/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Export..." })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Export…" })).toBeTruthy();
   });
 
   /**
@@ -293,7 +293,7 @@ describe("Tasks", () => {
     expect(screen.getByText("Section 3 was not touched")).toBeTruthy();
     expect(screen.getByText("Rewrite section 3, or correct the summary.")).toBeTruthy();
     // Rounds ran out — said plainly, because the user is now the one judging.
-    expect(screen.getByText(/2 revision rounds were spent/)).toBeTruthy();
+    expect(screen.getByText(/All 2 revision rounds are used up/)).toBeTruthy();
     // And who checked it, since the executor is not allowed to check itself.
     expect(screen.getByText("reviewer-model")).toBeTruthy();
   });
@@ -472,7 +472,7 @@ describe("Tasks", () => {
     expect(workTaskCreate).not.toHaveBeenCalled();
 
     await openDraft();
-    fireEvent.click(screen.getByRole("button", { name: "Save to to-do only" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to To do only" }));
     await waitFor(() =>
       expect(workTaskCreate).toHaveBeenCalledWith(
         "Index papers",

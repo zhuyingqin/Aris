@@ -279,7 +279,7 @@ mod platform {
     }
 
     pub(super) fn terminate_process_group(leader: u32) {
-        if leader <= 1 {
+        if group_kill_args("-TERM", leader).is_none() {
             return;
         }
         signal_process_group("-TERM", leader);
@@ -288,15 +288,52 @@ mod platform {
     }
 
     fn signal_process_group(signal: &str, leader: u32) {
+        let Some(args) = group_kill_args(signal, leader) else {
+            return;
+        };
         let _ = Command::new("kill")
-            .args([signal, &format!("-{leader}")])
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+
+    /// `kill <signal> -- -<leader>`. The `--` is load-bearing: procps-ng 4.0.4
+    /// (Ubuntu 24.04, Debian 13) reads an unseparated `-<pgid>` as options and
+    /// keeps only its first digit, so `kill -TERM -12345` became
+    /// `kill(-1, SIGTERM)` -- every process of the user. On the hosted CI
+    /// runner that killed the Actions worker; on a Linux desktop it would kill
+    /// the whole session. A leader of 0 or 1 (own group / broadcast) and pids
+    /// that would read as negative are refused.
+    pub(super) fn group_kill_args(signal: &str, leader: u32) -> Option<[String; 3]> {
+        if leader <= 1 || leader > i32::MAX as u32 {
+            return None;
+        }
+        Some([signal.to_string(), "--".to_string(), format!("-{leader}")])
     }
 }
 
 #[cfg(test)]
 #[path = "tests/managed_job.rs"]
 mod tests;
+
+/// Pure argument checks, outside `managed_job::tests` (which CI skips because
+/// those tests really kill process groups), so the hosted runners run them.
+#[cfg(all(test, not(windows)))]
+mod group_kill_args_tests {
+    use super::platform::group_kill_args;
+
+    #[test]
+    fn a_group_kill_separates_the_negative_pid_from_the_options() {
+        let args = group_kill_args("-TERM", 12345).expect("a real group");
+        assert_eq!(args, ["-TERM", "--", "-12345"]);
+    }
+
+    #[test]
+    fn own_group_broadcast_and_overflowing_pids_are_refused() {
+        assert!(group_kill_args("-KILL", 0).is_none());
+        assert!(group_kill_args("-KILL", 1).is_none());
+        assert!(group_kill_args("-KILL", u32::MAX).is_none());
+    }
+}

@@ -40,6 +40,7 @@ beforeEach(() => {
   });
   useStore.setState({
     tab: "chat",
+    language: "cn",
     pendingTypesetFilePath: null,
     pendingCodeFilePath: null,
     pendingSidePanelEvidence: null,
@@ -49,6 +50,17 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("streaming reasoning scroll", () => {
+  it("localizes reasoning controls and shows a plain summary without changing expanded Markdown", () => {
+    useStore.setState({ language: "en" });
+    const { container } = render(<ThinkBlock content="**Reviewing figures** with [source context](https://example.com)" />);
+    const toggle = screen.getByRole("button", { name: /Thought Reviewing figures with source context/ });
+    expect(container.querySelector(".md-think-preview")?.textContent).toBe("Reviewing figures with source context");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".md-think-body strong")?.textContent).toBe("Reviewing figures");
+    expect(container.querySelector(".md-think-body a")?.getAttribute("href")).toBe("https://example.com");
+  });
+
   it("preserves a reader's position inside reasoning and resumes following at its bottom", () => {
     const view = render(<ThinkBlock content="First step" streaming />);
     const body = view.container.querySelector<HTMLDivElement>(".md-think-body")!;
@@ -307,9 +319,9 @@ describe("MarkdownContent", () => {
       <MarkdownContent text={"```mermaid\nflowchart LR\n  A -->\n```"} />,
     );
 
-    expect(await screen.findByText("Mermaid syntax error")).toBeTruthy();
+    expect(await screen.findByText("Mermaid 语法错误")).toBeTruthy();
     expect(screen.queryByTestId("mermaid-diagram")).toBeNull();
-    expect(screen.getByText(/The diagram was not rendered/)).toBeTruthy();
+    expect(screen.getByText(/图表未能渲染/)).toBeTruthy();
   });
 });
 

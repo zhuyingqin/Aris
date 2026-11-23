@@ -7,7 +7,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { configGet, configSet, newapiBootstrap, newapiModels, newapiPaymentCatalog, newapiUsageLogs, profileStats } from "../api/tauri";
+import { configGet, configSet, newapiBootstrap, newapiModels, newapiPaymentCatalog, newapiUsageLogs, openExternalUrl, profileStats } from "../api/tauri";
 import { ACCOUNT_CACHE_KEY, readCachedAccount, readCachedUsageLogPages, subscribeCachedAccount, writeCachedAccount, writeCachedUsageLogPages } from "../accountCache";
 import { useStore } from "../store";
 import { SETTINGS_TAB_REQUEST_EVENT } from "../settingsTabRequest";
@@ -27,6 +27,7 @@ vi.mock("../api/tauri", async (importOriginal) => ({
   newapiPaymentCatalog: vi.fn(),
   profileStats: vi.fn(),
   newapiLogout: vi.fn(async () => undefined),
+  openExternalUrl: vi.fn(async () => undefined),
 }));
 
 vi.mock("../api/transport", async (importOriginal) => ({
@@ -70,8 +71,8 @@ describe("Settings against a native backend", () => {
     render(<Settings />);
     const executor = await screen.findByRole("combobox", { name: "执行模型" });
     await waitFor(() => expect((executor as HTMLSelectElement).value).toBe("MiniMax-M3"));
-    fireEvent.change(executor, { target: { value: "MiniMax-M2.7" } });
-    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M2.7" }));
+    fireEvent.change(executor, { target: { value: "MiniMax-M3.1-Flash" } });
+    await waitFor(() => expect(configSet).toHaveBeenCalledWith({ executorProvider: "openai", executorModel: "MiniMax-M3.1-Flash" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Reviewer 模型" }), { target: { value: "gpt-5.5" } });
     await waitFor(() => expect(configSet).toHaveBeenCalledWith({ reviewerProvider: "custom", reviewerModel: "gpt-5.5" }));
   });
@@ -201,6 +202,8 @@ describe("Settings against a native backend", () => {
         priceFen: 1900, totalAmount: 30_000_000, originalFen: 2900, promotionFen: 1900,
         studentFen: null, priceKind: "promotion", revision: 2 }] });
     render(<Settings />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改密码" }));
+    expect(vi.mocked(openExternalUrl)).toHaveBeenCalledWith("https://ensuanx.com/dashboard.html?tab=security&lang=zh");
     fireEvent.click(await screen.findByRole("button", { name: "购买会员" }));
     await screen.findByRole("button", { name: /Go.*19.00/ });
     expect(screen.getByRole("button", { name: "确认并前往支付宝支付" })).toHaveProperty("disabled", true);

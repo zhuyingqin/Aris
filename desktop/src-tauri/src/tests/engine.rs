@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "llm_review_tool.rs"]
+mod llm_review_tool;
+
 struct MultiWorkspaceFixture {
     _temp: tempfile::TempDir,
     first: PathBuf,
@@ -1781,6 +1784,7 @@ fn work_task_runtime_streams_into_an_open_read_only_transcript() {
         binding: crate::engine::WorkTaskTurnBinding {
             task_id: "t1".to_string(),
             run_seq: 1,
+            plugin_run: None,
         },
     });
 
@@ -2312,7 +2316,7 @@ fn live_chat_titles_are_labels_rather_than_request_slices() {
 
 #[test]
 fn desktop_chat_lets_permission_mode_gate_bash() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     assert!(specs.iter().any(|spec| spec.name == "bash"));
     assert!(specs.iter().any(|spec| spec.name == "Agent"));
 
@@ -2331,7 +2335,7 @@ fn desktop_chat_lets_permission_mode_gate_bash() {
 
 #[test]
 fn desktop_chat_registers_ask_user_question_gated_read_only() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     let spec = specs
         .iter()
         .find(|spec| spec.name == ASK_USER_QUESTION_TOOL)
@@ -2353,7 +2357,7 @@ fn desktop_chat_registers_ask_user_question_gated_read_only() {
 
 #[test]
 fn desktop_chat_registers_local_project_evidence_search_as_read_only() {
-    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let specs = all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     let spec = specs
         .iter()
         .find(|spec| spec.name == PROJECT_EVIDENCE_SEARCH_TOOL)
@@ -2374,45 +2378,50 @@ fn desktop_chat_registers_local_project_evidence_search_as_read_only() {
 }
 
 #[test]
-fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
-    assert!(
-        validate_question_input(r#"{"question":"Pick one","options":[{"label":"A"}]}"#).is_ok()
+fn ask_user_question_cards_render_the_question_the_executor_asks() {
+    // The card parses only the strict flat shape. A payload carrying the
+    // closers of a `{"questions": [...]}` wrapper is asked, so its card must
+    // receive the canonical form rather than fall back to a raw tool card.
+    let trailing_wrapper_closers =
+        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
+    let card: Value = serde_json::from_str(&tool_input_for_ui(
+        ASK_USER_QUESTION_TOOL,
+        trailing_wrapper_closers,
+    ))
+    .expect("card input is strict JSON");
+    assert_eq!(
+        card,
+        json!({"question": "Pick one", "options": [{"label": "A"}, {"label": "B"}]})
     );
 
-    assert!(validate_question_input(r#"{"question":"Pick one"}"#)
-        .expect_err("missing options should fail")
-        .to_string()
-        .contains("options"));
-    assert!(
-        validate_question_input(r#"{"question":"Pick one","options":[{"label":"  "}]}"#)
-            .expect_err("blank labels should fail")
-            .to_string()
-            .contains("label")
+    // Input with no recoverable question keeps its raw text for the fallback
+    // tool card, and other tools are untouched.
+    let truncated = r#"{"question":"Pick one","options":[{"label":"A"#;
+    assert_eq!(
+        tool_input_for_ui(ASK_USER_QUESTION_TOOL, truncated),
+        truncated
     );
-    assert!(validate_question_input(r#"{"options":[{"label":"A"}]}"#)
-        .expect_err("missing question should fail")
-        .to_string()
-        .contains("question"));
+    assert_eq!(
+        tool_input_for_ui("read_file", trailing_wrapper_closers),
+        trailing_wrapper_closers
+    );
 }
 
 #[test]
-fn ask_user_question_parse_failure_names_the_expected_shape() {
-    // A flat payload that ends with the closing punctuation of a
-    // `{"questions": [...]}` wrapper: the retry has to drop the stray closers,
-    // so the error must rule out adding the wrapper instead.
-    let trailing_wrapper_closers =
-        r#"{"question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}"#;
-    let message = validate_question_input(trailing_wrapper_closers)
-        .expect_err("trailing closers should fail")
-        .to_string();
-    assert!(
-        message.contains("trailing characters"),
-        "parse position should survive into the message: {message}"
-    );
-    assert!(
-        message.contains("not an array of questions"),
-        "message should rule out the wrapper shape: {message}"
-    );
+fn ask_user_question_reports_the_questions_a_card_did_not_show() {
+    let read = question_input::read_question_input(
+        r#"{"questions":[{"question":"First?","options":[{"label":"A"}]},{"question":"Second?","options":[{"label":"B"}]}]}"#,
+    )
+    .expect("a questions array is readable");
+    let result = read.tool_result("A".to_string());
+    assert!(result.starts_with("A\n\n"), "{result}");
+    assert!(result.contains("one question per call"), "{result}");
+    assert!(result.contains("- Second?"), "{result}");
+
+    let single =
+        question_input::read_question_input(r#"{"question":"Only?","options":[{"label":"A"}]}"#)
+            .unwrap();
+    assert_eq!(single.tool_result("A".to_string()), "A");
 }
 
 #[test]
@@ -3538,4 +3547,315 @@ fn pdf_download_fallback_does_not_open_a_browser_after_cancellation() {
     )
     .expect_err("cancelled before the browser starts");
     assert_eq!(error, direct);
+}
+
+
+fn frozen_set_with_disabled(disabled: &[&str]) -> runtime::plugins::PluginSet {
+    runtime::plugins::PluginSet {
+        project: "F:/project".into(),
+        plugins: Vec::new(),
+        fingerprint: "0".repeat(64),
+        frozen_at_ms: 1,
+        error: None,
+        builtin_disabled: disabled.iter().map(|id| (*id).to_string()).collect(),
+    }
+}
+
+fn spec_names(specs: &[tools::ToolSpec]) -> Vec<&'static str> {
+    specs.iter().map(|spec| spec.name).collect()
+}
+
+/// Official plugins on: the turn offers the registry it always offered.
+#[test]
+fn a_set_with_every_official_plugin_on_offers_the_whole_registry() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let frozen = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&[]),
+    ));
+    assert_eq!(frozen, all);
+}
+
+/// Switching mail off drops its eight tools as one block and leaves every
+/// other tool where it was, so the prompt prefix before it stays cacheable.
+#[test]
+fn switching_mail_off_drops_exactly_the_mail_tools_in_place() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["mail"]),
+    ));
+    let mail = all
+        .iter()
+        .copied()
+        .filter(|name| crate::mail::is_mail_tool(name))
+        .collect::<Vec<_>>();
+    assert_eq!(mail.len(), 8);
+    let expected = all
+        .iter()
+        .copied()
+        .filter(|name| !crate::mail::is_mail_tool(name))
+        .collect::<Vec<_>>();
+    assert_eq!(off, expected);
+}
+
+#[test]
+fn a_mail_tool_that_searches_papers_also_needs_literature() {
+    let names = spec_names(&all_tool_specs_with(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, |id| {
+        id != "literature"
+    }));
+    assert!(!names.contains(&"mail_literature_catch_up"));
+    assert!(names.contains(&"mail_search"));
+    assert!(!names.contains(&"LiteratureSearch"), "external search belongs to Literature");
+    assert!(names.contains(&"LibraryRetrieve"), "local evidence is core");
+    assert!(crate::official_plugins::tool_allowed("bash", |_| false));
+    assert!(!crate::official_plugins::tool_allowed("mail_send", |id| id != "mail"));
+    assert!(crate::official_plugins::disabled_tool_message("mail_literature_catch_up")
+        .contains("`mail`, `literature`"));
+}
+
+
+/// The independent Reviewer must not lose a tool when the user switches an
+/// official plugin off: its tools belong to no plugin and need none.
+#[test]
+fn switching_official_plugins_off_never_changes_the_reviewers_tools() {
+    for tool in crate::review_thread::REVIEWER_TOOLS {
+        assert!(crate::official_plugins::tool_owner(tool).is_none(), "{tool}");
+        assert!(crate::official_plugins::tool_allowed(tool, |_| false), "{tool}");
+    }
+    let names = crate::review_thread::reviewer_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, crate::review_thread::REVIEWER_TOOLS.map(String::from).to_vec());
+}
+
+
+/// The manifest's mail tools and the mail module's own list must not drift.
+#[test]
+fn the_mail_manifest_lists_exactly_the_mail_modules_tools() {
+    let declared = runtime::plugins::builtin_manifest("mail")
+        .unwrap()
+        .tools
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    let module = crate::mail::mail_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    assert_eq!(declared, module);
+}
+
+/// Literature off removes external search and acquisition; local evidence
+/// (the core retrieval tools) stays.
+#[test]
+fn switching_literature_off_keeps_local_evidence_tools() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["literature"]),
+    ));
+    for gone in ["LiteratureSearch", "LiteratureCitations", "LiteratureSearchExecute", "LiteraturePdfDownload", "mail_literature_catch_up"] {
+        assert!(!off.contains(&gone), "{gone}");
+    }
+    for kept in ["LibraryRetrieve", "RetrievalPlan", "RetrievalLedger", "ProjectEvidenceSearch", "mail_search"] {
+        assert!(off.contains(&kept), "{kept}");
+    }
+}
+
+#[test]
+fn switching_latex_off_drops_its_compile_and_render_tools_in_place() {
+    // The registry is read twice; a test that changes the environment in
+    // between (ARIS_CONFIG_ROOT and the like) would make the lists differ.
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let all = spec_names(&all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    let off = spec_names(&tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+        &frozen_set_with_disabled(&["latex"]),
+    ));
+    assert!(all.contains(&"LaTeXCompile") && all.contains(&"LaTeXRender"));
+    let expected = all
+        .iter()
+        .copied()
+        .filter(|name| !matches!(*name, "LaTeXCompile" | "LaTeXRender"))
+        .collect::<Vec<_>>();
+    assert_eq!(off, expected);
+}
+
+/// With Figures off for the project the scheme answers 404 and never reads
+/// the asset; with it on, or with no project open, the asset is served.
+#[test]
+fn the_figure_scheme_serves_nothing_while_figures_is_off() {
+    let _lock = crate::test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let previous = std::env::var_os("ARIS_CONFIG_ROOT");
+    std::env::set_var("ARIS_CONFIG_ROOT", &config);
+    let served = |status: u16| {
+        move || {
+            tauri::http::Response::builder()
+                .status(status)
+                .body(b"asset".to_vec())
+                .unwrap()
+        }
+    };
+
+    let on = crate::official_plugins::figure_scheme_response(Some(&project), served(200));
+    runtime::plugins::PluginStore::for_workspace(&project)
+        .set_builtin(
+            runtime::plugins::BUILTIN_FIGURES,
+            runtime::plugins::BuiltinTarget::Project,
+            Some(false),
+        )
+        .unwrap();
+    let mut touched = false;
+    let off = crate::official_plugins::figure_scheme_response(Some(&project), || {
+        touched = true;
+        served(200)()
+    });
+    let no_project = crate::official_plugins::figure_scheme_response(None, served(200));
+
+    match previous {
+        Some(value) => std::env::set_var("ARIS_CONFIG_ROOT", value),
+        None => std::env::remove_var("ARIS_CONFIG_ROOT"),
+    }
+    assert_eq!(on.status(), 200);
+    assert_eq!(off.status(), 404);
+    assert!(off.body().is_empty());
+    assert!(!touched, "the asset must not be read while Figures is off");
+    assert_eq!(no_project.status(), 200);
+}
+
+// ---- plugin review rubrics in the Reviewer's packets ---------------------------------
+
+#[test]
+fn review_rubrics_sit_before_the_answer_format_in_both_packets() {
+    let workspace = no_git_workspace("rubrics");
+    let rubrics = runtime::plugins::RubricPacket {
+        section: "Installed review rubrics. RUBRIC-MARKER `@lab/review/evidence#numbers`".into(),
+        ..Default::default()
+    };
+    let full = rubrics.place_in(
+        independent_review_prompt("Report the accuracy", "Accuracy is 91%.", "", "", &[], 1, workspace.path(), "openai", "executor-model"),
+        Some(REVIEW_ANSWER_FORMAT_MARKER),
+    );
+    let increment = rubrics.place_in(
+        incremental_review_packet(&incremental_input(
+            IncrementalReviewKind::NewRequest,
+            workspace.path(),
+            "Report the accuracy",
+            "Accuracy is 91%.",
+            "",
+            "",
+            None,
+        )),
+        Some(REVIEW_ANSWER_FORMAT_MARKER),
+    );
+    for packet in [&full, &increment] {
+        let rubric = packet.find("RUBRIC-MARKER").expect("the rubric section");
+        let format = packet.rfind("Return exactly one JSON object").expect("the answer format");
+        assert!(rubric < format, "the answer format stays last");
+        assert_eq!(packet.matches("RUBRIC-MARKER").count(), 1);
+    }
+    // Nothing installed: the packet is exactly what it was.
+    let plain = independent_review_prompt("Report", "Done.", "", "", &[], 1, workspace.path(), "openai", "m");
+    assert_eq!(runtime::plugins::RubricPacket::default().place_in(plain.clone(), Some(REVIEW_ANSWER_FORMAT_MARKER)), plain);
+}
+
+#[test]
+fn a_verdict_can_name_the_rubric_criterion_an_issue_violates() {
+    let parsed = parse_independent_review(
+        r#"{"verdict":"revise","summary":"An unsourced number","issues":[{"severity":"critical","title":"91% has no source","detail":"No result file holds it.","evidence":"answer","recommendation":"Cite the file.","criterion":"@lab/review/evidence#numbers"}],"evidenceChecked":["@lab/review/evidence#numbers"],"missingChecks":[],"revisionInstructions":["Cite the result file."],"relevantToGoal":false,"progressDelta":null,"criteriaSatisfied":[]}"#,
+    )
+    .expect("a verdict");
+    assert_eq!(parsed.issues[0].criterion.as_deref(), Some("@lab/review/evidence#numbers"));
+    // The Executor's revision prompt carries the finding, not the rubric's own text or key.
+    let ContentBlock::Text { text } = &revision_prompt(&parsed, 1).blocks[0] else { panic!("text") };
+    assert!(text.contains("91% has no source"));
+    assert!(!text.contains("@lab/review"));
+    // Serialized for the UI and audit log, with the controller's record.
+    let mut recorded = parsed;
+    apply_review_rubric_record(&mut recorded, &evidence_packet());
+    let value = serde_json::to_value(&recorded).unwrap();
+    assert_eq!(value["issues"][0]["criterion"], "@lab/review/evidence#numbers");
+    assert_eq!(value["rubrics"]["delivered"][0], "@lab/review/evidence");
+    assert_eq!(value["rubrics"]["checks"][0]["result"], "violated");
+    assert!(value.get("rubricChecks").is_none(), "the Reviewer's own account is not the record");
+}
+
+fn evidence_packet() -> runtime::plugins::RubricPacket {
+    use runtime::plugins::{ActiveReviewRubric, ReviewCriterion, ReviewRubric, ReviewSeverity, UiText};
+    let rubric = ActiveReviewRubric {
+        plugin_name: "@lab/review".into(),
+        plugin_version: "1.0.0".into(),
+        rubric: ReviewRubric {
+            id: "evidence".into(),
+            title: UiText::Plain("Evidence".into()),
+            applies_when: vec![],
+            criteria: vec![
+                ReviewCriterion { id: "numbers".into(), check: "Trace every number.".into(), severity: ReviewSeverity::Critical },
+                ReviewCriterion { id: "limits".into(), check: "State the limits.".into(), severity: ReviewSeverity::Medium },
+            ],
+        },
+    };
+    runtime::plugins::render_review_rubrics(&[&rubric])
+}
+
+#[test]
+fn a_pass_that_violates_a_critical_criterion_becomes_a_revision() {
+    let mut review = parse_independent_review(
+        r#"{"verdict":"pass","summary":"Looks fine","issues":[],"rubricChecks":[{"criterion":"@lab/review/evidence#numbers","result":"violated","note":"0.91 is in no result file"},{"criterion":"@lab/review/evidence#ghost","result":"met"}],"evidenceChecked":[],"missingChecks":[],"revisionInstructions":[],"relevantToGoal":false,"criteriaSatisfied":[]}"#,
+    )
+    .expect("a verdict");
+    apply_review_rubric_record(&mut review, &evidence_packet());
+    assert_eq!(review.verdict, IndependentReviewVerdict::Revise);
+    let record = review.rubrics.as_ref().expect("a record");
+    assert!(record.verdict_corrected);
+    assert_eq!(record.unknown_criteria, ["@lab/review/evidence#ghost"]);
+    assert_eq!(record.checks[1].result, runtime::plugins::RubricCheckResult::Unreported);
+    // The reported violation became an issue at the criterion's severity, and
+    // what the Executor reads names no rubric key.
+    assert_eq!(review.issues.len(), 1);
+    assert_eq!(review.issues[0].severity, "critical");
+    let ContentBlock::Text { text } = &revision_prompt(&review, 1).blocks[0] else { panic!("text") };
+    assert!(text.contains("0.91 is in no result file"));
+    assert!(!text.contains("@lab/review"));
+}
+
+#[test]
+fn an_unavailable_review_records_every_sent_criterion_as_unreported() {
+    let mut review = IndependentReviewResult::default();
+    apply_review_rubric_record(&mut review, &evidence_packet());
+    let record = review.rubrics.expect("a record");
+    assert_eq!(record.delivered, ["@lab/review/evidence"]);
+    assert!(record.checks.iter().all(|c| c.result == runtime::plugins::RubricCheckResult::Unreported));
+    // Without a packet, a stray criterion key never survives.
+    let mut stray = parse_independent_review(
+        r#"{"verdict":"revise","summary":"x","issues":[{"severity":"high","title":"t","criterion":"@x/y#z"}]}"#,
+    )
+    .unwrap();
+    apply_review_rubric_record(&mut stray, &runtime::plugins::RubricPacket::default());
+    assert!(stray.issues[0].criterion.is_none());
+    assert!(stray.rubrics.is_none());
 }

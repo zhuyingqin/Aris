@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useStore, type Language } from "./store";
 
 export const ONBOARDING_STORAGE_KEY = "somniq-onboarding-v2";
 
@@ -53,7 +54,7 @@ interface OnboardingStep {
   placement: OnboardingPlacement;
 }
 
-const ONBOARDING_STEPS: OnboardingStep[] = [
+const CN_STEPS: OnboardingStep[] = [
   {
     kicker: "功能入口",
     title: "左侧图标栏：在研究工作区间切换",
@@ -104,6 +105,118 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
     placement: "right",
   },
 ];
+
+const EN_STEPS: OnboardingStep[] = [
+  {
+    kicker: "Navigation",
+    title: "Left icon bar: switch between research workspaces",
+    body: "Click the icons on the left to switch to Chat, Code, LaTeX, or Literature; the current module stays highlighted. Other features are in the More menu.",
+    points: [
+      "Chat: describe a task and follow the agent's progress and results",
+      "Literature: search, organize, and cite research material",
+      "Code / LaTeX: write programs, run experiments, and typeset papers",
+      "More: open Workflows, Mail, and Settings",
+    ],
+    targetSelectors: ['[data-onboarding-target="module-navigation"]'],
+    placement: "right",
+  },
+  {
+    kicker: "Main workspace",
+    title: "Chat: hand research tasks to the agent",
+    body: "The center area shows the conversation, tool calls, results, and errors. Send your goals, materials, or error messages straight to Chat.",
+    points: [
+      "The sidebar groups past conversations under Pinned and Projects",
+      "When the agent runs commands, the steps and a summary of changes appear here",
+      "To pick up where you left off, return to the matching project and conversation",
+    ],
+    targetSelectors: ['[data-onboarding-target="workspace"]'],
+    placement: "inside",
+  },
+  {
+    kicker: "Current project",
+    title: "Project switcher: tell the agent which folder to work in",
+    body: "This control at the top sets the working directory. With the wrong project selected, the agent reads the wrong files, so check it before you start a task.",
+    points: [
+      "Click the project name at the top to open the project list",
+      "Choose “Add local project…” at the bottom of the panel to add a folder",
+      "Check the path under the project, or choose “Open project folder” to confirm the folder",
+    ],
+    targetSelectors: ['[data-onboarding-target="project-switcher"]'],
+    placement: "bottom",
+  },
+  {
+    kicker: "Personalization",
+    title: "Settings: tailor the workspace to how you work",
+    body: "Click the avatar at the bottom of the left icon bar to see account details and usage, or to open Settings. Open Settings whenever you want to change the appearance or the available features.",
+    points: [
+      "Switch between light and dark themes and change the interface language in General",
+      "Show or hide optional modules such as Mail and Workflows",
+      "Account shows your account, subscription, and remaining usage",
+    ],
+    targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
+    placement: "right",
+  },
+];
+
+const ES_STEPS: OnboardingStep[] = [
+  {
+    kicker: "Navegación",
+    title: "Barra de iconos izquierda: cambia de espacio de investigación",
+    body: "Haz clic en los iconos de la izquierda para ir a Chat, Código, LaTeX o Literatura; el módulo actual queda resaltado. Las demás funciones están en el menú Más.",
+    points: [
+      "Chat: plantea una tarea y sigue el progreso y los resultados del agente",
+      "Literatura: busca, organiza y cita material de investigación",
+      "Código / LaTeX: escribe programas, ejecuta experimentos y compón artículos",
+      "Más: abre Flujos de trabajo, Correo y Configuración",
+    ],
+    targetSelectors: ['[data-onboarding-target="module-navigation"]'],
+    placement: "right",
+  },
+  {
+    kicker: "Espacio principal",
+    title: "Chat: encarga tareas de investigación al agente",
+    body: "La zona central muestra la conversación, las llamadas a herramientas, los resultados y los errores. Envía tus objetivos, materiales o mensajes de error directamente al chat.",
+    points: [
+      "La barra lateral agrupa las conversaciones en Fijadas y Proyectos",
+      "Cuando el agente ejecuta comandos, aquí aparecen los pasos y un resumen de los cambios",
+      "Para retomar el trabajo, vuelve al proyecto y la conversación correspondientes",
+    ],
+    targetSelectors: ['[data-onboarding-target="workspace"]'],
+    placement: "inside",
+  },
+  {
+    kicker: "Proyecto actual",
+    title: "Selector de proyecto: indica al agente en qué carpeta trabajar",
+    body: "Este control de la parte superior fija el directorio de trabajo. Si eliges el proyecto equivocado, el agente leerá archivos equivocados, así que compruébalo antes de empezar una tarea.",
+    points: [
+      "Haz clic en el nombre del proyecto, arriba, para abrir la lista de proyectos",
+      "Elige «Añadir proyecto local…» al final del panel para añadir una carpeta",
+      "Revisa la ruta bajo el proyecto o elige «Abrir carpeta del proyecto» para confirmarla",
+    ],
+    targetSelectors: ['[data-onboarding-target="project-switcher"]'],
+    placement: "bottom",
+  },
+  {
+    kicker: "Personalización",
+    title: "Configuración: adapta el espacio de trabajo a tu manera",
+    body: "Haz clic en el avatar al final de la barra de iconos izquierda para ver tu cuenta y tu uso, o para abrir la configuración. Ábrela cuando quieras cambiar la apariencia o las funciones disponibles.",
+    points: [
+      "En General, cambia entre tema claro y oscuro y elige el idioma de la interfaz",
+      "Muestra u oculta módulos opcionales como Correo y Flujos de trabajo",
+      "En Cuenta verás tu cuenta, tu suscripción y el uso restante",
+    ],
+    targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
+    placement: "right",
+  },
+];
+
+const ONBOARDING_STEPS: Record<Language, OnboardingStep[]> = { cn: CN_STEPS, en: EN_STEPS, es: ES_STEPS };
+
+const ONBOARDING_COPY: Record<Language, { progress: (label: string) => string; back: string; skip: string; next: string; start: string }> = {
+  cn: { progress: (label) => `教程进度：${label}`, back: "上一步", skip: "跳过", next: "下一步", start: "开始使用" },
+  en: { progress: (label) => `Tutorial progress: ${label}`, back: "Back", skip: "Skip", next: "Next", start: "Get started" },
+  es: { progress: (label) => `Progreso del tutorial: ${label}`, back: "Atrás", skip: "Omitir", next: "Siguiente", start: "Empezar" },
+};
 
 function readSeenFlag() {
   if (typeof window === "undefined") return true;
@@ -230,15 +343,18 @@ function cardStyle(rect: TargetRect | null, placement: OnboardingPlacement): CSS
 }
 
 export default function OnboardingTutorial() {
+  const language = useStore((s) => s.language);
+  const steps = ONBOARDING_STEPS[language];
+  const copy = ONBOARDING_COPY[language];
   const [open, setOpen] = useState(() => !readSeenFlag());
   const [index, setIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
-  const step = ONBOARDING_STEPS[index];
+  const step = steps[index];
   const isFirstStep = index === 0;
-  const isLastStep = index === ONBOARDING_STEPS.length - 1;
+  const isLastStep = index === steps.length - 1;
   const progressLabel = useMemo(
-    () => `${index + 1} / ${ONBOARDING_STEPS.length}`,
-    [index],
+    () => `${index + 1} / ${steps.length}`,
+    [index, steps.length],
   );
   const cardPosition = useMemo(
     () => cardStyle(targetRect, step.placement),
@@ -255,7 +371,7 @@ export default function OnboardingTutorial() {
       close();
       return;
     }
-    setIndex((current) => Math.min(current + 1, ONBOARDING_STEPS.length - 1));
+    setIndex((current) => Math.min(current + 1, steps.length - 1));
   };
 
   const previous = () => {
@@ -309,8 +425,8 @@ export default function OnboardingTutorial() {
         aria-labelledby="onboarding-title"
         aria-describedby="onboarding-body"
       >
-        <div className="onboarding-progress" aria-label={`教程进度：${progressLabel}`}>
-          {ONBOARDING_STEPS.map((item, itemIndex) => (
+        <div className="onboarding-progress" aria-label={copy.progress(progressLabel)}>
+          {steps.map((item, itemIndex) => (
             <span
               key={item.title}
               className={`onboarding-progress-dot${itemIndex <= index ? " active" : ""}`}
@@ -338,13 +454,13 @@ export default function OnboardingTutorial() {
             onClick={previous}
             disabled={isFirstStep}
           >
-            上一步
+            {copy.back}
           </button>
           <button type="button" className="onboarding-skip" onClick={close}>
-            跳过
+            {copy.skip}
           </button>
           <button type="button" className="primary" onClick={next}>
-            {isLastStep ? "开始使用" : "下一步"}
+            {isLastStep ? copy.start : copy.next}
           </button>
         </div>
       </section>

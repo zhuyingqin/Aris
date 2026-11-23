@@ -920,6 +920,8 @@ fe = cookie["vscode.nls.locale"] || headers["accept-language"].split(",")[0].toL
 仍然盖过 SomniQ。前端把 `language` 传给 `code_server_ensure`，
 `workbench_locale()` 把 `cn` 映射成 `zh-cn`、`en` 映射成 `None`。
 
+**西语（2026-11-16）**：`resources/code-nls/es.i18n.json` 取自 Open VSX 上 `MS-CEINTL.vscode-language-pack-es` 1.126.0 的 `translations/main.i18n.json`（同样保留 MIT 头、压缩存放），对 1.126.04524 实测同为 1721/1755 模块、21,600/21,911 = 98.6%。`workbench_locale` 把 `es` 映射成 `es`；`VENDORED_LOCALES` 列出随包的语言，缓存哈希按它逐个计入文件大小。**新增语言必须先放文件再加映射**：缺文件时 `prepare_locale` 返回 `None`，`ensure` 永远等不到想要的 locale，每次进 Code 页都会重启服务。升级运行时要把两个语言包一起换成同版本。
+
 **服务端只在启动时读一次环境变量**，所以切语言必须重启服务 ——
 `ensure` 发现 `Inner.locale` 与请求的不一致就 `shutdown()` 后重来。
 iframe 本来就按完整 URL 重挂（端口和 token 都会变），不用额外处理。

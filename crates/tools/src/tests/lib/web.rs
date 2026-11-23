@@ -2,7 +2,7 @@ use super::*;
 use crate::web::{
     build_http_client_with_proxy, clear_web_search_cache_for_tests, extract_bocha_hits,
     extract_search_hits, is_arxiv_api_query_endpoint, is_provider_navigation_hit,
-    normalize_web_proxy_url, probe_web_search_provider, should_supplement_chinese_with_zhihu,
+    normalize_web_proxy_url, probe_web_search_provider, strip_credential_headers, should_supplement_chinese_with_zhihu,
     somniq_research_gateway_url, zhihu_raw_hits, RawSearchHit, WebProvider, WebSearchInput,
     ZhihuSearchResponse,
 };
@@ -1908,6 +1908,22 @@ fn search_hit_scan_survives_unclosed_anchor() {
     );
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].url, "https://example.com/one");
+}
+
+#[test]
+fn cross_origin_redirect_strips_credentials_but_keeps_other_headers() {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, COOKIE};
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+    headers.insert(COOKIE, HeaderValue::from_static("session=1"));
+    headers.insert("x-api-key", HeaderValue::from_static("secret"));
+    headers.insert("X-Subscription-Token", HeaderValue::from_static("secret"));
+    headers.insert(ACCEPT, HeaderValue::from_static("text/html"));
+
+    strip_credential_headers(&mut headers);
+
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers.get(ACCEPT).unwrap(), "text/html");
 }
 
 struct TestServer {

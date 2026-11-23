@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -49,6 +49,19 @@ fn search_cancellations() -> &'static CancelFlags {
     static REGISTRY: OnceLock<CancelFlags> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// Cancellation flags for in-flight OCR and PDF text extraction, by request id.
+fn ocr_cancellations() -> &'static CancelFlags {
+    static REGISTRY: OnceLock<CancelFlags> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How long one OCR or PDF rendering tool may run on one page.
+const OCR_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long a PDF text tool (pdfinfo, pdftotext) may run.
+const PDF_TEXT_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// A flag nobody raises, for extraction that has no request to cancel it.
+static NEVER_CANCELED: AtomicBool = AtomicBool::new(false);
 
 /// Publishes a request's cancellation flag for the lifetime of the call and
 /// withdraws it on drop, so a cancel that arrives after the call finished cannot
@@ -128,6 +141,14 @@ pub fn literature_llm_cancel(request_id: String) -> bool {
 #[tauri::command]
 pub fn literature_search_cancel(request_id: String) -> bool {
     raise_cancel_flag(search_cancellations(), &request_id)
+}
+
+/// Stops an in-flight PDF import (and the OCR it runs) by its request id: the
+/// running tool is killed and the import fails as canceled. `false` when the
+/// id is unknown.
+#[tauri::command]
+pub fn literature_ocr_cancel(request_id: String) -> bool {
+    raise_cancel_flag(ocr_cancellations(), &request_id)
 }
 
 /// Aborts a stream as soon as the request's flag is set. Mirrors the chat
@@ -317,10 +338,48 @@ fn run_oneshot_with_model_and_observer(
         validate_vision_model(&model)?;
     }
     runtime::clear_interrupt();
+    let text = run_single_turn(executor_config, model.clone(), system, message, observer)?;
+    Ok((text, model))
+}
+
+/// One short background call on the executor's own connection, for work that
+/// must not depend on a Reviewer being configured (lesson writing). Uses the
+/// cheap tier the compaction summarizer would pick (the executor itself when it
+/// is one, else a same-vendor cheap model the gateway lists), otherwise the
+/// executor model. Unlike `run_oneshot`, it leaves the process-wide interrupt
+/// flag alone: it runs beside the user's turns and must not swallow a Stop.
+pub(crate) fn run_background_oneshot(
+    system: &str,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let config = crate::config::current_executor_object()?;
+    let (model, _provider, executor_config) = aris_chat::resolve_settings_executor_config(&config)?;
+    let (executor_config, model) =
+        match aris_chat::resolve_summarizer_model(&executor_config, &model, Some("auto")) {
+            Some(cheap) if cheap != model => (executor_config.with_inferred_transport(), cheap),
+            _ => (executor_config, model),
+        };
+    let text = run_single_turn(
+        executor_config,
+        model.clone(),
+        system,
+        ConversationMessage::user_text(prompt),
+        Box::new(SilentObserver),
+    )?;
+    Ok((text, model))
+}
+
+fn run_single_turn(
+    executor_config: aris_chat::ChatExecutorConfig,
+    model: String,
+    system: &str,
+    message: ConversationMessage,
+    observer: Box<dyn aris_executor::StreamObserver>,
+) -> Result<String, String> {
     let mut conversation = aris_chat::build_conversation_runtime(
         Session::new(),
         executor_config,
-        model.clone(),
+        model,
         false,
         Vec::new(),
         observer,
@@ -340,7 +399,7 @@ fn run_oneshot_with_model_and_observer(
     let summary = conversation
         .run_turn_message(message, None)
         .map_err(|e| e.to_string())?;
-    Ok((aris_chat::final_assistant_text(&summary), model))
+    Ok(aris_chat::final_assistant_text(&summary))
 }
 
 pub(crate) fn validate_vision_model(model: &str) -> Result<(), String> {
@@ -654,7 +713,7 @@ fn extract_pdf_with_liteparse(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "python".to_string());
-    let mut command = Command::new(&python);
+    let mut command = crate::process::hidden_command(&python);
     command
         .arg(bridge_path)
         .arg("--pdf")
@@ -664,11 +723,6 @@ fn extract_pdf_with_liteparse(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
     let output = command.output().map_err(|error| {
         format!(
             "could not launch LiteParse through `{}`: {error}",
@@ -1024,13 +1078,18 @@ pub async fn literature_rag_cards(
 }
 
 /// Read a validated local PDF for the embedded PDF.js viewer.
+///
+/// Raw bytes (an `ArrayBuffer` on the JS side), like `file_read_bytes`: a JSON
+/// number array is several times the PDF's size and slow to build and parse.
 #[tauri::command]
-pub fn literature_pdf_bytes(
-    projects_state: State<ProjectState>,
+pub async fn literature_pdf_bytes(
+    projects_state: State<'_, ProjectState>,
     relative_path: String,
-) -> Result<Vec<u8>, String> {
+) -> Result<tauri::ipc::Response, String> {
     let path = resolve_pdf_path(&projects_state, &relative_path)?;
-    std::fs::read(path).map_err(|error| error.to_string())
+    off_main_thread(move || std::fs::read(path).map_err(|error| error.to_string()))
+        .await
+        .map(tauri::ipc::Response::new)
 }
 
 #[derive(Debug, Serialize)]
@@ -1160,17 +1219,18 @@ fn import_pdf_at(base: &Path, source_path: &Path, file_name: &str) -> Result<Imp
 
 /// Copy a user-selected PDF into the active project's literature library.
 #[tauri::command]
-pub fn literature_import_pdf(
-    projects_state: State<ProjectState>,
+pub async fn literature_import_pdf(
+    projects_state: State<'_, ProjectState>,
     source_path: String,
     file_name: String,
 ) -> Result<Value, String> {
-    serde_json::to_value(import_pdf_at(
-        &project_base(&projects_state)?,
-        Path::new(&source_path),
-        &file_name,
-    )?)
-    .map_err(|error| error.to_string())
+    let base = project_base(&projects_state)?;
+    // A copy of a large PDF is disk-bound: never on the window's thread.
+    off_main_thread(move || {
+        serde_json::to_value(import_pdf_at(&base, Path::new(&source_path), &file_name)?)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 /// Copy an explicit user-selected local file into `papers/attachments/`.
@@ -1178,31 +1238,39 @@ pub fn literature_import_pdf(
 /// to an existing bibliography record by the frontend and never becomes a
 /// duplicate literature record by accident.
 #[tauri::command]
-pub fn literature_import_attachment(
-    projects_state: State<ProjectState>,
+pub async fn literature_import_attachment(
+    projects_state: State<'_, ProjectState>,
     source_path: String,
 ) -> Result<Value, String> {
-    serde_json::to_value(import_attachment_at(
-        &project_base(&projects_state)?,
-        Path::new(&source_path),
-    )?)
-    .map_err(|error| error.to_string())
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        serde_json::to_value(import_attachment_at(&base, Path::new(&source_path))?)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 /// Copy a PDF and immediately create (or merge) its local-first literature
 /// record. This is distinct from `literature_import_pdf`, which attaches a
 /// file to an already selected record.
+///
+/// Runs off the main thread: it extracts every page's text for the search
+/// index, OCR included, which takes minutes on a long scanned PDF. Pass a
+/// `requestId` to make it cancellable with `literature_ocr_cancel`.
 #[tauri::command]
-pub fn literature_import_pdf_as_record(
-    projects_state: State<ProjectState>,
+pub async fn literature_import_pdf_as_record(
+    projects_state: State<'_, ProjectState>,
     source_path: String,
     title: Option<String>,
+    request_id: Option<String>,
 ) -> Result<Value, String> {
-    literature_import_pdf_as_record_core(
-        &project_base(&projects_state)?,
-        Path::new(&source_path),
-        title.as_deref(),
-    )
+    let base = project_base(&projects_state)?;
+    off_main_thread(move || {
+        let registration = CancelRegistration::in_registry(ocr_cancellations(), request_id.as_deref());
+        let cancel = registration.flag();
+        literature_import_pdf_as_record_core(&base, Path::new(&source_path), title.as_deref(), &cancel)
+    })
+    .await
 }
 
 /// Title precedence — an explicit title, then one inferred from the PDF's own
@@ -1215,6 +1283,7 @@ pub(crate) fn literature_import_pdf_as_record_core(
     base: &Path,
     source: &Path,
     title: Option<&str>,
+    cancel: &AtomicBool,
 ) -> Result<Value, String> {
     let file_name = source
         .file_name()
@@ -1225,7 +1294,12 @@ pub(crate) fn literature_import_pdf_as_record_core(
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(file_name);
-    let extracted = extract_pdf_text_by_page(Path::new(&imported.path)).ok();
+    let extracted = match extract_pdf_text_by_page_cancellable(Path::new(&imported.path), cancel) {
+        Ok(extraction) => Some(extraction),
+        // A canceled import stops here; the copied file stays, unindexed.
+        Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
+        Err(_) => None,
+    };
     let inferred_title = extracted
         .as_ref()
         .and_then(|extraction| infer_pdf_title(&extraction.text));
@@ -1288,6 +1362,7 @@ pub async fn literature_add_identifier(
         return Err("enter a DOI beginning with 10. or a 10/13-digit ISBN".to_string());
     }
     let base = project_base(&projects_state)?;
+    crate::official_plugins::require_in(&base, runtime::plugins::BUILTIN_LITERATURE)?;
     tauri::async_runtime::spawn_blocking(move || {
         tools::literature::literature_search_ad_hoc_at(
             &base,
@@ -1309,7 +1384,12 @@ pub async fn literature_add_identifier(
 /// keeps page rendering self-contained in the desktop bundle and uses the
 /// platform OCR engine (or Tesseract when available) only for image-only pages.
 #[tauri::command]
-pub fn literature_image_ocr(image: Vec<u8>) -> Result<String, String> {
+pub async fn literature_image_ocr(image: Vec<u8>) -> Result<String, String> {
+    // Bounded by the OCR tool timeout; nothing in the reader offers a cancel.
+    off_main_thread(move || image_ocr(image, &NEVER_CANCELED)).await
+}
+
+pub(crate) fn image_ocr(image: Vec<u8>, cancel: &AtomicBool) -> Result<String, String> {
     if image.len() > 24 * 1024 * 1024 {
         return Err("OCR page image exceeds the 24 MB limit".to_string());
     }
@@ -1324,18 +1404,7 @@ pub fn literature_image_ocr(image: Vec<u8>) -> Result<String, String> {
         std::process::id()
     ));
     std::fs::write(&path, image).map_err(|error| error.to_string())?;
-    let result = tesseract_ocr(&path).or_else(|tesseract_error| {
-        #[cfg(windows)]
-        {
-            windows_ocr(&path).map_err(|windows_error| {
-                format!("{tesseract_error}; Windows OCR failed: {windows_error}")
-            })
-        }
-        #[cfg(not(windows))]
-        {
-            Err(tesseract_error)
-        }
-    });
+    let result = ocr_image_file(&path, cancel);
     let _ = std::fs::remove_file(path);
     result
 }
@@ -1694,30 +1763,33 @@ fn read_attachment_text(
 /// are resolved below the literature directory so the command cannot traverse
 /// outside the project.
 #[tauri::command]
-pub fn literature_attachment_read_text(
-    projects_state: State<ProjectState>,
+pub async fn literature_attachment_read_text(
+    projects_state: State<'_, ProjectState>,
     relative_path: String,
 ) -> Result<LiteratureAttachmentText, String> {
     let path = resolve_attachment_path(&projects_state, &relative_path)?;
-    read_attachment_text(&path, &relative_path)
+    off_main_thread(move || read_attachment_text(&path, &relative_path)).await
 }
 
 /// Read a linked file only after the researcher explicitly chose it through
 /// the attachment picker. This mirrors the existing external-open action but
 /// keeps text/HTML/EPUB inside the same reader when the file is available.
 #[tauri::command]
-pub fn literature_attachment_read_external_text(
+pub async fn literature_attachment_read_external_text(
     source_path: String,
 ) -> Result<LiteratureAttachmentText, String> {
-    let trimmed = source_path.trim();
-    if trimmed.is_empty() {
-        return Err("attachment path is empty".to_string());
-    }
-    let path = Path::new(trimmed);
-    if !path.is_absolute() {
-        return Err("external attachment path must be absolute".to_string());
-    }
-    read_attachment_text(path, trimmed)
+    off_main_thread(move || {
+        let trimmed = source_path.trim();
+        if trimmed.is_empty() {
+            return Err("attachment path is empty".to_string());
+        }
+        let path = Path::new(trimmed);
+        if !path.is_absolute() {
+            return Err("external attachment path must be absolute".to_string());
+        }
+        read_attachment_text(path, trimmed)
+    })
+    .await
 }
 
 /// Read a user-selected annotation export. The payload is bounded and must be
@@ -1976,6 +2048,7 @@ pub async fn literature_search_protocol_execute(
         return Err(message);
     }
     let base = project_base(&projects_state)?;
+    crate::official_plugins::require_in(&base, runtime::plugins::BUILTIN_LITERATURE)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // A protocol run is minutes of provider paging on a blocking thread that
@@ -2158,6 +2231,10 @@ fn extraction_from_rag_pages(pages: &[LiteratureRagPdfPage]) -> Result<PdfTextEx
 }
 
 fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
+    extract_pdf_text_by_page_cancellable(path, &NEVER_CANCELED)
+}
+
+fn extract_pdf_text_by_page_cancellable(path: &Path, cancel: &AtomicBool) -> Result<PdfTextExtraction, String> {
     let rust_pages = pdf_extract::extract_text_by_pages(path)
         .map(|pages| {
             pages
@@ -2172,7 +2249,7 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
         .map(Vec::len)
         .filter(|count| *count > 0)
         .map(Ok)
-        .unwrap_or_else(|| pdf_page_count(path))?;
+        .unwrap_or_else(|| pdf_page_count(path, cancel))?;
     if page_count > MAX_RAG_PDF_PAGES {
         return Err(format!(
             "PDF has too many pages to index safely ({page_count} > {MAX_RAG_PDF_PAGES})"
@@ -2186,6 +2263,9 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
     let mut ocr_used = false;
 
     for page in 1..=page_count {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("PDF text extraction was canceled".to_string());
+        }
         let bundled = rust_pages
             .as_ref()
             .ok()
@@ -2195,7 +2275,7 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
         let embedded = if has_readable_text(&bundled) {
             bundled
         } else {
-            pdftotext_page(path, page).unwrap_or_else(|error| {
+            pdftotext_page(path, page, cancel).unwrap_or_else(|error| {
                 if page == 1 && !warnings.contains(&error) {
                     warnings.push(error);
                 }
@@ -2211,7 +2291,7 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
             continue;
         }
 
-        match ocr_pdf_page(path, page) {
+        match ocr_pdf_page(path, page, cancel) {
             Ok(text) if has_readable_text(&text) => {
                 ocr_used = true;
                 pages.push(PdfPageText {
@@ -2345,12 +2425,12 @@ fn infer_pdf_doi(text: &str) -> Option<String> {
     })
 }
 
-fn pdf_page_count(path: &Path) -> Result<usize, String> {
-    let pdfinfo = crate::process::hidden_command("pdfinfo")
-        .arg(path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+fn pdf_page_count(path: &Path, cancel: &AtomicBool) -> Result<usize, String> {
+    let pdfinfo = crate::process::output_bounded(
+        crate::process::hidden_command("pdfinfo").arg(path),
+        PDF_TEXT_TOOL_TIMEOUT,
+        Some(cancel),
+    );
     if let Ok(output) = pdfinfo {
         if output.status.success() {
             if let Some(count) = String::from_utf8_lossy(&output.stdout)
@@ -2366,14 +2446,15 @@ fn pdf_page_count(path: &Path) -> Result<usize, String> {
         }
     }
 
-    let output = crate::process::hidden_command("pdftotext")
-        .args(["-layout", "-enc", "UTF-8"])
-        .arg(path)
-        .arg("-")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("Poppler pdfinfo or pdftotext is required: {error}"))?;
+    let output = crate::process::output_bounded(
+        crate::process::hidden_command("pdftotext")
+            .args(["-layout", "-enc", "UTF-8"])
+            .arg(path)
+            .arg("-"),
+        PDF_TEXT_TOOL_TIMEOUT,
+        Some(cancel),
+    )
+    .map_err(|error| error.describe("Poppler pdfinfo or pdftotext", PDF_TEXT_TOOL_TIMEOUT))?;
     if !output.status.success() {
         return Err(format!(
             "could not determine PDF page count: {}",
@@ -2386,23 +2467,24 @@ fn pdf_page_count(path: &Path) -> Result<usize, String> {
         .max(1))
 }
 
-fn pdftotext_page(path: &Path, page: usize) -> Result<String, String> {
-    let output = crate::process::hidden_command("pdftotext")
-        .args([
-            "-f",
-            &page.to_string(),
-            "-l",
-            &page.to_string(),
-            "-layout",
-            "-enc",
-            "UTF-8",
-        ])
-        .arg(path)
-        .arg("-")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("pdftotext is unavailable: {error}"))?;
+fn pdftotext_page(path: &Path, page: usize, cancel: &AtomicBool) -> Result<String, String> {
+    let output = crate::process::output_bounded(
+        crate::process::hidden_command("pdftotext")
+            .args([
+                "-f",
+                &page.to_string(),
+                "-l",
+                &page.to_string(),
+                "-layout",
+                "-enc",
+                "UTF-8",
+            ])
+            .arg(path)
+            .arg("-"),
+        PDF_TEXT_TOOL_TIMEOUT,
+        Some(cancel),
+    )
+    .map_err(|error| error.describe("pdftotext", PDF_TEXT_TOOL_TIMEOUT))?;
     if !output.status.success() {
         return Err(format!(
             "pdftotext failed: {}",
@@ -2415,7 +2497,7 @@ fn pdftotext_page(path: &Path, page: usize) -> Result<String, String> {
         .to_string())
 }
 
-fn ocr_pdf_page(path: &Path, page: usize) -> Result<String, String> {
+fn ocr_pdf_page(path: &Path, page: usize, cancel: &AtomicBool) -> Result<String, String> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -2426,23 +2508,33 @@ fn ocr_pdf_page(path: &Path, page: usize) -> Result<String, String> {
     std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
     let prefix = temp_dir.join("page");
     let image = prefix.with_extension("png");
-    let render = crate::process::hidden_command("pdftoppm")
-        .args([
-            "-f",
-            &page.to_string(),
-            "-l",
-            &page.to_string(),
-            "-singlefile",
-            "-r",
-            "180",
-            "-png",
-        ])
-        .arg(path)
-        .arg(&prefix)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("pdftoppm is required for OCR: {error}"))?;
+    let render = crate::process::output_bounded(
+        crate::process::hidden_command("pdftoppm")
+            .args([
+                "-f",
+                &page.to_string(),
+                "-l",
+                &page.to_string(),
+                "-singlefile",
+                "-r",
+                "180",
+                "-png",
+            ])
+            .arg(path)
+            .arg(&prefix),
+        OCR_TOOL_TIMEOUT,
+        Some(cancel),
+    );
+    let render = match render {
+        Ok(render) => render,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(match error {
+                crate::process::BoundedOutputError::Spawn(error) => format!("pdftoppm is required for OCR: {error}"),
+                other => other.describe("pdftoppm", OCR_TOOL_TIMEOUT),
+            });
+        }
+    };
     if !render.status.success() {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!(
@@ -2451,10 +2543,21 @@ fn ocr_pdf_page(path: &Path, page: usize) -> Result<String, String> {
         ));
     }
 
-    let result = tesseract_ocr(&image).or_else(|tesseract_error| {
+    let result = ocr_image_file(&image, cancel);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    result
+}
+
+/// OCR one image file: Tesseract when installed, else the Windows OCR engine.
+/// A cancel stops at whichever engine is running and tries no other.
+fn ocr_image_file(image: &Path, cancel: &AtomicBool) -> Result<String, String> {
+    tesseract_ocr(image, cancel).or_else(|tesseract_error| {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(tesseract_error);
+        }
         #[cfg(windows)]
         {
-            windows_ocr(&image).map_err(|windows_error| {
+            windows_ocr(image, cancel).map_err(|windows_error| {
                 format!("{tesseract_error}; Windows OCR failed: {windows_error}")
             })
         }
@@ -2462,21 +2565,20 @@ fn ocr_pdf_page(path: &Path, page: usize) -> Result<String, String> {
         {
             Err(tesseract_error)
         }
-    });
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    result
+    })
 }
 
-fn tesseract_ocr(image: &Path) -> Result<String, String> {
-    let output = crate::process::hidden_command("tesseract")
-        .arg(image)
-        .arg("stdout")
-        .arg("-l")
-        .arg("eng")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("Tesseract OCR is unavailable: {error}"))?;
+fn tesseract_ocr(image: &Path, cancel: &AtomicBool) -> Result<String, String> {
+    let output = crate::process::output_bounded(
+        crate::process::hidden_command("tesseract")
+            .arg(image)
+            .arg("stdout")
+            .arg("-l")
+            .arg("eng"),
+        OCR_TOOL_TIMEOUT,
+        Some(cancel),
+    )
+    .map_err(|error| error.describe("Tesseract OCR", OCR_TOOL_TIMEOUT))?;
     if !output.status.success() {
         return Err(format!(
             "Tesseract OCR failed: {}",
@@ -2487,7 +2589,7 @@ fn tesseract_ocr(image: &Path) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn windows_ocr(image: &Path) -> Result<String, String> {
+fn windows_ocr(image: &Path, cancel: &AtomicBool) -> Result<String, String> {
     const SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -2512,13 +2614,14 @@ $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult]
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $result.Text
 "#;
-    let output = crate::process::hidden_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .env("ARIS_OCR_IMAGE", image)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = crate::process::output_bounded(
+        crate::process::hidden_command("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("ARIS_OCR_IMAGE", image),
+        OCR_TOOL_TIMEOUT,
+        Some(cancel),
+    )
+    .map_err(|error| error.describe("Windows OCR", OCR_TOOL_TIMEOUT))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }

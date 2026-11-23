@@ -1,0 +1,425 @@
+{
+ "root": {
+  "id": "root",
+  "title": "现状（0.4.91 生产）",
+  "what": "每轮用用户这句话检索：session_search 前 2 条（各带前后 5 条消息）+ v2 原子，拼进 system prompt；按整组任意命中计，比其他节点的“前 3 条”宽松",
+  "A": {
+   "test": 0.038,
+   "dev": 0.115,
+   "n": 52,
+   "key": "relearn.json:root_prod_inject"
+  },
+  "B": {
+   "test": 0.492,
+   "dev": 0.548,
+   "n": 59,
+   "key": "recall:root_prod_inject"
+  },
+  "verdict": "base",
+  "note": "注入中位 5,760 字/轮"
+ },
+ "branches": [
+  {
+   "id": "W",
+   "title": "① 存什么",
+   "hint": "写入",
+   "nodes": [
+    {
+     "id": "w1",
+     "title": "v2 原子库",
+     "what": "后台 LLM 抽取 + 逐条审查（现状在用）",
+     "A": {
+      "test": 0.019,
+      "dev": 0.0,
+      "n": 52,
+      "key": "relearn.json:v2_atoms_errq"
+     },
+     "B": {
+      "test": 0.034,
+      "dev": 0.014,
+      "n": 59,
+      "key": "recall:v2_atoms"
+     },
+     "verdict": "bad",
+     "note": "只有 26% 的考题在库里有对应记录；历史实测约 5,285 输入 token/条"
+    },
+    {
+     "id": "w2",
+     "title": "原始会话，不抽取",
+     "what": "会话本身就是记忆，写入成本为 0",
+     "A": {
+      "test": 0.231,
+      "dev": 0.308,
+      "n": 52,
+      "key": "relearn.json:raw_turn_bi_errq"
+     },
+     "B": {
+      "test": 0.695,
+      "dev": 0.699,
+      "n": 59,
+      "key": "recall:raw_msg_bi"
+     },
+     "verdict": "best",
+     "note": "前情回顾的最佳存储；踩坑这里按标注回合判分，等价修法在别处会漏计，可能低估"
+    },
+    {
+     "id": "w3",
+     "title": "教训笔记（v7 补录）",
+     "what": "模型按批把“踩坑→修法”写成短笔记，约每 7 回合 1 次调用",
+     "A": {
+      "test": 0.692,
+      "dev": 0.731,
+      "n": 52,
+      "key": "relearn.json:notes_v7_lesson_rrf_errq_all"
+     },
+     "B": {
+      "test": 0.288,
+      "dev": 0.274,
+      "n": 59,
+      "key": "recall:notes_v7_rrf"
+     },
+     "verdict": "best",
+     "note": "踩坑重现的最佳存储；但只覆盖 51% 的前情考题"
+    },
+    {
+     "id": "w4",
+     "title": "原文 + 笔记混排",
+     "what": "两种存储放进同一个排序",
+     "A": {
+      "test": 0.654,
+      "dev": 0.769,
+      "n": 52,
+      "key": "relearn.json:raw_plus_notes_rrf_errq_all"
+     },
+     "B": {
+      "test": 0.661,
+      "dev": 0.616,
+      "n": 59,
+      "key": "recall:notes_plus_raw_rrf"
+     },
+     "verdict": "bad",
+     "note": "互相稀释，不如各管一类"
+    }
+   ]
+  },
+  {
+   "id": "R",
+   "title": "② 怎么找",
+   "hint": "检索",
+   "nodes": [
+    {
+     "id": "r1",
+     "title": "现有算法（LIKE 计数）",
+     "what": "二元组子串命中个数，无 IDF；当工具用",
+     "A": {
+      "test": 0.115,
+      "dev": 0.308,
+      "n": 52,
+      "key": "relearn.json:raw_prod_like_errq"
+     },
+     "B": {
+      "test": 0.508,
+      "dev": 0.534,
+      "n": 59,
+      "key": "recall:raw_prod_like_tool"
+     },
+     "verdict": "base"
+    },
+    {
+     "id": "r2",
+     "title": "二元组 BM25 · 消息级",
+     "what": "中文切二元组，FTS5 + BM25",
+     "A": {
+      "test": 0.173,
+      "dev": 0.308,
+      "n": 52,
+      "key": "relearn.json:raw_msg_bi_errq"
+     },
+     "B": {
+      "test": 0.695,
+      "dev": 0.699,
+      "n": 59,
+      "key": "recall:raw_msg_bi"
+     },
+     "verdict": "best",
+     "note": "最便宜、两个划分都高；建议第一步就用它"
+    },
+    {
+     "id": "r3",
+     "title": "二元组 BM25 · 回合级",
+     "what": "一问一答 + 工具摘要作为一块",
+     "A": {
+      "test": 0.231,
+      "dev": 0.308,
+      "n": 52,
+      "key": "relearn.json:raw_turn_bi_errq"
+     },
+     "B": {
+      "test": 0.644,
+      "dev": 0.712,
+      "n": 59,
+      "key": "recall:raw_turn_bi"
+     },
+     "verdict": "good"
+    },
+    {
+     "id": "r4",
+     "title": "三元组 BM25（L1 设计稿）",
+     "what": "FTS5 trigram；两字词匹配不到",
+     "A": {
+      "test": 0.212,
+      "dev": 0.308,
+      "n": 52,
+      "key": "relearn.json:raw_turn_tri_errq"
+     },
+     "B": {
+      "test": 0.61,
+      "dev": 0.616,
+      "n": 59,
+      "key": "recall:raw_turn_tri"
+     },
+     "verdict": "same",
+     "note": "纯中文问题上更差：三元组 37%，二元组 54%（46 题）"
+    },
+    {
+     "id": "r5",
+     "title": "混合 RRF",
+     "what": "消息级 + 回合级 + 三元组 三路融合",
+     "B": {
+      "test": 0.661,
+      "dev": 0.671,
+      "n": 59,
+      "key": "recall:raw_hybrid_rrf"
+     },
+     "verdict": "same",
+     "note": "不比消息级 BM25 好"
+    },
+    {
+     "id": "r6",
+     "title": "+ 本地小模型重排",
+     "what": "Qwen3-0.6B（本机已缓存）给前 20 条重排，再与词法排名融合",
+     "B": {
+      "test": 0.746,
+      "dev": 0.699,
+      "n": 59,
+      "key": "recall:rerank_blend"
+     },
+     "verdict": "good",
+     "note": "测试集最高，但比消息级 BM25 只多对 7 题、少对 4 题，开发集持平：收益不确定"
+    },
+    {
+     "id": "r7",
+     "title": "只用小模型排序",
+     "what": "丢掉词法排名，只看小模型",
+     "B": {
+      "test": 0.644,
+      "dev": 0.658,
+      "n": 59,
+      "key": "recall:rerank_qwen3_0.6b"
+     },
+     "verdict": "bad"
+    },
+    {
+     "id": "r8",
+     "title": "+ 近因衰减",
+     "what": "30 天半衰期，越新越靠前",
+     "B": {
+      "test": 0.695,
+      "dev": 0.685,
+      "n": 59,
+      "key": "recall:raw_turn_rrf_recency"
+     },
+     "verdict": "good",
+     "note": "对照（不衰减）为 63%；审查前没锁时间时曾得出相反结论"
+    },
+    {
+     "id": "r9",
+     "title": "只查近 48 小时",
+     "what": "只检索最近两天的会话",
+     "A": {
+      "test": 0.038,
+      "dev": 0.154,
+      "n": 52,
+      "key": "relearn.json:raw_turn_rrf_errq_48h"
+     },
+     "verdict": "bad",
+     "note": "对照（查全部）为 21%"
+    },
+    {
+     "id": "r10",
+     "title": "跨项目检索（教训）",
+     "what": "教训不限本项目",
+     "A": {
+      "test": 0.596,
+      "dev": 0.635,
+      "n": 52,
+      "key": "relearn.json:notes_v7_rrf_errq_all"
+     },
+     "verdict": "good",
+     "note": "只查本项目为 42%"
+    },
+    {
+     "id": "r11",
+     "title": "向量检索",
+     "what": "Qwen3-Embedding-0.6B，需下载约 1.2 GB",
+     "verdict": "pending",
+     "note": "外部受控研究里，换检索器的影响是写入策略的 3–6 倍"
+    },
+    {
+     "id": "r12",
+     "title": "专用重排模型",
+     "what": "Qwen3-Reranker-0.6B，需下载约 1.2 GB",
+     "verdict": "pending",
+     "note": "也是“高置信才送达”门槛的前提"
+    }
+   ]
+  },
+  {
+   "id": "D",
+   "title": "③ 怎么送达",
+   "hint": "送达",
+   "nodes": [
+    {
+     "id": "d1",
+     "title": "每轮注入 system prompt",
+     "what": "现状做法",
+     "verdict": "bad",
+     "note": "同为 30 秒–5 分钟间隔：新回合首请求缓存命中 7%，同回合 42%（各 14/9 个请求，按时间推断换轮，没有空块对照）"
+    },
+    {
+     "id": "d2",
+     "title": "只给工具，模型自己查",
+     "what": "删掉注入，靠模型调用 session_search",
+     "verdict": "bad",
+     "note": "实测只有 3.2% 的回合调用；用户说“之前/上次”时也只查了 3/60 次"
+    },
+    {
+     "id": "d3",
+     "title": "“之前/上次”指代触发",
+     "what": "用户消息里有回指词才检索",
+     "verdict": "same",
+     "note": "3.8% 的回合会触发，但只覆盖 8% 的考题；可作补充"
+    },
+    {
+     "id": "d4",
+     "title": "报错触发（踩坑专用）",
+     "what": "工具报错时按报错查教训，附在工具结果后",
+     "A": {
+      "test": 0.692,
+      "dev": 0.731,
+      "n": 52,
+      "key": "relearn.json:notes_v7_lesson_rrf_errq_all_gated"
+     },
+     "verdict": "best",
+     "note": "已乘上触发门：97% 的重学事件会触发，反例误触发 23%（35 个反例）"
+    },
+    {
+     "id": "d5",
+     "title": "每轮检索，附在用户消息后",
+     "what": "不改 system，前缀缓存保住",
+     "B": {
+      "test": 0.746,
+      "dev": 0.699,
+      "n": 59,
+      "key": "recall:rerank_blend"
+     },
+     "verdict": "pending",
+     "note": "检索准，但“何时不送”还没解决：词法覆盖率和通用小模型都分不开（普通回合 99% 也会送）"
+    }
+   ]
+  },
+  {
+   "id": "C",
+   "title": "④ 怎么整理",
+   "hint": "整理",
+   "nodes": [
+    {
+     "id": "c1",
+     "title": "只追加、不改写",
+     "what": "Mem0 2026 的做法；原始会话天然如此",
+     "verdict": "base"
+    },
+    {
+     "id": "c2",
+     "title": "只检索“教训”类",
+     "what": "教训与事实/决定分开索引",
+     "A": {
+      "test": 0.692,
+      "dev": 0.731,
+      "n": 52,
+      "key": "relearn.json:notes_v7_lesson_rrf_errq_all"
+     },
+     "verdict": "good",
+     "note": "不区分类别为 60%"
+    },
+    {
+     "id": "c3",
+     "title": "新的优先（时间加权）",
+     "what": "在“后来改过主意”的 28 道题上看",
+     "verdict": "good",
+     "note": "加近因 57%，不加 50%；显式“已取代”标记未测"
+    },
+    {
+     "id": "c4",
+     "title": "按原因合并",
+     "what": "10-21 历史实验：377 条 → 224 个原因",
+     "verdict": "same",
+     "note": "召回不变，价值在存储与展示",
+     "historical": true
+    },
+    {
+     "id": "c5",
+     "title": "自动跨会话注入“决定”",
+     "what": "10-21 历史实验 C1 + 10-27 抓取诊断",
+     "verdict": "bad",
+     "note": "开发集 +17pp、测试集未复现；30% 被注入的“决定”是误判（如把「B吧」当长期规矩）",
+     "historical": true
+    }
+   ]
+  }
+ ],
+ "consensus": [
+  [
+   "砍掉 v2 后台抽取",
+   "砍",
+   "砍",
+   "多数系统转向只追加/原文检索",
+   "v2 两项任务都约 2%"
+  ],
+  [
+   "撤掉每轮 system 注入",
+   "撤",
+   "撤",
+   "共识：小而稳的层注入，大的走工具",
+   "缓存代价方向一致，幅度待对照"
+  ],
+  [
+   "原始会话 + 中文 BM25",
+   "主张",
+   "主张",
+   "检索器影响是写入策略的 3–6 倍",
+   "前情现状 49% → 70%"
+  ],
+  [
+   "报错触发召回",
+   "主张",
+   "主张",
+   "Hermes/OpenClaw 有类似做法",
+   "踩坑 4% → 69%（配教训笔记）"
+  ],
+  [
+   "常驻层只收用户确认",
+   "主张",
+   "主张",
+   "Codex/Claude Code 常驻层都很小",
+   "本次未测（审查认为证据最弱）"
+  ],
+  [
+   "向量检索",
+   "后置",
+   "先测再上",
+   "Qwen3-Embedding 换上后受控研究提升明显",
+   "待下载后测"
+  ]
+ ]
+}

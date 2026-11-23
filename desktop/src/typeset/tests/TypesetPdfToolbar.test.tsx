@@ -136,6 +136,27 @@ describe("compiled-PDF toolbar overflow", () => {
     expect(container.querySelector(".pdf-open-external")).toBeTruthy();
   });
 
+  it.each(["warning", "error"] as const)("labels %s diagnostics and keeps the compile log actionable", (severity) => {
+    const onToggleLog = vi.fn();
+    renderToolbar(1200, {
+      status: severity === "error" ? "partial" : "success",
+      diagnosticsCount: 1,
+      onToggleLog,
+      result: {
+        success: severity !== "error", inputPath: "paper.tex", outputPath: "paper.pdf", engine: "latexmk",
+        stdout: "", stderr: "", interrupted: false, timedOut: false, durationMs: 1200,
+        partialOutput: severity === "error", pdfState: severity === "error" ? "partial" : "fresh",
+        rootSourceHash: "source", compiledAtUnixMs: 1,
+        diagnostics: [{ severity, code: "latex", message: "Check the reference" }],
+      },
+    });
+    const button = screen.getByRole("button", { name: `Compile log · 1 ${severity}` });
+    expect(button.classList.contains(`diagnostics-${severity}`)).toBe(true);
+    expect(button.textContent).toContain(`1 ${severity}`);
+    fireEvent.click(button);
+    expect(onToggleLog).toHaveBeenCalledOnce();
+  });
+
   it("applies a custom time limit from the compile options", () => {
     const onSetCompileTimeoutMinutes = vi.fn();
     renderToolbar(1200, { onSetCompileTimeoutMinutes });
@@ -224,7 +245,7 @@ describe("compiled-PDF toolbar overflow", () => {
     expect(screen.getByRole("button", { name: "More PDF actions" })).toBeTruthy();
   });
 
-  it("keeps the pressed page canvas mounted throughout a drag-scroll gesture", async () => {
+  it.each([false, true])("keeps the pressed page mounted through dragging and retains an active selection after release (%s)", async (keepSelection) => {
     const pdfPage = {
       view: [0, 0, 240, 120],
       getViewport: ({ scale }: { scale: number }) => ({
@@ -232,7 +253,9 @@ describe("compiled-PDF toolbar overflow", () => {
         height: 120 * scale,
         transform: [scale, 0, 0, -scale, 0, 120 * scale],
       }),
-      getTextContent: vi.fn(async () => ({ items: [] })),
+      getTextContent: vi.fn(async () => ({ items: [
+        { str: "Page text", transform: [10, 0, 0, 10, 20, 64], width: 48, height: 10 },
+      ] })),
       getAnnotations: vi.fn(async () => []),
       render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
     };
@@ -270,7 +293,24 @@ describe("compiled-PDF toolbar overflow", () => {
       expect(firstPage.querySelector("canvas")).toBeTruthy();
     });
 
+    if (keepSelection) {
+      await waitFor(() => expect(container.querySelector('[data-pdf-page="4"] .typeset-pdf-text-run')).toBeTruthy());
+      const anchor = pages[0].querySelector(".typeset-pdf-text-run")!.firstChild!;
+      const focus = container.querySelector('[data-pdf-page="4"] .typeset-pdf-text-run')!.firstChild!;
+      window.getSelection()!.setBaseAndExtent(anchor, 0, focus, 4);
+      fireEvent(document, new Event("selectionchange"));
+    }
     fireEvent.pointerUp(window, { pointerId: 1 });
+    if (keepSelection) {
+      // A later visibility pass must not destroy the completed selection.
+      fireEvent.scroll(scroll);
+      await waitFor(() => {
+        expect(pages[0].querySelector("canvas")).toBeTruthy();
+        expect(window.getSelection()!.anchorNode?.isConnected).toBe(true);
+      });
+      window.getSelection()!.removeAllRanges();
+      fireEvent(document, new Event("selectionchange"));
+    }
     await waitFor(() => {
       const firstPage = container.querySelectorAll<HTMLElement>(".typeset-pdf-page")[0];
       expect(firstPage.querySelector("canvas")).toBeNull();

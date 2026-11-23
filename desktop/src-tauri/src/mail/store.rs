@@ -104,7 +104,7 @@ pub fn load() -> StoreFile {
 fn save(store: &StoreFile) -> Result<(), String> {
     let path = store_path();
     let body = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    super::atomic_file::write_replace(&path, body).map_err(|e| e.to_string())
+    runtime::write_file_atomically(&path, body).map_err(|e| e.to_string())
 }
 
 /// Run `f` against the on-disk store under the global lock, persisting the

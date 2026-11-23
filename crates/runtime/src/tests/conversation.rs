@@ -731,6 +731,134 @@ fn read_file_image_result_is_split_into_a_tool_result_and_an_image_block() {
 }
 
 #[test]
+fn rendered_pdf_pages_reach_the_model_as_image_blocks_with_ocr_text() {
+    struct ReadsPagesThenAnswers {
+        calls: usize,
+    }
+    impl ApiClient for ReadsPagesThenAnswers {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "pages-1".to_string(),
+                        name: "read_pdf_pages".to_string(),
+                        input: r#"{"path":"review.pdf","pages":"1-2","ocr":true}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => Ok(vec![
+                    AssistantEvent::TextDelta("Read both pages.".to_string()),
+                    AssistantEvent::MessageStop,
+                ]),
+                _ => Err(RuntimeError::new("unexpected extra API call")),
+            }
+        }
+    }
+
+    let tool_executor = StaticToolExecutor::new().register("read_pdf_pages", |_input| {
+        Ok(r#"{"type":"pdf_pages","filePath":"/tmp/review.pdf","pageCount":5,"renderer":"the Windows PDF renderer","dpi":130,
+"pages":[{"page":1,"mediaType":"image/png","bytes":3,"base64":"UEFHRTE=","ocrText":"审稿意见：方法部分"},
+{"page":2,"mediaType":"image/png","bytes":3,"base64":"UEFHRTI="}],"ocrEngine":"Windows OCR","warnings":[]}"#
+            .to_string())
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ReadsPagesThenAnswers { calls: 0 },
+        tool_executor,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+    runtime.run_turn("read the scanned review", None).expect("turn");
+
+    let blocks = &runtime.session().messages[2].blocks;
+    assert_eq!(blocks.len(), 3, "a text summary plus one image per page: {blocks:?}");
+    match &blocks[0] {
+        ContentBlock::ToolResult { is_error, output, .. } => {
+            assert!(!is_error);
+            assert!(!output.contains("UEFHRTE="), "base64 must not stay in the text: {output}");
+            assert!(output.contains("Rendered page(s) 1-2"), "{output}");
+            assert!(output.contains("审稿意见：方法部分"), "{output}");
+        }
+        other => panic!("expected a ToolResult, got {other:?}"),
+    }
+    assert!(matches!(&blocks[1], ContentBlock::Image { data, .. } if data == "UEFHRTE="));
+    assert!(matches!(&blocks[2], ContentBlock::Image { data, .. } if data == "UEFHRTI="));
+}
+
+#[test]
+fn unreadable_pdf_text_publishes_the_page_view_tool_for_the_next_step() {
+    #[derive(Clone)]
+    struct RoutingClient {
+        calls: usize,
+        active_history: std::sync::Arc<std::sync::Mutex<Vec<std::collections::BTreeSet<String>>>>,
+    }
+    impl ApiClient for RoutingClient {
+        fn set_active_tools(&mut self, tool_names: Option<&std::collections::BTreeSet<String>>) {
+            self.active_history
+                .lock()
+                .expect("active history")
+                .push(tool_names.cloned().unwrap_or_default());
+        }
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "read-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: r#"{"path":"scan.pdf"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            } else {
+                Ok(vec![
+                    AssistantEvent::TextDelta("viewing pages".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+    }
+
+    let scanned = crate::pdf_text::PdfTextExtraction {
+        text: String::new(),
+        metadata: crate::pdf_text::PdfExtractionMetadata {
+            method: "pdf_extract".to_string(),
+            quality: crate::pdf_text::PdfTextQuality::NoText,
+            warnings: Vec::new(),
+            page_count: Some(3),
+            pages_without_text: vec![1, 2, 3],
+            exact_content_verified: false,
+            verification_hint: String::new(),
+        },
+    }
+    .text_for_reading();
+    let history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tools = StaticToolExecutor::new().register("read_file", move |_| {
+        Ok(serde_json::json!({ "type": "text", "file": { "content": scanned.clone() } }).to_string())
+    });
+    let routing = DynamicToolRouting {
+        catalog: ["read_file", "read_pdf_pages"].into_iter().map(str::to_string).collect(),
+        active: ["read_file"].into_iter().map(str::to_string).collect(),
+        pinned: ["read_file"].into_iter().map(str::to_string).collect(),
+        max_active: 24,
+    };
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        RoutingClient { calls: 0, active_history: history.clone() },
+        tools,
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    )
+    .with_dynamic_tool_routing(routing);
+
+    runtime.run_turn("read scan.pdf", None).expect("turn");
+    let history = history.lock().expect("active history");
+    assert!(!history[0].contains("read_pdf_pages"), "{history:?}");
+    assert!(history.last().is_some_and(|active| active.contains("read_pdf_pages")), "{history:?}");
+}
+
+#[test]
 fn rich_tool_output_keeps_mcp_image_even_when_tool_reports_error() {
     struct RichExecutor;
     impl ToolExecutor for RichExecutor {
@@ -5564,4 +5692,98 @@ fn soft_checkpoint_under_pressure_keeps_the_previous_turn_verbatim() {
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
         .count();
     assert_eq!(tool_results, 7);
+}
+
+fn image_tool_message(n: usize) -> ConversationMessage {
+    ConversationMessage {
+        role: MessageRole::Tool,
+        blocks: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: format!("call-{n}"),
+                tool_name: "ReadMediaFile".to_string(),
+                output: format!("render {n}"),
+                is_error: false,
+            },
+            ContentBlock::Image { media_type: "image/png".to_string(), data: format!("PIXELS{n}") },
+        ],
+        usage: None,
+    }
+}
+
+fn request_images(messages: &[ConversationMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter_map(|block| match block {
+            ContentBlock::Image { data, .. } => Some(data.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn request_keeps_only_newest_images_and_notes_the_rest_in_their_tool_results() {
+    let mut messages: Vec<ConversationMessage> = (1..=9).map(image_tool_message).collect();
+    let omitted = super::limit_request_images(&mut messages, super::MAX_REQUEST_IMAGES);
+    assert_eq!(omitted, 9 - super::MAX_REQUEST_IMAGES);
+    let kept = request_images(&messages);
+    assert_eq!(kept.len(), super::MAX_REQUEST_IMAGES);
+    assert_eq!(kept.last().map(String::as_str), Some("PIXELS9"), "newest image survives");
+    assert!(!kept.contains(&"PIXELS1".to_string()), "oldest image is dropped");
+    let ContentBlock::ToolResult { output, .. } = &messages[0].blocks[0] else { panic!("tool result") };
+    assert!(output.starts_with("render 1") && output.contains("ReadMediaFile"), "{output}");
+    assert_eq!(messages[0].blocks.len(), 1, "image block removed, tool result kept");
+}
+
+#[test]
+fn omitted_user_images_become_a_visible_note() {
+    let mut messages = vec![
+        ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![
+                ContentBlock::Text { text: "look".to_string() },
+                ContentBlock::Image { media_type: "image/jpeg".to_string(), data: "OLD".to_string() },
+            ],
+            usage: None,
+        },
+        image_tool_message(2),
+    ];
+    assert_eq!(super::limit_request_images(&mut messages, 1), 1);
+    assert!(matches!(&messages[0].blocks[1], ContentBlock::Text { text } if text.contains("already viewed")));
+    assert_eq!(request_images(&messages), vec!["PIXELS2".to_string()]);
+}
+
+#[test]
+fn timeout_retries_resend_a_lighter_request_instead_of_the_identical_one() {
+    struct TimeoutThenOk {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+    impl ApiClient for TimeoutThenOk {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            let mut seen = self.seen.lock().expect("seen");
+            seen.push(request_images(&request.messages).len());
+            if seen.len() == 1 {
+                return Err(RuntimeError::new("OpenAI API error 408 Request Timeout: "));
+            }
+            Ok(vec![AssistantEvent::TextDelta("done".to_string()), AssistantEvent::MessageStop])
+        }
+    }
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = Session::new();
+    for n in 1..=8 {
+        session.messages.push(image_tool_message(n));
+    }
+    let mut runtime = ConversationRuntime::new(
+        session,
+        TimeoutThenOk { seen: seen.clone() },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+    runtime.run_turn("continue", None).expect("turn recovers after one timeout");
+    let seen = seen.lock().expect("seen").clone();
+    assert_eq!(seen, vec![super::MAX_REQUEST_IMAGES, super::TIMEOUT_RETRY_REQUEST_IMAGES]);
+    // the stored session still has every image
+    assert_eq!(request_images(&runtime.session().messages).len(), 8);
 }

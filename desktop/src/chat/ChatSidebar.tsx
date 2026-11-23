@@ -18,6 +18,7 @@ import type {
   RemoteAgentWorkspace,
 } from "../types";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
 import ChatWorkspaceSwitcher from "./ChatWorkspaceSwitcher";
@@ -231,8 +232,9 @@ export default function ChatSidebar({
     () => groupSessionsByProject(
       sessions.filter((session) => !session.pinned && !session.remoteAgent),
       projects,
+      language,
     ),
-    [projects, sessions],
+    [language, projects, sessions],
   );
   const orderedGroups = useMemo(() => {
     const order = new Map(
@@ -272,15 +274,15 @@ export default function ChatSidebar({
   ))?.projectId ?? projects[0]?.id ?? "default";
   const workspaceName = remoteMode
     ? (selectedRemotePeer?.displayName ?? selectedRemoteWorkspace?.nodeName
-      ?? (language === "cn" ? "远程电脑" : "Remote computer"))
-    : (language === "cn" ? "本机" : "This computer");
+      ?? (tr(language, "远程电脑", "Remote computer", "Equipo remoto")))
+    : (tr(language, "本机", "This computer", "Este equipo"));
   const workspaceDescription = remoteMode
     ? (selectedRemoteProject?.title
       ?? (remoteBusy
-        ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
-        : (language === "cn" ? "选择远程项目" : "Choose a remote project")))
+        ? (tr(language, "正在读取远程项目…", "Loading remote projects…", "Cargando proyectos remotos…"))
+        : (tr(language, "选择远程项目", "Choose a remote project", "Elige un proyecto remoto"))))
     : (projects.find((project) => project.id === defaultNewTaskProjectId)?.name
-      ?? (language === "cn" ? "项目、模型与工具" : "Projects, models, and tools"));
+      ?? (tr(language, "项目、模型与工具", "Projects, models, and tools", "Proyectos, modelos y herramientas")));
 
   const requestLocalNewChat = useCallback((projectId?: string) => {
     const targetProjectId = projectId ?? defaultNewTaskProjectId;
@@ -836,7 +838,7 @@ export default function ChatSidebar({
       <button
         className="chat-session-menu-btn"
         onClick={(event) => toggleSessionMenu(event, session.id)}
-        aria-label="Session options"
+        aria-label={tr(language, "会话选项", "Session options", "Opciones de la sesión")}
         aria-haspopup="true"
         aria-expanded={openMenuId === session.id && openMenu?.kind === "session"}
       >
@@ -860,7 +862,7 @@ export default function ChatSidebar({
           void onOpenRemote(session.nodeId, session.projectId, session.sessionId);
         }}
       >
-        <span className="chat-session-title" title={session.title}>{session.title || (language === "cn" ? "未命名对话" : "Untitled chat")}</span>
+        <span className="chat-session-title" title={session.title}>{session.title || (tr(language, "未命名对话", "Untitled chat", "Chat sin título"))}</span>
         {session.model && <small className="chat-remote-session-meta">{session.model}</small>}
       </button>
     );
@@ -908,15 +910,15 @@ export default function ChatSidebar({
           {remoteMode ? (
             <>
               <div className="chat-sidebar-label chat-projects-label">
-                {language === "cn" ? "远程项目" : "Remote projects"}
+                {tr(language, "远程项目", "Remote projects", "Proyectos remotos")}
               </div>
               {!selectedRemoteWorkspace && (
                 <div className="chat-session-empty">
                   {selectedRemotePeer && !selectedRemotePeer.connected
-                    ? (language === "cn" ? "这台电脑当前离线。" : "This computer is offline.")
+                    ? (tr(language, "这台电脑当前离线。", "This computer is offline.", "Este equipo está sin conexión."))
                     : remoteBusy
-                      ? (language === "cn" ? "正在读取远程项目…" : "Loading remote projects…")
-                      : (language === "cn" ? "远程项目暂不可用。" : "Remote projects are unavailable.")}
+                      ? (tr(language, "正在读取远程项目…", "Loading remote projects…", "Cargando proyectos remotos…"))
+                      : (tr(language, "远程项目暂不可用。", "Remote projects are unavailable.", "Los proyectos remotos no están disponibles."))}
                 </div>
               )}
               {selectedRemoteWorkspace?.projects.map((project) => {
@@ -967,18 +969,18 @@ export default function ChatSidebar({
                         {!history && (
                           <div className="chat-session-empty chat-remote-loading">
                             <SvgIcon name="spinner" size={13} />
-                            {language === "cn" ? "正在读取远程会话…" : "Loading remote conversations…"}
+                            {tr(language, "正在读取远程会话…", "Loading remote conversations…", "Cargando conversaciones remotas…")}
                           </div>
                         )}
                         {history?.sessions.map(renderRemoteSessionItem)}
                         {history && history.sessions.length === 0 && (
                           <div className="chat-session-empty">
-                            {language === "cn" ? "这个项目还没有对话。" : "No conversations in this project yet."}
+                            {tr(language, "这个项目还没有对话。", "No conversations in this project yet.", "Este proyecto aún no tiene conversaciones.")}
                           </div>
                         )}
                         {history?.hasMore && (
                           <div className="chat-session-empty">
-                            {language === "cn" ? "显示最近 50 个会话" : "Showing the latest 50 conversations"}
+                            {tr(language, "显示最近 50 个会话", "Showing the latest 50 conversations", "Mostrando las 50 conversaciones más recientes")}
                           </div>
                         )}
                       </div>
@@ -1008,7 +1010,7 @@ export default function ChatSidebar({
                 );
               })()}
               <div className="chat-sidebar-label chat-projects-label">
-                {language === "cn" ? "本机项目" : "Local projects"}
+                {tr(language, "本机项目", "Local projects", "Proyectos locales")}
               </div>
               {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
               {orderedGroups.map((group) => {
@@ -1119,8 +1121,8 @@ export default function ChatSidebar({
                   }}
                 >
                   {session.pinned
-                    ? (language === "cn" ? "取消置顶" : "Unpin")
-                    : (language === "cn" ? "置顶" : "Pin")}
+                    ? (tr(language, "取消置顶", "Unpin", "Desfijar"))
+                    : (tr(language, "置顶", "Pin", "Fijar"))}
                   <span className="chat-session-menu-key">P</span>
                 </button>
                 <button
@@ -1132,8 +1134,8 @@ export default function ChatSidebar({
                   }}
                 >
                   {unreadIds.has(session.id)
-                    ? (language === "cn" ? "标为已读" : "Mark as read")
-                    : (language === "cn" ? "标为未读" : "Mark as unread")}
+                    ? (tr(language, "标为已读", "Mark as read", "Marcar como leído"))
+                    : (tr(language, "标为未读", "Mark as unread", "Marcar como no leído"))}
                   <span className="chat-session-menu-key">U</span>
                 </button>
                 <button
@@ -1144,7 +1146,7 @@ export default function ChatSidebar({
                     closeMenu();
                   }}
                 >
-                  {language === "cn" ? "重命名" : "Rename"}
+                  {tr(language, "重命名", "Rename", "Cambiar nombre")}
                   <span className="chat-session-menu-key">R</span>
                 </button>
                 <div className="chat-session-menu-divider" role="separator" />
@@ -1157,7 +1159,7 @@ export default function ChatSidebar({
                     closeMenu();
                   }}
                 >
-                  {language === "cn" ? "删除" : "Delete"}
+                  {tr(language, "删除", "Delete", "Eliminar")}
                   <span className="chat-session-menu-key">D</span>
                 </button>
               </>
@@ -1176,7 +1178,7 @@ export default function ChatSidebar({
                     closeMenu();
                   }}
                 >
-                  {language === "cn" ? "新建任务" : "New task"}
+                  {tr(language, "新建任务", "New task", "Nueva tarea")}
                 </button>
                 {project?.path && (
                   <button
@@ -1187,7 +1189,7 @@ export default function ChatSidebar({
                       closeMenu();
                     }}
                   >
-                    {language === "cn" ? "在资源管理器中显示" : "Reveal in Explorer"}
+                    {tr(language, "在资源管理器中显示", "Reveal in Explorer", "Mostrar en el Explorador")}
                   </button>
                 )}
                 {isRemovable && (
@@ -1202,7 +1204,7 @@ export default function ChatSidebar({
                         closeMenu();
                       }}
                     >
-                      {language === "cn" ? "从列表中移除项目" : "Remove project"}
+                      {tr(language, "从列表中移除项目", "Remove project", "Quitar proyecto")}
                     </button>
                   </>
                 )}

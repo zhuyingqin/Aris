@@ -18,7 +18,7 @@ import {
   screenshotPin,
   type ScreenshotOverlayContext,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
 import ScreenshotToolbar from "./ScreenshotToolbar";
 import { decodeImage } from "./decodeImage";
 import { isScreenshotPreviewMode, previewOverlayCapture } from "./screenshotPreview";
@@ -91,6 +91,47 @@ function clampPoint(point: Point, bounds: Rect): Point {
   };
 }
 
+const OVERLAY_COPY = {
+  cn: {
+    hintIdle: "拖动选择区域，或点击某个窗口直接框住它",
+    hintReady: "拖动边角可调整 · 双击或回车复制 · Ctrl+T 钉住 · Esc 取消",
+    saving: "正在处理…",
+    failed: "截图失败：",
+    tools: {
+      rect: "矩形", ellipse: "椭圆", arrow: "箭头", pen: "画笔",
+      highlight: "荧光笔", mosaic: "马赛克", text: "文字",
+      undo: "撤销", redo: "重做", color: "颜色", width: "粗细",
+      cancel: "取消", copy: "复制", pin: "钉住", attach: "发送到聊天",
+    },
+  },
+  en: {
+    hintIdle: "Drag to select a region, or click a window to capture it",
+    hintReady:
+      "Drag the edges to adjust · Double-click or Enter to copy · Ctrl+T to pin · Esc to cancel",
+    saving: "Working…",
+    failed: "Screenshot failed: ",
+    tools: {
+      rect: "Rectangle", ellipse: "Ellipse", arrow: "Arrow", pen: "Pen",
+      highlight: "Highlighter", mosaic: "Mosaic", text: "Text",
+      undo: "Undo", redo: "Redo", color: "Color", width: "Stroke width",
+      cancel: "Cancel", copy: "Copy", pin: "Pin", attach: "Send to chat",
+    },
+  },
+  es: {
+    hintIdle: "Arrastra para seleccionar una zona o haz clic en una ventana para capturarla",
+    hintReady:
+      "Arrastra los bordes para ajustar · Doble clic o Intro para copiar · Ctrl+T para fijar · Esc para cancelar",
+    saving: "Procesando…",
+    failed: "Error en la captura: ",
+    tools: {
+      rect: "Rectángulo", ellipse: "Elipse", arrow: "Flecha", pen: "Lápiz",
+      highlight: "Resaltador", mosaic: "Mosaico", text: "Texto",
+      undo: "Deshacer", redo: "Rehacer", color: "Color", width: "Grosor del trazo",
+      cancel: "Cancelar", copy: "Copiar", pin: "Fijar", attach: "Enviar al chat",
+    },
+  },
+} satisfies Record<Language, unknown>;
+
 export default function ScreenshotOverlay() {
   const language = useStore((state) => state.language);
   const [context, setContext] = useState<ScreenshotOverlayContext | null>(null);
@@ -131,32 +172,7 @@ export default function ScreenshotOverlay() {
     );
   }, []);
 
-  const copy = language === "cn"
-    ? {
-        hintIdle: "拖动选择区域，或点击某个窗口直接框住它",
-        hintReady: "拖动边角可调整 · 双击或回车复制 · Ctrl+T 钉住 · Esc 取消",
-        saving: "正在处理…",
-        failed: "截图失败：",
-        tools: {
-          rect: "矩形", ellipse: "椭圆", arrow: "箭头", pen: "画笔",
-          highlight: "荧光笔", mosaic: "马赛克", text: "文字",
-          undo: "撤销", redo: "重做", color: "颜色", width: "粗细",
-          cancel: "取消", copy: "复制", pin: "钉住", attach: "发送到聊天",
-        },
-      }
-    : {
-        hintIdle: "Drag to select a region, or click a window to capture it",
-        hintReady:
-          "Drag the edges to adjust · Double-click or Enter to copy · Ctrl+T to pin · Esc to cancel",
-        saving: "Working…",
-        failed: "Screenshot failed: ",
-        tools: {
-          rect: "Rectangle", ellipse: "Ellipse", arrow: "Arrow", pen: "Pen",
-          highlight: "Highlighter", mosaic: "Mosaic", text: "Text",
-          undo: "Undo", redo: "Redo", color: "Color", width: "Stroke width",
-          cancel: "Cancel", copy: "Copy", pin: "Pin", attach: "Send to chat",
-        },
-      };
+  const copy = OVERLAY_COPY[language];
 
   const cancel = useCallback(() => {
     void screenshotCancel();

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "rubrics": [
+    {
+      "id": "literature-review",
+      "title": { "en": "Literature review standards", "cn": "综述写作标准", "es": "Normas de revisión de literatura" },
+      "appliesWhen": ["review", "related work", "survey", "state of the art", "literature", "compare", "revisión", "estado del arte", "trabajos relacionados", "literatura", "comparar", "综述", "相关工作", "文献", "对比", "比较"],
+      "criteria": [
+        { "id": "page-level-evidence", "severity": "critical", "check": "Every number, result or specific claim attributed to a published work cites that work and the page or section it comes from, and the cited passage in the evidence supports it." },
+        { "id": "comparable-protocols", "severity": "high", "check": "Results of different works are compared as better or worse only when they share the dataset or benchmark, the metric and the protocol, and the answer says so; otherwise the answer states that the numbers are not directly comparable." },
+        { "id": "shown-vs-proposed", "severity": "medium", "check": "The answer separates what a cited work demonstrates from what the review itself infers or proposes, with wording that marks the latter (for example \"we propose\", \"this suggests\")." },
+        { "id": "version-scope", "severity": "medium", "check": "Results from one version of a paper or system are not presented as properties of a later version, product or deployment unless the evidence covers that version." },
+        { "id": "selection-stated", "severity": "low", "check": "When the answer draws conclusions about a field, it says how the works discussed were chosen and that the selection is not exhaustive when it is not." }
+      ]
+    }
+  ]
+}

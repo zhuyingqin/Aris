@@ -52,10 +52,10 @@ pub(super) fn raster_image(
         .raster_versions
         .iter()
         .find(|v| v.index == index)
-        .ok_or("图片版本不存在。")?;
+        .ok_or(runtime::ui_lang::tr_static("图片版本不存在。", "The image version does not exist.", "La versión de la imagen no existe."))?;
     let bytes = store::read_artifact(workspace, &run.id, &version.path, store::MAX_SOURCE_BYTES)?;
     if store::hash(&bytes) != version.hash {
-        return Err("图片版本完整性检查失败。".into());
+        return Err(runtime::ui_lang::tr_static("图片版本完整性检查失败。", "The image version failed its integrity check.", "La versión de la imagen no superó la comprobación de integridad.").into());
     }
     api::validate_image_bytes(bytes)
 }
@@ -126,7 +126,7 @@ pub async fn figures_select_raster(
     let workspace = project(&app, &project_id)?;
     let jobs = active_runs().lock().map_err(|e| e.to_string())?;
     if jobs.contains_key(&(project_id.clone(), id.clone())) {
-        return Err("请等待当前任务完成。".into());
+        return Err(runtime::ui_lang::tr_static("请等待当前任务完成。", "Wait for the current task to finish.", "Espera a que termine la tarea actual.").into());
     }
     let run = store::load(&workspace, &id)?;
     raster_image(&workspace, &run, index)?;
@@ -234,20 +234,21 @@ pub async fn figures_edit_image(
     input: EditImageInput,
 ) -> Result<FigureView, String> {
     let workspace = project(&app, &input.project_id)?;
+    crate::official_plugins::require_in(&workspace, runtime::plugins::BUILTIN_FIGURES)?;
     if input.prompt.trim().is_empty() || input.prompt.len() > 4000 {
-        return Err("请填写修改要求，最多 4000 字节。".into());
+        return Err(runtime::ui_lang::tr_static("请填写修改要求，最多 4000 字节。", "Describe the change you want, in at most 4000 bytes.", "Describe el cambio que quieres, en 4000 bytes como máximo.").into());
     }
     if input.mask_base64.len() > 6 * 1024 * 1024 {
-        return Err("圈选蒙版过大。".into());
+        return Err(runtime::ui_lang::tr_static("圈选蒙版过大。", "The selection mask is too large.", "La máscara de selección es demasiado grande.").into());
     }
     let mask_bytes = base64::engine::general_purpose::STANDARD
         .decode(&input.mask_base64)
-        .map_err(|_| "圈选蒙版编码无效。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("圈选蒙版编码无效。", "The selection mask encoding is invalid.", "La codificación de la máscara de selección no es válida."))?;
     // Validate the base and mask before any paid request is recorded or sent.
     let run = ensure_raster(&workspace, &input.id)?;
     let original = raster_image(&workspace, &run, input.base_index)?;
     if store::hash(&original.bytes) != input.expected_hash {
-        return Err("图片已变更，请重新圈选。".into());
+        return Err(runtime::ui_lang::tr_static("图片已变更，请重新圈选。", "The image has changed. Select the area again.", "La imagen cambió. Vuelve a seleccionar la zona.").into());
     }
     let mask = api::validate_edit_mask(mask_bytes.clone(), &original)?;
     let mut prepared = crate::image_api::prepare_figure_edit(
@@ -258,19 +259,19 @@ pub async fn figures_edit_image(
         let mut expected = identity.clone();
         expected.transport = prepared.identity.transport.clone();
         if expected != prepared.identity {
-            return Err("SomniImage 连接已变更，请用此图片新建任务后再修改。".into());
+            return Err(runtime::ui_lang::tr_static("SomniImage 连接已变更，请用此图片新建任务后再修改。", "The SomniImage connection has changed. Start a new task with this image before editing it.", "La conexión de SomniImage cambió. Crea una tarea nueva con esta imagen antes de editarla.").into());
         }
     }
     let executor = prompt::executor(&run)?;
     let key = (input.project_id.clone(), input.id.clone());
     let mut jobs = active_runs().lock().map_err(|e| e.to_string())?;
     if jobs.contains_key(&key) {
-        return Err("请等待当前任务完成。".into());
+        return Err(runtime::ui_lang::tr_static("请等待当前任务完成。", "Wait for the current task to finish.", "Espera a que termine la tarea actual.").into());
     }
     // Reload under the same lock used by start/review/delete; no double submit.
     let run = store::load(&workspace, &input.id)?;
     if !edit_allowed(&run) {
-        return Err("当前任务不能修改图片；请先处理未决请求或新建任务。".into());
+        return Err(runtime::ui_lang::tr_static("当前任务不能修改图片；请先处理未决请求或新建任务。", "This task cannot edit the image. Handle the pending request first or start a new task.", "Esta tarea no puede editar la imagen. Atiende primero la solicitud pendiente o crea una tarea nueva.").into());
     }
     let previous_status = run.status.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -413,7 +414,7 @@ fn edit_once(
             return Err(error);
         }
     };
-    let edited = response.images.first().ok_or("没有返回修改后的图片。")?;
+    let edited = response.images.first().ok_or(runtime::ui_lang::tr_static("没有返回修改后的图片。", "No edited image was returned.", "No se devolvió la imagen editada."))?;
     runtime::write_file_atomically(
         &dir.join(format!("{}.result.{}", request.id, edited.extension)),
         &edited.bytes,

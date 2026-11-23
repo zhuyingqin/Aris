@@ -8,3 +8,6 @@ desktop/scripts/macos-signing.sh text eol=lf
 crates/runtime/src/tests/fixtures/*.pdf binary
 # Native Word fixtures are ZIP packages and must not undergo newline conversion.
 crates/runtime/src/tests/fixtures/*.docx binary
+
+# Visual editor fixture offsets must match CodeMirror LF-normalized documents.
+desktop/src/typeset/tests/fixtures/*.tex text eol=lf

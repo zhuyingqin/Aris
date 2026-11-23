@@ -6,7 +6,7 @@ import {
 } from "../api/tauri";
 import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
-import { useStore, type Language } from "../store";
+import { LANGUAGE_OPTIONS, tr, useStore, type Language } from "../store";
 import type { ConfigPatch, ConfigView, SystemPromptView, UserPromptView } from "../types";
 import { SETTINGS_COPY } from "./i18n";
 import { formatUsageDate, formatUsageExact } from "./settingsFormatters";
@@ -123,7 +123,7 @@ export default function GeneralSettings({
             onChange={(value) => void preferences.save("theme", () => setTheme(value, { requirePersistence: true }))} options={[
             { value: "light", label: copy.light, icon: <ThemePreview theme="light" /> },
             { value: "dark", label: copy.dark, icon: <ThemePreview theme="dark" /> },
-            { value: "system", label: language === "cn" ? "跟随系统" : "System", icon: <span className="appearance-system-preview"><SvgIcon name="desktop" size={28} /></span> },
+            { value: "system", label: tr(language, "跟随系统", "System", "Sistema"), icon: <span className="appearance-system-preview"><SvgIcon name="desktop" size={28} /></span> },
           ]} />
         </SettingRow>
         <SettingRow title={pageCopy.color} feedback={feedback("color")}>
@@ -131,21 +131,19 @@ export default function GeneralSettings({
             onChange={(value) => void preferences.save("color", () => value === "custom" ? patchAppearance({ customAccent: "#7c3aed" }) : selectAccentPreset(value))}
             options={[...UI_COLOR_PRESETS.map((value) => ({ value, label: pageCopy.colors[value],
               icon: <span className="settings-color-swatch" data-color={value} aria-hidden="true" />,
-            })), { value: "custom", label: language === "cn" ? "自定义" : "Custom", icon: <span className="appearance-rainbow" aria-hidden="true" /> }]} />
+            })), { value: "custom", label: tr(language, "自定义", "Custom", "Personalizado"), icon: <span className="appearance-rainbow" aria-hidden="true" /> }]} />
         </SettingRow>
         <AppearanceSettings language={language} preferences={preferences} section="basic" />
         <SettingRow title={copy.languageTitle} description={pageCopy.languageDescription} feedback={feedback("language")}>
           <SettingsChoice label={copy.languageTitle} value={language}
-            disabled={preferences.feedback.language?.state === "saving"} options={[
-            { value: "cn", label: "简体中文" }, { value: "en", label: "English" },
-          ]} onChange={(value) => void preferences.save("language", () => saveLanguage(value))} />
+            disabled={preferences.feedback.language?.state === "saving"} options={LANGUAGE_OPTIONS} onChange={(value) => void preferences.save("language", () => saveLanguage(value))} />
         </SettingRow>
         <TypographySettings language={language} preferences={preferences} />
       </SettingsSection>
 
       <AppearanceSettings language={language} preferences={preferences} section="chat" />
       <SettingsSection title={pageCopy.workspace}>
-        <SettingRow title={pageCopy.mail} feedback={feedback("mail")}>
+        <SettingRow title={pageCopy.mail} description={pageCopy.mailDescription} feedback={feedback("mail")}>
           <button type="button" className="settings-switch" role="switch" aria-label={copy.moduleMailTitle}
             aria-checked={!hideMail} onClick={() => void preferences.save("mail", () => setHideMail(!hideMail, { requirePersistence: true }))}><span /></button>
         </SettingRow>

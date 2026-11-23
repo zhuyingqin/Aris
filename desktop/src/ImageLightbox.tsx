@@ -59,6 +59,26 @@ const LIGHTBOX_COPY = {
     loading: "Loading image…",
     failed: "This image cannot be displayed.",
   },
+  es: {
+    imageLabel: "Imagen",
+    zoomOut: "Alejar",
+    zoomIn: "Acercar",
+    actualSize: "Tamaño real",
+    fit: "Ajustar a la ventana",
+    copyImage: "Copiar imagen",
+    copyingImage: "Copiando imagen…",
+    imageCopied: "Imagen copiada",
+    imageCopyFailed: "No se pudo copiar la imagen. Inténtalo de nuevo.",
+    pathCopyFailed: "No se pudo copiar la ruta. Inténtalo de nuevo.",
+    retry: "Recargar imagen",
+    copyPath: "Copiar ruta",
+    copied: "Copiado",
+    reveal: "Mostrar en el explorador de archivos",
+    openExternal: "Abrir con la app del sistema",
+    close: "Cerrar",
+    loading: "Cargando imagen…",
+    failed: "No se puede mostrar esta imagen.",
+  },
 } as const;
 
 function clampZoom(value: number): number {

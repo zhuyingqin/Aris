@@ -1,0 +1,133 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SomniQ 记忆模块实验树</title><style>
+.viz-root{color-scheme:light;--surface-1:#fcfcfb;--surface-2:#f3f2ef;--line:#e4e2dd;--text-primary:#0b0b0b;
+--text-secondary:#52514e;--text-muted:#7a7873;--series-1:#2a78d6;--series-2:#eb6834;--good:#0ca30c;--bad:#d03b3b;
+--warn:#b07a00;--best-ring:#2a78d6}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .viz-root{color-scheme:dark;
+--surface-1:#1a1a19;--surface-2:#242423;--line:#383835;--text-primary:#f0efec;--text-secondary:#c3c2b7;
+--text-muted:#9a998f;--series-1:#3987e5;--series-2:#d95926;--good:#0ca30c;--bad:#e66767;--warn:#fab219;--best-ring:#3987e5}}
+:root[data-theme="dark"] .viz-root{color-scheme:dark;--surface-1:#1a1a19;--surface-2:#242423;--line:#383835;
+--text-primary:#f0efec;--text-secondary:#c3c2b7;--text-muted:#9a998f;--series-1:#3987e5;--series-2:#d95926;
+--good:#0ca30c;--bad:#e66767;--warn:#fab219;--best-ring:#3987e5}
+body{margin:0;background:var(--surface-1)}
+.viz-root{background:var(--surface-1);color:var(--text-primary);font:14px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+max-width:1280px;margin:0 auto;padding:28px 24px 60px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:34px 0 10px}
+.sub{color:var(--text-secondary);margin:0 0 18px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.kpi{background:var(--surface-2);border-radius:10px;padding:14px 16px}
+.kpi .k{color:var(--text-secondary);font-size:13px}.kpi .v{font-size:30px;font-weight:600;margin:2px 0}
+.kpi .v small{font-size:15px;color:var(--text-muted);font-weight:400}.kpi .d{color:var(--text-secondary);font-size:12.5px}
+.legend{display:flex;gap:16px;align-items:center;color:var(--text-secondary);font-size:13px;margin:6px 0 12px;flex-wrap:wrap}
+.sw{display:inline-block;width:12px;height:8px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.tree{position:relative}
+.rootwrap{display:flex;justify-content:center}
+.rootwrap .node{width:420px;max-width:100%}
+.trunk{height:18px;border-left:1px solid var(--line);margin-left:50%}
+.branches{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;border-top:1px solid var(--line);padding-top:14px}
+.bhead{font-weight:600;margin-bottom:8px}.bhead span{color:var(--text-muted);font-weight:400;font-size:12px;margin-left:6px}
+.blist{border-left:1px solid var(--line);padding-left:10px;display:flex;flex-direction:column;gap:9px}
+.node{background:var(--surface-1);border:1px solid var(--line);border-radius:9px;padding:9px 11px;position:relative}
+.blist .node::before{content:"";position:absolute;left:-11px;top:18px;width:10px;border-top:1px solid var(--line)}
+.node.v-best{border:2px solid var(--best-ring)}
+.node.root{background:var(--surface-2)}
+.nhead{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ntitle{font-weight:600}
+.chip{font-size:11.5px;border-radius:999px;padding:0 7px;border:1px solid var(--line);color:var(--text-secondary);white-space:nowrap}
+.c-best{color:var(--best-ring);border-color:var(--best-ring)}.c-good{color:var(--good);border-color:var(--good)}
+.c-bad{color:var(--bad);border-color:var(--bad)}.c-pending{color:var(--warn);border-color:var(--warn)}
+.hist{font-size:11px;color:var(--text-muted)}
+.what{color:var(--text-secondary);font-size:12.5px;margin:2px 0 6px}
+.meter{display:grid;grid-template-columns:30px 1fr 38px;align-items:center;gap:6px;font-size:12px;margin:3px 0;cursor:default}
+.mname{color:var(--text-secondary)}.mval{text-align:right;font-variant-numeric:tabular-nums;color:var(--text-primary)}
+.track{position:relative;height:8px;background:var(--surface-2);border-radius:4px}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0}
+.fill.s1{background:var(--series-1)}.fill.s2{background:var(--series-2)}
+.tick{position:absolute;top:-3px;bottom:-3px;width:0;border-left:1.5px solid var(--text-muted);z-index:2}
+.note{font-size:12px;color:var(--text-secondary);margin-top:5px}
+#tip{position:fixed;pointer-events:none;background:var(--text-primary);color:var(--surface-1);font-size:12px;
+padding:5px 8px;border-radius:6px;opacity:0;transition:opacity .08s;z-index:9;max-width:320px}
+table{border-collapse:collapse;width:100%;font-size:13px}td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--text-secondary);font-weight:600}
+.plan li{margin:4px 0}.muted{color:var(--text-muted)}
+details summary{cursor:pointer;color:var(--text-secondary)}
+@media (max-width:980px){.branches{grid-template-columns:1fr 1fr}.kpis{grid-template-columns:1fr}}
+@media (max-width:640px){.branches{grid-template-columns:1fr}.rootwrap .node{width:auto;flex:1}.viz-root{padding:18px 12px 40px}}
+</style></head><body><div class="viz-root">
+<h1>SomniQ 记忆模块实验树</h1>
+<p class="sub">本机 426 个真实会话、1,560 个用户回合；两类考题：<b>踩坑重现</b>（52 道测试题，以前修好的错又犯了，能不能把修法找回来）和 <b>前情回顾</b>（59 道测试题，几周后问以前定过的事，能不能找到那一轮）。
+数字 = 测试集里“送到模型面前的前 3 条记忆中有正确答案”的比例；条形上的竖线是现状。2026-11-22，分支 <code>exp/memory-design</code>。</p>
+<div class="kpis">
+<div class="kpi"><div class="k">踩坑重现 · 找回率</div><div class="v">69% <small>现状 4%</small></div><div class="d">教训笔记 + 报错触发 + 跨项目；52 题里多对 34、少对 0</div></div>
+<div class="kpi"><div class="k">前情回顾 · 找回率</div><div class="v">70% <small>现状 49%</small></div><div class="d">原始会话 + 二元组 BM25（消息级）；59 题里多对 15、少对 3；开发集 70% 对 55%</div></div>
+<div class="kpi"><div class="k">每轮注入的缓存代价 · 新回合首请求命中</div><div class="v">7% <small>同间隔不换块 42%</small></div><div class="d">30 秒–5 分钟间隔，样本 14/9 个请求，无空块对照：方向可信，幅度待验证</div></div>
+</div>
+<h2>实验树</h2>
+<div class="legend"><span><span class="sw" style="background:var(--series-2)"></span>踩坑重现</span>
+<span><span class="sw" style="background:var(--series-1)"></span>前情回顾</span>
+<span>竖线 = 现状</span><span>★ 推荐 · ✓ 更好 · ＝ 持平 · ✗ 更差 · ⏳ 待验证</span><span class="muted">悬停条形看开发集与样本数</span></div>
+<div class="tree"><div class="rootwrap"><div class="node v-base root" id="root"><div class="nhead"><span class="ntitle">现状（0.4.91 生产）</span><span class="chip c-base">○ 基线</span></div><div class="what">每轮用用户这句话检索：session_search 前 2 条（各带前后 5 条消息）+ v2 原子，拼进 system prompt；按整组任意命中计，比其他节点的“前 3 条”宽松</div><div class="meter" data-tip="踩坑·测试集 4%（n=52）· 开发集 12%"><span class="mname">踩坑</span><span class="track"><span class="fill s2" style="width:3.8%"></span></span><span class="mval">4%</span></div><div class="meter" data-tip="前情·测试集 49%（n=59）· 开发集 55%"><span class="mname">前情</span><span class="track"><span class="fill s1" style="width:49.2%"></span></span><span class="mval">49%</span></div><div class="note">注入中位 5,760 字/轮</div></div></div><div class="trunk"></div><div class="branches"><div class="branch"><div class="bhead">① 存什么<span>写入</span></div><div class="blist"><div class="node v-bad" id="w1"><div class="nhead"><span class="ntitle">v2 原子库</span><span class="chip c-bad">✗ 更差</span></div><div class="what">后台 LLM 抽取 + 逐条审查（现状在用）</div><div class="meter" data-tip="踩坑·测试集 2%（n=52）· 开发集 0%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:1.9%"></span></span><span class="mval">2%</span></div><div class="meter" data-tip="前情·测试集 3%（n=59）· 开发集 1%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:3.4%"></span></span><span class="mval">3%</span></div><div class="note">只有 26% 的考题在库里有对应记录；历史实测约 5,285 输入 token/条</div></div><div class="node v-best" id="w2"><div class="nhead"><span class="ntitle">原始会话，不抽取</span><span class="chip c-best">★ 推荐</span></div><div class="what">会话本身就是记忆，写入成本为 0</div><div class="meter" data-tip="踩坑·测试集 23%（n=52）· 开发集 31%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:23.1%"></span></span><span class="mval">23%</span></div><div class="meter" data-tip="前情·测试集 70%（n=59）· 开发集 70%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:69.5%"></span></span><span class="mval">70%</span></div><div class="note">前情回顾的最佳存储；踩坑这里按标注回合判分，等价修法在别处会漏计，可能低估</div></div><div class="node v-best" id="w3"><div class="nhead"><span class="ntitle">教训笔记（v7 补录）</span><span class="chip c-best">★ 推荐</span></div><div class="what">模型按批把“踩坑→修法”写成短笔记，约每 7 回合 1 次调用</div><div class="meter" data-tip="踩坑·测试集 69%（n=52）· 开发集 73%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:69.2%"></span></span><span class="mval">69%</span></div><div class="meter" data-tip="前情·测试集 29%（n=59）· 开发集 27%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:28.8%"></span></span><span class="mval">29%</span></div><div class="note">踩坑重现的最佳存储；但只覆盖 51% 的前情考题</div></div><div class="node v-bad" id="w4"><div class="nhead"><span class="ntitle">原文 + 笔记混排</span><span class="chip c-bad">✗ 更差</span></div><div class="what">两种存储放进同一个排序</div><div class="meter" data-tip="踩坑·测试集 65%（n=52）· 开发集 77%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:65.4%"></span></span><span class="mval">65%</span></div><div class="meter" data-tip="前情·测试集 66%（n=59）· 开发集 62%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:66.1%"></span></span><span class="mval">66%</span></div><div class="note">互相稀释，不如各管一类</div></div></div></div><div class="branch"><div class="bhead">② 怎么找<span>检索</span></div><div class="blist"><div class="node v-base" id="r1"><div class="nhead"><span class="ntitle">现有算法（LIKE 计数）</span><span class="chip c-base">○ 基线</span></div><div class="what">二元组子串命中个数，无 IDF；当工具用</div><div class="meter" data-tip="踩坑·测试集 12%（n=52）· 开发集 31%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:11.5%"></span></span><span class="mval">12%</span></div><div class="meter" data-tip="前情·测试集 51%（n=59）· 开发集 53%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:50.8%"></span></span><span class="mval">51%</span></div></div><div class="node v-best" id="r2"><div class="nhead"><span class="ntitle">二元组 BM25 · 消息级</span><span class="chip c-best">★ 推荐</span></div><div class="what">中文切二元组，FTS5 + BM25</div><div class="meter" data-tip="踩坑·测试集 17%（n=52）· 开发集 31%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:17.3%"></span></span><span class="mval">17%</span></div><div class="meter" data-tip="前情·测试集 70%（n=59）· 开发集 70%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:69.5%"></span></span><span class="mval">70%</span></div><div class="note">最便宜、两个划分都高；建议第一步就用它</div></div><div class="node v-good" id="r3"><div class="nhead"><span class="ntitle">二元组 BM25 · 回合级</span><span class="chip c-good">✓ 更好</span></div><div class="what">一问一答 + 工具摘要作为一块</div><div class="meter" data-tip="踩坑·测试集 23%（n=52）· 开发集 31%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:23.1%"></span></span><span class="mval">23%</span></div><div class="meter" data-tip="前情·测试集 64%（n=59）· 开发集 71%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:64.4%"></span></span><span class="mval">64%</span></div></div><div class="node v-same" id="r4"><div class="nhead"><span class="ntitle">三元组 BM25（L1 设计稿）</span><span class="chip c-same">＝ 持平</span></div><div class="what">FTS5 trigram；两字词匹配不到</div><div class="meter" data-tip="踩坑·测试集 21%（n=52）· 开发集 31%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:21.2%"></span></span><span class="mval">21%</span></div><div class="meter" data-tip="前情·测试集 61%（n=59）· 开发集 62%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:61.0%"></span></span><span class="mval">61%</span></div><div class="note">纯中文问题上更差：三元组 37%，二元组 54%（46 题）</div></div><div class="node v-same" id="r5"><div class="nhead"><span class="ntitle">混合 RRF</span><span class="chip c-same">＝ 持平</span></div><div class="what">消息级 + 回合级 + 三元组 三路融合</div><div class="meter" data-tip="前情·测试集 66%（n=59）· 开发集 67%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:66.1%"></span></span><span class="mval">66%</span></div><div class="note">不比消息级 BM25 好</div></div><div class="node v-good" id="r6"><div class="nhead"><span class="ntitle">+ 本地小模型重排</span><span class="chip c-good">✓ 更好</span></div><div class="what">Qwen3-0.6B（本机已缓存）给前 20 条重排，再与词法排名融合</div><div class="meter" data-tip="前情·测试集 75%（n=59）· 开发集 70%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:74.6%"></span></span><span class="mval">75%</span></div><div class="note">测试集最高，但比消息级 BM25 只多对 7 题、少对 4 题，开发集持平：收益不确定</div></div><div class="node v-bad" id="r7"><div class="nhead"><span class="ntitle">只用小模型排序</span><span class="chip c-bad">✗ 更差</span></div><div class="what">丢掉词法排名，只看小模型</div><div class="meter" data-tip="前情·测试集 64%（n=59）· 开发集 66%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:64.4%"></span></span><span class="mval">64%</span></div></div><div class="node v-good" id="r8"><div class="nhead"><span class="ntitle">+ 近因衰减</span><span class="chip c-good">✓ 更好</span></div><div class="what">30 天半衰期，越新越靠前</div><div class="meter" data-tip="前情·测试集 70%（n=59）· 开发集 68%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:69.5%"></span></span><span class="mval">70%</span></div><div class="note">对照（不衰减）为 63%；审查前没锁时间时曾得出相反结论</div></div><div class="node v-bad" id="r9"><div class="nhead"><span class="ntitle">只查近 48 小时</span><span class="chip c-bad">✗ 更差</span></div><div class="what">只检索最近两天的会话</div><div class="meter" data-tip="踩坑·测试集 4%（n=52）· 开发集 15%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:3.8%"></span></span><span class="mval">4%</span></div><div class="note">对照（查全部）为 21%</div></div><div class="node v-good" id="r10"><div class="nhead"><span class="ntitle">跨项目检索（教训）</span><span class="chip c-good">✓ 更好</span></div><div class="what">教训不限本项目</div><div class="meter" data-tip="踩坑·测试集 60%（n=52）· 开发集 64%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:59.6%"></span></span><span class="mval">60%</span></div><div class="note">只查本项目为 42%</div></div><div class="node v-pending" id="r11"><div class="nhead"><span class="ntitle">向量检索</span><span class="chip c-pending">⏳ 待验证</span></div><div class="what">Qwen3-Embedding-0.6B，需下载约 1.2 GB</div><div class="note">外部受控研究里，换检索器的影响是写入策略的 3–6 倍</div></div><div class="node v-pending" id="r12"><div class="nhead"><span class="ntitle">专用重排模型</span><span class="chip c-pending">⏳ 待验证</span></div><div class="what">Qwen3-Reranker-0.6B，需下载约 1.2 GB</div><div class="note">也是“高置信才送达”门槛的前提</div></div></div></div><div class="branch"><div class="bhead">③ 怎么送达<span>送达</span></div><div class="blist"><div class="node v-bad" id="d1"><div class="nhead"><span class="ntitle">每轮注入 system prompt</span><span class="chip c-bad">✗ 更差</span></div><div class="what">现状做法</div><div class="note">同为 30 秒–5 分钟间隔：新回合首请求缓存命中 7%，同回合 42%（各 14/9 个请求，按时间推断换轮，没有空块对照）</div></div><div class="node v-bad" id="d2"><div class="nhead"><span class="ntitle">只给工具，模型自己查</span><span class="chip c-bad">✗ 更差</span></div><div class="what">删掉注入，靠模型调用 session_search</div><div class="note">实测只有 3.2% 的回合调用；用户说“之前/上次”时也只查了 3/60 次</div></div><div class="node v-same" id="d3"><div class="nhead"><span class="ntitle">“之前/上次”指代触发</span><span class="chip c-same">＝ 持平</span></div><div class="what">用户消息里有回指词才检索</div><div class="note">3.8% 的回合会触发，但只覆盖 8% 的考题；可作补充</div></div><div class="node v-best" id="d4"><div class="nhead"><span class="ntitle">报错触发（踩坑专用）</span><span class="chip c-best">★ 推荐</span></div><div class="what">工具报错时按报错查教训，附在工具结果后</div><div class="meter" data-tip="踩坑·测试集 69%（n=52）· 开发集 73%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:69.2%"></span></span><span class="mval">69%</span></div><div class="note">已乘上触发门：97% 的重学事件会触发，反例误触发 23%（35 个反例）</div></div><div class="node v-pending" id="d5"><div class="nhead"><span class="ntitle">每轮检索，附在用户消息后</span><span class="chip c-pending">⏳ 待验证</span></div><div class="what">不改 system，前缀缓存保住</div><div class="meter" data-tip="前情·测试集 75%（n=59）· 开发集 70%"><span class="mname">前情</span><span class="track"><span class="tick" style="left:49.2%"></span><span class="fill s1" style="width:74.6%"></span></span><span class="mval">75%</span></div><div class="note">检索准，但“何时不送”还没解决：词法覆盖率和通用小模型都分不开（普通回合 99% 也会送）</div></div></div></div><div class="branch"><div class="bhead">④ 怎么整理<span>整理</span></div><div class="blist"><div class="node v-base" id="c1"><div class="nhead"><span class="ntitle">只追加、不改写</span><span class="chip c-base">○ 基线</span></div><div class="what">Mem0 2026 的做法；原始会话天然如此</div></div><div class="node v-good" id="c2"><div class="nhead"><span class="ntitle">只检索“教训”类</span><span class="chip c-good">✓ 更好</span></div><div class="what">教训与事实/决定分开索引</div><div class="meter" data-tip="踩坑·测试集 69%（n=52）· 开发集 73%"><span class="mname">踩坑</span><span class="track"><span class="tick" style="left:3.8%"></span><span class="fill s2" style="width:69.2%"></span></span><span class="mval">69%</span></div><div class="note">不区分类别为 60%</div></div><div class="node v-good" id="c3"><div class="nhead"><span class="ntitle">新的优先（时间加权）</span><span class="chip c-good">✓ 更好</span></div><div class="what">在“后来改过主意”的 28 道题上看</div><div class="note">加近因 57%，不加 50%；显式“已取代”标记未测</div></div><div class="node v-same" id="c4"><div class="nhead"><span class="ntitle">按原因合并</span><span class="chip c-same">＝ 持平</span><span class="hist">历史实验</span></div><div class="what">10-21 历史实验：377 条 → 224 个原因</div><div class="note">召回不变，价值在存储与展示</div></div><div class="node v-bad" id="c5"><div class="nhead"><span class="ntitle">自动跨会话注入“决定”</span><span class="chip c-bad">✗ 更差</span><span class="hist">历史实验</span></div><div class="what">10-21 历史实验 C1 + 10-27 抓取诊断</div><div class="note">开发集 +17pp、测试集未复现；30% 被注入的“决定”是误判（如把「B吧」当长期规矩）</div></div></div></div></div></div>
+<h2>结论：选哪个方向</h2>
+<p><b>双通道记忆，系统负责送达，不进 system prompt。</b>“前情回顾”用原始会话检索（不抽取），“踩坑重现”用短教训笔记 + 报错触发；v2 后台抽取撤掉；每轮 system 注入先做对照再撤。常驻的 MEMORY.md / USER.md 只收用户确认的条目——这一条本次没有做实验，依据是 10 月的诊断（30% 自动“决定”是误判）。</p>
+<ol class="plan">
+<li><b>第 1 步</b>：<code>session_search</code> 的中文路径从 LIKE 计数换成二元组 BM25（消息级）+ 近因加权；离线前情找回率 51% → 70%（同为工具检索）。同时开一个对照开关：每轮 system 召回块 开/关，量回答质量与缓存 token。</li>
+<li><b>第 2 步</b>：报错触发召回——工具失败时用报错文本查“教训”类笔记（跨项目），结果附在工具结果后。踩坑 4% → 69%。</li>
+<li><b>第 3 步</b>：教训笔记的写入（v7 补录：约每 7 回合 1 次廉价模型调用，只写“踩坑→修法”）。</li>
+<li><b>第 4 步（需验证）</b>：前情回顾的主动送达——每轮检索、只在高置信时把 1–2 个片段附在用户消息后。缺一个可靠的“何时不送”门槛：需要专用重排模型，再做一次端到端（回答是否变好）试验。</li>
+<li><b>第 5 步</b>：本地向量 / 重排模型（下载与打包决策），以及 L2/L3 晋升（只由用户确认）。</li>
+</ol>
+<h2>三方意见对照</h2>
+<table><tr><th>主张</th><th>Claude 独立方案</th><th>Codex 独立方案</th><th>业界调研</th><th>本机实验</th></tr><tr><td>砍掉 v2 后台抽取</td><td>砍</td><td>砍</td><td>多数系统转向只追加/原文检索</td><td>v2 两项任务都约 2%</td></tr><tr><td>撤掉每轮 system 注入</td><td>撤</td><td>撤</td><td>共识：小而稳的层注入，大的走工具</td><td>缓存代价方向一致，幅度待对照</td></tr><tr><td>原始会话 + 中文 BM25</td><td>主张</td><td>主张</td><td>检索器影响是写入策略的 3–6 倍</td><td>前情现状 49% → 70%</td></tr><tr><td>报错触发召回</td><td>主张</td><td>主张</td><td>Hermes/OpenClaw 有类似做法</td><td>踩坑 4% → 69%（配教训笔记）</td></tr><tr><td>常驻层只收用户确认</td><td>主张</td><td>主张</td><td>Codex/Claude Code 常驻层都很小</td><td>本次未测（审查认为证据最弱）</td></tr><tr><td>向量检索</td><td>后置</td><td>先测再上</td><td>Qwen3-Embedding 换上后受控研究提升明显</td><td>待下载后测</td></tr></table>
+<p class="muted">Kimi：本机没有 Kimi CLI，网关里也没有 Kimi 模型，只做了架构调研（kimi-cli 已归档，接替的 kimi-code 源码里没找到跨会话记忆模块）。</p>
+<h2>独立审查（Codex）指出的问题与处理</h2>
+<ul>
+<li>前情回顾原先检索全部历史 → 已改为“在下一个会话开始时提问”，只看此前的会话。改后<b>近因衰减从“更差”翻成“更好”</b>。</li>
+<li>现状复刻漏了生产的前后 5 条消息窗口、v2 的中文分词把标点粘进词、没按更新时间取前 100、没过滤过期 → 已修，现状前情从 27% 变为 49%。</li>
+<li>踩坑 69% 没乘触发门 → 已乘（本批事件全部过门，数字不变）。缓存卡片原先跨了间隔档 → 改为同档比较。“零风险”等说法已删。</li>
+<li>未处理、只能注明：笔记按教训 ID 判分、原文按标注回合判分，口径不同；普通回合没有标注是否需要历史；全库 BM25 统计量含未来文档；现状按整组任意命中计（偏宽松）。审查原文见 <code>agents/outputs/codex_review.md</code>。</li>
+</ul>
+<h2>看结果时要知道的</h2>
+<ul>
+<li>单用户、单机器；测试集只有 52 / 59 道题，±10 个百分点以内的差别不要当真。开发集只用来挑配置。</li>
+<li>前情回顾的考题由独立的 Claude 子 agent 从真实回合改写（问题与原文的二元组重合中位 26%），可能仍偏向词法检索。</li>
+<li>这里量的是“找没找到”，不是“回答有没有变好”；端到端效果另需付费试验（审查建议的下一步：按事件时间滚动回放 + 盲评送达文本能否回答或修复；以及现状注入与双通道送达的随机配对对照）。</li>
+<li>缓存对比的新回合样本只有 29 个请求，且受服务商缓存过期影响（&gt;5 分钟两组都≈0）。</li>
+<li>v7 笔记的召回规则曾在开发集上迭代过 7 轮；本页用的是统一的 BM25，未用当时调过的指纹规则。</li>
+<li>通用 Qwen3-0.6B 不是重排专用模型；向量与专用重排两个节点待下载模型后补测。</li>
+</ul>
+<details><summary>表格视图（全部节点，测试 / 开发）</summary>
+<table><tr><th>节点</th><th>判定</th><th>踩坑 测试/开发</th><th>前情 测试/开发</th><th>备注</th></tr><tr><td>现状（0.4.91 生产）</td><td>基线</td><td>4% / 12%</td><td>49% / 55%</td><td>注入中位 5,760 字/轮</td></tr>
+<tr><td>v2 原子库</td><td>更差</td><td>2% / 0%</td><td>3% / 1%</td><td>只有 26% 的考题在库里有对应记录；历史实测约 5,285 输入 token/条</td></tr>
+<tr><td>原始会话，不抽取</td><td>推荐</td><td>23% / 31%</td><td>70% / 70%</td><td>前情回顾的最佳存储；踩坑这里按标注回合判分，等价修法在别处会漏计，可能低估</td></tr>
+<tr><td>教训笔记（v7 补录）</td><td>推荐</td><td>69% / 73%</td><td>29% / 27%</td><td>踩坑重现的最佳存储；但只覆盖 51% 的前情考题</td></tr>
+<tr><td>原文 + 笔记混排</td><td>更差</td><td>65% / 77%</td><td>66% / 62%</td><td>互相稀释，不如各管一类</td></tr>
+<tr><td>现有算法（LIKE 计数）</td><td>基线</td><td>12% / 31%</td><td>51% / 53%</td><td></td></tr>
+<tr><td>二元组 BM25 · 消息级</td><td>推荐</td><td>17% / 31%</td><td>70% / 70%</td><td>最便宜、两个划分都高；建议第一步就用它</td></tr>
+<tr><td>二元组 BM25 · 回合级</td><td>更好</td><td>23% / 31%</td><td>64% / 71%</td><td></td></tr>
+<tr><td>三元组 BM25（L1 设计稿）</td><td>持平</td><td>21% / 31%</td><td>61% / 62%</td><td>纯中文问题上更差：三元组 37%，二元组 54%（46 题）</td></tr>
+<tr><td>混合 RRF</td><td>持平</td><td>—</td><td>66% / 67%</td><td>不比消息级 BM25 好</td></tr>
+<tr><td>+ 本地小模型重排</td><td>更好</td><td>—</td><td>75% / 70%</td><td>测试集最高，但比消息级 BM25 只多对 7 题、少对 4 题，开发集持平：收益不确定</td></tr>
+<tr><td>只用小模型排序</td><td>更差</td><td>—</td><td>64% / 66%</td><td></td></tr>
+<tr><td>+ 近因衰减</td><td>更好</td><td>—</td><td>70% / 68%</td><td>对照（不衰减）为 63%；审查前没锁时间时曾得出相反结论</td></tr>
+<tr><td>只查近 48 小时</td><td>更差</td><td>4% / 15%</td><td>—</td><td>对照（查全部）为 21%</td></tr>
+<tr><td>跨项目检索（教训）</td><td>更好</td><td>60% / 64%</td><td>—</td><td>只查本项目为 42%</td></tr>
+<tr><td>向量检索</td><td>待验证</td><td>—</td><td>—</td><td>外部受控研究里，换检索器的影响是写入策略的 3–6 倍</td></tr>
+<tr><td>专用重排模型</td><td>待验证</td><td>—</td><td>—</td><td>也是“高置信才送达”门槛的前提</td></tr>
+<tr><td>每轮注入 system prompt</td><td>更差</td><td>—</td><td>—</td><td>同为 30 秒–5 分钟间隔：新回合首请求缓存命中 7%，同回合 42%（各 14/9 个请求，按时间推断换轮，没有空块对照）</td></tr>
+<tr><td>只给工具，模型自己查</td><td>更差</td><td>—</td><td>—</td><td>实测只有 3.2% 的回合调用；用户说“之前/上次”时也只查了 3/60 次</td></tr>
+<tr><td>“之前/上次”指代触发</td><td>持平</td><td>—</td><td>—</td><td>3.8% 的回合会触发，但只覆盖 8% 的考题；可作补充</td></tr>
+<tr><td>报错触发（踩坑专用）</td><td>推荐</td><td>69% / 73%</td><td>—</td><td>已乘上触发门：97% 的重学事件会触发，反例误触发 23%（35 个反例）</td></tr>
+<tr><td>每轮检索，附在用户消息后</td><td>待验证</td><td>—</td><td>75% / 70%</td><td>检索准，但“何时不送”还没解决：词法覆盖率和通用小模型都分不开（普通回合 99% 也会送）</td></tr>
+<tr><td>只追加、不改写</td><td>基线</td><td>—</td><td>—</td><td></td></tr>
+<tr><td>只检索“教训”类</td><td>更好</td><td>69% / 73%</td><td>—</td><td>不区分类别为 60%</td></tr>
+<tr><td>新的优先（时间加权）</td><td>更好</td><td>—</td><td>—</td><td>加近因 57%，不加 50%；显式“已取代”标记未测</td></tr>
+<tr><td>按原因合并</td><td>持平</td><td>—</td><td>—</td><td>召回不变，价值在存储与展示</td></tr>
+<tr><td>自动跨会话注入“决定”</td><td>更差</td><td>—</td><td>—</td><td>开发集 +17pp、测试集未复现；30% 被注入的“决定”是误判（如把「B吧」当长期规矩）</td></tr></table></details>
+</div><div id="tip"></div>
+<script>
+const tip=document.getElementById('tip');
+document.querySelectorAll('[data-tip]').forEach(el=>{
+ el.addEventListener('mousemove',e=>{tip.textContent=el.dataset.tip;tip.style.opacity=1;
+  tip.style.left=Math.min(e.clientX+12,innerWidth-330)+'px';tip.style.top=(e.clientY+14)+'px';});
+ el.addEventListener('mouseleave',()=>tip.style.opacity=0);});
+</script></body></html>

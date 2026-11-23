@@ -298,14 +298,18 @@ struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
     process: Option<McpStdioProcess>,
     initialized: bool,
+    /// [`crate::scoped_mcp_config_hash`] of the configuration, so a discovery
+    /// result is recorded against exactly the command line that produced it.
+    config_hash: String,
 }
 
 impl ManagedMcpServer {
-    fn new(bootstrap: McpClientBootstrap) -> Self {
+    fn new(bootstrap: McpClientBootstrap, config_hash: String) -> Self {
         Self {
             bootstrap,
             process: None,
             initialized: false,
+            config_hash,
         }
     }
 }
@@ -332,7 +336,13 @@ impl McpServerManager {
         for (server_name, server_config) in servers {
             if server_config.transport() == McpTransport::Stdio {
                 let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
-                managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
+                managed_servers.insert(
+                    server_name.clone(),
+                    ManagedMcpServer::new(
+                        bootstrap,
+                        crate::mcp::scoped_mcp_config_hash(server_config),
+                    ),
+                );
             } else {
                 unsupported_servers.push(UnsupportedMcpServer {
                     server_name: server_name.clone(),
@@ -402,10 +412,10 @@ impl McpServerManager {
                         Ok(result) => result,
                         Err(_) => {
                             self.terminate_server(&server_name).await;
-                            failures.push((
-                                server_name,
-                                format!("tool discovery exceeded {}s", timeout.as_secs_f64()),
-                            ));
+                            let message =
+                                format!("tool discovery exceeded {}s", timeout.as_secs_f64());
+                            self.record_health(&server_name, Err(message.clone()));
+                            failures.push((server_name, message));
                             continue;
                         }
                     }
@@ -413,12 +423,26 @@ impl McpServerManager {
                 None => self.discover_server_tools(&server_name).await,
             };
             match result {
-                Ok(tools) => discovered_tools.extend(tools),
-                Err(error) => failures.push((server_name, error.to_string())),
+                Ok(tools) => {
+                    self.record_health(&server_name, Ok(tools.len()));
+                    discovered_tools.extend(tools);
+                }
+                Err(error) => {
+                    self.record_health(&server_name, Err(error.to_string()));
+                    failures.push((server_name, error.to_string()));
+                }
             }
         }
 
         (discovered_tools, failures)
+    }
+
+    /// Let the plugin page (and anything else that asks) see what this
+    /// discovery actually observed for `server_name`.
+    fn record_health(&self, server_name: &str, outcome: Result<usize, String>) {
+        if let Some(server) = self.servers.get(server_name) {
+            crate::mcp_health::record_mcp_server_health(server_name, &server.config_hash, outcome);
+        }
     }
 
     /// Restore routes from a prior discovery without starting MCP processes.
@@ -830,8 +854,16 @@ impl McpStdioProcess {
             // it also turns the useful child error into an unexplained stdout
             // EOF. Give every server a real pipe and drain it continuously.
             .stderr(Stdio::piped());
-        apply_env(&mut command, &transport.env);
-        if let Some(working_directory) = transport.env.get("SOMNIQ_MCP_WORKING_DIRECTORY") {
+        let plugin = plugin_process(&transport.env)?;
+        if let Some(plugin) = &plugin {
+            apply_plugin_env(&mut command, &transport.env, plugin);
+            command.current_dir(&plugin.data);
+        } else {
+            apply_env(&mut command, &transport.env);
+        }
+        if plugin.is_some() {
+            // Set above: never the project, never a package-chosen directory.
+        } else if let Some(working_directory) = transport.env.get("SOMNIQ_MCP_WORKING_DIRECTORY") {
             let working_directory = std::path::PathBuf::from(working_directory);
             if !working_directory.is_absolute() || !working_directory.is_dir() {
                 return Err(io::Error::new(
@@ -847,10 +879,12 @@ impl McpStdioProcess {
             }
         }
         crate::configure_managed_tokio_command(&mut command);
-        let owns_process_tree = transport
-            .env
-            .get("SOMNIQ_MCP_OWN_PROCESS_TREE")
-            .is_some_and(|value| value == "1");
+        // A plugin's server always belongs to SomniQ's process tree.
+        let owns_process_tree = plugin.is_some()
+            || transport
+                .env
+                .get("SOMNIQ_MCP_OWN_PROCESS_TREE")
+                .is_some_and(|value| value == "1");
         command.kill_on_drop(owns_process_tree);
 
         let mut child = command.spawn()?;
@@ -1332,6 +1366,71 @@ pub fn spawn_mcp_stdio_process(bootstrap: &McpClientBootstrap) -> io::Result<Mcp
                 bootstrap.server_name
             ),
         )),
+    }
+}
+
+/// The directories the host gave a plugin's server ([`crate::PLUGIN_ROOT_ENV`]).
+struct PluginProcess {
+    data: std::path::PathBuf,
+}
+
+fn plugin_process(env: &BTreeMap<String, String>) -> io::Result<Option<PluginProcess>> {
+    if !env.contains_key(crate::PLUGIN_ROOT_ENV) {
+        return Ok(None);
+    }
+    let data = env
+        .get(crate::PLUGIN_DATA_ENV)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "plugin server has no data directory"))?;
+    std::fs::create_dir_all(data.join("tmp"))?;
+    Ok(Some(PluginProcess { data }))
+}
+
+/// Platform variables a plugin process gets from SomniQ's own environment.
+/// Nothing else is inherited: tokens, cloud credentials and SomniQ's own
+/// configuration stay out of third-party code.
+#[cfg(windows)]
+const PLUGIN_BASE_ENV: &[&str] = &[
+    "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "PATH", "USERPROFILE",
+    "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "ProgramData", "ALLUSERSPROFILE",
+    "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+    "CommonProgramFiles(x86)", "PSModulePath", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "OS", "USERNAME", "SOMNIQ_PYTHON",
+];
+#[cfg(not(windows))]
+const PLUGIN_BASE_ENV: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "SOMNIQ_PYTHON",
+];
+
+fn apply_plugin_env(command: &mut Command, env: &BTreeMap<String, String>, plugin: &PluginProcess) {
+    command.env_clear();
+    for key in PLUGIN_BASE_ENV {
+        let Some(value) = std::env::var_os(key) else { continue };
+        if *key == "PATH" {
+            // Absolute segments only: a relative one would search the
+            // working directory.
+            let segments = std::env::split_paths(&value).filter(|path| path.is_absolute());
+            if let Ok(path) = std::env::join_paths(segments) {
+                command.env(key, path);
+            }
+        } else {
+            command.env(key, value);
+        }
+    }
+    let tmp = plugin.data.join("tmp");
+    for key in ["TEMP", "TMP", "TMPDIR"] {
+        command.env(key, &tmp);
+    }
+    command.env("PYTHONUTF8", "1");
+    command.env("PYTHONIOENCODING", "utf-8");
+    #[cfg(windows)]
+    command.env("NoDefaultCurrentDirectoryInExePath", "1");
+    // The package's own variables, already checked against the reserved
+    // names at preview, and the host's SOMNIQ_PLUGIN_ROOT / _DATA.
+    for (key, value) in env {
+        command.env(key, value);
     }
 }
 

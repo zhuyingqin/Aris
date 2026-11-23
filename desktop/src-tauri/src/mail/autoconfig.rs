@@ -16,7 +16,7 @@ pub fn discover(email: &str) -> Result<MailAutoconfigResult, String> {
     let email = normalize_email(email)?;
     let (local, domain) = email
         .split_once('@')
-        .ok_or_else(|| "邮箱地址格式无效".to_string())?;
+        .ok_or_else(|| runtime::ui_lang::tr_static("邮箱地址格式无效", "Invalid email address format", "El formato de la dirección de correo no es válido").to_string())?;
 
     if let Some(result) = discover_from_thunderbird(&email, local, domain) {
         return Ok(result);
@@ -30,13 +30,13 @@ pub fn discover(email: &str) -> Result<MailAutoconfigResult, String> {
 fn normalize_email(email: &str) -> Result<String, String> {
     let email = email.trim().to_ascii_lowercase();
     if email.is_empty() {
-        return Err("请先输入邮箱地址".to_string());
+        return Err(runtime::ui_lang::tr_static("请先输入邮箱地址", "Enter an email address first", "Primero escribe una dirección de correo").to_string());
     }
     let Some((local, domain)) = email.split_once('@') else {
-        return Err("邮箱地址必须包含 @".to_string());
+        return Err(runtime::ui_lang::tr_static("邮箱地址必须包含 @", "The email address must contain @", "La dirección de correo debe contener @").to_string());
     };
     if local.trim().is_empty() || domain.trim().is_empty() || !domain.contains('.') {
-        return Err("邮箱地址格式无效".to_string());
+        return Err(runtime::ui_lang::tr_static("邮箱地址格式无效", "Invalid email address format", "El formato de la dirección de correo no es válido").to_string());
     }
     Ok(email)
 }
@@ -50,11 +50,11 @@ fn discover_from_thunderbird(
     let candidates = [
         (
             format!("https://autoconfig.{domain}/mail/config-v1.1.xml?emailaddress={encoded}"),
-            "域名 Autoconfig",
+            runtime::ui_lang::tr_static("域名 Autoconfig", "Domain Autoconfig", "Autoconfig del dominio"),
         ),
         (
             format!("https://{domain}/.well-known/autoconfig/mail/config-v1.1.xml?emailaddress={encoded}"),
-            "域名 .well-known Autoconfig",
+            runtime::ui_lang::tr_static("域名 .well-known Autoconfig", "Domain .well-known Autoconfig", "Autoconfig .well-known del dominio"),
         ),
         (
             format!("https://autoconfig.thunderbird.net/v1.1/{domain}"),
@@ -110,7 +110,7 @@ fn parse_thunderbird_xml(
             .as_ref()
             .is_some_and(|block| block_mentions_oauth(block))
     {
-        notes.push("该服务商的 Thunderbird 配置提到了 OAuth2；普通账户密码通常不可用，请优先使用服务商 OAuth/API，或使用明确支持的授权码/应用专用密码。".to_string());
+        notes.push(runtime::ui_lang::tr_static("该服务商的 Thunderbird 配置提到了 OAuth2；普通账户密码通常不可用，请优先使用服务商 OAuth/API，或使用明确支持的授权码/应用专用密码。", "This provider's Thunderbird configuration mentions OAuth2, so the normal account password usually does not work. Prefer the provider's OAuth/API, or an authorization code or app-specific password it explicitly supports.", "La configuración de Thunderbird de este proveedor menciona OAuth2, así que la contraseña normal de la cuenta no suele funcionar. Usa preferentemente el OAuth/API del proveedor, o un código de autorización o contraseña de aplicación que admita expresamente.").to_string());
     }
 
     let (smtp_enabled, smtp_host, smtp_port, smtp_security, smtp_username) =
@@ -227,7 +227,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.gmail.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["Gmail 的普通 Google 密码不能用于 IMAP LOGIN；请优先使用 Gmail OAuth/API，或在启用 IMAP 后使用 Google 应用专用密码。"],
+            vec![runtime::ui_lang::tr_static("Gmail 的普通 Google 密码不能用于 IMAP LOGIN；请优先使用 Gmail OAuth/API，或在启用 IMAP 后使用 Google 应用专用密码。", "A regular Google password cannot be used for Gmail IMAP LOGIN. Prefer Gmail OAuth/API, or enable IMAP and use a Google app password.", "La contraseña normal de Google no sirve para IMAP LOGIN en Gmail. Usa preferentemente Gmail OAuth/API, o activa IMAP y usa una contraseña de aplicación de Google.")],
         ),
         "outlook.com" | "hotmail.com" | "live.com" | "msn.com" => (
             "Outlook.com",
@@ -238,7 +238,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp-mail.outlook.com",
             587,
             MailSocketSecurity::Starttls,
-            vec!["Outlook.com / Microsoft 365 要求 Modern Authentication/OAuth2；此通用 IMAP/SMTP 密码路径不适用，请使用 Outlook OAuth/Graph。"],
+            vec![runtime::ui_lang::tr_static("Outlook.com / Microsoft 365 要求 Modern Authentication/OAuth2；此通用 IMAP/SMTP 密码路径不适用，请使用 Outlook OAuth/Graph。", "Outlook.com / Microsoft 365 require Modern Authentication/OAuth2, so this generic IMAP/SMTP password route does not apply. Use Outlook OAuth/Graph.", "Outlook.com / Microsoft 365 exigen Modern Authentication/OAuth2, así que esta vía genérica de IMAP/SMTP con contraseña no sirve. Usa Outlook OAuth/Graph.")],
         ),
         "qq.com" | "foxmail.com" => (
             "QQ Mail",
@@ -249,7 +249,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.qq.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["QQ 邮箱需要在网页端开启 IMAP/SMTP，并使用授权码作为密码。"],
+            vec![runtime::ui_lang::tr_static("QQ 邮箱需要在网页端开启 IMAP/SMTP，并使用授权码作为密码。", "QQ Mail needs IMAP/SMTP turned on in its web interface, with an authorization code as the password.", "QQ Mail necesita activar IMAP/SMTP en su web y usar un código de autorización como contraseña.")],
         ),
         "163.com" => (
             "NetEase 163",
@@ -260,7 +260,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.163.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["网易邮箱通常需要开启客户端授权，并使用授权码。"],
+            vec![runtime::ui_lang::tr_static("网易邮箱通常需要开启客户端授权，并使用授权码。", "NetEase Mail usually needs client authorization turned on and an authorization code.", "El correo de NetEase suele necesitar activar la autorización de clientes y usar un código de autorización.")],
         ),
         "126.com" => (
             "NetEase 126",
@@ -271,7 +271,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.126.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["网易邮箱通常需要开启客户端授权，并使用授权码。"],
+            vec![runtime::ui_lang::tr_static("网易邮箱通常需要开启客户端授权，并使用授权码。", "NetEase Mail usually needs client authorization turned on and an authorization code.", "El correo de NetEase suele necesitar activar la autorización de clientes y usar un código de autorización.")],
         ),
         "yeah.net" => (
             "NetEase Yeah",
@@ -282,7 +282,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.yeah.net",
             465,
             MailSocketSecurity::Tls,
-            vec!["网易邮箱通常需要开启客户端授权，并使用授权码。"],
+            vec![runtime::ui_lang::tr_static("网易邮箱通常需要开启客户端授权，并使用授权码。", "NetEase Mail usually needs client authorization turned on and an authorization code.", "El correo de NetEase suele necesitar activar la autorización de clientes y usar un código de autorización.")],
         ),
         "icloud.com" | "me.com" | "mac.com" => (
             "iCloud Mail",
@@ -293,7 +293,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.mail.me.com",
             587,
             MailSocketSecurity::Starttls,
-            vec!["iCloud 邮箱需要 Apple 应用专用密码。"],
+            vec![runtime::ui_lang::tr_static("iCloud 邮箱需要 Apple 应用专用密码。", "iCloud Mail needs an Apple app-specific password.", "iCloud Mail necesita una contraseña específica de app de Apple.")],
         ),
         "yahoo.com" | "ymail.com" | "rocketmail.com" => (
             "Yahoo Mail",
@@ -304,7 +304,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.mail.yahoo.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["Yahoo 邮箱通常需要应用专用密码。"],
+            vec![runtime::ui_lang::tr_static("Yahoo 邮箱通常需要应用专用密码。", "Yahoo Mail usually needs an app password.", "Yahoo Mail suele necesitar una contraseña de aplicación.")],
         ),
         "fastmail.com" => (
             "Fastmail",
@@ -315,7 +315,7 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.fastmail.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["Fastmail 推荐使用应用专用密码。"],
+            vec![runtime::ui_lang::tr_static("Fastmail 推荐使用应用专用密码。", "Fastmail recommends an app password.", "Fastmail recomienda usar una contraseña de aplicación.")],
         ),
         "zoho.com" => (
             "Zoho Mail",
@@ -326,12 +326,12 @@ fn provider_preset(email: &str, domain: &str) -> Option<MailAutoconfigResult> {
             "smtp.zoho.com",
             465,
             MailSocketSecurity::Tls,
-            vec!["Zoho 若开启两步验证，需要使用应用专用密码。"],
+            vec![runtime::ui_lang::tr_static("Zoho 若开启两步验证，需要使用应用专用密码。", "With two-step verification on, Zoho needs an app-specific password.", "Si tienes activada la verificación en dos pasos, Zoho necesita una contraseña de aplicación.")],
         ),
         _ => return None,
     };
     Some(result_from_parts(
-        "内置服务商规则",
+        runtime::ui_lang::tr_static("内置服务商规则", "Built-in provider rules", "Reglas de proveedor integradas"),
         preset.0,
         email,
         preset.1,
@@ -377,7 +377,7 @@ fn result_from_parts(
 
 fn guess_from_domain(email: &str, domain: &str) -> MailAutoconfigResult {
     result_from_parts(
-        "通用域名猜测",
+        runtime::ui_lang::tr_static("通用域名猜测", "Generic domain guess", "Suposición genérica por dominio"),
         domain,
         email,
         &format!("imap.{domain}"),
@@ -387,6 +387,6 @@ fn guess_from_domain(email: &str, domain: &str) -> MailAutoconfigResult {
         &format!("smtp.{domain}"),
         465,
         MailSocketSecurity::Tls,
-        vec!["没有找到 Thunderbird Autoconfig 记录，已按常见 IMAP/SMTP 主机名生成配置；如测试失败，请手动修改服务器参数。"],
+        vec![runtime::ui_lang::tr_static("没有找到 Thunderbird Autoconfig 记录，已按常见 IMAP/SMTP 主机名生成配置；如测试失败，请手动修改服务器参数。", "No Thunderbird Autoconfig record was found, so the settings were built from common IMAP/SMTP host names. If the test fails, edit the server settings by hand.", "No se encontró ningún registro de Thunderbird Autoconfig, así que la configuración se generó con nombres de host IMAP/SMTP habituales. Si la prueba falla, edita a mano los datos del servidor.")],
     )
 }

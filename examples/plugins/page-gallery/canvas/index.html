@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Idea canvas: a pannable board of notes and links, in three files (this one, canvas.css, canvas.js).
+  Widget "board": { "notes": [{ "id", "text", "kind": "idea" | "question" | "evidence", "x", "y" }], "links": [{ "from", "to" }] }
+-->
+<link rel="stylesheet" href="canvas.css">
+</head>
+<body>
+<div id="viewport">
+  <svg id="wires"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs><g id="paths"></g></svg>
+  <div id="world"></div>
+</div>
+<div id="hint"></div>
+<nav id="dock" aria-label="Tools"></nav>
+<script src="canvas.js"></script>
+</body>
+</html>

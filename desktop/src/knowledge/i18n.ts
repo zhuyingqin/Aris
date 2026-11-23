@@ -42,6 +42,13 @@ export const KNOWLEDGE_COPY: Record<Language, {
   previewFragmentAnswerText: string;
   pageEvidenceFallback: (page: number | string) => string;
   answerChainFallbackTitle: string;
+  errors: {
+    load: (error: string) => string;
+    confirm: (error: string) => string;
+    reject: (error: string) => string;
+    refine: (error: string) => string;
+    search: (error: string) => string;
+  };
 }> = {
   cn: {
     viewLabels: {
@@ -85,6 +92,13 @@ export const KNOWLEDGE_COPY: Record<Language, {
     previewFragmentAnswerText: "每个生成断言都必须能回到原文逐字证据 span，因此无锚点就不应形成 claim。",
     pageEvidenceFallback: (page) => `第 ${page} 页证据`,
     answerChainFallbackTitle: "证据链结论",
+    errors: {
+      load: (error) => `加载知识库失败：${error}`,
+      confirm: (error) => `确认知识点失败：${error}`,
+      reject: (error) => `驳回知识点失败：${error}`,
+      refine: (error) => `保存修订后的知识点失败：${error}`,
+      search: (error) => `检索知识库失败：${error}`,
+    },
   },
   en: {
     viewLabels: {
@@ -94,14 +108,14 @@ export const KNOWLEDGE_COPY: Record<Language, {
     },
     fragmentKindLabels: {
       evidence: "Evidence fragment",
-      "answer-chain": "QA conclusion",
+      "answer-chain": "Q&A conclusion",
     },
     noLocatableEvidence: "No locatable evidence.",
     evidenceAnchorsCount: (count) => `${count} evidence anchors`,
     fragmentListEmpty: "No knowledge fragments yet. Annotate evidence in the reader, or generate evidence chains on the Evidence page.",
     fragmentsSectionAriaLabel: "Knowledge fragments",
     fragmentSummaryBefore: "Collected",
-    fragmentSummaryAfter: "knowledge fragments from literature evidence and QA answer chains.",
+    fragmentSummaryAfter: "knowledge fragments from literature evidence and Q&A evidence chains.",
     progressLabel: (index, total) => `Knowledge point ${index}/${total}`,
     pointLabel: "Knowledge point",
     answerLabel: "Answer",
@@ -114,12 +128,12 @@ export const KNOWLEDGE_COPY: Record<Language, {
     paperKnowledgeTitle: "Paper knowledge points",
     paperKnowledgeDescription: "Distill knowledge fragments from this paper's evidence, answer chains, and annotations, then review them here into retrievable knowledge points.",
     noEligiblePapers: "No papers with reading material yet",
-    selectPaperPlaceholder: "Select a paper...",
-    generatingLabel: "Generating...",
+    selectPaperPlaceholder: "Select a paper…",
+    generatingLabel: "Generating…",
     generateAction: "Generate knowledge points",
-    loadingLabel: "Loading...",
+    loadingLabel: "Loading…",
     noDraftsEmptyState: "No knowledge points pending review yet. Generate candidates from a paper you've read above.",
-    searchPlaceholder: "Search confirmed knowledge points...",
+    searchPlaceholder: "Search confirmed knowledge points…",
     noSearchMatches: "No matching confirmed knowledge points.",
     noConfirmedYet: "No confirmed knowledge points yet. Confirm candidates in Review first.",
     previewFragmentEvidenceTitle: "Result: reviewer screening time drops",
@@ -128,5 +142,62 @@ export const KNOWLEDGE_COPY: Record<Language, {
     previewFragmentAnswerText: "Every generated assertion must resolve back to a verbatim evidence span in the source, so a claim without an anchor should never form.",
     pageEvidenceFallback: (page) => `Page ${page} evidence`,
     answerChainFallbackTitle: "Answer-chain conclusion",
+    errors: {
+      load: (error) => `Failed to load the knowledge base: ${error}`,
+      confirm: (error) => `Failed to confirm the knowledge point: ${error}`,
+      reject: (error) => `Failed to reject the knowledge point: ${error}`,
+      refine: (error) => `Failed to save the revised knowledge point: ${error}`,
+      search: (error) => `Failed to search the knowledge base: ${error}`,
+    },
+  },
+  es: {
+    viewLabels: {
+      fragments: "Fragmentos",
+      review: "Revisión",
+      confirmed: "Confirmados",
+    },
+    fragmentKindLabels: {
+      evidence: "Fragmento de evidencia",
+      "answer-chain": "Conclusión de preguntas y respuestas",
+    },
+    noLocatableEvidence: "No hay evidencia localizable.",
+    evidenceAnchorsCount: (count) => `${count} anclajes de evidencia`,
+    fragmentListEmpty: "Todavía no hay fragmentos de conocimiento. Anota evidencias en el lector o genera cadenas de evidencia en la página Evidencia.",
+    fragmentsSectionAriaLabel: "Fragmentos de conocimiento",
+    fragmentSummaryBefore: "Se han reunido",
+    fragmentSummaryAfter: "fragmentos de conocimiento a partir de evidencias de la literatura y cadenas de respuestas.",
+    progressLabel: (index, total) => `Punto de conocimiento ${index}/${total}`,
+    pointLabel: "Punto de conocimiento",
+    answerLabel: "Respuesta",
+    saveDraft: "Guardar borrador",
+    cancel: "Cancelar",
+    confirmAction: "Confirmar",
+    editAction: "Editar",
+    rejectAction: "Descartar",
+    relatedFallback: "relacionado",
+    paperKnowledgeTitle: "Puntos de conocimiento del artículo",
+    paperKnowledgeDescription: "Extrae fragmentos de conocimiento de las evidencias, cadenas de respuestas y anotaciones de este artículo y revísalos aquí para convertirlos en puntos de conocimiento consultables.",
+    noEligiblePapers: "Todavía no hay artículos con material de lectura",
+    selectPaperPlaceholder: "Selecciona un artículo…",
+    generatingLabel: "Generando…",
+    generateAction: "Generar puntos de conocimiento",
+    loadingLabel: "Cargando…",
+    noDraftsEmptyState: "Todavía no hay puntos de conocimiento pendientes de revisión. Genera candidatos a partir de un artículo leído de arriba.",
+    searchPlaceholder: "Buscar puntos de conocimiento confirmados…",
+    noSearchMatches: "Ningún punto de conocimiento confirmado coincide.",
+    noConfirmedYet: "Todavía no hay puntos de conocimiento confirmados. Confirma primero los candidatos en Revisión.",
+    previewFragmentEvidenceTitle: "Resultado: baja el tiempo de cribado de los revisores",
+    previewFragmentEvidenceText: "La evidencia visual muestra que un veredicto del agente con una justificación citada reduce un 61 % el tiempo del revisor por artículo.",
+    previewFragmentAnswerTitle: "¿Qué regla mantiene fiables las afirmaciones del agente?",
+    previewFragmentAnswerText: "Cada afirmación generada debe remitir a un fragmento literal de evidencia en la fuente, así que nunca debería formarse una afirmación sin anclaje.",
+    pageEvidenceFallback: (page) => `Evidencia de la página ${page}`,
+    answerChainFallbackTitle: "Conclusión de la cadena de respuestas",
+    errors: {
+      load: (error) => `No se pudo cargar la base de conocimiento: ${error}`,
+      confirm: (error) => `No se pudo confirmar el punto de conocimiento: ${error}`,
+      reject: (error) => `No se pudo rechazar el punto de conocimiento: ${error}`,
+      refine: (error) => `No se pudo guardar el punto de conocimiento revisado: ${error}`,
+      search: (error) => `No se pudo buscar en la base de conocimiento: ${error}`,
+    },
   },
 };

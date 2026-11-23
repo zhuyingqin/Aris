@@ -1,0 +1,228 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Experiment triage. The page lists runs (the "runs" json widget, filled by the
+  agent with PluginPanel or edited here) and shows what investigations found
+  (the "findings" markdown widget, written by the tasks themselves).
+
+  The task bridge calls it uses (they need "proposeTasks": true on the panel):
+    await somniq.task({ title, prompt, reportTo })
+      -> the app shows the proposal to the user, who starts it, only creates it,
+         or declines. Resolves to { status: "started" | "created" | "declined", taskId? }.
+         reportTo names a widget of this panel; the finished task writes its
+         conclusion there.
+    await somniq.tasks() / somniq.onTasks(list => ...)
+      -> the tasks this page proposed, as the task board records them:
+         { taskId, state: "todo" | "active" | "waiting" | "ready" | "done" | "failed" | "canceled",
+           phase?, review?: { verdict, summary }, result?: { summary, files }, error? }.
+         The row shows the board's state, so it never stays "investigating" after
+         the task ended, whether or not the task wrote its conclusion back.
+
+  runs: [{ "id", "name", "metric"?, "value"?, "baseline"?, "status": "ok" | "suspect" | "failed",
+           "note"?, "path"?, "taskId"?, "taskStatus"? }]
+-->
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 var(--somniq-font, system-ui, sans-serif);
+    color: var(--somniq-text, #e6e9ee); background: var(--somniq-bg, #10151c);
+    display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 18px; padding: 20px 26px;
+  }
+  h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  h2 { margin: 0 0 10px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--somniq-muted, #8b95a3); }
+  .lede { margin: 2px 0 14px; color: var(--somniq-muted, #8b95a3); font-size: 13px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .bar .spacer { flex: 1; }
+  button {
+    font: inherit; font-size: 12.5px; color: inherit; cursor: pointer; border-radius: 7px;
+    border: 1px solid var(--somniq-border, #2a323d); background: var(--somniq-surface, #161c24); padding: 5px 11px;
+  }
+  button:hover:not(:disabled) { border-color: var(--somniq-accent, #f0a23b); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.go { background: var(--somniq-accent, #f0a23b); border-color: transparent; color: #1a1205; font-weight: 600; }
+  .runs { display: flex; flex-direction: column; gap: 8px; }
+  .run {
+    display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+    padding: 11px 13px; border-radius: 11px;
+    background: var(--somniq-surface, #161c24); border: 1px solid var(--somniq-border, #2a323d);
+  }
+  .run .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb27f; }
+  .run[data-status="suspect"] .dot { background: #e0a23a; }
+  .run[data-status="failed"] .dot { background: #e5484d; }
+  .run strong { font-weight: 580; overflow-wrap: anywhere; }
+  .run .meta { color: var(--somniq-muted, #8b95a3); font-size: 12px; overflow-wrap: anywhere; }
+  .run .value { font-variant-numeric: tabular-nums; }
+  .run .worse { color: #e5484d; }
+  .pill { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 9px; font-size: 11px; border: 1px solid var(--somniq-border, #2a323d); color: var(--somniq-muted, #8b95a3); }
+  .pill.started { color: var(--somniq-accent, #f0a23b); border-color: var(--somniq-accent, #f0a23b); }
+  .pill.ready, .pill.done { color: #3fb27f; border-color: #3fb27f; }
+  .pill.failed { color: #e5484d; border-color: #e5484d; }
+  .pill.waiting, .pill.gone { color: #e0a23a; border-color: #e0a23a; }
+  aside {
+    min-height: 0; overflow: auto; padding: 14px 16px; border-radius: 14px;
+    background: var(--somniq-surface, #161c24); border: 1px solid var(--somniq-border, #2a323d);
+  }
+  #findings { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+  .empty { color: var(--somniq-muted, #8b95a3); font-size: 13px; }
+  .sample { font-size: 11px; color: var(--somniq-muted, #8b95a3); }
+  .error { color: #e5484d; font-size: 12px; min-height: 1em; }
+  button:focus-visible { outline: 2px solid var(--somniq-accent, #f0a23b); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <p class="lede" id="lede"></p>
+  <div class="bar">
+    <span class="sample" id="sample" hidden></span>
+    <span class="spacer"></span>
+    <button type="button" id="fill"></button>
+  </div>
+  <div class="runs" id="runs"></div>
+  <p class="error" id="error" role="alert"></p>
+</main>
+<aside>
+  <h2 id="findings-title"></h2>
+  <div id="findings"></div>
+</aside>
+<script>
+  const COPY = {
+    cn: {
+      title: "实验排查", lede: "挑一条看起来不对的实验，派 AI 在后台去查；查完它会把结论写回右边。",
+      fill: "让 AI 整理实验记录", sample: "示例数据：让 AI 整理实验记录后替换",
+      investigate: "派 AI 调查", asking: "等你确认…", started: "调查中", created: "已加入看板", declined: "已取消",
+      todo: "已加入看板", active: "调查中", waiting: "等待处理", ready: "待验收", done: "已完成", failed: "失败", canceled: "已取消",
+      review: "审查", gone: "任务已删除",
+      findings: "排查结论", none: "还没有结论。派出的任务完成后会写到这里。", baseline: "基线",
+      fillPrompt: "请检查本项目的实验结果文件（日志、results、runs 等目录），用 PluginPanel 工具把实验记录写入插件 @local/experiment-triage 面板 triage 的 runs 组件。每条为 {id, name, metric, value, baseline, status, note, path}：status 用 ok / suspect / failed，明显劣于基线或曲线异常的记为 suspect，报错或未完成的记为 failed；path 是该实验的日志或结果文件的项目相对路径。只写文件里真实存在的数据。",
+      taskTitle: (run) => `排查实验 ${run.name}`,
+      taskPrompt: (run) => [
+        `调查实验「${run.name}」（id: ${run.id}）为什么${run.status === "failed" ? "失败" : "结果可疑"}。`,
+        run.metric && run.value != null ? `指标 ${run.metric}：${run.value}${run.baseline != null ? `，基线 ${run.baseline}` : ""}。` : "",
+        run.note ? `已知情况：${run.note}` : "",
+        run.path ? `从这个文件开始看：${run.path}` : "",
+        "检查日志、配置和代码改动，找出最可能的原因并尽量用证据确认（必要时做最小复现）。不要修改原始结果文件。",
+        `写回结论时，在 findings 原有内容之后追加一节，标题用「## ${run.name}」，写清：原因、证据（文件与行）、建议的下一步、还没核实的部分。`,
+      ].filter(Boolean).join("\n"),
+    },
+    en: {
+      title: "Experiment triage", lede: "Pick a run that looks wrong and send the agent to investigate it in the background; it writes its conclusion back on the right.",
+      fill: "Have the agent list runs", sample: "Sample data: have the agent list your runs to replace it",
+      investigate: "Investigate", asking: "Waiting for you…", started: "Investigating", created: "On the board", declined: "Declined",
+      todo: "On the board", active: "Investigating", waiting: "Needs attention", ready: "Ready to accept", done: "Done", failed: "Failed", canceled: "Canceled",
+      review: "review", gone: "task deleted",
+      findings: "Findings", none: "No findings yet. Tasks you send write here when they finish.", baseline: "baseline",
+      fillPrompt: "Look through this project's experiment results (logs, results, runs directories) and use the PluginPanel tool to write the runs into the runs widget of panel triage of plugin @local/experiment-triage. Each is {id, name, metric, value, baseline, status, note, path}: status is ok / suspect / failed; mark clearly-worse-than-baseline or odd curves as suspect, crashed or unfinished as failed; path is the project-relative log or result file. Write only data the files actually contain.",
+      taskTitle: (run) => `Investigate run ${run.name}`,
+      taskPrompt: (run) => [
+        `Investigate why run "${run.name}" (id: ${run.id}) ${run.status === "failed" ? "failed" : "looks wrong"}.`,
+        run.metric && run.value != null ? `Metric ${run.metric}: ${run.value}${run.baseline != null ? `, baseline ${run.baseline}` : ""}.` : "",
+        run.note ? `Known so far: ${run.note}` : "",
+        run.path ? `Start from: ${run.path}` : "",
+        "Check logs, configuration and code changes, find the most likely cause and confirm it with evidence (a minimal reproduction if needed). Do not modify the original result files.",
+        `When writing the conclusion back, append a section after the existing findings titled "## ${run.name}": cause, evidence (files and lines), suggested next step, and what stayed unverified.`,
+      ].filter(Boolean).join("\n"),
+    },
+  };
+  const SAMPLE = [
+    { id: "r1", name: "baseline-lr3e-4", metric: "val_acc", value: 0.842, status: "ok", path: "runs/baseline/log.txt" },
+    { id: "r2", name: "ours-lr1e-3", metric: "val_acc", value: 0.611, baseline: 0.842, status: "suspect", note: "loss 在第 3 个 epoch 后开始发散", path: "runs/ours-lr1e-3/log.txt" },
+    { id: "r3", name: "ours-seed2", metric: "val_acc", value: null, status: "failed", note: "CUDA out of memory", path: "runs/ours-seed2/log.txt" },
+  ];
+  let copy = COPY.en, runs = [], sample = false, findings = "";
+  // The board's record of each task this page proposed, by task id.
+  let tasks = new Map(), tasksKnown = false;
+  const $ = (id) => document.getElementById(id);
+
+  function render() {
+    $("sample").hidden = !sample; $("sample").textContent = copy.sample;
+    const list = $("runs"); list.replaceChildren();
+    for (const run of runs) {
+      const row = document.createElement("div"); row.className = "run"; row.dataset.status = run.status || "ok";
+      const dot = document.createElement("span"); dot.className = "dot";
+      const body = document.createElement("div");
+      const name = document.createElement("strong"); name.textContent = run.name || run.id;
+      const task = run.taskId ? tasks.get(run.taskId) : undefined;
+      // The board's state wins over what the page last saved; a task that is
+      // no longer on the board says so instead of looking like it still runs.
+      const shown = task ? task.state : run.taskId && tasksKnown && run.taskStatus !== "declined" ? "gone" : run.taskStatus;
+      if (shown) {
+        const pill = document.createElement("span"); pill.className = "pill " + (shown === "active" ? "started" : shown);
+        pill.textContent = copy[shown] || shown; name.append(pill);
+      }
+      const meta = document.createElement("div"); meta.className = "meta";
+      const parts = [];
+      if (run.metric) {
+        const value = document.createElement("span"); value.className = "value";
+        if (typeof run.value === "number" && typeof run.baseline === "number" && run.value < run.baseline) value.classList.add("worse");
+        value.textContent = `${run.metric} ${run.value ?? "—"}`; parts.push(value);
+        if (run.baseline != null) parts.push(` · ${copy.baseline} ${run.baseline}`);
+      }
+      if (run.note) parts.push(` · ${run.note}`);
+      if (task && task.review) parts.push(` · ${copy.review} ${task.review.verdict}`);
+      if (task && task.state === "failed" && task.error) parts.push(` · ${task.error}`);
+      meta.append(...parts);
+      body.append(name, meta);
+      const go = document.createElement("button"); go.type = "button";
+      go.className = run.status === "ok" ? "" : "go";
+      go.textContent = run.taskStatus === "asking" ? copy.asking : copy.investigate;
+      go.disabled = run.taskStatus === "asking" || (task ? task.state === "todo" || task.state === "active" || task.state === "waiting" : run.taskStatus === "started" && !tasksKnown);
+      go.addEventListener("click", () => investigate(run));
+      row.append(dot, body, go); list.append(row);
+    }
+    if (!runs.length) { const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = copy.sample; list.append(empty); }
+    $("findings").textContent = findings || "";
+    if (!findings) { const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = copy.none; $("findings").append(empty); }
+  }
+
+  async function save() {
+    // Saving turns sample rows into the project's own, so they stop being labelled as samples.
+    sample = false;
+    await somniq.set("runs", runs);
+  }
+
+  async function investigate(run) {
+    $("error").textContent = "";
+    run.taskStatus = "asking"; render();
+    try {
+      const outcome = await somniq.task({ title: copy.taskTitle(run), prompt: copy.taskPrompt(run), reportTo: "findings" });
+      run.taskStatus = outcome.status;
+      if (outcome.taskId) run.taskId = outcome.taskId;
+      await save();
+    } catch (error) {
+      run.taskStatus = undefined;
+      $("error").textContent = error.message || String(error);
+    }
+    render();
+  }
+
+  function applyTasks(list) {
+    tasks = new Map((Array.isArray(list) ? list : []).map((task) => [task.taskId, task]));
+    tasksKnown = true;
+    render();
+  }
+
+  function apply(data) {
+    const stored = Array.isArray(data.runs) ? data.runs : null;
+    sample = !stored;
+    runs = stored ? stored.map((run) => ({ ...run })) : SAMPLE.map((run) => ({ ...run }));
+    findings = typeof data.findings === "string" ? data.findings : "";
+    render();
+  }
+
+  somniq.ready().then(({ language, data }) => {
+    copy = COPY[language] || COPY.en;
+    $("title").textContent = copy.title; $("lede").textContent = copy.lede;
+    $("fill").textContent = copy.fill; $("findings-title").textContent = copy.findings;
+    $("fill").addEventListener("click", () => somniq.prompt(copy.fillPrompt));
+    apply(data);
+    somniq.onData(apply);
+    somniq.onTasks(applyTasks);
+    somniq.tasks().then(applyTasks, () => undefined);
+  });
+</script>
+</body>
+</html>

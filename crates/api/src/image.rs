@@ -26,26 +26,26 @@ pub struct ImageGenerationRequest {
 impl ImageGenerationRequest {
     pub fn validate(&self) -> Result<(), String> {
         if !is_image_generation_model(&self.model) {
-            return Err("请选择网关中的 GPT Image 绘图模型。".into());
+            return Err(runtime::ui_lang::tr_static("请选择网关中的 GPT Image 绘图模型。", "Choose a GPT Image drawing model from the gateway.", "Elige un modelo de dibujo GPT Image del gateway.").into());
         }
         if self.prompt.trim().is_empty() || self.prompt.len() > 120_000 {
-            return Err("绘图提示词不能为空，且不能超过 120000 字节。".into());
+            return Err(runtime::ui_lang::tr_static("绘图提示词不能为空，且不能超过 120000 字节。", "The drawing prompt must not be empty or longer than 120000 bytes.", "La instrucción de dibujo no puede estar vacía ni superar los 120000 bytes.").into());
         }
         if !matches!(
             self.size.as_str(),
             "auto" | "1024x1024" | "1536x1024" | "1024x1536"
         ) {
-            return Err("不支持的图片尺寸。".into());
+            return Err(runtime::ui_lang::tr_static("不支持的图片尺寸。", "Unsupported image size.", "Tamaño de imagen no compatible.").into());
         }
         if self
             .quality
             .as_deref()
             .is_some_and(|quality| !matches!(quality, "auto" | "low" | "medium" | "high"))
         {
-            return Err("不支持的图片质量。".into());
+            return Err(runtime::ui_lang::tr_static("不支持的图片质量。", "Unsupported image quality.", "Calidad de imagen no compatible.").into());
         }
         if !(1..=4).contains(&self.n) {
-            return Err("每次可生成 1 到 4 张图片。".into());
+            return Err(runtime::ui_lang::tr_static("每次可生成 1 到 4 张图片。", "You can generate 1 to 4 images at a time.", "Puedes generar de 1 a 4 imágenes cada vez.").into());
         }
         Ok(())
     }
@@ -94,13 +94,13 @@ pub fn validate_edit_mask(
     reference: &GeneratedImage,
 ) -> Result<ImageEditMask, String> {
     if bytes.len() >= 4 * 1024 * 1024 {
-        return Err("圈选蒙版必须小于 4 MB。".into());
+        return Err(runtime::ui_lang::tr_static("圈选蒙版必须小于 4 MB。", "The selection mask must be smaller than 4 MB.", "La máscara de selección debe ocupar menos de 4 MB.").into());
     }
     let image = validate_image_bytes(bytes)?;
     if image.mime_type != "image/png"
         || (image.width, image.height) != (reference.width, reference.height)
     {
-        return Err("圈选蒙版必须是与原图尺寸一致的 PNG。".into());
+        return Err(runtime::ui_lang::tr_static("圈选蒙版必须是与原图尺寸一致的 PNG。", "The selection mask must be a PNG the same size as the original image.", "La máscara de selección debe ser un PNG del mismo tamaño que la imagen original.").into());
     }
     let pixels = ::image::load_from_memory(&image.bytes)
         .map_err(|e| e.to_string())?
@@ -108,7 +108,7 @@ pub fn validate_edit_mask(
     if pixels.pixels().any(|pixel| !matches!(pixel[3], 0 | 255))
         || !pixels.pixels().any(|pixel| pixel[3] == 0)
     {
-        return Err("请圈选需要修改的区域；蒙版只接受全透明和不透明像素。".into());
+        return Err(runtime::ui_lang::tr_static("请圈选需要修改的区域；蒙版只接受全透明和不透明像素。", "Select the area to change; the mask accepts only fully transparent and opaque pixels.", "Selecciona la zona que quieres cambiar; la máscara solo admite píxeles totalmente transparentes u opacos.").into());
     }
     Ok(ImageEditMask { image })
 }
@@ -146,11 +146,11 @@ pub fn composite_masked_edit(
 ) -> Result<GeneratedImage, String> {
     if (original.width, original.height) != (edited.width, edited.height) {
         return Err(
-            "图片尺寸不同，请先选择整图采用或缩放后应用圈选。".into(),
+            runtime::ui_lang::tr_static("图片尺寸不同，请先选择整图采用或缩放后应用圈选。", "The image sizes differ. Choose to use the whole image, or scale it before applying the selection.", "Las imágenes tienen tamaños distintos. Elige usar la imagen completa o escalarla antes de aplicar la selección.").into(),
         );
     }
     if (original.width, original.height) != (mask.image.width, mask.image.height) {
-        return Err("圈选与原图尺寸不一致。".into());
+        return Err(runtime::ui_lang::tr_static("圈选与原图尺寸不一致。", "The selection does not match the original image size.", "La selección no coincide con el tamaño de la imagen original.").into());
     }
     let mut pixels = ::image::load_from_memory(&original.bytes)
         .map_err(|e| e.to_string())?
@@ -184,30 +184,30 @@ pub struct ImageGenerationResult {
 
 pub fn validate_image_bytes(bytes: Vec<u8>) -> Result<GeneratedImage, String> {
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-        return Err("图片为空或超过 32 MB 限制。".into());
+        return Err(runtime::ui_lang::tr_static("图片为空或超过 32 MB 限制。", "The image is empty or exceeds the 32 MB limit.", "La imagen está vacía o supera el límite de 32 MB.").into());
     }
     let reader = ::image::ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
-        .map_err(|_| "无法识别图片格式。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("无法识别图片格式。", "Unrecognized image format.", "No se reconoce el formato de la imagen."))?;
     let (mime_type, extension) = match reader.format() {
         Some(::image::ImageFormat::Png) => ("image/png", "png"),
         Some(::image::ImageFormat::Jpeg) => ("image/jpeg", "jpg"),
         Some(::image::ImageFormat::WebP) => ("image/webp", "webp"),
-        _ => return Err("绘图服务只接受 PNG、JPEG 或 WebP 图片。".into()),
+        _ => return Err(runtime::ui_lang::tr_static("绘图服务只接受 PNG、JPEG 或 WebP 图片。", "The drawing service accepts only PNG, JPEG or WebP images.", "El servicio de dibujo solo acepta imágenes PNG, JPEG o WebP.").into()),
     };
-    let (width, height) = reader.into_dimensions().map_err(|_| "图片头损坏。")?;
+    let (width, height) = reader.into_dimensions().map_err(|_| runtime::ui_lang::tr_static("图片头损坏。", "The image header is corrupted.", "El encabezado de la imagen está dañado."))?;
     if width == 0 || height == 0 || width > 8192 || height > 8192 {
-        return Err("图片尺寸超出支持范围。".into());
+        return Err(runtime::ui_lang::tr_static("图片尺寸超出支持范围。", "The image dimensions are outside the supported range.", "Las dimensiones de la imagen están fuera del rango admitido.").into());
     }
     let mut reader = ::image::ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
-        .map_err(|_| "无法识别图片格式。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("无法识别图片格式。", "Unrecognized image format.", "No se reconoce el formato de la imagen."))?;
     let mut limits = ::image::Limits::default();
     limits.max_alloc = Some(256 * 1024 * 1024);
     reader.limits(limits);
     reader
         .decode()
-        .map_err(|_| "图片内容损坏或解码超过内存限制。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("图片内容损坏或解码超过内存限制。", "The image is corrupted or decoding it exceeds the memory limit.", "La imagen está dañada o decodificarla supera el límite de memoria."))?;
     Ok(GeneratedImage {
         bytes,
         mime_type,
@@ -238,7 +238,7 @@ pub struct ImageApiClient {
 
 impl ImageApiClient {
     pub fn new(base_url: &str, token: String) -> Result<Self, String> {
-        let mut base = Url::parse(base_url.trim()).map_err(|_| "绘图网关地址无效。")?;
+        let mut base = Url::parse(base_url.trim()).map_err(|_| runtime::ui_lang::tr_static("绘图网关地址无效。", "Invalid drawing gateway address.", "La dirección del gateway de dibujo no es válida."))?;
         let loopback = matches!(base.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
         if !(base.scheme() == "https" || (base.scheme() == "http" && loopback))
             || base.host_str().is_none()
@@ -248,7 +248,7 @@ impl ImageApiClient {
             || base.fragment().is_some()
             || token.trim().is_empty()
         {
-            return Err("绘图网关必须使用 HTTPS 和有效账号令牌。".into());
+            return Err(runtime::ui_lang::tr_static("绘图网关必须使用 HTTPS 和有效账号令牌。", "The drawing gateway must use HTTPS and a valid account token.", "El gateway de dibujo debe usar HTTPS y un token de cuenta válido.").into());
         }
         let path = format!("{}/", base.path().trim_end_matches('/'));
         base.set_path(&path);
@@ -258,7 +258,7 @@ impl ImageApiClient {
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(900))
             .build()
-            .map_err(|_| "无法创建绘图连接。")?;
+            .map_err(|_| runtime::ui_lang::tr_static("无法创建绘图连接。", "Could not create the drawing connection.", "No se pudo crear la conexión de dibujo."))?;
         Ok(Self {
             client,
             base,
@@ -282,7 +282,7 @@ impl ImageApiClient {
     ) -> Result<ImageGenerationResult, String> {
         if (reference.image.width, reference.image.height) != (mask.image.width, mask.image.height)
         {
-            return Err("圈选与原图尺寸不一致。".into());
+            return Err(runtime::ui_lang::tr_static("圈选与原图尺寸不一致。", "The selection does not match the original image size.", "La selección no coincide con el tamaño de la imagen original.").into());
         }
         self.submit(request, vec![reference], Some(mask)).await
     }
@@ -295,14 +295,14 @@ impl ImageApiClient {
     ) -> Result<ImageGenerationResult, String> {
         request.validate()?;
         if references.len() > 16 {
-            return Err("每次最多使用 16 张参考图片。".into());
+            return Err(runtime::ui_lang::tr_static("每次最多使用 16 张参考图片。", "Use at most 16 reference images at a time.", "Usa como máximo 16 imágenes de referencia cada vez.").into());
         }
         let endpoint = if references.is_empty() {
             "images/generations"
         } else {
             "images/edits"
         };
-        let url = self.base.join(endpoint).map_err(|_| "绘图接口地址无效。")?;
+        let url = self.base.join(endpoint).map_err(|_| runtime::ui_lang::tr_static("绘图接口地址无效。", "Invalid drawing endpoint address.", "La dirección del endpoint de dibujo no es válida."))?;
         let builder = self.client.post(url).bearer_auth(&self.token);
         let builder = if references.is_empty() {
             builder.json(request)
@@ -319,7 +319,7 @@ impl ImageApiClient {
                 let part = multipart::Part::bytes(reference.image.bytes)
                     .file_name(reference.name)
                     .mime_str(reference.image.mime_type)
-                    .map_err(|_| "参考图片格式无效。")?;
+                    .map_err(|_| runtime::ui_lang::tr_static("参考图片格式无效。", "Invalid reference image format.", "El formato de la imagen de referencia no es válido."))?;
                 form = form.part("image[]", part);
             }
             if let Some(mask) = mask {
@@ -341,10 +341,10 @@ impl ImageApiClient {
         let bytes = read_bounded(response, MAX_RESPONSE_BYTES).await?;
         let body: Value = serde_json::from_slice(&bytes).map_err(|_| {
             if status == reqwest::StatusCode::NOT_FOUND {
-                "Somni 绘图入口暂不可用（HTTP 404），请检查网关是否开放图片生成和编辑接口。"
+                runtime::ui_lang::tr_static("Somni 绘图入口暂不可用（HTTP 404），请检查网关是否开放图片生成和编辑接口。", "Somni drawing is unavailable (HTTP 404). Check that the gateway exposes the image generation and editing endpoints.", "El dibujo de Somni no está disponible (HTTP 404). Comprueba que el gateway ofrezca los endpoints de generación y edición de imágenes.")
                     .to_string()
             } else {
-                format!("绘图网关返回了无法解析的响应（HTTP {status}）。")
+                runtime::tr!("绘图网关返回了无法解析的响应（HTTP {status}）。", "The drawing gateway returned a response that could not be parsed (HTTP {status}).", "El gateway de dibujo devolvió una respuesta que no se pudo interpretar (HTTP {status}).")
             }
         })?;
         if !status.is_success() {
@@ -352,10 +352,10 @@ impl ImageApiClient {
                 .pointer("/error/message")
                 .or_else(|| body.get("message"))
                 .and_then(Value::as_str)
-                .unwrap_or("请求未成功")
+                .unwrap_or(runtime::ui_lang::tr_static("请求未成功", "The request did not succeed", "La solicitud no se completó"))
                 .replace(&self.token, "[redacted]");
-            return Err(format!(
-                "Somni 绘图失败（HTTP {status}）：{}",
+            return Err(runtime::tr!(
+                "Somni 绘图失败（HTTP {status}）：{}", "Somni drawing failed (HTTP {status}): {}", "El dibujo de Somni falló (HTTP {status}): {}",
                 detail.chars().take(700).collect::<String>()
             ));
         }
@@ -363,16 +363,16 @@ impl ImageApiClient {
             .get("data")
             .and_then(Value::as_array)
             .filter(|data| !data.is_empty())
-            .ok_or("绘图网关没有返回图片。")?;
+            .ok_or(runtime::ui_lang::tr_static("绘图网关没有返回图片。", "The drawing gateway returned no image.", "El gateway de dibujo no devolvió ninguna imagen."))?;
         if data.len() > usize::from(request.n) {
-            return Err("绘图网关返回的图片数量超过请求数量。".into());
+            return Err(runtime::ui_lang::tr_static("绘图网关返回的图片数量超过请求数量。", "The drawing gateway returned more images than requested.", "El gateway de dibujo devolvió más imágenes de las solicitadas.").into());
         }
         let mut images = Vec::with_capacity(data.len());
         for item in data {
             let bytes = if let Some(encoded) = item.get("b64_json").and_then(Value::as_str) {
                 STANDARD
                     .decode(encoded)
-                    .map_err(|_| "绘图网关返回了损坏的图片编码。")?
+                    .map_err(|_| runtime::ui_lang::tr_static("绘图网关返回了损坏的图片编码。", "The drawing gateway returned a corrupted image encoding.", "El gateway de dibujo devolvió una imagen con codificación dañada."))?
             } else if let Some(url) = item.get("url").and_then(Value::as_str) {
                 if let Some((header, encoded)) = url.split_once(',').filter(|(header, _)| {
                     header.starts_with("data:image/") && header.ends_with(";base64")
@@ -380,12 +380,12 @@ impl ImageApiClient {
                     let _ = header;
                     STANDARD
                         .decode(encoded)
-                        .map_err(|_| "绘图网关返回了损坏的图片编码。")?
+                        .map_err(|_| runtime::ui_lang::tr_static("绘图网关返回了损坏的图片编码。", "The drawing gateway returned a corrupted image encoding.", "El gateway de dibujo devolvió una imagen con codificación dañada."))?
                 } else {
                     download_image(url).await?
                 }
             } else {
-                return Err("绘图网关返回了缺少图片数据的结果。".into());
+                return Err(runtime::ui_lang::tr_static("绘图网关返回了缺少图片数据的结果。", "The drawing gateway returned a result without image data.", "El gateway de dibujo devolvió un resultado sin datos de imagen.").into());
             };
             let mut image = validate_image_bytes(bytes)?;
             image.revised_prompt = item
@@ -402,9 +402,9 @@ impl ImageApiClient {
 
     fn transport_error(&self, error: &reqwest::Error) -> String {
         if error.is_timeout() {
-            "Somni 绘图请求超时，服务器可能仍在生成；请先核对账户用量，避免重复提交。".into()
+            runtime::ui_lang::tr_static("Somni 绘图请求超时，服务器可能仍在生成；请先核对账户用量，避免重复提交。", "The Somni drawing request timed out and the server may still be generating. Check your account usage before submitting again.", "La solicitud de dibujo de Somni superó el tiempo de espera y es posible que el servidor siga generando. Revisa el uso de tu cuenta antes de volver a enviarla.").into()
         } else {
-            "无法连接 Somni 绘图服务，请检查网络或网关状态。".into()
+            runtime::ui_lang::tr_static("无法连接 Somni 绘图服务，请检查网络或网关状态。", "Failed to connect to the Somni drawing service. Check your network or the gateway status.", "No se pudo conectar con el servicio de dibujo de Somni. Revisa tu red o el estado del gateway.").into()
         }
     }
 }
@@ -414,16 +414,16 @@ async fn read_bounded(mut response: reqwest::Response, limit: usize) -> Result<V
         .content_length()
         .is_some_and(|length| length > limit as u64)
     {
-        return Err("绘图服务响应超过大小限制。".into());
+        return Err(runtime::ui_lang::tr_static("绘图服务响应超过大小限制。", "The drawing service response exceeds the size limit.", "La respuesta del servicio de dibujo supera el límite de tamaño.").into());
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "读取绘图响应失败；请核对账户用量后再决定是否重试。")?
+        .map_err(|_| runtime::ui_lang::tr_static("读取绘图响应失败；请核对账户用量后再决定是否重试。", "Reading the drawing response failed. Check your account usage before deciding whether to retry.", "No se pudo leer la respuesta de dibujo. Revisa el uso de tu cuenta antes de decidir si reintentas."))?
     {
         if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err("绘图服务响应超过大小限制。".into());
+            return Err(runtime::ui_lang::tr_static("绘图服务响应超过大小限制。", "The drawing service response exceeds the size limit.", "La respuesta del servicio de dibujo supera el límite de tamaño.").into());
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -460,18 +460,18 @@ fn public_ip(ip: IpAddr) -> bool {
 }
 
 async fn download_image(url: &str) -> Result<Vec<u8>, String> {
-    let url = Url::parse(url).map_err(|_| "图片下载地址无效。")?;
+    let url = Url::parse(url).map_err(|_| runtime::ui_lang::tr_static("图片下载地址无效。", "Invalid image download address.", "La dirección de descarga de la imagen no es válida."))?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return Err("图片下载地址必须是公开 HTTPS 地址。".into());
+        return Err(runtime::ui_lang::tr_static("图片下载地址必须是公开 HTTPS 地址。", "The image download address must be a public HTTPS address.", "La dirección de descarga de la imagen debe ser una dirección HTTPS pública.").into());
     }
-    let host = url.host_str().ok_or("图片下载地址缺少域名。")?;
-    let port = url.port_or_known_default().ok_or("图片下载端口无效。")?;
+    let host = url.host_str().ok_or(runtime::ui_lang::tr_static("图片下载地址缺少域名。", "The image download address has no host name.", "A la dirección de descarga de la imagen le falta el dominio."))?;
+    let port = url.port_or_known_default().ok_or(runtime::ui_lang::tr_static("图片下载端口无效。", "Invalid image download port.", "El puerto de descarga de la imagen no es válido."))?;
     let addresses: Vec<_> = tokio::net::lookup_host((host.trim_matches(['[', ']']), port))
         .await
-        .map_err(|_| "无法解析图片下载地址。")?
+        .map_err(|_| runtime::ui_lang::tr_static("无法解析图片下载地址。", "Could not resolve the image download address.", "No se pudo resolver la dirección de descarga de la imagen."))?
         .collect();
     if addresses.is_empty() || addresses.iter().any(|address| !public_ip(address.ip())) {
-        return Err("图片下载地址不能指向本机或内部网络。".into());
+        return Err(runtime::ui_lang::tr_static("图片下载地址不能指向本机或内部网络。", "The image download address must not point to this machine or an internal network.", "La dirección de descarga de la imagen no puede apuntar a este equipo ni a una red interna.").into());
     }
     let client = Client::builder()
         .no_proxy()
@@ -480,15 +480,15 @@ async fn download_image(url: &str) -> Result<Vec<u8>, String> {
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
         .build()
-        .map_err(|_| "无法创建图片下载连接。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("无法创建图片下载连接。", "Could not create the image download connection.", "No se pudo crear la conexión de descarga de la imagen."))?;
     // A CDN receives no gateway authorization header, even on the same origin.
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|_| "下载生成的图片失败。")?;
+        .map_err(|_| runtime::ui_lang::tr_static("下载生成的图片失败。", "Downloading the generated image failed.", "No se pudo descargar la imagen generada."))?;
     if !response.status().is_success() {
-        return Err("生成图片的下载地址不可用。".into());
+        return Err(runtime::ui_lang::tr_static("生成图片的下载地址不可用。", "The generated image's download address is unavailable.", "La dirección de descarga de la imagen generada no está disponible.").into());
     }
     read_bounded(response, MAX_IMAGE_BYTES).await
 }

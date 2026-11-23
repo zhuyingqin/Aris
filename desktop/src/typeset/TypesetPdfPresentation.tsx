@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isWindowFullscreen, setWindowFullscreen } from "../windowControls";
 import { type Language } from "../store";
+import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
 import { clampNumber } from "./pdfGeometry";
 import { PdfPage } from "./PdfPage";
@@ -491,7 +492,7 @@ export default function TypesetPdfPresentation({
       <div
         className={`typeset-presentation-hud${hudVisible ? " visible" : ""}`}
         role="toolbar"
-        aria-label="Presentation controls"
+        aria-label={tr(language, "演示控制", "Presentation controls", "Controles de presentación")}
         onMouseEnter={() => {
           if (hudTimerRef.current !== null) window.clearTimeout(hudTimerRef.current);
           setHudVisible(true);
@@ -604,8 +605,10 @@ export default function TypesetPdfPresentation({
         <button
           type="button"
           className="typeset-presentation-btn"
-          title={isFullscreen ? "Exit full screen (F)" : "Full screen (F)"}
-          aria-label="Toggle full screen"
+          title={isFullscreen
+            ? tr(language, "退出全屏 (F)", "Exit full screen (F)", "Salir de pantalla completa (F)")
+            : tr(language, "全屏 (F)", "Full screen (F)", "Pantalla completa (F)")}
+          aria-label={tr(language, "切换全屏", "Toggle full screen", "Alternar pantalla completa")}
           onClick={(event) => {
             event.stopPropagation();
             void toggleFs();

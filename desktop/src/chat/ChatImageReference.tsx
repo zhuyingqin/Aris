@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
+import { tr } from "../language";
 import ImageLightbox from "../ImageLightbox";
 import LocalImageLightbox from "../LocalImageLightbox";
 import { resolveWorkspaceFilePath } from "../editor/workspaceFiles";
@@ -20,7 +21,7 @@ export default function ChatImageReference({ src, label }: { src: string; label?
     <>
       <button type="button" className="chat-image-reference" title={name || undefined}
         onClick={() => setOpened({ source, path: direct ? undefined : resolveWorkspaceFilePath(source, projectPath) })}>
-        <SvgIcon name="image" size={13} /><span>{language === "cn" ? "查看图片" : "View image"}{name ? ` · ${name}` : ""}</span>
+        <SvgIcon name="image" size={13} /><span>{tr(language, "查看图片", "View image", "Ver imagen")}{name ? ` · ${name}` : ""}</span>
       </button>
       {opened?.path ? <LocalImageLightbox key={opened.path} path={opened.path} title={name}
         onClose={() => setOpened(null)} /> : opened && <ImageLightbox src={opened.source}

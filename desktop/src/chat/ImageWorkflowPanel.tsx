@@ -1,3 +1,5 @@
+import type { Language } from "../store";
+import { tr } from "../language";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { fileOpen, fileReveal } from "../api/tauri";
@@ -63,12 +65,11 @@ function truncate(value: string, length: number): string {
 interface Props {
   sessionId: string;
   turns: ChatTurn[];
-  language: "cn" | "en";
+  language: Language;
   onSendToChat: (prompt: string) => void;
 }
 
 export default function ImageWorkflowPanel({ sessionId, turns, language, onSendToChat }: Props) {
-  const cn = language === "cn";
   const calls = useMemo(() => imageWorkflowCallsFromTurns(turns), [turns]);
   const layout = useMemo(() => layoutImageWorkflow(calls), [calls]);
   const [saved, setSaved] = useState<SavedWorkflowState>(() => loadState(sessionId));
@@ -266,8 +267,7 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
   const lightboxIndex = previewableGenerations.findIndex((generation) => generation.id === lightboxId);
   const lightboxGeneration = lightboxIndex >= 0 ? previewableGenerations[lightboxIndex] : null;
 
-  const copy = cn
-    ? {
+  const copy = tr(language, {
       title: "图片节点工作流",
       subtitle: "画布只投影 Chat 中真实发生的图片提示词、调用与输出。",
       fit: "适应宽度",
@@ -314,8 +314,7 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       hideInspector: "收起编辑面板",
       showInspector: "展开编辑面板",
       quick: ["保持构图，只修正文案", "增强层级和可读性", "生成一个明显不同的方案"],
-    }
-    : {
+    }, {
       title: "Image node workflow",
       subtitle: "The canvas projects only prompts, calls, and outputs that actually occurred in Chat.",
       fit: "Fit width",
@@ -362,7 +361,54 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       hideInspector: "Collapse editor",
       showInspector: "Expand editor",
       quick: ["Keep composition; fix copy only", "Improve hierarchy and legibility", "Create a clearly different direction"],
-    };
+    }, {
+      title: "Flujo de nodos de imagen",
+      subtitle: "El lienzo solo muestra los prompts, llamadas y resultados que ocurrieron de verdad en el chat.",
+      fit: "Ajustar al ancho",
+      zoomIn: "Acercar",
+      zoomOut: "Alejar",
+      canvasHint: "Arrastra el espacio vacío para desplazarte · Ctrl+rueda para hacer zoom · Flechas para cambiar de nodo",
+      emptyTitle: "Esta conversación aún no tiene nodos de imagen",
+      emptyDescription: "Cuando el chat genere una imagen, su prompt real y su resultado aparecerán aquí automáticamente.",
+      emptyAction: "Redactar la primera generación",
+      emptyTemplate: "Construye un prompt de dibujo completo a partir de estos requisitos y genera una imagen con el servicio de dibujo configurado.\n\nRequisitos: ",
+      prompt: "Prompt",
+      output: "Imagen generada",
+      running: "Generando",
+      failed: "Falló",
+      complete: "Generada",
+      accepted: "Aceptada",
+      accept: "Aceptar versión",
+      unaccept: "Quitar aceptación",
+      compare: "Añadir a la comparación",
+      removeCompare: "Quitar de la comparación",
+      enlarge: "Ampliar imagen",
+      selected: "Editar nodo",
+      source: "Del historial del chat",
+      derived: "Derivada de una versión anterior",
+      titleLabel: "Título del nodo",
+      promptLabel: "Contenido del prompt",
+      revisionLabel: "Instrucción para la siguiente versión",
+      revisionPlaceholder: "Describe qué debe cambiar en la siguiente versión. El historial original no se modifica.",
+      reset: "Restaurar contenido del historial",
+      send: "Enviar al cuadro de chat",
+      sent: "Añadido al cuadro de chat; pulsa Enter",
+      compareTitle: "Comparar versiones",
+      clearCompare: "Vaciar",
+      swapCompare: "Intercambiar A / B",
+      removeSlot: "Quitar de la comparación",
+      closePreview: "Cerrar vista ampliada",
+      previous: "Imagen anterior",
+      next: "Imagen siguiente",
+      copyPath: "Copiar ruta",
+      copied: "Copiada",
+      openFile: "Abrir con el visor del sistema",
+      revealFile: "Mostrar en la carpeta",
+      original: "Contenido original del historial",
+      hideInspector: "Contraer editor",
+      showInspector: "Expandir editor",
+      quick: ["Mantener la composición; corregir solo el texto", "Mejorar la jerarquía y la legibilidad", "Crear una dirección claramente distinta"],
+    });
 
   const updateDraft = (patch: Partial<NodeDraft>) => {
     if (!selectedId) return;
@@ -391,12 +437,14 @@ export default function ImageWorkflowPanel({ sessionId, turns, language, onSendT
       ? selectedDraft.content?.trim() || selectedCall.prompt
       : selectedDraft.content?.trim() || copy.quick[0];
     const chatPrompt = sourcePath
-      ? cn
-        ? `请基于图片 ${sourcePath} 和以下修改要求构建完整绘图提示词，使用已配置的绘图服务创建新版本。\n\n修改要求：${instruction}\n\n保留未被明确要求修改的内容。`
-        : `Build a complete drawing prompt from ${sourcePath} and these changes, then create a new version with the configured drawing service.\n\nRevision: ${instruction}\n\nPreserve everything not explicitly requested to change.`
-      : cn
-        ? `请根据以下要求构建完整绘图提示词，并使用已配置的绘图服务生成图片。\n\n绘图要求：${instruction}`
-        : `Build a complete drawing prompt from these requirements, then generate an image with the configured drawing service.\n\nRequirements: ${instruction}`;
+      ? tr(language,
+        `请基于图片 ${sourcePath} 和以下修改要求构建完整绘图提示词，使用已配置的绘图服务创建新版本。\n\n修改要求：${instruction}\n\n保留未被明确要求修改的内容。`,
+        `Build a complete drawing prompt from ${sourcePath} and these changes, then create a new version with the configured drawing service.\n\nRevision: ${instruction}\n\nPreserve everything not explicitly requested to change.`,
+        `Construye un prompt de dibujo completo a partir de ${sourcePath} y estos cambios, y crea una nueva versión con el servicio de dibujo configurado.\n\nRevisión: ${instruction}\n\nConserva todo lo que no se haya pedido cambiar explícitamente.`)
+      : tr(language,
+        `请根据以下要求构建完整绘图提示词，并使用已配置的绘图服务生成图片。\n\n绘图要求：${instruction}`,
+        `Build a complete drawing prompt from these requirements, then generate an image with the configured drawing service.\n\nRequirements: ${instruction}`,
+        `Construye un prompt de dibujo completo a partir de estos requisitos y genera una imagen con el servicio de dibujo configurado.\n\nRequisitos: ${instruction}`);
     onSendToChat(chatPrompt);
     setHandoffSent(true);
   };

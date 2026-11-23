@@ -1,0 +1,97 @@
+{
+  "n_probes": 132,
+  "n_normal_turns": 300,
+  "lexical_gate": [
+    {
+      "threshold": 0.0,
+      "probe_delivered_hit": 0.606,
+      "normal_fire_rate": 1.0
+    },
+    {
+      "threshold": 0.3,
+      "probe_delivered_hit": 0.227,
+      "normal_fire_rate": 0.237
+    },
+    {
+      "threshold": 0.4,
+      "probe_delivered_hit": 0.061,
+      "normal_fire_rate": 0.17
+    },
+    {
+      "threshold": 0.5,
+      "probe_delivered_hit": 0.0,
+      "normal_fire_rate": 0.153
+    },
+    {
+      "threshold": 0.6,
+      "probe_delivered_hit": 0.0,
+      "normal_fire_rate": 0.103
+    },
+    {
+      "threshold": 0.7,
+      "probe_delivered_hit": 0.0,
+      "normal_fire_rate": 0.07
+    },
+    {
+      "threshold": 0.8,
+      "probe_delivered_hit": 0.0,
+      "normal_fire_rate": 0.067
+    }
+  ],
+  "semantic_gate_qwen3_0.6b": [
+    {
+      "threshold": 0.0,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 1.0
+    },
+    {
+      "threshold": 0.2,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.99
+    },
+    {
+      "threshold": 0.3,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.99
+    },
+    {
+      "threshold": 0.4,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.99
+    },
+    {
+      "threshold": 0.5,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.99
+    },
+    {
+      "threshold": 0.6,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.99
+    },
+    {
+      "threshold": 0.7,
+      "probe_delivered_hit": 0.606,
+      "probe_fire": 1.0,
+      "normal_fire_rate": 0.987
+    },
+    {
+      "threshold": 0.8,
+      "probe_delivered_hit": 0.598,
+      "probe_fire": 0.985,
+      "normal_fire_rate": 0.96
+    },
+    {
+      "threshold": 0.9,
+      "probe_delivered_hit": 0.515,
+      "probe_fire": 0.788,
+      "normal_fire_rate": 0.77
+    }
+  ]
+}

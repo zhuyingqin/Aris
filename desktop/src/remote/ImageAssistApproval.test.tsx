@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  language: "cn" as "cn" | "en" | "es",
   listen: vi.fn(),
   imageAssistDecide: vi.fn(),
   imageAssistConsent: vi.fn(),
@@ -17,6 +18,10 @@ vi.mock("../api/tauri", () => ({
   imageAssistConsent: mocks.imageAssistConsent,
   imageAssistPublish: mocks.imageAssistPublish,
   imageAssistRoster: mocks.imageAssistRoster,
+}));
+
+vi.mock("../store", () => ({
+  useStore: <T,>(selector: (state: { language: "cn" | "en" | "es" }) => T) => selector({ language: mocks.language }),
 }));
 
 import { ImageAssistApproval } from "./ImageAssistApproval";
@@ -43,6 +48,7 @@ const prompt = (overrides: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
+  mocks.language = "cn";
   publishImageAssistActivity(null);
   mocks.imageAssistDecide.mockReset().mockResolvedValue(undefined);
   mocks.imageAssistConsent.mockReset().mockResolvedValue(undefined);
@@ -73,6 +79,17 @@ describe("ImageAssistApproval", () => {
     expect(screen.getByText(/9f3a1c7e/)).toBeTruthy();
     // The cost to the helper is stated before they decide.
     expect(screen.getByText(/消耗你的额度/)).toBeTruthy();
+  });
+
+  it("renders the approval dialog in Spanish", async () => {
+    mocks.language = "es";
+    render(<ImageAssistApproval />);
+    emit({ payload: prompt() });
+
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+    expect(screen.getByText("Otro usuario te pide que generes una imagen por él")).toBeTruthy();
+    expect(screen.getByText(/Puedes ayudar 4 veces más hoy/)).toBeTruthy();
+    expect(screen.getByText("Aceptar y generar")).toBeTruthy();
   });
 
   it("sends the decision and closes", async () => {

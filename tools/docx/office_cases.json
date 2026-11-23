@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scope": "Operator-planned daily-office acceptance on authored anonymous fixtures; public official documentation defines behaviors, not real customer task histories.",
+  "sources": [
+    {"id": "line_spacing", "url": "https://support.microsoft.com/en-us/word/change-the-line-spacing-in-word", "requirement": "设置行距、段前段后距，并控制同页排版。"},
+    {"id": "convert_table", "url": "https://support.microsoft.com/en-us/word/convert-text-to-a-table-or-a-table-to-text", "requirement": "使用段落和制表符分隔行列；内容带逗号时应使用制表符。"},
+    {"id": "repeat_header", "url": "https://support.microsoft.com/en-us/word/repeat-table-header-on-subsequent-pages", "requirement": "长表自动跨页时，每页重复首行表头。"},
+    {"id": "page_numbers", "url": "https://support.microsoft.com/en-us/word/start-page-numbering-later-in-your-document", "requirement": "封面可不显示页码；后续页可从指定数字开始。"},
+    {"id": "orientation", "url": "https://support.microsoft.com/en-us/word/training/change-page-orientation-to-landscape-or-portrait", "requirement": "既可调整整份文档，也可仅将指定内容所在页改为横向。"},
+    {"id": "hidden_data", "url": "https://support.microsoft.com/en-us/office/collab-files/remove-hidden-data-and-personal-information-by-inspecting-documents-presentations-or-workbooks", "requirement": "对外副本应检查并清理隐藏个人信息，包括文档属性；只改可见文字不足以证明完成。"},
+    {"id": "revisions", "url": "https://support.microsoft.com/en-us/word/training/track-changes-in-word", "requirement": "接受或拒绝修订后再定稿；关闭显示不等于清除修订。"},
+    {"id": "forms", "url": "https://support.microsoft.com/en-us/word/create-a-form-in-word-that-users-can-complete-or-print", "requirement": "原生内容控件提供可填写文字、日期和下拉选项等表单功能。"},
+    {"id": "contents", "url": "https://support.microsoft.com/en-us/word/training/insert-a-table-of-contents", "requirement": "自动目录依据标题生成并可更新；手写目录不能替代。"},
+    {"id": "save_pdf", "url": "https://support.microsoft.com/en-us/office/collab-files/save-or-convert-to-pdf-or-xps-in-office-desktop-apps", "requirement": "导出实际 PDF 文件用于分发或打印，并核对交付文件。"}
+  ],
+  "cases": [
+    {"id": "office_notice", "label": "一页维护通知", "sources": ["line_spacing", "save_pdf"], "request": "保留通知原文，标题18磅居中，正文12磅1.15倍行距，维护时间标红，保持A4且恰好一页。", "criteria": ["原文不变", "标题/正文和时间范围格式正确", "A4一页且无多余白页"]},
+    {"id": "meeting_minutes", "label": "会议纪要更新行动项", "sources": ["line_spacing"], "request": "将采购清单的负责人由陈工改为李工，截止日期改为2026-11-20；其他行动项、表格和原格式保持不变。", "criteria": ["仅指定行动项两处文字变化", "其他内容、表格结构和格式保留", "一页可读"]},
+    {"id": "contract_edit", "label": "合同金额和交付日期修改", "sources": ["save_pdf", "revisions"], "request": "将合同价款12,800.00改为13,500.00元，交付日改为2026年12月01日；保留加粗金额、含税斜体、签字栏及其他条款。", "criteria": ["跨run金额与日期精确修改", "原run及段落属性保留", "签字栏和其他条款保留"]},
+    {"id": "expense_form", "label": "带合并单元格的报销单", "sources": ["forms"], "request": "把住宿金额改为1,000.00、合计改为1,520.00；保留原合并单元格、边框、其他费用和审批签字栏。", "criteria": ["指定金额正确且合计一致", "表格合并、边框和签字栏保留", "一页可读"]},
+    {"id": "quotation_table", "label": "报价清单转表格并导出PDF", "sources": ["convert_table", "save_pdf"], "request": "把制表符报价清单转为5行4列表格；品名内的逗号不能分列，金额原样保留、数字右对齐，并交付同名PDF。", "criteria": ["原生5×4表格", "品名逗号及所有金额保留", "数字右对齐", "同名PDF及内容完整"]},
+    {"id": "report_pagination", "label": "三页报告连续页码", "sources": ["page_numbers"], "request": "在现有三页报告右下角添加连续1至3页码，保留单位页眉、正文和原分页。", "criteria": ["三页右下角依次1至3", "原页眉及文字保留", "无新增空白页"]},
+    {"id": "contact_deduplication", "label": "联络名单去重", "sources": [], "request": "按工号去重，保留首次出现的完整记录及原顺序，不留下空段或白尾页。", "criteria": ["工号唯一且首次顺序保留", "未删除唯一记录", "无残留空段或白尾页"]},
+    {"id": "external_redaction", "label": "对外材料完整脱敏", "sources": ["hidden_data"], "request": "将正文联系人和电话脱敏，同时清除作者及最后修改者等隐藏个人信息；项目编号和预算不变。", "criteria": ["正文联系人及电话不再出现", "隐藏作者和最后修改者清除", "项目编号和预算保留"]},
+    {"id": "long_table_header", "label": "跨页库存表重复表头", "sources": ["repeat_header"], "request": "现有60条库存明细跨页时每页重复首行表头，保持全部编码、数量及原表格内容。", "criteria": ["原生重复表头属性", "实际跨页且每页表头可见", "全部60条数据保留"]},
+    {"id": "cover_page_numbering", "label": "封面无页码正文从1开始", "sources": ["page_numbers"], "request": "三页报告封面不显示页码，第二页开始显示1、2，其他版式保持不变。", "criteria": ["封面无页码", "正文两页分别为1、2", "原有三页及正文保留"]},
+    {"id": "landscape_appendix", "label": "仅宽表附件改横向", "sources": ["orientation"], "request": "封面保持纵向，仅第二节宽表附件改为横向，保留全部表格内容与分节。", "criteria": ["第一节纵向", "第二节横向", "原分节及全部数据保留"]},
+    {"id": "accept_revisions", "label": "接受合同修订生成定稿", "sources": ["revisions"], "request": "接受合同中的全部修订，成稿只保留新金额11,000.00，不残留插入、删除修订标记。", "criteria": ["保留已接受的新金额", "无w:ins/w:del修订节点", "其他条款保留"]},
+    {"id": "automatic_contents", "label": "工作报告自动目录", "sources": ["contents"], "request": "根据现有一级、二级标题插入可更新的原生目录和页码，不使用手写目录代替。", "criteria": ["原生TOC字段", "一级二级标题及页码正确", "可随标题变更更新"]},
+    {"id": "fillable_controls", "label": "保留可填写表单控件", "sources": ["forms"], "request": "填写原生内容控件中的姓名，同时保留下拉列表及其选项；不能把控件转成普通文字。", "criteria": ["目标姓名已填写", "文字控件及下拉控件保留", "原选项和其他内容保留"]}
+  ],
+  "limitations": ["All document fixtures are authored anonymous test inputs, not downloaded customer or institutional forms.", "Source documentation describes editor behavior; it does not certify this application or its Word/WPS compatibility.", "The contact deduplication request is an authored office scenario rather than a quotation from a public support article.", "Tools receive explicit operator-selected anchors and parameters; no full model-conversation success rate is measured."]
+}

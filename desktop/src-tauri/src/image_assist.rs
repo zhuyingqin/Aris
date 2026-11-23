@@ -417,9 +417,9 @@ fn emit_transfer_progress(
             match_id: match_id.map(|id| id.to_string()),
             stage: "transferring",
             detail: Some(if direction == "sending" {
-                "正在通过加密通道回传图片给请求方".to_string()
+                runtime::ui_lang::tr_static("正在通过加密通道回传图片给请求方", "Sending the images back to the requester over the encrypted channel", "Enviando las imágenes de vuelta a quien las pidió por el canal cifrado").to_string()
             } else {
-                "正在通过加密通道接收图片".to_string()
+                runtime::ui_lang::tr_static("正在通过加密通道接收图片", "Receiving the images over the encrypted channel", "Recibiendo las imágenes por el canal cifrado").to_string()
             }),
             images: Vec::new(),
             transfer_received_bytes: Some(received_bytes),
@@ -861,7 +861,7 @@ pub(crate) fn handle_gateway_frame(app: &AppHandle, frame: ImageAssistServerFram
                 eprintln!("SomniQ Image Assist declined an offer: {error}");
                 let _ = app.emit(
                     IMAGE_ASSIST_ERROR_EVENT,
-                    format!("收到一个代出图请求，但本机拒绝了：{error}"),
+                    runtime::tr!("收到一个代出图请求，但本机拒绝了：{error}", "An image request arrived, but this computer declined it: {error}", "Llegó una solicitud de imagen, pero este equipo la rechazó: {error}"),
                 );
                 decline_locally(app, match_id);
             }
@@ -985,7 +985,7 @@ fn on_approved(
         app,
         Some(match_id),
         "connecting",
-        Some("对方已接受，正在尝试建立点对点加密通道".to_string()),
+        Some(runtime::ui_lang::tr_static("对方已接受，正在尝试建立点对点加密通道", "The other side accepted; setting up a peer-to-peer encrypted channel", "La otra parte aceptó; estableciendo un canal cifrado entre pares").to_string()),
     );
     // The gateway assigns the helper as the deterministic offerer. The
     // requester reserves the same brokered session but waits for this offer
@@ -1200,7 +1200,7 @@ fn on_relay_granted(
         app,
         Some(match_id),
         "connecting",
-        Some("已建立端到端加密中继回传通道".to_string()),
+        Some(runtime::ui_lang::tr_static("已建立端到端加密中继回传通道", "End-to-end encrypted relay channel for returning images established", "Se estableció el canal de retransmisión cifrado de extremo a extremo para devolver las imágenes").to_string()),
     );
     Ok(())
 }
@@ -1238,7 +1238,7 @@ pub(crate) fn brokered_direct_failed(
         app,
         Some(match_id),
         "connecting",
-        Some("直连未成功，正在申请加密中继".to_string()),
+        Some(runtime::ui_lang::tr_static("直连未成功，正在申请加密中继", "The direct connection failed; requesting an encrypted relay", "La conexión directa falló; solicitando un relé cifrado").to_string()),
     );
     if !local_is_helper {
         crate::remote::send_image_assist_frame(
@@ -1268,7 +1268,7 @@ pub(crate) fn brokered_transport_opened(
         app,
         match_id,
         "connected",
-        Some("安全连接已建立，正在校验临时会话".to_string()),
+        Some(runtime::ui_lang::tr_static("安全连接已建立，正在校验临时会话", "Secure connection established; verifying the temporary session", "Conexión segura establecida; verificando la sesión temporal").to_string()),
     );
     match send_local_transcript(state, session_id, &sink) {
         Ok(()) => {
@@ -1555,7 +1555,7 @@ fn fail_match(app: &AppHandle, match_id: MatchId, reason: &str) {
     eprintln!("SomniQ Image Assist ended match {match_id}: {reason}");
     let _ = app.emit(
         IMAGE_ASSIST_ERROR_EVENT,
-        format!("代出图请求中断：{reason}"),
+        runtime::tr!("代出图请求中断：{reason}", "The image request was interrupted: {reason}", "Se interrumpió la solicitud de imagen: {reason}"),
     );
     let request_id = runtime()
         .lock()
@@ -1620,10 +1620,10 @@ fn on_candidate(
         app,
         Some(match_id),
         "sent",
-        Some(format!(
-            "已发送给 {}（设备 {}），等待对方查看并接受",
+        Some(runtime::tr!(
+            "已发送给 {}（设备 {}），等待对方查看并接受", "Sent to {} (device {}); waiting for them to review and accept", "Enviado a {} (dispositivo {}); esperando a que lo revise y lo acepte",
             if peer.display_name.trim().is_empty() {
-                "在线互助用户"
+                runtime::ui_lang::tr_static("在线互助用户", "an online helper", "un usuario de ayuda en línea")
             } else {
                 peer.display_name.trim()
             },
@@ -1644,13 +1644,13 @@ fn on_offered(
 ) -> Result<(), String> {
     let policy = crate::compute::image_help_policy(app)?;
     if !policy.accept_image_help {
-        return Err("「为其他用户生成图片」开关未打开（设置 → 远程控制 → 电脑）".to_string());
+        return Err(runtime::ui_lang::tr_static("「为其他用户生成图片」开关未打开（设置 → 远程控制 → 电脑）", "The \"Generate images for other users\" switch is off (Settings → Remote control → Computer)", "El interruptor \"Generar imágenes para otros usuarios\" está desactivado (Ajustes → Control remoto → Ordenador)").to_string());
     }
     if !crate::oracle_web::image_tool_available() {
         // The gateway matched on a stale advertisement: this machine said it
         // could help, and by the time the offer arrived it could not.
         return Err(
-            "本机的 ChatGPT Web 账号当前不可用（未绑定、Oracle 运行时未就绪，或账号浏览器窗口开着）"
+            runtime::ui_lang::tr_static("本机的 ChatGPT Web 账号当前不可用（未绑定、Oracle 运行时未就绪，或账号浏览器窗口开着）", "This computer's ChatGPT Web account is unavailable right now (not linked, the Oracle runtime is not ready, or the account's browser window is open)", "La cuenta de ChatGPT Web de este equipo no está disponible ahora (no está vinculada, el entorno de Oracle no está listo o la ventana del navegador de la cuenta está abierta)")
                 .to_string(),
         );
     }
@@ -1697,8 +1697,8 @@ fn on_offered(
         app,
         Some(match_id),
         "accepted",
-        Some(format!(
-            "已按设置自动接受设备 {} 的图片请求",
+        Some(runtime::tr!(
+            "已按设置自动接受设备 {} 的图片请求", "Automatically accepted the image request from device {} as set in Settings", "Se aceptó automáticamente la solicitud de imagen del dispositivo {} según tus ajustes",
             peer_fingerprint(&peer.device_id.to_string())
         )),
     );
@@ -2037,9 +2037,9 @@ pub async fn image_assist_decide(
         Some(match_id),
         if accept { "accepted" } else { "declined" },
         Some(if accept {
-            "已接受请求，正在创建图片互助临时会话".to_string()
+            runtime::ui_lang::tr_static("已接受请求，正在创建图片互助临时会话", "Request accepted; creating a temporary image-assist session", "Solicitud aceptada; creando una sesión temporal de ayuda con imágenes").to_string()
         } else {
-            "已拒绝该图片请求".to_string()
+            runtime::ui_lang::tr_static("已拒绝该图片请求", "Image request declined", "Solicitud de imagen rechazada").to_string()
         }),
     );
     Ok(())
@@ -2151,7 +2151,7 @@ pub(crate) fn execute_brokered_image_tool(
         &app,
         None,
         "matching",
-        Some(format!("请求 {} 已提交，正在匹配在线互助用户", request_id)),
+        Some(runtime::tr!("请求 {} 已提交，正在匹配在线互助用户", "Request {} submitted; matching an online helper", "Solicitud {} enviada; buscando un usuario de ayuda en línea", request_id)),
     );
 
     let outcome = await_request(&app, request_id, cancelled);
@@ -2251,7 +2251,7 @@ fn await_request(
             return result;
         }
         if let Some(match_id) = stalled_transfer_match(request_id)? {
-            let reason = "图片回传在 45 秒内没有进展，请检查双方网络后重试";
+            let reason = runtime::ui_lang::tr_static("图片回传在 45 秒内没有进展，请检查双方网络后重试", "Returning the images made no progress in 45 seconds. Check both networks and try again", "La devolución de las imágenes no avanzó en 45 segundos. Revisa la red de ambas partes y vuelve a intentarlo");
             fail_match(app, match_id, reason);
             return Err(reason.to_string());
         }
@@ -2424,7 +2424,7 @@ pub(crate) fn handle_transport_frame(
                 eprintln!("SomniQ Image Assist refused a request from an unverified peer");
                 let _ = app.emit(
                     IMAGE_ASSIST_ERROR_EVENT,
-                    "收到一个代出图请求，但对方尚未通过身份校验，已拒绝。".to_string(),
+                    runtime::ui_lang::tr_static("收到一个代出图请求，但对方尚未通过身份校验，已拒绝。", "An image request arrived from a peer that had not passed identity verification, so it was declined.", "Llegó una solicitud de imagen de alguien que no superó la verificación de identidad, así que se rechazó.").to_string(),
                 );
                 reply(ImageAssistWireMessage::Failed {
                     request_id,
@@ -2505,7 +2505,7 @@ pub(crate) fn handle_transport_frame(
                             clear_result_receipt(request_id);
                             release_served(request_id);
                             if let Some(match_id) = match_for_session(&session_id) {
-                                fail_match(&app, match_id, "无法发送图片回传清单");
+                                fail_match(&app, match_id, runtime::ui_lang::tr_static("无法发送图片回传清单", "Could not send the image return manifest", "No se pudo enviar la lista de imágenes de vuelta"));
                             }
                             return;
                         }
@@ -2514,7 +2514,7 @@ pub(crate) fn handle_transport_frame(
                             &app,
                             match_id,
                             "generating",
-                            Some("图片清单已发出，等待请求方确认接收".to_string()),
+                            Some(runtime::ui_lang::tr_static("图片清单已发出，等待请求方确认接收", "Image manifest sent; waiting for the requester to confirm receipt", "Lista de imágenes enviada; esperando a que quien las pidió confirme la recepción").to_string()),
                         );
                         match receipt.recv_timeout(IMAGE_ASSIST_RESULT_RECEIPT_TIMEOUT) {
                             Ok(()) => {
@@ -2531,7 +2531,7 @@ pub(crate) fn handle_transport_frame(
                                     fail_match(
                                         &app,
                                         match_id,
-                                        "请求方未确认图片清单，请检查双方网络后重试",
+                                        runtime::ui_lang::tr_static("请求方未确认图片清单，请检查双方网络后重试", "The requester did not confirm the image manifest. Check both networks and try again", "Quien las pidió no confirmó la lista de imágenes. Revisa la red de ambas partes y vuelve a intentarlo"),
                                     );
                                 }
                             }
@@ -2590,7 +2590,7 @@ pub(crate) fn handle_transport_frame(
                                 &app,
                                 Some(match_id),
                                 "completed",
-                                Some("图片已全部回传给请求方".to_string()),
+                                Some(runtime::ui_lang::tr_static("图片已全部回传给请求方", "All images were returned to the requester", "Se devolvieron todas las imágenes a quien las pidió").to_string()),
                             );
                         }
                     }
@@ -2617,7 +2617,7 @@ pub(crate) fn handle_transport_frame(
                 brokered_transport_failed(
                     &app,
                     &session_id,
-                    "对方在通过身份校验前就发回了图片清单",
+                    runtime::ui_lang::tr_static("对方在通过身份校验前就发回了图片清单", "The other side sent back an image manifest before passing identity verification", "La otra parte devolvió una lista de imágenes antes de superar la verificación de identidad"),
                 );
                 return;
             }
@@ -2677,7 +2677,7 @@ pub(crate) fn handle_transport_frame(
                 &app,
                 match_id,
                 "generating",
-                Some("对方已接受，正在执行图片生成".to_string()),
+                Some(runtime::ui_lang::tr_static("对方已接受，正在执行图片生成", "The other side accepted and is generating the images", "La otra parte aceptó y está generando las imágenes").to_string()),
             );
         }
     }
@@ -2686,14 +2686,14 @@ pub(crate) fn handle_transport_frame(
 /// A brokered failure, phrased for the helper who agreed to serve it.
 fn served_failure(reason: ImageAssistFailure) -> &'static str {
     match reason {
-        ImageAssistFailure::Declined => "本机拒绝",
+        ImageAssistFailure::Declined => runtime::ui_lang::tr_static("本机拒绝", "Declined on this computer", "Rechazada en este equipo"),
         ImageAssistFailure::HelperUnavailable => {
-            "本机的 ChatGPT Web 账号不可用，或当日代出图额度已用完"
+            runtime::ui_lang::tr_static("本机的 ChatGPT Web 账号不可用，或当日代出图额度已用完", "This computer's ChatGPT Web account is unavailable, or today's quota for generating images for others is used up", "La cuenta de ChatGPT Web de este equipo no está disponible o ya se agotó la cuota diaria para generar imágenes para otros")
         }
-        ImageAssistFailure::RequestMismatch => "送达的请求与你批准的那份不一致",
-        ImageAssistFailure::GenerationFailed => "生成失败",
-        ImageAssistFailure::Cancelled => "已取消",
-        ImageAssistFailure::Expired => "已超时",
+        ImageAssistFailure::RequestMismatch => runtime::ui_lang::tr_static("送达的请求与你批准的那份不一致", "The request that arrived differs from the one you approved", "La solicitud recibida no coincide con la que aprobaste"),
+        ImageAssistFailure::GenerationFailed => runtime::ui_lang::tr_static("生成失败", "Generation failed", "La generación falló"),
+        ImageAssistFailure::Cancelled => runtime::ui_lang::tr_static("已取消", "Canceled", "Cancelada"),
+        ImageAssistFailure::Expired => runtime::ui_lang::tr_static("已超时", "Timed out", "Tiempo agotado"),
     }
 }
 
@@ -2974,7 +2974,7 @@ fn advance_pull(
         app,
         match_id,
         "completed",
-        Some(format!("已接收 {} 张图片", paths.len())),
+        Some(runtime::tr!("已接收 {} 张图片", "Received {} image(s)", "Se recibieron {} imagen(es)", paths.len())),
         paths,
     );
     Ok(None)
@@ -3020,7 +3020,7 @@ fn serve_peer_request(
         app,
         match_id,
         "generating",
-        Some("临时会话已验证，正在使用本机 ChatGPT 生成图片".to_string()),
+        Some(runtime::ui_lang::tr_static("临时会话已验证，正在使用本机 ChatGPT 生成图片", "Temporary session verified; generating the images with this computer's ChatGPT", "Sesión temporal verificada; generando las imágenes con el ChatGPT de este equipo").to_string()),
     );
     let canonical = canonical_prompt(prompt);
     let ratio = canonical_aspect_ratio(aspect_ratio);
@@ -3036,8 +3036,8 @@ fn serve_peer_request(
             };
             let _ = app.emit(
                 IMAGE_ASSIST_ERROR_EVENT,
-                format!(
-                    "本机拒绝了一个已批准的代出图请求：{}",
+                runtime::tr!(
+                    "本机拒绝了一个已批准的代出图请求：{}", "This computer declined an approved image request: {}", "Este equipo rechazó una solicitud de imagen ya aprobada: {}",
                     served_failure(reason)
                 ),
             );
@@ -3065,7 +3065,7 @@ fn serve_peer_request(
             eprintln!("SomniQ Image Assist refused to share a generated image: {error}");
             let _ = app.emit(
                 IMAGE_ASSIST_ERROR_EVENT,
-                format!("图片已生成，但无法安全传回：{error}"),
+                runtime::tr!("图片已生成，但无法安全传回：{error}", "The images were generated but could not be sent back securely: {error}", "Las imágenes se generaron, pero no se pudieron devolver de forma segura: {error}"),
             );
             emit_match_update(
                 app,
@@ -3082,7 +3082,7 @@ fn serve_peer_request(
         eprintln!("SomniQ Image Assist could not prepare a transfer: {error}");
         let _ = app.emit(
             IMAGE_ASSIST_ERROR_EVENT,
-            format!("图片已生成，但无法安全传回：{error}"),
+            runtime::tr!("图片已生成，但无法安全传回：{error}", "The images were generated but could not be sent back securely: {error}", "Las imágenes se generaron, pero no se pudieron devolver de forma segura: {error}"),
         );
         return Err(ImageAssistFailure::GenerationFailed);
     }
@@ -3090,8 +3090,8 @@ fn serve_peer_request(
         app,
         match_id,
         "generating",
-        Some(format!(
-            "已生成 {} 张图片，正在投递加密回传清单",
+        Some(runtime::tr!(
+            "已生成 {} 张图片，正在投递加密回传清单", "Generated {} image(s); delivering the encrypted return manifest", "Se generaron {} imagen(es); entregando la lista cifrada de devolución",
             artifacts.len()
         )),
     );

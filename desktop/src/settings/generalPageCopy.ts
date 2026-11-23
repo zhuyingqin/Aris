@@ -2,7 +2,7 @@ export const GENERAL_PAGE_COPY = {
   cn: {
     appearance: "外观与语言", mode: "模式", languageDescription: "同时用于后续助手回复。",
     color: "主题色", colors: { default: "默认蓝", purple: "紫色", teal: "青色", green: "绿色", orange: "橙色", pink: "粉色" },
-    workspace: "工作区", mail: "邮箱", workflows: "研究流程", memoryDescription: "写入本地记忆前是否需要审批。",
+    workspace: "工作区", mail: "邮箱", mailDescription: "官方插件“邮箱”的开关：关闭后邮箱入口、邮件工具和新邮件监听一起停用，账号保留。也可以在“插件”页按项目设置。", workflows: "研究流程", memoryDescription: "写入本地记忆前是否需要审批。",
     advanced: "高级", fontSize: "界面字号", fontDescription: "侧栏、菜单和正文同步调整。",
     saving: "正在保存记忆策略…", saved: "记忆策略已保存", saveFailed: "保存失败，已保留原设置。", retry: "重试",
     preferenceSaving: "保存中…", preferenceSaved: "已保存",
@@ -14,7 +14,7 @@ export const GENERAL_PAGE_COPY = {
   en: {
     appearance: "Appearance & language", mode: "Mode", languageDescription: "Also used for future assistant replies.",
     color: "Accent color", colors: { default: "Default blue", purple: "Purple", teal: "Teal", green: "Green", orange: "Orange", pink: "Pink" },
-    workspace: "Workspace", mail: "Mail", workflows: "Research workflows", memoryDescription: "Require approval before saving local memory.",
+    workspace: "Workspace", mail: "Mail", mailDescription: "Switches the official Mail plugin: off stops the Mail page, the mail tools and new-mail watching together; your accounts are kept. Plugins also offers a per-project setting.", workflows: "Research workflows", memoryDescription: "Require approval before saving local memory.",
     advanced: "Advanced", fontSize: "Interface text size", fontDescription: "Sidebars, menus, and body text resize together.",
     saving: "Saving memory policy…", saved: "Memory policy saved", saveFailed: "Could not save. Your previous setting is still active.", retry: "Retry",
     preferenceSaving: "Saving…", preferenceSaved: "Saved",
@@ -22,5 +22,17 @@ export const GENERAL_PAGE_COPY = {
     shortcutHint: "Click to change the global shortcut. Esc cancels.", shortcutDesktopOnly: "Change the shortcut in the desktop app.",
     shortcutInvalid: "Use Ctrl, Alt, or Command with a letter, number, or function key.",
     shortcutConflict: "This key combination is in use. Choose a different shortcut, or release it and retry.",
+  },
+  es: {
+    appearance: "Apariencia e idioma", mode: "Modo", languageDescription: "También se usa en las próximas respuestas del asistente.",
+    color: "Color de acento", colors: { default: "Azul predeterminado", purple: "Morado", teal: "Verde azulado", green: "Verde", orange: "Naranja", pink: "Rosa" },
+    workspace: "Espacio de trabajo", mail: "Correo", mailDescription: "Activa o desactiva el plugin oficial Correo: al apagarlo se detienen a la vez la página de Correo, las herramientas de correo y la escucha de correo nuevo; tus cuentas se conservan. En Plugins también puedes configurarlo por proyecto.", workflows: "Flujos de investigación", memoryDescription: "Pedir aprobación antes de guardar memoria local.",
+    advanced: "Avanzado", fontSize: "Tamaño del texto de la interfaz", fontDescription: "Las barras laterales, los menús y el texto se ajustan juntos.",
+    saving: "Guardando la política de memoria…", saved: "Política de memoria guardada", saveFailed: "No se pudo guardar. Se mantiene tu configuración anterior.", retry: "Reintentar",
+    preferenceSaving: "Guardando…", preferenceSaved: "Guardado",
+    shortcutEdit: "Editar el atajo de captura", shortcutRecording: "Pulsa un nuevo atajo…",
+    shortcutHint: "Haz clic para cambiar el atajo global. Esc cancela.", shortcutDesktopOnly: "Cambia el atajo en la aplicación de escritorio.",
+    shortcutInvalid: "Usa Ctrl, Alt o Command con una letra, un número o una tecla de función.",
+    shortcutConflict: "Esta combinación ya está en uso. Elige otro atajo, o libéralo y vuelve a intentarlo.",
   },
 };

@@ -7,6 +7,7 @@ import {
   takeChatCompanionHandoff,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { tr } from "../language";
 import { requestWindowAction } from "../windowControls";
 import Chat from "./Chat";
 
@@ -36,26 +37,31 @@ export default function ChatCompanion() {
       return true;
     }
   });
-  const copy = language === "cn"
-    ? {
+  const copy = tr(language, {
         title: "论文伴写",
         subtitle: currentProject?.name ?? "SomniQ Chat",
         pin: pinned ? "取消置顶" : "保持置顶",
         minimize: "最小化悬浮窗",
         maximize: "最大化或还原悬浮窗",
         close: "关闭悬浮窗",
-      }
-    : {
+      }, {
         title: "Writing companion",
         subtitle: currentProject?.name ?? "SomniQ Chat",
         pin: pinned ? "Turn off always on top" : "Keep always on top",
         minimize: "Minimize companion",
         maximize: "Maximize or restore companion",
         close: "Close companion",
-      };
-  const densityLabel = language === "cn"
-    ? (compact ? "切换到舒展排版" : "切换到紧凑排版")
-    : (compact ? "Use comfortable spacing" : "Use compact spacing");
+      }, {
+        title: "Compañero de escritura",
+        subtitle: currentProject?.name ?? "SomniQ Chat",
+        pin: pinned ? "Quitar siempre visible" : "Mantener siempre visible",
+        minimize: "Minimizar compañero",
+        maximize: "Maximizar o restaurar compañero",
+        close: "Cerrar compañero",
+      });
+  const densityLabel = compact
+    ? tr(language, "切换到舒展排版", "Use comfortable spacing", "Usar espaciado amplio")
+    : tr(language, "切换到紧凑排版", "Use compact spacing", "Usar espaciado compacto");
 
   useEffect(() => init(), [init]);
 
@@ -94,7 +100,7 @@ export default function ChatCompanion() {
 
   useEffect(() => {
     const previousTitle = document.title;
-    document.title = language === "cn" ? "论文伴写 · SomniQ" : "Writing companion · SomniQ";
+    document.title = tr(language, "论文伴写 · SomniQ", "Writing companion · SomniQ", "Compañero de escritura · SomniQ");
     document.body.classList.add("chat-companion-window");
     return () => {
       document.title = previousTitle;

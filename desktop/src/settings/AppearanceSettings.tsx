@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useAppearance, SURFACES, UI_FONTS, type Appearance } from "../appearance";
-import { applyAppearancePreset, exportAppearancePreset, parseAppearancePreset, resetAppearance } from "../appearanceTransfer";
+import { applyAppearancePreset, exportAppearancePreset, parseAppearancePreset, resetAppearance, themeFileTooLarge } from "../appearanceTransfer";
 import { prepareWallpaper, readWallpaperAsset, writeWallpaperAsset } from "../chatWallpaper";
 import { useEditorSettings } from "../editor/useEditorSettings";
 import { EDITOR_FONT_FAMILIES, EDITOR_FONT_SIZES, EDITOR_LINE_HEIGHTS, setEditorSettings } from "../editor/editorSettings";
@@ -40,6 +40,21 @@ export const APPEARANCE_COPY = {
       none: "None", mountains: "Mountains", orbit: "Orbit", grid: "Grid", custom: "Local image", cover: "Fill", contain: "Fit", tile: "Tile",
       auto: "Follow interface", manual: "Custom", compact: "Compact", standard: "Standard", relaxed: "Relaxed", narrow: "Narrow", wide: "Wide", comfortable: "Comfortable",
       square: "Small radius", round: "Large radius", soft: "Soft", mono: "Monospace", sans: "Sans serif", normal: "Standard" } as Record<string, string>,
+  },
+  es: {
+    surface: "Paleta de fondo", font: "Fuente de la interfaz", customAccent: "Color de acento personalizado", chat: "Fondo del chat", wallpaper: "Imagen de fondo",
+    upload: "Importar imagen", remove: "Quitar imagen", opacity: "Opacidad de la imagen", fit: "Ajuste de la imagen", local: "Solo en este equipo. PNG / JPEG / WebP, hasta 12 MB.",
+    preview: "Vista previa en vivo", question: "Ayúdame a organizar los hallazgos de la investigación.", answer: "Resumen de la investigación", sample: "Agrupemos los hallazgos clave, la evidencia que los respalda y las preguntas por explorar.",
+    previewHint: "Los cambios se aplican al instante en tus chats.", message: "Escribe a SomniQ…",
+    imageMissing: "No se pudo cargar la imagen de fondo. Vuelve a importarla.",
+    advanced: "Apariencia avanzada", bodyMode: "Tamaño del texto", bodySize: "Tamaño del texto del chat", lineHeight: "Interlineado del texto", readingWidth: "Ancho de lectura", density: "Densidad de la interfaz",
+    corners: "Esquinas", shadows: "Sombras", reducedMotion: "Reducir animaciones", editorFont: "Fuente del editor", editorSize: "Tamaño del texto del editor", editorHeight: "Interlineado del editor",
+    editorScope: "Compartido con los editores de código y de composición.", themeFiles: "Ajustes de apariencia", export: "Exportar tema", import: "Importar tema", reset: "Restaurar valores predeterminados",
+    transferNote: "No incluye las imágenes de fondo locales.", imageError: "No se pudo importar la imagen", themeError: "No se pudo importar el tema",
+    values: { default: "Predeterminado", warm: "Cálido", cool: "Frío", neutral: "Neutro", contrast: "Blanco / Negro", system: "Fuente del sistema", serif: "Serif",
+      none: "Ninguno", mountains: "Montañas", orbit: "Órbita", grid: "Cuadrícula", custom: "Imagen local", cover: "Rellenar", contain: "Ajustar", tile: "Mosaico",
+      auto: "Seguir la interfaz", manual: "Personalizado", compact: "Compacta", standard: "Estándar", relaxed: "Amplio", narrow: "Estrecho", wide: "Ancho", comfortable: "Cómoda",
+      square: "Radio pequeño", round: "Radio grande", soft: "Suaves", mono: "Monoespaciada", sans: "Sans serif", normal: "Estándar" } as Record<string, string>,
   },
 };
 
@@ -116,7 +131,7 @@ export default function AppearanceSettings({ language, preferences, section }: {
               if (!selected) return;
               setImageBusy(true);
               save("image", async () => {
-                try { await changeImage(await prepareWallpaper(selected)); }
+                try { await changeImage(await prepareWallpaper(selected, language)); }
                 catch (error) { throw new Error(`${copy.imageError}: ${error instanceof Error ? error.message : String(error)}`); }
                 finally { setImageBusy(false); }
               });
@@ -208,7 +223,7 @@ export default function AppearanceSettings({ language, preferences, section }: {
         <input ref={themeFile} type="file" hidden aria-label={copy.import} accept=".json,application/json" onChange={(e) => {
           const selected = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (!selected) return;
           save("transfer", async () => {
-            try { if (selected.size > 100_000) throw new Error("Theme file is too large."); applyAppearancePreset(parseAppearancePreset(await selected.text())); }
+            try { if (selected.size > 100_000) throw new Error(themeFileTooLarge(language)); applyAppearancePreset(parseAppearancePreset(await selected.text(), language)); }
             catch (error) { throw new Error(`${copy.themeError}: ${error instanceof Error ? error.message : String(error)}`); }
           });
         }} /><span className="appearance-transfer-note">{copy.transferNote}</span>

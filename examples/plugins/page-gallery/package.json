@@ -1,0 +1,6 @@
+{
+  "name": "@local/page-gallery",
+  "version": "0.1.0",
+  "description": "Three plugin pages with nothing in common but the bridge: an editorial research timeline, a free-form idea canvas, and an experiment cockpit built from several files.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

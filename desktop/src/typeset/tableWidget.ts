@@ -92,6 +92,7 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
   }
 
   const width = tableColumnCount(model);
+  applyColumnWidths(table, model, width);
   let active = { row: 0, column: 0 };
 
   const commitStructure = (next: TableModel) => {
@@ -140,6 +141,7 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
 
   model.rows.forEach((row, rowIndex) => {
     const tr = document.createElement("tr");
+    if (row.rulesBefore.some((rule) => rule.startsWith("\\addlinespace"))) tr.className = "cm-vis-table-spaced-row";
     const header = hasHeader && rowIndex === 0;
     for (let columnIndex = 0; columnIndex < width; columnIndex += 1) {
       const cell = row.cells[columnIndex];
@@ -148,7 +150,8 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
       td.dataset.row = String(rowIndex);
       td.dataset.column = String(columnIndex);
       td.setAttribute("aria-label", copy.cellLabel(rowIndex + 1, columnIndex + 1));
-      const align = model.columns[columnIndex]?.align;
+      const column = model.columns[columnIndex];
+      const align = column?.previewAlign ?? column?.align;
       if (align === "c" || align === "r") td.style.textAlign = align === "c" ? "center" : "right";
 
       // A cell with no source of its own (a ragged row) cannot be written to
@@ -173,6 +176,30 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
 
   container.append(toolbar, table);
   return container;
+}
+
+/** Fixed paragraph columns wrap inside their stated proportions, even on a
+ * narrow page. Percentage col widths let the entire table shrink together. */
+function applyColumnWidths(table: HTMLTableElement, model: TableModel, count: number): void {
+  const widths = model.columns.map((column) => column.width);
+  const allFixed = widths.length === count && widths.every((width) => width && /(?:px|%)$/.test(width));
+  const sameUnit = allFixed && widths.every((width) => width!.endsWith(widths[0]!.endsWith("%") ? "%" : "px"));
+  const total = sameUnit ? widths.reduce((sum, width) => sum + parseFloat(width!), 0) : 0;
+  if (total > 0) {
+    table.style.tableLayout = "fixed";
+    // TeX paragraph widths describe content; HTML col widths include padding.
+    table.style.width = widths[0]!.endsWith("%")
+      ? total + "%"
+      : `calc(${total}px + ${count * 2} * var(--cm-vis-table-cell-padding, 14px))`;
+  }
+  if (!widths.some(Boolean)) return;
+  const colgroup = document.createElement("colgroup");
+  for (let index = 0; index < count; index += 1) {
+    const col = document.createElement("col");
+    if (widths[index]) col.style.width = total > 0 ? parseFloat(widths[index]!) / total * 100 + "%" : widths[index]!;
+    colgroup.append(col);
+  }
+  table.append(colgroup);
 }
 
 function hasAnyBorder(model: TableModel): boolean {

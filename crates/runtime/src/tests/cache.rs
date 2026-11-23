@@ -175,7 +175,7 @@ fn every_bundleable_asset_file_is_actually_bundled() {
     const EXCLUDED_SKILL_PREFIX: &str = "skills-codex";
     // build.rs bundles these at key `<dir>/<rel>`, dropping the `skills/` segment.
     const SHARED_RESOURCE_DIRS: &[&str] = &["shared-references", "shared-governance"];
-    // Only assets/tools/ and assets/skills/ are walked by build.rs. assets/prompts/
+    // assets/tools/, assets/docx/ and assets/skills/ are walked by build.rs. assets/prompts/
     // is `include_str!`d directly by prompt.rs, not routed through the cache.
     const UNBUNDLED_ROOTS: &[&str] = &["prompts/"];
 

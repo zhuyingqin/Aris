@@ -24,7 +24,7 @@ import {
   onMailNewMessage,
   isTauri,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { languageLocale, useStore } from "../store";
 import type { Language } from "../store";
 import type {
   MailAccount,
@@ -288,7 +288,7 @@ function formatDate(raw: string, language: Language): string {
   if (!raw) return "";
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) return raw;
-  const locale = language === "en" ? "en-US" : "zh-CN";
+  const locale = languageLocale(language);
   const now = new Date();
   if (parsed.toDateString() === now.toDateString()) {
     return parsed.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });

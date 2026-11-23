@@ -42,6 +42,10 @@ import {
   validateScopusQuery,
 } from "../workflowEngine";
 import type { ReviewWorkflowRun, WorkflowBatchCheckpoint, WorkflowOutlineSection } from "../workflowTypes";
+import { useStore } from "../../store";
+
+// These assertions pin the Chinese copy; the store defaults to English.
+useStore.setState({ language: "cn" });
 
 const run = {
   topic: "anion design in zinc-ion batteries",

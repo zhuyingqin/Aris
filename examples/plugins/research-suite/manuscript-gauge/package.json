@@ -1,0 +1,9 @@
+{
+  "name": "@local/manuscript-gauge",
+  "version": "0.1.3",
+  "description": "A small card in the Chat's project summary: words of every section of the manuscript against a budget the user sets, and pages against the page limit, so overruns are visible while writing.",
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json"
+  }
+}

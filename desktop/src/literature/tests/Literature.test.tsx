@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   literatureDuplicateCandidates: vi.fn(),
   literatureMergeDuplicates: vi.fn(),
   literatureImportPdfAsRecord: vi.fn(),
+  literatureOcrCancel: vi.fn(),
   literatureApplyDelta: vi.fn(),
   literatureRestoreItems: vi.fn(),
   literatureUpdateCollections: vi.fn(),
@@ -73,6 +74,7 @@ vi.mock("../../api/tauri", () => ({
   literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
   literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
+  literatureOcrCancel: mocks.literatureOcrCancel,
   literatureApplyDelta: mocks.literatureApplyDelta,
   literatureRestoreItems: mocks.literatureRestoreItems,
   literatureUpdateCollections: mocks.literatureUpdateCollections,
@@ -116,7 +118,7 @@ vi.mock("../../api/tauri", () => ({
   stateDir: vi.fn(),
 }));
 
-vi.mock("../pdfExtraction", () => ({
+vi.mock("../../pdf/pdfExtraction", () => ({
   extractPdfTextByPage: mocks.literaturePdfText,
   extractPdfPageImages: mocks.literaturePdfImages,
 }));
@@ -1121,6 +1123,30 @@ describe("Literature library", () => {
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
   });
 
+  it("shows a PDF import while it runs and cancels it as canceled, not failed", async () => {
+    const user = userEvent.setup();
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(dialog.open).mockResolvedValueOnce("E:/papers/scanned.pdf");
+    let reject: (error: unknown) => void = () => undefined;
+    mocks.literatureImportPdfAsRecord.mockReturnValueOnce(new Promise((_, fail) => { reject = fail; }));
+    mocks.literatureOcrCancel.mockImplementation(async () => { reject("PDF text extraction was canceled"); return true; });
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "添加文献" }));
+    await user.click(within(screen.getByRole("menu", { name: "添加文献" })).getByRole("menuitem", { name: /导入 PDF/ }));
+    const progress = (await screen.findByText(/正在导入 scanned\.pdf/)).closest("[role=status]");
+    expect(progress).not.toBeNull();
+    const [, , requestId] = mocks.literatureImportPdfAsRecord.mock.calls.at(-1)!;
+    expect(typeof requestId).toBe("string");
+
+    await user.click(screen.getByRole("button", { name: "取消导入" }));
+    expect(mocks.literatureOcrCancel).toHaveBeenCalledWith(requestId);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消导入" })).toBeNull());
+    // A cancel is not reported as an import failure.
+    expect(screen.queryByText(/导入 PDF 失败/)).toBeNull();
+  });
+
   it("keeps every import route available in a populated library and creates a manual item", async () => {
     const user = userEvent.setup();
     render(<Literature />);
@@ -1406,10 +1432,10 @@ describe("Literature library", () => {
 
     const log = screen.getByRole("log", { name: "Literature activity log" });
     expect(
-      within(log).getByText(/Agent \(Chat\): refreshing the projection for 3 canonical records/),
+      within(log).getByText(/智能体（对话）：正在刷新 3 条规范记录的投影/),
     ).toBeTruthy();
     expect(
-      within(log).getByText(/Agent refreshed the local literature database for 3 canonical records/),
+      within(log).getByText(/智能体为 3 条规范记录刷新了本地文献数据库/),
     ).toBeTruthy();
   });
 
@@ -1851,7 +1877,7 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "打开所选论文 PDF" }));
     const rail = screen.getByRole("tablist", { name: "论文详情导航" });
     // A cold suite must also load the reader chunk before its toolbar appears.
-    const toggle = await screen.findByRole("button", { name: "论文讲解" }, { timeout: 5000 });
+    const toggle = await screen.findByRole("button", { name: "论文讲解" }, { timeout: 15_000 });
     const pdf = document.querySelector(".lit-pdf-reader");
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByRole("complementary", { name: "论文讲解" })).toBeNull();
@@ -1884,7 +1910,11 @@ describe("Literature library", () => {
     await user.click(within(rail).getByRole("tab", { name: "相关" }));
     await user.click(screen.getByRole("button", { name: "返回" }));
     expect(within(screen.getByRole("region", { name: "文献详情" })).getByRole("tab", { name: "相关" }).getAttribute("aria-selected")).toBe("true");
-  });
+    // Loading the reader chunk on a cold, busy suite can take longer than the
+    // 5 s default for the whole test: the PDF toolbar work in 0.4.87 took
+    // this test from just under 5 s to about 6 s on an idle machine. The wait
+    // above and this budget leave room for it.
+  }, 30_000);
 
   it("opens the guide directly and restores focus when guide and detail panels close with Escape", async () => {
     const user = userEvent.setup();
@@ -2603,10 +2633,10 @@ describe("Literature library", () => {
     ]);
     expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(1);
     expect(mocks.literatureLlmVision.mock.calls[0][0]).toContain(
-      "Write every evidence explanation in Chinese",
+      "Write every evidence explanation in Simplified Chinese (zh-CN)",
     );
     expect(mocks.literatureLlmVision.mock.calls[0][1]).toContain(
-      "Write every note in Chinese",
+      "Write every note in Simplified Chinese (zh-CN)",
     );
   });
 
@@ -2669,10 +2699,10 @@ describe("Literature library", () => {
     expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(2);
     expect(mocks.literatureLlmVision.mock.calls.flatMap((call) => call[2])).toHaveLength(5);
     expect(mocks.literatureLlm.mock.calls[0][0]).toContain(
-      "Write every question and final answer in Chinese",
+      "Write every question and final answer in Simplified Chinese (zh-CN)",
     );
     expect(mocks.literatureLlm.mock.calls[0][1]).toContain(
-      "All question and answer values must be written in Chinese",
+      "All question and answer values must be written in Simplified Chinese (zh-CN)",
     );
   });
 

@@ -248,18 +248,26 @@ fn imap_error(response: &[u8]) -> String {
         .unwrap_or(text.trim());
     let lower = final_line.to_ascii_lowercase();
     if lower.contains("unsafe login") || lower.contains("kefu@188.com") {
-        format!(
-            "网易邮箱拒绝了本次 IMAP 访问：{final_line}. 请在 126/163/yeah/188 邮箱网页版设置中开启 IMAP/SMTP 服务，并使用“客户端授权码/应用专用密码”作为这里的密码，不要使用网页登录密码。如果已经使用授权码仍然失败，说明网易风控认为当前客户端或登录环境不安全，需要先完成网页端安全验证，或按服务器提示联系 kefu@188.com。"
+        runtime::tr!(
+            "网易邮箱拒绝了本次 IMAP 访问：{final_line}. 请在 126/163/yeah/188 邮箱网页版设置中开启 IMAP/SMTP 服务，并使用“客户端授权码/应用专用密码”作为这里的密码，不要使用网页登录密码。如果已经使用授权码仍然失败，说明网易风控认为当前客户端或登录环境不安全，需要先完成网页端安全验证，或按服务器提示联系 kefu@188.com。",
+            "NetEase Mail refused this IMAP access: {final_line}. Turn on IMAP/SMTP in the 126/163/yeah/188 webmail settings and use the client authorization code / app password here, not your web sign-in password. If it still fails with an authorization code, NetEase's risk control considers this client or sign-in environment unsafe: complete the security check on the web first, or contact kefu@188.com as the server suggests.",
+            "NetEase Mail rechazó este acceso IMAP: {final_line}. Activa IMAP/SMTP en los ajustes del correo web de 126/163/yeah/188 y usa aquí el código de autorización de cliente o la contraseña de aplicación, no tu contraseña de acceso web. Si sigue fallando con un código de autorización, el control de riesgos de NetEase considera inseguro este cliente o entorno: completa primero la verificación de seguridad en la web o escribe a kefu@188.com, como indica el servidor."
         )
     } else if lower.contains("authenticate failed")
         || lower.contains("authenticationfailed")
         || lower.contains("login failed")
     {
-        format!(
-            "IMAP authentication failed: {final_line}. Gmail does not accept a normal Google password here; use Continue with Gmail or a Google app password with IMAP enabled. Outlook.com and Microsoft 365 require Modern Authentication/OAuth2, so use Continue with Outlook instead of this IMAP password path."
+        runtime::tr!(
+            "IMAP 认证失败：{final_line}。Gmail 不接受普通 Google 密码；请使用“通过 Gmail 继续”，或在开启 IMAP 后使用 Google 应用专用密码。Outlook.com 和 Microsoft 365 要求 Modern Authentication/OAuth2，请改用“通过 Outlook 继续”，不要走这条 IMAP 密码路径。",
+            "IMAP authentication failed: {final_line}. Gmail does not accept a normal Google password here; use Continue with Gmail or a Google app password with IMAP enabled. Outlook.com and Microsoft 365 require Modern Authentication/OAuth2, so use Continue with Outlook instead of this IMAP password path.",
+            "Falló la autenticación IMAP: {final_line}. Gmail no acepta aquí la contraseña normal de Google; usa Continuar con Gmail o una contraseña de aplicación de Google con IMAP activado. Outlook.com y Microsoft 365 exigen Modern Authentication/OAuth2, así que usa Continuar con Outlook en lugar de esta vía de contraseña IMAP."
         )
     } else {
-        format!("IMAP command failed: {final_line}")
+        runtime::tr!(
+            "IMAP 命令失败：{final_line}",
+            "IMAP command failed: {final_line}",
+            "Falló el comando IMAP: {final_line}"
+        )
     }
 }
 

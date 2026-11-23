@@ -30,6 +30,17 @@ const COPY = {
     update: "Update to the latest version",
     checking: "Checking for updates…",
   },
+  es: {
+    title: "Esta versión ya no tiene soporte",
+    body: "Actualiza SomniQ Studio para continuar.",
+    install: "Actualizar ahora",
+    installing: "Instalando actualización…",
+    restart: "Reiniciar para terminar",
+    download: "Descargar desde el sitio web",
+    dismiss: "Cerrar",
+    update: "Actualizar a la última versión",
+    checking: "Buscando actualizaciones…",
+  },
 } satisfies Record<Language, Record<string, string>>;
 
 /** Shown once the gateway refused this release. The update action reuses the

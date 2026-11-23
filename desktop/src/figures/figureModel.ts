@@ -1,34 +1,35 @@
+import type { Language } from "../store";
 // Pure view-model helpers for SomniQ Figures. They only read the run manifest;
 // nothing here sends requests or decides review outcomes.
 import type { FigureRequest, FigureRun } from "./types";
+import { pickCopy, type Copy } from "./figureStyles";
 
-type Copy = [cn: string, en: string];
-export type Language = "cn" | "en";
+export type { Language };
 export type StatusTone = "ok" | "warn" | "danger" | "running" | "neutral";
 export type StepState = "done" | "active" | "warn" | "failed" | "pending";
 export interface PipelineStep { key: string; label: Copy; state: StepState }
 
 export const STATUS: Record<string, Copy> = {
-  ready: ["待启动", "Ready"], probing: ["检查视觉能力", "Checking vision"], generating: ["生成参考图", "Generating image"],
-  image_ready: ["图片待确认", "Confirm image"], editing_image: ["修改 PNG 选区", "Editing PNG region"],
-  planning_image: ["Executor 整理生图需求", "Executor planning image"], planning_image_edit: ["Executor 理解修改要求", "Executor planning edit"],
-  reconstructing: ["重建 SVG", "Reconstructing SVG"], reviewing: ["独立审查", "Independent review"], revising: ["修订 SVG", "Revising SVG"],
-  editing_svg: ["按要求修改 SVG", "Editing SVG"],
-  accepted: ["结构与视觉通过", "Structure and visual passed"], visual_pending: ["结构通过 · 视觉待检查", "Structure passed · visual pending"],
-  draft: ["草稿 · 待检查", "Draft · check needed"], unknown: ["请求结果不明", "Request result unknown"], cancelled: ["已取消", "Cancelled"],
-  needs_vision_executor: ["需配置视觉 Executor", "Vision Executor required"], budget_truncated: ["输出达到上限", "Output limit reached"],
+  ready: ["待启动", "Ready", "Lista para iniciar"], probing: ["检查视觉能力", "Checking vision", "Comprobando visión"], generating: ["生成参考图", "Generating image", "Generando imagen"],
+  image_ready: ["图片待确认", "Image awaiting confirmation", "Imagen pendiente de confirmar"], editing_image: ["修改 PNG 选区", "Editing PNG region", "Editando zona PNG"],
+  planning_image: ["Executor 整理生图需求", "Executor planning image", "Executor planificando la imagen"], planning_image_edit: ["Executor 理解修改要求", "Executor planning edit", "Executor planificando el cambio"],
+  reconstructing: ["重建 SVG", "Reconstructing SVG", "Reconstruyendo SVG"], reviewing: ["独立审查", "Independent review", "Revisión independiente"], revising: ["修订 SVG", "Revising SVG", "Corrigiendo SVG"],
+  editing_svg: ["按要求修改 SVG", "Editing SVG", "Editando SVG"],
+  accepted: ["结构与视觉通过", "Structure and visuals passed", "Estructura y aspecto visual aprobados"], visual_pending: ["结构通过 · 视觉待检查", "Structure passed · visuals pending", "Estructura aprobada · visual pendiente"],
+  draft: ["草稿 · 待检查", "Draft · check needed", "Borrador · requiere revisión"], unknown: ["请求结果不明", "Request result unknown", "Resultado de la solicitud desconocido"], cancelled: ["已取消", "Cancelled", "Cancelada"],
+  needs_vision_executor: ["需配置视觉 Executor", "Vision Executor required", "Se requiere un Executor con visión"], budget_truncated: ["输出达到上限", "Output limit reached", "Límite de salida alcanzado"],
 };
 
 const REQUEST_KIND: Record<string, Copy> = {
-  vision_probe: ["视觉探针", "Vision probe"], generate_image: ["生成参考图", "Generate image"],
-  manual_image_edit: ["修改 PNG 选区", "Edit PNG region"],
-  manual_svg_edit: ["对话修改 SVG", "Edit SVG with chat"], manual_review: ["独立审查", "Review"],
-  plan_image: ["Executor 整理生图提示词", "Plan image prompt"], manual_image_prompt: ["Executor 整理修改提示词", "Plan edit prompt"],
-  reconstruct: ["重建 SVG", "Reconstruct"], review: ["独立审查", "Review"], revise: ["修订 SVG", "Revise"],
+  vision_probe: ["视觉探针", "Vision probe", "Prueba de visión"], generate_image: ["生成参考图", "Generate image", "Generar imagen"],
+  manual_image_edit: ["修改 PNG 选区", "Edit PNG region", "Editar zona PNG"],
+  manual_svg_edit: ["对话修改 SVG", "Edit SVG with chat", "Editar SVG con chat"], manual_review: ["独立审查", "Review", "Revisión"],
+  plan_image: ["Executor 整理生图提示词", "Plan image prompt", "Planificar prompt de imagen"], manual_image_prompt: ["Executor 整理修改提示词", "Plan edit prompt", "Planificar prompt de edición"],
+  reconstruct: ["重建 SVG", "Reconstruct", "Reconstruir"], review: ["独立审查", "Review", "Revisión"], revise: ["修订 SVG", "Revise", "Corregir"],
 };
 const REQUEST_STATUS: Record<string, Copy> = {
-  submitted: ["进行中", "In flight"], completed: ["完成", "Done"], failed: ["失败", "Failed"],
-  unknown: ["结果不明", "Unknown"], cancelled: ["已取消", "Cancelled"],
+  submitted: ["进行中", "In progress", "En curso"], completed: ["完成", "Done", "Hecha"], failed: ["失败", "Failed", "Fallida"],
+  unknown: ["结果不明", "Unknown", "Desconocido"], cancelled: ["已取消", "Cancelled", "Cancelada"],
 };
 const ACTIVE_STEP: Record<string, string> = {
   probing: "probe", generating: "source", editing_image: "source", reconstructing: "reconstruct", reviewing: "review", revising: "revise",
@@ -36,7 +37,7 @@ const ACTIVE_STEP: Record<string, string> = {
   editing_svg: "svg_edit",
 };
 
-const pick = (copy: Copy | undefined, language: Language, fallback: string) => copy?.[language === "cn" ? 0 : 1] ?? fallback;
+const pick = (copy: Copy | undefined, language: Language, fallback: string) => copy ? pickCopy(copy, language) : fallback;
 export const statusLabel = (status: string, language: Language) => pick(STATUS[status], language, status);
 export const requestKindLabel = (kind: string, language: Language) => pick(REQUEST_KIND[kind], language, kind);
 export const requestStatusLabel = (status: string, language: Language) => pick(REQUEST_STATUS[status], language, status);
@@ -75,28 +76,28 @@ function requestState(run: FigureRun, kind: string): StepState | null {
 export function pipelineSteps(run: FigureRun): PipelineStep[] {
   const steps: PipelineStep[] = [
     run.sourceMode === "generate"
-      ? { key: "source", label: ["生成参考图", "Image"], state: requestState(run, "generate_image") ?? (run.sourceHash ? "done" : "pending") }
-      : { key: "source", label: ["导入参考图", "Import"], state: run.sourceHash ? "done" : "pending" },
-    { key: "probe", label: ["视觉检查", "Vision"], state: run.status === "needs_vision_executor" ? "failed" : requestState(run, "vision_probe") ?? (run.executorVision ? "done" : "pending") },
-    { key: "reconstruct", label: ["重建 SVG", "Reconstruct"], state: requestState(run, "reconstruct") ?? (run.versions.length ? "done" : "pending") },
-    { key: "review", label: ["独立审查", "Review"], state: requestState(run, "review") ?? (run.review ? "done" : "pending") },
+      ? { key: "source", label: ["生成参考图", "Image", "Imagen"], state: requestState(run, "generate_image") ?? (run.sourceHash ? "done" : "pending") }
+      : { key: "source", label: ["导入参考图", "Import", "Importar"], state: run.sourceHash ? "done" : "pending" },
+    { key: "probe", label: ["视觉检查", "Vision", "Visión"], state: run.status === "needs_vision_executor" ? "failed" : requestState(run, "vision_probe") ?? (run.executorVision ? "done" : "pending") },
+    { key: "reconstruct", label: ["重建 SVG", "Reconstruct", "Reconstruir"], state: requestState(run, "reconstruct") ?? (run.versions.length ? "done" : "pending") },
+    { key: "review", label: ["独立审查", "Review", "Revisión"], state: requestState(run, "review") ?? (run.review ? "done" : "pending") },
   ];
   if (run.requests.some((request) => request.kind === "manual_image_prompt")) {
-    steps.splice(1, 0, { key: "edit_prompt", label: ["理解修改", "Plan edit"], state: requestState(run, "manual_image_prompt") ?? "pending" });
+    steps.splice(1, 0, { key: "edit_prompt", label: ["理解修改", "Plan edit", "Planificar cambio"], state: requestState(run, "manual_image_prompt") ?? "pending" });
   }
   if ((run.sourceMode === "generate" && !run.sourceHash) || run.requests.some((request) => request.kind === "plan_image")) {
-    steps.unshift({ key: "prompt", label: ["理解需求", "Plan image"], state: requestState(run, "plan_image") ?? "pending" });
+    steps.unshift({ key: "prompt", label: ["理解需求", "Plan image", "Planificar imagen"], state: requestState(run, "plan_image") ?? "pending" });
   }
   if (run.revisionUsed || run.status === "revising" || run.requests.some((request) => request.kind === "revise")) {
-    steps.push({ key: "revise", label: ["修订", "Revise"], state: requestState(run, "revise") ?? "pending" });
+    steps.push({ key: "revise", label: ["修订", "Revise", "Corregir"], state: requestState(run, "revise") ?? "pending" });
   }
   const final: StepState = run.status === "accepted" ? "done"
     : ["visual_pending", "draft", "budget_truncated", "unknown"].includes(run.status) ? "warn" : "pending";
   if (run.svgEdits?.length) {
-    steps.push({ key: "svg_edit", label: ["对话修改", "SVG edit"], state: requestState(run, "manual_svg_edit") ?? "pending" });
-    steps.push({ key: "svg_review", label: ["修改后审查", "Edit review"], state: requestState(run, "manual_review") ?? "pending" });
+    steps.push({ key: "svg_edit", label: ["对话修改", "SVG edit", "Edición SVG"], state: requestState(run, "manual_svg_edit") ?? "pending" });
+    steps.push({ key: "svg_review", label: ["修改后审查", "Edit review", "Revisión del cambio"], state: requestState(run, "manual_review") ?? "pending" });
   }
-  steps.push({ key: "final", label: ["定稿", "Final"], state: final });
+  steps.push({ key: "final", label: ["定稿", "Final", "Final"], state: final });
   const active = run.status === "reviewing" && run.svgEdits?.at(-1)?.status === "running" ? "svg_review" : ACTIVE_STEP[run.status];
   const at = steps.findIndex((step) => step.key === active);
   if (at >= 0) steps.forEach((step, index) => {
@@ -163,10 +164,10 @@ export interface FlowStep { key: FlowKey; label: Copy; state: StepState; detail:
  * The detailed Executor/Reviewer stages stay in `pipelineSteps`. */
 export function flowSteps(run: FigureRun | null, active: boolean, language: Language): FlowStep[] {
   const steps: FlowStep[] = [
-    { key: "describe", label: ["描述", "Describe"], state: run ? "done" : "active", detail: null },
-    { key: "generate", label: ["生成", "Generate"], state: "pending", detail: null },
-    { key: "edit", label: ["编辑", "Edit"], state: "pending", detail: null },
-    { key: "export", label: ["导出", "Export"], state: "pending", detail: null },
+    { key: "describe", label: ["描述", "Describe", "Describir"], state: run ? "done" : "active", detail: null },
+    { key: "generate", label: ["生成", "Generate", "Generar"], state: "pending", detail: null },
+    { key: "edit", label: ["编辑", "Edit", "Editar"], state: "pending", detail: null },
+    { key: "export", label: ["导出", "Export", "Exportar"], state: "pending", detail: null },
   ];
   if (!run) return steps;
   const [, generate, edit] = steps;

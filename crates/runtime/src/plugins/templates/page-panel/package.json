@@ -1,0 +1,6 @@
+{
+  "name": "@local/focus-board",
+  "version": "0.1.0",
+  "description": "A project page drawn by the package's own HTML: a three-column board the user drags cards across and the agent can fill.",
+  "somniq": { "manifestVersion": 1, "ui": "./ui.json" }
+}

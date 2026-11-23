@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 2,
+  "panels": [
+    {
+      "id": "watch",
+      "slot": "chat.sidebar",
+      "title": {
+        "en": "Literature watch",
+        "cn": "新论文追踪",
+        "es": "Vigilancia de novedades"
+      },
+      "order": 30,
+      "scope": "project",
+      "widgets": [
+        {
+          "id": "query",
+          "type": "markdown",
+          "title": {
+            "en": "What is watched",
+            "cn": "追踪内容",
+            "es": "Qué se vigila"
+          }
+        },
+        {
+          "id": "summary",
+          "type": "metrics",
+          "title": {
+            "en": "Last search",
+            "cn": "上次检索",
+            "es": "Última búsqueda"
+          }
+        },
+        {
+          "id": "papers",
+          "type": "list",
+          "title": {
+            "en": "New papers",
+            "cn": "新论文",
+            "es": "Artículos nuevos"
+          }
+        },
+        {
+          "id": "search-now",
+          "type": "button",
+          "label": {
+            "en": "Search now",
+            "cn": "立即检索",
+            "es": "Buscar ahora"
+          },
+          "action": {
+            "type": "prompt",
+            "send": true,
+            "text": {
+              "en": "Run the literature watch of @local/literature-watch. Read its panel with PluginPanel. If the query widget is empty, derive a search query from this project's goal and write it there first. Search with LiteratureSearch for papers newer than the last search date, skip papers already in the project library or already listed, and write the papers list (title, detail = one line on why it matters for this project, tag = publication date, url) and the summary metrics (date of this search, new papers, total listed). Add nothing to the library and change no project files.",
+              "cn": "运行 @local/literature-watch 的新论文追踪。先用 PluginPanel 读取面板；如果检索式为空，先根据本项目目标拟定一个并写入。用 LiteratureSearch 检索上次检索日期之后的新论文，跳过已在文献库或已列出的论文，写入新论文列表（title、detail=一句话说明对本项目的意义、tag=发表日期、url）和概览指标（本次检索日期、新论文数、总数）。不往文献库添加任何论文，不改项目文件。",
+              "es": "Ejecuta la vigilancia de novedades de @local/literature-watch. Lee su panel con PluginPanel. Si la consulta está vacía, dedúcela del objetivo del proyecto y escríbela primero. Busca con LiteratureSearch artículos posteriores a la última búsqueda, omite los que ya estén en la biblioteca o en la lista, y escribe la lista de artículos (title, detail = una línea sobre por qué importa para este proyecto, tag = fecha de publicación, url) y las métricas (fecha de esta búsqueda, artículos nuevos, total). No añadas nada a la biblioteca ni cambies archivos del proyecto."
+            }
+          }
+        },
+        {
+          "id": "set-query",
+          "type": "form",
+          "title": {
+            "en": "Change what is watched",
+            "cn": "修改追踪内容",
+            "es": "Cambiar lo que se vigila"
+          },
+          "fields": [
+            {
+              "key": "topic",
+              "label": {
+                "en": "Topic or search query",
+                "cn": "主题或检索式",
+                "es": "Tema o consulta"
+              },
+              "input": "textarea"
+            },
+            {
+              "key": "since",
+              "label": {
+                "en": "Only papers since",
+                "cn": "只看此后的论文",
+                "es": "Solo artículos desde"
+              },
+              "input": "text"
+            }
+          ],
+          "submit": {
+            "label": {
+              "en": "Save the query",
+              "cn": "保存检索式",
+              "es": "Guardar la consulta"
+            },
+            "action": {
+              "type": "prompt",
+              "text": {
+                "en": "Update the query widget of @local/literature-watch with PluginPanel: topic or query \"{{topic}}\", only papers since \"{{since}}\" (empty means since the last search). Turn the topic into a LiteratureSearch query and show both. Do not search yet.",
+                "cn": "用 PluginPanel 更新 @local/literature-watch 的检索式：主题或检索式「{{topic}}」，只看「{{since}}」之后的论文（为空表示上次检索之后）。把主题转成 LiteratureSearch 检索式并一起显示。先不要检索。",
+                "es": "Actualiza con PluginPanel la consulta de @local/literature-watch: tema o consulta «{{topic}}», solo artículos desde «{{since}}» (vacío significa desde la última búsqueda). Convierte el tema en una consulta de LiteratureSearch y muestra ambos. No busques todavía."
+              }
+            }
+          }
+        },
+        {
+          "id": "schedule",
+          "type": "button",
+          "label": {
+            "en": "Watch every week",
+            "cn": "每周自动追踪",
+            "es": "Vigilar cada semana"
+          },
+          "action": {
+            "type": "prompt",
+            "text": {
+              "en": "Create a weekly scheduled task for this project that does exactly what the Search now button of @local/literature-watch does: search with LiteratureSearch for new papers and update only that panel with PluginPanel, adding nothing to the library and changing no project files. Show me the schedule before creating it.",
+              "cn": "为本项目创建一个每周运行的定时任务，内容与 @local/literature-watch 的“立即检索”按钮完全相同：用 LiteratureSearch 检索新论文，只用 PluginPanel 更新该面板，不往文献库添加论文，不改项目文件。创建前先把计划给我看。",
+              "es": "Crea una tarea programada semanal para este proyecto que haga exactamente lo mismo que el botón Buscar ahora de @local/literature-watch: buscar artículos nuevos con LiteratureSearch y actualizar solo ese panel con PluginPanel, sin añadir nada a la biblioteca ni cambiar archivos del proyecto. Muéstrame la programación antes de crearla."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

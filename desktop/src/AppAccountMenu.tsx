@@ -25,12 +25,14 @@ interface Props {
 
 const COPY = {
   cn: { menu: "用户菜单", quota: "套餐额度", remaining: "剩余额度", remainingPercent: (percent: number) => `剩余 ${percent}%`, unavailable: "额度信息暂不可用", settings: "设置", logout: "退出登录", refresh: "刷新额度", refreshing: "正在刷新额度", refreshFailed: "刷新失败，显示上次额度" },
-  en: { menu: "User menu", quota: "Plan allowance", remaining: "Remaining allowance", remainingPercent: (percent: number) => `${percent}% remaining`, unavailable: "Allowance unavailable", settings: "Settings", logout: "Sign out", refresh: "Refresh allowance", refreshing: "Refreshing allowance", refreshFailed: "Refresh failed. Showing last allowance." },
+  en: { menu: "User menu", quota: "Plan allowance", remaining: "Remaining allowance", remainingPercent: (percent: number) => `${percent}% remaining`, unavailable: "Allowance unavailable", settings: "Settings", logout: "Sign out", refresh: "Refresh allowance", refreshing: "Refreshing allowance…", refreshFailed: "Refresh failed. Showing the last known allowance." },
+  es: { menu: "Menú de usuario", quota: "Cuota del plan", remaining: "Cuota restante", remainingPercent: (percent: number) => `${percent}% restante`, unavailable: "Cuota no disponible", settings: "Configuración", logout: "Cerrar sesión", refresh: "Actualizar cuota", refreshing: "Actualizando cuota…", refreshFailed: "Error al actualizar. Se muestra la última cuota." },
 };
 
 const MEMBERSHIP_COPY = {
   cn: { buy: "购买会员", upgrade: "会员升级" },
   en: { buy: "Buy membership", upgrade: "Upgrade membership" },
+  es: { buy: "Comprar membresía", upgrade: "Mejorar membresía" },
 };
 
 const UsageIcon = () => (

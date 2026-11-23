@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ChatCommandSelection } from "../types";
+import { tr, useStore } from "../store";
 
 interface Props {
   selection: ChatCommandSelection;
@@ -19,6 +20,7 @@ export default function CommandSelection({
   onSelect,
   onCancel,
 }: Props) {
+  const language = useStore((state) => state.language);
   const [activeIndex, setActiveIndex] = useState(() => initialIndex(selection));
   const listboxId = useId();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -120,7 +122,7 @@ export default function CommandSelection({
           >
             <span className="command-select-label">{item.label}</span>
             <span className="command-select-desc">{item.description}</span>
-            {item.isCurrent && <span className="command-select-current">Current</span>}
+            {item.isCurrent && <span className="command-select-current">{tr(language, "当前", "Current", "Actual")}</span>}
           </div>
         ))}
       </div>

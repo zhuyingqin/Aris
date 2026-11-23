@@ -1,5 +1,7 @@
 import { RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import { Decoration, EditorView, GutterMarker, WidgetType, gutter, type DecorationSet } from "@codemirror/view";
+import { useStore } from "../store";
+import { tr } from "../language";
 
 export interface CodeDiffLine {
   line: number;
@@ -170,7 +172,7 @@ class DiffDeletionWidget extends WidgetType {
     // Keep the mapped candidate line on the marker for reliable hunk lookup.
     wrapper.dataset.diffLine = String(this.entry.line);
     wrapper.setAttribute("role", "note");
-    wrapper.setAttribute("aria-label", `Removed source${this.total > 1 ? ` (${this.entry.line})` : ""}`);
+    wrapper.setAttribute("aria-label", `${tr(useStore.getState().language, "已删除的源码", "Removed source", "Código eliminado")}${this.total > 1 ? ` (${this.entry.line})` : ""}`);
     wrapper.contentEditable = "false";
     const lines = (this.entry.text ?? "").split("\n");
     for (const text of lines) {

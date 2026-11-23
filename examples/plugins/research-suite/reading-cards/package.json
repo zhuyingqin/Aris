@@ -1,0 +1,15 @@
+{
+  "name": "@local/reading-cards",
+  "version": "0.1.1",
+  "description": "Reading cards for any paper in the project library: one skill that writes a card in a fixed, evidence-only format, and a project panel that tracks which papers still have no card.",
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "somniq": {
+    "manifestVersion": 1,
+    "ui": "./ui.json"
+  }
+}

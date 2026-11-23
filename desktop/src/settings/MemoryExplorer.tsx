@@ -12,7 +12,7 @@ import type {
   MemoryExplorerSnapshot,
   MemoryGovernanceHit,
 } from "../types";
-import type { Language } from "../store";
+import { languageLocale, tr, type Language } from "../language";
 import { SETTINGS_COPY } from "./i18n";
 
 type Layer = "l0" | "l1" | "l2" | "l3";
@@ -29,18 +29,18 @@ interface Props {
   projectId: string;
 }
 
-const KIND_CONFIG: Record<string, { labelCn: string; labelEn: string; icon?: SvgIconName }> = {
-  artifact_pointer: { labelCn: "产物指针", labelEn: "Artifact Pointer", icon: "document" },
-  research_decision: { labelCn: "科研决策", labelEn: "Research Decision", icon: "target" },
-  user_preference: { labelCn: "用户偏好", labelEn: "User Preference", icon: "user" },
-  instruction: { labelCn: "偏好指令", labelEn: "Instruction", icon: "sparkle" },
-  episodic: { labelCn: "实验事件", labelEn: "Episodic", icon: "clock" },
-  fact: { labelCn: "知识事实", labelEn: "Fact", icon: "library" },
-  finding: { labelCn: "研究结论", labelEn: "Finding", icon: "graph" },
-  constraint: { labelCn: "约束条件", labelEn: "Constraint", icon: "shieldCheck" },
-  guideline: { labelCn: "规范准则", labelEn: "Guideline", icon: "document" },
-  user: { labelCn: "用户", labelEn: "User", icon: "user" },
-  assistant: { labelCn: "助手", labelEn: "Assistant", icon: "sparkle" },
+const KIND_CONFIG: Record<string, { labelCn: string; labelEn: string; labelEs: string; icon?: SvgIconName }> = {
+  artifact_pointer: { labelCn: "产物指针", labelEn: "Artifact Pointer", labelEs: "Puntero de artefacto", icon: "document" },
+  research_decision: { labelCn: "科研决策", labelEn: "Research Decision", labelEs: "Decisión de investigación", icon: "target" },
+  user_preference: { labelCn: "用户偏好", labelEn: "User Preference", labelEs: "Preferencia del usuario", icon: "user" },
+  instruction: { labelCn: "偏好指令", labelEn: "Instruction", labelEs: "Instrucción", icon: "sparkle" },
+  episodic: { labelCn: "实验事件", labelEn: "Episodic", labelEs: "Episódico", icon: "clock" },
+  fact: { labelCn: "知识事实", labelEn: "Fact", labelEs: "Hecho", icon: "library" },
+  finding: { labelCn: "研究结论", labelEn: "Finding", labelEs: "Hallazgo", icon: "graph" },
+  constraint: { labelCn: "约束条件", labelEn: "Constraint", labelEs: "Restricción", icon: "shieldCheck" },
+  guideline: { labelCn: "规范准则", labelEn: "Guideline", labelEs: "Directriz", icon: "document" },
+  user: { labelCn: "用户", labelEn: "User", labelEs: "Usuario", icon: "user" },
+  assistant: { labelCn: "助手", labelEn: "Assistant", labelEs: "Asistente", icon: "sparkle" },
 };
 
 const PREVIEW_SNAPSHOT: MemoryExplorerSnapshot = {
@@ -144,7 +144,7 @@ function displayTime(value: string | null | undefined, language: Language) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(language === "cn" ? "zh-CN" : "en-US", {
+  return new Intl.DateTimeFormat(languageLocale(language), {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -270,7 +270,7 @@ export default function MemoryExplorer({ language, projectId }: Props) {
     const kindOrRole = kind ?? role;
     const kindMeta = kindOrRole ? KIND_CONFIG[kindOrRole] : null;
     const kindDisplayLabel = kindMeta
-      ? (language === "cn" ? kindMeta.labelCn : kindMeta.labelEn)
+      ? tr(language, kindMeta.labelCn, kindMeta.labelEn, kindMeta.labelEs)
       : kindOrRole;
 
     const artifactPaths = "artifactPaths" in item ? item.artifactPaths : undefined;
@@ -280,13 +280,13 @@ export default function MemoryExplorer({ language, projectId }: Props) {
     const subjectKey = "subjectKey" in item ? item.subjectKey : null;
     const standingInjected = "standingInjected" in item ? item.standingInjected : null;
     const lifecycle = status === "pending_user_confirmation"
-      ? (language === "cn" ? "待确认" : "Awaiting confirmation")
+      ? tr(language, "待确认", "Awaiting confirmation", "Pendiente de confirmación")
       : status === "superseded"
-      ? (language === "cn" ? "历史" : "Historical")
+      ? tr(language, "历史", "Historical", "Histórico")
       : status === "conflict"
-        ? (language === "cn" ? "冲突" : "Conflict")
+        ? tr(language, "冲突", "Conflict", "Conflicto")
         : status && status !== "authoritative"
-          ? (language === "cn" ? "当前" : "Current")
+          ? tr(language, "当前", "Current", "Actual")
           : null;
 
     return (
@@ -307,17 +307,17 @@ export default function MemoryExplorer({ language, projectId }: Props) {
             {standingInjected !== null && (
               <span className="memory-version-badge">
                 {standingInjected
-                  ? language === "cn" ? "长期注入" : "Standing injection"
-                  : language === "cn" ? "仅按需召回" : "Recall only"}
+                  ? tr(language, "长期注入", "Always injected", "Inyección permanente")
+                  : tr(language, "仅按需召回", "Recalled on demand", "Solo recuperación bajo demanda")}
               </span>
             )}
             {extractedConfidence !== null && (
               <span
                 className={`memory-confidence-badge ${extractedConfidence >= 80 ? "high" : extractedConfidence >= 60 ? "med" : "low"}`}
-                title={language === "cn" ? `置信度: ${extractedConfidence}%` : `Confidence: ${extractedConfidence}%`}
+                title={tr(language, `置信度: ${extractedConfidence}%`, `Confidence: ${extractedConfidence}%`, `Confianza: ${extractedConfidence}%`)}
               >
                 <span className="memory-confidence-dot" />
-                <span>{extractedConfidence}% {language === "cn" ? "置信度" : "confidence"}</span>
+                <span>{extractedConfidence}% {tr(language, "置信度", "confidence", "de confianza")}</span>
               </span>
             )}
           </div>
@@ -404,7 +404,7 @@ export default function MemoryExplorer({ language, projectId }: Props) {
               </span>
             )}
             {subjectKey && (
-              <span className="memory-meta-pill" title={language === "cn" ? "稳定主题键" : "Stable subject key"}>
+              <span className="memory-meta-pill" title={tr(language, "稳定主题键", "Stable subject key", "Clave de tema estable")}>
                 <span className="memory-meta-key">Subject</span>
                 <span className="memory-meta-val">{subjectKey}</span>
               </span>

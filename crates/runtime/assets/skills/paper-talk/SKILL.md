@@ -155,8 +155,13 @@ Invoke `/paper-slides` to generate Beamer source + PPTX from the approved
 outline.
 
 ```
-/paper-slides "<paper-dir>" — talk_type: <T> — minutes: <N> — venue: <V> — aspect: 16:9 — notes: true
+/paper-slides "<paper-dir>" — talk_type: <T> — minutes: <N> — venue: <V> — format: beamer — notes: true
 ```
+
+`format: beamer` is required here: this pipeline binds to `slides/main.tex` /
+`slides/main.pdf`. `/paper-slides` builds the PPTX with its bundled
+`deck_builder.py` from `slides/slides.json` and generates the Beamer source from
+the same file, so both formats carry identical content.
 
 Forward `— style-ref:` if the user originally passed it (writer-side; the
 reviewer-side polish in Phase 3 must NOT see it — see invariant 8).

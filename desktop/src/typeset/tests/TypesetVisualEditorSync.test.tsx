@@ -6,6 +6,7 @@ import type { EditorView } from "@codemirror/view";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TypesetVisualEditor } from "../TypesetVisualEditor";
+import { visualCompiledDocument } from "../visualDecorations";
 import { numberingPrefixFor, outlineFor } from "../outlineModel";
 import { theoremDefinitions } from "../theoremEnvironments";
 
@@ -23,6 +24,8 @@ describe("TypesetVisualEditor document synchronization", () => {
   it("commits a file and all document-scoped facets in one transaction", async () => {
     const first = "\\section{First}\nFirst body";
     const second = "\\section{Second}\nSecond body";
+    const firstPdf = { pdfPath: "first.pdf", revision: 1, source: first };
+    const secondPdf = { pdfPath: "second.pdf", revision: 2, source: second };
     const root = [
       "\\documentclass{book}",
       "\\newtheorem{requirement}{Requirement}",
@@ -46,6 +49,7 @@ describe("TypesetVisualEditor document synchronization", () => {
       <TypesetVisualEditor
         path="first.tex"
         draft={first}
+        compiledDocument={firstPdf}
         numbering={null}
         theorems={null}
         pdfCursor={null}
@@ -73,6 +77,7 @@ describe("TypesetVisualEditor document synchronization", () => {
       <TypesetVisualEditor
         path="second.tex"
         draft={second}
+        compiledDocument={secondPdf}
         numbering={numbering}
         theorems={theorems}
         pdfCursor={null}
@@ -87,6 +92,7 @@ describe("TypesetVisualEditor document synchronization", () => {
     const reconfigured = transactions.filter((transaction) => transaction.reconfigured);
     expect(reconfigured).toHaveLength(1);
     expect(reconfigured[0].docChanged).toBe(true);
+    expect(liveView.state.facet(visualCompiledDocument)).toBe(secondPdf);
 
     transactions.length = 0;
     const revisedSecond = `${second}\nRevised prose`;
@@ -94,6 +100,7 @@ describe("TypesetVisualEditor document synchronization", () => {
       <TypesetVisualEditor
         path="second.tex"
         draft={revisedSecond}
+        compiledDocument={secondPdf}
         numbering={numbering}
         theorems={theorems}
         pdfCursor={null}

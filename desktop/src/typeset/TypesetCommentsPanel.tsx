@@ -6,6 +6,7 @@ import {
   type TypesetComment,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { languageLocale } from "../language";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 
 export type TypesetSourceRange = { from: number; to: number };
@@ -140,7 +141,7 @@ export default function TypesetCommentsPanel({
                   {comment.selectedText && <code>{comment.selectedText.replace(/\s+/g, " ").slice(0, 160)}</code>}
                 </button>
                 <footer>
-                  <time>{new Date(comment.updatedAtMs).toLocaleString()}</time>
+                  <time>{new Date(comment.updatedAtMs).toLocaleString(languageLocale(language))}</time>
                   <button type="button" disabled={busy} onClick={() => void toggleResolved(comment)}>{comment.resolved ? copy.commentReopen : copy.commentResolve}</button>
                   <button type="button" disabled={busy} onClick={() => void remove(comment)}>{copy.commentDelete}</button>
                 </footer>

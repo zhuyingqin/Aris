@@ -71,7 +71,9 @@ export function SharedEditor({ className, ...options }: SharedEditorProps) {
     const view = handleRef.current?.view;
     // The factory applies the creation-time language. This effect only handles
     // a later prop change, avoiding a duplicate lazy import/reconfigure on mount.
-    if (view && options.language !== initialRef.current.language) reconfigureLanguage(view, options.language);
+    if (view && options.language !== initialRef.current.language) {
+      reconfigureLanguage(view, options.language, initialRef.current.surface);
+    }
   }, [options.language]);
 
   return <div className={className} ref={hostRef} />;

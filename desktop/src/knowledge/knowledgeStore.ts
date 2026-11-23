@@ -330,7 +330,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const fragments = papers.flatMap(toKnowledgeFragments);
       set({ points, fragments, sourcePapers, loaded: true, loadedProjectId: projectId });
     } catch (error) {
-      set({ error: `failed to load knowledge base: ${String(error)}` });
+      set({ error: KNOWLEDGE_COPY[useStore.getState().language].errors.load(String(error)) });
     }
   },
 
@@ -375,7 +375,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await knowledgeConfirm(id);
       stamp();
     } catch (error) {
-      set({ error: `failed to confirm knowledge point: ${String(error)}` });
+      set({ error: KNOWLEDGE_COPY[useStore.getState().language].errors.confirm(String(error)) });
     }
   },
 
@@ -390,7 +390,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await knowledgeReject(id);
       drop();
     } catch (error) {
-      set({ error: `failed to reject knowledge point: ${String(error)}` });
+      set({ error: KNOWLEDGE_COPY[useStore.getState().language].errors.reject(String(error)) });
     }
   },
 
@@ -405,7 +405,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     try {
       await knowledgeUpsert([toUpsertInput(next)]);
     } catch (error) {
-      set({ error: `failed to save refined knowledge point: ${String(error)}` });
+      set({ error: KNOWLEDGE_COPY[useStore.getState().language].errors.refine(String(error)) });
     }
   },
 
@@ -434,7 +434,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const result = await knowledgeSearch<{ results?: KnowledgeSearchHit[] }>(trimmed);
       set({ searchHits: result.results ?? [] });
     } catch (error) {
-      set({ error: `failed to search knowledge base: ${String(error)}` });
+      set({ error: KNOWLEDGE_COPY[useStore.getState().language].errors.search(String(error)) });
     }
   },
 }));

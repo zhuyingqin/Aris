@@ -1,5 +1,7 @@
+import type { Language } from "../store";
 import { basename, extension } from "../editor/workspaceFiles";
 import { isImagePath } from "../imageFiles";
+import { tr } from "../language";
 export { imageMimeType } from "../imageFiles";
 
 /**
@@ -45,21 +47,27 @@ export function sideFileTitle(path: string, maxChars = 24): string {
 export function fileHandoff(
   path: string,
   selection: string,
-  language: "cn" | "en",
+  language: Language,
   page?: number | null,
 ): string {
   const quote = selection.replace(/\s+$/g, "").trim();
   const location = page && page > 0
-    ? language === "cn" ? `${path} · 第 ${page} 页` : `${path} · page ${page}`
+    ? tr(language, `${path} · 第 ${page} 页`, `${path} · page ${page}`, `${path} · página ${page}`)
     : path;
   if (!quote) {
-    return language === "cn"
-      ? `[侧栏文件 · ${location}]\n\n请阅读这个文件后继续。`
-      : `[Side panel file · ${location}]\n\nRead this file before continuing.`;
+    return tr(
+      language,
+      `[侧栏文件 · ${location}]\n\n请阅读这个文件后继续。`,
+      `[Side panel file · ${location}]\n\nRead this file before continuing.`,
+      `[Archivo del panel lateral · ${location}]\n\nLee este archivo antes de continuar.`,
+    );
   }
-  return language === "cn"
-    ? `[侧栏摘录 · ${location}]\n\n"""\n${quote}\n"""`
-    : `[Side panel excerpt · ${location}]\n\n"""\n${quote}\n"""`;
+  return tr(
+    language,
+    `[侧栏摘录 · ${location}]\n\n"""\n${quote}\n"""`,
+    `[Side panel excerpt · ${location}]\n\n"""\n${quote}\n"""`,
+    `[Extracto del panel lateral · ${location}]\n\n"""\n${quote}\n"""`,
+  );
 }
 
 /**

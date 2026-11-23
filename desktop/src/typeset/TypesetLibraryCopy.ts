@@ -41,7 +41,7 @@ const EN_COPY = {
     poster: "Posters",
     report: "Reports",
     ready: "Ready",
-    "needs-compile": "Needs compile",
+    "needs-compile": "Needs compiling",
     archived: "Archived",
   },
   rootDocumentsOnly: "Browse LaTeX documents by folder",
@@ -56,7 +56,7 @@ const EN_COPY = {
   refresh: "Refresh",
   refreshLibrary: "Refresh document library",
   latexMissingTitle: "System LaTeX is not installed",
-  latexMissingBody: "Open Chat to choose an installation method, review the required download, and verify the toolchain when it is ready.",
+  latexMissingBody: "Go to Chat and SomniQ will pick an installation method, explain what it will download, and verify the toolchain afterward.",
   installInChat: "Install with Chat",
   searchPlaceholder: "Search by title or path",
   sort: "Sort",
@@ -80,7 +80,7 @@ const EN_COPY = {
   },
   compileStates: {
     fresh: "Compiled",
-    stale: "Needs compile",
+    stale: "Needs compiling",
     missing: "Not compiled",
   },
   selectDocument: (title: string) => `Select ${title}`,
@@ -93,8 +93,8 @@ const EN_COPY = {
   openFolderDocument: (name: string) => `Open main document in ${name}`,
   reveal: "Show in folder",
   revealDocument: (title: string) => `Show ${title} in folder`,
-  addFavorite: "Add favorite",
-  removeFavorite: "Remove favorite",
+  addFavorite: "Add to favorites",
+  removeFavorite: "Remove from favorites",
   favoriteDocument: (title: string, favorite: boolean) => `${favorite ? "Remove" : "Add"} ${title} ${favorite ? "from favorites" : "to favorites"}`,
   archive: "Archive document",
   restore: "Restore document",
@@ -108,7 +108,7 @@ const EN_COPY = {
   dialogTitle: "Choose a starting point",
   closeDialog: "Close new document dialog",
   documentTitle: "Document title",
-  titlePlaceholder: "Untitled research note",
+  titlePlaceholder: "Untitled research document",
   templateLabel: "Document template",
   templates: {
     article: { label: "Article", description: "Paper, note, or manuscript" },
@@ -229,8 +229,118 @@ const CN_COPY: typeof EN_COPY = {
   create: "创建文档",
 };
 
+const ES_COPY: typeof EN_COPY = {
+  libraryLabel: "Biblioteca de documentos LaTeX",
+  categoriesLabel: "Categorías de documentos",
+  newDocument: "Nuevo documento LaTeX",
+  groups: {
+    library: "Biblioteca",
+    documentType: "Tipo de documento",
+    buildStatus: "Estado de compilación",
+  },
+  scopes: {
+    all: "Todos los documentos",
+    recent: "Modificados recientemente",
+    favorites: "Favoritos",
+    article: "Artículos",
+    beamer: "Presentaciones",
+    poster: "Pósteres",
+    report: "Informes",
+    ready: "Listos para revisar",
+    "needs-compile": "Necesitan compilación",
+    archived: "Documentos archivados",
+  },
+  navigation: {
+    all: "Todos los documentos",
+    recent: "Recientes",
+    favorites: "Favoritos",
+    article: "Artículos",
+    beamer: "Presentaciones",
+    poster: "Pósteres",
+    report: "Informes",
+    ready: "Listos",
+    "needs-compile": "Por compilar",
+    archived: "Archivados",
+  },
+  rootDocumentsOnly: "Explorar documentos LaTeX por carpeta",
+  folderControls: "Visualización de carpetas",
+  expandAllFolders: "Expandir todas las carpetas",
+  collapseAllFolders: "Contraer todas las carpetas",
+  scanning: "Analizando el espacio de trabajo local…",
+  documentCount: (count: number) => `${count} documento${count === 1 ? "" : "s"}`,
+  projectSummary: (projects: number, documents: number) => `${projects} proyecto${projects === 1 ? "" : "s"} · ${documents} documento${documents === 1 ? "" : "s"} raíz`,
+  documentsInProject: (count: number) => `${count} documento${count === 1 ? "" : "s"} raíz`,
+  texFilesInProject: (count: number) => `${count} archivo${count === 1 ? "" : "s"} .tex`,
+  refresh: "Actualizar",
+  refreshLibrary: "Actualizar la biblioteca de documentos",
+  latexMissingTitle: "LaTeX no está instalado en el sistema",
+  latexMissingBody: "Ve al chat y SomniQ elegirá un método de instalación, explicará qué va a descargar y verificará la cadena de herramientas después.",
+  installInChat: "Instalar con el chat",
+  searchPlaceholder: "Buscar por título o ruta",
+  sort: "Ordenar",
+  sortDocuments: "Ordenar documentos",
+  sortModified: "Última modificación",
+  sortTitle: "Título",
+  selectVisible: "Seleccionar los documentos visibles",
+  table: {
+    document: "Carpetas y documentos",
+    type: "Tipo",
+    modified: "Última modificación",
+    status: "Estado",
+    actions: "Acciones",
+  },
+  projectRoot: "Raíz del proyecto",
+  kinds: {
+    article: "Artículo",
+    beamer: "Presentación",
+    poster: "Póster",
+    report: "Informe",
+  },
+  compileStates: {
+    fresh: "Compilado",
+    stale: "Por compilar",
+    missing: "Sin compilar",
+  },
+  selectDocument: (title: string) => `Seleccionar ${title}`,
+  actionsFor: (title: string) => `Acciones de ${title}`,
+  open: "Abrir documento",
+  openDocument: (title: string) => `Abrir ${title}`,
+  openProject: (name: string) => `Abrir el proyecto ${name}`,
+  toggleProject: (name: string, expanded: boolean) => `${expanded ? "Contraer" : "Expandir"} el proyecto ${name}`,
+  toggleFolder: (name: string, expanded: boolean) => `${expanded ? "Contraer" : "Expandir"} la carpeta ${name}`,
+  openFolderDocument: (name: string) => `Abrir el documento principal de ${name}`,
+  reveal: "Mostrar en la carpeta",
+  revealDocument: (title: string) => `Mostrar ${title} en la carpeta`,
+  addFavorite: "Añadir a favoritos",
+  removeFavorite: "Quitar de favoritos",
+  favoriteDocument: (title: string, favorite: boolean) => `${favorite ? "Quitar" : "Añadir"} ${title} ${favorite ? "de favoritos" : "a favoritos"}`,
+  archive: "Archivar documento",
+  restore: "Restaurar documento",
+  archiveDocument: (title: string, archived: boolean) => `${archived ? "Restaurar" : "Archivar"} ${title}`,
+  emptyRootTitle: "No se encontraron documentos LaTeX raíz",
+  emptyRootBody: "Crea un documento o añade un archivo .tex que contenga \\documentclass.",
+  emptyViewTitle: "Ningún documento coincide con esta vista",
+  emptyViewBody: "Prueba con otra búsqueda o categoría.",
+  dialogLabel: "Nuevo documento LaTeX",
+  dialogEyebrow: "Nuevo documento LaTeX",
+  dialogTitle: "Elige un punto de partida",
+  closeDialog: "Cerrar el diálogo de nuevo documento",
+  documentTitle: "Título del documento",
+  titlePlaceholder: "Nota de investigación sin título",
+  templateLabel: "Plantilla del documento",
+  templates: {
+    article: { label: "Artículo", description: "Artículo, nota o manuscrito" },
+    beamer: { label: "Presentación", description: "Presentación Beamer 16:9" },
+    report: { label: "Informe", description: "Informe de investigación con varios capítulos" },
+    poster: { label: "Póster", description: "Póster Beamer A1" },
+  },
+  cancel: "Cancelar",
+  create: "Crear documento",
+};
+
 export const TYPESET_LIBRARY_COPY: Record<Language, typeof EN_COPY> = {
   en: EN_COPY,
+  es: ES_COPY,
   cn: CN_COPY,
 };
 
@@ -253,6 +363,15 @@ export function documentRelativeTime(epochMs: number, language: Language): strin
     const days = Math.floor(hours / 24);
     if (days < 30) return `${days} 天前`;
     return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" }).format(new Date(epochMs));
+  }
+  if (language === "es") {
+    if (minutes < 1) return "justo ahora";
+    if (minutes < 60) return `hace ${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `hace ${hours} h`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `hace ${days} día${days === 1 ? "" : "s"}`;
+    return new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", year: "numeric" }).format(new Date(epochMs));
   }
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes} min ago`;

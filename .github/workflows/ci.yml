@@ -196,6 +196,50 @@ jobs:
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib newapi:: -- --test-threads=1
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib figure_model_choices_survive_conflicting_defaults_and_allow_recovery -- --test-threads=1
 
+  # The desktop app ships mainly on Windows, where path handling, file
+  # replacement and subprocesses differ most. Covers plugin switches and
+  # capabilities, the independent review loop and its rubric record, work-task
+  # review and origin, workflow review gates, plugin page tasks, run-library
+  # persistence and bounded OCR subprocesses.
+  desktop-windows:
+    name: desktop checks (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Plugin, review and task UI regressions
+        working-directory: desktop
+        run: |
+          npx vitest run src/extensions src/tasks src/workflows src/chat/IndependentReviewPanel --maxWorkers=4 --minWorkers=1
+          npm run typecheck
+      - name: Shared runtime and tools
+        run: |
+          cargo test -p runtime --lib plugins::tests
+          cargo test -p runtime --lib review_workflow
+          cargo test -p runtime --lib atomic_file
+          cargo test -p tools --lib runs
+      - name: Desktop native regressions
+        run: |
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib -- --test-threads=1 rubric criterion work_task:: workflow:: plugins:: process::tests a_plugin_page_origin
+
   docx-converters:
     name: native Word equation and atomic-save regressions
     runs-on: ubuntu-22.04
@@ -219,3 +263,7 @@ jobs:
           python-version: '3.11'
       - name: Verify editable slides, provenance and independent review
         run: python -B crates/runtime/assets/skills/paper-slides/tests/test_slide_quality.py -v
+      - name: Install deck builder dependencies
+        run: python -m pip install 'python-pptx==1.0.2' 'pillow>=10' 'pymupdf>=1.24' 'matplotlib>=3.8'
+      - name: Verify the deterministic deck builder
+        run: python -B crates/runtime/assets/skills/paper-slides/tests/test_deck_builder.py -v

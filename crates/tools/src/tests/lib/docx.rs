@@ -64,6 +64,19 @@ fn docx_tool_contract_rejects_missing_versions_bad_batches_and_plain_text_writes
         let read = run("read_docx", json!({"path": "sample.docx"}));
         let id = read["paragraphs"][0]["id"].clone();
         assert!(execute_tool("edit_docx", &json!({"path":"sample.docx","edits":[]})).is_err());
+        assert!(execute_tool(
+            "delete_docx_paragraphs",
+            &json!({
+                "path":"sample.docx", "output_path":"candidate.docx", "deletions":[]
+            })
+        )
+        .unwrap_err()
+        .contains("expected_source_revision"));
+        assert!(
+            execute_tool("export_docx_pdf", &json!({"path":"sample.docx"}))
+                .unwrap_err()
+                .contains("expected_source_revision")
+        );
         for revision in [json!("stale"), read["revision"].clone()] {
             assert!(execute_tool("edit_docx", &json!({
                 "path": "sample.docx", "expected_revision": revision,
@@ -102,6 +115,14 @@ fn docx_tool_contract_rejects_missing_versions_bad_batches_and_plain_text_writes
 
 #[test]
 fn docx_tools_have_distinct_permissions_and_reviewers_can_read() {
+    for name in [
+        "delete_docx_paragraphs",
+        "export_docx_pdf",
+        "edit_docx_structure",
+        "remove_odt_highlight",
+    ] {
+        assert_eq!(tool_execution(name), ToolExecution::Serial);
+    }
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -117,18 +138,70 @@ fn docx_tools_have_distinct_permissions_and_reviewers_can_read() {
             .required_permission,
         runtime::PermissionMode::ReadOnly
     );
-    assert_eq!(
-        specs
-            .iter()
-            .find(|s| s.name == "edit_docx")
-            .unwrap()
-            .required_permission,
-        runtime::PermissionMode::WorkspaceWrite
-    );
+    for name in [
+        "edit_docx",
+        "export_docx",
+        "format_docx",
+        "render_docx",
+        "delete_docx_paragraphs",
+        "export_docx_pdf",
+        "edit_docx_structure",
+        "remove_odt_highlight",
+    ] {
+        assert_eq!(specs.iter().filter(|s| s.name == name).count(), 1);
+        assert_eq!(
+            specs
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .required_permission,
+            runtime::PermissionMode::WorkspaceWrite,
+            "{name}"
+        );
+        assert_eq!(tool_execution(name), ToolExecution::Serial, "{name}");
+    }
     assert_eq!(tool_execution("read_docx"), ToolExecution::Parallel);
+    assert_eq!(tool_execution("read_odt"), ToolExecution::Parallel);
     assert_eq!(tool_execution("edit_docx"), ToolExecution::Serial);
     // Child permissions are bound by the session host, which intersects these
     // schema permissions with its read-only allowlist. No legacy role bypass.
+}
+
+#[test]
+fn export_format_and_render_require_snapshot_versions_and_reject_unknown_operations() {
+    in_workspace(|root| {
+        fs::write(root.join("source.md"), "# Saved source").unwrap();
+        fs::write(root.join("sample.docx"), REAL_DOCX).unwrap();
+        for (tool, input) in [
+            (
+                "export_docx",
+                json!({"source_path":"source.md", "output_path":"out.docx"}),
+            ),
+            (
+                "format_docx",
+                json!({"path":"sample.docx", "output_path":"out.docx", "operations":[]}),
+            ),
+            ("render_docx", json!({"path":"sample.docx"})),
+            (
+                "export_docx",
+                json!({"source_path":"source.md", "output_path":"out.docx", "expected_source_revision":"stale"}),
+            ),
+            (
+                "render_docx",
+                json!({"path":"sample.docx", "expected_revision":"stale"}),
+            ),
+            (
+                "format_docx",
+                json!({"path":"sample.docx", "output_path":"out.docx", "expected_source_revision":"stale",
+                "operations":[{"paragraph_id":"word/document.xml:p1", "replace_text":"flatten"}]}),
+            ),
+        ] {
+            assert!(execute_tool(tool, &input).is_err(), "{tool}: {input}");
+            assert!(!root.join("out.docx").exists());
+            assert_eq!(fs::read(root.join("sample.docx")).unwrap(), REAL_DOCX);
+            assert!(!root.join(".somniq/artifacts").exists());
+        }
+    });
 }
 
 #[cfg(windows)]

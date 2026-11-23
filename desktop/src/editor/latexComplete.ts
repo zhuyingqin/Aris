@@ -1,6 +1,9 @@
 import { snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { EditorState, type Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
+import { useStore } from "../store";
+import type { Language } from "../language";
+import { LATEX_COMPLETION_CATEGORY_COPY } from "./latex/latexCopy";
 
 /**
  * LaTeX autocomplete for the Typeset (and Lab `.tex`) editors. CodeMirror ships
@@ -229,14 +232,26 @@ function insideComment(before: string): boolean {
   return false;
 }
 
-function commandCompletion([label, snippet, detail]: CommandEntry): Completion {
-  const boost = detail === "greek" ? -1 : 0;
+function commandCompletion([label, snippet, category]: CommandEntry, language: Language): Completion {
+  const boost = category === "greek" ? -1 : 0;
+  const detail = category === undefined ? undefined : LATEX_COMPLETION_CATEGORY_COPY[language][category] ?? category;
   return snippet
     ? snippetCompletion(snippet, { label, type: "function", detail, boost })
     : { label, type: "keyword", detail, boost };
 }
 
-const COMMAND_OPTIONS: Completion[] = COMMANDS.map(commandCompletion);
+/** Built once per UI language, so the category hints follow the language toggle. */
+const commandOptionsByLanguage = new Map<Language, Completion[]>();
+
+function commandOptions(): Completion[] {
+  const language = useStore.getState().language;
+  let options = commandOptionsByLanguage.get(language);
+  if (!options) {
+    options = COMMANDS.map((entry) => commandCompletion(entry, language));
+    commandOptionsByLanguage.set(language, options);
+  }
+  return options;
+}
 
 /** Expands `\begin{env}` on its own line into the full begin/body/end block,
  * the way Overleaf and every LaTeX editor do — otherwise the writer types the
@@ -355,7 +370,7 @@ export function latexCompletionSource(context: CompletionContext): CompletionRes
   if (!command) return null;
   // Bare `\` with nothing typed still opens the list — that is the discovery
   // path for writers who don't know the command name yet.
-  return { from: context.pos - command[1].length - 1, options: COMMAND_OPTIONS, validFor: /^\\[a-zA-Z]*$/ };
+  return { from: context.pos - command[1].length - 1, options: commandOptions(), validFor: /^\\[a-zA-Z]*$/ };
 }
 
 /** Registers the source as language data so it composes with the shared

@@ -40,6 +40,18 @@ fn main() {
         bundle_tree(&tools_root, "tools", out_path, &mut resource_entries);
     }
 
+    // Native document adapters and their upstream notices also ship as readable
+    // resources. The binary reference DOCX is include_bytes!d by its runtime.
+    let docx_root = assets_dir.join("docx");
+    if docx_root.exists() {
+        let meta = fs::symlink_metadata(&docx_root).expect("symlink_metadata for assets/docx");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "assets/docx must not be a symlink"
+        );
+        bundle_tree(&docx_root, "docx", out_path, &mut resource_entries);
+    }
+
     // ------ Walk assets/skills/ ------
     let skills_root = assets_dir.join("skills");
     if skills_root.exists() {
@@ -138,6 +150,7 @@ fn main() {
         "/// Bundled helper files (`.py`, `.sh`, `.tex`, `.cls`, `.bst`, `.md`, configs) for skills.\n\
          /// Keys use these namespaces:\n\
          /// - `tools/<rel>` — shared, cross-skill helpers (from assets/tools/)\n\
+         /// - `docx/<rel>` — native document adapter sources and upstream notices\n\
          /// - `skills/<name>/<rel>` — skill-local helpers and templates\n\
          /// - `shared-references/<rel>` — always-extracted reference docs\n\
          pub static BUNDLED_RESOURCES: &[(&str, &str)] = &[\n",

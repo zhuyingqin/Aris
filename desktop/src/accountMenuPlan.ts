@@ -1,5 +1,5 @@
 import type { NewApiAccount } from "./api/tauri";
-import type { Language } from "./store";
+import { tr, type Language } from "./language";
 
 export type AccountPlanTier = "free" | "go" | "plus" | "pro" | "unknown";
 
@@ -27,13 +27,13 @@ function quotaValue(value?: number): number | null {
 }
 
 export function accountMenuPlan(account: NewApiAccount | null, language: Language): AccountMenuPlan {
-  if (!account) return { tier: "unknown", label: language === "cn" ? "账户" : "Account", remaining: null, remainingPercent: null };
+  if (!account) return { tier: "unknown", label: tr(language, "账户", "Account", "Cuenta"), remaining: null, remainingPercent: null };
   const subscriptionName = account.subscriptionName?.trim();
   const subscriptionDesc = account.subscriptionDesc?.trim();
   const tier = namedTier(subscriptionName) ?? namedTier(account.group) ?? namedTier(account.groupDesc)
     ?? namedTier(subscriptionDesc) ?? (account.group?.trim().toLowerCase() === "default" ? "free" : "unknown");
   const label = tier === "unknown"
-    ? subscriptionName || account.groupDesc?.trim() || (language === "cn" ? "账户" : "Account")
+    ? subscriptionName || account.groupDesc?.trim() || (tr(language, "账户", "Account", "Cuenta"))
     : tier[0].toUpperCase() + tier.slice(1);
 
   // The native projection emits empty names and zero subscription counters

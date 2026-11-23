@@ -93,6 +93,21 @@ describe("pdfTextRunBox", () => {
     expect(textRunsFromPdfContent({ items: [ALPHA_ITEM] }, undefined, 1)).toEqual([]);
     expect(textRunsFromPdfContent(null, { transform: [] }, 1)).toEqual([]);
   });
+
+  it("preserves separate PDF space and empty line-ending items around math when selecting text", () => {
+    const runs = textRunsFromPdfContent({ items: [
+      { ...ALPHA_ITEM, str: "Forecast" },
+      { ...ALPHA_ITEM, str: " ", width: 3 },
+      { ...ALPHA_ITEM, str: "y" },
+      { ...ALPHA_ITEM, str: "", hasEOL: true },
+      { ...ALPHA_ITEM, str: "Next line", hasEOL: true },
+    ] }, viewportAt(1), 1);
+
+    expect(runs.map((run) => run.raw + (run.endsLine ? "\n" : "")).join(""))
+      .toBe("Forecast y\nNext line\n");
+    // Search highlights still address the original PDF.js item indices.
+    expect(runs.map((run) => run.itemIndex)).toEqual([0, 1, 2, 4]);
+  });
 });
 
 describe("pdfLinkRunsFromAnnotations", () => {

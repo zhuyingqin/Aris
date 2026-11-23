@@ -1,0 +1,6 @@
+{
+  "name": "@local/research-reviewer",
+  "version": "0.1.0",
+  "description": "Review criteria the independent Reviewer checks on every research answer: evidence behind every number, and statistics reported in full when a result is called significant.",
+  "somniq": { "manifestVersion": 1, "reviewer": "./reviewer.json" }
+}
