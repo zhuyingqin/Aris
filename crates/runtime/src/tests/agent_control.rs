@@ -1912,9 +1912,11 @@ fn agent_events_survive_event_log_compaction() {
         row(4, "session_reset"),
         row(5, "assistant_delta"),
         row(6, "agent.result"),
-        row(7, "session_checkpoint"),
-        row(8, "assistant_delta"),
-        row(9, "agent.close"),
+        row(7, "lesson_recall"),
+        row(8, "memory_recall"),
+        row(9, "session_checkpoint"),
+        row(10, "assistant_delta"),
+        row(11, "agent.close"),
     ]
     .concat();
     fs::write(&path, log).unwrap();
@@ -1938,13 +1940,14 @@ fn agent_events_survive_event_log_compaction() {
             "agent.mail.sent",
             "session_reset",
             "agent.result",
+            "lesson_recall",
             "session_checkpoint",
             "assistant_delta",
             "agent.close"
         ],
-        "the stream rows behind the reset and checkpoint went; every agent row stayed"
+        "the stream rows behind the reset and checkpoint went; every agent row and lesson_recall stayed"
     );
-    assert_eq!(outcome.removed_lines, 2);
+    assert_eq!(outcome.removed_lines, 3);
 }
 
 fn task_contract() -> AgentTask {

@@ -687,6 +687,11 @@ const SESSION_CHECKPOINT_KIND: &str = "session_checkpoint";
 /// canonical stream, but nothing folds these: they are the only record of who
 /// started whom and who told whom what, so compaction never removes them.
 const DURABLE_EVENT_KIND_PREFIX: &str = "agent.";
+/// Small audit rows nothing else records: which past lessons were attached to
+/// which failed tool call. Without this the checkpoint after the turn erased
+/// every `lesson_recall` row (seen in-app), so a delivered lesson could not be
+/// traced afterwards.
+const DURABLE_EVENT_KINDS: &[&str] = &["lesson_recall"];
 
 /// What a compaction pass removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -704,6 +709,7 @@ fn line_kind_is(line: &str, kinds: &[&str]) -> bool {
 
 fn line_kind_is_durable(line: &str) -> bool {
     line.contains(&format!("\"kind\":\"{DURABLE_EVENT_KIND_PREFIX}"))
+        || line_kind_is(line, DURABLE_EVENT_KINDS)
 }
 
 /// Drop the rows of an event log that no reader can reach any more.

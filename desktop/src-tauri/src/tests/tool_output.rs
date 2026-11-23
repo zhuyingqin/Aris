@@ -555,3 +555,18 @@ fn only_real_image_payloads_are_treated_as_images() {
     assert!(runtime::parse_image_tool_output("not json at all").is_none());
     assert!(runtime::parse_image_tool_output("{}").is_none());
 }
+
+#[test]
+fn past_lessons_ride_on_the_failed_result_not_in_place_of_it() {
+    let json = super::attach_past_lessons(
+        r#"{"stderr":"UnicodeEncodeError: 'gbk' codec","exitCode":1}"#.to_string(),
+        "Lessons from earlier sessions...\n- use utf-8",
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).expect("still json");
+    assert_eq!(value["exitCode"], 1);
+    assert!(value["pastLessons"].as_str().unwrap_or_default().contains("use utf-8"));
+
+    let text = super::attach_past_lessons("bash: foo: command not found".to_string(), "- use bar");
+    assert!(text.starts_with("bash: foo: command not found"));
+    assert!(text.ends_with("- use bar"));
+}

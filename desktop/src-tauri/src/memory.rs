@@ -111,6 +111,40 @@ impl MemoryState {
         if research_memory_v2_mode().runs_pipeline() {
             self.spawn_v2_outbox_drain();
         }
+        // Lessons queued before the last exit and now overdue get written.
+        spawn_lesson_writer();
+    }
+
+    /// L1 lessons: queue the finished turn when a tool failure in it was
+    /// recovered. No model call here; the writer batches turns later.
+    pub(crate) fn enqueue_lesson_turn(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        turn_key: &str,
+        session: &runtime::Session,
+    ) {
+        if !lessons_enabled() || !is_general_memory_session_id(session_id) {
+            return;
+        }
+        let Some(turn) =
+            runtime::lesson_turn_from_messages(runtime::last_turn_messages(&session.messages))
+        else {
+            // Any turn end also wakes the writer (a no-op until a store
+            // exists), so a batch that only became due by waiting is sent
+            // without needing another qualifying turn or a restart.
+            spawn_lesson_writer();
+            return;
+        };
+        match runtime::LessonStore::default().enqueue_job(
+            project_id,
+            session_id,
+            &format!("{session_id}:{turn_key}"),
+            &turn,
+        ) {
+            Ok(_) => spawn_lesson_writer(),
+            Err(error) => eprintln!("SomniQ lesson capture skipped: {error}"),
+        }
     }
 
     pub(crate) fn builtin_research_recall_prompt(
@@ -384,6 +418,159 @@ fn research_memory_v2_model() -> Option<String> {
 /// for that document on each of the ~6 calls a single capture costs. This entry
 /// point sends only the memory instructions, and lets the user point the
 /// pipeline at a cheaper, faster model than their chat reviewer.
+/// L1 lesson writer batching. Turns with a recovered failure are 23% of all
+/// turns on local history, so waiting for 3 of them (or 15 minutes) keeps the
+/// writer at roughly one cheap call per 13 turns.
+const LESSON_BATCH_MIN_TURNS: usize = 3;
+const LESSON_BATCH_MAX_TURNS: usize = 4;
+const LESSON_BATCH_MAX_WAIT_MS: i64 = 15 * 60_000;
+const LESSON_WRITER_MAX_ATTEMPTS: i64 = 3;
+const LESSON_WRITER_KNOWN_LINES: usize = 30;
+static LESSON_WRITER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// `memory_lessons_enabled` (default on) gates both writing and recall.
+pub(crate) fn lessons_enabled() -> bool {
+    crate::config::load_object()
+        .get("memory_lessons_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn lesson_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// Write due lesson batches on a background thread. A store that does not
+/// exist yet has nothing queued, so nothing is created or opened for it.
+pub(crate) fn spawn_lesson_writer() {
+    if !lessons_enabled() {
+        return;
+    }
+    let store = runtime::LessonStore::default();
+    if !store.path().exists() || LESSON_WRITER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("somniq-lesson-writer".to_string())
+        .spawn(move || {
+            drain_lesson_jobs(&store);
+            LESSON_WRITER_RUNNING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        LESSON_WRITER_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn drain_lesson_jobs(store: &runtime::LessonStore) {
+    // A batch that failed in this drain waits for the next one, so an outage
+    // does not burn every attempt within a second.
+    let mut failed_now = BTreeSet::new();
+    loop {
+        let batches = match store.due_batches(
+            lesson_now_ms(),
+            LESSON_BATCH_MIN_TURNS,
+            LESSON_BATCH_MAX_TURNS,
+            LESSON_BATCH_MAX_WAIT_MS,
+        ) {
+            Ok(batches) => batches,
+            Err(error) => {
+                eprintln!("SomniQ lesson writer skipped: {error}");
+                return;
+            }
+        };
+        let batches: Vec<_> = batches
+            .into_iter()
+            .filter(|batch| !batch.iter().any(|job| failed_now.contains(&job.id)))
+            .collect();
+        if batches.is_empty() {
+            return;
+        }
+        for batch in batches {
+            let ids: Vec<i64> = batch.iter().map(|job| job.id).collect();
+            let known = store
+                .recent_statements(&batch[0].project_id, LESSON_WRITER_KNOWN_LINES)
+                .unwrap_or_default();
+            let body = runtime::lesson_request_body(&batch, &known);
+            let outcome = run_lesson_oneshot(runtime::LESSON_SYSTEM_PROMPT, &body).and_then(
+                |(reply, model)| {
+                    let (drafts, rejected) = runtime::parse_lesson_reply(&reply, &batch);
+                    let added = store.insert_lessons(&batch, &drafts)?;
+                    Ok((added, drafts.len(), rejected, model))
+                },
+            );
+            match outcome {
+                Ok((added, accepted, rejected, model)) => {
+                    let _ = store.complete_jobs(&ids);
+                    let reasons: Vec<&str> = rejected.iter().map(|(_, reason)| *reason).collect();
+                    eprintln!(
+                        "SomniQ lessons ({model}): {} turns, {accepted} accepted ({added} new), {} rejected {reasons:?}",
+                        batch.len(),
+                        rejected.len()
+                    );
+                }
+                Err(error) => {
+                    failed_now.extend(ids.iter().copied());
+                    let _ = store.fail_jobs(&ids, &error, LESSON_WRITER_MAX_ATTEMPTS);
+                }
+            }
+        }
+    }
+}
+
+/// Lessons from earlier sessions that may explain a tool failure, as a block
+/// to append to the failed tool result (never to the system prompt, so the
+/// cached prefix is untouched). `None` when nothing relevant is stored.
+pub(crate) fn past_lessons_for_failure(
+    tool_name: &str,
+    input: &str,
+    output: &str,
+    project_id: &str,
+) -> Option<(String, usize)> {
+    if !lessons_enabled() {
+        return None;
+    }
+    match runtime::LessonStore::default().recall_for_failure(tool_name, input, output) {
+        Ok(lessons) if !lessons.is_empty() => Some((
+            runtime::render_recalled_lessons(&lessons, project_id),
+            lessons.len(),
+        )),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("SomniQ lesson recall skipped: {error}");
+            None
+        }
+    }
+}
+
+/// The lesson writer's model call. A configured Reviewer route (and its
+/// `memory_v2_model`) is used when there is one; otherwise the executor's own
+/// connection at its cheap tier. Lessons must not silently stop for every user
+/// who never set up a Reviewer: in-app, a fresh account's jobs all failed with
+/// "reviewer is disabled" and were dropped after three attempts.
+fn run_lesson_oneshot(system: &str, prompt: &str) -> Result<(String, String), String> {
+    let config = crate::config::managed_config_object().unwrap_or_else(|_| crate::config::load_object());
+    let reviewer_configured = config
+        .get("reviewer_provider")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|provider| !provider.is_empty() && !matches!(provider, "none" | "disabled" | "off"));
+    if reviewer_configured {
+        let model = research_memory_v2_model()
+            .or_else(|| {
+                config
+                    .get("reviewer_model")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "reviewer".to_string());
+        return run_memory_oneshot(system, prompt).map(|reply| (reply, model));
+    }
+    crate::literature::run_background_oneshot(system, prompt)
+}
+
 fn run_memory_oneshot(system: &str, prompt: &str) -> Result<String, String> {
     crate::config::apply_reviewer_environment(true);
     tools::execute_llm_review_observed_with_cancel(

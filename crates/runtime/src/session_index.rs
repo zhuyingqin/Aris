@@ -15,6 +15,16 @@ use crate::{ContentBlock, MessageRole, Session};
 /// values in the shared `messages` table.
 const ARCHIVE_INDEX_BASE: usize = 1_000_000;
 const INDEX_SCHEMA_VERSION: i64 = 2;
+/// Metadata flag: every `messages` row has its row in `messages_bigram_fts`.
+/// Until the background repair backfills an older index, CJK queries keep
+/// using the LIKE path so nothing regresses mid-migration.
+const BIGRAM_READY_FLAG: &str = "bigram_ready";
+/// Recency weight for CJK hits: score x (0.5 + 0.5 * 0.5^(age / half-life)).
+/// Offline replay on 132 cross-session recall probes: +4 / -0 questions.
+const BIGRAM_RECENCY_HALF_LIFE_DAYS: f64 = 30.0;
+/// Bigram BM25 needs a wider pool than LIKE before one-hit-per-session.
+const BIGRAM_MIN_CANDIDATES: usize = 80;
+const BIGRAM_QUERY_TERM_LIMIT: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedMessageRow {
@@ -151,7 +161,8 @@ pub fn session_index_reindex_state(
         .filter(|progress| progress.sessions_dir == sessions_dir);
     let connection = open_index(sessions_dir)?;
     Ok(SessionIndexReindexState {
-        pending: metadata_flag(&connection, "reindex_required")?,
+        pending: metadata_flag(&connection, "reindex_required")?
+            || !metadata_flag(&connection, BIGRAM_READY_FLAG)?,
         running: running.is_some(),
         completed: running.as_ref().map_or(0, |progress| progress.completed),
         total: running.as_ref().map_or(0, |progress| progress.total),
@@ -326,6 +337,14 @@ fn replace_index_row(
             params![session_id, row.index, row.role, row.content],
         )
         .map_err(|error| error.to_string())?;
+    if let Some(rowid) = message_rowid(transaction, session_id, row.index)? {
+        transaction
+            .execute(
+                "INSERT INTO messages_bigram_fts(rowid, content) VALUES (?1, ?2)",
+                params![rowid, bigram_index_text(&row.content)],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     if row.profile_score > 0 {
         transaction
             .execute(
@@ -357,6 +376,11 @@ fn delete_fts_rows(
     session_id: &str,
     message_index: usize,
 ) -> Result<(), String> {
+    if let Some(rowid) = message_rowid(transaction, session_id, message_index)? {
+        transaction
+            .execute("DELETE FROM messages_bigram_fts WHERE rowid = ?1", [rowid])
+            .map_err(|error| error.to_string())?;
+    }
     transaction
         .execute(
             "DELETE FROM messages_fts WHERE session_id = ?1 AND message_index = ?2",
@@ -611,7 +635,10 @@ pub fn sync_sessions_dir(sessions_dir: &Path) -> Result<(), String> {
     if !sessions_dir.exists() {
         return Ok(());
     }
-    let connection = open_index(sessions_dir)?;
+    let mut connection = open_index(sessions_dir)?;
+    if !metadata_flag(&connection, BIGRAM_READY_FLAG)? {
+        backfill_bigram_index(&mut connection)?;
+    }
     let force_rebuild = metadata_flag(&connection, "reindex_required")?;
     let indexed_metadata = load_session_metadata(&connection)?;
     drop(connection);
@@ -1005,7 +1032,23 @@ fn search_sessions_internal(
         .saturating_mul(candidate_multiplier)
         .max(candidate_multiplier);
     let mut ranked_hits = if query.chars().any(is_cjk) {
-        search_like(&connection, query, candidate_limit)?
+        let bigram = if metadata_flag(&connection, BIGRAM_READY_FLAG)? {
+            search_bigram(
+                &connection,
+                query,
+                candidate_limit.max(BIGRAM_MIN_CANDIDATES),
+                now_millis(),
+            )?
+        } else {
+            Vec::new()
+        };
+        if bigram.is_empty() {
+            // Not yet backfilled, or a one-character query that no bigram can
+            // carry: the substring path still answers.
+            search_like(&connection, query, candidate_limit)?
+        } else {
+            bigram
+        }
     } else {
         let strict = search_fts(&connection, query, candidate_limit)?;
         if strict.is_empty() {
@@ -1110,6 +1153,9 @@ fn open_index(sessions_dir: &Path) -> Result<Connection, String> {
                role UNINDEXED,
                content
              );
+             CREATE VIRTUAL TABLE IF NOT EXISTS messages_bigram_fts USING fts5(
+               content, content='', contentless_delete=1
+             );
              CREATE VIRTUAL TABLE IF NOT EXISTS profile_fts USING fts5(
                session_id UNINDEXED,
                message_index UNINDEXED,
@@ -1156,6 +1202,7 @@ fn open_index(sessions_dir: &Path) -> Result<Connection, String> {
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or_default();
+    ensure_bigram_flag(&connection)?;
     if current_version < INDEX_SCHEMA_VERSION {
         let has_existing_projection = connection
             .query_row("SELECT EXISTS(SELECT 1 FROM sessions LIMIT 1)", [], |row| {
@@ -1270,6 +1317,13 @@ fn prune_missing_sessions(sessions_dir: &Path, seen: &BTreeSet<String>) -> Resul
         .into_iter()
         .filter(|session_id| !seen.contains(session_id))
     {
+        transaction
+            .execute(
+                "DELETE FROM messages_bigram_fts WHERE rowid IN
+                   (SELECT rowid FROM messages WHERE session_id = ?1)",
+                [&session_id],
+            )
+            .map_err(|error| error.to_string())?;
         transaction
             .execute(
                 "DELETE FROM messages_fts WHERE session_id = ?1",
@@ -1400,6 +1454,257 @@ fn search_profile_fts(
         })
         .map_err(|error| error.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
+}
+
+fn ensure_bigram_flag(connection: &Connection) -> Result<(), String> {
+    let known = connection
+        .query_row(
+            "SELECT 1 FROM index_metadata WHERE key = ?1",
+            [BIGRAM_READY_FLAG],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if known {
+        return Ok(());
+    }
+    // A fresh index has nothing to backfill; an older one owes a backfill that
+    // the background repair performs (see `sync_sessions_dir`).
+    let has_messages = connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM messages LIMIT 1)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or_default()
+        != 0;
+    set_metadata_flag(connection, BIGRAM_READY_FLAG, !has_messages)
+}
+
+fn message_rowid(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    message_index: usize,
+) -> Result<Option<i64>, String> {
+    match transaction.query_row(
+        "SELECT rowid FROM messages WHERE session_id = ?1 AND message_index = ?2",
+        params![session_id, message_index],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(rowid) => Ok(Some(rowid)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Rebuild the bigram projection from the rows already in `messages`; no
+/// Session file is re-read, so this is a few seconds even on large projects.
+fn backfill_bigram_index(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO messages_bigram_fts(messages_bigram_fts) VALUES('delete-all')",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    {
+        let mut select = transaction
+            .prepare("SELECT rowid, content FROM messages")
+            .map_err(|error| error.to_string())?;
+        let mut insert = transaction
+            .prepare("INSERT INTO messages_bigram_fts(rowid, content) VALUES (?1, ?2)")
+            .map_err(|error| error.to_string())?;
+        let rows = select
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (rowid, content) = row.map_err(|error| error.to_string())?;
+            insert
+                .execute(params![rowid, bigram_index_text(&content)])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction
+        .execute(
+            "INSERT INTO index_metadata(key, value) VALUES(?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [BIGRAM_READY_FLAG],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn is_word_char(character: char) -> bool {
+    !is_cjk(character)
+        && (character.is_alphanumeric() || matches!(character, '_' | '.' | '-' | '/'))
+}
+
+/// Visit the tokens of the bigram projection: each run of CJK characters
+/// becomes its overlapping two-character windows (a lone character stays
+/// itself), and every other alphanumeric run becomes one lowercase word.
+/// FTS5 `unicode61` then indexes these space-separated tokens, which gives
+/// two-character Chinese words real BM25 weight -- the trigram tokenizer cannot
+/// match them at all, and LIKE has no IDF.
+fn for_each_bigram_token(text: &str, mut visit: impl FnMut(String)) {
+    let mut run: Vec<char> = Vec::new();
+    let mut word = String::new();
+    let flush_word = |word: &mut String, visit: &mut dyn FnMut(String)| {
+        let trimmed = word.trim_matches(|c: char| matches!(c, '_' | '.' | '-' | '/'));
+        if trimmed.chars().count() > 1 {
+            visit(trimmed.to_lowercase());
+        }
+        word.clear();
+    };
+    let flush_run = |run: &mut Vec<char>, visit: &mut dyn FnMut(String)| {
+        match run.len() {
+            0 => {}
+            1 => visit(run[0].to_string()),
+            _ => {
+                for pair in run.windows(2) {
+                    visit(pair.iter().collect());
+                }
+            }
+        }
+        run.clear();
+    };
+    for character in text.chars() {
+        if is_cjk(character) {
+            flush_word(&mut word, &mut visit);
+            run.push(character);
+        } else if is_word_char(character) {
+            flush_run(&mut run, &mut visit);
+            word.push(character);
+        } else {
+            flush_word(&mut word, &mut visit);
+            flush_run(&mut run, &mut visit);
+        }
+    }
+    flush_word(&mut word, &mut visit);
+    flush_run(&mut run, &mut visit);
+}
+
+pub(crate) fn bigram_index_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for_each_bigram_token(text, |token| {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&token);
+    });
+    out
+}
+
+/// Distinct bigram tokens of a query, in first-seen order, capped.
+pub(crate) fn bigram_query_terms(query: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut terms = Vec::new();
+    for_each_bigram_token(query, |token| {
+        if terms.len() < BIGRAM_QUERY_TERM_LIMIT && seen.insert(token.clone()) {
+            terms.push(token);
+        }
+    });
+    terms
+}
+
+pub(crate) fn fts_or_expression(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+pub(crate) fn recency_weight(age_ms: i64, half_life_days: f64) -> f64 {
+    let age_days = (age_ms.max(0) as f64) / 86_400_000.0;
+    0.5 + 0.5 * 0.5_f64.powf(age_days / half_life_days)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// BM25 over the bigram projection, weighted towards recent messages.
+fn search_bigram(
+    connection: &Connection,
+    query: &str,
+    limit: usize,
+    now_ms: i64,
+) -> Result<Vec<RankedMessageHit>, String> {
+    let terms = bigram_query_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT messages.session_id, messages.message_index, messages.content,
+                    sessions.updated_at, messages.recorded_at,
+                    bm25(messages_bigram_fts)
+             FROM messages_bigram_fts
+             JOIN messages ON messages.rowid = messages_bigram_fts.rowid
+             JOIN sessions ON sessions.session_id = messages.session_id
+             WHERE messages_bigram_fts MATCH ?1
+             ORDER BY bm25(messages_bigram_fts)
+             LIMIT ?2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![fts_or_expression(&terms), limit], |row| {
+            Ok((
+                RankedMessageHit {
+                    session_id: row.get(0)?,
+                    message_index: usize::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                    snippet: String::new(),
+                    updated_at: row.get(3)?,
+                    recorded_at: row.get(4)?,
+                    score: 0.0,
+                    supplemental_indices: Vec::new(),
+                },
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut hits = Vec::new();
+    for row in rows {
+        let (mut hit, content, bm25) = row.map_err(|error| error.to_string())?;
+        let timestamp = hit_timestamp(&hit);
+        let weight = if timestamp > 0 {
+            recency_weight(now_ms.saturating_sub(timestamp), BIGRAM_RECENCY_HALF_LIFE_DAYS)
+        } else {
+            0.5
+        };
+        // FTS5 bm25() is lower-is-better (negative); flip it so the recency
+        // weight scales relevance rather than inverting it.
+        hit.score = -bm25 * weight;
+        hit.snippet = snippet_around(&content, &terms, 300);
+        hits.push(hit);
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.recorded_at.cmp(&left.recorded_at))
+    });
+    Ok(hits)
+}
+
+/// Up to `width` characters of `content`, starting a little before the first
+/// query term it contains.
+fn snippet_around(content: &str, terms: &[String], width: usize) -> String {
+    let lowered = content.to_lowercase();
+    let start_byte = terms
+        .iter()
+        .filter_map(|term| lowered.find(term.as_str()))
+        .min()
+        .unwrap_or(0);
+    // `to_lowercase` can change byte lengths; map back by character count.
+    let start_char = lowered
+        .get(..start_byte)
+        .map_or(0, |prefix| prefix.chars().count())
+        .saturating_sub(40);
+    content.chars().skip(start_char).take(width).collect()
 }
 
 fn search_like(
@@ -1932,6 +2237,10 @@ fn role_name(role: MessageRole) -> &'static str {
         MessageRole::Assistant => "assistant",
         MessageRole::Tool => "tool",
     }
+}
+
+pub(crate) fn is_cjk_char(character: char) -> bool {
+    is_cjk(character)
 }
 
 fn is_cjk(character: char) -> bool {

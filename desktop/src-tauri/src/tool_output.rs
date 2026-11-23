@@ -253,6 +253,21 @@ pub(crate) fn attach_latex_repair_guard(output: String, message: &str) -> String
     format!("{output}\n\n{message}")
 }
 
+/// Append recalled lessons to a failed tool result: a `pastLessons` field on a
+/// JSON envelope, otherwise a trailing paragraph.
+pub(crate) fn attach_past_lessons(output: String, lessons: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&output) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "pastLessons".to_string(),
+                serde_json::Value::String(lessons.to_string()),
+            );
+            return serde_json::to_string_pretty(&value).unwrap_or(output);
+        }
+    }
+    format!("{output}\n\n{lessons}")
+}
+
 pub(crate) fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> String {
     let hint = tool_recovery_hint(tool_name, error)
         .unwrap_or_else(|| "Use the error message to adjust the next step; if the operation is optional, explain the fallback and continue.".to_string());

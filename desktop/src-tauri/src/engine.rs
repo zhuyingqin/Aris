@@ -30,7 +30,8 @@ use crate::system_prompt::{
     workflow_task_context_message,
 };
 use crate::tool_output::{
-    attach_latex_repair_guard, attach_recovery_hint, compact_edges, compact_stream_text,
+    attach_latex_repair_guard, attach_past_lessons, attach_recovery_hint, compact_edges,
+    compact_stream_text,
     compact_tool_output_for_context, format_tool_error_with_recovery, persist_tool_output_if_large,
     sanitize_output_file_component, tool_output_indicates_error,
 };
@@ -2162,7 +2163,23 @@ where
                 let is_error = output.reported_error
                     || tool_output_indicates_error(tool_name, &context_output);
                 if is_error {
+                    // Looked up before the hint is added, so the hint's own
+                    // words do not steer the search.
+                    let lessons = crate::memory::past_lessons_for_failure(
+                        tool_name,
+                        input,
+                        &context_output,
+                        &self.project_id,
+                    );
                     context_output = attach_recovery_hint(tool_name, &context_output);
+                    if let Some((block, count)) = lessons {
+                        context_output = attach_past_lessons(context_output, &block);
+                        crate::chat_events::record_event(
+                            &self.session_id,
+                            "lesson_recall",
+                            json!({ "toolUseId": tool_use_id, "tool": tool_name, "lessons": count }),
+                        );
+                    }
                 }
                 self.latex_repair_guard
                     .record(tool_name, input, is_error, &context_output);
@@ -2235,7 +2252,21 @@ where
                         }),
                     );
                 }
-                let output = format_tool_error_with_recovery(tool_name, &error.to_string());
+                let raw_error = error.to_string();
+                let mut output = format_tool_error_with_recovery(tool_name, &raw_error);
+                if let Some((block, count)) = crate::memory::past_lessons_for_failure(
+                    tool_name,
+                    input,
+                    &raw_error,
+                    &self.project_id,
+                ) {
+                    output = attach_past_lessons(output, &block);
+                    crate::chat_events::record_event(
+                        &self.session_id,
+                        "lesson_recall",
+                        json!({ "toolUseId": tool_use_id, "tool": tool_name, "lessons": count }),
+                    );
+                }
                 Err(ToolError::new(output))
             }
         }
@@ -10338,6 +10369,14 @@ async fn run_chat_turn_with_context(
     let _turn_scope = crate::chat_events::TurnTag::new(&session_id, &audit_turn_id).enter();
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if capture_research_memory && !ephemeral && !workflow_mode && !autonomous_workflow {
+        // L1 lessons are independent of the v2 pipeline mode: a turn whose
+        // tool failure was recovered is queued for the batched writer.
+        app.state::<crate::memory::MemoryState>().enqueue_lesson_turn(
+            &capture_project_id,
+            &session_id,
+            &audit_turn_id,
+            &updated,
+        );
         if let Some((user_index, message_index, assistant_text, tool_trace)) =
             final_assistant_memory_source(&updated)
         {

@@ -24,6 +24,7 @@ mod hooks;
 mod hot_memory;
 mod json;
 mod knowledge_memory;
+mod lesson_memory;
 pub mod literature;
 pub mod paper_reading;
 pub mod figures;
@@ -268,6 +269,11 @@ pub use research_memory_v2::{
     ResearchMemoryV2Layer, ResearchMemoryV2Mode, ResearchMemoryV2OutboxItem,
     ResearchMemoryV2Prefilter, ResearchMemoryV2Promotion, ResearchMemoryV2Stats,
     ResearchMemoryV2Store, ToolEpisode, RESEARCH_MEMORY_V2_VERSION, TOOL_TRACE_FAILURE_MARKER,
+};
+pub use lesson_memory::{
+    failure_is_informative, last_turn_messages, lesson_request_body, lesson_turn_from_messages,
+    parse_lesson_reply, render_recalled_lessons, LessonDraft, LessonJob, LessonStore, LessonTurn,
+    RecalledLesson, LESSON_SYSTEM_PROMPT,
 };
 pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{

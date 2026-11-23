@@ -338,10 +338,48 @@ fn run_oneshot_with_model_and_observer(
         validate_vision_model(&model)?;
     }
     runtime::clear_interrupt();
+    let text = run_single_turn(executor_config, model.clone(), system, message, observer)?;
+    Ok((text, model))
+}
+
+/// One short background call on the executor's own connection, for work that
+/// must not depend on a Reviewer being configured (lesson writing). Uses the
+/// cheap tier the compaction summarizer would pick (the executor itself when it
+/// is one, else a same-vendor cheap model the gateway lists), otherwise the
+/// executor model. Unlike `run_oneshot`, it leaves the process-wide interrupt
+/// flag alone: it runs beside the user's turns and must not swallow a Stop.
+pub(crate) fn run_background_oneshot(
+    system: &str,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let config = crate::config::current_executor_object()?;
+    let (model, _provider, executor_config) = aris_chat::resolve_settings_executor_config(&config)?;
+    let (executor_config, model) =
+        match aris_chat::resolve_summarizer_model(&executor_config, &model, Some("auto")) {
+            Some(cheap) if cheap != model => (executor_config.with_inferred_transport(), cheap),
+            _ => (executor_config, model),
+        };
+    let text = run_single_turn(
+        executor_config,
+        model.clone(),
+        system,
+        ConversationMessage::user_text(prompt),
+        Box::new(SilentObserver),
+    )?;
+    Ok((text, model))
+}
+
+fn run_single_turn(
+    executor_config: aris_chat::ChatExecutorConfig,
+    model: String,
+    system: &str,
+    message: ConversationMessage,
+    observer: Box<dyn aris_executor::StreamObserver>,
+) -> Result<String, String> {
     let mut conversation = aris_chat::build_conversation_runtime(
         Session::new(),
         executor_config,
-        model.clone(),
+        model,
         false,
         Vec::new(),
         observer,
@@ -361,7 +399,7 @@ fn run_oneshot_with_model_and_observer(
     let summary = conversation
         .run_turn_message(message, None)
         .map_err(|e| e.to_string())?;
-    Ok((aris_chat::final_assistant_text(&summary), model))
+    Ok(aris_chat::final_assistant_text(&summary))
 }
 
 pub(crate) fn validate_vision_model(model: &str) -> Result<(), String> {

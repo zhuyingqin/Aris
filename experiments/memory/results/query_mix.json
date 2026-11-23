@@ -1,0 +1,12 @@
+{
+  "mixed": {
+    "n": 86,
+    "bigram_hit@3": 0.756,
+    "trigram_hit@3": 0.744
+  },
+  "pure_chinese": {
+    "n": 46,
+    "bigram_hit@3": 0.543,
+    "trigram_hit@3": 0.37
+  }
+}
