@@ -11782,6 +11782,21 @@ fn school_route_signed_in() -> bool {
         .is_some_and(|issuer| research_account::same_origin(&issuer, SCOPUS_SCHOOL_URL))
 }
 
+/// New API groups whose tier includes `scopus-search` (`tiers.json` in the
+/// Site repository: Go, Plus, Pro and the operators' 千研 group).
+const SCOPUS_SCHOOL_GROUPS: &[&str] = &["go", "plus", "pro", "千研"];
+
+/// The group named by New API's "No available channel for model … under
+/// group <group> (…)" refusal.
+fn no_channel_group(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("under group ")?;
+    let group = rest
+        .split(|character: char| character.is_whitespace() || character == '(')
+        .next()?
+        .trim();
+    (!group.is_empty()).then(|| group.to_string())
+}
+
 /// Explains a school-route refusal. New API answers OpenAI-shaped errors for
 /// the account (tier, credits, token) and relays the research channel's own;
 /// every non-2xx answer is refunded, so none of them cost a credit.
@@ -11811,9 +11826,17 @@ fn scopus_school_refusal(response: &ProviderResponse, body: Option<&Value>) -> O
         403 => format!(
             "this SomniQ API key may not use {SCOPUS_SCHOOL_MODEL}; Scopus needs a Go, Plus, Pro or 千研 membership"
         ),
-        503 if no_channel => format!(
-            "this SomniQ API key's group has no {SCOPUS_SCHOOL_MODEL} channel; Scopus needs a Go, Plus, Pro or 千研 membership"
-        ),
+        503 if no_channel => match no_channel_group(&message) {
+            // A paying group without the channel is a gap in the server's
+            // configuration, not the member's plan. Kept free of "api key" and
+            // auth status codes so the run files it as a provider failure.
+            Some(group) if SCOPUS_SCHOOL_GROUPS.contains(&group.as_str()) => format!(
+                "the SomniQ server has not enabled the {SCOPUS_SCHOOL_MODEL} channel for the `{group}` membership group yet; this is a server configuration problem, not the account's membership, so upgrading will not help. Use other sources and report it to SomniQ support"
+            ),
+            _ => format!(
+                "this SomniQ API key's group has no {SCOPUS_SCHOOL_MODEL} channel; Scopus needs a Go, Plus, Pro or 千研 membership"
+            ),
+        },
         429 => "the school's Scopus quota is busy; retry later".to_string(),
         _ => return None,
     };

@@ -158,8 +158,30 @@ const OUTPUT_FILE_EXTENSIONS: &[&str] = &[
     "xdv",
 ];
 
-/// Directories that are never part of the source of a project.
-const PROJECT_ZIP_SKIP_DIRS: &[&str] = &[".git", ".svn", "node_modules", "__pycache__", ".aris"];
+/// Directories that are never part of the source of a project. Every hidden
+/// directory is skipped as well (see [`project_zip_skips_dir`]).
+const PROJECT_ZIP_SKIP_DIRS: &[&str] = &["node_modules", "__pycache__"];
+
+/// The archive is made to be sent to co-authors or a journal, and a document
+/// at the workspace root makes the whole workspace "the project". Hidden
+/// directories there are VCS or app state, never LaTeX source: `.somniq`
+/// alone holds chat sessions, revision blobs and the literature library.
+fn project_zip_skips_dir(name: &str) -> bool {
+    name.starts_with('.') || PROJECT_ZIP_SKIP_DIRS.contains(&name)
+}
+
+/// Credential files that must never leave the machine inside a source archive.
+/// Hidden *files* are otherwise kept: `.latexmkrc` is part of the build.
+fn project_zip_skips_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || matches!(
+            lower.as_str(),
+            ".netrc" | ".npmrc" | ".pypirc" | ".git-credentials" | "id_rsa" | "id_ed25519" | "id_ecdsa"
+        )
+        || [".pem", ".p12", ".pfx"].iter().any(|suffix| lower.ends_with(suffix))
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,8 +272,6 @@ fn typeset_export_project_blocking(
     root_path: String,
     destination_path: String,
 ) -> Result<String, String> {
-    use std::io::Write;
-
     let (_workspace, resolved) = crate::files::resolve_workspace_file(&root_path)?;
     let project = if resolved.is_dir() {
         resolved.clone()
@@ -272,12 +292,24 @@ fn typeset_export_project_blocking(
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
+    let written = write_project_archive(&project, destination)?;
+    if written == 0 {
+        return Err("The project folder contains no files to archive.".to_string());
+    }
+    Ok(destination.display().to_string())
+}
+
+/// Zip the source files under `project` into `destination`; returns how many
+/// files were written.
+fn write_project_archive(project: &Path, destination: &Path) -> Result<usize, String> {
+    use std::io::Write;
+
     let file = std::fs::File::create(destination).map_err(|error| error.to_string())?;
     let mut writer = zip::ZipWriter::new(file);
     let options: zip::write::FileOptions<'_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let mut stack = vec![project.clone()];
+    let mut stack = vec![project.to_path_buf()];
     let mut written = 0usize;
     while let Some(directory) = stack.pop() {
         let entries = match std::fs::read_dir(&directory) {
@@ -288,16 +320,16 @@ fn typeset_export_project_blocking(
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
-                if PROJECT_ZIP_SKIP_DIRS.contains(&name.as_str()) {
+                if project_zip_skips_dir(&name) {
                     continue;
                 }
                 stack.push(path);
                 continue;
             }
-            if is_build_artifact(&name) {
+            if is_build_artifact(&name) || project_zip_skips_file(&name) {
                 continue;
             }
-            let relative = match path.strip_prefix(&project) {
+            let relative = match path.strip_prefix(project) {
                 Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
                 Err(_) => continue,
             };
@@ -316,10 +348,7 @@ fn typeset_export_project_blocking(
         }
     }
     writer.finish().map_err(|error| error.to_string())?;
-    if written == 0 {
-        return Err("The project folder contains no files to archive.".to_string());
-    }
-    Ok(destination.display().to_string())
+    Ok(written)
 }
 
 /// Whether a file is something a LaTeX run produced rather than something the
@@ -365,7 +394,37 @@ fn is_build_artifact(name: &str) -> bool {
 /// it. The destination is resolved through the workspace guard, so a crafted
 /// relative path cannot write outside the project.
 #[tauri::command]
-pub fn typeset_import_file(
+pub async fn typeset_import_file(
+    source_path: String,
+    destination_path: String,
+) -> Result<String, String> {
+    // Up to 256 MB of copying: never on the window's thread.
+    crate::blocking::off_main_thread(move || typeset_import_file_blocking(source_path, destination_path)).await
+}
+
+/// `figure.png` → `figure-2.png`, … — the first name not taken. A clash used
+/// to fail the whole import; hyphenated rather than `figure (2).png` because
+/// spaces and parentheses are awkward inside `\includegraphics{…}`.
+fn available_import_destination(destination: &Path) -> PathBuf {
+    if !destination.exists() {
+        return destination.to_path_buf();
+    }
+    let stem = destination
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = destination
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = destination.parent().unwrap_or_else(|| Path::new(""));
+    (2..10_000)
+        .map(|index| parent.join(format!("{stem}-{index}{extension}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or_else(|| destination.to_path_buf())
+}
+
+fn typeset_import_file_blocking(
     source_path: String,
     destination_path: String,
 ) -> Result<String, String> {
@@ -380,8 +439,9 @@ pub fn typeset_import_file(
     if size > MAX_IMPORT_BYTES {
         return Err("That file is larger than the 256 MB import limit.".to_string());
     }
-    let (workspace, destination) = crate::files::resolve_workspace_output_file(&destination_path)?;
+    let (workspace, requested) = crate::files::resolve_workspace_output_file(&destination_path)?;
     crate::typeset_state::ensure_project_revision(&workspace)?;
+    let destination = available_import_destination(&requested);
     if destination.exists() {
         return Err(format!(
             "{} already exists in the project.",
@@ -1222,6 +1282,15 @@ fn resolve_compile_root(input_path: &Path, workspace: &Path) -> Result<PathBuf, 
         score(left).cmp(&score(right)).then_with(|| left.cmp(right))
     });
     if candidates.len() > 1 {
+        // The main document set in Typeset (shared through the workspace's
+        // settings file) is the explicit choice this would otherwise demand.
+        let chosen = tools::read_latex_project_settings(workspace)
+            .main_document
+            .and_then(|main| workspace.join(main).canonicalize().ok())
+            .filter(|main| candidates.contains(main));
+        if let Some(main) = chosen {
+            return Ok(main);
+        }
         let roots = candidates
             .iter()
             .filter_map(|path| path.strip_prefix(workspace).ok())
@@ -1229,7 +1298,7 @@ fn resolve_compile_root(input_path: &Path, workspace: &Path) -> Result<PathBuf, 
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "multiple LaTeX roots include {} ({roots}); add `% !TeX root = ../main.tex` to select one",
+            "multiple LaTeX roots include {} ({roots}); set one as the main document in Typeset (right-click it in the file tree) or add `% !TeX root = ../main.tex` to select one",
             input_path.display()
         ));
     }
@@ -1714,6 +1783,16 @@ SyncTeX result end
         let error = resolve_compile_root(&chapter, &workspace).expect_err("ambiguous root");
         assert!(error.contains("multiple LaTeX roots"));
         assert!(error.contains("% !TeX root"));
+        // The main document chosen in Typeset settles it.
+        tools::write_latex_project_settings(
+            &workspace,
+            &tools::LatexProjectSettings { main_document: Some("report.tex".to_string()), engine: None },
+        )
+        .expect("settings");
+        assert_eq!(
+            resolve_compile_root(&chapter, &workspace).expect("chosen root"),
+            workspace.join("report.tex").canonicalize().expect("canonical report"),
+        );
         std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 
@@ -1788,5 +1867,55 @@ SyncTeX result end
         request_latex_compile_cancellation(&registry, &run_id);
 
         assert!(cancellation.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn an_import_that_would_clash_takes_the_next_free_name() {
+        let root = temporary_tex_project("import-names");
+        std::fs::write(root.join("figure.png"), "1").expect("existing");
+        std::fs::write(root.join("figure-2.png"), "2").expect("existing");
+        assert_eq!(available_import_destination(&root.join("figure.png")), root.join("figure-3.png"));
+        assert_eq!(available_import_destination(&root.join("new.png")), root.join("new.png"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_archive_leaves_app_state_and_credentials_behind() {
+        // A document at the workspace root makes the whole workspace the
+        // project, so the archive walk starts beside `.somniq` and `.env`.
+        let root = temporary_tex_project("archive");
+        let write = |relative: &str, body: &str| {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+            std::fs::write(path, body).expect("write fixture");
+        };
+        write("main.tex", "\\documentclass{article}");
+        write("chapters/intro.tex", "Intro");
+        write("figures/plot.png", "png");
+        write(".latexmkrc", "$pdf_mode = 5;");
+        write("main.aux", "aux");
+        write(".env", "API_KEY=secret");
+        write(".env.local", "API_KEY=secret");
+        write("deploy.pem", "key");
+        write(".somniq/sessions/chat.json", "{}");
+        write(".somniq/papers/other/main.tex", "other paper");
+        write(".git/config", "[core]");
+        write(".vscode/settings.json", "{}");
+        write("node_modules/pkg/index.js", "");
+
+        let destination = root.with_extension("zip");
+        let written = write_project_archive(&root, &destination).expect("write archive");
+        let archive = zip::ZipArchive::new(std::fs::File::open(&destination).expect("open archive"))
+            .expect("read archive");
+        let mut names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        names.sort();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&destination);
+
+        assert_eq!(
+            names,
+            vec![".latexmkrc", "chapters/intro.tex", "figures/plot.png", "main.tex"]
+        );
+        assert_eq!(written, names.len());
     }
 }

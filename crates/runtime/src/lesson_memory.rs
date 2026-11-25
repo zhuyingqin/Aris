@@ -20,8 +20,9 @@
 //!
 //! Read path (zero model calls): when a tool fails,
 //! [`LessonStore::recall_for_failure`] searches lessons from every project
-//! with the error text and returns at most three that share at least two
-//! distinctive words with it; the caller appends them to the tool result, so
+//! with the error text and returns at most three of the same error kind that
+//! share at least [`LESSON_RECALL_MIN_SHARED`] distinctive words with it
+//! (paths and stock wording do not count); the caller appends them to the tool result, so
 //! the prompt prefix (and its cache) is untouched.
 
 use std::collections::BTreeSet;

@@ -60,8 +60,12 @@ const INDEXED_ARGUMENT_COMMANDS = new Set([
   "title", "author", "date", "frametitle", "caption", "includegraphics", "href", "label",
   "cite", "citep", "citet", "parencite", "textcite", "autocite",
   "citealp", "citealt", "citeauthor", "citeyear", "footcite",
+  "Citep", "Citet", "Citeauthor", "citeyearpar", "citenum", "Parencite", "Textcite", "Autocite",
+  "smartcite", "supercite", "nocite", "bibitem",
   "ref", "eqref", "autoref", "cref", "Cref", "pageref", "nameref", "vref",
+  "Vref", "cpageref", "labelcref", "autopageref",
   "textbf", "textit", "emph", "underline", "texttt", "textsc", "textsubscript", "textsuperscript", "footnote",
+  "textsf", "textrm", "textnormal", "textup", "textmd", "textsl", "textcolor",
   "input", "include", "subfile", "subfileinclude", "import", "subimport",
   "addcontentsline",
   "vspace", "hspace", "thispagestyle", "pagestyle", "column", "setlength",
@@ -71,7 +75,13 @@ const INDEXED_ARGUMENT_COMMANDS = new Set([
 ]);
 
 /** Commands whose second brace group carries meaning, not just spacing. */
-const TWO_ARGUMENT_COMMANDS = new Set(["href", "import", "subimport", "setlength", "setcounter", "addtocounter"]);
+/** Display-math environments, for `isMath`. */
+const MATH_ENVIRONMENT_NAMES = new Set([
+  "equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "math", "displaymath",
+  "alignat", "alignat*", "flalign", "flalign*", "eqnarray", "eqnarray*",
+]);
+
+const TWO_ARGUMENT_COMMANDS = new Set(["href", "import", "subimport", "setlength", "setcounter", "addtocounter", "textcolor"]);
 const THREE_ARGUMENT_COMMANDS = new Set(["addcontentsline"]);
 
 export const LATEX_RAW_ENVIRONMENTS = new Set([
@@ -98,6 +108,26 @@ const structureCache = new Map<string, LatexStructureIndex>();
 let cachedSourceCharacters = 0;
 
 const isLetter = (char: string | undefined) => Boolean(char && /[A-Za-z@]/.test(char));
+
+/** Commands TeX refuses in math mode; an inline `$` "spanning" one is unclosed. */
+const NON_MATH_STRUCTURE = /\\(?:begin|end|item|par|noindent|part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(?![A-Za-z@])|\\\[/;
+
+/**
+ * Whether the text between two `$` can be the inside of one inline formula.
+ * Hard-wrapped sources routinely continue a `$…$` on the next line (resetting
+ * at every newline paired the closing `$` with the *next* formula's opening
+ * one and rendered the prose between them as math). But an unclosed `$` must
+ * not swallow the paragraphs that follow it either, so a continuation stops
+ * at a paragraph break, after a couple of lines, or at structure that is
+ * illegal in math anyway.
+ */
+function inlineMathMayContinue(between: string): boolean {
+  const lineBreaks = between.split("\n").length - 1;
+  if (lineBreaks === 0) return true;
+  return lineBreaks <= 2
+    && !/\n[ \t]*\n/.test(between)
+    && !NON_MATH_STRUCTURE.test(between);
+}
 
 export function isEscapedLatex(source: string, at: number): boolean {
   let slashes = 0;
@@ -452,7 +482,7 @@ export class LatexStructureIndex {
         dollarOpen.set(delimiter.display, delimiter);
         continue;
       }
-      if (!delimiter.display && source.slice(opened.to, delimiter.from).includes("\n")) {
+      if (!delimiter.display && !inlineMathMayContinue(source.slice(opened.to, delimiter.from))) {
         dollarOpen.set(false, delimiter);
         continue;
       }
@@ -551,9 +581,7 @@ export class LatexStructureIndex {
 
   isMath(position: number): boolean {
     if (rangeContains(this.mathRanges, position)) return true;
-    return Boolean(this.environmentAt(position, new Set([
-      "equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "math", "displaymath",
-    ])));
+    return Boolean(this.environmentAt(position, MATH_ENVIRONMENT_NAMES));
   }
 
   environmentsNamed(names: ReadonlySet<string>): LatexEnvironment[] {
@@ -653,40 +681,66 @@ function cacheLatexStructure(source: string, structure: LatexStructureIndex): La
  * window; letters, spaces and line breaks in prose/arguments take this fast
  * path and never rescan the document text.
  */
-export function updateLatexStructure(
+/** Each index's longest control word, so the prose check can bound its search. */
+const controlWordSpans = new WeakMap<LatexStructureIndex, number>();
+
+function longestControlWord(structure: LatexStructureIndex): number {
+  let span = controlWordSpans.get(structure);
+  if (span === undefined) {
+    span = 0;
+    for (const command of structure.commands) span = Math.max(span, command.controlTo - command.from);
+    controlWordSpans.set(structure, span);
+  }
+  return span;
+}
+
+/** One replaced range of an edit, with the text it removed and inserted. */
+export type LatexEdit = { fromA: number; toA: number; removed: string; inserted: string };
+
+/**
+ * Whether edits leave the TeX structure as it was: letters, spaces and line
+ * breaks in prose or arguments. `toStructure` maps a position of the edited
+ * text back into `previous`'s own text, for an index that is behind by
+ * prose-only edits (which move positions but cannot add or remove syntax).
+ */
+export function latexEditsKeepStructure(
   previous: LatexStructureIndex,
-  source: string,
-  changes: LatexChangeSet,
-): LatexStructureIndex | null {
-  if (previous.source === source) return previous;
-  let safe = true;
-  changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-    if (!safe) return;
-    const removedText = previous.source.slice(fromA, toA);
-    const insertedText = inserted.toString();
-    if (/[\\%${}\[\]*]/.test(removedText) || /[\\%${}\[\]*]/.test(insertedText)) {
-      safe = false;
-      return;
-    }
+  edits: readonly LatexEdit[],
+  toStructure?: (position: number, assoc: -1 | 1) => number,
+): boolean {
+  for (const edit of edits) {
+    if (/[\\%${}\[\]*]/.test(edit.removed) || /[\\%${}\[\]*]/.test(edit.inserted)) return false;
+    const fromA = toStructure ? toStructure(edit.fromA, -1) : edit.fromA;
+    const toA = toStructure ? toStructure(edit.toA, 1) : edit.toA;
     // Editing a control-sequence name (including inserting a letter at its end)
-    // changes how TeX tokenises all following characters. Inline verbatim also
-    // has arbitrary literal delimiters, so edits anywhere in it need a rescan.
-    if (previous.commands.some((command) => (
-      fromA <= (command.name === "verb" ? command.to : command.controlTo) && toA >= command.from
-    ))) {
-      safe = false;
-      return;
+    // changes how TeX tokenises all following characters. Commands are in
+    // document order and a control word is short, so only the few starting
+    // just before the edit can reach it — a binary search, not a scan of
+    // every command per keystroke.
+    const commands = previous.commands;
+    const reach = longestControlWord(previous);
+    let low = 0;
+    let high = commands.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (commands[middle].from <= toA) low = middle + 1;
+      else high = middle;
     }
-    // Environment names determine nesting and raw/math/list behaviour.
-    if (previous.commands.some((command) => {
-      if (command.name !== "begin" && command.name !== "end") return false;
-      const name = command.requiredArguments[0];
-      return Boolean(name && fromA <= name.contentTo && toA >= name.contentFrom);
-    })) {
-      safe = false;
-      return;
+    for (let index = low - 1; index >= 0 && commands[index].from >= fromA - reach; index -= 1) {
+      const command = commands[index];
+      if (fromA <= command.controlTo && toA >= command.from) return false;
     }
-    const changesLineShape = removedText.includes("\n") || insertedText.includes("\n");
+    // Inline verbatim has arbitrary literal delimiters, so edits anywhere in
+    // it need a rescan; environment names determine nesting and raw/math/list
+    // behaviour. Both are short lists by name.
+    if (previous.commandsNamed("verb").some((command) => fromA <= command.to && toA >= command.from)) return false;
+    for (const name of ["begin", "end"]) {
+      if (previous.commandsNamed(name).some((command) => {
+        const argument = command.requiredArguments[0];
+        return Boolean(argument && fromA <= argument.contentTo && toA >= argument.contentFrom);
+      })) return false;
+    }
+    const changesLineShape = edit.removed.includes("\n") || edit.inserted.includes("\n");
     if (changesLineShape) {
       const touchesComment = previous.comments.some((comment) => fromA <= comment.to && toA >= comment.from);
       const touchesInlineMath = previous.mathRanges.some((range) => (
@@ -695,10 +749,23 @@ export function updateLatexStructure(
         && fromA <= range.to
         && toA >= range.from
       ));
-      if (touchesComment || touchesInlineMath) safe = false;
+      if (touchesComment || touchesInlineMath) return false;
     }
+  }
+  return true;
+}
+
+export function updateLatexStructure(
+  previous: LatexStructureIndex,
+  source: string,
+  changes: LatexChangeSet,
+): LatexStructureIndex | null {
+  if (previous.source === source) return previous;
+  const edits: LatexEdit[] = [];
+  changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    edits.push({ fromA, toA, removed: previous.source.slice(fromA, toA), inserted: inserted.toString() });
   });
-  if (!safe) return null;
+  if (!latexEditsKeepStructure(previous, edits)) return null;
 
   const mapRange = <T extends LatexRange>(range: T): T => ({
     ...range,

@@ -1211,6 +1211,8 @@ pub fn run() {
             typeset_state::typeset_change_proposal_load,
             typeset_state::typeset_change_proposal_clear,
             typeset_state::typeset_comments_list,
+            typeset_state::typeset_tracked_changes_load,
+            typeset_state::typeset_tracked_changes_save,
             typeset_state::typeset_comment_upsert,
             typeset_state::typeset_comment_delete,
             typeset_state::typeset_history_create,
@@ -1229,6 +1231,9 @@ pub fn run() {
             typeset_state::typeset_changeset_resolve,
             typeset_state::typeset_project_search,
             typeset_state::typeset_project_replace,
+            typeset_state::typeset_project_settings_read,
+            typeset_state::typeset_project_settings_write,
+            typeset_state::typeset_revision_blob_text,
         ])
         .build(app_context())
         .expect("error while building SomniQ Studio")

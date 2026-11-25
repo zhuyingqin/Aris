@@ -1,3 +1,5 @@
+import { stripLatexComments } from "./latex/mathMacros";
+
 /**
  * A tolerant BibTeX reader, used to offer real citation keys in `\cite{`.
  *
@@ -110,9 +112,12 @@ export function parseBibEntries(text: string): BibEntry[] {
  * project the way it resolves `\input`. */
 export function bibliographyTargets(source: string): string[] {
   const targets: string[] = [];
-  const re = /\\(?:bibliography|addbibresource|addglobalbib)\s*\{([^{}]+)\}/g;
+  // `\addbibresource[label=…]{refs.bib}` carries options before its target,
+  // and a commented-out declaration names nothing TeX will read.
+  const re = /\\(?:bibliography|addbibresource|addglobalbib)\s*(?:\[[^\]]*\]\s*)?\{([^{}]+)\}/g;
+  const text = stripLatexComments(source);
   let match: RegExpExecArray | null;
-  while ((match = re.exec(source))) {
+  while ((match = re.exec(text))) {
     for (const piece of match[1].split(",")) {
       const target = piece.trim();
       if (!target || targets.includes(target)) continue;
@@ -120,6 +125,29 @@ export function bibliographyTargets(source: string): string[] {
     }
   }
   return targets;
+}
+
+/** `text` without the entries whose keys are in `keys`, and which keys went. */
+export function withoutBibEntries(text: string, keys: ReadonlySet<string>): { text: string; removed: string[] } {
+  if (keys.size === 0) return { text, removed: [] };
+  const removed: string[] = [];
+  let output = "";
+  let cursor = 0;
+  const re = /@([A-Za-z]+)\s*\{\s*([^,\s{}]+)\s*,/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text))) {
+    const entryType = match[1].toLowerCase();
+    if (entryType === "string" || entryType === "preamble" || entryType === "comment") continue;
+    const body = balancedBody(text, text.indexOf("{", match.index));
+    if (!body) continue;
+    if (keys.has(match[2])) {
+      output += text.slice(cursor, match.index);
+      cursor = body.end + 1;
+      removed.push(match[2]);
+    }
+    if (body.end > re.lastIndex) re.lastIndex = body.end;
+  }
+  return { text: output + text.slice(cursor), removed };
 }
 
 /** The one-line hint shown next to a key in the completion popup. */

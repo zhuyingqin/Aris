@@ -1186,6 +1186,63 @@ fn search_sessions_internal(
     })
 }
 
+/// What recalled Session windows share with the question, for a caller that
+/// decides whether to deliver them at all. `score_micros` is rank-based and
+/// says nothing about absolute relevance, so this reports the question's
+/// tokens of the bigram projection, how many indexed messages contain each,
+/// and which of them each hit's anchor messages contain.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionRecallEvidence {
+    /// Indexed messages, the denominator of every document frequency.
+    pub messages: i64,
+    /// Query tokens in first-seen order, each with its document frequency.
+    pub query_terms: Vec<(String, i64)>,
+    /// Per hit, the query tokens its anchor messages contain.
+    pub anchor_terms: Vec<Vec<String>>,
+}
+
+pub fn session_recall_evidence(
+    sessions_dir: &Path,
+    query: &str,
+    hits: &[SessionSearchHit],
+) -> Result<SessionRecallEvidence, String> {
+    let connection = open_index(sessions_dir)?;
+    let messages = connection
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT COUNT(*) FROM messages_bigram_fts WHERE messages_bigram_fts MATCH ?1")
+        .map_err(|error| error.to_string())?;
+    let mut query_terms = Vec::new();
+    for term in bigram_query_terms(query) {
+        let frequency = statement
+            .query_row([fts_or_expression(std::slice::from_ref(&term))], |row| row.get(0))
+            .unwrap_or_default();
+        query_terms.push((term, frequency));
+    }
+    let anchor_terms = hits
+        .iter()
+        .map(|hit| {
+            let mut tokens = BTreeSet::new();
+            for message in hit.messages.iter().filter(|message| message.anchor) {
+                for_each_bigram_token(&message.content, |token| {
+                    tokens.insert(token);
+                });
+            }
+            query_terms
+                .iter()
+                .filter(|(term, _)| tokens.contains(term))
+                .map(|(term, _)| term.clone())
+                .collect()
+        })
+        .collect();
+    Ok(SessionRecallEvidence {
+        messages,
+        query_terms,
+        anchor_terms,
+    })
+}
+
 #[must_use]
 pub fn sessions_dir_from_env() -> PathBuf {
     crate::project_sessions_dir_from_env()

@@ -36,6 +36,21 @@ describe("latexCompletionSource", () => {
     expect(labels(completeAt("\\|"))).toContain("\\begin");
   });
 
+  it("offers the document's own macros and environments, and closes the innermost one first", () => {
+    const preamble = "\\newcommand{\\RR}{\\mathbb{R}}\n\\newtheorem{lemma}{Lemma}\n";
+    expect(labels(completeAt(`${preamble}\\R|`))).toContain("\\RR");
+    expect(labels(completeAt(`${preamble}\\begin{lem|`))).toContain("lemma");
+    const closing = completeAt(`${preamble}\\begin{lemma}\n\\begin{itemize}\n\\item x\n\\end{|`);
+    const best = [...(closing?.options ?? [])].sort((left, right) => (right.boost ?? 0) - (left.boost ?? 0))[0];
+    expect(best?.label).toBe("itemize");
+  });
+
+  it("does not offer labels that are commented out, but does offer option labels", () => {
+    const result = completeAt("% \\label{old:gone}\n\\begin{lstlisting}[label=lst:loop]\n\\end{lstlisting}\n\\ref{|}");
+    expect(labels(result)).toContain("lst:loop");
+    expect(labels(result)).not.toContain("old:gone");
+  });
+
   it("does not suggest anything inside a comment", () => {
     expect(completeAt("% talk about \\sec|")).toBeNull();
     // An escaped percent is ordinary text, so completion still runs after it.

@@ -78,6 +78,8 @@ export type PdfLinkRun = {
   width: number;
   height: number;
   destination: unknown;
+  /** An external `\href`/`\url` target (http, https, mailto); null for internal links. */
+  url: string | null;
   borderColor: string | null;
   borderWidth: number;
   borderStyle: "solid" | "dashed" | "double";
@@ -87,6 +89,7 @@ export type PdfAnnotationLike = {
   subtype?: unknown;
   rect?: unknown;
   dest?: unknown;
+  url?: unknown;
   color?: unknown;
   borderStyle?: {
     width?: unknown;
@@ -106,7 +109,9 @@ export function pdfLinkRunsFromAnnotations(annotations: unknown, viewport: PdfAn
   if (!Array.isArray(annotations) || typeof viewport.convertToViewportRectangle !== "function") return [];
   return annotations.flatMap((annotation, index) => {
     const link = annotation as PdfAnnotationLike;
-    if (link.subtype !== "Link" || link.dest == null || !isPdfRectangle(link.rect)) return [];
+    // Internal jumps carry `dest`; hyperref's `\href`/`\url` carry a URI.
+    const url = typeof link.url === "string" && /^(?:https?:|mailto:)/i.test(link.url) ? link.url : null;
+    if (link.subtype !== "Link" || (link.dest == null && !url) || !isPdfRectangle(link.rect)) return [];
     let rectangle: number[];
     try {
       // PageViewport methods read `this.transform`; calling a detached method
@@ -148,7 +153,8 @@ export function pdfLinkRunsFromAnnotations(annotations: unknown, viewport: PdfAn
       top: Math.min(y1, y2),
       width: Math.abs(x2 - x1),
       height: Math.abs(y2 - y1),
-      destination: link.dest,
+      destination: link.dest ?? null,
+      url,
       borderColor,
       borderWidth: rawBorderWidth * viewportScale,
       borderStyle,

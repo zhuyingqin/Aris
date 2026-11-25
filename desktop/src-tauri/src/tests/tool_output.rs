@@ -49,6 +49,80 @@ fn latex_timeout_keeps_a_concrete_source_error_actionable() {
 }
 
 #[test]
+fn latex_font_scan_does_not_split_cjk_log_text() {
+    // The marker is followed by enough CJK text that byte 240 falls inside a
+    // character; slicing there used to panic the whole turn.
+    let stdout = format!("! Font \\TU/SimSun(0)/m/n/10=a{} not loadable", "中".repeat(100));
+    let output = json!({ "success": false, "stdout": stdout }).to_string();
+    assert_ne!(latex_failure_class(&output), LatexFailureClass::Environment);
+    let near = format!("! Font \\TU/SimSun(0)/m/n/10=a{} not loadable", "中".repeat(20));
+    let output = json!({ "success": false, "stdout": near }).to_string();
+    assert_eq!(latex_failure_class(&output), LatexFailureClass::Environment);
+}
+
+#[test]
+fn ctex_font_substitution_warning_keeps_a_source_error_actionable() {
+    let output = json!({
+        "success": false,
+        "stdout": "LaTeX Font Warning: Font shape `TU/SimSun(1)/b/n' undefined\n(Font)              using `TU/SimSun(1)/m/n' instead on input line 12.\n./main.tex:30: Undefined control sequence.",
+        "diagnostics": [{ "severity": "error", "code": "file_line_error",
+            "message": "Undefined control sequence.", "filePath": "./main.tex", "line": 30 }]
+    }).to_string();
+    assert_eq!(latex_failure_class(&output), LatexFailureClass::Source);
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("source hint");
+    assert!(hint.contains("smallest source edit"), "{hint}");
+}
+
+#[test]
+fn latex_missing_package_is_recognised_in_file_line_error_format() {
+    let output = json!({
+        "success": false,
+        "stdout": "./main.tex:3: LaTeX Error: File `ctexhook.sty' not found.",
+        "diagnostics": [{ "severity": "error", "code": "file_line_error",
+            "message": "LaTeX Error: File `ctexhook.sty' not found.", "filePath": "./main.tex", "line": 3 }]
+    }).to_string();
+    assert_eq!(latex_failure_class(&output), LatexFailureClass::Environment);
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("missing resource hint");
+    assert!(hint.contains("ctexhook.sty"), "{hint}");
+    assert!(!hint.contains("smallest source edit"), "{hint}");
+}
+
+#[test]
+fn latex_missing_input_file_before_a_missing_package_is_still_environment() {
+    let output = json!({
+        "success": false,
+        "stdout": "./main.tex:4: LaTeX Error: File `chapters/intro.tex' not found.\n./main.tex:9: LaTeX Error: File `algorithm2e.sty' not found.",
+    }).to_string();
+    let hint = tool_recovery_hint("LaTeXCompile", &output).expect("missing resource hint");
+    assert!(hint.contains("algorithm2e.sty"), "{hint}");
+}
+
+#[test]
+fn latex_context_keeps_errors_when_bounding_many_diagnostics() {
+    let mut diagnostics = (0..30)
+        .map(|index| json!({ "severity": "warning", "code": "latex_warning", "message": format!("warning {index}") }))
+        .collect::<Vec<_>>();
+    diagnostics.push(json!({ "severity": "error", "code": "undefined_control_sequence",
+        "message": "Undefined control sequence.", "filePath": "./main.tex", "line": 9 }));
+    let raw = json!({ "success": false, "stdout": "", "stderr": "", "diagnostics": diagnostics }).to_string();
+    let compacted = compact_tool_output_for_context("LaTeXCompile", raw, None);
+    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("still valid JSON");
+    let kept = parsed["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(kept.len(), 20);
+    assert_eq!(kept[0]["severity"], "error");
+    assert_eq!(parsed["diagnosticsOmittedForContext"], 11);
+}
+
+#[test]
+fn fontspec_missing_font_is_recognised_inside_the_json_envelope() {
+    let output = json!({
+        "success": false,
+        "stdout": "./main.tex:5: Package fontspec Error: The font \"Source Han Serif SC\" cannot be found.",
+    }).to_string();
+    assert_eq!(latex_failure_class(&output), LatexFailureClass::Environment);
+}
+
+#[test]
 fn oracle_busy_profile_errors_get_specific_recovery_instructions() {
     for tool in ["ChatGptWebConsult", "ChatGptWebImage"] {
         for error in [

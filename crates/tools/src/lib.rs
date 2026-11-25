@@ -5448,13 +5448,99 @@ fn latex_escape_template_value(value: &Value) -> Result<String, String> {
         .collect())
 }
 
+/// The Typeset choices a build of this workspace should honour whoever starts
+/// it: the main document and the engine the user picked in Desktop. They used
+/// to live only in the WebView's local storage, so the agent's LaTeXCompile
+/// built a chapter on its own, or a Chinese paper with pdflatex, and then
+/// "fixed" sources that were never wrong.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatexProjectSettings {
+    /// Workspace-relative path of the root document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_document: Option<String>,
+    /// `pdflatex`, `xelatex` or `lualatex`; absent means detect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+}
+
+pub fn latex_project_settings_path(workspace: &Path) -> PathBuf {
+    layout::project_data_dir_at(workspace)
+        .join("typeset")
+        .join("settings.json")
+}
+
+/// Missing or unreadable settings are simply "no choices made".
+pub fn read_latex_project_settings(workspace: &Path) -> LatexProjectSettings {
+    std::fs::read(latex_project_settings_path(workspace))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LatexProjectSettings>(&bytes).ok())
+        .map(|mut settings| {
+            settings.main_document = settings
+                .main_document
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty());
+            settings.engine = settings
+                .engine
+                .filter(|engine| matches!(engine.as_str(), "pdflatex" | "xelatex" | "lualatex"));
+            settings
+        })
+        .unwrap_or_default()
+}
+
+pub fn write_latex_project_settings(workspace: &Path, settings: &LatexProjectSettings) -> Result<(), String> {
+    let path = latex_project_settings_path(workspace);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let body = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    runtime::write_file_atomically(&path, &body).map_err(|error| error.to_string())
+}
+
+/// Whether a `.tex` file is a document of its own rather than a chapter.
+fn latex_file_declares_documentclass(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| {
+        runtime::decode_process_text(&bytes)
+            .lines()
+            .map(latex_line_without_comment)
+            .any(|line| line.contains("\\documentclass") || line.contains("\\documentstyle"))
+    })
+}
+
+/// What a compile of `input_path` should build. A chapter (no
+/// `\documentclass`) cannot be built alone, so it builds the main document
+/// the user set in Typeset, with a note saying so.
+fn latex_compile_target(
+    input_path: &Path,
+    workspace: &Path,
+    settings: &LatexProjectSettings,
+) -> (PathBuf, Option<String>) {
+    if latex_file_declares_documentclass(input_path) {
+        return (input_path.to_path_buf(), None);
+    }
+    let Some(main) = settings
+        .main_document
+        .as_deref()
+        .and_then(|main| resolve_existing_workspace_path(main, workspace).ok())
+        .filter(|main| main != input_path && latex_file_declares_documentclass(main))
+    else {
+        return (input_path.to_path_buf(), None);
+    };
+    let note = format!(
+        "{} has no \\documentclass; compiled the project's main document {} instead (Typeset main document setting).",
+        workspace_relative_display(input_path, workspace),
+        workspace_relative_display(&main, workspace),
+    );
+    (main, Some(note))
+}
+
 fn execute_latex_compile(
     input: LatexCompileInput,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<LatexCompileOutput, String> {
     let workspace = canonical_workspace_root()?;
-    let input_path = resolve_existing_workspace_path(&input.input_path, &workspace)?;
+    let mut input_path = resolve_existing_workspace_path(&input.input_path, &workspace)?;
     if !input_path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -5462,6 +5548,9 @@ fn execute_latex_compile(
     {
         return Err("LaTeXCompile inputPath must point to a .tex file".to_string());
     }
+    let settings = read_latex_project_settings(&workspace);
+    let (target, settings_note) = latex_compile_target(&input_path, &workspace, &settings);
+    input_path = target;
     let output_path = match input.output_path.as_deref() {
         Some(path) => resolve_output_workspace_path(path, &workspace)?,
         None => input_path.with_extension("pdf"),
@@ -5477,8 +5566,10 @@ fn execute_latex_compile(
         LatexCompileRequest {
             input_path: input_path.clone(),
             output_path: output_path.clone(),
+            // The engine chosen in Typeset applies unless the call names a
+            // compiler itself.
+            engine: input.compiler.is_none().then(|| settings.engine.clone()).flatten(),
             compiler: input.compiler,
-            engine: None,
             timeout_ms: input.timeout_ms,
             clean_cache: false,
             continue_on_error: false,
@@ -5487,9 +5578,105 @@ fn execute_latex_compile(
         should_cancel,
         on_progress,
     )?;
+    if let Some(note) = settings_note {
+        output.stdout = format!("{note}\n{}", output.stdout);
+    }
     output.input_path = workspace_relative_display(&input_path, &workspace);
     output.output_path = workspace_relative_display(&output_path, &workspace);
     Ok(output)
+}
+
+/// Wait for another build writing the same folder to finish — answering the
+/// Stop button and the time budget meanwhile. A Desktop compile queued behind
+/// the agent's used to sit in "Compiling…" until that build ended, whatever
+/// the user pressed. `Err(true)` means the budget ran out, `Err(false)` that
+/// the caller cancelled.
+fn wait_for_latex_output_directory<'lock>(
+    lock: &'lock Mutex<()>,
+    budget: &LatexCompileBudget,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<std::sync::MutexGuard<'lock, ()>, bool> {
+    let mut last_report: Option<Instant> = None;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if should_cancel() {
+            return Err(false);
+        }
+        if budget.remaining().is_zero() {
+            return Err(true);
+        }
+        if last_report.is_none_or(|reported| reported.elapsed() >= Duration::from_secs(1)) {
+            last_report = Some(Instant::now());
+            on_progress(ToolProgress {
+                elapsed_ms: budget.started.elapsed().as_millis() as u64,
+                timeout_ms: Some(budget.timeout.as_millis() as u64),
+                pid: None,
+                stdout_tail: None,
+                stderr_tail: Some(
+                    "Waiting for another LaTeX build of this folder to finish…".to_string(),
+                ),
+                near_timeout: false,
+                message: "Waiting for another build".to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The result of a compile that was cancelled or ran out of time before it
+/// could start, so callers handle it like any other interrupted build.
+fn latex_compile_never_started(
+    input_path: &Path,
+    output_path: &Path,
+    expected_pdf: &Path,
+    timed_out: bool,
+    timeout_ms: u64,
+    started: Instant,
+) -> LatexCompileOutput {
+    let (stderr, interpretation) = if timed_out {
+        (
+            format!("LaTeXCompile exceeded timeout of {timeout_ms} ms while waiting for another build of this folder"),
+            "timeout",
+        )
+    } else {
+        (
+            "LaTeXCompile interrupted by user while waiting for another build of this folder".to_string(),
+            "interrupted",
+        )
+    };
+    let diagnostics = extract_latex_diagnostics("", &stderr, false, Some(interpretation));
+    let repair_guidance = Some(latex_repair_guidance(&diagnostics));
+    LatexCompileOutput {
+        success: false,
+        input_path: input_path.display().to_string(),
+        output_path: output_path.display().to_string(),
+        engine: String::new(),
+        stdout: String::new(),
+        stderr,
+        exit_code: None,
+        interrupted: true,
+        timed_out,
+        duration_ms: started.elapsed().as_millis(),
+        return_code_interpretation: Some(interpretation.to_string()),
+        diagnostics,
+        repair_guidance,
+        pdf_state: if expected_pdf.is_file() || output_path.is_file() {
+            LatexPdfState::Stale
+        } else {
+            LatexPdfState::Missing
+        },
+        root_source_hash: String::new(),
+        pdf_hash: latex_file_hash(output_path),
+        compiled_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    }
 }
 
 fn latex_output_directory_lock(output_dir: &Path) -> Arc<Mutex<()>> {
@@ -5524,20 +5711,7 @@ pub fn compile_latex_document(
     let source_dir = input_path
         .parent()
         .ok_or_else(|| "inputPath must include a file name".to_string())?;
-    // Capture the complete discoverable project input set before launching TeX.
-    // The manifest is both the provenance hash shown to users and the guard
-    // against accepting a PDF assembled while an external editor was writing.
-    let input_snapshot = latex_input_snapshot(&input_path, workspace);
-    let compile_input_hash = latex_input_manifest_hash(&input_snapshot, workspace);
     std::fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
-    // TeX writes auxiliary files and its PDF directly into `output_dir`. Keep
-    // the whole artifact lifecycle (including the final copy/fingerprint) to a
-    // single writer so two foreground compiles cannot consume each other's PDF.
-    let output_directory_lock = latex_output_directory_lock(output_dir);
-    let _output_directory_guard = output_directory_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
     let expected_pdf = output_dir
         .join(
             input_path
@@ -5545,13 +5719,45 @@ pub fn compile_latex_document(
                 .ok_or_else(|| "inputPath must include a file name".to_string())?,
         )
         .with_extension("pdf");
-    let expected_pdf_before = latex_output_fingerprint(&expected_pdf);
+    // The budget starts now, not once the folder is free: waiting behind
+    // another build is part of how long this compile takes.
     let timeout_ms = latex_compile_timeout_ms(request.timeout_ms);
     let started = Instant::now();
     let budget = LatexCompileBudget {
         started,
         timeout: Duration::from_millis(timeout_ms),
     };
+    // TeX writes auxiliary files and its PDF directly into `output_dir`. Keep
+    // the whole artifact lifecycle (including the final copy/fingerprint) to a
+    // single writer so two foreground compiles cannot consume each other's PDF.
+    let output_directory_lock = latex_output_directory_lock(output_dir);
+    let _output_directory_guard = match wait_for_latex_output_directory(
+        &output_directory_lock,
+        &budget,
+        should_cancel,
+        on_progress,
+    ) {
+        Ok(guard) => guard,
+        Err(timed_out) => {
+            return Ok(latex_compile_never_started(
+                &input_path,
+                &output_path,
+                &expected_pdf,
+                timed_out,
+                timeout_ms,
+                started,
+            ));
+        }
+    };
+    // Capture the complete discoverable project input set before launching TeX
+    // (and after any wait, so edits made meanwhile are not "changed during the
+    // build"). The manifest is both the provenance hash shown to users and the
+    // guard against accepting a PDF assembled while an editor was writing.
+    let input_snapshot = latex_input_snapshot(&input_path, workspace);
+    let compile_input_hash = latex_input_manifest_hash(&input_snapshot, workspace);
+    let expected_pdf_before = latex_output_fingerprint(&expected_pdf);
+    let final_log_path = expected_pdf.with_extension("log");
+    let compile_started_at = SystemTime::now();
     let cache_note = if request.clean_cache {
         let removed = remove_known_latex_cache_files(&input_path, output_dir)?;
         Some(format!(
@@ -5623,9 +5829,12 @@ pub fn compile_latex_document(
         latex_output_fingerprint(&expected_pdf).as_ref(),
         output_path.is_file(),
     );
-    let diagnostics = extract_latex_diagnostics(
+    let final_log = latex_log_written_since(&final_log_path, compile_started_at);
+    let diagnostics = extract_latex_diagnostics_from(
         &stdout,
         &stderr,
+        final_log.as_deref(),
+        Some(source_dir),
         success,
         return_code_interpretation.as_deref(),
     );
@@ -5671,7 +5880,7 @@ fn latex_output_fingerprint(path: &Path) -> Option<LatexOutputFingerprint> {
 
 fn latex_pdf_state(
     success: bool,
-    continue_on_error: bool,
+    _continue_on_error: bool,
     interrupted: bool,
     timed_out: bool,
     before: Option<&LatexOutputFingerprint>,
@@ -5680,7 +5889,12 @@ fn latex_pdf_state(
 ) -> LatexPdfState {
     if success {
         LatexPdfState::Fresh
-    } else if continue_on_error && !interrupted && !timed_out && before != after && output_exists {
+    } else if !interrupted && !timed_out && before != after && output_exists {
+        // This run wrote the PDF even though something reported failure — with
+        // halt-on-error that is a later step (BibTeX, biber, makeindex), since
+        // a halted TeX pass writes no PDF. It is this build's output with
+        // problems, not a leftover: calling it stale hid it behind "showing
+        // the last verified PDF" and turned SyncTeX off.
         LatexPdfState::Partial
     } else if output_exists {
         LatexPdfState::Stale
@@ -5716,6 +5930,19 @@ fn latex_pdf_state_after_compile(
             output_exists,
         )
     }
+}
+
+/// The `.log` this compile's last engine pass wrote; `None` when the engine
+/// never got that far (a missing binary, a crash) and stdout is all there is.
+fn latex_log_written_since(path: &Path, since: SystemTime) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    // Coarse filesystem clocks can stamp a file written right after `since`
+    // a little before it.
+    if modified + Duration::from_secs(2) < since {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(runtime::decode_process_text(&bytes))
 }
 
 fn latex_file_hash(path: &Path) -> Option<String> {
@@ -6037,7 +6264,35 @@ fn run_latex_compile_process(
             should_cancel,
             on_progress,
         ) {
-            Ok(output) => return Ok(((*compiler).to_string(), output)),
+            Ok(output) => {
+                // Detection guessed pdflatex but a package refused it (fontspec,
+                // xeCJK, unicode-math): rebuild once with XeLaTeX, as the
+                // latexmk path already does.
+                if *compiler == "pdflatex"
+                    && !output.interrupted
+                    && !output.timed_out
+                    && latex_output_needs_unicode_engine(&output)
+                {
+                    match run_latex_engine(
+                        "xelatex",
+                        input_path,
+                        source_dir,
+                        output_dir,
+                        budget,
+                        workspace,
+                        continue_on_error,
+                        should_cancel,
+                        on_progress,
+                    ) {
+                        Ok(retried) => return Ok(("xelatex".to_string(), retried)),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!("LaTeX command `xelatex` failed to start: {error}"));
+                        }
+                    }
+                }
+                return Ok(((*compiler).to_string(), output));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 not_found.push((*compiler).to_string());
             }
@@ -6170,41 +6425,213 @@ fn run_latex_engine(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
-    let first = run_single_latex_engine(
-        engine,
-        input_path,
-        source_dir,
-        output_dir,
-        budget,
-        workspace,
-        continue_on_error,
-        should_cancel,
-        on_progress,
-    )?;
+    // Without latexmk nothing else drives the auxiliary tools, so this does
+    // the minimum latexmk would: one pass, the bibliography and index, then
+    // enough passes to settle references. (It used to run the engine twice
+    // and stop, so a biblatex/BibTeX document "compiled" with every citation
+    // printed as `[?]` and an empty reference list.)
+    let run = |on_progress: &mut dyn FnMut(ToolProgress)| -> std::io::Result<runtime::ManagedCommandOutput> {
+        run_single_latex_engine(
+            engine,
+            input_path,
+            source_dir,
+            output_dir,
+            budget,
+            workspace,
+            continue_on_error,
+            should_cancel,
+            on_progress,
+        )
+    };
+    let first = run(on_progress)?;
     if first.interrupted || first.timed_out || !first.status.success() {
         return Ok(first);
     }
-    let second = run_single_latex_engine(
-        engine,
+    let mut stderr = first.stderr;
+    let mut auxiliary_stdout = Vec::new();
+    let mut output_pipe_held = first.output_pipe_held;
+    let mut output_truncated = first.output_truncated;
+    let mut auxiliary_ran = false;
+    for tool in latex_auxiliary_tools(input_path, source_dir, output_dir) {
+        match run_latex_auxiliary_tool(&tool, input_path, workspace, budget, should_cancel, on_progress) {
+            Ok(output) => {
+                auxiliary_ran = true;
+                output_pipe_held |= output.output_pipe_held;
+                output_truncated |= output.output_truncated;
+                auxiliary_stdout = join_process_bytes(auxiliary_stdout, output.stdout);
+                stderr = join_process_bytes(stderr, output.stderr);
+                if output.interrupted || output.timed_out {
+                    return Ok(runtime::ManagedCommandOutput {
+                        stdout: auxiliary_stdout,
+                        stderr,
+                        output_pipe_held,
+                        output_truncated,
+                        ..output
+                    });
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                stderr = join_process_bytes(
+                    stderr,
+                    format!(
+                        "`{}` was not found on PATH, so the {} was not built.\n",
+                        tool.program, tool.purpose
+                    )
+                    .into_bytes(),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut remaining = if auxiliary_ran { 2 } else { 1 };
+    let mut rerun_available = true;
+    let last = loop {
+        let output = run(on_progress)?;
+        remaining -= 1;
+        if output.interrupted || output.timed_out || !output.status.success() {
+            break output;
+        }
+        if remaining == 0 {
+            if rerun_available && latex_output_requests_rerun(&output.stdout) {
+                rerun_available = false;
+                remaining = 1;
+            } else {
+                break output;
+            }
+        }
+        output_pipe_held |= output.output_pipe_held;
+        output_truncated |= output.output_truncated;
+        stderr = join_process_bytes(stderr, output.stderr);
+    };
+    // Only the last pass's log is the document's state: earlier passes report
+    // "Citation undefined" and "Rerun" notices that the later ones resolved.
+    Ok(runtime::ManagedCommandOutput {
+        stdout: join_process_bytes(auxiliary_stdout, last.stdout),
+        stderr: join_process_bytes(stderr, last.stderr),
+        status: last.status,
+        interrupted: last.interrupted,
+        timed_out: last.timed_out,
+        output_pipe_held: output_pipe_held || last.output_pipe_held,
+        output_truncated: output_truncated || last.output_truncated,
+        adopted_background_pid: last.adopted_background_pid,
+    })
+}
+
+/// A bibliography or index processor the direct-engine path has to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LatexAuxiliaryTool {
+    program: &'static str,
+    purpose: &'static str,
+    args: Vec<std::ffi::OsString>,
+    current_dir: PathBuf,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+}
+
+/// What the first engine pass asked for. biblatex's biber backend writes a
+/// `.bcf` and `\abx@aux@…` records into the `.aux` (checked so a stale `.bcf`
+/// from an earlier biblatex build does not win); classic BibTeX — including
+/// biblatex's `backend=bibtex` — leaves `\bibdata{…}` in the `.aux`.
+fn latex_auxiliary_tools(input_path: &Path, source_dir: &Path, output_dir: &Path) -> Vec<LatexAuxiliaryTool> {
+    let Some(stem) = input_path.file_stem() else {
+        return Vec::new();
+    };
+    let named = |extension: &str| {
+        let mut name = stem.to_os_string();
+        name.push(".");
+        name.push(extension);
+        output_dir.join(name)
+    };
+    let source = tex_tool_path(source_dir);
+    let output = tex_tool_path(output_dir);
+    let aux = fs::read(named("aux"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let mut tools = Vec::new();
+    if aux.contains("\\bibdata{") {
+        // BibTeX writes beside the `.aux`, so it runs in the output folder and
+        // finds the author's `.bib`/`.bst` through the kpathsea search path.
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let search_path = |variable: &'static str| {
+            let mut value = source.clone().into_os_string();
+            value.push(separator);
+            if let Some(existing) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+                value.push(existing);
+            }
+            (variable, value)
+        };
+        tools.push(LatexAuxiliaryTool {
+            program: "bibtex",
+            purpose: "bibliography",
+            args: vec![stem.to_os_string()],
+            current_dir: output.clone(),
+            env: vec![search_path("BIBINPUTS"), search_path("BSTINPUTS")],
+        });
+    } else if aux.contains("\\abx@aux@") && named("bcf").is_file() {
+        // biber resolves `\addbibresource` paths against its working folder,
+        // which is where the author wrote them from.
+        tools.push(LatexAuxiliaryTool {
+            program: "biber",
+            purpose: "bibliography",
+            args: vec![
+                "--input-directory".into(),
+                output.clone().into_os_string(),
+                "--output-directory".into(),
+                output.clone().into_os_string(),
+                stem.to_os_string(),
+            ],
+            current_dir: source,
+            env: Vec::new(),
+        });
+    }
+    if named("idx").is_file() {
+        let mut index = stem.to_os_string();
+        index.push(".idx");
+        tools.push(LatexAuxiliaryTool {
+            program: "makeindex",
+            purpose: "index",
+            args: vec![index],
+            current_dir: output,
+            env: Vec::new(),
+        });
+    }
+    tools
+}
+
+fn run_latex_auxiliary_tool(
+    tool: &LatexAuxiliaryTool,
+    input_path: &Path,
+    workspace: &Path,
+    budget: &LatexCompileBudget,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let mut process = runtime::hidden_command(tool.program);
+    process
+        .args(&tool.args)
+        .current_dir(&tool.current_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (variable, value) in &tool.env {
+        process.env(variable, value);
+    }
+    run_latex_process(
+        &mut process,
+        tool.program,
         input_path,
-        source_dir,
-        output_dir,
-        budget,
         workspace,
-        continue_on_error,
+        budget,
         should_cancel,
         on_progress,
-    )?;
-    Ok(runtime::ManagedCommandOutput {
-        stdout: join_process_bytes(first.stdout, second.stdout),
-        stderr: join_process_bytes(first.stderr, second.stderr),
-        status: second.status,
-        interrupted: second.interrupted,
-        timed_out: second.timed_out,
-        output_pipe_held: first.output_pipe_held || second.output_pipe_held,
-        output_truncated: first.output_truncated || second.output_truncated,
-        adopted_background_pid: second.adopted_background_pid,
-    })
+    )
+}
+
+/// The notices LaTeX and its packages print when another pass would change
+/// the output (labels, outlines, biblatex's own rerun request).
+fn latex_output_requests_rerun(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    ["Rerun to get", "Please rerun LaTeX", "Rerun LaTeX"]
+        .iter()
+        .any(|notice| text.contains(notice))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6255,6 +6682,14 @@ fn run_latex_process(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
+    // TeX wraps its terminal and .log output at 79 columns by default, which
+    // splits long (CJK) paths and citation keys mid-token: `file:line:` and
+    // "on input line N" then stop parsing, or a wrapped "2." is read as a line
+    // number. kpathsea takes these from the environment; latexmk passes them on.
+    process
+        .env("max_print_line", "10000")
+        .env("error_line", "254")
+        .env("half_error_line", "238");
     runtime::run_managed_command_with_cancel_and_progress(
         process,
         format!(
@@ -6328,19 +6763,86 @@ impl LatexEnginePreference {
 }
 
 fn preferred_latex_engine(input_path: &Path) -> LatexEnginePreference {
-    let Ok(source) = std::fs::read_to_string(input_path) else {
+    // Bytes, not `read_to_string`: a GBK-encoded root failed to read, which
+    // silently meant pdflatex — even with `% !TeX program = xelatex` on top.
+    let Ok(bytes) = std::fs::read(input_path) else {
         return LatexEnginePreference::PdfLatex;
     };
+    let source = runtime::decode_process_text(&bytes);
     if let Some(engine) = latex_magic_comment_engine(&source) {
         return engine;
     }
-    if latex_source_uses_luatex(&source) {
+    // Theses keep their preamble in `\input{preamble}`, a local `.sty` or the
+    // university's `.cls`; ctex/fontspec there decide the engine just the same.
+    let mut sources = vec![source];
+    sources.extend(latex_preamble_dependency_sources(input_path, &sources[0]));
+    if sources.iter().any(|source| latex_source_uses_luatex(source)) {
         return LatexEnginePreference::LuaLatex;
     }
-    if latex_source_uses_unicode_engine(&source) {
+    if sources.iter().any(|source| latex_source_uses_unicode_engine(source)) {
         return LatexEnginePreference::XeLatex;
     }
     LatexEnginePreference::PdfLatex
+}
+
+/// Project-local files the root's preamble pulls in: `\input`/`\include`d
+/// `.tex`, and `.sty`/`.cls` that sit beside the root (TeX tree packages are
+/// not read). Followed two levels deep and capped, so a large project costs a
+/// handful of small reads.
+fn latex_preamble_dependency_sources(input_path: &Path, root_source: &str) -> Vec<String> {
+    let Some(folder) = input_path.parent() else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut sources = Vec::new();
+    let mut pending = vec![(root_source.to_string(), 0_usize)];
+    while let Some((source, depth)) = pending.pop() {
+        let preamble = source
+            .find("\\begin{document}")
+            .map_or(source.as_str(), |end| &source[..end]);
+        let mut candidates = Vec::new();
+        for line in preamble.lines().map(latex_line_without_comment) {
+            for command in ["input", "include"] {
+                for argument in latex_command_arguments(line, command) {
+                    let name = argument.trim();
+                    candidates.push(if name.to_ascii_lowercase().ends_with(".tex") {
+                        name.to_string()
+                    } else {
+                        format!("{name}.tex")
+                    });
+                }
+            }
+            for command in ["usepackage", "RequirePackage"] {
+                for argument in latex_command_arguments(line, command) {
+                    candidates.extend(argument.split(',').map(|name| format!("{}.sty", name.trim())));
+                }
+            }
+            for argument in latex_command_arguments(line, "documentclass") {
+                candidates.push(format!("{}.cls", argument.trim()));
+            }
+        }
+        for candidate in candidates {
+            let named = Path::new(&candidate)
+                .file_stem()
+                .is_some_and(|stem| !stem.is_empty() && !stem.to_string_lossy().starts_with('.'));
+            if sources.len() >= 12 || !named {
+                continue;
+            }
+            let path = folder.join(&candidate);
+            if !path.is_file() || !seen.insert(path.clone()) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let text = runtime::decode_process_text(&bytes);
+            if depth < 1 {
+                pending.push((text.clone(), depth + 1));
+            }
+            sources.push(text);
+        }
+    }
+    sources
 }
 
 fn latex_magic_comment_engine(source: &str) -> Option<LatexEnginePreference> {
@@ -6473,7 +6975,15 @@ fn latex_output_needs_unicode_engine(output: &runtime::ManagedCommandOutput) -> 
         runtime::decode_process_text(&output.stderr)
     )
     .to_ascii_lowercase();
-    combined.contains("fontspec") && combined.contains("requires either xetex or luatex")
+    latex_text_needs_unicode_engine(&combined)
+}
+
+/// Package refusals that only XeTeX/LuaTeX can answer (lower-cased text).
+fn latex_text_needs_unicode_engine(lower: &str) -> bool {
+    (lower.contains("fontspec") && lower.contains("requires either xetex or luatex"))
+        || lower.contains("the xecjk package only supports xetex")
+        || lower.contains("cannot be run with pdflatex")
+        || lower.contains("use xelatex or lualatex instead")
 }
 
 fn latexmk_output_reports_stale_failure(output: &runtime::ManagedCommandOutput) -> bool {
@@ -6509,10 +7019,62 @@ fn known_latex_cache_paths(input_path: &Path, output_dir: &Path) -> Vec<PathBuf>
         "toc",
         "vrb",
         "xdv",
+        "auxlock",
+        "figlist",
+        "makefile",
+        "idx",
+        "ind",
+        "ilg",
+        "glo",
+        "gls",
+        "glg",
+        "ist",
+        "loa",
+        "lol",
+        "synctex(busy)",
     ]
     .into_iter()
     .map(|suffix| output_dir.join(format!("{stem}.{suffix}")))
+    .chain(included_chapter_aux_files(input_path, output_dir))
     .collect()
+}
+
+/// `\include{chapters/intro}` gives each chapter its own `.aux` (under the
+/// output folder, mirroring the source layout), and a corrupt chapter `.aux`
+/// is the classic reason a build only recovers after a cache clear. Only an
+/// `.aux` with a matching `.tex` source is touched.
+fn included_chapter_aux_files(input_path: &Path, output_dir: &Path) -> Vec<PathBuf> {
+    let Some(source_dir) = input_path.parent() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut pending = vec![(output_dir.to_path_buf(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < 3 && !entry.file_name().to_string_lossy().starts_with('.') {
+                    pending.push((path, depth + 1));
+                }
+                continue;
+            }
+            let is_chapter_aux = kind.is_file()
+                && path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("aux"))
+                && path
+                    .strip_prefix(output_dir)
+                    .is_ok_and(|relative| source_dir.join(relative).with_extension("tex").is_file());
+            if is_chapter_aux {
+                found.push(path);
+            }
+        }
+    }
+    found
 }
 
 fn remove_known_latex_cache_files(input_path: &Path, output_dir: &Path) -> Result<usize, String> {
@@ -6521,6 +7083,21 @@ fn remove_known_latex_cache_files(input_path: &Path, output_dir: &Path) -> Resul
         if path.is_file() {
             std::fs::remove_file(&path).map_err(|error| {
                 format!("failed to remove LaTeX cache {}: {error}", path.display())
+            })?;
+            removed += 1;
+        }
+    }
+    // minted keeps highlighted code in `_minted-<stem>` (`_minted` in v3); a
+    // stale copy survives every other kind of clean.
+    let stem = input_path
+        .file_stem()
+        .unwrap_or_else(|| input_path.as_os_str())
+        .to_string_lossy();
+    for name in [format!("_minted-{stem}"), "_minted".to_string()] {
+        let directory = output_dir.join(name);
+        if directory.is_dir() {
+            std::fs::remove_dir_all(&directory).map_err(|error| {
+                format!("failed to remove LaTeX cache {}: {error}", directory.display())
             })?;
             removed += 1;
         }
@@ -6547,7 +7124,78 @@ fn extract_latex_diagnostics(
     success: bool,
     return_code_interpretation: Option<&str>,
 ) -> Vec<LatexDiagnostic> {
-    let combined = format!("{stdout}\n{stderr}");
+    extract_latex_diagnostics_from(stdout, stderr, None, None, success, return_code_interpretation)
+}
+
+/// Diagnostics for one compile.
+///
+/// TeX's own messages are read from `final_log` — the `.log` the last engine
+/// pass wrote — when there is one: latexmk's stdout concatenates every pass,
+/// so "Citation undefined" and "Rerun" notices that a later pass resolved used
+/// to be reported against a document that no longer had them. BibTeX/biber
+/// output never reaches the `.log` and is always read from stdout.
+///
+/// `project_dir` is the compile root's folder. Builds pass an absolute
+/// `-output-directory`, and TeX then names the project's own files by
+/// absolute path (`C:\paper/chapters/intro.tex:3:`); those are reported as
+/// `./chapters/intro.tex`, relative to that folder like every other path.
+fn extract_latex_diagnostics_from(
+    stdout: &str,
+    stderr: &str,
+    final_log: Option<&str>,
+    project_dir: Option<&Path>,
+    success: bool,
+    return_code_interpretation: Option<&str>,
+) -> Vec<LatexDiagnostic> {
+    let mut diagnostics = extract_latex_diagnostics_raw(
+        stdout,
+        stderr,
+        final_log,
+        project_dir,
+        success,
+        return_code_interpretation,
+    );
+    for diagnostic in &mut diagnostics {
+        if let Some(path) = diagnostic.file_path.take() {
+            diagnostic.file_path =
+                Some(latex_project_relative_path(&path, project_dir).unwrap_or(path));
+        }
+    }
+    diagnostics
+}
+
+/// A log path as the project knows it: relative paths as TeX printed them,
+/// absolute ones under `project_dir` as `./relative`; `None` for anything
+/// else (the TeX tree's own classes and packages).
+fn latex_project_relative_path(path: &str, project_dir: Option<&Path>) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    if !latex_log_path_is_absolute(&normalized) {
+        return Some(normalized);
+    }
+    let folder = tex_tool_path(project_dir?).to_string_lossy().replace('\\', "/");
+    let folder = folder.trim_end_matches('/');
+    let prefix = format!("{folder}/");
+    // ASCII-only case folding keeps byte offsets valid for the slice below.
+    let inside = if cfg!(windows) {
+        normalized.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())
+    } else {
+        normalized.starts_with(&prefix)
+    };
+    inside.then(|| format!("./{}", &normalized[prefix.len()..]))
+}
+
+fn extract_latex_diagnostics_raw(
+    stdout: &str,
+    stderr: &str,
+    final_log: Option<&str>,
+    project_dir: Option<&Path>,
+    success: bool,
+    return_code_interpretation: Option<&str>,
+) -> Vec<LatexDiagnostic> {
+    let combined = match final_log {
+        Some(log) => format!("{log}\n{stderr}"),
+        None => format!("{stdout}\n{stderr}"),
+    };
     let lines = combined.lines().collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -6557,7 +7205,7 @@ fn extract_latex_diagnostics(
                 &mut diagnostics,
                 LatexDiagnostic {
                     severity: "error".to_string(),
-                    code: "file_line_error".to_string(),
+                    code: latex_diagnostic_code(&message).to_string(),
                     message,
                     file_path: Some(file_path),
                     line: Some(source_line),
@@ -6586,6 +7234,9 @@ fn extract_latex_diagnostics(
                 line: source_line,
             },
         );
+    }
+    for diagnostic in bibliography_tool_diagnostics(stdout) {
+        push_latex_diagnostic(&mut diagnostics, diagnostic);
     }
     // A failed latexmk invocation can still emit ordinary warnings. Keep the
     // compile failure visible as an error instead of making the UI report
@@ -6620,21 +7271,219 @@ fn extract_latex_diagnostics(
             line: None,
         });
     }
-    for line in &lines {
-        let line = line.trim();
-        let Some(message) = latex_warning_message(line) else {
-            continue;
-        };
-        push_latex_diagnostic(
-            &mut diagnostics,
-            LatexDiagnostic {
-                severity: "warning".to_string(),
-                code: "latex_warning".to_string(),
-                message,
+    // Warnings and bad boxes name no file of their own; TeX's file stack (the
+    // `(./chapter.tex … )` nesting in the log) says which input was being read.
+    let mut files = LatexLogFileStack::default();
+    for (index, raw_line) in lines.iter().enumerate() {
+        let line = raw_line.trim();
+        let current_file = files.current_project_file(project_dir);
+        if let Some(message) = latex_warning_message(line) {
+            // Package warnings continue on `(pkg)`-prefixed lines, and the
+            // "on input line N" often sits on the last of them.
+            let input_line = latex_warning_input_line(line).or_else(|| {
+                lines[index + 1..]
+                    .iter()
+                    .take(4)
+                    .map(|next| next.trim())
+                    .take_while(|next| next.starts_with('('))
+                    .find_map(latex_warning_input_line)
+            });
+            push_latex_diagnostic(
+                &mut diagnostics,
+                LatexDiagnostic {
+                    severity: "warning".to_string(),
+                    code: "latex_warning".to_string(),
+                    message,
+                    file_path: input_line.and(current_file.clone()),
+                    line: input_line,
+                },
+            );
+        } else if let Some((message, box_line)) = latex_bad_box(line) {
+            push_latex_diagnostic(
+                &mut diagnostics,
+                LatexDiagnostic {
+                    severity: "info".to_string(),
+                    code: "bad_box".to_string(),
+                    message,
+                    file_path: box_line.and(current_file.clone()),
+                    line: box_line,
+                },
+            );
+        }
+        files.read_line(raw_line);
+    }
+    diagnostics
+}
+
+/// The input-file nesting TeX prints into its log: `(` + a path when it opens
+/// a file, `)` when it closes one. Parentheses that open no file (message text
+/// such as `(Font)` or `(hyperref)`) are counted so their `)` does not pop a
+/// file — the same rule Overleaf's log parser uses.
+#[derive(Default)]
+struct LatexLogFileStack {
+    files: Vec<String>,
+    other_parens: usize,
+}
+
+impl LatexLogFileStack {
+    fn read_line(&mut self, line: &str) {
+        let characters = line.char_indices().collect::<Vec<_>>();
+        let mut position = 0;
+        while position < characters.len() {
+            let (offset, character) = characters[position];
+            if character == '(' {
+                if let Some((path, consumed)) = latex_log_opened_file(&line[offset + 1..]) {
+                    self.files.push(path);
+                    // Skip past the path so a `(` inside it is not re-read.
+                    let end = offset + 1 + consumed;
+                    while position < characters.len() && characters[position].0 < end {
+                        position += 1;
+                    }
+                    continue;
+                }
+                self.other_parens += 1;
+            } else if character == ')' {
+                if self.other_parens > 0 {
+                    self.other_parens -= 1;
+                } else {
+                    self.files.pop();
+                }
+            }
+            position += 1;
+        }
+    }
+
+    /// The innermost open file that belongs to the project (see
+    /// [`latex_project_relative_path`]): classes and packages from the TeX
+    /// tree are not something the editor can open, and a warning raised while
+    /// one is being read still belongs to the line of the document using it.
+    fn current_project_file(&self, project_dir: Option<&Path>) -> Option<String> {
+        self.files
+            .iter()
+            .rev()
+            .find_map(|path| latex_project_relative_path(path, project_dir))
+    }
+}
+
+fn latex_log_path_is_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || (bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+/// The file a `(` in the log opens, and how many bytes of `rest` it spans.
+fn latex_log_opened_file(rest: &str) -> Option<(String, usize)> {
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        let path = &quoted[..end];
+        return latex_log_looks_like_file(path).then(|| (path.to_string(), end + 2));
+    }
+    let end = rest
+        .find(|character: char| character.is_whitespace() || character == '(' || character == ')')
+        .unwrap_or(rest.len());
+    let path = &rest[..end];
+    latex_log_looks_like_file(path).then(|| (path.to_string(), end))
+}
+
+fn latex_log_looks_like_file(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && (1..=8).contains(&extension.len())
+        && extension.chars().all(|character| character.is_ascii_alphanumeric())
+        && (path.starts_with("./")
+            || path.starts_with("../")
+            || latex_log_path_is_absolute(path)
+            || !path.contains(' '))
+}
+
+/// `Overfull \hbox (12.0pt too wide) in paragraph at lines 12--14`.
+fn latex_bad_box(line: &str) -> Option<(String, Option<u32>)> {
+    if !(line.starts_with("Overfull \\") || line.starts_with("Underfull \\")) {
+        return None;
+    }
+    let source_line = ["at lines ", "at line "].iter().find_map(|marker| {
+        let start = line.find(marker)? + marker.len();
+        line[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()
+    });
+    Some((line.to_string(), source_line))
+}
+
+/// BibTeX and biber report problems in their own formats, which never reach
+/// the TeX log: a malformed `.bib` used to surface only as `compile_failed`.
+fn bibliography_tool_diagnostics(stdout: &str) -> Vec<LatexDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let lines = stdout.lines().map(str::trim).collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        // BibTeX: "I was expecting a `,' or a `}'---line 5 of file refs.bib"
+        // (sometimes the message is on the previous line and this one starts
+        // with "---line").
+        if let Some(at) = line.find("---line ") {
+            let rest = &line[at + "---line ".len()..];
+            let number = rest
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            if let (Ok(number), Some(file)) = (number.parse::<u32>(), rest.split(" of file ").nth(1)) {
+                let message = if at > 0 {
+                    line[..at].trim().to_string()
+                } else {
+                    index
+                        .checked_sub(1)
+                        .map(|previous| lines[previous].to_string())
+                        .unwrap_or_else(|| "BibTeX error".to_string())
+                };
+                diagnostics.push(LatexDiagnostic {
+                    severity: "error".to_string(),
+                    code: "bibliography_error".to_string(),
+                    message,
+                    file_path: Some(file.trim().to_string()),
+                    line: Some(number),
+                });
+                continue;
+            }
+        }
+        if let Some(message) = line.strip_prefix("I couldn't open database file ") {
+            diagnostics.push(LatexDiagnostic {
+                severity: "error".to_string(),
+                code: "bibliography_error".to_string(),
+                message: format!("BibTeX could not open database file {}", message.trim()),
                 file_path: None,
-                line: latex_warning_input_line(line),
-            },
-        );
+                line: None,
+            });
+        } else if let Some(message) = line.strip_prefix("Warning--") {
+            diagnostics.push(LatexDiagnostic {
+                severity: "warning".to_string(),
+                code: "bibliography_warning".to_string(),
+                message: format!("BibTeX: {}", message.trim()),
+                file_path: None,
+                line: None,
+            });
+        } else if let Some(message) = line.strip_prefix("ERROR - ") {
+            diagnostics.push(LatexDiagnostic {
+                severity: "error".to_string(),
+                code: "bibliography_error".to_string(),
+                message: format!("biber: {}", message.trim()),
+                file_path: None,
+                line: None,
+            });
+        } else if let Some(message) = line.strip_prefix("WARN - ") {
+            diagnostics.push(LatexDiagnostic {
+                severity: "warning".to_string(),
+                code: "bibliography_warning".to_string(),
+                message: format!("biber: {}", message.trim()),
+                file_path: None,
+                line: None,
+            });
+        }
     }
     diagnostics
 }
@@ -6679,6 +7528,11 @@ fn latex_warning_input_line(line: &str) -> Option<u32> {
         .ok()
 }
 
+/// Files a `-file-line-error` report can name.
+const LATEX_FILE_LINE_EXTENSIONS: &[&str] = &[
+    ".tex", ".ltx", ".sty", ".cls", ".clo", ".bbl", ".def", ".cfg", ".fd", ".aux", ".toc", ".tikz",
+];
+
 fn parse_latex_file_line_diagnostic(line: &str) -> Option<(String, u32, String)> {
     for (index, character) in line.char_indices() {
         if character != ':' {
@@ -6693,7 +7547,11 @@ fn parse_latex_file_line_diagnostic(line: &str) -> Option<(String, u32, String)>
             continue;
         }
         let file_path = line[..index].trim();
-        if !file_path.to_ascii_lowercase().contains(".tex") {
+        // Errors raised while TeX reads a class, package or the generated
+        // bibliography (`./main.bbl:23:`) are reported the same way; requiring
+        // ".tex" dropped them, leaving only "no parseable source diagnostic".
+        let lower = file_path.to_ascii_lowercase();
+        if !LATEX_FILE_LINE_EXTENSIONS.iter().any(|extension| lower.ends_with(extension)) {
             continue;
         }
         let message = rest[digits.len() + 1..].trim();
@@ -6728,6 +7586,9 @@ fn latex_diagnostic_code(message: &str) -> &'static str {
         "undefined_control_sequence"
     } else if lower.contains("file `") && lower.contains("not found") {
         "missing_file"
+    } else if lower.contains("can't write on file") {
+        // Windows: a PDF viewer still holding the previous build open.
+        "output_locked"
     } else if lower.contains("emergency stop") {
         "emergency_stop"
     } else {
@@ -6735,8 +7596,20 @@ fn latex_diagnostic_code(message: &str) -> &'static str {
     }
 }
 
+/// Caps per severity rather than one shared count of 8: a document with a
+/// dozen harmless warnings used to crowd out the one error that matters, and
+/// the error/warning badges in the PDF bar showed the cap, not the document.
 fn push_latex_diagnostic(diagnostics: &mut Vec<LatexDiagnostic>, diagnostic: LatexDiagnostic) {
-    if diagnostics.len() < 8 && !diagnostics.contains(&diagnostic) {
+    let limit = match diagnostic.severity.as_str() {
+        "error" => 10,
+        "warning" => 20,
+        _ => 10,
+    };
+    let same_severity = diagnostics
+        .iter()
+        .filter(|existing| existing.severity == diagnostic.severity)
+        .count();
+    if same_severity < limit && !diagnostics.contains(&diagnostic) {
         diagnostics.push(diagnostic);
     }
 }

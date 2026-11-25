@@ -34,6 +34,7 @@ import {
 } from "./visualDecorations";
 import type { SectionNumberingPrefix } from "./outlineModel";
 import type { TheoremDefinition } from "./theoremEnvironments";
+import { latexMathMacros, type MathMacros } from "../editor/latex/mathMacros";
 import type { VisualCompiledDocument } from "./compiledDiagramPreview";
 import type { VisualPdfCursor } from "./visualModel";
 import { scanLatexStructure } from "../editor/latex/latexStructure";
@@ -129,6 +130,7 @@ export function TypesetVisualEditor({
   compiledDocument = null,
   numbering,
   theorems = null,
+  mathMacros = null,
   pdfCursor,
   onChange,
   onVisibleLineChange,
@@ -156,6 +158,9 @@ export function TypesetVisualEditor({
    * "Requirement". The open file's own declarations are read from the live
    * buffer and override these. */
   theorems?: ReadonlyMap<string, TheoremDefinition> | null;
+  /** Math macros the root file's preamble defines (`\newcommand{\R}…`), for
+   * KaTeX; the open file's own definitions are read from the live buffer. */
+  mathMacros?: MathMacros | null;
   pdfCursor: VisualPdfCursor | null;
   onChange: (value: string) => void;
   onOpenCodeRange: (start: number, end: number) => void;
@@ -189,6 +194,7 @@ export function TypesetVisualEditor({
   const compiledDocumentCompartmentRef = useRef(new Compartment());
   const numberingCompartmentRef = useRef(new Compartment());
   const theoremsCompartmentRef = useRef(new Compartment());
+  const mathMacrosCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
   const onForwardSearchCompartmentRef = useRef(new Compartment());
   const spellCheckCompartmentRef = useRef(new Compartment());
@@ -199,6 +205,7 @@ export function TypesetVisualEditor({
     compiledDocument,
     numbering,
     theorems,
+    mathMacros,
     onOpenCodeRange,
     onForwardSearch: onForwardSearch ?? null,
   });
@@ -268,6 +275,7 @@ export function TypesetVisualEditor({
         compiledDocumentCompartmentRef.current.of(visualCompiledDocumentFacet.of(compiledDocument)),
         numberingCompartmentRef.current.of(visualNumberingFacet.of(numbering)),
         theoremsCompartmentRef.current.of(visualTheoremsFacet.of(theorems)),
+        mathMacrosCompartmentRef.current.of(latexMathMacros.of(mathMacros)),
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
         spellCheckCompartmentRef.current.of(spellCheckAttributes(spellCheck, effectiveSpellCheckLanguage)),
@@ -367,6 +375,7 @@ export function TypesetVisualEditor({
       compiledDocument,
       numbering,
       theorems,
+      mathMacros,
       onOpenCodeRange,
       onForwardSearch: onForwardSearch ?? null,
     };
@@ -386,6 +395,9 @@ export function TypesetVisualEditor({
     if (previous.theorems !== theorems) {
       effects.push(theoremsCompartmentRef.current.reconfigure(visualTheoremsFacet.of(theorems)));
     }
+    if (previous.mathMacros !== mathMacros) {
+      effects.push(mathMacrosCompartmentRef.current.reconfigure(latexMathMacros.of(mathMacros)));
+    }
     if (previous.onOpenCodeRange !== onOpenCodeRange) {
       effects.push(onOpenCodeRangeCompartmentRef.current.reconfigure(onOpenCodeRangeFacet.of(onOpenCodeRange)));
     }
@@ -404,7 +416,7 @@ export function TypesetVisualEditor({
       ...(replacement ? { changes: replacement, annotations: Transaction.addToHistory.of(false) } : {}),
       effects,
     });
-  }, [compiledDocument, draft, numbering, onForwardSearch, onOpenCodeRange, path, theorems]);
+  }, [compiledDocument, draft, mathMacros, numbering, onForwardSearch, onOpenCodeRange, path, theorems]);
 
   useEffect(() => {
     const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
@@ -871,6 +883,17 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
   // Lists: hang the marker just inside the document column, never in the
   // CodeMirror line-number gutter. Wrapped text aligns with the item body.
   ".cm-vis-list-line": { paddingLeft: "2em", textIndent: "-1.15em" },
+  // Nested lists indent per level, as the PDF does.
+  ".cm-vis-list-line.cm-vis-list-depth-2": { paddingLeft: "4em" },
+  ".cm-vis-list-line.cm-vis-list-depth-3": { paddingLeft: "6em" },
+  ".cm-vis-list-line.cm-vis-list-depth-4": { paddingLeft: "8em" },
+  // `description` terms: bold, no hanging bullet column.
+  ".cm-vis-item-marker.cm-vis-item-term": { justifyContent: "flex-start", fontWeight: "700", minWidth: "0" },
+  ".cm-vis-sans": { fontFamily: "var(--visual-sans-font, system-ui, sans-serif)" },
+  ".cm-vis-slanted": { fontStyle: "oblique" },
+  ".cm-vis-upright": { fontStyle: "normal", fontWeight: "normal" },
+  ".cm-vis-url": { fontFamily: "var(--visual-mono-font, ui-monospace, monospace)", fontSize: "0.92em", color: "var(--visual-link, #3b82f6)" },
+  ".cm-vis-raw-block": { fontFamily: "var(--visual-mono-font, ui-monospace, monospace)", fontSize: "0.9em", whiteSpace: "pre-wrap" },
   ".cm-vis-item-marker": {
     display: "inline-flex",
     position: "relative",
@@ -969,6 +992,30 @@ export const visualThemeSpec: Parameters<typeof EditorView.theme>[0] = {
     maxWidth: "100%",
     maxHeight: "300px",
     objectFit: "contain",
+  },
+  // Sub-figures (subcaption, minipage) side by side, each with its caption.
+  ".cm-vis-figure-row": {
+    display: "flex",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    alignItems: "flex-end",
+    gap: "16px",
+    width: "100%",
+  },
+  ".cm-vis-figure-item": {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "4px",
+    flex: "1 1 0",
+    minWidth: "140px",
+  },
+  ".cm-vis-figure-image": {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: "60px",
   },
   ".cm-vis-diagram-preview": {
     display: "block",

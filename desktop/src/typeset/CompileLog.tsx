@@ -105,6 +105,13 @@ export default function CompileLog({
     if (diagnostic.code === "table_alignment") {
       return copy.tableAlignmentGuidance;
     }
+    const missingResource = diagnostic.code === "missing_file"
+      ? /file [`'‘]([^'’`]+\.(?:sty|cls))['’]/i.exec(diagnostic.message)?.[1]
+      : undefined;
+    if (missingResource) return copy.missingPackageGuidance(missingResource);
+    if (diagnostic.code === "output_locked") return copy.outputLockedGuidance;
+    if (diagnostic.code === "bibliography_error") return copy.bibliographyGuidance;
+    if (diagnostic.code === "bad_box") return copy.badBoxGuidance;
     if (/citation .*undefined/i.test(diagnostic.message)) {
       return copy.undefinedCitationGuidance;
     }

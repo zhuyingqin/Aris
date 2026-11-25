@@ -303,11 +303,11 @@ pub use session::{
 };
 pub use session_index::{
     forget_indexed_session, index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
-    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
+    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state, session_recall_evidence,
     session_index_stats, session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
     upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
     SessionEmbeddingInput, SessionIndexReindexState, SessionIndexStats, SessionMessageEmbedding,
-    SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+    SessionRecallEvidence, SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
     activated_canonical_skill_name, registered_skill, RegisteredSkillResolution, SkillLifecycle,

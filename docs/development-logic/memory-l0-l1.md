@@ -314,11 +314,43 @@ test; benchmark negatives 1/35; held-out failures with a lesson 265/894; about
 46% of attached lessons apply. Stores under 20 active lessons still need one
 word more.
 
+## Step 6: what the per-turn recall block delivers (2026-11-24)
+
+Replay: `memory_replay recall` over 400 real user turns sampled from the
+corpus, each searched as production does at that moment (history before the
+turn), plus the 132 probes (`prep_recall_gate.py`). The two windows a turn would
+receive were judged blind (`judge_recall.py`; 805 pairs, 8 judges; known-right
+probe windows 86% "useful", known-wrong pairs 0%).
+
+- **The turn's own Session took a top-2 slot on 40% of turns** (159/400): the
+  block resent what the model had just read. `recall_session_hits` (shared by
+  the turn's recall and the Settings preview) now drops the asking Session.
+- Without it, **11% of delivered windows are useful** (76/702; first window
+  12%, second 10%); 66 of 400 turns get at least one useful window. The rest
+  is "same project, changes nothing" (49%) or unrelated (41%), about 5,300
+  characters a turn.
+- Lexical evidence does not rescue it. Gating on query bigrams the anchor
+  shares (`session_recall_evidence`: document frequency per token) reaches
+  ~60% useful only by delivering on ~3% of turns (11-15 windows, 8-9 of the 76
+  useful ones kept, no probe kept), and that threshold was picked on the same
+  labels. Most shared "distinctive" bigrams straddle two words ("到服", "们为").
+  A question repeated verbatim in the earlier Session is useful 21% of the
+  time.
+- Where it does help: a Session's first turn got a useful window 31% of the
+  time (29/94), later turns 14% (37/268). Users almost never point back
+  ("上次", "之前", "last time": 18 of 1,560 corpus turns, none of the useful
+  deliveries).
+
+Decision (user, 2026-11-24): **the per-turn block is off by default**
+(`memory_recall_placement` unset = `off`; `system`, `user` and `alternate`
+still opt in). The model reaches history through `session_search`.
+
 ## Not in this change
 
-- The per-turn recall block is still in every turn; `memory_recall_placement`
-  (step 2) compares system and user placement per session. Whether to drop it
-  waits for that data (`usage_report.py`).
-- Proactive delivery of earlier sessions (a relevance gate before the recall
-  block, then an end-to-end comparison) and any reranker model.
+- What replaces the block, if anything. Candidates, cheapest first: tell the
+  model to search history at a Session's start or on a reference it cannot
+  resolve (it searches on 3.2% of turns today); a start-of-Session card showing
+  the user where the project stands, delivered only on their click; letting the
+  user attach an earlier chat like a file; a short per-project progress note
+  written at Session end; a cheap-model gate on first turns only.
 - L2/L3 promotion: replayed offline in step 4 and not built.

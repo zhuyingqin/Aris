@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use runtime::{
-    is_research_memory_session_id, search_sessions_filtered, sync_sessions_dir, LessonCall, LessonDraft, LessonGates, LessonJob, LessonStore, LessonTurn,
+    is_research_memory_session_id, search_sessions_filtered, session_recall_evidence, sync_sessions_dir, LessonCall, LessonDraft, LessonGates, LessonJob, LessonStore, LessonTurn,
     SessionSearchFilter, SessionSearchResult,
 };
 use serde_json::Value;
@@ -297,11 +297,153 @@ fn l1(path: &str) {
     let _ = std::fs::remove_file(&store_path);
 }
 
+/// The probe's source turn and its neighbours, as message index ranges of the
+/// gold Session (see `l0`).
+fn gold_ranges_of(probe: &Value) -> Vec<(usize, usize)> {
+    let dir = Path::new(probe["sessions_dir"].as_str().unwrap_or_default());
+    let Some(gold) = probe["gold_session"].as_str() else {
+        return Vec::new();
+    };
+    let markers: Vec<String> = probe["markers"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).map(collapse).collect())
+        .unwrap_or_default();
+    let mut ranges = Vec::new();
+    if let Ok(SessionSearchResult::Read { messages, .. }) =
+        search_sessions_filtered(dir, None, Some(gold), 1, 0, SessionSearchFilter::default())
+    {
+        let is_user_text =
+            |m: &runtime::SessionSearchMessage| m.role == "user" && !m.content.starts_with("tool result");
+        for (position, message) in messages.iter().enumerate() {
+            let content = collapse(&message.content);
+            if !is_user_text(message) || !markers.iter().any(|marker| content.contains(marker.as_str())) {
+                continue;
+            }
+            let end = messages[position + 1..]
+                .iter()
+                .find(|later| is_user_text(later))
+                .map_or(usize::MAX, |later| later.index.saturating_sub(1));
+            ranges.push((message.index, end));
+        }
+    }
+    ranges
+}
+
+/// Roughly what the R0 section shows of a hit: the anchor (700 characters)
+/// and its nearest neighbours (300 each) in message order, about 2,000
+/// characters in all.
+fn window_text(hit: &runtime::SessionSearchHit) -> String {
+    let anchor = hit.messages.iter().position(|m| m.anchor).unwrap_or(0);
+    let mut order: Vec<usize> = (0..hit.messages.len()).collect();
+    order.sort_by_key(|position| position.abs_diff(anchor));
+    let mut kept = BTreeSet::new();
+    let mut spent = 0;
+    for position in order {
+        let message = &hit.messages[position];
+        let limit = if message.anchor { 700 } else { 300 };
+        let cost = message.content.chars().count().min(limit);
+        if spent + cost > 2_000 && !kept.is_empty() {
+            continue;
+        }
+        spent += cost;
+        kept.insert(position);
+    }
+    kept.into_iter()
+        .map(|position| {
+            let message = &hit.messages[position];
+            let limit = if message.anchor { 700 } else { 300 };
+            let marker = if message.anchor { " match" } else { "" };
+            format!(
+                "[{}{} #{}] {}",
+                message.role,
+                marker,
+                message.index,
+                message.content.chars().take(limit).collect::<String>()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Per-turn recall as production runs it, plus what each delivered window
+/// shares with the question, exported for the gate analysis
+/// (experiments/memory/scripts/recall_gate.py). Input: prep_recall_gate.py.
+fn recall(path: &str, out: &str) {
+    let items: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json");
+    let dirs: BTreeSet<String> = items
+        .iter()
+        .filter_map(|item| item["sessions_dir"].as_str().map(ToOwned::to_owned))
+        .collect();
+    let started = Instant::now();
+    for dir in &dirs {
+        sync_sessions_dir(Path::new(dir)).expect("repair");
+    }
+    eprintln!("backfill/repair of {} indexes: {:.1} s", dirs.len(), started.elapsed().as_secs_f64());
+    let started = Instant::now();
+    let mut rows = Vec::new();
+    for item in &items {
+        let dir = Path::new(item["sessions_dir"].as_str().unwrap_or_default());
+        let question = item["question"].as_str().unwrap_or_default();
+        let own = item["session_id"].as_str().unwrap_or_default();
+        let gold = item["gold_session"].as_str().unwrap_or_default();
+        let ranges = gold_ranges_of(item);
+        let filter = SessionSearchFilter {
+            time_start_ms: None,
+            time_end_ms: item["time_end_ms"].as_i64(),
+            prefer_recent: false,
+        };
+        let results: Vec<_> = match search_sessions_filtered(dir, Some(question), None, 8, 5, filter) {
+            Ok(SessionSearchResult::Search { results, .. }) => results
+                .into_iter()
+                .filter(|hit| is_research_memory_session_id(&hit.session_id))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let own_in_production = results.iter().take(2).any(|hit| hit.session_id == own);
+        let delivered: Vec<_> = results.into_iter().filter(|hit| hit.session_id != own).take(2).collect();
+        let evidence = session_recall_evidence(dir, question, &delivered).unwrap_or_default();
+        let hits: Vec<Value> = delivered
+            .iter()
+            .zip(&evidence.anchor_terms)
+            .map(|(hit, shared)| {
+                let is_gold = hit.session_id == gold
+                    && hit.messages.iter().any(|message| {
+                        ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&message.index))
+                    });
+                serde_json::json!({
+                    "session_id": hit.session_id,
+                    "gold": is_gold,
+                    "shared": shared,
+                    "window": window_text(hit),
+                })
+            })
+            .collect();
+        rows.push(serde_json::json!({
+            "kind": item["kind"],
+            "split": item["split"],
+            "id": item["id"],
+            "question": question,
+            "gold_located": !ranges.is_empty(),
+            "own_in_production": own_in_production,
+            "messages": evidence.messages,
+            "query_terms": evidence.query_terms,
+            "hits": hits,
+        }));
+    }
+    eprintln!(
+        "mean recall + evidence time {:.1} ms",
+        started.elapsed().as_secs_f64() * 1000.0 / items.len().max(1) as f64
+    );
+    std::fs::write(out, serde_json::to_string(&rows).expect("json")).expect("write");
+    eprintln!("wrote {} rows to {out}", rows.len());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    match (args.get(1).map(String::as_str), args.get(2)) {
-        (Some("l0"), Some(path)) => l0(path),
-        (Some("l1"), Some(path)) => l1(path),
-        _ => eprintln!("usage: memory_replay (l0|l1) <input.json>"),
+    match (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
+        (Some("l0"), Some(path), _) => l0(path),
+        (Some("l1"), Some(path), _) => l1(path),
+        (Some("recall"), Some(path), Some(out)) => recall(path, out),
+        _ => eprintln!("usage: memory_replay (l0|l1) <input.json> | recall <input.json> <out.json>"),
     }
 }

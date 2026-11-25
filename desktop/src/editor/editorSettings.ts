@@ -19,6 +19,8 @@ import { emacs } from "@replit/codemirror-emacs";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { latexLint } from "./latexLint";
 import type { EditorLanguage, EditorSurface } from "./editorTypes";
+import { latexCommentHighlights } from "./latexCommentHighlights";
+import { trackChanges } from "./trackChanges";
 
 export type EditorKeybindings = "default" | "vim" | "emacs";
 export type EditorFontFamily = "mono" | "sans" | "serif";
@@ -198,6 +200,8 @@ export function editorSettingsExtensions(
   // `closeBracketsKeymap` stays in `sharedKeymap()`: its Backspace handler is a
   // no-op without the extension, so it costs nothing when this is off.
   if (settings.autoCloseBrackets) extensions.push(closeBrackets());
+  // Comments are content, not a check: shown whether or not code checking is on.
+  if (options.language === "latex") extensions.push(latexCommentHighlights(), trackChanges());
   if (options.language === "latex" && settings.codeCheck) {
     // The WYSIWYG surface renders a page, not a gutter column.
     extensions.push(latexLint({ gutter: options.surface !== "typeset" }));

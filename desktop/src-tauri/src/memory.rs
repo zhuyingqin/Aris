@@ -184,25 +184,7 @@ impl MemoryState {
         }
         let started = std::time::Instant::now();
         let mode = research_memory_v2_mode();
-        let session_hits = runtime::search_sessions(
-            &state::sessions_dir_for_project(project_id),
-            Some(query),
-            None,
-            8,
-            5,
-        )
-        .ok()
-        .and_then(|result| match result {
-            SessionSearchResult::Search { results, .. } => Some(
-                results
-                    .into_iter()
-                    .filter(|hit| is_general_memory_session_id(&hit.session_id))
-                    .take(RESEARCH_RECALL_SESSION_HITS)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+        let session_hits = recall_session_hits(project_id, query, Some(session_id));
         // Legacy v1 R1--R3 is intentionally absent here. If v2 or its remote
         // backend is unavailable, the safe fallback is authoritative R0 only.
         let (r3, recalled) = if mode.allows_prompt() {
@@ -1766,25 +1748,7 @@ pub async fn memory_recall_preview(
     spawn_memory_task(move || {
         let started = std::time::Instant::now();
         let mode = research_memory_v2_mode();
-        let session_hits = runtime::search_sessions(
-            &state::sessions_dir_for_project(&project_id),
-            Some(&query),
-            None,
-            8,
-            5,
-        )
-        .ok()
-        .and_then(|result| match result {
-            SessionSearchResult::Search { results, .. } => Some(
-                results
-                    .into_iter()
-                    .filter(|hit| is_general_memory_session_id(&hit.session_id))
-                    .take(RESEARCH_RECALL_SESSION_HITS)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+        let session_hits = recall_session_hits(&project_id, &query, None);
         let (r3, recalled) = if mode.allows_prompt() {
             recall_v2_atoms(&project_id, "preview", &query)?
         } else {
@@ -1898,6 +1862,29 @@ fn export_memory(project_id: String) -> Result<String, String> {
         )
         .map_err(|error| error.to_string())?;
         Ok(path.display().to_string())
+    }
+}
+
+/// The Session windows (R0) a turn's recall block may carry: the search's
+/// best chat Sessions other than `own_session`. The turn's own Session is
+/// already in the context window or its compaction summary; on 400 replayed
+/// real turns it took a top-2 slot 40% of the time, resending what the model
+/// had just read.
+fn recall_session_hits(
+    project_id: &str,
+    query: &str,
+    own_session: Option<&str>,
+) -> Vec<runtime::SessionSearchHit> {
+    match runtime::search_sessions(&state::sessions_dir_for_project(project_id), Some(query), None, 8, 5) {
+        Ok(SessionSearchResult::Search { results, .. }) => results
+            .into_iter()
+            .filter(|hit| {
+                is_general_memory_session_id(&hit.session_id)
+                    && own_session != Some(hit.session_id.as_str())
+            })
+            .take(RESEARCH_RECALL_SESSION_HITS)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -2030,11 +2017,16 @@ impl RecallPlacement {
     }
 }
 
-/// `memory_recall_placement` in config: `system`, `user`, `off`, or
-/// `alternate` (the default while step 2 measures it): each Session is
-/// assigned `system` or `user` by a stable hash of its id, so one Session never
-/// switches and both arms see the same kind of traffic. The arm is recorded in
-/// every `memory_recall` row; `usage_report.py` compares cache reads and use.
+/// `memory_recall_placement` in config: `off` (the default), `system`, `user`,
+/// or `alternate`: each Session is assigned `system` or `user` by a stable hash
+/// of its id, so one Session never switches and both arms see the same kind of
+/// traffic. The arm is recorded in every `memory_recall` row; `usage_report.py`
+/// compares cache reads and use.
+///
+/// Off by default since 2026-11-24: judged blind on 400 replayed real turns,
+/// 11% of the windows the block delivered were useful (about 5,300 characters a
+/// turn), and no lexical gate kept the useful ones without dropping nearly all
+/// deliveries. The model still reaches history through `session_search`.
 pub(crate) fn recall_placement(session_id: &str) -> RecallPlacement {
     let configured = crate::config::load_object()
         .get("memory_recall_placement")
@@ -2044,8 +2036,8 @@ pub(crate) fn recall_placement(session_id: &str) -> RecallPlacement {
     match configured.as_str() {
         "system" => RecallPlacement::System,
         "user" => RecallPlacement::User,
-        "off" => RecallPlacement::Off,
-        _ => placement_arm(session_id),
+        "alternate" => placement_arm(session_id),
+        _ => RecallPlacement::Off,
     }
 }
 
@@ -3541,6 +3533,14 @@ mod tests {
     }
 
     #[test]
+    fn the_per_turn_recall_block_is_off_unless_configured() {
+        let (root, _guards, _serial) = migration_fixture("r0-default-off");
+        assert_eq!(recall_placement("chat-1795406255665-3zf9ga"), RecallPlacement::Off);
+        assert_eq!(recall_placement("chat-1795406255666-abcdef"), RecallPlacement::Off);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn the_off_arm_records_its_turn_without_searching() {
         let (root, _guards, _serial) = migration_fixture("r0-off");
         let memory = MemoryState::default();
@@ -3595,6 +3595,11 @@ mod tests {
         assert_eq!(recall.payload["placement"], "system");
         let row = recall.payload.to_string();
         assert!(!row.contains("SCADA") && !row.contains("风机"), "text leaked into the audit row: {row}");
+
+        // The same question asked inside that Session recalls nothing from it:
+        // the model already has it in context.
+        let own = memory.builtin_research_recall_prompt(project_id, "chat-old", "风机数据用什么粒度？");
+        assert!(own.as_ref().is_none_or(|block| !block.contains("SCADA")), "{own:?}");
 
         let _ = fs::remove_dir_all(root);
     }

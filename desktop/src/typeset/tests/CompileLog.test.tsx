@@ -42,4 +42,24 @@ describe("compile failure guidance", () => {
     expect(screen.getByText(TYPESET_EDITOR_COPY.en.compileLog.errorGuidance)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open main.tex, 7" })).toBeTruthy();
   });
+
+  it("says a missing package is an installation problem, not a source error", () => {
+    const result = failure("missing_file");
+    result.diagnostics[0] = {
+      severity: "error", code: "missing_file", message: "LaTeX Error: File `algorithm2e.sty' not found.",
+      filePath: "./main.tex", line: 3,
+    };
+    render(<CompileLog result={result} status="error" error={null} liveLog={null} onDiagnosticClick={vi.fn()} />);
+    expect(screen.getByText(TYPESET_EDITOR_COPY.en.compileLog.missingPackageGuidance("algorithm2e.sty"))).toBeTruthy();
+  });
+
+  it("files bad boxes under info with layout guidance", () => {
+    const result = { ...failure("bad_box"), success: true, pdfState: "fresh" as const };
+    result.diagnostics = [{
+      severity: "info", code: "bad_box", message: "Overfull \\hbox (12.0pt too wide) in paragraph at lines 12--14",
+      filePath: "./chapters/intro.tex", line: 12,
+    }];
+    render(<CompileLog result={result} status="success" error={null} liveLog={null} onDiagnosticClick={vi.fn()} />);
+    expect(screen.getByText(TYPESET_EDITOR_COPY.en.compileLog.badBoxGuidance)).toBeTruthy();
+  });
 });
