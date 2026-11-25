@@ -319,6 +319,26 @@ export interface MemoryV2StatusView {
   availableModels: string[];
 }
 
+/** A lesson learned from a fixed tool failure (`runtime::LessonView`). */
+export interface MemoryLessonView {
+  id: string;
+  projectId: string;
+  tool: string;
+  statement: string;
+  seen: number;
+  recalled: number;
+  /** `active`, `stale` (stopped helping) or `archived` (unused or switched off). */
+  status: "active" | "stale" | "archived" | string;
+  lastSeenAtMs: number;
+  lastRecalledAtMs: number;
+  sources: number;
+}
+
+export interface MemoryLessonsView {
+  enabled: boolean;
+  lessons: MemoryLessonView[];
+}
+
 export interface MemoryV2AtomView {
   id: string;
   kind: string;

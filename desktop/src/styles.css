@@ -25670,3 +25670,65 @@ button.chat-remote-session-item:hover {
 .tasks-review-rubrics { display: grid; gap: 2px; margin: 4px 0 6px; }
 .tasks-review-rubrics small { color: var(--text-3); }
 .tasks-review-criterion { display: inline-block; margin: 2px 0; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
+
+/* Settings > Memory > lessons from errors (MemoryLessons.tsx). Own class
+   names only, so nothing earlier in the cascade is affected. */
+.memory-lessons-summary {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.memory-lessons-list {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.memory-lesson {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 11px;
+}
+
+.memory-lesson + .memory-lesson {
+  border-top: 1px solid var(--border-color);
+}
+
+.memory-lesson-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.memory-lesson-statement {
+  color: var(--text-primary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.memory-lesson-body small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.memory-lesson-stale .memory-lesson-statement,
+.memory-lesson-archived .memory-lesson-statement {
+  color: var(--text-muted);
+}
+
+.memory-lesson-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+

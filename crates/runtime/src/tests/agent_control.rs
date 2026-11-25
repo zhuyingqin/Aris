@@ -1941,13 +1941,14 @@ fn agent_events_survive_event_log_compaction() {
             "session_reset",
             "agent.result",
             "lesson_recall",
+            "memory_recall",
             "session_checkpoint",
             "assistant_delta",
             "agent.close"
         ],
-        "the stream rows behind the reset and checkpoint went; every agent row and lesson_recall stayed"
+        "the stream rows behind the reset and checkpoint went; every agent row and the recall audit rows stayed"
     );
-    assert_eq!(outcome.removed_lines, 3);
+    assert_eq!(outcome.removed_lines, 2);
 }
 
 fn task_contract() -> AgentTask {

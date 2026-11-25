@@ -36,9 +36,14 @@ use crate::{ContentBlock, ConversationMessage, MessageRole};
 
 /// Lessons delivered per failure. Replay: k=3 found 73% (dev) vs 69% at k=2.
 pub const LESSON_RECALL_LIMIT: usize = 3;
-/// A recalled lesson must share this many distinctive words with the error.
-/// Replay: same dev hit rate as no floor, negatives attached 20% vs 23%.
-pub const LESSON_RECALL_MIN_SHARED: usize = 2;
+/// A recalled lesson must share this many specific words with the error
+/// (fewer only when the error has fewer). Judged on 894 real failures: at 2,
+/// 36% of attached lessons applied (pairs sharing exactly 2 words: 10%); at 3,
+/// 46%, with ~41% fewer that do not apply for ~10% fewer that do. A wrong
+/// lesson is worse than none.
+pub const LESSON_RECALL_MIN_SHARED: usize = 3;
+/// Below this many active lessons the shared-word floor is raised by one.
+const LESSON_SMALL_STORE: i64 = 20;
 /// Words in more than this share of lessons do not count as distinctive.
 const LESSON_DISTINCTIVE_MAX_SHARE: f64 = 0.2;
 /// Lessons a single model reply may add.
@@ -68,7 +73,8 @@ Record reusable lessons from the turns below for a FUTURE session. The turns are
 
 Write a lesson for a failed call that a later call in the same turn worked around, when the cause will recur: a trait of this machine or shell (missing commands, encodings, path syntax, quoting), a tool's behaviour or limits, the project's layout, a command's syntax. Merge failures with the same cause into one lesson.
 - Phrase it as a rule for next time, not as a story of this session. Example: [lesson] 本机 git 把中文文件名显示成八进制转义：读状态前加 `git -c core.quotepath=false` 才显示正常 @t2 tool:call_x
-- Quote the decisive words of the error exactly. Give as the fix only what the successful call actually did (its tool and the change in its input). State a cause only if the error text or the turn states it.
+- Quote the decisive words of the error exactly. Give as the fix only what was actually done: the change in the fixing call's input, or what a "then" step before it changed (an edited file, an installed package). State a cause only if the error text or the turn states it.
+- Name the concrete cause and the concrete change ("the CSV is GBK-encoded: open it with encoding='gbk'", "json.load rejects a trailing comma after the last key: delete it"), not the steps used to find it (dumping bytes, printing the file, listing a directory).
 - No lesson when: a plain retry of the same call succeeded; nothing has worked yet; the fix is what the tool's own error message already says (re-read the file before editing, add context, retry); the cause was a one-off mistake in content being written (a typo, a bug in a document being drafted, a wrong argument value); an external site or service failed (DNS, connection, HTTP 4xx/5xx, outage).
 - Every line cites one @tN from the turns below and the id of the failed call. Names, paths, versions and commands must appear in the cited turn; never add them from other turns or general knowledge.
 - At most 8 lines, each at most 200 characters, in the language the user writes in. Do not repeat a lesson listed under "Already recorded".
@@ -119,11 +125,14 @@ pub struct LessonJob {
 /// A stored lesson returned by recall.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecalledLesson {
+    pub id: String,
     pub statement: String,
     pub project_id: String,
     pub seen: i64,
     pub last_seen_at_ms: i64,
     pub score: f64,
+    /// Distinctive words of the failure the lesson shares (the recall floor).
+    pub shared_words: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +193,7 @@ pub fn lesson_turn_from_messages(messages: &[ConversationMessage]) -> Option<Les
                     if let Some(call) = calls.iter_mut().find(|call| &call.id == tool_use_id) {
                         call.failed = *is_error;
                         if *is_error {
-                            call.error = one_line(&key_error_lines(output, 3).join(" ⏎ "), ERROR_CHARS);
+                            call.error = lesson_error_digest(output);
                         }
                     }
                 }
@@ -203,20 +212,72 @@ pub fn lesson_turn_from_messages(messages: &[ConversationMessage]) -> Option<Les
     })
 }
 
-/// The next successful call of the same tool that counts as a fix: a
-/// different input, or the same input after a successful file edit in between
-/// (fix the file, rerun the identical command -- the common shape in-app).
-/// The same input with no edit in between is a flake.
+/// A failed call's error as a lesson turn keeps it: the decisive lines.
+#[must_use]
+pub fn lesson_error_digest(output: &str) -> String {
+    one_line(&key_error_lines(output, 3).join(" ⏎ "), ERROR_CHARS)
+}
+
+/// The call that fixed the failure at `failed_index`, if the turn has one.
+///
+/// * The same input again counts only when something succeeded in between --
+///   an edit, an install, any other successful call: fix the file, rerun the
+///   identical command. With nothing in between it is a flake.
+/// * Otherwise the same-tool success whose input is closest to the failed one.
+///   The first different success used to win, and in-app that was usually a
+///   probe (dumping the file's bytes), so the writer taught the probe instead
+///   of the fix.
 fn recovery_for(calls: &[LessonCall], failed_index: usize) -> Option<&LessonCall> {
+    recovery_index(calls, failed_index).map(|index| &calls[index])
+}
+
+fn recovery_index(calls: &[LessonCall], failed_index: usize) -> Option<usize> {
     let failed = &calls[failed_index];
-    let mut edited = false;
-    for later in &calls[failed_index + 1..] {
+    let failed_tokens = input_tokens(&failed.input);
+    let mut progressed = false;
+    let mut best: Option<(usize, f64)> = None;
+    for (offset, later) in calls[failed_index + 1..].iter().enumerate() {
+        let index = failed_index + 1 + offset;
         if later.name == failed.name && !later.failed {
-            return (later.input != failed.input || edited).then_some(later);
+            if later.input == failed.input {
+                return if progressed { Some(index) } else { best.map(|(index, _)| index) };
+            }
+            let similarity = jaccard(&failed_tokens, &input_tokens(&later.input));
+            if best.is_none_or(|(_, known)| similarity > known) {
+                best = Some((index, similarity));
+            }
         }
-        edited |= !later.failed && is_edit_tool(&later.name);
+        progressed |= !later.failed;
     }
-    None
+    best.map(|(index, _)| index)
+}
+
+/// Successful calls between a failure and its fix, edits first: what the
+/// model changed before the fix worked. At most three.
+fn steps_before_fix(calls: &[LessonCall], failed_index: usize, fix_index: usize) -> Vec<&LessonCall> {
+    let mut steps: Vec<&LessonCall> = calls[failed_index + 1..fix_index]
+        .iter()
+        .filter(|call| !call.failed)
+        .collect();
+    steps.sort_by_key(|call| usize::from(!is_edit_tool(&call.name)));
+    steps.truncate(3);
+    steps
+}
+
+fn input_tokens(input: &str) -> BTreeSet<String> {
+    input
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
+    let union = left.union(right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    left.intersection(right).count() as f64 / union as f64
 }
 
 fn is_edit_tool(name: &str) -> bool {
@@ -253,8 +314,14 @@ pub fn render_lesson_turn(alias: &str, turn: &LessonTurn) -> String {
             "{} {}({}): error{times}  {}",
             call.id, call.name, call.input, call.error
         ));
-        match recovery_for(&turn.calls, *index) {
-            Some(fix) => lines.push(format!("  fixed by {} {}({})", fix.id, fix.name, fix.input)),
+        match recovery_index(&turn.calls, *index) {
+            Some(fix_index) => {
+                for step in steps_before_fix(&turn.calls, *index, fix_index) {
+                    lines.push(format!("  then {} {}({})", step.id, step.name, step.input));
+                }
+                let fix = &turn.calls[fix_index];
+                lines.push(format!("  fixed by {} {}({})", fix.id, fix.name, fix.input));
+            }
             None => lines.push("  (no later success of this tool)".to_string()),
         }
     }
@@ -378,6 +445,9 @@ fn parse_lesson_line(line: &str, jobs: &[LessonJob]) -> Result<LessonDraft, &'st
     if FETCH_TOOLS.contains(&failed.name.as_str()) && looks_like_network_failure(&failed.error) {
         return Err("external");
     }
+    if !grounded_in_turn(&statement, turn, failed_index) {
+        return Err("ungrounded");
+    }
     Ok(LessonDraft {
         job_index,
         statement,
@@ -386,6 +456,32 @@ fn parse_lesson_line(line: &str, jobs: &[LessonJob]) -> Result<LessonDraft, &'st
         fix_tool_use_id: recovery_for(&turn.calls, failed_index).map(|fix| fix.id.clone()),
         cause_key: cause_key(&failed.name, &failed.error),
     })
+}
+
+/// A lesson must quote the failure and name what fixed it: it shares a word
+/// with the error, and one with the fixing call or a step before it. Catches
+/// lines about some other call of the turn, and generic advice that names
+/// neither ("check the syntax and retry").
+fn grounded_in_turn(statement: &str, turn: &LessonTurn, failed_index: usize) -> bool {
+    let words = |text: &str| -> BTreeSet<String> {
+        bigram_query_terms(text)
+            .into_iter()
+            .filter(|token| token.chars().count() >= 2 && !token.chars().all(|ch| ch.is_ascii_digit()))
+            .collect()
+    };
+    let said = words(statement);
+    let failed = &turn.calls[failed_index];
+    let mut fix_text = String::new();
+    if let Some(fix_index) = recovery_index(&turn.calls, failed_index) {
+        for step in steps_before_fix(&turn.calls, failed_index, fix_index) {
+            fix_text.push_str(&step.input);
+            fix_text.push(' ');
+        }
+        fix_text.push_str(&turn.calls[fix_index].input);
+    }
+    let quotes_error = !said.is_disjoint(&words(&failed.error));
+    let names_fix = !said.is_disjoint(&words(&fix_text));
+    quotes_error && names_fix
 }
 
 fn looks_like_network_failure(error: &str) -> bool {
@@ -423,6 +519,9 @@ pub fn key_error_lines(output: &str, limit: usize) -> Vec<String> {
         .map(str::trim)
         .filter(|line| line.chars().count() >= 3)
         .filter(|line| !line.to_lowercase().starts_with("traceback (most recent call last)"))
+        // Appended by the desktop to every failed result (tool_output.rs): the
+        // same words on unrelated failures, not part of the error.
+        .filter(|line| !line.starts_with("Recovery hint:"))
         .map(ToOwned::to_owned)
         .collect();
     let is_exception = |line: &str| {
@@ -524,8 +623,11 @@ fn one_line(text: &str, budget: usize) -> String {
 /// The parts of a tool input a lesson can name: command, path, query...
 #[must_use]
 pub fn input_digest(input: &str) -> String {
+    // `new_string` / `content` last: for an edit the writer needs to see what
+    // changed, not only which file.
     const KEYS: &[&str] = &[
         "command", "path", "file_path", "query", "pattern", "url", "code", "action", "cwd",
+        "new_string", "content",
     ];
     let digest = match serde_json::from_str::<serde_json::Value>(input) {
         Ok(serde_json::Value::Object(object)) => {
@@ -575,6 +677,265 @@ fn distinctive_error_tokens(text: &str) -> BTreeSet<String> {
 pub fn failure_query(tool: &str, input: &str, output: &str) -> String {
     let target: String = input_digest(input).chars().take(160).collect();
     format!("{tool} {target} {}", key_error_lines(output, 3).join(" "))
+}
+
+/// Error kinds, checked in order; the first kind with a matching marker wins.
+/// Both sides of a recall are classified by this same table, so consistency
+/// matters more than naming the root cause.
+const ERROR_CLASSES: &[(&str, &[&str])] = &[
+    (
+        "edit_mismatch",
+        &["old_string", "not found in file", "revision_conflict", "not unique", "multiple matches", "string to replace"],
+    ),
+    (
+        "latex",
+        &["undefined control sequence", "latex error", "emergency stop", "no output pdf", "! missing", "runaway argument"],
+    ),
+    (
+        "command_missing",
+        &[
+            "command not found",
+            "is not recognized as",
+            "commandnotfoundexception",
+            "不是内部或外部命令",
+        ],
+    ),
+    (
+        "module_missing",
+        &["modulenotfounderror", "no module named", "importerror", "cannot find module", "cannot import name"],
+    ),
+    (
+        "encoding",
+        &[
+            "unicodedecodeerror",
+            "unicodeencodeerror",
+            "codec can't",
+            "'gbk'",
+            "invalid byte sequence",
+            "illegal multibyte",
+            "invalid utf-8",
+            "charmap",
+            "编码",
+        ],
+    ),
+    (
+        "permission",
+        &[
+            "permission denied",
+            "access is denied",
+            "eacces",
+            "eperm",
+            "operation not permitted",
+            "unauthorizedaccess",
+            "拒绝访问",
+        ],
+    ),
+    (
+        "usage",
+        &[
+            "usage:",
+            "unrecognized argument",
+            "unknown option",
+            "invalid option",
+            "unexpected argument",
+            "parameterbinding",
+            "a parameter cannot be found",
+            "arguments are required",
+            "missing required",
+        ],
+    ),
+    (
+        "syntax",
+        &[
+            "syntaxerror",
+            "syntax error",
+            "parsererror",
+            "parse error",
+            "unexpected token",
+            "unexpected eof",
+            "unterminated",
+            "missing terminator",
+            "jsondecodeerror",
+            "invalid json",
+        ],
+    ),
+    ("timeout", &["timed out", "timeout", "deadline exceeded", "超时"]),
+    (
+        "network",
+        &[
+            "connection refused",
+            "connection reset",
+            "could not resolve host",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+            "ssl",
+            "certificate",
+            "proxy",
+        ],
+    ),
+    ("out_of_memory", &["memoryerror", "out of memory"]),
+    (
+        "path_missing",
+        &[
+            "no such file or directory",
+            "cannot find path",
+            "cannot find the path",
+            "does not exist",
+            "filenotfounderror",
+            "enoent",
+            "file not found",
+            "找不到",
+            "不存在",
+        ],
+    ),
+    (
+        "python_exception",
+        &["typeerror", "attributeerror", "keyerror", "valueerror", "nameerror", "indexerror", "runtimeerror", "assertionerror"],
+    ),
+];
+
+/// The kind of a failure from its decisive error lines ("" when no rule
+/// matches). Two failures of different kinds are not the same pitfall.
+#[must_use]
+pub fn error_class(error: &str) -> &'static str {
+    let text = key_error_lines(error, 3).join(" ").to_lowercase();
+    ERROR_CLASSES
+        .iter()
+        .find(|(_, markers)| markers.iter().any(|marker| text.contains(marker)))
+        .map_or("", |(name, _)| name)
+}
+
+/// The failure's words a lesson must share: in the tool name or the error
+/// lines (not in the command, whose program names and paths match lessons by
+/// accident), and in at most 20% of lessons. English function words pass the
+/// 20% rule because most lessons are written in Chinese, and matched unrelated
+/// lessons ("the", "not"), so they are dropped with the stock wording.
+fn distinctive_failure_words(
+    connection: &Connection,
+    tool: &str,
+    evidence_text: &str,
+    total: i64,
+    gates: LessonGates,
+) -> BTreeSet<String> {
+    let max_df = ((total as f64) * LESSON_DISTINCTIVE_MAX_SHARE).max(1.0);
+    let mut distinctive = BTreeSet::new();
+    for token in distinctive_error_tokens(&format!("{tool} {evidence_text}"))
+        .into_iter()
+        .filter(|token| !(gates.ignore_stock_wording && ENGLISH_FUNCTION_WORDS.contains(&token.as_str())))
+        .take(48)
+    {
+        let df: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM lessons_bi WHERE lessons_bi MATCH ?1",
+                [fts_or_expression(std::slice::from_ref(&token))],
+                |row| row.get(0),
+            )
+            .unwrap_or(i64::MAX);
+        if (df as f64) <= max_df {
+            distinctive.insert(token);
+        }
+    }
+    distinctive
+}
+
+fn looks_like_path(token: &str) -> bool {
+    let bytes = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')')).as_bytes();
+    // `x/y`, `x\y`, or a drive-qualified name like `E:foo`.
+    token.contains('/')
+        || token.contains('\\')
+        || (bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+/// The text without whitespace-separated tokens that are paths or URLs.
+/// (Keeping the last two components instead lost 8 dev hits in the replay:
+/// the tail words lifted the shared-word floor back to 2.)
+#[must_use]
+pub fn without_paths(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|token| !looks_like_path(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Wording that many unrelated failures share: a lesson matching only on it
+/// is about some other failure that happened to print the same template.
+const STOCK_ERROR_WORDING: &[&str] = &[
+    "no such file or directory",
+    "cannot access",
+    "command not found",
+    "is not recognized as the name of a cmdlet, function, script file, or operable program",
+    "is not recognized as an internal or external command",
+    "permission denied",
+    "does not exist",
+    "cannot find path",
+    "because it does not exist",
+    "an error occurred",
+    "error",
+    "failed",
+    // `/usr/bin/bash: line 1: rg: ...` once the path is gone.
+    "line",
+];
+
+/// Words that carry no failure-specific meaning in an English error line.
+const ENGLISH_FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "not", "no", "is", "are", "was", "were", "be", "been", "to", "of",
+    "in", "on", "at", "for", "with", "from", "by", "as", "it", "its", "this", "that", "can", "cannot",
+    "must", "after", "before", "if", "then", "than", "but", "into", "has", "have", "had", "do", "does",
+    "did", "will", "would", "should", "could", "may", "might", "so", "such", "any", "all", "some",
+    "when", "while", "there", "which", "what", "too", "many", "more", "most", "only", "also", "very",
+    "just", "each", "other", "same", "again", "out", "up",
+];
+
+/// The text without the stock wording of common errors (case-insensitive,
+/// whole words only: `FileNotFoundError` keeps its `error`).
+#[must_use]
+pub fn without_stock_wording(text: &str) -> String {
+    let mut lowered = text.to_lowercase();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    for phrase in STOCK_ERROR_WORDING {
+        let mut out = String::with_capacity(lowered.len());
+        let mut rest = lowered.as_str();
+        while let Some(at) = rest.find(phrase) {
+            let before_ok = !rest[..at].chars().next_back().is_some_and(is_word);
+            let after_ok = !rest[at + phrase.len()..].chars().next().is_some_and(is_word);
+            if before_ok && after_ok {
+                out.push_str(&rest[..at]);
+                out.push(' ');
+            } else {
+                out.push_str(&rest[..at + phrase.len()]);
+            }
+            rest = &rest[at + phrase.len()..];
+        }
+        out.push_str(rest);
+        lowered = out;
+    }
+    lowered
+}
+
+/// Which consistency checks recall applies on top of the shared-word floor.
+/// Both on in the product; the replay turns them off one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LessonGates {
+    /// Reject a lesson whose failure is of another known kind.
+    pub error_class: bool,
+    /// Path pieces of the error do not count as shared words.
+    pub ignore_paths: bool,
+    /// The stock wording of common errors does not count as shared words.
+    pub ignore_stock_wording: bool,
+    /// Specific words a lesson must share ([`LESSON_RECALL_MIN_SHARED`]).
+    pub min_shared: usize,
+}
+
+impl Default for LessonGates {
+    fn default() -> Self {
+        Self {
+            error_class: true,
+            ignore_paths: true,
+            ignore_stock_wording: true,
+            min_shared: LESSON_RECALL_MIN_SHARED,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +1026,7 @@ impl LessonStore {
                  CREATE INDEX IF NOT EXISTS lesson_jobs_pending ON lesson_jobs(status, session_id);",
             )
             .map_err(|error| error.to_string())?;
+        migrate_lesson_schema(&connection)?;
         Ok(connection)
     }
 
@@ -755,7 +1117,10 @@ impl LessonStore {
         let connection = self.open()?;
         for id in ids {
             connection
-                .execute("UPDATE lesson_jobs SET status = 'done' WHERE id = ?1", [id])
+                .execute(
+                    "UPDATE lesson_jobs SET status = 'done', finished_at = ?2 WHERE id = ?1",
+                    params![id, now_ms()],
+                )
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -768,9 +1133,10 @@ impl LessonStore {
             connection
                 .execute(
                     "UPDATE lesson_jobs SET attempts = attempts + 1, last_error = ?2,
-                       status = CASE WHEN attempts + 1 >= ?3 THEN 'failed' ELSE 'pending' END
+                       status = CASE WHEN attempts + 1 >= ?3 THEN 'failed' ELSE 'pending' END,
+                       finished_at = CASE WHEN attempts + 1 >= ?3 THEN ?4 ELSE 0 END
                      WHERE id = ?1",
-                    params![id, error.chars().take(500).collect::<String>(), max_attempts],
+                    params![id, error.chars().take(500).collect::<String>(), max_attempts, now_ms()],
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -815,18 +1181,24 @@ impl LessonStore {
             if let Some(id) = existing {
                 transaction
                     .execute(
-                        "UPDATE lessons SET seen = seen + 1, last_seen_at = ?2 WHERE id = ?1",
+                        "UPDATE lessons SET seen = seen + 1, last_seen_at = ?2, unhelpful = 0 WHERE id = ?1",
                         params![id, now],
                     )
                     .map_err(|error| error.to_string())?;
+                add_source(&transaction, &id, &job.session_id)?;
                 continue;
             }
             let id = lesson_id(&job.project_id, &job.session_id, &draft.tool_use_id, &draft.statement);
+            let failed_call = job.turn.calls.iter().find(|call| call.id == draft.tool_use_id);
+            let kind = match failed_call {
+                Some(call) => error_class(&call.error),
+                None => error_class(draft.cause_key.split_once(" | ").map_or("", |(_, error)| error)),
+            };
             let inserted = transaction
                 .execute(
                     "INSERT OR IGNORE INTO lessons(id, project_id, session_id, tool, tool_use_id,
-                       fix_tool_use_id, statement, cause_key, first_seen_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                       fix_tool_use_id, statement, cause_key, first_seen_at, last_seen_at, error_class)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
                     params![
                         id,
                         job.project_id,
@@ -836,13 +1208,15 @@ impl LessonStore {
                         draft.fix_tool_use_id,
                         draft.statement,
                         draft.cause_key,
-                        now
+                        now,
+                        kind
                     ],
                 )
                 .map_err(|error| error.to_string())?;
             if inserted == 0 {
                 continue;
             }
+            add_source(&transaction, &id, &job.session_id)?;
             let rowid = transaction.last_insert_rowid();
             let indexed = format!("{} {}", draft.tool, draft.statement);
             transaction
@@ -866,17 +1240,37 @@ impl LessonStore {
     /// Lessons that may explain this failure, from every project. Returns
     /// nothing when the failure is only an exit code, when it is a fetch
     /// tool's network failure, or when no lesson shares at least
-    /// [`LESSON_RECALL_MIN_SHARED`] distinctive words with the error.
+    /// [`LESSON_RECALL_MIN_SHARED`] distinctive words with the error, not
+    /// counting its paths and stock wording. A lesson about another kind of
+    /// failure is skipped: see [`LessonGates`].
     pub fn recall_for_failure(
         &self,
         tool: &str,
         input: &str,
         output: &str,
     ) -> Result<Vec<RecalledLesson>, String> {
+        self.recall_for_failure_gated(tool, input, output, LessonGates::default())
+    }
+
+    /// [`Self::recall_for_failure`] with a chosen set of consistency checks.
+    pub fn recall_for_failure_gated(
+        &self,
+        tool: &str,
+        input: &str,
+        output: &str,
+        gates: LessonGates,
+    ) -> Result<Vec<RecalledLesson>, String> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
         let error_text = key_error_lines(output, 3).join(" ");
+        // The words a lesson must share: the error without its paths (path
+        // pieces matched unrelated lessons that named the same project or
+        // install folder) and without the stock wording of common errors.
+        let mut evidence_text = if gates.ignore_paths { without_paths(&error_text) } else { error_text.clone() };
+        if gates.ignore_stock_wording {
+            evidence_text = without_stock_wording(&evidence_text);
+        }
         if !failure_is_informative(&error_text) {
             return Ok(Vec::new());
         }
@@ -919,66 +1313,280 @@ impl LessonStore {
         }
         fused.sort_by(|left, right| right.1.total_cmp(&left.1));
 
-        // Distinctive words: in the tool name or the error lines (not in the
-        // command, whose program names and paths match lessons by accident),
-        // and in at most 20% of lessons.
-        let max_df = ((total as f64) * LESSON_DISTINCTIVE_MAX_SHARE).max(1.0);
-        let mut distinctive = BTreeSet::new();
-        for token in distinctive_error_tokens(&format!("{tool} {error_text}"))
-            .into_iter()
-            .take(48)
-        {
-            let df: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM lessons_bi WHERE lessons_bi MATCH ?1",
-                    [fts_or_expression(std::slice::from_ref(&token))],
-                    |row| row.get(0),
-                )
-                .unwrap_or(i64::MAX);
-            if (df as f64) <= max_df {
-                distinctive.insert(token);
-            }
-        }
+        let distinctive = distinctive_failure_words(&connection, tool, &evidence_text, total, gates);
 
+        // In a small store the 20% rule admits any word found in one lesson,
+        // so almost everything is "distinctive": with 3 lessons in-app an
+        // unrelated one was attached. Ask for more overlap until the store
+        // has enough lessons for document frequency to mean something.
+        let mut min_shared = if total < LESSON_SMALL_STORE {
+            gates.min_shared + 1
+        } else {
+            gates.min_shared
+        };
+        if gates.ignore_paths || gates.ignore_stock_wording {
+            // Without paths and stock wording, `rg: command not found` leaves
+            // one specific word; it must then be shared, and nothing else can be.
+            if distinctive.is_empty() {
+                return Ok(Vec::new());
+            }
+            min_shared = min_shared.min(distinctive.len());
+        }
+        let failure_kind = error_class(&error_text);
         let mut recalled = Vec::new();
         for (rowid, score) in fused {
             let row = connection
                 .query_row(
-                    "SELECT statement, project_id, seen, last_seen_at, tool FROM lessons
-                     WHERE rowid = ?1 AND status = 'active'",
+                    "SELECT statement, project_id, seen, last_seen_at, tool, id, error_class
+                     FROM lessons WHERE rowid = ?1 AND status = 'active'",
                     [rowid],
                     |row| {
                         Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, String>(4)?,
+                            (
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                            ),
+                            row.get::<_, String>(6)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(|error| error.to_string())?;
-            let Some((statement, project_id, seen, last_seen_at_ms, lesson_tool)) = row else {
+            let Some(((statement, project_id, seen, last_seen_at_ms, lesson_tool, id), lesson_kind)) = row else {
                 continue;
             };
+            // Unknown on either side means no evidence either way: keep it.
+            if gates.error_class && !failure_kind.is_empty() && !lesson_kind.is_empty() && lesson_kind != failure_kind {
+                continue;
+            }
             let lesson_tokens: BTreeSet<String> =
                 bigram_query_terms(&format!("{lesson_tool} {statement}")).into_iter().collect();
-            if distinctive.intersection(&lesson_tokens).count() < LESSON_RECALL_MIN_SHARED {
+            let shared_words = distinctive.intersection(&lesson_tokens).count();
+            if shared_words < min_shared {
                 continue;
             }
             recalled.push(RecalledLesson {
+                id,
                 statement,
                 project_id,
                 seen,
                 last_seen_at_ms,
                 score,
+                shared_words,
             });
             if recalled.len() >= LESSON_RECALL_LIMIT {
                 break;
             }
         }
         Ok(recalled)
+    }
+
+    /// Count a delivery of these lessons (for the Settings list and the
+    /// unused-lesson rule).
+    pub fn record_recalled(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() || !self.path.exists() {
+            return Ok(());
+        }
+        let connection = self.open()?;
+        let now = now_ms();
+        for id in ids {
+            connection
+                .execute(
+                    "UPDATE lessons SET recalled = recalled + 1, last_recalled_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Settle lessons delivered for a failed call once its turn ended: did the
+    /// call get fixed in that turn? Two unhelpful deliveries in a row mark a
+    /// lesson stale -- it is no longer recalled, and is deleted 90 days later.
+    pub fn record_outcome(&self, ids: &[String], fixed: bool) -> Result<(), String> {
+        if ids.is_empty() || !self.path.exists() {
+            return Ok(());
+        }
+        let connection = self.open()?;
+        let now = now_ms();
+        for id in ids {
+            let statement = if fixed {
+                "UPDATE lessons SET unhelpful = 0 WHERE id = ?1"
+            } else {
+                "UPDATE lessons SET unhelpful = unhelpful + 1,
+                   status = CASE WHEN unhelpful + 1 >= ?3 AND status = 'active' THEN 'stale' ELSE status END,
+                   status_changed_at = CASE WHEN unhelpful + 1 >= ?3 AND status = 'active' THEN ?2 ELSE status_changed_at END
+                 WHERE id = ?1"
+            };
+            if fixed {
+                connection.execute(statement, [id])
+            } else {
+                connection.execute(statement, params![id, now, LESSON_STALE_AFTER_UNHELPFUL])
+            }
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// The user deleted a chat: drop it as a source, delete lessons that no
+    /// other chat taught, and its queued turns. A store that does not exist is
+    /// not created. Returns the number of lessons deleted.
+    pub fn forget_session(&self, session_id: &str) -> Result<usize, String> {
+        if !self.path.exists() {
+            return Ok(0);
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let orphaned: Vec<String> = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT lesson_id FROM lesson_sources WHERE session_id = ?1
+                       AND lesson_id NOT IN
+                         (SELECT lesson_id FROM lesson_sources WHERE session_id != ?1)",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([session_id], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for id in &orphaned {
+            delete_lesson_rows(&transaction, id)?;
+        }
+        transaction
+            .execute("DELETE FROM lesson_sources WHERE session_id = ?1", [session_id])
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM lesson_jobs WHERE session_id = ?1", [session_id])
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(orphaned.len())
+    }
+
+    /// Delete one lesson (Settings).
+    pub fn delete(&self, id: &str) -> Result<bool, String> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let deleted = delete_lesson_rows(&transaction, id)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(deleted)
+    }
+
+    /// Turn a lesson on or off (Settings): `active` or `archived`. Re-activating
+    /// clears its unhelpful streak.
+    pub fn set_status(&self, id: &str, active: bool) -> Result<bool, String> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let connection = self.open()?;
+        let changed = connection
+            .execute(
+                "UPDATE lessons SET status = ?2, status_changed_at = ?3, unhelpful = 0 WHERE id = ?1",
+                params![id, if active { "active" } else { "archived" }, now_ms()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed > 0)
+    }
+
+    /// Retention. Run now and then (the writer does, at most hourly):
+    /// * finished writer jobs (they hold turn text) go after 7 days, dropped
+    ///   ones after 30;
+    /// * stale lessons are deleted 90 days after they went stale;
+    /// * active lessons neither seen nor recalled for 180 days are archived
+    ///   (kept, listed, not recalled): the environment they describe has
+    ///   probably changed;
+    /// * beyond 2,000 active lessons, the least seen and least recent are
+    ///   archived.
+    pub fn cleanup(&self, now_ms: i64) -> Result<LessonCleanup, String> {
+        if !self.path.exists() {
+            return Ok(LessonCleanup::default());
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let mut report = LessonCleanup::default();
+        report.jobs_deleted = transaction
+            .execute(
+                "DELETE FROM lesson_jobs WHERE
+                   (status = 'done' AND (CASE WHEN finished_at > 0 THEN finished_at ELSE created_at END) < ?1)
+                   OR (status = 'failed' AND (CASE WHEN finished_at > 0 THEN finished_at ELSE created_at END) < ?2)",
+                params![now_ms - 7 * DAY_MS, now_ms - 30 * DAY_MS],
+            )
+            .map_err(|error| error.to_string())?;
+        let stale: Vec<String> = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM lessons WHERE status = 'stale' AND status_changed_at < ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([now_ms - 90 * DAY_MS], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.filter_map(Result::ok).collect()
+        };
+        for id in &stale {
+            delete_lesson_rows(&transaction, id)?;
+        }
+        report.stale_deleted = stale.len();
+        report.archived_unused = transaction
+            .execute(
+                "UPDATE lessons SET status = 'archived', status_changed_at = ?1
+                 WHERE status = 'active' AND max(last_seen_at, last_recalled_at) < ?2",
+                params![now_ms, now_ms - 180 * DAY_MS],
+            )
+            .map_err(|error| error.to_string())?;
+        report.archived_over_cap = transaction
+            .execute(
+                "UPDATE lessons SET status = 'archived', status_changed_at = ?1
+                 WHERE id IN (
+                   SELECT id FROM lessons WHERE status = 'active'
+                   ORDER BY seen DESC, max(last_seen_at, last_recalled_at) DESC
+                   LIMIT -1 OFFSET ?2)",
+                params![now_ms, LESSON_ACTIVE_CAP],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(report)
+    }
+
+    /// Every lesson with its counters, most recently seen first (Settings).
+    pub fn list_views(&self, limit: usize) -> Result<Vec<LessonView>, String> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let connection = self.open()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, project_id, tool, statement, seen, recalled, status,
+                        last_seen_at, last_recalled_at,
+                        (SELECT count(*) FROM lesson_sources WHERE lesson_id = lessons.id)
+                 FROM lessons
+                 ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END,
+                          max(last_seen_at, last_recalled_at) DESC
+                 LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok(LessonView {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    tool: row.get(2)?,
+                    statement: row.get(3)?,
+                    seen: row.get(4)?,
+                    recalled: row.get(5)?,
+                    status: row.get(6)?,
+                    last_seen_at_ms: row.get(7)?,
+                    last_recalled_at_ms: row.get(8)?,
+                    sources: row.get(9)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(rows.filter_map(Result::ok).collect())
     }
 
     /// Active lessons, newest first (for inspection surfaces and tests).
@@ -998,6 +1606,165 @@ impl LessonStore {
             .map_err(|error| error.to_string())?;
         Ok(rows.filter_map(Result::ok).collect())
     }
+}
+
+const DAY_MS: i64 = 24 * 3_600_000;
+/// Unhelpful deliveries in a row (the failure it was attached to was not fixed
+/// in that turn) before a lesson goes stale.
+const LESSON_STALE_AFTER_UNHELPFUL: i64 = 2;
+/// Most active lessons kept; the rest are archived by `cleanup`.
+const LESSON_ACTIVE_CAP: i64 = 2_000;
+const LESSON_SCHEMA_VERSION: i64 = 3;
+
+/// What one `LessonStore::cleanup` pass changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LessonCleanup {
+    pub jobs_deleted: usize,
+    pub stale_deleted: usize,
+    pub archived_unused: usize,
+    pub archived_over_cap: usize,
+}
+
+/// A lesson as the Settings list shows it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LessonView {
+    pub id: String,
+    pub project_id: String,
+    pub tool: String,
+    pub statement: String,
+    pub seen: i64,
+    pub recalled: i64,
+    /// `active`, `stale` (stopped helping) or `archived` (unused, or turned off).
+    pub status: String,
+    pub last_seen_at_ms: i64,
+    pub last_recalled_at_ms: i64,
+    /// Chats this lesson was learned from that still exist.
+    pub sources: i64,
+}
+
+/// Schema v2: recall counters, an unhelpful streak, when the status last
+/// changed, which chats taught each lesson, and when a job finished.
+/// Schema v3: the kind of the failure a lesson was learned from. Every step
+/// is idempotent, so a v2 store runs them all again.
+fn migrate_lesson_schema(connection: &Connection) -> Result<(), String> {
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if version >= LESSON_SCHEMA_VERSION {
+        return Ok(());
+    }
+    let columns = |table: &str| -> Result<BTreeSet<String>, String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?;
+        Ok(rows.filter_map(Result::ok).collect())
+    };
+    let lesson_columns = columns("lessons")?;
+    for (name, definition) in [
+        ("recalled", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_recalled_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("unhelpful", "INTEGER NOT NULL DEFAULT 0"),
+        ("status_changed_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("error_class", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !lesson_columns.contains(name) {
+            connection
+                .execute(&format!("ALTER TABLE lessons ADD COLUMN {name} {definition}"), [])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if !lesson_columns.contains("error_class") {
+        // v3: older lessons get their kind from the error line kept in the
+        // cause key.
+        let rows: Vec<(String, String)> = {
+            let mut statement = connection
+                .prepare("SELECT id, cause_key FROM lessons")
+                .map_err(|error| error.to_string())?;
+            let mapped = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| error.to_string())?;
+            mapped.filter_map(Result::ok).collect()
+        };
+        for (id, cause) in rows {
+            let error = cause.split_once(" | ").map_or("", |(_, error)| error);
+            connection
+                .execute("UPDATE lessons SET error_class = ?2 WHERE id = ?1", params![id, error_class(error)])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if !columns("lesson_jobs")?.contains("finished_at") {
+        connection
+            .execute("ALTER TABLE lesson_jobs ADD COLUMN finished_at INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS lesson_sources(
+               lesson_id TEXT NOT NULL,
+               session_id TEXT NOT NULL,
+               PRIMARY KEY(lesson_id, session_id)
+             );
+             CREATE INDEX IF NOT EXISTS lesson_sources_session ON lesson_sources(session_id);
+             INSERT OR IGNORE INTO lesson_sources(lesson_id, session_id)
+               SELECT id, session_id FROM lessons;
+             PRAGMA user_version = {LESSON_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())
+}
+
+fn add_source(connection: &Connection, lesson_id: &str, session_id: &str) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO lesson_sources(lesson_id, session_id) VALUES (?1, ?2)",
+            params![lesson_id, session_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Delete a lesson with its search rows and sources. `true` if it existed.
+fn delete_lesson_rows(connection: &Connection, id: &str) -> Result<bool, String> {
+    let rowid: Option<i64> = connection
+        .query_row("SELECT rowid FROM lessons WHERE id = ?1", [id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(rowid) = rowid else {
+        return Ok(false);
+    };
+    for statement in [
+        "DELETE FROM lessons_bi WHERE rowid = ?1",
+        "DELETE FROM lessons_tri WHERE rowid = ?1",
+    ] {
+        connection
+            .execute(statement, [rowid])
+            .map_err(|error| error.to_string())?;
+    }
+    connection
+        .execute("DELETE FROM lesson_sources WHERE lesson_id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute("DELETE FROM lessons WHERE id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// Failed calls of a turn that a later call fixed (same rule as lesson
+/// capture), so a delivered lesson can be judged at turn end.
+#[must_use]
+pub fn fixed_failure_ids(messages: &[ConversationMessage]) -> BTreeSet<String> {
+    let Some(turn) = lesson_turn_from_messages(messages) else {
+        return BTreeSet::new();
+    };
+    turn.calls
+        .iter()
+        .enumerate()
+        .filter(|(index, call)| call.failed && recovery_index(&turn.calls, *index).is_some())
+        .map(|(_, call)| call.id.clone())
+        .collect()
 }
 
 fn fts_rowids(connection: &Connection, table: &str, expression: &str) -> Result<Vec<i64>, String> {

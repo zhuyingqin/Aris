@@ -2172,12 +2172,18 @@ where
                         &self.project_id,
                     );
                     context_output = attach_recovery_hint(tool_name, &context_output);
-                    if let Some((block, count)) = lessons {
+                    if let Some((block, lesson_ids)) = lessons {
                         context_output = attach_past_lessons(context_output, &block);
+                        crate::memory::note_lessons_delivered(&self.session_id, tool_use_id, &lesson_ids);
                         crate::chat_events::record_event(
                             &self.session_id,
                             "lesson_recall",
-                            json!({ "toolUseId": tool_use_id, "tool": tool_name, "lessons": count }),
+                            json!({
+                                "toolUseId": tool_use_id,
+                                "tool": tool_name,
+                                "lessons": lesson_ids.len(),
+                                "lessonIds": lesson_ids,
+                            }),
                         );
                     }
                 }
@@ -2254,17 +2260,23 @@ where
                 }
                 let raw_error = error.to_string();
                 let mut output = format_tool_error_with_recovery(tool_name, &raw_error);
-                if let Some((block, count)) = crate::memory::past_lessons_for_failure(
+                if let Some((block, lesson_ids)) = crate::memory::past_lessons_for_failure(
                     tool_name,
                     input,
                     &raw_error,
                     &self.project_id,
                 ) {
                     output = attach_past_lessons(output, &block);
+                    crate::memory::note_lessons_delivered(&self.session_id, tool_use_id, &lesson_ids);
                     crate::chat_events::record_event(
                         &self.session_id,
                         "lesson_recall",
-                        json!({ "toolUseId": tool_use_id, "tool": tool_name, "lessons": count }),
+                        json!({
+                            "toolUseId": tool_use_id,
+                            "tool": tool_name,
+                            "lessons": lesson_ids.len(),
+                            "lessonIds": lesson_ids,
+                        }),
                     );
                 }
                 Err(ToolError::new(output))
@@ -9661,17 +9673,27 @@ async fn run_chat_turn_with_context(
                 &executor_config, &model, permission_mode, &feature_config, worker_cancelled.clone(), &mcp_bundle.tool_specs);
         }
         let persisted_review_memory = load_persisted_review_memory(&worker_session_id);
+        let recall_placement = crate::memory::recall_placement(&worker_session_id);
         let recalled_memory = if worker_workflow.is_none() && worker_paper_reading.is_none() && !ephemeral {
             worker_app
                 .state::<crate::memory::MemoryState>()
-                .builtin_research_recall_prompt(
+                .builtin_research_recall(
                     &worker_project_id,
                     &worker_session_id,
                     &worker_user_text,
+                    recall_placement,
                 )
         } else {
             None
         };
+        // A user-side block rides on this turn's request only; see
+        // `RecallPlacement`.
+        let (recalled_memory, mut user_side_recall) =
+            if recall_placement == crate::memory::RecallPlacement::User {
+                (None, recalled_memory)
+            } else {
+                (recalled_memory, None)
+            };
         let mut system_prompt = if worker_paper_reading.is_some() {
             PaperReadingRuntimeContext::system_prompt()
         } else { worker_workflow.as_ref().map_or_else(
@@ -9902,6 +9924,7 @@ async fn run_chat_turn_with_context(
             };
         }
         let review_user_anchor = user_message.clone();
+        runtime.set_turn_context(user_side_recall.take());
         let summary_result = runtime.run_turn_message(user_message, permission_prompter!());
         // Recorded before the error branch: a turn that failed still published
         // tool schemas and still reached for deferred tools, and re-cutting the
@@ -10368,6 +10391,7 @@ async fn run_chat_turn_with_context(
     // function: usage, compaction and the other closing events carry it too.
     let _turn_scope = crate::chat_events::TurnTag::new(&session_id, &audit_turn_id).enter();
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
+    crate::memory::settle_delivered_lessons(&session_id, &updated);
     if capture_research_memory && !ephemeral && !workflow_mode && !autonomous_workflow {
         // L1 lessons are independent of the v2 pipeline mode: a turn whose
         // tool failure was recovered is queued for the batched writer.
@@ -10861,8 +10885,16 @@ pub fn chat_delete(
         None => chat_session_path(&session_id)?,
     };
     if path.exists() {
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
+    // Out of search (and so out of later recall blocks) now, not at the next
+    // project activation. A failure here is repaired by that background sync.
+    if let Some(sessions_dir) = path.parent() {
+        if let Err(error) = runtime::forget_indexed_session(sessions_dir, &session_id) {
+            eprintln!("SomniQ desktop: deleted chat stays in the search index until repair: {error}");
+        }
+    }
+    crate::memory::forget_session_lessons(&session_id);
     if let Ok(events_path) = crate::chat_events::chat_event_log_path(&session_id) {
         if events_path.exists() {
             std::fs::remove_file(events_path).map_err(|e| e.to_string())?;

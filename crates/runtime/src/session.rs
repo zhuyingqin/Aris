@@ -688,10 +688,11 @@ const SESSION_CHECKPOINT_KIND: &str = "session_checkpoint";
 /// started whom and who told whom what, so compaction never removes them.
 const DURABLE_EVENT_KIND_PREFIX: &str = "agent.";
 /// Small audit rows nothing else records: which past lessons were attached to
-/// which failed tool call. Without this the checkpoint after the turn erased
-/// every `lesson_recall` row (seen in-app), so a delivered lesson could not be
-/// traced afterwards.
-const DURABLE_EVENT_KINDS: &[&str] = &["lesson_recall"];
+/// which failed tool call, and which history each turn's recall block carried.
+/// Without this the checkpoint after the turn erased them (seen in-app), so
+/// whether memory is ever used could not be measured from real sessions. Both
+/// carry references and counts, not the recalled text (a few hundred bytes).
+const DURABLE_EVENT_KINDS: &[&str] = &["lesson_recall", "memory_recall"];
 
 /// What a compaction pass removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
