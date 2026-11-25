@@ -7,18 +7,22 @@ import type { Language } from "../../store";
 export const LATEX_REFERENCE_TOOLTIP_COPY: Record<Language, {
   undefinedLabel: string;
   definedOnLine: (line: number) => string;
+  definedInFile: (file: string) => string;
 }> = {
   en: {
-    undefinedLabel: "No \\label with this key in this file.",
+    undefinedLabel: "No \\label with this key in this document.",
     definedOnLine: (line: number): string => `Defined on line ${line}`,
+    definedInFile: (file: string): string => `Defined in ${file}`,
   },
   es: {
-    undefinedLabel: "No hay ningún \\label con esta clave en este archivo.",
+    undefinedLabel: "No hay ningún \\label con esta clave en este documento.",
     definedOnLine: (line: number): string => `Definido en la línea ${line}`,
+    definedInFile: (file: string): string => `Definido en ${file}`,
   },
   cn: {
-    undefinedLabel: "本文件中没有这个 \\label。",
+    undefinedLabel: "本文档中没有这个 \\label。",
     definedOnLine: (line: number): string => `定义在第 ${line} 行`,
+    definedInFile: (file: string): string => `定义在 ${file}`,
   },
 };
 
@@ -70,24 +74,28 @@ export const LATEX_COMPLETION_CATEGORY_COPY: Record<Language, Record<string, str
 /** Messages of the compile-free LaTeX checks (duplicate labels, dangling references, …). */
 export const LATEX_LINT_COPY: Record<Language, {
   duplicateLabel: (name: string) => string;
+  duplicateLabelAcrossFiles: (name: string) => string;
   undefinedReference: (name: string) => string;
   unknownCitation: (name: string) => string;
   unclosedEnvironment: (name: string) => string;
 }> = {
   en: {
     duplicateLabel: (name) => `Label "${name}" is already defined in this file — LaTeX keeps the last one and every \\ref to it becomes ambiguous.`,
+    duplicateLabelAcrossFiles: (name) => `Label "${name}" is also defined in another file of this document; references to it are ambiguous.`,
     undefinedReference: (name) => `No \\label{${name}} anywhere in this document — the reference will typeset as "??".`,
     unknownCitation: (name) => `Citation key "${name}" is not in the project bibliography.`,
     unclosedEnvironment: (name) => `Environment "${name}" has no matching \\end{${name}}.`,
   },
   es: {
     duplicateLabel: (name) => `La etiqueta "${name}" ya está definida en este archivo: LaTeX conserva la última y cada \\ref a ella se vuelve ambigua.`,
+    duplicateLabelAcrossFiles: (name) => `La etiqueta "${name}" también está definida en otro archivo de este documento; las referencias a ella son ambiguas.`,
     undefinedReference: (name) => `No hay ningún \\label{${name}} en este documento: la referencia cruzada aparecerá como "??" al compilar.`,
     unknownCitation: (name) => `La clave de cita "${name}" no está en la bibliografía del proyecto.`,
     unclosedEnvironment: (name) => `El entorno "${name}" no tiene su \\end{${name}} correspondiente.`,
   },
   cn: {
     duplicateLabel: (name) => `标签“${name}”已在本文件中定义过——LaTeX 只保留最后一个，指向它的每个 \\ref 都会有歧义。`,
+    duplicateLabelAcrossFiles: (name) => `标签“${name}”在本文档的另一个文件中也定义了，指向它的引用会有歧义。`,
     undefinedReference: (name) => `本文档中没有 \\label{${name}}——编译后这个引用会显示为“??”。`,
     unknownCitation: (name) => `引用键“${name}”不在项目参考文献中。`,
     unclosedEnvironment: (name) => `环境“${name}”缺少对应的 \\end{${name}}。`,

@@ -4,6 +4,7 @@ import type { EditorView } from "@codemirror/view";
 import { useStore } from "../store";
 import type { Language } from "../language";
 import { LATEX_COMPLETION_CATEGORY_COPY } from "./latex/latexCopy";
+import { mathMacrosFor, stripLatexComments } from "./latex/mathMacros";
 
 /**
  * LaTeX autocomplete for the Typeset (and Lab `.tex`) editors. CodeMirror ships
@@ -26,6 +27,16 @@ export interface LatexProjectSymbols {
   citations: LatexSymbol[];
   /** Project-relative paths, for `\includegraphics{}` / `\input{}` / `.bib`. */
   files: LatexSymbol[];
+  /**
+   * The keys the document's own bibliography defines — its `.bib` files once
+   * loaded, `\bibitem`s, and the library only when the managed bibliography
+   * is declared. `null` while that is not known yet, which turns the
+   * citation check off rather than flagging every `\cite` in the meantime.
+   * (`citations` is wider on purpose: completion may offer the library.)
+   */
+  bibliographyKeys?: readonly string[] | null;
+  /** Labels defined in more than one file of the document. */
+  crossFileDuplicateLabels?: ReadonlySet<string>;
 }
 
 const EMPTY_SYMBOLS: LatexProjectSymbols = { labels: [], citations: [], files: [] };
@@ -281,16 +292,58 @@ function environmentApply(name: string, body: string | undefined, closing: boole
   };
 }
 
-function environmentResult(from: number, kind: "begin" | "end"): CompletionResult {
+/** Environments the document declares itself (`\newtheorem{lemma}{Lemma}`,
+ * `\newenvironment`, tcolorbox's `\newtcolorbox`). */
+function documentEnvironments(text: string): string[] {
+  const names = new Set<string>();
+  const declaration = /\\(?:newtheorem|newenvironment|renewenvironment|newtcolorbox|newtcbtheorem|DeclareTColorBox|newmdenv)\*?\s*(?:\[[^\]]*\]\s*)?\{([A-Za-z@*]+)\}/g;
+  for (let match = declaration.exec(text); match; match = declaration.exec(text)) names.add(match[1]);
+  return [...names];
+}
+
+/** The innermost environment still open at the end of `text`. */
+function innermostOpenEnvironment(text: string): string | null {
+  const stack: string[] = [];
+  const marker = /\\(begin|end)\s*\{([^{}]+)\}/g;
+  for (let match = marker.exec(text); match; match = marker.exec(text)) {
+    const name = match[2].trim();
+    if (match[1] === "begin") stack.push(name);
+    else {
+      const open = stack.lastIndexOf(name);
+      if (open >= 0) stack.length = open;
+    }
+  }
+  return stack[stack.length - 1] ?? null;
+}
+
+function environmentResult(state: EditorState, from: number, kind: "begin" | "end"): CompletionResult {
+  const text = stripLatexComments(state.doc.toString());
+  const builtin = new Set(ENVIRONMENTS.map(([name]) => name));
+  const own = documentEnvironments(text).filter((name) => !builtin.has(name));
+  // `\end{` most often closes what is open; offer that first.
+  const closing = kind === "end"
+    ? innermostOpenEnvironment(stripLatexComments(state.doc.sliceString(0, Math.max(0, from - "\\end{".length))))
+    : null;
+  const entries: Array<readonly [string, string?]> = [...ENVIRONMENTS, ...own.map((name) => [name] as const)];
   return {
     from,
-    options: ENVIRONMENTS.map(([name, body]) => ({
+    options: entries.map(([name, body]) => ({
       label: name,
       type: "class",
+      detail: builtin.has(name) ? undefined : "document",
+      boost: name === closing ? 99 : undefined,
       apply: environmentApply(name, body, kind === "begin"),
     })),
     validFor: /^[\w*]*$/,
   };
+}
+
+/** `\newcommand{\R}…` and `\DeclareMathOperator{\Tr}…` from the document. */
+function documentCommandOptions(state: EditorState): Completion[] {
+  const builtin = new Set(COMMANDS.map(([name]) => name));
+  return Object.keys(mathMacrosFor(state))
+    .filter((name) => /^\\[A-Za-z@]+$/.test(name) && !builtin.has(name))
+    .map((name) => ({ label: name, type: "function", detail: "document macro" }));
 }
 
 function symbolOptions(symbols: LatexSymbol[], type: string): Completion[] {
@@ -303,13 +356,21 @@ function documentLabels(state: EditorState): LatexSymbol[] {
   const symbols: LatexSymbol[] = [];
   const seen = new Set<string>();
   const re = /\\label\s*\{([^{}]+)\}/g;
-  const text = state.doc.toString();
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text))) {
-    const name = match[1].trim();
-    if (!name || seen.has(name)) continue;
+  // A commented-out \label defines nothing; offering it compiles to "??".
+  const text = stripLatexComments(state.doc.toString());
+  const add = (raw: string) => {
+    const name = raw.trim();
+    if (!name || seen.has(name)) return;
     seen.add(name);
     symbols.push({ name });
+  };
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text))) add(match[1]);
+  // `\begin{lstlisting}[label=lst:x]` and friends.
+  const options = /\\begin\s*\{[^}]+\}\s*\[([^\]]*)\]/g;
+  while ((match = options.exec(text))) {
+    const label = /(?:^|,)\s*label\s*=\s*\{?\s*([^,}\]\s]+)/.exec(match[1]);
+    if (label) add(label[1]);
   }
   return symbols;
 }
@@ -341,7 +402,7 @@ export function latexCompletionSource(context: CompletionContext): CompletionRes
 
   const environment = /\\(begin|end)\s*\{([^{}]*)$/.exec(before);
   if (environment) {
-    return environmentResult(context.pos - environment[2].length, environment[1] as "begin" | "end");
+    return environmentResult(context.state, context.pos - environment[2].length, environment[1] as "begin" | "end");
   }
 
   // Inside a command's brace argument: only keys make sense, never commands.
@@ -370,11 +431,21 @@ export function latexCompletionSource(context: CompletionContext): CompletionRes
   if (!command) return null;
   // Bare `\` with nothing typed still opens the list — that is the discovery
   // path for writers who don't know the command name yet.
-  return { from: context.pos - command[1].length - 1, options: commandOptions(), validFor: /^\\[a-zA-Z]*$/ };
+  return {
+    from: context.pos - command[1].length - 1,
+    options: [...commandOptions(), ...documentCommandOptions(context.state)],
+    validFor: /^\\[a-zA-Z]*$/,
+  };
 }
 
 /** Registers the source as language data so it composes with the shared
  * `autocompletion()` already configured in `editorState.ts`. */
 export function latexCompletion(): Extension {
-  return EditorState.languageData.of(() => [{ autocomplete: latexCompletionSource }]);
+  return EditorState.languageData.of(() => [{
+    autocomplete: latexCompletionSource,
+    // LaTeX quotes with ``…'' and uses ' for primes and apostrophes, so the
+    // default auto-closing of ' and " only gets in the way — while $ is the
+    // pair a writer types all day. (Read by `closeBrackets()` when enabled.)
+    closeBrackets: { brackets: ["(", "[", "{", "$"] },
+  }]);
 }

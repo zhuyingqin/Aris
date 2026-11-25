@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { EditorView, type KeyBinding } from "@codemirror/view";
+import { EditorView, type KeyBinding, type ViewUpdate } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
-import { Transaction } from "@codemirror/state";
+import { Prec, StateEffect, Transaction } from "@codemirror/state";
 import "katex/dist/katex.min.css";
 
 import { isFilePreviewMode } from "../api/browserPreview";
@@ -11,7 +11,12 @@ import {
   fileCreateText,
   fileReadText,
   fileSearch,
+  fileOpen,
   fileWriteText,
+  typesetCommentsList,
+  typesetTrackedChangesLoad,
+  typesetTrackedChangesSave,
+  type TypesetComment,
   isTauri,
   latexCompile,
   latexCompileCancel,
@@ -47,6 +52,8 @@ import {
   typesetExportProject,
   type TypesetOutputFile,
   typesetImportImageData,
+  typesetProjectSettingsRead,
+  typesetProjectSettingsWrite,
   typesetListDocuments,
   typesetRecoveryClear,
   typesetRecoveryLoad,
@@ -91,6 +98,14 @@ import CodeEditor, {
   type CodeReviewDecision,
 } from "../editor/CodeEditor";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
+import TypesetRenameLabelDialog from "./TypesetRenameLabelDialog";
+import {
+  bibEntryOffset,
+  labelSites,
+  latexNavigationTargetAt,
+  renameLabelInSource,
+  type LatexNavigationTarget,
+} from "../editor/latexNavigation";
 import {
   type TypesetTemplate,
 } from "./TypesetLibraryCopy";
@@ -104,8 +119,9 @@ import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { minimalReplacement } from "../editor/editorView";
 import { clearLatexProjectSymbols, setLatexProjectSymbols, type LatexSymbol } from "../editor/latexComplete";
-import { bibEntryDetail, bibliographyTargets, parseBibEntries } from "../editor/latexBib";
-import { setLatexCompileMarkers, type LatexCompileMarker } from "../editor/latexLint";
+import { bibEntryDetail, bibliographyTargets, parseBibEntries, withoutBibEntries } from "../editor/latexBib";
+import { optionLabels, refreshLatexDiagnostics, setLatexCompileMarkers, type LatexCompileMarker } from "../editor/latexLint";
+import { mathMacrosFromSource, mathMacrosKey, stripLatexComments, type MathMacros } from "../editor/latex/mathMacros";
 import { useStore } from "../store";
 import { languageLocale, tr } from "../language";
 import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
@@ -117,7 +133,6 @@ import {
 import CompileLog from "./CompileLog";
 import TypesetEditorSettings from "./TypesetEditorSettings";
 import TypesetAiPanel from "./TypesetAiPanel";
-import TypesetReviewPanel from "./TypesetReviewPanel";
 import {
   compileErrorHandlingStorageKey,
   loadCompileErrorHandling,
@@ -139,13 +154,17 @@ import {
 } from "./typesetPreferences";
 import { useTypesetPanels } from "./useTypesetPanels";
 import TypesetEditorToolbar from "./TypesetEditorToolbar";
+import { starterTemplate, type StarterTemplateId } from "./latexTemplates";
 import {
+  activeEditorAdapter,
+  wrapSelection,
   type EditorMode,
 } from "./editorCommands";
 import TypesetStartPage from "./TypesetStartPage";
 import TypesetExplorer, { defaultSourceFor, type TypesetFileMutation } from "./TypesetExplorer";
 import TypesetImagePreview from "./TypesetImagePreview";
 import TypesetCompiledVisual from "./TypesetCompiledVisual";
+import type { PdfClickPosition } from "./PdfPage";
 import TypesetPdfPreview, { type PdfForwardTarget } from "./TypesetPdfPreview";
 import TypesetExternalChangeReview, {
   type ExternalChangeReviewCopy,
@@ -154,7 +173,21 @@ import TypesetExternalChangeReview, {
 import TypesetChangeSetMenu from "./TypesetChangeSetMenu";
 import TypesetHistoryPanel from "./TypesetHistoryPanel";
 import TypesetProjectSearchPanel from "./TypesetProjectSearchPanel";
-import TypesetCommentsPanel, { type TypesetSourceRange } from "./TypesetCommentsPanel";
+import TypesetCommentsPanel, { commentRangeInSource, type TypesetSourceRange } from "./TypesetCommentsPanel";
+import { OPEN_COMMENT_EVENT, setCommentHighlights, type OpenCommentEventDetail } from "../editor/latexCommentHighlights";
+import {
+  TRACKED_CHANGE_EVENT,
+  anchorTrackedChanges,
+  resolveTrackedChanges,
+  setTrackChangesRecording,
+  setTrackedChanges as setTrackedChangesEffect,
+  storedTrackedChanges,
+  trackChangesField,
+  untrackedEdit,
+  type TrackedChange,
+  type TrackedChangeEventDetail,
+} from "../editor/trackChanges";
+import TypesetTrackChangesControl from "./TypesetTrackChangesControl";
 import {
   externalTextDiff,
   resolveExternalDiff,
@@ -163,7 +196,9 @@ import {
 } from "../diff/externalChangeDiff";
 import {
   BUILD_ARTIFACT_SUFFIXES,
+  diagnosticWorkspacePath,
   isTypesetImagePath,
+  isTypesetTextSourcePath,
   normalizeNewTypesetPath,
   outputPathFor,
   workDirContains,
@@ -563,7 +598,16 @@ function bibliographyPathForSource(sourcePath: string): string {
   return [...segments, SOMNIQ_BIBLIOGRAPHY_FILE].filter(Boolean).join("/") || SOMNIQ_BIBLIOGRAPHY_FILE;
 }
 
-function sourceUsesSomniqBibliography(source: string): boolean {
+/** Whether `index` falls after a `%` comment start on its line. */
+function isCommentedAt(source: string, index: number): boolean {
+  const lineStart = source.lastIndexOf("\n", index - 1) + 1;
+  const prefix = source.slice(lineStart, index);
+  return stripLatexComments(prefix).length < prefix.length;
+}
+
+function sourceUsesSomniqBibliography(rawSource: string): boolean {
+  // A commented-out declaration declares nothing.
+  const source = stripLatexComments(rawSource);
   const bibliographyResources = [
     ...source.matchAll(/\\addbibresource\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g),
     ...source.matchAll(/\\bibliography\s*\{([^}]+)\}/g),
@@ -590,9 +634,12 @@ function insertBeforeEndDocument(source: string, block: string): string {
 /** Add a separate managed bibliography without ever rewriting user .bib files. */
 function withSomniqBibliography(source: string): string {
   const biblatex = /\\addbibresource\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g;
-  const bibtex = /\\bibliography\s*\{([^}]+)\}/;
   const hasManagedResource = (value: string) => value.split(",").some((item) => item.trim().replace(/\.bib$/i, "") === SOMNIQ_BIBLIOGRAPHY_STEM);
-  const usesBiblatex = /\\usepackage(?:\s*\[[^\]]*\])?\s*\{biblatex\}/.test(source) || Array.from(source.matchAll(biblatex)).length > 0;
+  const uncommented = stripLatexComments(source);
+  const usesBiblatex = /\\usepackage(?:\s*\[[^\]]*\])?\s*\{biblatex\}/.test(uncommented) || Array.from(uncommented.matchAll(biblatex)).length > 0;
+  // The first live `\bibliography{…}`; one inside a `%` comment is not it.
+  const bibtexDeclaration = Array.from(source.matchAll(/\\bibliography\s*\{([^}]+)\}/g))
+    .find((match) => !isCommentedAt(source, match.index ?? 0));
   if (usesBiblatex) {
     let next = source;
     if (!sourceUsesSomniqBibliography(next)) {
@@ -601,15 +648,16 @@ function withSomniqBibliography(source: string): string {
       // duplicating it after every declaration).
       next = insertBeforeDocument(next, `% SomniQ bibliography (managed)\n\\addbibresource{${SOMNIQ_BIBLIOGRAPHY_FILE}}`);
     }
-    if (!/\\printbibliography\b/.test(next)) {
+    if (!/\\printbibliography\b/.test(stripLatexComments(next))) {
       next = insertBeforeEndDocument(next, "% SomniQ bibliography (managed)\n\\printbibliography");
     }
     return next;
   }
-  if (bibtex.test(source)) {
-    return source.replace(bibtex, (whole, resources: string) =>
-      hasManagedResource(resources) ? whole : `\\bibliography{${resources.trim()},${SOMNIQ_BIBLIOGRAPHY_STEM}}`,
-    );
+  if (bibtexDeclaration) {
+    const [whole, resources] = bibtexDeclaration;
+    if (hasManagedResource(resources)) return source;
+    const at = bibtexDeclaration.index ?? 0;
+    return `${source.slice(0, at)}\\bibliography{${resources.trim()},${SOMNIQ_BIBLIOGRAPHY_STEM}}${source.slice(at + whole.length)}`;
   }
   return insertBeforeEndDocument(
     source,
@@ -659,6 +707,13 @@ function withBlanketAnswers(fresh: TypesetChangeSet, stagedOperationId: string, 
   };
 }
 
+/** `value`, kept referentially stable for as long as `key` (its content) is. */
+function useContentStable<T>(value: T, key: string): T {
+  const ref = useRef<{ key: string; value: T } | null>(null);
+  if (!ref.current || ref.current.key !== key) ref.current = { key, value };
+  return ref.current.value;
+}
+
 export default function Typeset() {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].workbench;
@@ -687,6 +742,11 @@ export default function Typeset() {
   const [compileOnSave, setCompileOnSave] = useState(() => loadCompileOnSave(currentProject?.id));
   const [compileTimeoutMinutes, setCompileTimeoutMinutes] = useState(() => loadCompileTimeoutMinutes(currentProject?.id));
   const [mainDocumentPath, setMainDocumentPath] = useState<string | null>(() => loadMainDocument(currentProject?.id));
+  // Read by the preference setters, which write both choices to the project.
+  const mainDocumentPathRef = useRef(mainDocumentPath);
+  mainDocumentPathRef.current = mainDocumentPath;
+  const latexEngineRef = useRef(latexEngine);
+  latexEngineRef.current = latexEngine;
   const [pdfInverted, setPdfInverted] = useState(() => loadPdfInverted());
   const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -709,10 +769,16 @@ export default function Typeset() {
   // rather than the reviewer's own edits; this explains that substitution
   // instead of `setError`, which `compile()` clears at the start of every run.
   const [reviewCompileNotice, setReviewCompileNotice] = useState<string | null>(null);
+  /** Ctrl+S pressed during a build: save and rebuild once it finishes. */
+  const [saveQueuedAfterCompile, setSaveQueuedAfterCompile] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [projectSearchOpen, setProjectSearchOpen] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [commentSelection, setCommentSelection] = useState<TypesetSourceRange>({ from: 0, to: 0 });
+  /** The open file's comments, highlighted in both editors. */
+  const [fileComments, setFileComments] = useState<TypesetComment[]>([]);
+  /** A comment opened from its highlight, shown first in the panel. */
+  const [focusCommentId, setFocusCommentId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   /** The root and source graph of the current LaTeX document. They deliberately
@@ -738,7 +804,7 @@ export default function Typeset() {
   const [syncedBeamerPage, setSyncedBeamerPage] = useState<number | null>(null);
   const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
   const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
-  type LeftPanelTab = "files" | "review" | "ai";
+  type LeftPanelTab = "files" | "ai";
   const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>("files");
   const {
     editorFocused, toggleEditorFocus,
@@ -752,13 +818,12 @@ export default function Typeset() {
     handlePanelResizeKey, handleOutlineResizeKey,
   } = useTypesetPanels(activeLeftTab === "ai");
   // Chat owns the live Typeset writing session. Once the user opens it, keep
-  // that instance mounted while switching to Files or Review so its current
+  // that instance mounted while switching to Files so its current
   // conversation and composer draft are not reset to the Chat home screen.
   const [aiPanelMounted, setAiPanelMounted] = useState(false);
   useEffect(() => {
     if (activeLeftTab === "ai") setAiPanelMounted(true);
   }, [activeLeftTab]);
-  const [trackChangesEnabled, setTrackChangesEnabled] = useState(false);
   const [slideFocusMode, setSlideFocusMode] = useState(true);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
   // CodeMirror reports edits synchronously, while React may defer committing the
@@ -770,6 +835,8 @@ export default function Typeset() {
   // the visible Code surface when the user has selected Code mode.
   const editorModeRef = useRef<EditorMode>(editorMode);
   editorModeRef.current = editorMode;
+  /** The mode to restore after a .bib/.sty forced Code mode (see `openSource`). */
+  const modeBeforeTextSourceRef = useRef<EditorMode | null>(null);
   // Mirror the panel widths into refs so the drag callbacks can read the current
   // size without listing the widths as dependencies. Keeping the callbacks stable
   // stops the window/document listener effect from tearing down (and aborting the
@@ -779,8 +846,18 @@ export default function Typeset() {
   // lets the toolbar apply edits at whichever editor's real selection is
   // current, instead of always inserting near `\end{document}`.
   const visualViewRef = useRef<EditorView | null>(null);
+  /** Set below; read by the Visual view's listener installed at mount. */
+  const mirrorVisualEditRef = useRef<(update: ViewUpdate) => void>(() => {});
   const onVisualViewReady = useCallback((view: EditorView | null) => {
     visualViewRef.current = view;
+    // A Visual view that mounts late shows what the Code view has recorded.
+    const recorded = editorRef.current?.view.state.field(trackChangesField, false)?.changes;
+    if (view && recorded?.length) view.dispatch({ effects: setTrackedChangesEffect.of(recorded) });
+    // Highest precedence: the mirror has to reach the Code view before the
+    // Visual editor's own change listener syncs it as an unrecorded edit.
+    view?.dispatch({
+      effects: StateEffect.appendConfig.of(Prec.highest(EditorView.updateListener.of((update) => mirrorVisualEditRef.current(update)))),
+    });
   }, []);
   const previewAutoOpenedRef = useRef(false);
   // Tracks the last source path we auto-compiled so opening a tex compiles it
@@ -817,6 +894,8 @@ export default function Typeset() {
   const documentSourcesRef = useRef<Record<string, string>>(documentSources);
   const loadedRef = useRef<FileText | null>(loaded);
   const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
+  /** The run a Stop was pressed for, honoured even before the backend knows it. */
+  const cancelRequestedRunIdRef = useRef<string | null>(null);
   const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
   const dirtySinceRef = useRef<number | null>(null);
   const externalChangeRef = useRef<PendingExternalChange | null>(externalChange);
@@ -854,9 +933,41 @@ export default function Typeset() {
     pendingCompileProgressRef.current = null;
   }, []);
 
+  // The page stays mounted across project switches, so every project-scoped
+  // preference initialised above must be re-read here; one left out keeps the
+  // previous project's value (e.g. compiling project B with A's main document).
   useEffect(() => {
-    setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
-    setCompileTimeoutMinutes(loadCompileTimeoutMinutes(currentProject?.id));
+    const projectId = currentProject?.id;
+    const localEngine = loadLatexEngineChoice(projectId);
+    const localMainDocument = loadMainDocument(projectId);
+    setCompileErrorHandling(loadCompileErrorHandling(projectId));
+    setLatexEngine(localEngine);
+    setCompileOnSave(loadCompileOnSave(projectId));
+    setCompileTimeoutMinutes(loadCompileTimeoutMinutes(projectId));
+    setMainDocumentPath(localMainDocument);
+    if (!isTauri()) return;
+    // The workspace file is the shared record (the agent's LaTeXCompile reads
+    // it); local storage is only the instant cache. A project whose choices
+    // predate the file has them migrated into it once.
+    let active = true;
+    void typesetProjectSettingsRead().then((stored) => {
+      if (!active) return;
+      if (stored.mainDocument || stored.engine) {
+        const engine: LatexEngineChoice = stored.engine ?? "auto";
+        setLatexEngine(engine);
+        setMainDocumentPath(stored.mainDocument ?? null);
+        writeStoredValue(projectScopedKey(LATEX_ENGINE_STORAGE_PREFIX, projectId), engine === "auto" ? null : engine);
+        writeStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, projectId), stored.mainDocument ?? null);
+      } else if (localMainDocument || localEngine !== "auto") {
+        void typesetProjectSettingsWrite({
+          mainDocument: localMainDocument,
+          engine: localEngine === "auto" ? null : localEngine,
+        }).catch(() => undefined);
+      }
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, [currentProject?.id]);
 
   // Citation completion reads the shared literature store. Loading it
@@ -997,6 +1108,12 @@ export default function Typeset() {
       projectScopedKey(LATEX_ENGINE_STORAGE_PREFIX, currentProject?.id),
       value === "auto" ? null : value,
     );
+    if (isTauri()) {
+      void typesetProjectSettingsWrite({
+        mainDocument: mainDocumentPathRef.current,
+        engine: value === "auto" ? null : value,
+      }).catch((writeError) => setError(String(writeError)));
+    }
   }, [currentProject?.id]);
 
   const setCompileOnSavePreference = useCallback((value: boolean) => {
@@ -1018,6 +1135,13 @@ export default function Typeset() {
   const setMainDocumentPreference = useCallback((value: string | null) => {
     setMainDocumentPath(value);
     writeStoredValue(projectScopedKey(MAIN_DOCUMENT_STORAGE_PREFIX, currentProject?.id), value);
+    if (isTauri()) {
+      const engine = latexEngineRef.current;
+      void typesetProjectSettingsWrite({
+        mainDocument: value,
+        engine: engine === "auto" ? null : engine,
+      }).catch((writeError) => setError(String(writeError)));
+    }
   }, [currentProject?.id]);
 
   /** Save-as for the compiled PDF: the workspace copy stays where TeX put it. */
@@ -1103,23 +1227,42 @@ export default function Typeset() {
   // chapter that main.tex pulls in second renders "1.2.1" beside a PDF that
   // says "2.2.1". Derived from the same walk that numbers the Outline panel, so
   // the two surfaces cannot disagree.
-  const visualNumbering = useMemo(() => {
+  const computedVisualNumbering = useMemo(() => {
     const rootPath = documentRootPath ?? sourcePath;
     if (!rootPath || !sourcePath) return null;
     const rootSource = documentSourceForPath(outlineSources, rootPath)?.source
       ?? (sameWorkspacePath(rootPath, sourcePath) ? analysisDraft : "");
     return numberingPrefixFor(outline, sourcePath, rootSource);
   }, [analysisDraft, documentRootPath, outline, outlineSources, sourcePath]);
+  // Recomputed after every typing pause, but a new object reconfigures the
+  // Visual editor and rebuilds every decoration; only a real change should.
+  const visualNumbering = useContentStable(computedVisualNumbering, JSON.stringify(computedVisualNumbering));
   // `\newtheorem{requirement}{Requirement}` almost always lives in the root
   // preamble while the environments it declares live in the chapter files, so
   // the Visual editor is told about them from here. It re-reads the open file's
   // own declarations from the live buffer, which is why only the root is passed.
-  const visualTheoremDefinitions = useMemo(() => {
+  const computedTheoremDefinitions = useMemo(() => {
     const rootPath = documentRootPath ?? sourcePath;
     if (!rootPath) return null;
     const rootSource = documentSourceForPath(outlineSources, rootPath)?.source;
     return rootSource ? theoremDefinitions(rootSource) : null;
   }, [documentRootPath, outlineSources, sourcePath]);
+  const visualTheoremDefinitions = useContentStable(
+    computedTheoremDefinitions,
+    computedTheoremDefinitions ? JSON.stringify([...computedTheoremDefinitions]) : "",
+  );
+  // Same reasoning for `\newcommand{\R}{\mathbb{R}}`: defined in the root,
+  // used in every chapter's formulas. Kept referentially stable while the
+  // definitions are unchanged, because a new table re-renders every formula.
+  const parsedRootMathMacros = useMemo(() => {
+    const rootPath = documentRootPath ?? sourcePath;
+    const rootSource = rootPath ? documentSourceForPath(outlineSources, rootPath)?.source : undefined;
+    return rootSource ? mathMacrosFromSource(rootSource) : null;
+  }, [documentRootPath, outlineSources, sourcePath]);
+  const visualMathMacros = useContentStable<MathMacros | null>(
+    parsedRootMathMacros,
+    parsedRootMathMacros ? mathMacrosKey(parsedRootMathMacros) : "",
+  );
   // Counted over the whole document graph, so a thesis root reports the thesis
   // rather than the handful of words in its shell.
   const documentWordCount = useMemo(
@@ -1130,18 +1273,33 @@ export default function Typeset() {
   // Autocomplete for \ref{ and \cite{ needs keys the open file alone can't
   // supply: a label defined in another chapter of the same thesis, and the
   // library entries the citation picker inserts.
-  const projectLabels = useMemo(() => {
+  const { projectLabels, crossFileDuplicateLabels, documentBibitemKeys } = useMemo(() => {
     const labels: LatexSymbol[] = [];
-    const seen = new Set<string>();
+    const filesByLabel = new Map<string, Set<string>>();
+    const bibitems: string[] = [];
     for (const [path, source] of Object.entries(outlineSources)) {
-      for (const command of scanLatexStructure(source).commandsNamed("label")) {
-        const name = command.requiredArguments[0]?.value.trim();
-        if (!name || seen.has(name)) continue;
-        seen.add(name);
-        labels.push({ name, detail: basename(path) });
+      const structure = scanLatexStructure(source);
+      const names = [
+        ...structure.commandsNamed("label").map((command) => command.requiredArguments[0]?.value.trim() ?? ""),
+        ...optionLabels(source),
+      ];
+      for (const name of names) {
+        if (!name) continue;
+        const files = filesByLabel.get(name) ?? new Set<string>();
+        if (files.size === 0) labels.push({ name, detail: basename(path) });
+        files.add(path);
+        filesByLabel.set(name, files);
+      }
+      for (const command of structure.commandsNamed("bibitem")) {
+        const key = command.requiredArguments[0]?.value.trim();
+        if (key) bibitems.push(key);
       }
     }
-    return labels;
+    return {
+      projectLabels: labels,
+      crossFileDuplicateLabels: new Set([...filesByLabel].filter(([, files]) => files.size > 1).map(([name]) => name)),
+      documentBibitemKeys: bibitems,
+    };
   }, [outlineSources]);
   // Most projects keep their references in a hand-maintained .bib rather than
   // the app library, so follow \bibliography{}/\addbibresource{} the same way
@@ -1162,20 +1320,28 @@ export default function Typeset() {
   }, [documentRootPath, outlineSources, sourcePath]);
 
   const [bibCitations, setBibCitations] = useState<LatexSymbol[]>([]);
+  /** Which `bibliographySignature` the keys in `bibCitations` were read for. */
+  const [bibCitationsSignature, setBibCitationsSignature] = useState<string | null>(null);
+  /** Keys the author's own .bib files define (the managed one excluded). */
+  const userBibliographyKeysRef = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
     if (!bibliographySignature) {
       setBibCitations((current) => (current.length === 0 ? current : []));
+      setBibCitationsSignature("");
       return;
     }
     let active = true;
     void (async () => {
       const citations: LatexSymbol[] = [];
       const seen = new Set<string>();
+      const userKeys = new Set<string>();
       for (const path of bibliographySignature.split("\n")) {
         try {
           const file = await fileReadText(path);
           if (!active) return;
+          const managed = basename(path) === SOMNIQ_BIBLIOGRAPHY_FILE;
           for (const entry of parseBibEntries(file.content)) {
+            if (!managed) userKeys.add(entry.key);
             if (seen.has(entry.key)) continue;
             seen.add(entry.key);
             citations.push({ name: entry.key, detail: bibEntryDetail(entry) });
@@ -1184,7 +1350,11 @@ export default function Typeset() {
           // A .bib named but not present yet simply contributes no keys.
         }
       }
-      if (active) setBibCitations(citations);
+      if (active) {
+        setBibCitations(citations);
+        setBibCitationsSignature(bibliographySignature);
+        userBibliographyKeysRef.current = userKeys;
+      }
     })();
     return () => {
       active = false;
@@ -1247,9 +1417,35 @@ export default function Typeset() {
     };
   }, [documentRootPath, sourcePath, treeRefreshKey]);
 
+  // What the citation lint checks against: this document's bibliography only
+  // (its .bib files once read, \bibitems, and the library when the managed
+  // bibliography is declared) — null while the .bib is still loading, or when
+  // the document declares no bibliography at all.
+  const documentBibliographyKeys = useMemo(() => {
+    const managed = Object.values(outlineSources).some(sourceUsesSomniqBibliography);
+    if (bibliographySignature && bibCitationsSignature !== bibliographySignature) return null;
+    if (!bibliographySignature && documentBibitemKeys.length === 0 && !managed) return null;
+    return [
+      ...bibCitations.map((citation) => citation.name),
+      ...documentBibitemKeys,
+      ...(managed ? literaturePapers.map((paper) => paper.citationKey || suggestedCitationKey(paper)) : []),
+    ];
+  }, [bibCitations, bibCitationsSignature, bibliographySignature, documentBibitemKeys, literaturePapers, outlineSources]);
+
   useEffect(() => {
-    setLatexProjectSymbols({ labels: projectLabels, citations: projectCitations, files: projectFiles });
-  }, [projectCitations, projectFiles, projectLabels]);
+    setLatexProjectSymbols({
+      labels: projectLabels,
+      citations: projectCitations,
+      files: projectFiles,
+      bibliographyKeys: documentBibliographyKeys,
+      crossFileDuplicateLabels,
+    });
+    // The registry is module state the linter cannot observe; re-check now so
+    // "undefined reference" markers from before the .bib/labels loaded clear.
+    for (const view of [editorRef.current?.view, visualViewRef.current]) {
+      view?.dispatch({ effects: refreshLatexDiagnostics.of(null) });
+    }
+  }, [crossFileDuplicateLabels, documentBibliographyKeys, projectCitations, projectFiles, projectLabels]);
   useEffect(() => clearLatexProjectSymbols, []);
 
   // Compiler errors belong on the offending line, not only in the log panel.
@@ -1258,7 +1454,10 @@ export default function Typeset() {
     if (!sourcePath) return [];
     const rootPath = compileResult?.inputPath ?? documentRootPath ?? sourcePath;
     return (compileResult?.diagnostics ?? [])
-      .filter((diagnostic) => (diagnostic.line ?? 0) > 0 && sameWorkspacePath(diagnostic.filePath || rootPath, sourcePath))
+      .filter((diagnostic) => (diagnostic.line ?? 0) > 0 && sameWorkspacePath(
+        diagnostic.filePath?.trim() ? diagnosticWorkspacePath(diagnostic.filePath, rootPath) : rootPath,
+        sourcePath,
+      ))
       .map((diagnostic) => ({
         line: diagnostic.line ?? 1,
         severity: diagnostic.severity === "error" ? "error" : diagnostic.severity === "warning" ? "warning" : "info",
@@ -1353,9 +1552,10 @@ export default function Typeset() {
     // Raw log lines are one unstructured message, not a count of diagnostics.
     return 1;
   }, [compileResult?.diagnostics, compileResult?.stderr, error]);
-  const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
-  const canUndoDraft = Boolean(activeEditorView && undoDepth(activeEditorView.state) > 0);
-  const canRedoDraft = Boolean(activeEditorView && redoDepth(activeEditorView.state) > 0);
+  // One history for both modes, kept by the Code view (see `mirrorVisualEdit`).
+  const historyView = editorRef.current?.view ?? (editorMode === "visual" ? visualViewRef.current : null);
+  const canUndoDraft = Boolean(historyView && undoDepth(historyView.state) > 0);
+  const canRedoDraft = Boolean(historyView && redoDepth(historyView.state) > 0);
 
   const resetDraft = useCallback((nextDraft: string) => {
     draftRef.current = nextDraft;
@@ -1715,6 +1915,7 @@ export default function Typeset() {
     let unlistenWorkspace: (() => void) | null = null;
     let rerun = false;
     let retryTimer: number | undefined;
+    let treeRefreshTimer: number | undefined;
     const check = async (provenance?: { actor: string; origin: string }) => {
       if (disposed) return;
       if (checking || saveInFlightRef.current) {
@@ -1739,9 +1940,19 @@ export default function Typeset() {
           || sourcePathRef.current !== checkedPath
         ) return;
         await presentExternalChange(diskFile, provenance);
-      } catch {
+      } catch (readError) {
         // A transient read failure must not replace the editor with an error
         // banner; explicit save/compile paths still report actionable failures.
+        // A file deleted or moved outside the app is different: say so, rather
+        // than letting the editor keep showing it as if nothing happened.
+        if (
+          !disposed
+          && checkedPath
+          && sourcePathRef.current === checkedPath
+          && /os error 2\b|no such file|not found|cannot find|找不到/i.test(String(readError))
+        ) {
+          setError(copy.openFileMissingOnDisk(basename(checkedPath)));
+        }
       } finally {
         checking = false;
         if (rerun && !disposed) {
@@ -1762,6 +1973,15 @@ export default function Typeset() {
         || sameWorkspacePath(event.path, previewPath);
       if (!generated && !saveInFlightRef.current) scheduleProjectChangeSet(provenance, event.path);
       if (sameWorkspacePath(event.path, sourcePathRef.current)) void check(provenance);
+      // A file created or removed outside the tree's own actions (the agent
+      // writing a figure, a git checkout) used to stay invisible until the
+      // next manual refresh.
+      if (!generated && (event.kind === "create" || event.kind === "remove")) {
+        window.clearTimeout(treeRefreshTimer);
+        treeRefreshTimer = window.setTimeout(() => {
+          if (!disposed) setTreeRefreshKey((key) => key + 1);
+        }, 400);
+      }
     }).then((unlisten) => {
       if (disposed) unlisten();
       else unlistenWorkspace = unlisten;
@@ -1771,6 +1991,7 @@ export default function Typeset() {
     return () => {
       disposed = true;
       window.clearTimeout(retryTimer);
+      window.clearTimeout(treeRefreshTimer);
       window.removeEventListener("focus", checkWhenVisible);
       document.removeEventListener("visibilitychange", checkWhenVisible);
       unlistenWorkspace?.();
@@ -2275,22 +2496,29 @@ export default function Typeset() {
     return ids.map((id) => keysById[id]).filter((key): key is string => Boolean(key));
   }, [ensureCitationKeys]);
 
-  const synchronizeBibliography = useCallback(async (
-    expectedSourcePath = sourcePathRef.current,
-    expectedDraft = draftRef.current,
-  ) => {
-    const activeSourcePath = expectedSourcePath;
-    if (!activeSourcePath) throw new Error(copy.openSourceBeforeCitation);
-    // The export and file operations below are asynchronous. Capture both
-    // identities at the call site so a delayed sync cannot modify a newly
-    // opened document.
-    const remainsCurrent = () => (
-      sourcePathRef.current === activeSourcePath && draftRef.current === expectedDraft
-    );
+  /**
+   * The document TeX compiles, never whichever chapter happens to be open.
+   * Project-level additions belong to it: TeX resolves `.bib` and figure
+   * paths against the root's folder, and a `\bibliography` appended to a
+   * chapter prints the references mid-thesis and gives BibTeX a second
+   * `\bibdata` next to the root's own.
+   */
+  const compileRootFor = useCallback((openPath: string) => (
+    mainDocumentPath?.trim() || documentRootPathRef.current || openPath
+  ), [mainDocumentPath]);
+
+  /** Export the library into the managed `.bib`, writing only when it changed. */
+  const writeManagedBibliography = useCallback(async (bibliographyPath: string, remainsCurrent: () => boolean) => {
     const bibliography = await literatureExportBibliography<{ content: string }>({ format: "bibtex" });
-    if (!remainsCurrent()) return;
-    const bibliographyPath = bibliographyPathForSource(activeSourcePath);
-    const managedContent = `${SOMNIQ_BIBLIOGRAPHY_HEADER}${bibliography.content}`;
+    if (!remainsCurrent()) return false;
+    // A key the author's own .bib already defines stays theirs: exporting the
+    // library's entry too gives BibTeX a "Repeated entry" error and the build
+    // fails over an entry nobody asked to change.
+    const { text: exported, removed } = withoutBibEntries(bibliography.content, userBibliographyKeysRef.current);
+    const shadowed = removed.length > 0
+      ? `% Left out because your own .bib defines the same key: ${removed.join(", ")}\n`
+      : "";
+    const managedContent = `${SOMNIQ_BIBLIOGRAPHY_HEADER}${shadowed}${exported}`;
     let existing: FileText | null = null;
     try {
       existing = await fileReadText(bibliographyPath);
@@ -2298,10 +2526,13 @@ export default function Typeset() {
       // A missing generated bibliography is created below. Other read failures
       // are caught by the subsequent write/create operation.
     }
-    if (!remainsCurrent()) return;
+    if (!remainsCurrent()) return false;
     if (existing && !existing.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
       throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
     }
+    // An unchanged export is the common case; rewriting it would record a
+    // project revision and wake the watcher for nothing.
+    if (existing?.content === managedContent) return true;
     if (existing) {
       await fileWriteText(bibliographyPath, managedContent);
     } else {
@@ -2317,18 +2548,54 @@ export default function Typeset() {
         } catch {
           throw createError;
         }
-        if (!remainsCurrent()) return;
+        if (!remainsCurrent()) return false;
         if (!racedFile.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
           throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
         }
         await fileWriteText(bibliographyPath, managedContent);
       }
+      setTreeRefreshKey((value) => value + 1);
     }
-    if (!remainsCurrent()) return;
-    const sourceWithBibliography = withSomniqBibliography(expectedDraft);
-    if (sourceWithBibliography !== expectedDraft) changeDraft(sourceWithBibliography);
-    setTreeRefreshKey((value) => value + 1);
+    return true;
+  }, []);
+
+  /** Make the root document declare the managed bibliography. */
+  const declareManagedBibliography = useCallback(async (rootPath: string, openPath: string) => {
+    if (sameWorkspacePath(rootPath, openPath)) {
+      // Applied to the latest draft, so typing during the export is kept.
+      const current = draftRef.current;
+      const next = withSomniqBibliography(current);
+      if (next !== current) changeDraft(next);
+      return;
+    }
+    const tabKey = [...openDraftsRef.current.keys()].find((path) => sameWorkspacePath(path, rootPath));
+    const tab = tabKey ? openDraftsRef.current.get(tabKey) : undefined;
+    if (tab && tab.draft !== tab.loaded.content) throw new Error(copy.saveMainDocumentBeforeCitation(basename(rootPath)));
+    const file = await fileReadText(rootPath);
+    const next = withSomniqBibliography(file.content);
+    if (next === file.content) return;
+    const written = await fileWriteText(rootPath, next, file.version ?? null);
+    const loaded: FileText = { ...written, content: next };
+    // Keep the inactive tab's snapshot in step, or selecting it would present
+    // our own write as an external change to review.
+    if (tabKey) openDraftsRef.current.set(tabKey, { draft: next, loaded });
+    setDocumentSources((sources) => {
+      const key = Object.keys(sources).find((path) => sameWorkspacePath(path, rootPath));
+      return key ? { ...sources, [key]: next } : sources;
+    });
   }, [changeDraft]);
+
+  const synchronizeBibliography = useCallback(async () => {
+    const openPath = sourcePathRef.current;
+    if (!openPath) throw new Error(copy.openSourceBeforeCitation);
+    const rootPath = compileRootFor(openPath);
+    // The steps below are asynchronous; a delayed sync must not modify a
+    // document the user has since left.
+    const remainsCurrent = () => sourcePathRef.current === openPath;
+    if (!await writeManagedBibliography(bibliographyPathForSource(rootPath), remainsCurrent)) return;
+    if (!remainsCurrent()) return;
+    await declareManagedBibliography(rootPath, openPath);
+  }, [compileRootFor, declareManagedBibliography, writeManagedBibliography]);
 
   const citationLibraryFingerprint = useMemo(
     () => literaturePapers
@@ -2349,15 +2616,22 @@ export default function Typeset() {
       .join("\u0003"),
     [literaturePapers],
   );
-  const sourceUsesManagedBibliography = sourceUsesSomniqBibliography(draft);
+  const managedBibliographyRoot = sourcePath ? compileRootFor(sourcePath) : null;
+  const managedBibliographyRootSource = managedBibliographyRoot
+    ? sameWorkspacePath(managedBibliographyRoot, sourcePath)
+      ? draft
+      : documentSourceForPath(documentSources, managedBibliographyRoot)?.source ?? ""
+    : "";
+  const documentUsesManagedBibliography = sourceUsesSomniqBibliography(managedBibliographyRootSource);
 
+  // Keep the managed .bib in step with the library. It depends on the library
+  // and the document, not on every keystroke: re-exporting the whole library
+  // and rewriting the file 150ms after each pause in typing was the old cost.
   useEffect(() => {
-    if (!sourcePath || !sourceUsesManagedBibliography) return;
+    if (!managedBibliographyRoot || !documentUsesManagedBibliography) return;
     let active = true;
-    const expectedSourcePath = sourcePath;
-    const expectedDraft = draft;
     const timer = window.setTimeout(() => {
-      void synchronizeBibliography(expectedSourcePath, expectedDraft).catch((syncError) => {
+      void writeManagedBibliography(bibliographyPathForSource(managedBibliographyRoot), () => active).catch((syncError) => {
         if (active) setError(copy.couldNotSyncBibliography(SOMNIQ_BIBLIOGRAPHY_FILE, String(syncError)));
       });
     }, 150);
@@ -2365,17 +2639,240 @@ export default function Typeset() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [citationLibraryFingerprint, draft, sourcePath, sourceUsesManagedBibliography, synchronizeBibliography]);
+  }, [citationLibraryFingerprint, documentUsesManagedBibliography, managedBibliographyRoot, writeManagedBibliography]);
+
+  /**
+   * Code and Visual mode share one undo history, the Code view's: an edit made
+   * in Visual mode is replayed into it as a recorded transaction (and the
+   * Visual view's own copy is never undone), so Ctrl+Z walks back through
+   * every edit in the order it was made, whichever mode made it.
+   */
+  mirrorVisualEditRef.current = (update: ViewUpdate) => {
+    if (!update.docChanged || editorModeRef.current !== "visual") return;
+    const codeView = editorRef.current?.view;
+    if (!codeView) return;
+    for (const transaction of update.transactions) {
+      // Unrecorded changes are the sync from the Code view, a reload, or a
+      // review applying — the Code view already has them or receives them.
+      if (!transaction.docChanged || transaction.annotation(Transaction.addToHistory) === false) continue;
+      if (!codeView.state.doc.eq(transaction.startState.doc)) {
+        const current = codeView.state.doc.toString();
+        codeView.dispatch({
+          changes: minimalReplacement(current, transaction.startState.doc.toString()),
+          annotations: Transaction.addToHistory.of(false),
+        });
+      }
+      // Undo restores the selection the edit started from, so start there.
+      codeView.dispatch({ selection: transaction.startState.selection, annotations: Transaction.addToHistory.of(false) });
+      // Typing is replayed without its "input.type" tag, which would open
+      // autocompletion in the hidden Code view; untagged edits still group
+      // into one undo step the way typing does. Paste, delete and the like
+      // keep theirs, so they stay their own steps.
+      const userEvent = transaction.annotation(Transaction.userEvent);
+      codeView.dispatch({
+        changes: transaction.changes,
+        selection: transaction.selection,
+        ...(userEvent && !transaction.isUserEvent("input.type") ? { userEvent } : {}),
+      });
+    }
+  };
+
+  // ── Track changes ─────────────────────────────────────────────────────────
+  // Recorded by the Code view (it sees every edit of both modes, Visual ones
+  // through the shared history above), shown in both, kept per file.
+  const trackChangesStorageKey = `somniq-typeset-track-changes:${currentProject?.id ?? "default"}`;
+  const [trackChangesEnabled, setTrackChangesEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem(trackChangesStorageKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const trackChangesEnabledRef = useRef(trackChangesEnabled);
+  trackChangesEnabledRef.current = trackChangesEnabled;
+  const [trackedChanges, setTrackedChanges] = useState<TrackedChange[]>([]);
+  /** The file whose stored changes the Code view holds; saves wait for it. */
+  const trackedLoadedPathRef = useRef<string | null>(null);
+  const trackedSaveRef = useRef<{ timer: number; run: () => void } | null>(null);
+  const flushTrackedSave = useCallback(() => {
+    const pending = trackedSaveRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    trackedSaveRef.current = null;
+    pending.run();
+  }, []);
+  const trackedUpdateRef = useRef<(update: ViewUpdate) => void>(() => {});
+  trackedUpdateRef.current = (update: ViewUpdate) => {
+    const before = update.startState.field(trackChangesField, false)?.changes;
+    const after = update.state.field(trackChangesField, false)?.changes;
+    if (!after || before === after) return;
+    setTrackedChanges(after);
+    // After this update, when the Visual view has the same text again.
+    queueMicrotask(() => {
+      const visual = visualViewRef.current;
+      if (visual && visual.state.field(trackChangesField, false)?.changes !== after) {
+        visual.dispatch({ effects: setTrackedChangesEffect.of(after) });
+      }
+    });
+    // Only what the user did is saved: an edit, an accept or reject. A file
+    // switch or reload maps the old record over new text until the new
+    // file's own record is loaded, and must never be written.
+    const userAction = update.transactions.some((transaction) =>
+      (transaction.docChanged && transaction.annotation(Transaction.addToHistory) !== false)
+      || transaction.effects.some((effect) => effect.is(resolveTrackedChanges)));
+    const path = sourcePathRef.current;
+    if (!userAction || !path || trackedLoadedPathRef.current !== path) return;
+    const doc = update.state.doc;
+    if (trackedSaveRef.current) window.clearTimeout(trackedSaveRef.current.timer);
+    const run = () => {
+      void typesetTrackedChangesSave(path, storedTrackedChanges(after, doc.toString())).catch(() => undefined);
+    };
+    trackedSaveRef.current = { run, timer: window.setTimeout(() => { trackedSaveRef.current = null; run(); }, 700) };
+  };
+
+  useEffect(() => {
+    try {
+      setTrackChangesEnabled(window.localStorage.getItem(trackChangesStorageKey) === "1");
+    } catch {
+      // Storage unavailable: the switch keeps its current position.
+    }
+  }, [trackChangesStorageKey]);
+  useEffect(() => {
+    editorRef.current?.view.dispatch({ effects: setTrackChangesRecording.of({ enabled: trackChangesEnabled, author: copy.commentAuthorYou }) });
+  }, [copy.commentAuthorYou, trackChangesEnabled]);
+  const toggleTrackChanges = () => {
+    const next = !trackChangesEnabledRef.current;
+    setTrackChangesEnabled(next);
+    try {
+      window.localStorage.setItem(trackChangesStorageKey, next ? "1" : "0");
+    } catch {
+      // The switch still applies to this session.
+    }
+  };
+
+  // Each file's record is loaded when it opens (and the previous one's
+  // pending save written first).
+  const loadedFilePath = loaded?.path ?? null;
+  useEffect(() => {
+    flushTrackedSave();
+    trackedLoadedPathRef.current = null;
+    const view = editorRef.current?.view;
+    view?.dispatch({ effects: setTrackedChangesEffect.of([]) });
+    const path = sourcePath;
+    if (!path || !loadedFilePath) return;
+    let active = true;
+    void typesetTrackedChangesLoad(path)
+      .then((stored) => {
+        const codeView = editorRef.current?.view;
+        if (!active || sourcePathRef.current !== path || !codeView) return;
+        const placed = anchorTrackedChanges(Array.isArray(stored) ? stored : [], codeView.state.doc.toString());
+        codeView.dispatch({ effects: setTrackedChangesEffect.of(placed) });
+        trackedLoadedPathRef.current = path;
+      })
+      .catch(() => {
+        if (active && sourcePathRef.current === path) trackedLoadedPathRef.current = path;
+      });
+    return () => {
+      active = false;
+    };
+  }, [flushTrackedSave, loadedFilePath, sourcePath]);
+  useEffect(() => () => flushTrackedSave(), [flushTrackedSave]);
+
+  /** Accepting keeps the text and drops the mark; rejecting restores the original. */
+  const resolveTracked = useCallback((ids: string[], action: "accept" | "reject") => {
+    const view = editorRef.current?.view;
+    if (!view || ids.length === 0) return;
+    const wanted = new Set(ids);
+    const targets = view.state.field(trackChangesField).changes.filter((change) => wanted.has(change.id));
+    if (targets.length === 0) return;
+    if (action === "accept") {
+      view.dispatch({ effects: resolveTrackedChanges.of(targets.map((change) => change.id)) });
+      return;
+    }
+    view.dispatch({
+      changes: targets.map((change) => change.kind === "insert"
+        ? { from: change.from, to: change.to }
+        : { from: change.from, insert: change.text }),
+      effects: resolveTrackedChanges.of(targets.map((change) => change.id)),
+      annotations: untrackedEdit.of(true),
+      userEvent: "input.reject",
+    });
+  }, []);
+  useEffect(() => {
+    const fromCard = (event: Event) => {
+      const detail = (event as CustomEvent<TrackedChangeEventDetail>).detail;
+      if (detail?.id) resolveTracked([detail.id], detail.action);
+    };
+    window.addEventListener(TRACKED_CHANGE_EVENT, fromCard);
+    return () => window.removeEventListener(TRACKED_CHANGE_EVENT, fromCard);
+  }, [resolveTracked]);
+
+  /** Undo/redo on the shared history, shown where the user is editing. */
+  const runSharedHistory = useCallback((direction: "undo" | "redo"): boolean => {
+    const codeView = editorRef.current?.view;
+    const visualView = visualViewRef.current;
+    if (editorModeRef.current !== "visual" || !codeView || !visualView) {
+      const view = editorModeRef.current === "visual" ? visualView : codeView;
+      return view ? (direction === "undo" ? undo(view) : redo(view)) : false;
+    }
+    if (!(direction === "undo" ? undo(codeView) : redo(codeView))) return false;
+    // The Code view's change reached the Visual view through `changeDraft`;
+    // the cursor follows to where the undone edit was.
+    const { selection } = codeView.state;
+    const length = visualView.state.doc.length;
+    const head = Math.min(selection.main.head, length);
+    visualView.dispatch({
+      selection: { anchor: Math.min(selection.main.anchor, length), head },
+      effects: EditorView.scrollIntoView(head, { y: "nearest" }),
+      annotations: Transaction.addToHistory.of(false),
+    });
+    return true;
+  }, []);
 
   const undoDraft = useCallback(() => {
-    const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
-    if (view) undo(view);
-  }, [editorMode]);
+    runSharedHistory("undo");
+  }, [runSharedHistory]);
 
   const redoDraft = useCallback(() => {
-    const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
-    if (view) redo(view);
-  }, [editorMode]);
+    runSharedHistory("redo");
+  }, [runSharedHistory]);
+
+  // Visual mode's own undo keys (and the Edit menu's "Undo") go to the shared
+  // history. Text fields inside widgets — a table cell, a caption box — keep
+  // their native undo.
+  useEffect(() => {
+    const visualHistoryTarget = (target: EventTarget | null) => {
+      const view = visualViewRef.current;
+      if (editorModeRef.current !== "visual" || !view || !(target instanceof Node)) return false;
+      if (!view.contentDOM.contains(target)) return false;
+      const element = target instanceof Element ? target : target.parentElement;
+      if (element?.closest("input, textarea, select")) return false;
+      const editable = element?.closest("[contenteditable='true']");
+      return !editable || editable === view.contentDOM;
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const direction = key === "z" ? (event.shiftKey ? "redo" : "undo") : key === "y" && !event.shiftKey ? "redo" : null;
+      if (!direction || !visualHistoryTarget(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runSharedHistory(direction);
+    };
+    const handleBeforeInput = (event: InputEvent) => {
+      if (event.inputType !== "historyUndo" && event.inputType !== "historyRedo") return;
+      if (!visualHistoryTarget(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runSharedHistory(event.inputType === "historyUndo" ? "undo" : "redo");
+    };
+    window.addEventListener("keydown", handleKey, { capture: true });
+    window.addEventListener("beforeinput", handleBeforeInput, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", handleKey, { capture: true });
+      window.removeEventListener("beforeinput", handleBeforeInput, { capture: true });
+    };
+  }, [runSharedHistory]);
 
   const changeEditorMode = useCallback((nextMode: EditorMode) => {
     if (nextMode === editorMode) return;
@@ -2404,11 +2901,13 @@ export default function Typeset() {
     path: string,
     initialLine = 1,
     preserveDocument = false,
+    /** Select this range once the file is showing, instead of only its line. */
+    range?: { start: number; end: number; forceCode?: boolean },
   ): Promise<boolean> => {
     const currentPath = sourcePathRef.current;
     if (sameWorkspacePath(currentPath, path)) {
       setCurrentSourceLine(initialLine);
-      setPendingSourceNavigation({ path, line: initialLine });
+      setPendingSourceNavigation({ path, line: initialLine, ...range });
       return true;
     }
     // Switching files keeps the one being left open, unsaved edits and all —
@@ -2432,7 +2931,11 @@ export default function Typeset() {
     const belongsToCurrentDocument = preserveDocument
       || sameWorkspacePath(path, currentRoot)
       || Object.keys(documentSourcesRef.current).some((source) => sameWorkspacePath(source, path));
-    invalidateActiveCompile();
+    // Opening another chapter of the document being built keeps the build: it
+    // compiles the same root, and a thesis build can take minutes. Only a
+    // different document makes the running compile obsolete.
+    if (belongsToCurrentDocument) forwardSearchEpochRef.current += 1;
+    else invalidateActiveCompile();
     setLoading(true);
     setSaving(false);
     setError(null);
@@ -2510,6 +3013,18 @@ export default function Typeset() {
       // already keeps `draftRef` in step for the same reason.
       sourcePathRef.current = activeFile.path;
       loadedRef.current = activeFile;
+      // The Visual surface renders LaTeX prose; a .bib or .sty is only ever
+      // source. Switch to Code for it and give the user's mode back on the
+      // next .tex file.
+      if (isTypesetTextSourcePath(activeFile.path)) {
+        if (editorModeRef.current === "visual") {
+          modeBeforeTextSourceRef.current = "visual";
+          setEditorMode("code");
+        }
+      } else if (modeBeforeTextSourceRef.current) {
+        setEditorMode(modeBeforeTextSourceRef.current);
+        modeBeforeTextSourceRef.current = null;
+      }
       resetDraft(activeDraft);
       openDraftsRef.current.delete(file.path);
       setOpenTabs((tabs) => (tabs.includes(file.path) ? tabs : [...tabs, file.path]));
@@ -2529,7 +3044,7 @@ export default function Typeset() {
       }
       setVisualPdfCursor(null);
       setCurrentSourceLine(initialLine);
-      setPendingSourceNavigation({ path: activeFile.path, line: initialLine });
+      setPendingSourceNavigation({ path: activeFile.path, line: initialLine, ...range });
       if (!belongsToCurrentDocument) {
         setCompileStatus("idle");
         setCompileResult(null);
@@ -2856,6 +3371,12 @@ export default function Typeset() {
       void openSource(path);
       return;
     }
+    // A .bib/.sty/.cls is edited as part of the document already open, so the
+    // compile root, outline and PDF stay that document's.
+    if (isTypesetTextSourcePath(path)) {
+      void openSource(path, 1, true);
+      return;
+    }
     if (extension(path) === ".pdf") {
       forwardSearchEpochRef.current += 1;
       setPreviewPath(path);
@@ -2887,6 +3408,8 @@ export default function Typeset() {
       publishOpenDrafts();
       setOpenTabs((tabs) => tabs.filter((tab) => !pathMatches(tab, mutation.path)));
       setLastPdfPreviewPath((path) => pathMatches(path, mutation.path) ? null : path);
+      // A deleted main document cannot stay the compile target.
+      if (pathMatches(mainDocumentPathRef.current, mutation.path)) setMainDocumentPreference(null);
       if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
         documentEpochRef.current += 1;
         invalidateActiveCompile();
@@ -2930,16 +3453,43 @@ export default function Typeset() {
     setLastPdfPreviewPath((path) => renamedPath(path));
     setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
     setDocumentSources((sources) => Object.fromEntries(Object.entries(sources).map(([path, content]) => [renamedPath(path) ?? path, content])));
+    // Tabs, their unsaved drafts and the main-document choice all name files
+    // by path. Left on the old name, a tab opened nothing, an inactive tab's
+    // unsaved draft was stranded under a key no tab used, and the next
+    // compile pointed TeX at a file that no longer existed.
+    setOpenTabs((tabs) => tabs.map((tab) => renamedPath(tab) ?? tab));
+    for (const [path, snapshot] of [...openDraftsRef.current]) {
+      const next = renamedPath(path);
+      if (!next || next === path) continue;
+      openDraftsRef.current.delete(path);
+      openDraftsRef.current.set(next, { draft: snapshot.draft, loaded: { ...snapshot.loaded, path: next } });
+    }
+    publishOpenDrafts();
+    const nextMainDocument = renamedPath(mainDocumentPathRef.current);
+    if (nextMainDocument !== mainDocumentPathRef.current) setMainDocumentPreference(nextMainDocument);
     setTreeRefreshKey((key) => key + 1);
-  }, [documentRootPath, invalidateActiveCompile, previewPath, publishOpenDrafts, resetDraft, sourcePath]);
+  }, [documentRootPath, invalidateActiveCompile, previewPath, publishOpenDrafts, resetDraft, setMainDocumentPreference, sourcePath]);
 
-  const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
+  const createSource = useCallback(async (
+    path: string,
+    template: TypesetTemplate = "article",
+    title = "SomniQ LaTeX Draft",
+    starterId?: StarterTemplateId,
+  ) => {
     const documentEpoch = ++documentEpochRef.current;
     invalidateActiveCompile();
     setError(null);
     try {
       const normalized = normalizeNewTypesetPath(path);
-      const file = await fileCreateText(normalized, defaultSourceFor(normalized, template, title));
+      // A journal or thesis template is a small project: main.tex first, then
+      // its bibliography and chapter files beside it.
+      const starterFiles = starterId ? starterTemplate(starterId)?.files(title) ?? [] : [];
+      const mainContent = starterFiles[0]?.content ?? defaultSourceFor(normalized, template, title);
+      const file = await fileCreateText(normalized, mainContent);
+      const folder = dirname(normalized);
+      for (const extra of starterFiles.slice(1)) {
+        await fileCreateText(folder ? `${folder}/${extra.path}` : extra.path, extra.content);
+      }
       if (documentEpochRef.current !== documentEpoch) return;
       // Templates always seed their own folder, so that folder is the project
       // the library groups this document under until the next scan.
@@ -3268,10 +3818,21 @@ export default function Typeset() {
     compileProgressTimerRef.current = null;
     pendingCompileProgressRef.current = null;
     activeCompileRunIdRef.current = runId;
+    const compileDocumentRoot = documentRootPathRef.current;
+    // The build stays this view's while the open file is still part of the
+    // document it compiles — the user may move between chapters meanwhile.
+    const openFileBelongsToCompile = () => {
+      const current = sourcePathRef.current;
+      if (!current) return false;
+      return current === openPath
+        || sameWorkspacePath(current, compileDocumentRoot)
+        || sameWorkspacePath(current, mainDocumentPath)
+        || Object.keys(documentSourcesRef.current).some((source) => sameWorkspacePath(source, current));
+    };
     const ownsCompile = () => (
       compileEpochRef.current === compileEpoch
       && activeCompileRunIdRef.current === runId
-      && sourcePathRef.current === openPath
+      && openFileBelongsToCompile()
     );
     const flushCompileProgress = () => {
       if (compileProgressTimerRef.current !== null) {
@@ -3324,7 +3885,21 @@ export default function Typeset() {
     // Detection (`% !TeX root`, `\input` scanning) still covers projects that
     // never set one.
     const openedPath = effectiveSaved.path || openPath;
-    const compilePath = mainDocumentPath?.trim() ? mainDocumentPath : openedPath;
+    // A .bib or .sty open in the editor is not something TeX can be pointed
+    // at; build the document it belongs to.
+    const compilePath = mainDocumentPath?.trim()
+      ? mainDocumentPath
+      : isTypesetTextSourcePath(openedPath)
+        ? documentRootPathRef.current
+        : openedPath;
+    if (!compilePath) {
+      setError(copy.compileNeedsTexDocument);
+      setCompileStatus("idle");
+      setCompileLiveLog(null);
+      activeCompileRunIdRef.current = null;
+      setActiveCompileRunId(null);
+      return;
+    }
     // Freeze what TeX is about to read. `save()` has just flushed the open file,
     // and the rest of the graph is whatever was last loaded from disk — the same
     // bytes the compiler will see, and the baseline every later SyncTeX result
@@ -3340,6 +3915,13 @@ export default function Typeset() {
         }
       });
       if (!ownsCompile()) return;
+      if (cancelRequestedRunIdRef.current === runId) {
+        setCompileStatus("idle");
+        setCompileLiveLog(null);
+        activeCompileRunIdRef.current = null;
+        setActiveCompileRunId(null);
+        return;
+      }
       const outputPath = outputPathFor(compilePath);
       const result = await latexCompile(
         compilePath,
@@ -3388,6 +3970,10 @@ export default function Typeset() {
   const cancelCompile = useCallback(() => {
     const runId = activeCompileRunIdRef.current;
     if (!runId) return;
+    // The backend only learns the run id when latexCompile starts; a Stop
+    // pressed while the file is still being saved would otherwise be lost
+    // and the build would go ahead (see `compile`).
+    cancelRequestedRunIdRef.current = runId;
     void latexCompileCancel(runId).catch((cancelError) => {
       setError(String(cancelError));
     });
@@ -3458,11 +4044,22 @@ export default function Typeset() {
     }
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
-      setError(copy.compileStillReading);
+      // Writing now would change the project under the running build. Queue
+      // the save instead of refusing it: a thesis build can take minutes.
+      setSaveQueuedAfterCompile(sourcePathRef.current);
       return;
     }
     void saveThenCompile();
   }, [handleHeldForReviewSave, loaded, saveThenCompile]);
+
+  // The queued Ctrl+S runs once the build it waited for has finished.
+  useEffect(() => {
+    if (!saveQueuedAfterCompile || activeCompileRunId) return;
+    setSaveQueuedAfterCompile(null);
+    // Dropped if the user has moved to another document meanwhile; the file
+    // they left was already flushed by the switch.
+    if (sameWorkspacePath(saveQueuedAfterCompile, sourcePathRef.current)) void saveThenCompile();
+  }, [activeCompileRunId, saveQueuedAfterCompile, saveThenCompile]);
 
   // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
   // fresh every render rather than closing over these (non-memoized, in `compile`'s
@@ -3487,6 +4084,35 @@ export default function Typeset() {
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
   }, [loaded, saveShortcut, sourcePath]);
+
+  // Overleaf's editing shortcuts, in both modes: Ctrl/⌘+B and +I wrap the
+  // selection like the toolbar buttons, and Ctrl/⌘+Enter compiles from the
+  // Visual editor too (Code mode has it in its own keymap). Scoped to this
+  // page's editors so the Chat composer beside them keeps its own keys.
+  useEffect(() => {
+    const handleEditorShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest(".typeset-editor-pane .cm-editor")) return;
+      const key = event.key.toLowerCase();
+      if (key === "enter") {
+        if (editorModeRef.current !== "visual") return;
+        event.preventDefault();
+        event.stopPropagation();
+        compileRef.current();
+        return;
+      }
+      if (key !== "b" && key !== "i") return;
+      const adapter = activeEditorAdapter(editorModeRef.current, editorRef, visualViewRef);
+      if (!adapter) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (key === "b") wrapSelection(adapter, "\\textbf{", "}", "bold text");
+      else wrapSelection(adapter, "\\emph{", "}", "emphasis");
+    };
+    window.addEventListener("keydown", handleEditorShortcut, { capture: true });
+    return () => window.removeEventListener("keydown", handleEditorShortcut, { capture: true });
+  }, []);
 
   const openCodeAtLine = useCallback((line: number) => {
     const offset = lineOffsetFor(draftRef.current, line);
@@ -3520,27 +4146,22 @@ export default function Typeset() {
 
   const openDiagnostic = useCallback((diagnostic: LatexDiagnostic) => {
     const line = diagnostic.line ?? 1;
+    if (!sourcePath) {
+      navigateToLine(line);
+      return;
+    }
+    // Resolved exactly like the inline markers: TeX names files relative to
+    // the compile root's folder, and a diagnostic without a file belongs to
+    // the root document TeX was given.
+    const compileRootPath = compileResult?.inputPath || documentRootPath || sourcePath;
     const reportedPath = diagnostic.filePath?.trim();
-    if (!reportedPath || !sourcePath) {
-      navigateToLine(line);
-      return;
-    }
-    const compileRootPath = compileResult?.inputPath || sourcePath;
-    const normalizedReportedPath = normalizePath(reportedPath).replace(/^\.\//, "");
-    const normalizedSourcePath = normalizePath(sourcePath);
-    if (normalizedReportedPath === normalizedSourcePath) {
-      navigateToLine(line);
-      return;
-    }
-    const targetPath = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(reportedPath)
-      ? reportedPath
-      : `${dirname(compileRootPath)}/${normalizedReportedPath}`.replace(/\\/g, "/");
-    if (normalizePath(targetPath) === normalizedSourcePath) {
+    const targetPath = reportedPath ? diagnosticWorkspacePath(reportedPath, compileRootPath) : compileRootPath;
+    if (sameWorkspacePath(targetPath, sourcePath)) {
       navigateToLine(line);
       return;
     }
     void openSource(targetPath, line, true);
-  }, [compileResult?.inputPath, navigateToLine, openSource, sourcePath]);
+  }, [compileResult?.inputPath, documentRootPath, navigateToLine, openSource, sourcePath]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
     const source = draftRef.current;
@@ -3565,6 +4186,302 @@ export default function Typeset() {
     });
   }, []);
 
+  /** Toolbar search: select the match where the user is, instead of always
+   * switching a Visual-mode search over to Code mode for every hit. */
+  const showSearchMatch = useCallback((start: number, end: number) => {
+    const view = visualViewRef.current;
+    if (editorModeRef.current !== "visual" || !view) {
+      openCodeRange(start, end);
+      return;
+    }
+    const length = view.state.doc.length;
+    const from = clampNumber(start, 0, length);
+    const to = clampNumber(end, from, length);
+    view.focus();
+    view.dispatch({ selection: { anchor: from, head: to }, effects: EditorView.scrollIntoView(from, { y: "center" }) });
+    setCurrentSourceLine(lineNumberForOffset(view.state.doc.toString(), from));
+  }, [openCodeRange]);
+
+  // ── Go to definition (F12, Ctrl/⌘+click) and rename label (F2) ──────────
+  const [navigationNotice, setNavigationNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!navigationNotice) return;
+    const timer = window.setTimeout(() => setNavigationNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [navigationNotice]);
+  const [labelRename, setLabelRename] = useState<{ name: string } | null>(null);
+
+  const activeSourceView = (): EditorView | null => (
+    editorModeRef.current === "visual" ? visualViewRef.current : editorRef.current?.view ?? null
+  );
+  /** Every file of the document, the open one read from its live buffer. */
+  const navigationSources = (): [string, string][] => {
+    const active = sourcePathRef.current;
+    const others = Object.entries(outlineSources).filter(([path]) => !sameWorkspacePath(path, active));
+    if (!active) return others;
+    return [[active, activeSourceView()?.state.doc.toString() ?? draftRef.current], ...others];
+  };
+  const revealSourceRange = async (path: string, source: string, from: number, to: number) => {
+    if (sameWorkspacePath(path, sourcePathRef.current)) {
+      showSearchMatch(from, to);
+      return;
+    }
+    const line = lineNumberForOffset(source, from);
+    // A .bib (or .sty) is edited as part of the document already open.
+    await openSource(path, line, extension(path) !== ".tex", { start: from, end: to });
+  };
+  const goToNavigationTarget = async (target: LatexNavigationTarget) => {
+    const sources = navigationSources();
+    if (target.kind === "label-reference") {
+      for (const [path, source] of sources) {
+        const definition = labelSites(source, target.name).find((site) => site.kind === "definition");
+        if (definition) return revealSourceRange(path, source, definition.from, definition.to);
+      }
+      setNavigationNotice(tr(language,
+        `找不到标签“${target.name}”的定义。`,
+        `No definition of the label "${target.name}" was found.`,
+        `No se encontró la definición de la etiqueta «${target.name}».`));
+      return;
+    }
+    if (target.kind === "label-definition") {
+      // From a \label, step to where it is used: the next use in this file,
+      // then a use in another file, then back to the first one here.
+      const [active, ...others] = sources;
+      const here = active ? labelSites(active[1], target.name).filter((site) => site.kind === "reference") : [];
+      const next = here.find((site) => site.from > target.to);
+      if (active && next) return revealSourceRange(active[0], active[1], next.from, next.to);
+      for (const [path, source] of others) {
+        const use = labelSites(source, target.name).find((site) => site.kind === "reference");
+        if (use) return revealSourceRange(path, source, use.from, use.to);
+      }
+      if (active && here[0]) return revealSourceRange(active[0], active[1], here[0].from, here[0].to);
+      setNavigationNotice(tr(language,
+        `标签“${target.name}”还没有被引用。`,
+        `The label "${target.name}" is not referenced yet.`,
+        `La etiqueta «${target.name}» aún no se referencia.`));
+      return;
+    }
+    if (target.kind === "citation") {
+      for (const path of bibliographySignature.split("\n").filter(Boolean)) {
+        let content: string;
+        try {
+          content = (await fileReadText(path)).content;
+        } catch {
+          continue;
+        }
+        const offset = bibEntryOffset(content, target.key);
+        if (offset >= 0) return revealSourceRange(path, content, offset, offset + target.key.length);
+      }
+      const bibitem = new RegExp(String.raw`\\bibitem\s*(?:\[[^\]]*\])?\s*\{\s*${target.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\s*\}`);
+      for (const [path, source] of sources) {
+        const match = bibitem.exec(source);
+        if (match) return revealSourceRange(path, source, match.index, match.index + match[0].length);
+      }
+      setNavigationNotice(tr(language,
+        `在文档的参考文献里找不到“${target.key}”。`,
+        `"${target.key}" is not in this document's bibliography.`,
+        `«${target.key}» no está en la bibliografía de este documento.`));
+      return;
+    }
+    // A file: resolved the way TeX does, from the compile root first.
+    const openPathNow = sourcePathRef.current;
+    const rootPath = documentRootPathRef.current ?? openPathNow;
+    if (!rootPath) return;
+    const rootDir = dirname(rootPath);
+    const graphics = target.command === "includegraphics" || target.command === "includepdf";
+    const extensions = graphics
+      ? [".pdf", ".png", ".jpg", ".jpeg", ".eps", ".svg"]
+      : target.command === "bibliography" ? [".bib"]
+        : target.command === "addbibresource" || target.command === "lstinputlisting" || target.command === "inputminted" ? [""]
+          : [".tex"];
+    const known = [
+      ...Object.keys(outlineSources),
+      ...projectFiles.map((file) => (rootDir ? `${rootDir}/${file.name}` : file.name)),
+    ];
+    const bases = [...new Set([rootDir, openPathNow ? dirname(openPathNow) : rootDir])];
+    for (const base of bases) {
+      for (const defaultExtension of extensions) {
+        const candidate = resolveTexPath(target.target, base, defaultExtension);
+        const existing = candidate ? known.find((path) => sameWorkspacePath(path, candidate)) : undefined;
+        if (!existing) continue;
+        const kind = extension(existing);
+        if (kind === ".tex" || kind === ".pdf" || isTypesetTextSourcePath(existing) || isTypesetImagePath(existing)) {
+          openPath(existing);
+        } else {
+          void fileOpen(existing);
+        }
+        return;
+      }
+    }
+    setNavigationNotice(tr(language,
+      `项目里找不到文件“${target.target}”。`,
+      `The file "${target.target}" is not in the project.`,
+      `El archivo «${target.target}» no está en el proyecto.`));
+  };
+  const navigationTargetAt = (view: EditorView, pos: number): LatexNavigationTarget | null => {
+    const line = view.state.doc.lineAt(pos);
+    // Loose: a Visual-mode chip hides the braces, so the whole command counts.
+    return latexNavigationTargetAt(line.text, line.from, pos, { loose: true });
+  };
+  const beginLabelRename = (view: EditorView) => {
+    const target = navigationTargetAt(view, view.state.selection.main.head);
+    if (target?.kind === "label-definition" || target?.kind === "label-reference") {
+      setLabelRename({ name: target.name });
+      return;
+    }
+    setNavigationNotice(tr(language,
+      "把光标放在 \\label{…} 或 \\ref{…} 的标签名上，再按 F2 重命名。",
+      "Put the cursor on a label name in \\label{…} or \\ref{…}, then press F2 to rename it.",
+      "Coloca el cursor sobre el nombre de una etiqueta en \\label{…} o \\ref{…} y pulsa F2 para renombrarla."));
+  };
+  /** Renames a label in every file of the document; returns what changed. */
+  const renameLabel = async (from: string, to: string): Promise<{ files: number; places: number }> => {
+    let files = 0;
+    let places = 0;
+    const activePath = sourcePathRef.current;
+    // The open file is edited through its editor, so the rename is one undo step.
+    const view = activeSourceView();
+    if (view) {
+      const sites = labelSites(view.state.doc.toString(), from);
+      if (sites.length > 0) {
+        view.dispatch({ changes: sites.map((site) => ({ from: site.from, to: site.to, insert: to })), userEvent: "input.rename" });
+        files += 1;
+        places += sites.length;
+      }
+    }
+    for (const path of Object.keys(outlineSources)) {
+      if (sameWorkspacePath(path, activePath)) continue;
+      const tabKey = [...openDraftsRef.current.keys()].find((key) => sameWorkspacePath(key, path));
+      const tab = tabKey ? openDraftsRef.current.get(tabKey) : undefined;
+      if (tab && tabKey && tab.draft !== tab.loaded.content) {
+        // Unsaved edits in another tab stay unsaved; the rename joins them.
+        const renamed = renameLabelInSource(tab.draft, from, to);
+        if (renamed.count === 0) continue;
+        openDraftsRef.current.set(tabKey, { ...tab, draft: renamed.text });
+        setDocumentSources((sources) => ({ ...sources, [path]: renamed.text }));
+        files += 1;
+        places += renamed.count;
+        continue;
+      }
+      const file = await fileReadText(path);
+      const renamed = renameLabelInSource(file.content, from, to);
+      if (renamed.count === 0) continue;
+      const written = await fileWriteText(path, renamed.text, file.version ?? null);
+      // Keep a clean tab's snapshot in step, or selecting it would present
+      // this write as an external change to review.
+      if (tabKey) openDraftsRef.current.set(tabKey, { draft: renamed.text, loaded: { ...written, content: renamed.text } });
+      setDocumentSources((sources) => ({ ...sources, [path]: renamed.text }));
+      files += 1;
+      places += renamed.count;
+    }
+    publishOpenDrafts();
+    return { files, places };
+  };
+  const navigationActionsRef = useRef({ goToNavigationTarget, navigationTargetAt, beginLabelRename });
+  navigationActionsRef.current = { goToNavigationTarget, navigationTargetAt, beginLabelRename };
+
+  useEffect(() => {
+    const editorViewFor = (target: EventTarget | null): EditorView | null => {
+      const element = target instanceof Element ? target : null;
+      const editor = element?.closest(".typeset-editor-pane .cm-editor");
+      if (!editor) return null;
+      for (const view of [editorRef.current?.view, visualViewRef.current]) {
+        if (view && view.dom === editor) return view;
+      }
+      return null;
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key !== "F12" && event.key !== "F2") return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const view = editorViewFor(event.target);
+      if (!view) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const actions = navigationActionsRef.current;
+      if (event.key === "F2") {
+        actions.beginLabelRename(view);
+        return;
+      }
+      const target = actions.navigationTargetAt(view, view.state.selection.main.head);
+      if (target) void actions.goToNavigationTarget(target);
+    };
+    const handleClick = (event: MouseEvent) => {
+      if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      const view = editorViewFor(event.target);
+      if (!view) return;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+        ?? (event.target instanceof Node ? view.posAtDOM(event.target) : null);
+      if (pos == null) return;
+      const actions = navigationActionsRef.current;
+      const target = actions.navigationTargetAt(view, pos);
+      if (!target) return;
+      // Ctrl/⌘+click would otherwise add a second cursor here.
+      event.preventDefault();
+      event.stopPropagation();
+      void actions.goToNavigationTarget(target);
+    };
+    window.addEventListener("keydown", handleKey, { capture: true });
+    window.addEventListener("mousedown", handleClick, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", handleKey, { capture: true });
+      window.removeEventListener("mousedown", handleClick, { capture: true });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sourcePath) {
+      setFileComments([]);
+      return;
+    }
+    let active = true;
+    void typesetCommentsList(sourcePath)
+      .then((comments) => {
+        if (active) setFileComments(Array.isArray(comments) ? comments : []);
+      })
+      .catch(() => {
+        if (active) setFileComments([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [sourcePath]);
+
+  // Open comments are marked where they sit. Anchored against each editor's
+  // own text, and only when the list or the editors change: typing moves the
+  // marks inside CodeMirror, as it moves a selection.
+  useEffect(() => {
+    for (const view of [editorRef.current?.view, visualViewRef.current]) {
+      if (!view) continue;
+      const text = view.state.doc.toString();
+      const highlights = fileComments
+        // The list is already this file's (and follows it through renames).
+        .filter((comment) => !comment.resolved)
+        .map((comment) => {
+          const range = commentRangeInSource(comment, text);
+          return {
+            id: comment.id,
+            from: range.from,
+            to: range.to,
+            author: comment.author,
+            body: comment.body,
+            replies: comment.replies?.length ?? 0,
+          };
+        });
+      view.dispatch({ effects: setCommentHighlights.of(highlights) });
+    }
+  }, [editorMode, fileComments, loaded, sourcePath]);
+
+  useEffect(() => {
+    const openFromHighlight = (event: Event) => {
+      const { id } = (event as CustomEvent<OpenCommentEventDetail>).detail ?? {};
+      if (!id) return;
+      setFocusCommentId(id);
+      setCommentsOpen(true);
+    };
+    window.addEventListener(OPEN_COMMENT_EVENT, openFromHighlight);
+    return () => window.removeEventListener(OPEN_COMMENT_EVENT, openFromHighlight);
+  }, []);
+
   const openComments = useCallback(() => {
     const selection = editorMode === "visual"
       ? visualViewRef.current?.state.selection.main
@@ -3572,6 +4489,7 @@ export default function Typeset() {
     setCommentSelection(selection
       ? { from: selection.from, to: selection.to }
       : { from: 0, to: 0 });
+    setFocusCommentId(null);
     setCommentsOpen(true);
   }, [editorMode]);
 
@@ -3645,9 +4563,9 @@ export default function Typeset() {
     setVisualPdfCursor(cursor);
     setCurrentSourceLine(cursor.line);
     if (!sameWorkspacePath(path, sourcePathRef.current)) {
-      void openSource(path, cursor.line, true).then((opened) => {
-        if (opened) setPendingSourceNavigation({ path, line: cursor.line, start: match.start, end: match.end, forceCode });
-      });
+      // The range rides with the open itself: a second navigation queued after
+      // it raced the open's own line-only one and could lose the selection.
+      void openSource(path, cursor.line, true, { start: match.start, end: match.end, forceCode });
       return true;
     }
     if (editorModeRef.current === "visual" && !forceCode) {
@@ -3695,6 +4613,8 @@ export default function Typeset() {
         if (requestEpoch !== forwardSearchEpochRef.current) return;
         const location = result.locations[0];
         if (location) {
+          // A jump into a hidden PDF pane would land nowhere visible.
+          setPdfPanelVisible(true);
           setPdfForwardTarget({ location, nonce: Date.now() });
           setForwardSearchNotice(remapped ? copy.syncTexRemappedAfterEdit : null);
         } else {
@@ -3787,6 +4707,8 @@ export default function Typeset() {
   }, [navigateToPdfTextFallback, openSource, previewPath]);
 
   const lastPdfPositionRef = useRef<{ page: number; x: number; y: number; word?: string } | null>(null);
+  /** Set by the PDF preview: reads the PDF point currently in view. */
+  const pdfViewPositionRef = useRef<(() => PdfClickPosition | null) | null>(null);
 
   const syncEditorToPdf = useCallback(() => {
     const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
@@ -3797,7 +4719,11 @@ export default function Typeset() {
   }, [editorMode, jumpToPdfForLine]);
 
   const syncPdfToEditor = useCallback(() => {
-    if (lastPdfPositionRef.current) {
+    // The part of the PDF on screen, not the last double-click (or page 1).
+    const viewed = pdfViewPositionRef.current?.();
+    if (viewed) {
+      openSourceForPdfPosition(viewed.page, viewed.x, viewed.y, "", "");
+    } else if (lastPdfPositionRef.current) {
       const pos = lastPdfPositionRef.current;
       openSourceForPdfPosition(pos.page, pos.x, pos.y, "", "", pos.word);
     } else {
@@ -4330,27 +5256,6 @@ export default function Typeset() {
                 </button>
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "review" ? " open-rail active" : ""}`}
-                  title={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
-                  aria-label={effectiveProjectPanelVisible && activeLeftTab === "review" ? copy.hideReviewPanel : copy.showReviewPanel}
-                  aria-pressed={effectiveProjectPanelVisible && activeLeftTab === "review"}
-                  onClick={() => {
-                    if (slideFocusActive) {
-                      setSlideFocusMode(false);
-                      setProjectPanelVisible(true);
-                      setActiveLeftTab("review");
-                    } else if (effectiveProjectPanelVisible && activeLeftTab === "review") {
-                      setProjectPanelVisible(false);
-                    } else {
-                      setProjectPanelVisible(true);
-                      setActiveLeftTab("review");
-                    }
-                  }}
-                >
-                  <ToolIcon name="review" className="ide-rail-tab-link-icon" />
-                </button>
-                <button
-                  type="button"
                   className={`ide-rail-tab-link${effectiveProjectPanelVisible && activeLeftTab === "ai" ? " open-rail active" : ""}`}
                   title={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
                   aria-label={effectiveProjectPanelVisible && activeLeftTab === "ai" ? copy.hideAiPanel : copy.showAiPanel}
@@ -4451,16 +5356,6 @@ export default function Typeset() {
                       />
                     </>
                   )}
-                  {activeLeftTab === "review" && (
-                    <TypesetReviewPanel
-                      trackChangesEnabled={trackChangesEnabled}
-                      onToggleTrackChanges={() => setTrackChangesEnabled((on) => !on)}
-                      currentLine={currentSourceLine}
-                      sourcePath={sourcePath}
-                      onJumpToLine={navigateToLine}
-                      onClose={() => setProjectPanelVisible(false)}
-                    />
-                  )}
                   {aiPanelMounted && (
                     <TypesetAiPanel visible={effectiveProjectPanelVisible && activeLeftTab === "ai"} prepareEditorContext={prepareChatEditorContext} />
                   )}
@@ -4490,7 +5385,7 @@ export default function Typeset() {
                   <button
                     type="button"
                     className="typeset-resizer-collapse-btn"
-                    title={activeLeftTab === "ai" ? copy.hideAiPanel : activeLeftTab === "review" ? copy.hideReviewPanel : copy.hideProjectFiles}
+                    title={activeLeftTab === "ai" ? copy.hideAiPanel : copy.hideProjectFiles}
                     aria-label={copy.collapseSidePanel}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -4543,7 +5438,6 @@ export default function Typeset() {
                   canUndo={canUndoDraft}
                   editorRef={editorRef}
                   visualViewRef={visualViewRef}
-                  onChange={changeDraft}
                   onModeChange={changeEditorMode}
                   onNavigateToLine={navigateToLine}
                   onEditSlideSource={openCodeAtLine}
@@ -4555,7 +5449,17 @@ export default function Typeset() {
                   projectSearchLabel={copy.projectSearchTitle}
                   onComments={openComments}
                   commentsLabel={copy.commentsTitle}
-                  onSearch={openCodeRange}
+                  trackChangesControl={(
+                    <TypesetTrackChangesControl
+                      enabled={trackChangesEnabled}
+                      changes={trackedChanges}
+                      language={language}
+                      onToggle={toggleTrackChanges}
+                      onResolve={resolveTracked}
+                      onNavigate={(change) => showSearchMatch(change.from, change.to)}
+                    />
+                  )}
+                  onSearch={showSearchMatch}
                   onUndo={undoDraft}
                   saving={saving}
                   citationPapers={literaturePapers}
@@ -4733,6 +5637,36 @@ export default function Typeset() {
               {reviewCompileNotice && externalChange?.path === sourcePath && (
                 <div className="typeset-warning-bar" role="status">{reviewCompileNotice}</div>
               )}
+              {navigationNotice && (
+                <div className="typeset-warning-bar typeset-navigation-notice" role="status">
+                  <span>{navigationNotice}</span>
+                  <button type="button" aria-label={tr(language, "关闭提示", "Dismiss", "Descartar")} onClick={() => setNavigationNotice(null)}>×</button>
+                </div>
+              )}
+              {labelRename && (
+                <TypesetRenameLabelDialog
+                  name={labelRename.name}
+                  sources={navigationSources()}
+                  language={language}
+                  onCancel={() => {
+                    setLabelRename(null);
+                    activeSourceView()?.focus();
+                  }}
+                  onRename={async (to) => {
+                    const result = await renameLabel(labelRename.name, to);
+                    setLabelRename(null);
+                    activeSourceView()?.focus();
+                    setNavigationNotice(tr(language,
+                      `已把“${labelRename.name}”改为“${to}”：${result.files} 个文件，${result.places} 处。`,
+                      `Renamed "${labelRename.name}" to "${to}": ${result.places} places in ${result.files} files.`,
+                      `«${labelRename.name}» renombrada a «${to}»: ${result.places} lugares en ${result.files} archivos.`));
+                    return result;
+                  }}
+                />
+              )}
+              {saveQueuedAfterCompile && (
+                <div className="typeset-warning-bar" role="status">{copy.saveQueuedAfterCompile}</div>
+              )}
               {loading && !previewPath ? (
                 <div className="typeset-empty">{copy.loadingSource}</div>
               ) : loaded ? (
@@ -4751,6 +5685,13 @@ export default function Typeset() {
                       extraKeymap={codeEditorKeymapRef.current}
                       onReady={(handle) => {
                         editorRef.current = handle;
+                        // The Code view keeps the track-changes record for both modes.
+                        handle?.view.dispatch({
+                          effects: [
+                            StateEffect.appendConfig.of(EditorView.updateListener.of((update) => trackedUpdateRef.current(update))),
+                            setTrackChangesRecording.of({ enabled: trackChangesEnabledRef.current, author: copy.commentAuthorYou }),
+                          ],
+                        });
                       }}
                       onDoubleClickPos={jumpToPdfForLine}
                       readOnly={saving}
@@ -4793,6 +5734,7 @@ export default function Typeset() {
                         reviewHunks={externalReviewHunks}
                         numbering={visualNumbering}
                         theorems={visualTheoremDefinitions}
+                        mathMacros={visualMathMacros}
                         pdfCursor={visualPdfCursor}
                         onChange={reviewSafeOnChange}
                         onVisibleLineChange={setCurrentSourceLine}
@@ -4801,9 +5743,12 @@ export default function Typeset() {
                         onViewReady={onVisualViewReady}
                       onPasteImage={async (file) => {
                         const sourceName = file.name || `pasted-image.${file.type.split("/")[1] || "png"}`;
-                        const imported = await typesetImportImageData(sourceName, new Uint8Array(await file.arrayBuffer()));
+                        // Stored beside the root document and referenced relative
+                        // to it: TeX resolves \includegraphics from the root's folder.
+                        const documentPath = sourcePathRef.current ? compileRootFor(sourcePathRef.current) : null;
+                        const imported = await typesetImportImageData(sourceName, new Uint8Array(await file.arrayBuffer()), documentPath);
                         setTreeRefreshKey((key) => key + 1);
-                        const imagePath = imported.path.replace(/\\/g, "/");
+                        const imagePath = (imported.includePath ?? imported.path).replace(/\\/g, "/");
                         return `\n\\begin{figure}[htbp]\n\\centering\n\\includegraphics[width=\\linewidth]{${imagePath}}\n\\end{figure}\n`;
                       }}
                       onPasteError={(pasteError) => setError(String(pasteError))}
@@ -4960,6 +5905,7 @@ export default function Typeset() {
                       }}
                       onHide={() => setPdfPanelVisible(false)}
                       forwardTarget={pdfForwardTarget}
+                      viewPositionRef={pdfViewPositionRef}
                       forwardSearchNotice={forwardSearchNotice}
                     />
                   )}
@@ -4980,6 +5926,7 @@ export default function Typeset() {
       )}
       {projectSearchOpen && (
         <TypesetProjectSearchPanel
+          scopePath={activeWorkDir}
           onClose={() => setProjectSearchOpen(false)}
           onOpenMatch={openProjectSearchMatch}
           onBeforeReplace={prepareProjectReplace}
@@ -4991,11 +5938,14 @@ export default function Typeset() {
           path={sourcePath}
           source={draft}
           selection={commentSelection}
+          focusCommentId={focusCommentId}
           onClose={() => setCommentsOpen(false)}
           onNavigate={(range) => {
             setCommentsOpen(false);
-            openCodeRange(range.from, range.to);
+            // Shown where the reader is, Visual mode included.
+            showSearchMatch(range.from, range.to);
           }}
+          onCommentsChanged={setFileComments}
         />
       )}
     </div>

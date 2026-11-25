@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bibEntryDetail, bibliographyTargets, parseBibEntries } from "../latexBib";
+import { bibEntryDetail, bibliographyTargets, parseBibEntries, withoutBibEntries } from "../latexBib";
 
 describe("parseBibEntries", () => {
   it("reads keys and the fields the completion popup shows", () => {
@@ -49,5 +49,21 @@ describe("bibliographyTargets", () => {
       .toEqual(["cas-refs", "extra", "other.bib"]);
     // \bibliographystyle names a style, not a source.
     expect(bibliographyTargets("\\bibliographystyle{plain}")).toEqual([]);
+  });
+
+  it("reads \\addbibresource options and ignores commented declarations", () => {
+    expect(bibliographyTargets("\\addbibresource[label=main]{refs.bib}\n% \\bibliography{old}")).toEqual(["refs.bib"]);
+    expect(bibliographyTargets("Price is 5\\% \\bibliography{live}")).toEqual(["live"]);
+  });
+});
+
+describe("withoutBibEntries", () => {
+  it("drops only the entries whose keys are taken", () => {
+    const text = "@article{a2020, title={A}}\n@string{j = {Journal}}\n@book{b2021, title={B {nested}}}\n";
+    const { text: kept, removed } = withoutBibEntries(text, new Set(["a2020"]));
+    expect(removed).toEqual(["a2020"]);
+    expect(parseBibEntries(kept).map((entry) => entry.key)).toEqual(["b2021"]);
+    expect(kept).toContain("@string{j = {Journal}}");
+    expect(withoutBibEntries(text, new Set()).text).toBe(text);
   });
 });

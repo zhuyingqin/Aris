@@ -4826,6 +4826,28 @@ fn school_route_explains_the_account_gateway_refusals() {
 }
 
 #[test]
+fn school_route_missing_channel_for_a_paid_group_is_a_server_gap() {
+    // A Pro member whose group has no scopus-search channel: the server was
+    // never configured for it, so the error must not ask for a membership.
+    let body = r#"{"error":{"code":"","message":"No available channel for model scopus-search under group pro (distributor)","type":"new_api_error"}}"#;
+    let server = ScopusFixtureServer::spawn(vec![(503, body); 3]);
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+        .expect_err("no channel");
+    assert!(
+        error.contains("HTTP 503")
+            && error.contains("server configuration problem")
+            && error.contains("`pro`")
+            && !error.contains("needs a Go"),
+        "{error}"
+    );
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Failed,
+        "{error}"
+    );
+}
+
+#[test]
 fn school_route_upstream_failure_keeps_the_channel_message() {
     // The research channel's own answer when the school fails. New API refunds
     // it, so the generic provider retries stay free.

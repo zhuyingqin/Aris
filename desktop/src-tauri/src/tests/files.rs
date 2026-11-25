@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
     collect_typeset_library, file_read, import_chat_attachment_at, import_chat_attachment_bytes_at,
-    normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
+    invoke_body_bytes, normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
     sanitize_chat_upload_name, strip_location_suffix, TypesetScan,
 };
 
@@ -73,6 +73,31 @@ fn pasted_images_keep_their_own_extension_when_staged() {
     );
 
     let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn byte_payloads_survive_the_post_message_ipc_fallback() {
+    use tauri::ipc::InvokeBody;
+
+    let raw = InvokeBody::Raw(vec![0, 1, 254, 255]);
+    assert_eq!(invoke_body_bytes(&raw).as_deref(), Some(&[0, 1, 254, 255][..]));
+
+    // After the custom-protocol IPC fails once, Tauri serialises a Uint8Array
+    // payload as a JSON number array for the rest of the page's life.
+    let fallback = InvokeBody::Json(serde_json::json!([0, 1, 254, 255]));
+    assert_eq!(invoke_body_bytes(&fallback).as_deref(), Some(&[0, 1, 254, 255][..]));
+    let empty = InvokeBody::Json(serde_json::json!([]));
+    assert_eq!(invoke_body_bytes(&empty).as_deref(), Some(&[][..]));
+
+    for not_bytes in [
+        serde_json::json!({ "data": [1, 2] }),
+        serde_json::json!([1, 256]),
+        serde_json::json!([1, -1]),
+        serde_json::json!([1, 2.5]),
+        serde_json::json!(["1"]),
+    ] {
+        assert!(invoke_body_bytes(&InvokeBody::Json(not_bytes)).is_none());
+    }
 }
 
 #[test]

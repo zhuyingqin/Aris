@@ -5787,3 +5787,67 @@ fn timeout_retries_resend_a_lighter_request_instead_of_the_identical_one() {
     // the stored session still has every image
     assert_eq!(request_images(&runtime.session().messages).len(), 8);
 }
+
+#[test]
+fn turn_context_rides_on_this_turns_user_message_in_requests_only() {
+    use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use crate::permissions::{PermissionMode, PermissionPolicy};
+
+    #[derive(Clone)]
+    struct Recorder {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<ConversationMessage>>>>,
+    }
+    impl ApiClient for Recorder {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.messages);
+            Ok(if requests.len() == 1 {
+                vec![
+                    AssistantEvent::ToolUse {
+                        id: "t1".to_string(),
+                        name: "echo".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]
+            } else {
+                vec![AssistantEvent::TextDelta("done".to_string()), AssistantEvent::MessageStop]
+            })
+        }
+    }
+
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text("earlier question"));
+    session.messages.push(ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: "earlier answer".to_string(),
+    }]));
+    let mut runtime = ConversationRuntime::new(
+        session,
+        Recorder { requests: requests.clone() },
+        StaticToolExecutor::new().register("echo", |_input| Ok("echoed".to_string())),
+        PermissionPolicy::new(PermissionMode::Allow),
+        vec!["system".to_string()],
+    );
+    runtime.set_turn_context(Some("# recalled history\n- old decision".to_string()));
+    runtime.run_turn("what did we decide?", None).expect("turn");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "tool call then answer");
+    for messages in requests.iter() {
+        // Earlier history is sent exactly as stored: its cached prefix holds.
+        assert_eq!(messages[0], ConversationMessage::user_text("earlier question"));
+        let turn = &messages[2];
+        assert_eq!(turn.role, MessageRole::User);
+        assert!(matches!(turn.blocks.last(), Some(ContentBlock::Text { text }) if text.contains("old decision")));
+    }
+    // The Session keeps only what the user wrote.
+    assert_eq!(runtime.session().messages[2], ConversationMessage::user_text("what did we decide?"));
+    drop(requests);
+
+    // The context belongs to that turn alone.
+    runtime.run_turn("next question", None).expect("second turn");
+    let last = runtime.session().messages.len();
+    assert!(last > 4);
+}
+

@@ -4,7 +4,7 @@
  * without importing the workbench.
  */
 
-export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "presentation" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode" | "more" | "ai" | "focus"; className?: string }) {
+export function ToolIcon({ name, className }: { name: "compile" | "save" | "refresh" | "new" | "open" | "minus" | "plus" | "code" | "visual" | "presentation" | "logs" | "files" | "search" | "history" | "settings" | "download" | "home" | "undo" | "redo" | "list" | "figure" | "table" | "citation" | "clear" | "copy" | "review" | "previous" | "next" | "comments" | "link" | "ref" | "chevron" | "numberedList" | "contrast" | "syncToPdf" | "syncToCode" | "more" | "ai" | "focus" | "sidebar"; className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none">
       {name === "compile" && <path d="M5.2 3.1 12 8l-6.8 4.9z" fill="currentColor" />}
@@ -53,6 +53,7 @@ export function ToolIcon({ name, className }: { name: "compile" | "save" | "refr
       {name === "home" && <path d="M2.7 7.3 8 3l5.3 4.3M4.2 6.4v6.1h7.6V6.4M6.7 12.5V9.2h2.6v3.3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "undo" && <path d="M6.8 4.1 3.4 7.5l3.4 3.4M3.8 7.5h5.5a3.4 3.4 0 0 1 0 6.8H7.4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "redo" && <path d="m9.2 4.1 3.4 3.4-3.4 3.4M12.2 7.5H6.7a3.4 3.4 0 0 0 0 6.8h1.9" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />}
+      {name === "sidebar" && <path d="M2.5 3.2h11v9.6h-11zM6.3 3.2v9.6M3.8 5.4h1.2M3.8 7.4h1.2M3.8 9.4h1.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "list" && <path d="M5.7 4.5h7M5.7 8h7M5.7 11.5h7M3.2 4.5h.1M3.2 8h.1M3.2 11.5h.1" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />}
       {name === "figure" && <path d="M2.8 3.2h10.4v9.6H2.8zM4.6 10.8l2.6-3 1.9 2.1 1.1-1.2 1.4 2.1M5.4 5.6h.1" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />}
       {name === "table" && <path d="M2.8 3.2h10.4v9.6H2.8zM2.8 6.4h10.4M2.8 9.6h10.4M6.25 3.2v9.6M9.75 3.2v9.6" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />}

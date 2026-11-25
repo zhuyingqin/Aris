@@ -63,7 +63,7 @@ pub(crate) const MAX_FILES: usize = 50_000;
 
 /// Bumped when the repository settings below change, so an existing shadow is
 /// reconfigured once instead of on every task.
-const LAYOUT_VERSION: &str = "1";
+const LAYOUT_VERSION: &str = "2";
 
 /// Always outside a snapshot, in `info/exclude` syntax.
 ///
@@ -144,6 +144,13 @@ fn settings(git_dir: &Path) -> Vec<(&'static str, String)> {
         // A plain-folder user often has no Git identity configured at all.
         ("user.name", "SomniQ".to_string()),
         ("user.email", "work-tasks@somniq.invalid".to_string()),
+        // No automatic housekeeping. A snapshot of a large folder makes
+        // `commit` start `maintenance --auto --detach`, and on Windows that
+        // detached repack inherits the pipes SomniQ reads the commit's output
+        // from — so the snapshot did not return until a whole-store repack
+        // had finished, minutes later, with a core pegged throughout.
+        ("gc.auto", "0".to_string()),
+        ("maintenance.auto", "false".to_string()),
     ]
 }
 
@@ -289,8 +296,9 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub(crate) struct Snapshot {
     /// The snapshot branch's commit after the snapshot.
     pub head: String,
-    /// Files present in the folder but left out for size or because they could
-    /// not be read. Already-excluded caches are not listed.
+    /// Files present in the folder but left out for size, because they could
+    /// not be read, or because Git on Windows cannot hold their name (see
+    /// [`rejected_by_windows_git`]). Already-excluded caches are not listed.
     pub omitted: Vec<String>,
 }
 
@@ -319,6 +327,13 @@ pub(crate) fn snapshot(repo: &ProjectRepo) -> Result<Snapshot, String> {
     let mut omitted = Vec::new();
     let mut total = 0_u64;
     for path in candidates {
+        // Git for Windows refuses these outright, and one refusal fails the
+        // whole `add` — so a single stray `nul` left by a `> nul` redirect
+        // used to stop every task in the folder before it started.
+        if rejected_by_windows_git(&path) {
+            omitted.push(path);
+            continue;
+        }
         let full = work_tree.join(&path);
         // Gone (deleted since the last snapshot), a directory (a nested
         // repository), or a link: not something to copy.
@@ -389,6 +404,56 @@ pub(crate) fn snapshot(repo: &ProjectRepo) -> Result<Snapshot, String> {
     let head = repo.checked(&["rev-parse", "HEAD"], "resolve the folder's snapshot")?;
     omitted.sort();
     Ok(Snapshot { head, omitted })
+}
+
+/// Whether Git for Windows refuses to index `path` (`invalid path '…'`).
+///
+/// Mirrors `is_valid_win32_path` in Git for Windows (`compat/mingw.c`), which
+/// `core.protectNTFS` applies to every path added to the index. Such files do
+/// exist in real folders — `nul` is what a Git Bash `> nul` redirect creates —
+/// and since they could never be checked out on Windows either, leaving them
+/// out of the snapshot loses nothing a task could have used.
+pub(crate) fn rejected_by_windows_git(path: &str) -> bool {
+    cfg!(windows) && path.split('/').any(invalid_win32_component)
+}
+
+fn invalid_win32_component(component: &str) -> bool {
+    if component.is_empty() || component == "." || component == ".." {
+        return false;
+    }
+    if component.ends_with('.') || component.ends_with(' ') {
+        return true;
+    }
+    if component
+        .chars()
+        .any(|c| (c as u32) < 32 || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\'))
+    {
+        return true;
+    }
+    reserved_device_name(component)
+}
+
+/// `NUL`, `con.txt`, `COM1 .log`, …: a device name, whatever follows a dot.
+fn reserved_device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_lowercase();
+    match stem.as_str() {
+        "aux" | "con" | "conin$" | "conout$" | "nul" | "prn" => true,
+        _ => {
+            let (Some(prefix), Some(rest)) = (stem.get(..3), stem.get(3..)) else {
+                return false;
+            };
+            matches!(prefix, "com" | "lpt")
+                && matches!(
+                    rest,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"
+                )
+        }
+    }
 }
 
 fn too_large(files: usize, bytes: u64) -> String {

@@ -28,11 +28,12 @@ function widgets(source: string) {
 
 describe("footnotes", () => {
   it("collapses a footnote to the marker the PDF prints, with its text on hover", () => {
-    const source = "\\begin{document}\nA claim\\footnote{See \\textbf{Jaeger} 2001.} follows.\n\\end{document}";
-    const footnote = widgets(source).find((widget) => widget.className.includes("cm-vis-footnote"));
+    const source = "\\begin{document}\nA claim\\footnote{See \\textbf{Jaeger} 2001.} follows\\footnote{Second.}.\n\\end{document}";
+    const footnotes = widgets(source).filter((widget) => widget.className.includes("cm-vis-footnote"));
 
-    expect(footnote?.text).toBe("*");
-    expect(source.slice(footnote!.from, footnote!.to)).toBe("\\footnote{See \\textbf{Jaeger} 2001.}");
+    // Numbered as the PDF numbers them, not a bare "*".
+    expect(footnotes.map((footnote) => footnote.text)).toEqual(["1", "2"]);
+    expect(source.slice(footnotes[0].from, footnotes[0].to)).toBe("\\footnote{See \\textbf{Jaeger} 2001.}");
   });
 
   it("shows the footnote's own source again when the caret is inside it", () => {

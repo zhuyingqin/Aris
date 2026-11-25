@@ -110,6 +110,8 @@ const EN_COPY = {
   documentTitle: "Document title",
   titlePlaceholder: "Untitled research document",
   templateLabel: "Document template",
+  journalTemplates: "Journals and conferences",
+  thesisTemplates: "Theses",
   templates: {
     article: { label: "Article", description: "Paper, note, or manuscript" },
     beamer: { label: "Presentation", description: "16:9 Beamer slide deck" },
@@ -219,6 +221,8 @@ const CN_COPY: typeof EN_COPY = {
   documentTitle: "文档标题",
   titlePlaceholder: "未命名研究文档",
   templateLabel: "文档模板",
+  journalTemplates: "期刊与会议",
+  thesisTemplates: "学位论文",
   templates: {
     article: { label: "论文与文章", description: "适合论文、笔记和普通文稿" },
     beamer: { label: "演示文稿", description: "16:9 Beamer 幻灯片" },
@@ -328,6 +332,8 @@ const ES_COPY: typeof EN_COPY = {
   documentTitle: "Título del documento",
   titlePlaceholder: "Nota de investigación sin título",
   templateLabel: "Plantilla del documento",
+  journalTemplates: "Revistas y congresos",
+  thesisTemplates: "Tesis",
   templates: {
     article: { label: "Artículo", description: "Artículo, nota o manuscrito" },
     beamer: { label: "Presentación", description: "Presentación Beamer 16:9" },

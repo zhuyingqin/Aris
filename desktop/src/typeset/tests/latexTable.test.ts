@@ -11,6 +11,7 @@ import {
   setTableBorders,
   setTableColumnAlign,
   tableCellEdit,
+  tableStructureEdit,
   tableColumnCount,
 } from "../latexTable";
 
@@ -180,5 +181,48 @@ describe("tableCellEdit", () => {
 
   it("refuses to write a cell that has no source of its own", () => {
     expect(tableCellEdit({ from: -1, to: -1, text: "" }, "x")).toBeNull();
+  });
+});
+
+describe("tables the whole-table tools must not rewrite", () => {
+  const parse = (source: string) => {
+    const model = parseTable(source, 0, source.length);
+    expect(model).toBeTruthy();
+    return model!;
+  };
+
+  it("reads cells around comments instead of through them", () => {
+    const source = [
+      "\\begin{tabular}{ll}",
+      "% header row & not a cell",
+      "Name & Score \\\\ % trailing note",
+      "% Alice's row follows \\\\ not a break",
+      "Alice & 71.2\\% \\\\",
+      "\\end{tabular}",
+    ].join("\n");
+    const model = parse(source);
+    expect(model.rows.map((row) => row.cells.map((cell) => cell.text))).toEqual([
+      ["Name", "Score"],
+      ["Alice", "71.2\\%"],
+    ]);
+    expect(model.structureLock).toBe("comments");
+    expect(tableStructureEdit(model, insertTableRow(model, 1))).toBeNull();
+    // Cell text itself stays editable in place.
+    expect(tableCellEdit(model.rows[1].cells[0], "Bob")).toEqual({
+      from: source.indexOf("Alice &"), to: source.indexOf("Alice &") + "Alice".length, insert: "Bob",
+    });
+  });
+
+  it("keeps a cell with a comment inside it read-only", () => {
+    const source = "\\begin{tabular}{ll}\nA % first half\n continued & B \\\\\n\\end{tabular}";
+    const cell = parse(source).rows[0].cells[0];
+    expect(cell.editable).toBe(false);
+    expect(tableCellEdit(cell, "X")).toBeNull();
+  });
+
+  it("locks merged cells and row options", () => {
+    expect(parse("\\begin{tabular}{lll}\n\\multicolumn{2}{c}{AB} & C \\\\\n1 & 2 & 3 \\\\\n\\end{tabular}").structureLock).toBe("spans");
+    expect(parse("\\begin{tabular}{ll}\nA & B \\\\[2pt]\nC & D \\\\\n\\end{tabular}").structureLock).toBe("rowOptions");
+    expect(parse("\\begin{tabular}{ll}\nA & B \\\\\nC & D \\\\\n\\end{tabular}").structureLock).toBeNull();
   });
 });

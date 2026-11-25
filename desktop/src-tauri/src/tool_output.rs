@@ -148,6 +148,7 @@ impl OutputCompactor for LatexCompileOutputCompactor {
             );
         };
         insert_output_artifact_fields(&mut value, artifact);
+        bound_latex_diagnostics_for_context(&mut value);
         let truncated =
             compact_shell_stream_fields(&mut value, LATEX_STREAM_CONTEXT_CHARS, artifact);
         if truncated {
@@ -166,6 +167,42 @@ impl OutputCompactor for LatexCompileOutputCompactor {
             "LaTeX compiler output",
         )
     }
+}
+
+/// Diagnostics the model is shown, errors first. The compiler keeps up to 40
+/// for the log panel; past this many the JSON would be cut mid-array by the
+/// overall context limit, losing the very first error with it.
+const MAX_LATEX_CONTEXT_DIAGNOSTICS: usize = 20;
+
+fn bound_latex_diagnostics_for_context(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(diagnostics) = object
+        .get_mut("diagnostics")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    let total = diagnostics.len();
+    if total <= MAX_LATEX_CONTEXT_DIAGNOSTICS {
+        return;
+    }
+    let is_error = |item: &serde_json::Value| {
+        item.get("severity").and_then(serde_json::Value::as_str) == Some("error")
+    };
+    let mut kept = diagnostics
+        .iter()
+        .filter(|item| is_error(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    kept.extend(diagnostics.iter().filter(|item| !is_error(item)).cloned());
+    kept.truncate(MAX_LATEX_CONTEXT_DIAGNOSTICS);
+    *diagnostics = kept;
+    object.insert(
+        "diagnosticsOmittedForContext".to_string(),
+        serde_json::Value::from(total - MAX_LATEX_CONTEXT_DIAGNOSTICS),
+    );
 }
 
 impl OutputCompactor for ShellOutputCompactor {
@@ -445,8 +482,11 @@ pub(crate) fn latex_failure_class(output: &str) -> LatexFailureClass {
 /// A missing `.tex` is excluded on purpose — that one *is* the document's
 /// fault, because the author wrote the `\input` that names it.
 fn missing_tex_resource(output: &str) -> Option<String> {
-    for marker in ["! LaTeX Error: File `", "! Package Error: File `"] {
-        if let Some(start) = output.find(marker) {
+    // Markers carry no leading `! `: every build runs with `-file-line-error`,
+    // which replaces it with `./main.tex:3: `. Every occurrence is checked
+    // because a missing `\input` file (the document's fault) may come first.
+    for marker in ["LaTeX Error: File `", "Package Error: File `"] {
+        for (start, _) in output.match_indices(marker) {
             let rest = &output[start + marker.len()..];
             if let Some(end) = rest.find('\'') {
                 let name = rest[..end].trim();
@@ -456,25 +496,36 @@ fn missing_tex_resource(output: &str) -> Option<String> {
             }
         }
     }
-    // fontspec and the TeX font machinery each phrase this their own way.
-    for marker in [
-        "! Package fontspec Error: The font \"",
-        "! Font \\",
-        "Font shape `",
-    ] {
-        if let Some(start) = output.find(marker) {
-            let rest = &output[start..];
-            let window = &rest[..rest.len().min(240)];
+    // fontspec and the TeX font machinery each phrase this their own way. The
+    // output is a JSON envelope, so no marker may contain a quote (escaped as
+    // `\"` there). `Font shape \`…' undefined` is deliberately absent: it is
+    // the substitution *warning* every ctex document on Windows prints, and
+    // treating it as fatal told the model not to fix real source errors.
+    for marker in ["Package fontspec Error: The font ", "Font \\"] {
+        for (start, _) in output.match_indices(marker) {
+            let window = prefix_within_bytes(&output[start..], 240);
             if window.contains("not found")
                 || window.contains("cannot be found")
                 || window.contains("not loadable")
-                || window.contains("undefined")
             {
                 return Some("a font the installation does not provide".to_string());
             }
         }
     }
     None
+}
+
+/// The longest prefix of `text` that fits in `max_bytes` without splitting a
+/// UTF-8 character. TeX logs routinely carry CJK text and paths.
+fn prefix_within_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn missing_resource_hint(output: &str) -> Option<String> {

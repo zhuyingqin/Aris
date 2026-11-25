@@ -146,6 +146,17 @@ describe("pdfLinkRunsFromAnnotations", () => {
 
     expect(link).toMatchObject({ borderColor: null, borderWidth: 0 });
   });
+
+  it("keeps \\href/\\url links, which carry a URI instead of a destination", () => {
+    const viewport = { convertToPdfPoint: (x: number, y: number) => [x, y], convertToViewportRectangle: (rect: number[]) => rect };
+    const links = pdfLinkRunsFromAnnotations([
+      { subtype: "Link", rect: [0, 0, 10, 10], url: "https://example.org" },
+      { subtype: "Link", rect: [0, 0, 10, 10], url: "javascript:alert(1)" },
+      { subtype: "Link", rect: [0, 0, 10, 10], dest: "section.1" },
+    ], viewport);
+    expect(links.map((link) => link.url)).toEqual(["https://example.org", null]);
+    expect(links[1].destination).toBe("section.1");
+  });
 });
 
 describe("wordAtRatio", () => {

@@ -23,12 +23,16 @@ export type EditorAdapter = {
   text: string;
   replace: (from: number, to: number, insert: string, selStart: number, selEnd: number) => void;
 };
+/**
+ * Both modes edit through a CodeMirror transaction on the live view, so a
+ * toolbar command is one undoable step in that editor's own history. (Code
+ * mode used to rewrite the whole draft through the shell, which syncs editors
+ * with `addToHistory: false` — every toolbar edit there was unundoable.)
+ */
 export function activeEditorAdapter(
   mode: EditorMode,
   editorRef: { current: SharedEditorHandle | null },
   visualViewRef: { current: EditorView | null },
-  draft: string,
-  onChange: (value: string) => void,
 ): EditorAdapter | null {
   if (mode === "code") {
     const editor = editorRef.current;
@@ -37,13 +41,14 @@ export function activeEditorAdapter(
     return {
       from,
       to,
-      text: draft,
+      text: editor.getText(),
       replace: (rFrom, rTo, insert, selStart, selEnd) => {
-        onChange(draft.slice(0, rFrom) + insert + draft.slice(rTo));
-        window.setTimeout(() => {
-          editor.focus();
-          editor.dispatch({ selection: { anchor: selStart, head: selEnd } });
-        }, 0);
+        editor.dispatch({
+          changes: { from: rFrom, to: rTo, insert },
+          selection: { anchor: selStart, head: selEnd },
+          scrollIntoView: true,
+        });
+        editor.focus();
       },
     };
   }

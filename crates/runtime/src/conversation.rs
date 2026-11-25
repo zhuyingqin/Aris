@@ -810,6 +810,15 @@ pub struct ConversationRuntime<C, T> {
     evidence_ledger: EvidenceLedger,
     evidence_guard_mode: EvidenceGuardMode,
     evidence_observed_tool_uses: HashSet<String>,
+    /// Text the caller wants the model to see with this turn's user message
+    /// only (the per-turn recall block when it is placed on the user side).
+    /// It is added to the request copy of that message, never to the Session,
+    /// so history stays as the user wrote it and earlier turns keep their
+    /// cached prefix. Cleared when the turn ends.
+    turn_context: Option<String>,
+    /// The user message the context belongs to, to find it again after an
+    /// in-turn compaction moves messages around.
+    turn_context_anchor: Option<ConversationMessage>,
 }
 
 /// A turn's model-visible tool projection, as the caller computes it.
@@ -962,6 +971,8 @@ where
             evidence_ledger: EvidenceLedger::default(),
             evidence_guard_mode: evidence_guard_mode(),
             evidence_observed_tool_uses: HashSet::new(),
+            turn_context: None,
+            turn_context_anchor: None,
         }
     }
 
@@ -1005,6 +1016,21 @@ where
     /// prompt merely *quotes* a research request — chat-title and intent
     /// inference both quote one, and both need the bare model output. Such a
     /// turn cannot retrieve anything, so it has no coverage to declare.
+    /// Text for the next turn's request only, attached to that turn's user
+    /// message. See the `turn_context` field.
+    pub fn set_turn_context(&mut self, text: Option<String>) {
+        self.turn_context = text.filter(|text| !text.trim().is_empty());
+    }
+
+    fn attach_turn_context(&self, messages: &mut [ConversationMessage]) {
+        let (Some(text), Some(anchor)) = (&self.turn_context, &self.turn_context_anchor) else {
+            return;
+        };
+        if let Some(message) = messages.iter_mut().rev().find(|message| *message == anchor) {
+            message.blocks.push(ContentBlock::Text { text: text.clone() });
+        }
+    }
+
     #[must_use]
     pub fn without_retrieval_guard(mut self) -> Self {
         self.retrieval_guard_enabled = false;
@@ -1198,6 +1224,8 @@ where
             if let Some(source) = self.turn_input_source.as_mut() { source.checkpoint(&self.session)?; }
             Ok(summary)
         });
+        self.turn_context = None;
+        self.turn_context_anchor = None;
         let (outcome, last_message) = match &result {
             Ok(summary) => (TurnOutcome::Completed, last_assistant_text(summary)),
             Err(error) if error.is_interrupted() => (TurnOutcome::Interrupted, None),
@@ -1247,6 +1275,7 @@ where
         } else {
             TaskPlanCompletion::default()
         };
+        self.turn_context_anchor = self.turn_context.as_ref().map(|_| user_message.clone());
         self.session.messages.push(user_message);
 
         if self.resume_retrieval_on_next_user_message {
@@ -1398,6 +1427,7 @@ where
 
             let mut messages = self.session.messages.clone();
             limit_request_images(&mut messages, request_image_limit);
+            self.attach_turn_context(&mut messages);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages,

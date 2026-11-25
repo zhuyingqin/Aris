@@ -46,6 +46,8 @@ import {
   parseCompileTimeoutMinutes,
 } from "./typesetPreferences";
 import TypesetPdfPresentation from "./TypesetPdfPresentation";
+import TypesetPdfSidebar, { type PdfSidebarTab } from "./TypesetPdfSidebar";
+import { pdfPageForDestination } from "./pdfOutline";
 import { setWindowFullscreen } from "../windowControls";
 
 export type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
@@ -108,15 +110,28 @@ export interface PdfPreviewProps {
   onHide?: () => void;
   forwardTarget?: PdfForwardTarget | null;
   forwardSearchNotice?: string | null;
+  /**
+   * Filled with a reader for the PDF point the user is looking at (a third of
+   * the way down the visible area), for "go to the source of this page".
+   */
+  viewPositionRef?: MutableRefObject<(() => PdfClickPosition | null) | null>;
 }
-async function pdfPageForDestination(pdf: PDFDocumentProxy, destination: unknown): Promise<number | null> {
-  let explicitDestination = destination;
-  if (typeof explicitDestination === "string") {
-    explicitDestination = await pdf.getDestination(explicitDestination);
+const PDF_SIDEBAR_STORAGE_KEY = "somniq.typeset.pdfSidebarOpen";
+
+function readPdfSidebarOpen(): boolean {
+  try {
+    return window.localStorage.getItem(PDF_SIDEBAR_STORAGE_KEY) === "1";
+  } catch {
+    return false;
   }
-  if (!Array.isArray(explicitDestination) || !explicitDestination[0]) return null;
-  const pageReference = explicitDestination[0] as Parameters<PDFDocumentProxy["getPageIndex"]>[0];
-  return (await pdf.getPageIndex(pageReference)) + 1;
+}
+
+function writePdfSidebarOpen(open: boolean) {
+  try {
+    window.localStorage.setItem(PDF_SIDEBAR_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    // Storage is a convenience; the panel still opens for this session.
+  }
 }
 
 /** Identifies one loaded document, so a repair is attempted at most once for it. */
@@ -170,6 +185,7 @@ export default function TypesetPdfPreview({
   onHide: _onHide,
   forwardTarget,
   forwardSearchNotice,
+  viewPositionRef,
 }: PdfPreviewProps) {
   const language = useStore((state) => state.language);
   const copy = TYPESET_EDITOR_COPY[language].pdfPreview;
@@ -212,6 +228,9 @@ export default function TypesetPdfPreview({
   const [actionFit, setActionFit] = useState(ALL_ACTIONS_INLINE);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [dismissedNoticeKeys, setDismissedNoticeKeys] = useState<Set<string>>(new Set());
+  // Bookmarks / thumbnails beside the pages; remembered across sessions.
+  const [sidebarOpen, setSidebarOpen] = useState(() => readPdfSidebarOpen());
+  const [sidebarTab, setSidebarTab] = useState<PdfSidebarTab | null>(null);
 
   useEffect(() => {
     if (status === "running") {
@@ -277,6 +296,8 @@ export default function TypesetPdfPreview({
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const pageSizesRef = useRef(pageSizes);
   const pendingRestorePageRef = useRef<number | null>(null);
+  /** Where on that page the reader was, as a fraction of its height. */
+  const pendingRestoreFractionRef = useRef<number | null>(null);
   const scrollAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const pageRefCallbacksRef = useRef(new Map<number, (element: HTMLDivElement | null) => void>());
   const pageSizeCallbacksRef = useRef(new Map<number, (width: number, height: number) => void>());
@@ -289,6 +310,30 @@ export default function TypesetPdfPreview({
     if (convert) pointConvertersRef.current.set(page, convert);
     else pointConvertersRef.current.delete(page);
   }, []);
+
+  // What the reader is looking at, for the "go to source" button: a point a
+  // third of the way down the visible area, on whichever page is there. That
+  // button used to reuse the last double-click — or page 1 when there was none.
+  useEffect(() => {
+    if (!viewPositionRef) return;
+    viewPositionRef.current = () => {
+      const scroll = scrollRef.current;
+      if (!scroll) return null;
+      const view = scroll.getBoundingClientRect();
+      const clientY = view.top + view.height / 3;
+      for (const [page, element] of pageElementsRef.current) {
+        const box = element.getBoundingClientRect();
+        if (clientY < box.top || clientY > box.bottom) continue;
+        const clientX = Math.min(Math.max(view.left + view.width / 2, box.left + 1), box.right - 1);
+        const point = pointConvertersRef.current.get(page)?.(clientX, clientY);
+        return point ? { page, x: point.x, y: point.y } : null;
+      }
+      return null;
+    };
+    return () => {
+      viewPositionRef.current = null;
+    };
+  }, [viewPositionRef]);
 
 
   const captureScrollAnchor = useCallback(() => {
@@ -447,6 +492,18 @@ export default function TypesetPdfPreview({
     if (previousPath) lastPageByPathRef.current.set(previousPath, currentPageRef.current);
     const samePdfPath = previousPath === path;
     const restoredPage = path ? lastPageByPathRef.current.get(path) ?? 1 : 1;
+    // How far down its page the reader was, as a fraction of the page's
+    // height (a rebuild can change it slightly). Restoring only the page top
+    // threw every Ctrl+S back to the start of the page being read.
+    if (samePdfPath) {
+      const scroll = scrollRef.current;
+      const pageElement = pageElementsRef.current.get(currentPageRef.current);
+      pendingRestoreFractionRef.current = scroll && pageElement && pageElement.offsetHeight > 0
+        ? clampNumber((scroll.scrollTop - pageElement.offsetTop) / pageElement.offsetHeight, 0, 1)
+        : null;
+    } else {
+      pendingRestoreFractionRef.current = null;
+    }
     loadedPdfPathRef.current = path;
     // A recompile keeps the same path. Preserve its reader position and any
     // explicit zoom choice; a different PDF starts with fit-to-width again.
@@ -537,7 +594,11 @@ export default function TypesetPdfPreview({
       const pageElement = pageElementsRef.current.get(page);
       const scroll = scrollRef.current;
       if (!pageElement || !scroll) return;
-      const top = Math.max(0, pageElement.offsetTop - 12);
+      const fraction = pendingRestoreFractionRef.current;
+      pendingRestoreFractionRef.current = null;
+      const top = fraction === null
+        ? Math.max(0, pageElement.offsetTop - 12)
+        : Math.max(0, pageElement.offsetTop + fraction * pageElement.offsetHeight);
       if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior: "auto" });
       else scroll.scrollTop = top;
       pendingRestorePageRef.current = null;
@@ -730,7 +791,7 @@ export default function TypesetPdfPreview({
         currentPageRef.current = forwardTarget.location.page;
         setCurrentPage(forwardTarget.location.page);
         setPageDraft(String(forwardTarget.location.page));
-        const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoom - scroll.clientHeight / 2;
+        const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoomRef.current - scroll.clientHeight / 2;
         if (typeof scroll.scrollTo === "function") {
           scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
         } else {
@@ -743,7 +804,9 @@ export default function TypesetPdfPreview({
       window.cancelAnimationFrame(frame1);
       window.cancelAnimationFrame(frame2);
     };
-  }, [cancelProgrammaticScroll, forwardTarget, showPagesAround, zoom]);
+    // Not keyed on zoom: the target outlives its jump, so every later zoom
+    // used to drag the reader back to the last forward-search location.
+  }, [cancelProgrammaticScroll, forwardTarget, showPagesAround]);
 
   const setZoomLevel = (value: number, closeMenu = true) => {
     const nextZoom = clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
@@ -952,6 +1015,7 @@ export default function TypesetPdfPreview({
     });
   }
 
+  const showSidebar = sidebarOpen && Boolean(path) && Boolean(pdf) && !error;
   const activeNotice = bannerNotices.find((notice) => !dismissedNoticeKeys.has(notice.key));
 
   // The toolbar strip shows compact live compiler state (e.g. running, unsaved changes, or clean success duration)
@@ -967,6 +1031,20 @@ export default function TypesetPdfPreview({
   // Display order, which read backwards is also the order the actions give up
   // their slot when the pane narrows.
   const toolbarActions: PdfToolbarAction[] = [
+    {
+      key: "sidebar",
+      label: sidebarOpen
+        ? tr(language, "隐藏书签和缩略图", "Hide bookmarks and thumbnails", "Ocultar marcadores y miniaturas")
+        : tr(language, "显示书签和缩略图", "Show bookmarks and thumbnails", "Mostrar marcadores y miniaturas"),
+      icon: <ToolIcon name="sidebar" />,
+      className: "pdf-sidebar",
+      disabled: !path,
+      active: sidebarOpen,
+      run: () => setSidebarOpen((open) => {
+        writePdfSidebarOpen(!open);
+        return !open;
+      }),
+    },
     {
       key: "present",
       label: presenting ? copy.exitPresentation : copy.presentPdf,
@@ -1557,7 +1635,19 @@ export default function TypesetPdfPreview({
           </button>
         </aside>
       )}
-      <div className="typeset-pdf-content">
+      <div className={`typeset-pdf-content${showSidebar ? " has-sidebar" : ""}`}>
+        {showSidebar && (
+          <TypesetPdfSidebar
+            pdf={pdf}
+            numPages={numPages}
+            currentPage={currentPage}
+            pageSizes={pageSizes}
+            language={language}
+            tab={sidebarTab}
+            onTabChange={setSidebarTab}
+            onNavigate={(page) => scrollToPage(page, "smooth")}
+          />
+        )}
         <div
           className={`typeset-pdf-scroll${inverted ? " inverted" : ""}`}
           ref={scrollRef}

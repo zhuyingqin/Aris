@@ -9,7 +9,9 @@
 import { hoverTooltip, type Tooltip } from "@codemirror/view";
 import type { EditorState } from "@codemirror/state";
 import katex from "katex";
-import { scanLatexStructure, type LatexStructureIndex } from "./latex/latexStructure";
+import { scanLatexStructure, type LatexCommand, type LatexStructureIndex } from "./latex/latexStructure";
+import { mathMacrosFor } from "./latex/mathMacros";
+import { latexProjectSymbols } from "./latexComplete";
 
 /** Environments whose whole body is maths. */
 const MATH_ENVIRONMENTS = new Set([
@@ -76,13 +78,39 @@ export function referenceAt(
  * Same-file only: the whole document graph lives in the Typeset workbench, not
  * in the editor kernel.
  */
+/** Each structure's labels by name (the first definition wins, as in TeX's warning). */
+const labelDefinitions = new WeakMap<LatexStructureIndex, Map<string, LatexCommand>>();
+
+function labelDefinitionsOf(structure: LatexStructureIndex): Map<string, LatexCommand> {
+  let definitions = labelDefinitions.get(structure);
+  if (!definitions) {
+    definitions = new Map();
+    for (const command of structure.commandsNamed("label")) {
+      const key = command.requiredArguments[0]?.value.trim();
+      if (key && !definitions.has(key)) definitions.set(key, command);
+    }
+    labelDefinitions.set(structure, definitions);
+  }
+  return definitions;
+}
+
+/**
+ * Where a label is defined, and under which heading. Asked once per `\ref`
+ * chip by the Visual editor, so it is an index lookup and a binary search —
+ * a scan of every command per reference was quadratic on a long thesis.
+ */
 export function labelTarget(structure: LatexStructureIndex, key: string): { line: number; heading: string } | null {
-  const definition = structure.commands.find((command) =>
-    command.name === "label" && command.requiredArguments[0]?.value.trim() === key);
+  const definition = labelDefinitionsOf(structure).get(key);
   if (!definition) return null;
-  const heading = [...structure.headings]
-    .filter((candidate) => candidate.from <= definition.from)
-    .at(-1);
+  const { headings } = structure;
+  let low = 0;
+  let high = headings.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (headings[middle].from <= definition.from) low = middle + 1;
+    else high = middle;
+  }
+  const heading = headings[low - 1];
   return { line: structure.lineNumberAt(definition.from), heading: heading?.title.value.trim() ?? "" };
 }
 
@@ -109,7 +137,13 @@ export const latexMathPreview = hoverTooltip((view, position): Tooltip | null =>
     create: () => {
       const dom = element("cm-latex-tooltip cm-latex-math-preview");
       try {
-        katex.render(span.source, dom, { throwOnError: true, displayMode: span.display, output: "html" });
+        katex.render(span.source, dom, {
+          throwOnError: true,
+          displayMode: span.display,
+          output: "html",
+          // The document's own \newcommand / \DeclareMathOperator definitions.
+          macros: { ...mathMacrosFor(view.state) },
+        });
       } catch (error) {
         dom.classList.add("cm-latex-tooltip-error");
         dom.textContent = error instanceof Error ? error.message : String(error);
@@ -123,6 +157,7 @@ export const latexMathPreview = hoverTooltip((view, position): Tooltip | null =>
 export function latexReferenceTooltip(copy: {
   undefinedLabel: string;
   definedOnLine: (line: number) => string;
+  definedInFile?: (file: string) => string;
 }) {
   return hoverTooltip((view, position): Tooltip | null => {
     const state: EditorState = view.state;
@@ -141,6 +176,14 @@ export function latexReferenceTooltip(copy: {
         }
         const target = labelTarget(structure, reference.target);
         if (!target) {
+          // Defined in another chapter of the document: say where, instead of
+          // contradicting the lint, which (rightly) accepts it.
+          const elsewhere = latexProjectSymbols().labels.find((label) => label.name === reference.target);
+          if (elsewhere) {
+            dom.append(element("cm-latex-tooltip-target", reference.target));
+            if (elsewhere.detail) dom.append(element("cm-latex-tooltip-meta", copy.definedInFile?.(elsewhere.detail) ?? elsewhere.detail));
+            return { dom };
+          }
           dom.classList.add("cm-latex-tooltip-error");
           dom.textContent = copy.undefinedLabel;
           return { dom };

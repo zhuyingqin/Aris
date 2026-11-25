@@ -6,6 +6,7 @@ import { SvgIcon } from "../SvgIcon";
 import { useStore } from "../store";
 import { FileIcon } from "./FileIcon";
 import { ToolIcon } from "./ToolIcon";
+import { STARTER_TEMPLATES, starterTemplate, type StarterTemplateId } from "./latexTemplates";
 import { basename, dirname, normalizePath } from "./latexText";
 import { buildTypesetLibraryFolders, typesetLibraryRows } from "./typesetLibraryFolders";
 import {
@@ -74,7 +75,7 @@ export default function TypesetStartPage({
   loading: boolean;
   error: string | null;
   onOpenSource: (path: string) => void;
-  onCreateSource: (path: string, template: TypesetTemplate, title: string) => void;
+  onCreateSource: (path: string, template: TypesetTemplate, title: string, starterId?: StarterTemplateId) => void;
   onRefresh: () => void;
 }) {
   const language = useStore((state) => state.language);
@@ -88,6 +89,8 @@ export default function TypesetStartPage({
   const [preferences, setPreferences] = useState<TypesetLibraryPreferences>(() => loadTypesetLibraryPreferences(projectPath));
   const [createOpen, setCreateOpen] = useState(false);
   const [template, setTemplate] = useState<TypesetTemplate>("article");
+  /** A journal/thesis template, when one is picked instead of a basic kind. */
+  const [starterId, setStarterId] = useState<StarterTemplateId | null>(null);
   const [newTitle, setNewTitle] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -239,9 +242,11 @@ export default function TypesetStartPage({
   };
 
   const createDocument = () => {
-    const fallbackTitle = copy.templates[template].label;
+    const starter = starterId ? starterTemplate(starterId) : undefined;
+    const kind = starter?.kind ?? template;
+    const fallbackTitle = starter?.label(language) ?? copy.templates[template].label;
     const titleValue = newTitle.trim() || fallbackTitle;
-    onCreateSource(newTypesetDocumentPath(template, titleValue), template, titleValue);
+    onCreateSource(newTypesetDocumentPath(kind, titleValue), kind, titleValue, starter?.id);
     setCreateOpen(false);
     setNewTitle("");
   };
@@ -480,9 +485,12 @@ export default function TypesetStartPage({
                     key={item.kind}
                     type="button"
                     role="radio"
-                    aria-checked={template === item.kind}
-                    className={template === item.kind ? "active" : ""}
-                    onClick={() => setTemplate(item.kind)}
+                    aria-checked={!starterId && template === item.kind}
+                    className={!starterId && template === item.kind ? "active" : ""}
+                    onClick={() => {
+                      setTemplate(item.kind);
+                      setStarterId(null);
+                    }}
                   >
                     <strong>{templateCopy.label}</strong>
                     <span>{templateCopy.description}</span>
@@ -490,6 +498,26 @@ export default function TypesetStartPage({
                 );
               })}
             </div>
+            {(["journal", "thesis"] as const).map((group) => (
+              <div key={group} className="typeset-library-starter-group">
+                <span className="typeset-library-starter-heading">{group === "journal" ? copy.journalTemplates : copy.thesisTemplates}</span>
+                <div className="typeset-library-template-grid" role="radiogroup" aria-label={group === "journal" ? copy.journalTemplates : copy.thesisTemplates}>
+                  {STARTER_TEMPLATES.filter((item) => item.group === group).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={starterId === item.id}
+                      className={starterId === item.id ? "active" : ""}
+                      onClick={() => setStarterId(item.id)}
+                    >
+                      <strong>{item.label(language)}</strong>
+                      <span>{item.description(language)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
             <footer>
               <button type="button" className="typeset-btn subtle" onClick={() => setCreateOpen(false)}>{copy.cancel}</button>
               <button type="button" className="typeset-recompile-btn" onClick={createDocument}><ToolIcon name="new" />{copy.create}</button>

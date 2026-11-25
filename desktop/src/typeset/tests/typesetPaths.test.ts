@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isAuxiliaryFile } from "../TypesetExplorer";
-import { isBuildArtifactPath, isTypesetImagePath } from "../typesetPaths";
+import { diagnosticWorkspacePath, isBuildArtifactPath, isTypesetImagePath } from "../typesetPaths";
 
 describe("isBuildArtifactPath", () => {
   it("matches the multi-part suffixes a LaTeX run writes", () => {
@@ -35,5 +35,20 @@ describe("isTypesetImagePath", () => {
     // has nothing that can render .eps.
     expect(isTypesetImagePath("fig.pdf")).toBe(false);
     expect(isTypesetImagePath("fig.eps")).toBe(false);
+  });
+});
+
+describe("diagnosticWorkspacePath", () => {
+  it("resolves TeX's ./ paths against the compile root's folder", () => {
+    expect(diagnosticWorkspacePath("./main.tex", ".somniq/papers/thesis/main.tex")).toBe(".somniq/papers/thesis/main.tex");
+    expect(diagnosticWorkspacePath("./chapters/intro.tex", "thesis/main.tex")).toBe("thesis/chapters/intro.tex");
+    expect(diagnosticWorkspacePath("./main.tex", "main.tex")).toBe("main.tex");
+    expect(diagnosticWorkspacePath("chapters/intro.tex", "main.tex")).toBe("chapters/intro.tex");
+    expect(diagnosticWorkspacePath("./../shared/macros.tex", "thesis/main.tex")).toBe("shared/macros.tex");
+  });
+
+  it("keeps absolute paths", () => {
+    expect(diagnosticWorkspacePath("C:/texlive/texmf/tex/latex/foo.sty", "main.tex")).toBe("C:/texlive/texmf/tex/latex/foo.sty");
+    expect(diagnosticWorkspacePath("/usr/share/texmf/foo.sty", "main.tex")).toBe("/usr/share/texmf/foo.sty");
   });
 });

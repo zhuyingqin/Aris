@@ -2,6 +2,8 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { startCompletion } from "@codemirror/autocomplete";
+import { undo } from "@codemirror/commands";
+import { Transaction } from "@codemirror/state";
 import { highlightingFor } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -71,9 +73,13 @@ const mocks = vi.hoisted(() => ({
   typesetProjectSearch: vi.fn(),
   typesetProjectReplace: vi.fn(),
   typesetCommentsList: vi.fn(),
+  typesetTrackedChangesLoad: vi.fn(),
+  typesetTrackedChangesSave: vi.fn(),
   typesetCommentUpsert: vi.fn(),
   typesetCommentDelete: vi.fn(),
   typesetImportImageData: vi.fn(),
+  typesetProjectSettingsRead: vi.fn(),
+  typesetProjectSettingsWrite: vi.fn(),
   typesetRecoveryClear: vi.fn(),
   typesetRecoveryLoad: vi.fn(),
   typesetRecoverySave: vi.fn(),
@@ -198,9 +204,13 @@ vi.mock("../../api/tauri", () => ({
   typesetProjectSearch: mocks.typesetProjectSearch,
   typesetProjectReplace: mocks.typesetProjectReplace,
   typesetCommentsList: mocks.typesetCommentsList,
+  typesetTrackedChangesLoad: mocks.typesetTrackedChangesLoad,
+  typesetTrackedChangesSave: mocks.typesetTrackedChangesSave,
   typesetCommentUpsert: mocks.typesetCommentUpsert,
   typesetCommentDelete: mocks.typesetCommentDelete,
   typesetImportImageData: mocks.typesetImportImageData,
+  typesetProjectSettingsRead: mocks.typesetProjectSettingsRead,
+  typesetProjectSettingsWrite: mocks.typesetProjectSettingsWrite,
   typesetRecoveryClear: mocks.typesetRecoveryClear,
   typesetRecoveryLoad: mocks.typesetRecoveryLoad,
   typesetRecoverySave: mocks.typesetRecoverySave,
@@ -308,6 +318,7 @@ beforeEach(() => {
   window.localStorage.removeItem("somniq-lab-preview");
   window.localStorage.removeItem("aris-lab-preview");
   window.localStorage.removeItem("somniq-typeset-compile-error-handling:project-a");
+  window.localStorage.removeItem("somniq-typeset-track-changes:project-a");
   window.localStorage.removeItem(`somniq-typeset-library-folders:${project.path}`);
   if (!window.PointerEvent) {
     Object.defineProperty(window, "PointerEvent", {
@@ -463,9 +474,13 @@ beforeEach(() => {
   mocks.typesetProjectSearch.mockReset().mockResolvedValue([]);
   mocks.typesetProjectReplace.mockReset().mockResolvedValue({ filesChanged: 0, replacements: 0 });
   mocks.typesetCommentsList.mockReset().mockResolvedValue([]);
+  mocks.typesetTrackedChangesLoad.mockReset().mockResolvedValue([]);
+  mocks.typesetTrackedChangesSave.mockReset().mockResolvedValue(undefined);
   mocks.typesetCommentUpsert.mockReset().mockImplementation((_path, comment) => Promise.resolve({ ...comment, id: comment.id || "comment-1", createdAtMs: 1, updatedAtMs: 1 }));
   mocks.typesetCommentDelete.mockReset().mockResolvedValue(undefined);
   mocks.typesetImportImageData.mockReset().mockResolvedValue({ path: "figures/pasted.png", name: "pasted.png", bytes: 10 });
+  mocks.typesetProjectSettingsRead.mockReset().mockResolvedValue({});
+  mocks.typesetProjectSettingsWrite.mockReset().mockResolvedValue(undefined);
   mocks.typesetRecoveryClear.mockReset().mockResolvedValue(undefined);
   mocks.typesetRecoveryLoad.mockReset().mockResolvedValue(null);
   mocks.typesetRecoverySave.mockReset().mockResolvedValue({ path: "sections/local.tex", content: "", baseContent: "", baseVersion: null, updatedAtMs: 1 });
@@ -777,6 +792,23 @@ describe("Typeset start page", () => {
       ".somniq/slides/Research-talk/main.tex",
       expect.stringContaining("\\documentclass[aspectratio=169]{beamer}"),
     ));
+  });
+
+  it("creates a whole thesis project from its starter template", async () => {
+    mockProjectFiles();
+    render(<Typeset />);
+    fireEvent.click(await screen.findByRole("button", { name: "New LaTeX document" }));
+    fireEvent.change(screen.getByLabelText("Document title"), { target: { value: "Wind Power" } });
+    fireEvent.click(screen.getByRole("radio", { name: /English thesis/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create document" }));
+
+    await waitFor(() => expect(mocks.fileCreateText).toHaveBeenCalledWith(
+      ".somniq/reports/Wind-Power/main.tex",
+      expect.stringContaining("\\input{chapters/introduction}"),
+    ));
+    for (const extra of ["chapters/introduction.tex", "chapters/method.tex", "chapters/conclusion.tex", "refs.bib"]) {
+      expect(mocks.fileCreateText).toHaveBeenCalledWith(`.somniq/reports/Wind-Power/${extra}`, expect.any(String));
+    }
   });
 
   it("returns to the source start page after opening a file", async () => {
@@ -3866,6 +3898,30 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(screen.getByText("latexmk -pdf · 0.1s")).toBeTruthy());
   });
 
+  it("keeps the tab and the main document pointing at a renamed file", async () => {
+    mockProjectFiles();
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("local.tex"));
+    await waitForSourceOpen(container, "sections/local.tex");
+    const tree = container.querySelector<HTMLElement>(".typeset-tree")!;
+    fireEvent.contextMenu(within(tree).getByText("local.tex"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Set as main document" }));
+
+    fireEvent.contextMenu(within(tree).getByText("local.tex"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename file" });
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "intro.tex" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(mocks.fileRename).toHaveBeenCalledWith("sections/local.tex", "sections/intro.tex"));
+
+    await waitFor(() => expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("intro.tex"));
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "sections/intro.tex", expect.any(String), false, expect.any(String), false, null, null,
+    ));
+    expect(window.localStorage.getItem("somniq-typeset-main-document:project-a")).toBe("sections/intro.tex");
+  });
+
   it("opens file actions from the Typeset tree context menu", async () => {
     mockProjectFiles();
     const { container } = render(<Typeset />);
@@ -4433,6 +4489,131 @@ describe("Typeset start page", () => {
     finish?.({ success: false, partialOutput: false, pdfState: "missing", outputPath: "paper.pdf", engine: "latexmk", stdout: "", stderr: "interrupted", interrupted: true, timedOut: false, durationMs: 1, rootSourceHash: "x", diagnostics: [] });
   });
 
+  it("opens a .bib from the tree in Code mode and still compiles the document", async () => {
+    mockProjectFiles();
+    mocks.fileListDir.mockImplementation(() => Promise.resolve([
+      { name: "paper.tex", path: "paper.tex", isDir: false },
+      { name: "refs.bib", path: "refs.bib", isDir: false },
+    ]));
+    const source = "\\documentclass{article}\n\\begin{document}\nBody \\cite{knuth}.\n\\bibliography{refs}\n\\end{document}";
+    const bib = "@book{knuth, title={The TeXbook}, year={1984}}\n";
+    mocks.fileReadText.mockImplementation((path: string) => (
+      path === "paper.tex"
+        ? Promise.resolve({ path, content: source, bytes: source.length })
+        : path === "refs.bib"
+          ? Promise.resolve({ path, content: bib, bytes: bib.length })
+          : Promise.reject(new Error(`no such file: ${path}`))
+    ));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    expect((screen.getByRole("tab", { name: "Visual" }) as HTMLElement).getAttribute("aria-selected")).toBe("true");
+
+    const tree = container.querySelector<HTMLElement>(".typeset-tree")!;
+    fireEvent.click(within(tree).getByText("refs.bib"));
+    await waitForSourceOpen(container, "refs.bib");
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(bib));
+    expect((screen.getByRole("tab", { name: "Code" }) as HTMLElement).getAttribute("aria-selected")).toBe("true");
+
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "paper.tex", "paper.pdf", false, expect.any(String), false, null, null,
+    ));
+
+    // Back on the .tex file the user's Visual mode returns.
+    fireEvent.click(within(tree).getByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await waitFor(() => expect((screen.getByRole("tab", { name: "Visual" }) as HTMLElement).getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("keeps a running build when another chapter of the same document is opened", async () => {
+    // A thesis build can take minutes; reading a chapter meanwhile must not
+    // kill it or throw its result away.
+    mockProjectFiles();
+    const root = "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch2}\n\\end{document}";
+    const chapter = "\\chapter{Foundations}\nBody.";
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "paper.tex") return Promise.resolve({ path, content: root, bytes: root.length });
+      if (path === "chapters/ch2.tex") return Promise.resolve({ path, content: chapter, bytes: chapter.length });
+      return Promise.reject(new Error(`no such file: ${path}`));
+    });
+    let finishCompile: ((result: unknown) => void) | undefined;
+    mocks.latexCompile.mockImplementationOnce(() => new Promise((resolve) => { finishCompile = resolve; }));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const outline = screen.getByLabelText("Document outline");
+    const chapterHeading = await within(outline).findByRole("button", { name: /Foundations/ });
+
+    fireEvent.click(screen.getByRole("button", { name: "Recompile" }));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledTimes(1));
+    fireEvent.click(chapterHeading);
+    await waitForSourceOpen(container, "chapters/ch2.tex", "ch2.tex");
+    expect(mocks.latexCompileCancel).not.toHaveBeenCalled();
+
+    finishCompile?.({
+      success: false, partialOutput: false, pdfState: "missing", inputPath: "paper.tex",
+      outputPath: "paper.pdf", engine: "latexmk", stdout: "", stderr: "", interrupted: false, timedOut: false,
+      durationMs: 5, rootSourceHash: "root", compiledAtUnixMs: 1,
+      diagnostics: [{ severity: "error", code: "file_line_error", message: "Root build finished with an error", filePath: "./paper.tex", line: 2 }],
+    });
+    expect(await screen.findByText("Root build finished with an error")).toBeTruthy();
+  });
+
+  it("queues a Ctrl+S pressed during a build and runs it when the build ends", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.fileWriteText.mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length }));
+    let finishCompile: ((result: unknown) => void) | undefined;
+    mocks.latexCompile.mockImplementationOnce(() => new Promise((resolve) => { finishCompile = resolve; }));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recompile" }));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledTimes(1));
+
+    const view = typesetCodeView()!;
+    act(() => { view.dispatch({ changes: { from: view.state.doc.toString().indexOf("Body") , insert: "New " } }); });
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(await screen.findByText("Saved changes are queued: they will be written and rebuilt as soon as the current compile finishes.")).toBeTruthy();
+    expect(mocks.fileWriteText).not.toHaveBeenCalledWith("paper.tex", expect.stringContaining("New Body"));
+
+    finishCompile?.({
+      success: true, partialOutput: false, pdfState: "fresh", inputPath: "paper.tex", outputPath: "paper.pdf",
+      engine: "latexmk", stdout: "", stderr: "", interrupted: false, timedOut: false, durationMs: 5,
+      rootSourceHash: "a", compiledAtUnixMs: 1, diagnostics: [],
+    });
+    await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalledWith("paper.tex", expect.stringContaining("New Body")));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Saved changes are queued: they will be written and rebuilt as soon as the current compile finishes.")).toBeNull();
+  });
+
+  it("honours Stop pressed while the build is still saving the file", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    let finishSave: ((file: unknown) => void) | undefined;
+    mocks.fileWriteText.mockImplementationOnce((path: string, content: string) => new Promise((resolve) => {
+      finishSave = () => resolve({ path, content, bytes: content.length });
+    }));
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    const view = typesetCodeView()!;
+    act(() => { view.dispatch({ changes: { from: 0, insert: "% edited\n" } }); });
+
+    fireEvent.click(screen.getByRole("button", { name: "Recompile" }));
+    await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "Stop compilation" }));
+    finishSave?.(null);
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 50)); });
+    expect(mocks.latexCompile).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "Recompile" })).toBeTruthy();
+  });
+
   it("cancels and ignores a compile result after switching source files", async () => {
     mockProjectFiles();
     const sourceA = "\\documentclass{article}\n\\begin{document}\nSource A\n\\end{document}";
@@ -4867,6 +5048,33 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("undoes a Code-mode toolbar edit", async () => {
+    // Code mode used to rewrite the whole draft, which the shell syncs into
+    // the editor with addToHistory:false — the edit was never undoable.
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    const view = await waitFor(() => {
+      const v = typesetCodeView();
+      expect(v).toBeTruthy();
+      return v!;
+    });
+    const from = view.state.doc.toString().indexOf("Hello");
+    view.dispatch({ selection: { anchor: from, head: from + "Hello".length } });
+
+    const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar")!;
+    fireEvent.click(within(toolbar).getByRole("button", { name: "Bold" }));
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("\\textbf{Hello} world"));
+    const undo = within(toolbar).getByRole("button", { name: "Undo" }) as HTMLButtonElement;
+    await waitFor(() => expect(undo.disabled).toBe(false));
+    fireEvent.click(undo);
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toBe(source));
+  });
+
   it("Citation inserts at the cursor, not appended near \\end{document}", async () => {
     mockProjectFiles();
     const source = "\\documentclass{article}\n\\begin{document}\nFirst.\nSecond.\n\\end{document}";
@@ -5090,6 +5298,90 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("declares the managed bibliography in the root document when citing from a chapter", async () => {
+    mockProjectFiles();
+    const root = "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch2}\n\\end{document}";
+    const chapter = "\\chapter{Foundations}\nFirst.";
+    mocks.fileReadText.mockImplementation((path: string) => {
+      if (path === "paper.tex") return Promise.resolve({ path, content: root, bytes: root.length, version: "root-v1" });
+      if (path === "chapters/ch2.tex") return Promise.resolve({ path, content: chapter, bytes: chapter.length });
+      return Promise.reject(new Error(`no such file: ${path}`));
+    });
+    mocks.fileWriteText.mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length, version: "v2" }));
+    mocks.literatureLoad.mockResolvedValueOnce({
+      version: 1,
+      papers: [{
+        id: "library-paper", title: "Citable Local Paper", authors: ["Ada Lovelace"], year: 2025,
+        venue: "SomniQ Journal", abstract: "", tags: [], collectionIds: [], searchIds: [], stage: "inbox",
+        starred: false, unread: true, source: "local", addedAt: "2026-07-20T00:00:00.000Z",
+        pdf: { status: "none" }, evidence: [], answerChains: [], pdfAnnotations: [],
+      }],
+      searches: [], collections: [], reviewTasks: [], screenRuns: [],
+    });
+    mocks.literatureExportBibliography.mockResolvedValue({ content: "@article{ada2025citable,}", exported: 1 });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const outline = screen.getByLabelText("Document outline");
+    fireEvent.click(await within(outline).findByRole("button", { name: /Foundations/ }));
+    await waitForSourceOpen(container, "chapters/ch2.tex", "ch2.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(useLiteratureStore.getState().library.papers).toHaveLength(1));
+    const view = await waitFor(() => {
+      const editor = typesetCodeView();
+      expect(editor?.state.doc.toString()).toBe(chapter);
+      return editor!;
+    });
+    view.dispatch({ selection: { anchor: chapter.length, head: chapter.length } });
+    const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar")!;
+    fireEvent.click(within(toolbar).getByRole("button", { name: "Insert citation" }));
+    fireEvent.click((await screen.findByText("Citable Local Paper")).closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Insert \\cite{}" }));
+
+    await waitFor(() => {
+      expect(mocks.fileWriteText).toHaveBeenCalledWith(
+        "paper.tex",
+        expect.stringContaining("\\bibliography{somniq-references}"),
+        "root-v1",
+      );
+    });
+    // Next to the root, where TeX resolves it — not in the chapter folder.
+    expect(mocks.fileCreateText).toHaveBeenCalledWith("somniq-references.bib", expect.stringContaining("@article{ada2025citable,}"));
+    expect(mocks.fileCreateText).not.toHaveBeenCalledWith("chapters/somniq-references.bib", expect.anything());
+    const chapterText = typesetCodeView()?.state.doc.toString() ?? "";
+    expect(chapterText).toMatch(/\\cite\{[^}]+\}/);
+    expect(chapterText).not.toContain("\\bibliography");
+  });
+
+  it("does not re-export the library on every keystroke", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nFirst.\n\\bibliographystyle{plain}\n\\bibliography{somniq-references}\n\\end{document}";
+    const managed = "% SomniQ managed bibliography — do not edit this file directly.\n@article{same,}";
+    mocks.fileReadText.mockImplementation((path: string) => Promise.resolve({
+      path,
+      content: path === "paper.tex" ? source : managed,
+      bytes: 100,
+    }));
+    mocks.literatureExportBibliography.mockResolvedValue({ content: "@article{same,}", exported: 1 });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(mocks.literatureExportBibliography).toHaveBeenCalled());
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    const exportsBefore = mocks.literatureExportBibliography.mock.calls.length;
+    // An unchanged export is never written back.
+    expect(mocks.fileWriteText).not.toHaveBeenCalledWith("somniq-references.bib", expect.anything());
+
+    const view = typesetCodeView()!;
+    for (const letter of "abc") {
+      act(() => { view.dispatch({ changes: { from: view.state.doc.toString().indexOf("First.") + 6, insert: letter } }); });
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    expect(mocks.literatureExportBibliography.mock.calls.length).toBe(exportsBefore);
+  });
+
   it("abandons an in-flight bibliography sync when the source document changes", async () => {
     mockProjectFiles();
     const sourceA = "\\documentclass{article}\n\\begin{document}\nA\n\\bibliographystyle{plain}\n\\bibliography{somniq-references}\n\\end{document}";
@@ -5221,6 +5513,60 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("undoes edits from both modes in the order they were made, with one history", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    // 1. Code mode: type "Alpha ".
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    const codeView = await waitFor(() => {
+      const view = typesetCodeView();
+      expect(view).toBeTruthy();
+      return view!;
+    });
+    const body = codeView.state.doc.toString().indexOf("Body");
+    act(() => { codeView.dispatch({ changes: { from: body, insert: "Alpha " }, userEvent: "input.type" }); });
+
+    // 2. Visual mode, well after the first edit: type "Omega".
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+    const visualView = await waitFor(() => {
+      expect(window.__typesetView).toBeTruthy();
+      return window.__typesetView!;
+    });
+    await waitFor(() => expect(visualView.state.doc.toString()).toContain("Alpha Body"));
+    const end = visualView.state.doc.toString().indexOf("\n\\end{document}");
+    act(() => {
+      visualView.dispatch({
+        changes: { from: end, insert: " Omega" },
+        userEvent: "input.type",
+        annotations: Transaction.time.of(Date.now() + 5_000),
+      });
+    });
+    expect(codeView.state.doc.toString()).toContain("Body text Omega");
+
+    // Ctrl+Z in Visual mode: the Visual edit first, then the Code-mode one.
+    fireEvent.keyDown(visualView.contentDOM, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(visualView.state.doc.toString()).toContain("Alpha Body text\n"));
+    fireEvent.keyDown(visualView.contentDOM, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(visualView.state.doc.toString()).toBe(source));
+    expect(codeView.state.doc.toString()).toBe(source);
+
+    // Redo replays them forward, Ctrl+Y and Ctrl+Shift+Z alike.
+    fireEvent.keyDown(visualView.contentDOM, { key: "y", ctrlKey: true });
+    await waitFor(() => expect(visualView.state.doc.toString()).toContain("Alpha Body text\n"));
+    fireEvent.keyDown(visualView.contentDOM, { key: "z", ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(visualView.state.doc.toString()).toContain("Alpha Body text Omega"));
+
+    // Back in Code mode the same history continues.
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    act(() => { undo(codeView); });
+    expect(codeView.state.doc.toString()).toContain("Alpha Body text\n");
+  });
+
   it("saves visual editor changes with Ctrl+S", async () => {
     mockProjectFiles();
     mocks.fileReadText.mockResolvedValueOnce({
@@ -5277,13 +5623,213 @@ describe("Typeset start page", () => {
     fireEvent.change(searchInput, { target: { value: "Body" } });
     fireEvent.submit(searchInput.closest("form")!);
 
+    // A search from the Visual editor selects the match there; it used to
+    // throw the writer into Code mode for every hit.
     await waitFor(() => {
-      const view = typesetCodeView();
+      const view = window.__typesetView;
       const text = view?.state.doc.toString() ?? "";
       const { from, to } = view?.state.selection.main ?? { from: -1, to: -1 };
       expect(from).toBe(text.indexOf("Body"));
       expect(to).toBe(text.indexOf("Body") + "Body".length);
     });
+    expect(screen.getByRole("tab", { name: "Visual" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  describe("track changes", () => {
+    const source = "\\documentclass{article}\n\\begin{document}\nDeep nets work.\n\\end{document}";
+    async function openPaper(container: HTMLElement) {
+      mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+      fireEvent.click(await screen.findByText("paper.tex"));
+      await waitForSourceOpen(container, "paper.tex");
+      await waitFor(() => expect(mocks.typesetTrackedChangesLoad).toHaveBeenCalledWith("paper.tex"));
+      fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+      return waitFor(() => {
+        const view = typesetCodeView();
+        expect(view?.state.doc.toString()).toBe(source);
+        return view!;
+      });
+    }
+
+    it("records insertions and deletions while on, lists them, and rejects them back to the original", async () => {
+      mockProjectFiles();
+      const { container } = render(<Typeset />);
+      const view = await openPaper(container);
+      fireEvent.click(screen.getByRole("button", { name: "Track changes" }));
+      expect(screen.getByRole("button", { name: "Stop tracking changes" }).getAttribute("aria-pressed")).toBe("true");
+
+      const nets = view.state.doc.toString().indexOf(" nets");
+      act(() => { view.dispatch({ changes: { from: nets, to: nets + 5 }, userEvent: "delete" }); });
+      const work = view.state.doc.toString().indexOf(" work");
+      act(() => { view.dispatch({ changes: { from: work + 5, insert: " well" }, userEvent: "input.type" }); });
+      expect(view.state.doc.toString()).toContain("Deep work well.");
+      await waitFor(() => {
+        expect(view.dom.querySelector(".cm-tracked-insert")?.textContent).toBe(" well");
+        expect(view.dom.querySelector(".cm-tracked-delete")?.textContent).toBe(" nets");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Tracked changes (2)" }));
+      const menu = await screen.findByRole("dialog", { name: "Tracked changes list" });
+      expect(within(menu).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+        expect.stringContaining("nets"),
+        expect.stringContaining("well"),
+      ]);
+      await waitFor(() => expect(mocks.typesetTrackedChangesSave).toHaveBeenCalledWith("paper.tex", [
+        expect.objectContaining({ kind: "delete", text: " nets", before: expect.stringContaining("Deep") }),
+        expect.objectContaining({ kind: "insert", text: " well" }),
+      ]), { timeout: 2000 });
+
+      fireEvent.click(within(menu).getByRole("button", { name: "Reject all" }));
+      expect(view.state.doc.toString()).toBe(source);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Tracked changes (0)" })).toBeTruthy());
+    });
+
+    it("leaves edits alone while off, and accepts a change from the list", async () => {
+      mockProjectFiles();
+      const stored = {
+        id: "t1", kind: "insert", from: 0, to: 0, text: " really", before: "Deep nets", after: " work.", author: "Ann", createdAtMs: 1,
+      };
+      const withInsertion = source.replace("Deep nets work", "Deep nets really work");
+      mocks.typesetTrackedChangesLoad.mockResolvedValue([stored]);
+      mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: withInsertion, bytes: withInsertion.length });
+      const { container } = render(<Typeset />);
+      fireEvent.click(await screen.findByText("paper.tex"));
+      await waitForSourceOpen(container, "paper.tex");
+      fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+      const view = typesetCodeView()!;
+      // Found again by its surrounding text, though stored at a stale offset.
+      await waitFor(() => expect(view.dom.querySelector(".cm-tracked-insert")?.textContent).toBe(" really"));
+
+      act(() => { view.dispatch({ changes: { from: 0, insert: "% note\n" }, userEvent: "input.type" }); });
+      fireEvent.click(screen.getByRole("button", { name: "Tracked changes (1)" }));
+      const menu = await screen.findByRole("dialog", { name: "Tracked changes list" });
+      fireEvent.click(within(menu).getByRole("button", { name: "Accept" }));
+      expect(view.state.doc.toString()).toContain("Deep nets really work");
+      await waitFor(() => expect(view.dom.querySelector(".cm-tracked-insert")).toBeNull());
+      await waitFor(() => expect(mocks.typesetTrackedChangesSave).toHaveBeenLastCalledWith("paper.tex", []), { timeout: 2000 });
+    });
+  });
+
+  it("highlights the open file's unresolved comments in the editor", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nDeep nets work.\nOld claim.\n\\end{document}";
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: source, bytes: source.length });
+    const base = { path: "paper.tex", author: "Ann", origin: "user", createdAtMs: 1, updatedAtMs: 1 };
+    mocks.typesetCommentsList.mockResolvedValue([
+      { ...base, id: "c1", from: source.indexOf("Deep"), to: source.indexOf("Deep") + 9, selectedText: "Deep nets", body: "Cite this.", resolved: false },
+      { ...base, id: "c2", from: source.indexOf("Old"), to: source.indexOf("Old") + 9, selectedText: "Old claim", body: "Gone.", resolved: true },
+    ]);
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => {
+      const marks = [...(typesetCodeView()?.dom.querySelectorAll(".cm-typeset-comment") ?? [])];
+      expect(marks.map((mark) => mark.textContent)).toEqual(["Deep nets"]);
+    });
+  });
+
+  describe("go to definition and rename label", () => {
+    const root = "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch2}\nSee \\ref{sec:found}.\n\\end{document}";
+    const chapter = "\\chapter{Foundations}\\label{sec:found}\nBody, as \\cref{sec:found} says.";
+    function mockThesis() {
+      mockProjectFiles();
+      mocks.fileReadText.mockImplementation((path: string) => {
+        if (path === "paper.tex") return Promise.resolve({ path, content: root, bytes: root.length, version: "v-root" });
+        if (path === "chapters/ch2.tex") return Promise.resolve({ path, content: chapter, bytes: chapter.length, version: "v-ch2" });
+        return Promise.reject(new Error(`no such file: ${path}`));
+      });
+      mocks.fileWriteText.mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length, version: "v-new" }));
+    }
+    async function openRootInCode(container: HTMLElement) {
+      fireEvent.click(await screen.findByText("paper.tex"));
+      await waitForSourceOpen(container, "paper.tex");
+      // The chapter is part of the document graph once the outline shows it.
+      await within(screen.getByLabelText("Document outline")).findByRole("button", { name: /Foundations/ });
+      fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+      return waitFor(() => {
+        const view = typesetCodeView();
+        expect(view?.state.doc.toString()).toContain("\\ref{sec:found}");
+        return view!;
+      });
+    }
+
+    it("jumps from a \\ref to the \\label in another chapter with F12", async () => {
+      mockThesis();
+      const { container } = render(<Typeset />);
+      const view = await openRootInCode(container);
+      const at = view.state.doc.toString().indexOf("sec:found") + 2;
+      act(() => { view.dispatch({ selection: { anchor: at } }); });
+      fireEvent.keyDown(view.contentDOM, { key: "F12" });
+
+      await waitForSourceOpen(container, "chapters/ch2.tex", "ch2.tex");
+      await waitFor(() => {
+        const chapterView = typesetCodeView()!;
+        const { from, to } = chapterView.state.selection.main;
+        expect(chapterView.state.sliceDoc(from, to)).toBe("sec:found");
+        expect(from).toBe(chapter.indexOf("sec:found"));
+      });
+    });
+
+    it("opens the file an \\input names with F12", async () => {
+      mockThesis();
+      const { container } = render(<Typeset />);
+      const view = await openRootInCode(container);
+      act(() => { view.dispatch({ selection: { anchor: view.state.doc.toString().indexOf("chapters/ch2") + 3 } }); });
+      fireEvent.keyDown(view.contentDOM, { key: "F12" });
+      await waitForSourceOpen(container, "chapters/ch2.tex", "ch2.tex");
+    });
+
+    it("says so when a reference has no definition", async () => {
+      mockThesis();
+      const { container } = render(<Typeset />);
+      const view = await openRootInCode(container);
+      const end = view.state.doc.toString().indexOf("\\end{document}");
+      act(() => { view.dispatch({ changes: { from: end, insert: "\\ref{nowhere}\n" }, selection: { anchor: end + 7 } }); });
+      fireEvent.keyDown(view.contentDOM, { key: "F12" });
+      expect(await screen.findByText("No definition of the label \"nowhere\" was found.")).toBeTruthy();
+    });
+
+    it("renames a label in every file of the document with F2", async () => {
+      mockThesis();
+      const { container } = render(<Typeset />);
+      const view = await openRootInCode(container);
+      act(() => { view.dispatch({ selection: { anchor: view.state.doc.toString().indexOf("sec:found") + 1 } }); });
+      fireEvent.keyDown(view.contentDOM, { key: "F2" });
+
+      const dialog = await screen.findByRole("dialog", { name: "Rename label" });
+      expect(dialog.textContent).toContain("appears 3 times in 2 files");
+      const input = within(dialog).getByLabelText("New name");
+      fireEvent.change(input, { target: { value: "sec basics" } });
+      expect(within(dialog).getByRole("alert").textContent).toContain("cannot contain spaces");
+      fireEvent.change(input, { target: { value: "sec:basics" } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+      await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalledWith(
+        "chapters/ch2.tex",
+        "\\chapter{Foundations}\\label{sec:basics}\nBody, as \\cref{sec:basics} says.",
+        "v-ch2",
+      ));
+      expect(view.state.doc.toString()).toContain("See \\ref{sec:basics}.");
+      expect(await screen.findByText("Renamed \"sec:found\" to \"sec:basics\": 3 places in 2 files.")).toBeTruthy();
+      expect(screen.queryByRole("dialog", { name: "Rename label" })).toBeNull();
+    });
+  });
+
+  it("wraps the selection with Ctrl+B in the Visual editor", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const view = await waitFor(() => {
+      expect(window.__typesetView).toBeTruthy();
+      return window.__typesetView!;
+    });
+    const from = view.state.doc.toString().indexOf("world");
+    view.dispatch({ selection: { anchor: from, head: from + "world".length } });
+    fireEvent.keyDown(view.contentDOM, { key: "b", ctrlKey: true });
+    await waitFor(() => expect(view.state.doc.toString()).toContain("Hello \\textbf{world}"));
   });
 
   it("jumps from clicked PDF text to the matching LaTeX source in Code mode", async () => {
@@ -5742,6 +6288,62 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
     await waitFor(() => expect((screen.getByRole("spinbutton", { name: "Maximum compile time (minutes)" }) as HTMLInputElement).value).toBe("30"));
+  });
+
+  it("re-reads the engine and main document when switching projects", async () => {
+    // The page stays mounted across projects; project B must not compile with
+    // project A's main document or engine.
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: "\\documentclass{article}\n", bytes: 24 });
+    window.localStorage.setItem("somniq-typeset-engine:project-a", "xelatex");
+    window.localStorage.setItem("somniq-typeset-main-document:project-a", "sections/local.tex");
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "sections/local.tex",
+      expect.any(String),
+      false,
+      expect.any(String),
+      false,
+      "xelatex",
+      null,
+    ));
+
+    await act(async () => { useStore.setState({ currentProject: { ...project, id: "project-b" } }); });
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "paper.tex",
+      "paper.pdf",
+      false,
+      expect.any(String),
+      false,
+      null,
+      null,
+    ));
+  });
+
+  it("takes the main document and engine from the workspace settings the agent also reads", async () => {
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValue({ path: "paper.tex", content: "\\documentclass{article}\n", bytes: 24 });
+    mocks.typesetProjectSettingsRead.mockResolvedValue({ mainDocument: "sections/local.tex", engine: "xelatex" });
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenLastCalledWith(
+      "sections/local.tex", expect.any(String), false, expect.any(String), false, "xelatex", null,
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /pdflatex/ }));
+    await waitFor(() => expect(mocks.typesetProjectSettingsWrite).toHaveBeenLastCalledWith({
+      mainDocument: "sections/local.tex",
+      engine: "pdflatex",
+    }));
   });
 
   it("compiles the chosen main document rather than the open file", async () => {

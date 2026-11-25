@@ -1,4 +1,3 @@
-use tauri::ipc::InvokeBody;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 fn decode_image(bytes: &[u8]) -> Result<tauri::image::Image<'static>, String> {
@@ -19,10 +18,9 @@ pub fn clipboard_write_image(
     app: tauri::AppHandle,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    let InvokeBody::Raw(bytes) = request.body() else {
-        return Err("clipboard image must be sent as binary PNG bytes".into());
-    };
-    write_image_bytes(&app, bytes)
+    let bytes = crate::files::invoke_body_bytes(request.body())
+        .ok_or("clipboard image must be sent as binary PNG bytes")?;
+    write_image_bytes(&app, &bytes)
 }
 
 #[cfg(test)]

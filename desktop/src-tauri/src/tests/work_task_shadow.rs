@@ -83,6 +83,14 @@ fn a_plain_folder_gets_a_private_repository_and_no_git_directory() {
     );
     assert_eq!(tracked(&repo), vec!["draft.tex".to_string()]);
     assert!(!taken.head.is_empty());
+    // A detached auto-repack held the snapshot's output pipes open for
+    // minutes on a large folder; the private repository never starts one.
+    for (key, value) in [("gc.auto", "0"), ("maintenance.auto", "false")] {
+        assert_eq!(
+            repo.checked(&["config", "--get", key], "config").expect("config"),
+            value
+        );
+    }
 }
 
 /// What a task sees must be what is on disk: no line-ending conversion, even
@@ -210,4 +218,52 @@ fn the_private_repository_is_keyed_by_folder_path() {
         .into_owned();
     assert!(name.starts_with("project-"), "readable, ASCII-only prefix: {name}");
     assert!(name.ends_with(".git"));
+}
+
+/// The names Git for Windows will not index. Checked as a pure rule so it
+/// runs everywhere; the next test shows Git agreeing with it.
+#[test]
+fn windows_reserved_and_malformed_names_are_recognised() {
+    use super::invalid_win32_component as invalid;
+    for name in [
+        "nul", "NUL", "nul.txt", "Con", "con .log", "aux", "prn.tex", "COM1", "lpt9.dat",
+        "com\u{b9}", "conin$", "CONOUT$.x", "trailing.", "trailing ", "a:b", "q?", "x*y",
+    ] {
+        assert!(invalid(name), "{name:?} must be refused");
+    }
+    for name in [
+        "null", "nul_", "console.tex", "auxiliary.aux", "com", "com0", "com10", "lpt",
+        "report.current.tex", ".gitignore", "论文.pdf", "a b.txt", "main.aux", "x\u{f03a}y",
+    ] {
+        assert!(!invalid(name), "{name:?} must be kept");
+    }
+}
+
+/// A stray `nul` (what a Git Bash `> nul` redirect leaves behind) used to fail
+/// the whole snapshot with `invalid path 'nul'`, and with it every task and
+/// scheduled run in the folder.
+#[cfg(windows)]
+#[test]
+fn a_file_named_nul_is_left_out_instead_of_failing_the_snapshot() {
+    let fixture = fixture();
+    write(&fixture.folder, "draft.tex", b"draft\n");
+    write(&fixture.folder, "slides/main.tex", b"slides\n");
+    for relative in ["nul", "slides/nul", "slides/con.txt"] {
+        // Only the verbatim form creates a real file with a device's name.
+        // Verbatim paths take no `/`, so the separators are normalised.
+        let full = fixture.folder.join(relative).display().to_string().replace('/', "\\");
+        let verbatim = format!(r"\\?\{full}");
+        std::fs::write(&verbatim, b"").expect("create a reserved-name file");
+    }
+
+    let repo = prepare(&fixture.folder).expect("prepare");
+    let taken = snapshot(&repo).expect("a reserved name must not fail the snapshot");
+
+    let mut files = tracked(&repo);
+    files.sort();
+    assert_eq!(files, vec!["draft.tex".to_string(), "slides/main.tex".to_string()]);
+    assert_eq!(
+        taken.omitted,
+        vec!["nul".to_string(), "slides/con.txt".to_string(), "slides/nul".to_string()]
+    );
 }

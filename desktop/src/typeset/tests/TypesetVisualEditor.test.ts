@@ -18,6 +18,7 @@ import {
 } from "../visualDecorations";
 import { numberingPrefixFor, outlineFor } from "../outlineModel";
 import { theoremDefinitions } from "../theoremEnvironments";
+import { latexMathMacros } from "../../editor/latex/mathMacros";
 import { applyHeadingLevel, insertLink, type EditorAdapter } from "../editorCommands";
 import { htmlClipboardToLatex } from "../latexHtmlPaste";
 import { useStore } from "../../store";
@@ -300,7 +301,7 @@ describe("formatted HTML paste", () => {
 });
 
 describe("visualDecorations", () => {
-  it("maps prose edits incrementally and reuses that index during the idle decoration rebuild", () => {
+  it("queues prose edits for the index, skips the idle rebuild, and maps them once when a rebuild needs it", () => {
     vi.useFakeTimers();
     const parent = document.createElement("div");
     document.body.append(parent);
@@ -313,14 +314,22 @@ describe("visualDecorations", () => {
       const at = view.state.doc.toString().indexOf("Text") + 4;
       view.dispatch({ changes: { from: at, insert: " one" } });
       view.dispatch({ changes: { from: at + 4, insert: " two" } });
-      const mappedDecorations = view.state.field(visualDecorations);
-      const mapped = mappedDecorations.structure;
-      expect(mapped).not.toBe(initial);
-      expect(mapped.source).toContain("Text one two");
+      // Mapping re-creates the whole index, so keystrokes only queue changes.
+      const queued = view.state.field(visualDecorations);
+      expect(queued.structure).toBe(initial);
+      expect(queued.pendingStructure).not.toBeNull();
+      expect(queued.pendingRefresh).toBe(false);
 
       vi.advanceTimersByTime(VISUAL_REPARSE_IDLE_MS + 1);
-      expect(view.state.field(visualDecorations)).toBe(mappedDecorations);
-      expect(view.state.field(visualDecorations).structure).toBe(mapped);
+      expect(view.state.field(visualDecorations)).toBe(queued);
+
+      // A rebuild (here: a pointer selection ending) gets the index of the
+      // text as it is now.
+      view.dispatch({ effects: visualPointerSelecting.of(true) });
+      view.dispatch({ effects: visualPointerSelecting.of(false) });
+      const rebuilt = view.state.field(visualDecorations);
+      expect(rebuilt.structure.source).toContain("Text one two");
+      expect(rebuilt.pendingStructure).toBeNull();
     } finally {
       view.destroy();
       parent.remove();
@@ -820,6 +829,116 @@ describe("visualDecorations", () => {
         && range.widget?.toDOM().classList.contains("cm-vis-math")
       ))).toBe(false);
     }
+  });
+
+  it("draws description terms, nested labels and indentation like the PDF", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{description}",
+      "\\item[Latency] time to first byte",
+      "\\end{description}",
+      "\\begin{itemize}",
+      "\\item Outer",
+      "\\begin{itemize}",
+      "\\item Inner",
+      "\\end{itemize}",
+      "\\end{itemize}",
+      "\\end{document}",
+    ].join("\n");
+    const ranges = visualDecorationRanges(source);
+    const markers = ranges
+      .map((range) => range.widget?.toDOM())
+      .filter((element) => element?.classList.contains("cm-vis-item-marker"));
+    expect(markers.map((marker) => marker?.textContent)).toEqual(["Latency", "•", "–"]);
+    expect(markers[0]?.classList.contains("cm-vis-item-term")).toBe(true);
+    const innerLine = ranges.find((range) => range.className?.includes("cm-vis-list-depth-2"));
+    expect(innerLine && source.slice(innerLine.from).startsWith("\\item Inner")).toBe(true);
+  });
+
+  it("reveals only the item under the caret, not the whole list", () => {
+    const source = "\\begin{document}\n\\begin{itemize}\n\\item First\n\\item Second\n\\end{itemize}\n\\end{document}";
+    const caret = source.indexOf("\\item Second") + 1;
+    const markers = visualDecorationRanges(source, caret)
+      .map((range) => range.widget?.toDOM())
+      .filter((element) => element?.classList.contains("cm-vis-item-marker"));
+    // The first item keeps its bullet; the declarations stay hidden.
+    expect(markers).toHaveLength(1);
+    const hiddenBegin = visualDecorationRanges(source, caret)
+      .some((range) => range.from === source.indexOf("\\begin{itemize}"));
+    expect(hiddenBegin).toBe(true);
+  });
+
+  it("renders urls, colours and citation notes instead of their markup", () => {
+    const source = [
+      "\\begin{document}",
+      "See \\url{https://example.org/a_b} and \\textcolor{red}{this} \\cite[p.~3]{knuth84} \\citeauthor{lamport94}.",
+      "\\end{document}",
+    ].join("\n");
+    const ranges = visualDecorationRanges(source);
+    const url = ranges.find((range) => range.className?.includes("cm-vis-url"));
+    expect(url && source.slice(url.from, url.to)).toBe("https://example.org/a_b");
+    const colour = ranges.find((range) => range.className?.includes("cm-vis-colored"));
+    expect(colour && source.slice(colour.from, colour.to)).toBe("this");
+    const chips = ranges.map((range) => range.widget?.toDOM()?.textContent).filter(Boolean);
+    expect(chips).toContain("[knuth84, p. 3]");
+    expect(chips).toContain("lamport94");
+  });
+
+  it("shows every sub-figure and the float's own caption", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{figure}[t]",
+      "\\begin{subfigure}{0.48\\textwidth}\\includegraphics{a.png}\\caption{Left}\\end{subfigure}",
+      "\\begin{subfigure}{0.48\\textwidth}\\includegraphics{b.png}\\caption{Right}\\end{subfigure}",
+      "\\caption{Both panels for $\\alpha$, from \\cite{knuth84}}",
+      "\\end{figure}",
+      "\\end{document}",
+    ].join("\n");
+    const figure = visualDecorationRanges(source)
+      .find((range) => range.widget?.toDOM().classList.contains("cm-vis-figure"))!.widget!.toDOM();
+    expect(figure.querySelectorAll(".cm-vis-figure-item")).toHaveLength(2);
+    const captions = [...figure.querySelectorAll(".cm-vis-caption")].map((caption) => caption.textContent ?? "");
+    expect(captions[0]).toBe("Left");
+    expect(captions[1]).toBe("Right");
+    const main = figure.querySelector<HTMLElement>(":scope > .cm-vis-caption")!;
+    expect(main.querySelector(".katex")).toBeTruthy();
+    expect(main.textContent).toContain("[knuth84]");
+    expect(main.textContent).not.toContain("\\cite");
+  });
+
+  it("prints a merged or coloured table cell as its text", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{tabular}{lll}",
+      "\\multicolumn{2}{c}{\\textbf{Total}} & \\cellcolor{gray}71.2\\% \\\\",
+      "a & b & c \\\\",
+      "\\end{tabular}",
+      "\\end{document}",
+    ].join("\n");
+    const table = visualDecorationRanges(source)
+      .find((range) => range.widget?.toDOM().querySelector?.("table"))!.widget!.toDOM();
+    const firstRow = [...table.querySelectorAll("tr")][0];
+    const cells = [...firstRow.querySelectorAll("td, th")].map((cell) => cell.textContent);
+    expect(cells[0]).toBe("Total");
+    expect(cells[1]).toBe("71.2%");
+    expect(table.textContent).not.toContain("gray");
+  });
+
+  it("renders formulas with the document's own macros, from the file or the root", () => {
+    const render = (source: string, extensions: Extension[] = []) => {
+      const from = source.indexOf("$\\RR");
+      const math = visualDecorationRanges(source, 0, 0, extensions)
+        .find((range) => range.from === from && range.widget?.toDOM().classList.contains("cm-vis-math"));
+      expect(math).toBeTruthy();
+      return math!.widget!.toDOM();
+    };
+    // KaTeX prints an undefined command as its own red source text.
+    const own = render("\\newcommand{\\RR}{\\mathbb{R}}\n\\begin{document}\nLet $\\RR^n$ be.\n\\end{document}");
+    expect(own.textContent).not.toContain("\\RR");
+    // A chapter defines nothing itself; the root's preamble arrives via the facet.
+    const chapter = render("Let $\\RR^n$ be.", [latexMathMacros.of({ "\\RR": "\\mathbb{R}" })]);
+    expect(chapter.textContent).not.toContain("\\RR");
+    expect(render("Let $\\RR^n$ be.").textContent).toContain("\\RR");
   });
 
   it("renders citations as clickable inline citation chips", () => {

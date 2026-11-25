@@ -3,13 +3,16 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   typesetRevisionCapture,
   typesetRevisionCompare,
+  typesetRevisionBlobText,
   typesetRevisionExportZip,
   typesetRevisionList,
   typesetRevisionRestoreFile,
   typesetRevisionRestoreProject,
   type TypesetProjectRevisionSummary,
   type TypesetRevisionComparison,
+  type TypesetRevisionOperation,
 } from "../api/tauri";
+import { externalTextDiff, type ExternalTextDiff } from "../diff/externalChangeDiff";
 import { useStore } from "../store";
 import { languageLocale, tr, type Language } from "../language";
 import { TYPESET_EDITOR_COPY } from "./i18n";
@@ -22,6 +25,52 @@ const OPERATION_LABELS: Record<Language, Record<string, string>> = {
 
 const operationLabel = (kind: string, language: Language) =>
   OPERATION_LABELS[language][kind.replace(/^comment-/, "")] ?? kind;
+
+const operationDiffKey = (operation: TypesetRevisionOperation) =>
+  `${operation.beforeHash ?? ""}:${operation.afterHash ?? ""}`;
+
+type OperationDiff =
+  | { state: "loading" }
+  | { state: "binary" }
+  | { state: "error"; message: string }
+  | { state: "ready"; diff: ExternalTextDiff };
+
+/** One compared file, line by line: hunks with old/new line numbers. */
+function OperationLines({ diff, language }: { diff: OperationDiff | undefined; language: Language }) {
+  const t = (cn: string, en: string, es: string) => tr(language, cn, en, es);
+  if (!diff || diff.state === "loading") return <p className="typeset-history-diff-note">{t("正在读取…", "Loading…", "Cargando…")}</p>;
+  if (diff.state === "error") return <p className="typeset-history-error">{diff.message}</p>;
+  if (diff.state === "binary") {
+    return <p className="typeset-history-diff-note">{t("二进制或过大的文件，无法逐行对比。", "Binary or very large file; no line comparison.", "Archivo binario o muy grande; sin comparación por líneas.")}</p>;
+  }
+  const { diff: lines } = diff;
+  if (lines.tooLargeToChunk) {
+    return <p className="typeset-history-diff-note">{t(
+      `改动太大，无法逐行展示（约 +${lines.added} −${lines.removed} 行）。`,
+      `Too many changes to show line by line (about +${lines.added} −${lines.removed} lines).`,
+      `Demasiados cambios para mostrarlos por líneas (unas +${lines.added} −${lines.removed} líneas).`,
+    )}</p>;
+  }
+  if (lines.hunks.length === 0) return <p className="typeset-history-diff-note">{t("文本内容相同。", "The text is identical.", "El texto es idéntico.")}</p>;
+  return (
+    <div className="typeset-history-diff" role="table" aria-label={t("逐行对比", "Line comparison", "Comparación por líneas")}>
+      <p className="typeset-history-diff-summary">+{lines.added} −{lines.removed}</p>
+      {lines.hunks.map((hunk, hunkIndex) => (
+        <div key={`${hunk.oldStart}:${hunk.newStart}:${hunkIndex}`} className="typeset-history-diff-hunk" role="rowgroup">
+          <div className="typeset-history-diff-hunk-head" role="row">@@ −{hunk.oldStart} +{hunk.newStart} @@</div>
+          {hunk.lines.map((line, lineIndex) => (
+            <div key={lineIndex} className={`typeset-history-diff-line ${line.kind}`} role="row">
+              <span className="old" role="cell">{line.oldLine ?? ""}</span>
+              <span className="new" role="cell">{line.newLine ?? ""}</span>
+              <span className="sign" role="cell" aria-hidden="true">{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</span>
+              <code role="cell">{line.text || " "}</code>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function TypesetHistoryPanel({
   path,
@@ -49,6 +98,11 @@ export default function TypesetHistoryPanel({
   const [comparison, setComparison] = useState<TypesetRevisionComparison | null>(null);
   const [compareBaseId, setCompareBaseId] = useState("");
   const [compareTargetId, setCompareTargetId] = useState("");
+  /** Whether the open comparison is "previous version" or two picked versions. */
+  const [comparisonOfSelected, setComparisonOfSelected] = useState(false);
+  /** The file whose lines are shown, and what was read for it. */
+  const [openOperation, setOpenOperation] = useState<string | null>(null);
+  const [operationDiffs, setOperationDiffs] = useState<Record<string, OperationDiff>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -95,10 +149,38 @@ export default function TypesetHistoryPanel({
     setError(null);
     try {
       setComparison(await typesetRevisionCompare(entry.parentRevisionId, entry.id));
+      setComparisonOfSelected(false);
+      setOpenOperation(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
       setBusy(null);
+    }
+  };
+
+  /** Show (or hide) the line-by-line changes of one compared file. */
+  const toggleOperation = async (operation: TypesetRevisionOperation) => {
+    if (openOperation === operation.id) {
+      setOpenOperation(null);
+      return;
+    }
+    setOpenOperation(operation.id);
+    // Operation ids are per path ("modify:main.tex") and repeat across
+    // comparisons; the blob hashes name the exact contents being compared.
+    const key = operationDiffKey(operation);
+    if (operationDiffs[key] && operationDiffs[key].state !== "error") return;
+    setOperationDiffs((current) => ({ ...current, [key]: { state: "loading" } }));
+    try {
+      const [before, after] = await Promise.all([
+        operation.beforeHash ? typesetRevisionBlobText(operation.beforeHash) : Promise.resolve(""),
+        operation.afterHash ? typesetRevisionBlobText(operation.afterHash) : Promise.resolve(""),
+      ]);
+      const result: OperationDiff = before === null || after === null
+        ? { state: "binary" }
+        : { state: "ready", diff: externalTextDiff(before, after) };
+      setOperationDiffs((current) => ({ ...current, [key]: result }));
+    } catch (reason) {
+      setOperationDiffs((current) => ({ ...current, [key]: { state: "error", message: String(reason) } }));
     }
   };
 
@@ -108,6 +190,8 @@ export default function TypesetHistoryPanel({
     setError(null);
     try {
       setComparison(await typesetRevisionCompare(compareBaseId, compareTargetId));
+      setComparisonOfSelected(true);
+      setOpenOperation(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -209,15 +293,31 @@ export default function TypesetHistoryPanel({
         {comparison && (
           <section className="typeset-history-comparison" aria-label={t("版本比较", "Version comparison", "Comparación de versiones")}>
             <header>
-              <strong>{t("与上一版本的比较", "Comparison with the previous version", "Comparación con la versión anterior")}</strong>
+              <strong>{comparisonOfSelected
+                ? t("所选两个版本的比较", "Comparison of the selected versions", "Comparación de las versiones seleccionadas")
+                : t("与上一版本的比较", "Comparison with the previous version", "Comparación con la versión anterior")}</strong>
               <button type="button" onClick={() => setComparison(null)}>{t("关闭", "Close", "Cerrar")}</button>
             </header>
-            {comparison.operations.length === 0 ? <p>{t("没有文件内容差异。", "No file content differences.", "No hay diferencias en el contenido de los archivos.")}</p> : comparison.operations.map((operation) => (
-              <div key={operation.id} className={`operation-${operation.kind}`}>
-                <b>{operationLabel(operation.kind, language)}</b>
-                <code>{operation.previousPath ? `${operation.previousPath} → ${operation.path}` : operation.path}</code>
-              </div>
-            ))}
+            {comparison.operations.length === 0 ? <p>{t("没有文件内容差异。", "No file content differences.", "No hay diferencias en el contenido de los archivos.")}</p> : comparison.operations.map((operation) => {
+              const lineDiffable = !operation.kind.startsWith("comment-") && (operation.beforeHash || operation.afterHash);
+              const open = openOperation === operation.id;
+              return (
+                <div key={operation.id} className={`operation-${operation.kind}${open ? " open" : ""}`}>
+                  {lineDiffable ? (
+                    <button type="button" className="typeset-history-operation-toggle" aria-expanded={open} onClick={() => void toggleOperation(operation)}>
+                      <b>{operationLabel(operation.kind, language)}</b>
+                      <code>{operation.previousPath ? `${operation.previousPath} → ${operation.path}` : operation.path}</code>
+                    </button>
+                  ) : (
+                    <>
+                      <b>{operationLabel(operation.kind, language)}</b>
+                      <code>{operation.previousPath ? `${operation.previousPath} → ${operation.path}` : operation.path}</code>
+                    </>
+                  )}
+                  {open && <OperationLines diff={operationDiffs[operationDiffKey(operation)]} language={language} />}
+                </div>
+              );
+            })}
           </section>
         )}
         <div className="typeset-history-list">

@@ -1,5 +1,82 @@
 # ARIS-Code Changelog
 
+## v0.4.92 (2026-11-25)
+
+- **Chat history search** — past chats are indexed by character pairs, so
+  Chinese text without word breaks is found reliably. A search takes about
+  40–80 ms instead of about 440 ms. Deleting a chat removes it from the index
+  immediately.
+- **Lessons from failures** — after a turn in which a failed tool call was
+  later fixed, a background call to a cheap model writes a short lesson. It
+  uses the Reviewer connection when one is set, otherwise the Executor's
+  cheap tier. When a tool fails, at most three lessons are appended to the
+  tool result. A lesson must be for the same kind of error and share at least
+  three specific words with the error. Paths, stock error wording, the
+  desktop's "Recovery hint" line and English function words are not counted.
+  Lessons are marked when recalled, unhelpful or stale. A lesson is deleted
+  with the only chat it came from, and an hourly cleanup keeps at most 2,000.
+  Settings → Memory lists the lessons. `memory_lessons_enabled` turns
+  lessons off.
+- **Automatic recall off by default** — past-chat excerpts are no longer added
+  to every turn. In a blind review of 400 replayed real turns, 11% of the
+  excerpts were useful. The model can still search history with
+  `session_search`. `memory_recall_placement` (`system`, `user` or
+  `alternate`) turns the block back on, and it no longer includes the current
+  chat. Background memory screening (v2) is also off by default.
+- **LaTeX compile** — without latexmk, compiles now run BibTeX or biber and
+  makeindex when the document needs them, then rerun until references settle
+  (at most four passes). Diagnostics come from the last pass's log and point
+  to the right chapter file, including `\include`d ones. They also include
+  BibTeX/biber errors and bad boxes. Chinese logs no longer crash the error
+  summary, and `Font shape … undefined` warnings are no longer reported as a
+  missing package. Waiting for an earlier compile can be cancelled, and
+  Ctrl+S during a compile is queued. The Agent's LaTeXCompile uses the main
+  document and engine chosen in the editor (`.somniq/typeset/settings.json`).
+- **LaTeX editor** — toolbar edits can be undone, and one undo history spans
+  the Visual and Code views. Compile errors show inline in the right file.
+  F12 or Ctrl+click goes to a label, citation or included file. F2 renames a
+  label in every file. Completion offers the document's own macros and
+  environments. Citation checks use the document's own `.bib`, and duplicate
+  labels across files are reported. Math previews use the document's
+  `\newcommand` macros. `.bib`, `.sty` and `.cls` files open from the file
+  tree in Code view.
+- **Visual editor** — tables with comments, `\multicolumn` or row options can
+  no longer be broken by structure edits. Visual mode now handles subfigures,
+  float captions, `description` lists, footnote numbers, `\url`,
+  `\textcolor` and citation variants. On a 6,800-line document a full
+  rebuild takes about 115 ms (was 330 ms), and per-keystroke checks take
+  about 2 ms (were about 35 ms).
+- **Track changes** — Code view can record insertions and deletions. Each
+  change, or all at once, can be accepted or rejected. Records are saved under
+  `.somniq/typeset/tracked/` and follow renamed files.
+- **Comments** — comments take replies, are highlighted in the source, open
+  from a hover card and export to Markdown.
+- **History** — project history compares two versions line by line. Papers,
+  slides, posters and reports under `.somniq/` are now included in history and
+  in project search. An AI edit to them now goes through change-set review.
+- **PDF sidebar** — an outline tree that highlights the current section, and
+  page thumbnails.
+- **Templates** — new documents can start from IEEE (two layouts), ACM,
+  Elsevier, LNCS or REVTeX, or from a Chinese or English thesis split into
+  chapters. A document with a Chinese title starts with ctex and XeLaTeX.
+- **Project files** — renaming a file keeps its comments, history and
+  tracked changes. Deleted files go to `.somniq/trash` for 30 days. Files can
+  be dragged in from the system, and a clashing name gets `-2`. Files changed
+  outside the app refresh the tree. Search and replace stay inside the
+  current folder and keep GBK files in GBK. Pasted images are saved in
+  `figures/` next to the main document. Project zips leave out hidden folders,
+  `.env` files and private keys. The demo-only "Review and revisions" panel
+  is gone.
+- **Scheduled tasks** — a folder containing a file Windows Git cannot store
+  (such as a stray `nul`) no longer fails every task. A task that creates such
+  a file no longer fails when committing. Snapshots of large folders no longer
+  stall for minutes on Git's background repack.
+- **Scopus (school route)** — when a paid membership group has no Scopus
+  channel on the server, the error says the server is misconfigured instead of
+  telling the member to upgrade.
+- **Binary uploads** — pasted images and clipboard copies keep working when a
+  page has fallen back from Tauri's custom-protocol IPC to `postMessage`.
+
 ## v0.4.91 (2026-11-19)
 
 - **Context windows** — models that ship a 1M-token window inside a smaller
