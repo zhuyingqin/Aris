@@ -490,3 +490,132 @@ fn only_failures_fixed_in_the_turn_count_as_fixed() {
     messages.truncate(3);
     assert!(fixed_failure_ids(&messages).is_empty());
 }
+
+#[test]
+fn error_classes_group_failures_by_kind() {
+    assert_eq!(error_class("/usr/bin/bash: line 1: rg: command not found\nexit_code:127"), "command_missing");
+    assert_eq!(error_class("ls: cannot access 'target': No such file or directory"), "path_missing");
+    assert_eq!(error_class("UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb1"), "encoding");
+    assert_eq!(error_class("edit 3: old_string not found in file"), "edit_mismatch");
+    assert_eq!(error_class("ValueError: too many values to unpack (expected 2)"), "python_exception");
+    assert_eq!(error_class("exit_code:1"), "");
+}
+
+#[test]
+fn the_desktop_recovery_hint_is_not_part_of_the_error() {
+    let output = "old_string not found in file\n\nRecovery hint: Use the error message to adjust the next step.";
+    assert_eq!(key_error_lines(output, 3), vec!["old_string not found in file".to_string()]);
+}
+
+#[test]
+fn paths_and_stock_wording_are_not_evidence() {
+    assert_eq!(
+        without_paths("python: can't open file 'G:/2-博士期间资料/0- 毕业材料/x.py': [Errno 2]"),
+        "python: can't open file [Errno 2]"
+    );
+    let stripped = without_stock_wording("FileNotFoundError: No such file or directory; ls failed");
+    assert!(stripped.contains("filenotfounderror"), "{stripped}");
+    assert!(!stripped.contains("no such file"), "{stripped}");
+    assert!(!stripped.contains("failed"), "{stripped}");
+}
+
+fn insert_lesson(store: &LessonStore, statement: &str, tool: &str, error: &str) {
+    let draft = LessonDraft {
+        job_index: 0,
+        statement: statement.to_string(),
+        tool: tool.to_string(),
+        tool_use_id: format!("src-{}", statement.len()),
+        fix_tool_use_id: None,
+        cause_key: cause_key(tool, error),
+    };
+    store.insert_lessons(&[job(gbk_csv_turn())], &[draft]).expect("insert");
+}
+
+#[test]
+fn a_shared_path_alone_does_not_attach_a_lesson_but_one_specific_word_can() {
+    let store = temp_store("evidence");
+    insert_lesson(
+        &store,
+        "本机 bash 没有 ripgrep：`rg` 报 command not found，改用 grep -rn",
+        "bash",
+        "/usr/bin/bash: line 1: rg: command not found",
+    );
+    insert_lesson(
+        &store,
+        "项目根是 G:/2-博士期间资料/0- 毕业材料（0- 后有空格），cd 前先 pwd 确认",
+        "bash",
+        "cd: G:/2-博士期间资料/0-毕业材料: No such file or directory",
+    );
+    insert_lesson(
+        &store,
+        "PowerShell 读 GBK 文件乱码：Get-Content 加 -Encoding UTF8",
+        "PowerShell",
+        "UnicodeDecodeError: 'gbk' codec can't decode",
+    );
+
+    // Only `rg` is left once the bash prefix and the stock wording go; it is shared.
+    let found = store
+        .recall_for_failure("bash", r#"{"command":"rg -n foo src"}"#, "/usr/bin/bash: line 1: rg: command not found\nexit_code:127")
+        .expect("recall");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].statement.contains("ripgrep"));
+    // Another missing program shares only the stock wording.
+    assert!(store
+        .recall_for_failure("bash", r#"{"command":"head -5 x"}"#, "/usr/bin/bash: line 1: head: command not found\nexit_code:127")
+        .expect("recall")
+        .is_empty());
+
+    // A failure under the same project root shares only path pieces.
+    let output = "python: can't open file 'G:/2-博士期间资料/0- 毕业材料/x.py': [Errno 2] No such file or directory";
+    let input = r#"{"command":"python x.py"}"#;
+    assert!(store.recall_for_failure("bash", input, output).expect("recall").is_empty());
+    let off = LessonGates {
+        error_class: false,
+        ignore_paths: false,
+        ignore_stock_wording: false,
+        min_shared: LESSON_RECALL_MIN_SHARED,
+    };
+    let unguarded = store.recall_for_failure_gated("bash", input, output, off).expect("recall");
+    assert!(unguarded.iter().any(|lesson| lesson.statement.contains("项目根")), "{unguarded:?}");
+    let _ = std::fs::remove_file(store.path());
+}
+
+#[test]
+fn a_v2_store_gets_the_error_kind_of_its_lessons_from_their_cause_keys() {
+    let store = temp_store("migrate-v3");
+    {
+        let connection = Connection::open(store.path()).expect("open");
+        connection
+            .execute_batch(
+                "CREATE TABLE lessons(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                   tool TEXT NOT NULL, tool_use_id TEXT NOT NULL, fix_tool_use_id TEXT, statement TEXT NOT NULL,
+                   cause_key TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 1, first_seen_at INTEGER NOT NULL,
+                   last_seen_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                   recalled INTEGER NOT NULL DEFAULT 0, last_recalled_at INTEGER NOT NULL DEFAULT 0,
+                   unhelpful INTEGER NOT NULL DEFAULT 0, status_changed_at INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE lesson_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL, turn_key TEXT NOT NULL UNIQUE, turn_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                   last_error TEXT, finished_at INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE lesson_sources(lesson_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                   PRIMARY KEY(lesson_id, session_id));
+                 INSERT INTO lessons(id, project_id, session_id, tool, tool_use_id, statement, cause_key,
+                   first_seen_at, last_seen_at)
+                   VALUES ('lesson_v2', 'p', 'chat-old', 'bash', 't', 'old', 'bash | rg: command not found', 1, 1);
+                 PRAGMA user_version = 2;",
+            )
+            .expect("v2 schema");
+    }
+    assert_eq!(store.list_views(10).expect("list").len(), 1);
+    let connection = Connection::open(store.path()).expect("open");
+    let (kind, version): (String, i64) = connection
+        .query_row(
+            "SELECT error_class, (SELECT user_version FROM pragma_user_version) FROM lessons WHERE id = 'lesson_v2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("row");
+    assert_eq!((kind.as_str(), version), ("command_missing", 3));
+    drop(connection);
+    let _ = std::fs::remove_file(store.path());
+}

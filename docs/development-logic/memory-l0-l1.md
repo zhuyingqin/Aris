@@ -223,10 +223,102 @@ not model the 6,000-character budget, so that is left for production data.
   and its confirmation. L2 project cards were not built for the same reason:
   project facts are already found in the raw sessions.
 
+## Step 5: what a lesson must share with the failure (2026-11-24)
+
+The 8 wrong attachments of step 3 were read one by one. None was about the
+tool: all 35 negatives are bash/PowerShell failures, so "same tool" filters
+nothing (and a check on the programs a command ran cost 3-6 hits for at most
+one negative; dropped). Five matched on path pieces (the project root
+`G:/2-博士期间资料/0- 毕业材料`, `E:\texlive\2025\bin\windows`), two of them
+not even errors (`where` output, a diff); three matched on stock wording
+("cannot access", "no such file or directory"). A held-out sample of 200 real
+failures from chats the benchmark never used added two more causes: the
+desktop's "Recovery hint: ..." line appended to every failed result (77 of
+200), and English function words ("the", "not", "too many"), which pass the
+20% document-frequency rule because most lessons are written in Chinese.
+
+Recall now (`LessonGates`, all on in the product):
+
+- `key_error_lines` drops the "Recovery hint:" line.
+- Shared words are counted on the error without its paths, without stock
+  error wording (whole words only, so `FileNotFoundError` keeps its `error`)
+  and without English function words. When that leaves fewer than the floor,
+  every remaining specific word must be shared: `rg: command not found`
+  becomes `rg`, which the ripgrep lesson shares and the coreutils one does not.
+  Nothing left means nothing is attached. Keeping the last two path components
+  instead lifted the floor back up and lost 8 dev hits.
+- A lesson about another known kind of failure is skipped (`error_class`: 13
+  kinds such as command_missing, path_missing, encoding, edit_mismatch; unknown
+  on either side passes). Schema v3 stores the kind; older lessons get it from
+  the error line in their cause key.
+
+Replay (`examples/memory_replay.rs l1` on `l1_enriched.json`, whose notes carry
+their source call, read back by `experiments/memory/scripts/enrich_l1_notes.py`;
+`sample_failures.py` adds the held-out split; `MEMORY_REPLAY_GATES` picks the
+rules):
+
+| | before | after |
+|---|---|---|
+| right lesson, dev | 34/52 (65.4%) | 36/52 (69.2%) |
+| right lesson, test | 35/52 (67.3%) | 35/52 (67.3%) |
+| benchmark negatives with a lesson | 8/35 (22.9%) | 2/35 (5.7%) |
+| held-out failures with a lesson | 104/200 (52%) | 73/200 (36.5%) |
+
+"before" already includes the tool name in the indexed text (the old replay
+notes had none: 67.3/65.4% there) and the Recovery-hint filter. Each rule alone
+helps (stock wording alone: 4/35, 43%); together is best. The held-out split
+is unlabelled: of the 30 attachments the rules removed, about 28 read as wrong
+(lost: `head: command not found`, a Playwright port refusal); of 25 sampled
+that remain, about 13 are right or related. So wrong attachments on random
+failures fall from roughly 31% to 18% while right ones are mostly kept. The 35
+negatives were read while designing the rules, so 5.7% is optimistic; the
+held-out numbers are the honest ones. Recall time about 30 ms per failure.
+
+### Larger held-out set, judged blind (2026-11-24)
+
+`sample_failures.py ... all` takes every failed call in local history (all
+projects and the no-project chats) except the 142 the benchmark labelled, one
+per tool + error opening: 894 failures. With the replay's JSON export
+(`MEMORY_REPLAY_JSON`), every (failure, lesson) pair either rule set attaches
+was stratified and a sample judged by 8 independent subagents, blind to the
+stratum, as applies / related / unrelated (`judge_report.py`):
+
+| stratum | pairs | judged | applies |
+|---|---|---|---|
+| benchmark right lessons (control) | 159 | 60 | 97% |
+| benchmark negatives' attachments (control) | 24 | 24 | 4% |
+| attached by old rules only | 673 | 300 | 5% (3-8%) |
+| attached by new rules only | 161 | 161 | 14% (9-20%) |
+| attached by both | 766 | 250 | 40% (35-47%) |
+
+The judges agree with the benchmark labels (97% / 96%). Weighted by stratum
+size, on the 894 failures:
+
+| | failures with a lesson | lessons attached | apply | do not |
+|---|---|---|---|---|
+| old rules | 533 | 1,439 | ~343 (24%) | ~1,096 |
+| new rules (floor 2) | 380 | 927 | ~331 (36%) | ~596 |
+| new rules, floor 3 | 265 | 650 | ~298 (46%) | ~352 |
+| new rules, floor 4 | 212 | 502 | ~246 (49%) | ~256 |
+
+So the new rules remove ~46% of the lessons that do not apply for ~3% of those
+that do. Rank does not separate them (38/33/36% apply at ranks 1/2/3); the
+number of shared specific words does: pairs sharing exactly 2 apply 10% of the
+time, 4 or more about 50%. A floor of 3 removes another ~244 non-applying
+lessons for ~33 applying ones and costs 7 of 104 benchmark hits (dev 36->32,
+test 35->32). Decision (2026-11-24): the floor is 3 -- a wrong lesson is worse
+than none, and wrong attachments also blur the unhelpful-streak signal that
+retires lessons (`LESSON_RECALL_MIN_SHARED`; replays can still set it with
+`MEMORY_REPLAY_MIN_SHARED`). Product replay: right lesson 32/52 dev, 32/52
+test; benchmark negatives 1/35; held-out failures with a lesson 265/894; about
+46% of attached lessons apply. Stores under 20 active lessons still need one
+word more.
+
 ## Not in this change
 
-- The per-turn system-prompt recall block still exists (it now ranks with the
-  bigram path). Removing it should be an A/B switch measured on answer quality
-  and cached tokens first.
-- L2/L3 promotion (project card, user rules) is designed but untested.
-- Lessons have no UI yet.
+- The per-turn recall block is still in every turn; `memory_recall_placement`
+  (step 2) compares system and user placement per session. Whether to drop it
+  waits for that data (`usage_report.py`).
+- Proactive delivery of earlier sessions (a relevance gate before the recall
+  block, then an end-to-end comparison) and any reranker model.
+- L2/L3 promotion: replayed offline in step 4 and not built.

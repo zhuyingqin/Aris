@@ -36,9 +36,12 @@ use crate::{ContentBlock, ConversationMessage, MessageRole};
 
 /// Lessons delivered per failure. Replay: k=3 found 73% (dev) vs 69% at k=2.
 pub const LESSON_RECALL_LIMIT: usize = 3;
-/// A recalled lesson must share this many distinctive words with the error.
-/// Replay: same dev hit rate as no floor, negatives attached 20% vs 23%.
-pub const LESSON_RECALL_MIN_SHARED: usize = 2;
+/// A recalled lesson must share this many specific words with the error
+/// (fewer only when the error has fewer). Judged on 894 real failures: at 2,
+/// 36% of attached lessons applied (pairs sharing exactly 2 words: 10%); at 3,
+/// 46%, with ~41% fewer that do not apply for ~10% fewer that do. A wrong
+/// lesson is worse than none.
+pub const LESSON_RECALL_MIN_SHARED: usize = 3;
 /// Below this many active lessons the shared-word floor is raised by one.
 const LESSON_SMALL_STORE: i64 = 20;
 /// Words in more than this share of lessons do not count as distinctive.
@@ -190,7 +193,7 @@ pub fn lesson_turn_from_messages(messages: &[ConversationMessage]) -> Option<Les
                     if let Some(call) = calls.iter_mut().find(|call| &call.id == tool_use_id) {
                         call.failed = *is_error;
                         if *is_error {
-                            call.error = one_line(&key_error_lines(output, 3).join(" ⏎ "), ERROR_CHARS);
+                            call.error = lesson_error_digest(output);
                         }
                     }
                 }
@@ -207,6 +210,12 @@ pub fn lesson_turn_from_messages(messages: &[ConversationMessage]) -> Option<Les
         assistant,
         calls,
     })
+}
+
+/// A failed call's error as a lesson turn keeps it: the decisive lines.
+#[must_use]
+pub fn lesson_error_digest(output: &str) -> String {
+    one_line(&key_error_lines(output, 3).join(" ⏎ "), ERROR_CHARS)
 }
 
 /// The call that fixed the failure at `failed_index`, if the turn has one.
@@ -510,6 +519,9 @@ pub fn key_error_lines(output: &str, limit: usize) -> Vec<String> {
         .map(str::trim)
         .filter(|line| line.chars().count() >= 3)
         .filter(|line| !line.to_lowercase().starts_with("traceback (most recent call last)"))
+        // Appended by the desktop to every failed result (tool_output.rs): the
+        // same words on unrelated failures, not part of the error.
+        .filter(|line| !line.starts_with("Recovery hint:"))
         .map(ToOwned::to_owned)
         .collect();
     let is_exception = |line: &str| {
@@ -665,6 +677,265 @@ fn distinctive_error_tokens(text: &str) -> BTreeSet<String> {
 pub fn failure_query(tool: &str, input: &str, output: &str) -> String {
     let target: String = input_digest(input).chars().take(160).collect();
     format!("{tool} {target} {}", key_error_lines(output, 3).join(" "))
+}
+
+/// Error kinds, checked in order; the first kind with a matching marker wins.
+/// Both sides of a recall are classified by this same table, so consistency
+/// matters more than naming the root cause.
+const ERROR_CLASSES: &[(&str, &[&str])] = &[
+    (
+        "edit_mismatch",
+        &["old_string", "not found in file", "revision_conflict", "not unique", "multiple matches", "string to replace"],
+    ),
+    (
+        "latex",
+        &["undefined control sequence", "latex error", "emergency stop", "no output pdf", "! missing", "runaway argument"],
+    ),
+    (
+        "command_missing",
+        &[
+            "command not found",
+            "is not recognized as",
+            "commandnotfoundexception",
+            "不是内部或外部命令",
+        ],
+    ),
+    (
+        "module_missing",
+        &["modulenotfounderror", "no module named", "importerror", "cannot find module", "cannot import name"],
+    ),
+    (
+        "encoding",
+        &[
+            "unicodedecodeerror",
+            "unicodeencodeerror",
+            "codec can't",
+            "'gbk'",
+            "invalid byte sequence",
+            "illegal multibyte",
+            "invalid utf-8",
+            "charmap",
+            "编码",
+        ],
+    ),
+    (
+        "permission",
+        &[
+            "permission denied",
+            "access is denied",
+            "eacces",
+            "eperm",
+            "operation not permitted",
+            "unauthorizedaccess",
+            "拒绝访问",
+        ],
+    ),
+    (
+        "usage",
+        &[
+            "usage:",
+            "unrecognized argument",
+            "unknown option",
+            "invalid option",
+            "unexpected argument",
+            "parameterbinding",
+            "a parameter cannot be found",
+            "arguments are required",
+            "missing required",
+        ],
+    ),
+    (
+        "syntax",
+        &[
+            "syntaxerror",
+            "syntax error",
+            "parsererror",
+            "parse error",
+            "unexpected token",
+            "unexpected eof",
+            "unterminated",
+            "missing terminator",
+            "jsondecodeerror",
+            "invalid json",
+        ],
+    ),
+    ("timeout", &["timed out", "timeout", "deadline exceeded", "超时"]),
+    (
+        "network",
+        &[
+            "connection refused",
+            "connection reset",
+            "could not resolve host",
+            "name or service not known",
+            "getaddrinfo",
+            "network is unreachable",
+            "ssl",
+            "certificate",
+            "proxy",
+        ],
+    ),
+    ("out_of_memory", &["memoryerror", "out of memory"]),
+    (
+        "path_missing",
+        &[
+            "no such file or directory",
+            "cannot find path",
+            "cannot find the path",
+            "does not exist",
+            "filenotfounderror",
+            "enoent",
+            "file not found",
+            "找不到",
+            "不存在",
+        ],
+    ),
+    (
+        "python_exception",
+        &["typeerror", "attributeerror", "keyerror", "valueerror", "nameerror", "indexerror", "runtimeerror", "assertionerror"],
+    ),
+];
+
+/// The kind of a failure from its decisive error lines ("" when no rule
+/// matches). Two failures of different kinds are not the same pitfall.
+#[must_use]
+pub fn error_class(error: &str) -> &'static str {
+    let text = key_error_lines(error, 3).join(" ").to_lowercase();
+    ERROR_CLASSES
+        .iter()
+        .find(|(_, markers)| markers.iter().any(|marker| text.contains(marker)))
+        .map_or("", |(name, _)| name)
+}
+
+/// The failure's words a lesson must share: in the tool name or the error
+/// lines (not in the command, whose program names and paths match lessons by
+/// accident), and in at most 20% of lessons. English function words pass the
+/// 20% rule because most lessons are written in Chinese, and matched unrelated
+/// lessons ("the", "not"), so they are dropped with the stock wording.
+fn distinctive_failure_words(
+    connection: &Connection,
+    tool: &str,
+    evidence_text: &str,
+    total: i64,
+    gates: LessonGates,
+) -> BTreeSet<String> {
+    let max_df = ((total as f64) * LESSON_DISTINCTIVE_MAX_SHARE).max(1.0);
+    let mut distinctive = BTreeSet::new();
+    for token in distinctive_error_tokens(&format!("{tool} {evidence_text}"))
+        .into_iter()
+        .filter(|token| !(gates.ignore_stock_wording && ENGLISH_FUNCTION_WORDS.contains(&token.as_str())))
+        .take(48)
+    {
+        let df: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM lessons_bi WHERE lessons_bi MATCH ?1",
+                [fts_or_expression(std::slice::from_ref(&token))],
+                |row| row.get(0),
+            )
+            .unwrap_or(i64::MAX);
+        if (df as f64) <= max_df {
+            distinctive.insert(token);
+        }
+    }
+    distinctive
+}
+
+fn looks_like_path(token: &str) -> bool {
+    let bytes = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')')).as_bytes();
+    // `x/y`, `x\y`, or a drive-qualified name like `E:foo`.
+    token.contains('/')
+        || token.contains('\\')
+        || (bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+/// The text without whitespace-separated tokens that are paths or URLs.
+/// (Keeping the last two components instead lost 8 dev hits in the replay:
+/// the tail words lifted the shared-word floor back to 2.)
+#[must_use]
+pub fn without_paths(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|token| !looks_like_path(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Wording that many unrelated failures share: a lesson matching only on it
+/// is about some other failure that happened to print the same template.
+const STOCK_ERROR_WORDING: &[&str] = &[
+    "no such file or directory",
+    "cannot access",
+    "command not found",
+    "is not recognized as the name of a cmdlet, function, script file, or operable program",
+    "is not recognized as an internal or external command",
+    "permission denied",
+    "does not exist",
+    "cannot find path",
+    "because it does not exist",
+    "an error occurred",
+    "error",
+    "failed",
+    // `/usr/bin/bash: line 1: rg: ...` once the path is gone.
+    "line",
+];
+
+/// Words that carry no failure-specific meaning in an English error line.
+const ENGLISH_FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "not", "no", "is", "are", "was", "were", "be", "been", "to", "of",
+    "in", "on", "at", "for", "with", "from", "by", "as", "it", "its", "this", "that", "can", "cannot",
+    "must", "after", "before", "if", "then", "than", "but", "into", "has", "have", "had", "do", "does",
+    "did", "will", "would", "should", "could", "may", "might", "so", "such", "any", "all", "some",
+    "when", "while", "there", "which", "what", "too", "many", "more", "most", "only", "also", "very",
+    "just", "each", "other", "same", "again", "out", "up",
+];
+
+/// The text without the stock wording of common errors (case-insensitive,
+/// whole words only: `FileNotFoundError` keeps its `error`).
+#[must_use]
+pub fn without_stock_wording(text: &str) -> String {
+    let mut lowered = text.to_lowercase();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    for phrase in STOCK_ERROR_WORDING {
+        let mut out = String::with_capacity(lowered.len());
+        let mut rest = lowered.as_str();
+        while let Some(at) = rest.find(phrase) {
+            let before_ok = !rest[..at].chars().next_back().is_some_and(is_word);
+            let after_ok = !rest[at + phrase.len()..].chars().next().is_some_and(is_word);
+            if before_ok && after_ok {
+                out.push_str(&rest[..at]);
+                out.push(' ');
+            } else {
+                out.push_str(&rest[..at + phrase.len()]);
+            }
+            rest = &rest[at + phrase.len()..];
+        }
+        out.push_str(rest);
+        lowered = out;
+    }
+    lowered
+}
+
+/// Which consistency checks recall applies on top of the shared-word floor.
+/// Both on in the product; the replay turns them off one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LessonGates {
+    /// Reject a lesson whose failure is of another known kind.
+    pub error_class: bool,
+    /// Path pieces of the error do not count as shared words.
+    pub ignore_paths: bool,
+    /// The stock wording of common errors does not count as shared words.
+    pub ignore_stock_wording: bool,
+    /// Specific words a lesson must share ([`LESSON_RECALL_MIN_SHARED`]).
+    pub min_shared: usize,
+}
+
+impl Default for LessonGates {
+    fn default() -> Self {
+        Self {
+            error_class: true,
+            ignore_paths: true,
+            ignore_stock_wording: true,
+            min_shared: LESSON_RECALL_MIN_SHARED,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -918,11 +1189,16 @@ impl LessonStore {
                 continue;
             }
             let id = lesson_id(&job.project_id, &job.session_id, &draft.tool_use_id, &draft.statement);
+            let failed_call = job.turn.calls.iter().find(|call| call.id == draft.tool_use_id);
+            let kind = match failed_call {
+                Some(call) => error_class(&call.error),
+                None => error_class(draft.cause_key.split_once(" | ").map_or("", |(_, error)| error)),
+            };
             let inserted = transaction
                 .execute(
                     "INSERT OR IGNORE INTO lessons(id, project_id, session_id, tool, tool_use_id,
-                       fix_tool_use_id, statement, cause_key, first_seen_at, last_seen_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                       fix_tool_use_id, statement, cause_key, first_seen_at, last_seen_at, error_class)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
                     params![
                         id,
                         job.project_id,
@@ -932,7 +1208,8 @@ impl LessonStore {
                         draft.fix_tool_use_id,
                         draft.statement,
                         draft.cause_key,
-                        now
+                        now,
+                        kind
                     ],
                 )
                 .map_err(|error| error.to_string())?;
@@ -963,17 +1240,37 @@ impl LessonStore {
     /// Lessons that may explain this failure, from every project. Returns
     /// nothing when the failure is only an exit code, when it is a fetch
     /// tool's network failure, or when no lesson shares at least
-    /// [`LESSON_RECALL_MIN_SHARED`] distinctive words with the error.
+    /// [`LESSON_RECALL_MIN_SHARED`] distinctive words with the error, not
+    /// counting its paths and stock wording. A lesson about another kind of
+    /// failure is skipped: see [`LessonGates`].
     pub fn recall_for_failure(
         &self,
         tool: &str,
         input: &str,
         output: &str,
     ) -> Result<Vec<RecalledLesson>, String> {
+        self.recall_for_failure_gated(tool, input, output, LessonGates::default())
+    }
+
+    /// [`Self::recall_for_failure`] with a chosen set of consistency checks.
+    pub fn recall_for_failure_gated(
+        &self,
+        tool: &str,
+        input: &str,
+        output: &str,
+        gates: LessonGates,
+    ) -> Result<Vec<RecalledLesson>, String> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
         let error_text = key_error_lines(output, 3).join(" ");
+        // The words a lesson must share: the error without its paths (path
+        // pieces matched unrelated lessons that named the same project or
+        // install folder) and without the stock wording of common errors.
+        let mut evidence_text = if gates.ignore_paths { without_paths(&error_text) } else { error_text.clone() };
+        if gates.ignore_stock_wording {
+            evidence_text = without_stock_wording(&evidence_text);
+        }
         if !failure_is_informative(&error_text) {
             return Ok(Vec::new());
         }
@@ -1016,59 +1313,56 @@ impl LessonStore {
         }
         fused.sort_by(|left, right| right.1.total_cmp(&left.1));
 
-        // Distinctive words: in the tool name or the error lines (not in the
-        // command, whose program names and paths match lessons by accident),
-        // and in at most 20% of lessons.
-        let max_df = ((total as f64) * LESSON_DISTINCTIVE_MAX_SHARE).max(1.0);
-        let mut distinctive = BTreeSet::new();
-        for token in distinctive_error_tokens(&format!("{tool} {error_text}"))
-            .into_iter()
-            .take(48)
-        {
-            let df: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM lessons_bi WHERE lessons_bi MATCH ?1",
-                    [fts_or_expression(std::slice::from_ref(&token))],
-                    |row| row.get(0),
-                )
-                .unwrap_or(i64::MAX);
-            if (df as f64) <= max_df {
-                distinctive.insert(token);
-            }
-        }
+        let distinctive = distinctive_failure_words(&connection, tool, &evidence_text, total, gates);
 
         // In a small store the 20% rule admits any word found in one lesson,
         // so almost everything is "distinctive": with 3 lessons in-app an
         // unrelated one was attached. Ask for more overlap until the store
         // has enough lessons for document frequency to mean something.
-        let min_shared = if total < LESSON_SMALL_STORE {
-            LESSON_RECALL_MIN_SHARED + 1
+        let mut min_shared = if total < LESSON_SMALL_STORE {
+            gates.min_shared + 1
         } else {
-            LESSON_RECALL_MIN_SHARED
+            gates.min_shared
         };
+        if gates.ignore_paths || gates.ignore_stock_wording {
+            // Without paths and stock wording, `rg: command not found` leaves
+            // one specific word; it must then be shared, and nothing else can be.
+            if distinctive.is_empty() {
+                return Ok(Vec::new());
+            }
+            min_shared = min_shared.min(distinctive.len());
+        }
+        let failure_kind = error_class(&error_text);
         let mut recalled = Vec::new();
         for (rowid, score) in fused {
             let row = connection
                 .query_row(
-                    "SELECT statement, project_id, seen, last_seen_at, tool, id FROM lessons
-                     WHERE rowid = ?1 AND status = 'active'",
+                    "SELECT statement, project_id, seen, last_seen_at, tool, id, error_class
+                     FROM lessons WHERE rowid = ?1 AND status = 'active'",
                     [rowid],
                     |row| {
                         Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
+                            (
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                            ),
+                            row.get::<_, String>(6)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(|error| error.to_string())?;
-            let Some((statement, project_id, seen, last_seen_at_ms, lesson_tool, id)) = row else {
+            let Some(((statement, project_id, seen, last_seen_at_ms, lesson_tool, id), lesson_kind)) = row else {
                 continue;
             };
+            // Unknown on either side means no evidence either way: keep it.
+            if gates.error_class && !failure_kind.is_empty() && !lesson_kind.is_empty() && lesson_kind != failure_kind {
+                continue;
+            }
             let lesson_tokens: BTreeSet<String> =
                 bigram_query_terms(&format!("{lesson_tool} {statement}")).into_iter().collect();
             let shared_words = distinctive.intersection(&lesson_tokens).count();
@@ -1320,7 +1614,7 @@ const DAY_MS: i64 = 24 * 3_600_000;
 const LESSON_STALE_AFTER_UNHELPFUL: i64 = 2;
 /// Most active lessons kept; the rest are archived by `cleanup`.
 const LESSON_ACTIVE_CAP: i64 = 2_000;
-const LESSON_SCHEMA_VERSION: i64 = 2;
+const LESSON_SCHEMA_VERSION: i64 = 3;
 
 /// What one `LessonStore::cleanup` pass changed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1351,6 +1645,8 @@ pub struct LessonView {
 
 /// Schema v2: recall counters, an unhelpful streak, when the status last
 /// changed, which chats taught each lesson, and when a job finished.
+/// Schema v3: the kind of the failure a lesson was learned from. Every step
+/// is idempotent, so a v2 store runs them all again.
 fn migrate_lesson_schema(connection: &Connection) -> Result<(), String> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -1373,10 +1669,30 @@ fn migrate_lesson_schema(connection: &Connection) -> Result<(), String> {
         ("last_recalled_at", "INTEGER NOT NULL DEFAULT 0"),
         ("unhelpful", "INTEGER NOT NULL DEFAULT 0"),
         ("status_changed_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("error_class", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !lesson_columns.contains(name) {
             connection
                 .execute(&format!("ALTER TABLE lessons ADD COLUMN {name} {definition}"), [])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if !lesson_columns.contains("error_class") {
+        // v3: older lessons get their kind from the error line kept in the
+        // cause key.
+        let rows: Vec<(String, String)> = {
+            let mut statement = connection
+                .prepare("SELECT id, cause_key FROM lessons")
+                .map_err(|error| error.to_string())?;
+            let mapped = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| error.to_string())?;
+            mapped.filter_map(Result::ok).collect()
+        };
+        for (id, cause) in rows {
+            let error = cause.split_once(" | ").map_or("", |(_, error)| error);
+            connection
+                .execute("UPDATE lessons SET error_class = ?2 WHERE id = ?1", params![id, error_class(error)])
                 .map_err(|error| error.to_string())?;
         }
     }
