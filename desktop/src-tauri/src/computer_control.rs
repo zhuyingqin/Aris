@@ -267,10 +267,15 @@ fn overlay_builder<'a>(
     label: &'a str,
     url: &str,
 ) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()));
+    // On macOS `transparent` exists only with Tauri's `macos-private-api`
+    // feature, which this app does not enable; the pill keeps its own
+    // background there and only its rounded corners lose transparency.
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.transparent(true);
+    builder
         .title("SomniQ")
         .decorations(false)
-        .transparent(true)
         .resizable(false)
         .shadow(false)
         .skip_taskbar(true)

@@ -159,7 +159,12 @@ fn valid_host(host: &str) -> bool {
 pub(super) fn workspace_file_path(path: &str) -> Result<String, String> {
     let normalized = path.replace('\\', "/");
     let candidate = Path::new(&normalized);
+    // `Path` parses for the platform it runs on: on Linux `C:/x.py` is a
+    // relative path, but the same declaration names a drive on Windows. A
+    // colon is never part of a portable file name (on NTFS it also selects an
+    // alternate data stream), so it is refused everywhere.
     if normalized.trim().is_empty()
+        || normalized.contains(':')
         || candidate.is_absolute()
         || normalized.starts_with('/')
         || candidate.components().any(|part| !matches!(part, Component::Normal(_)))
