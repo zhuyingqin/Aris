@@ -8,6 +8,13 @@ export const MODEL_WAIT_VISIBLE_AFTER_MS = 3_000;
  * relay gateway an xhigh/max reasoning model can stay silent for minutes. */
 export const MODEL_WAIT_HINT_AFTER_MS = 60_000;
 
+/** The backend's default time-to-first-output budget (and the longest gap it
+ * allows between outputs is shorter). A request that has produced nothing
+ * this long is re-sent or failed, each of which shows here, so a clock past
+ * it means something is waiting outside those limits: say so instead of
+ * still promising that deep reasoning just takes a while. */
+export const MODEL_WAIT_STALLED_AFTER_MS = 600_000;
+
 // Turn blocks are replaced, never mutated, on every streamed change, so the
 // first time an array is seen is the turn's latest visible activity. Weak keys
 // make finished turns free; living outside component state keeps the clock
@@ -38,10 +45,33 @@ export function turnAwaitsNonModelWork(blocks: ChatBlock[], now: number): boolea
   return false;
 }
 
+/** Apply a `chat-compaction` event. When compaction ends, the model wait
+ * starts then, not at send time: a fresh `blocks` array is the turn's newest
+ * activity. */
+export function applyCompactionProgress(
+  turn: ChatTurn,
+  phase: "started" | "finished",
+  now = Date.now(),
+): ChatTurn {
+  if (phase === "started") {
+    return turn.compactingSince != null ? turn : { ...turn, compactingSince: now };
+  }
+  if (turn.compactingSince == null) return turn;
+  const { compactingSince: _finished, ...rest } = turn;
+  return { ...rest, blocks: [...turn.blocks] };
+}
+
+/** How long the turn has been compacting history, or `null` when it is not. */
+export function compactionElapsedMs(turn: ChatTurn, now: number): number | null {
+  if (turn.role !== "assistant" || !turn.streaming || turn.compactingSince == null) return null;
+  return Math.max(0, now - turn.compactingSince);
+}
+
 /** How long the turn has been waiting on the model, or `null` when nothing
  * should be shown. */
 export function modelWaitElapsedMs(turn: ChatTurn, now: number): number | null {
   if (turn.role !== "assistant" || !turn.streaming) return null;
+  if (turn.compactingSince != null) return null;
   if (turnAwaitsNonModelWork(turn.blocks, now)) return null;
   const elapsed = now - turnActivitySince(turn.blocks, now);
   return elapsed >= MODEL_WAIT_VISIBLE_AFTER_MS ? elapsed : null;

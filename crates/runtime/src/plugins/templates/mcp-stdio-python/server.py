@@ -5,8 +5,12 @@ stdin is one JSON-RPC message and every reply is one line on stdout. Write
 diagnostics to stderr only: anything else printed to stdout breaks the
 protocol. The working directory is this plugin's own data directory
 (SOMNIQ_PLUGIN_DATA), never the project; this package's files are under
-SOMNIQ_PLUGIN_ROOT. The environment holds only platform variables and the
-package's own `env`: no tokens or settings leak in from SomniQ.
+SOMNIQ_PLUGIN_ROOT. The environment holds only platform variables, the
+package's own `env` and what package.json declares under somniq.capabilities:
+variables passed from this computer by name (env), proxy settings when it
+needs the network, SOMNIQ_WORKSPACE_ROOT when it reads or writes the project,
+and SOMNIQ_PLUGIN_FILES with the approved copies of workspaceFiles. No tokens
+or settings leak in from SomniQ.
 
 To add a tool, write a function that takes the arguments dict and returns
 text, then add an entry to TOOLS with a description and a JSON Schema.

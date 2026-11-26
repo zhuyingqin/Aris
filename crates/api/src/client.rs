@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime::{load_oauth_credentials, save_oauth_credentials, OAuthConfig, OAuthRefreshRequest};
 use serde::Deserialize;
@@ -405,7 +405,11 @@ impl AnthropicClient {
             stream: false,
             ..request.clone()
         };
-        let response = self.send_with_retry(&request, &mut 0).await?;
+        let deadline = self
+            .wait_policy
+            .request_max_duration
+            .map(|limit| Instant::now() + limit);
+        let (response, _) = self.send_with_retry(&request, &mut 0, deadline).await?;
         let request_id = request_id_from_headers(response.headers());
         let mut response = response
             .json::<MessageResponse>()
@@ -423,9 +427,11 @@ impl AnthropicClient {
     ) -> Result<MessageStream, ApiError> {
         let streaming_request = request.clone().with_streaming();
         let mut timeout_resends = 0;
-        let response = self
-            .send_with_retry(&streaming_request, &mut timeout_resends)
+        let mut progress = StreamProgressClock::new(self.wait_policy, Instant::now());
+        let (response, sent_at) = self
+            .send_with_retry(&streaming_request, &mut timeout_resends, progress.request_deadline())
             .await?;
+        progress.restart(sent_at);
         Ok(MessageStream {
             inner: self.clone(),
             request: streaming_request,
@@ -438,6 +444,8 @@ impl AnthropicClient {
             stream_retries_remaining: if self.max_retries == 0 { 0 } else { read_stream_retry_budget() },
             observed_terminal: false,
             idle_timeout: self.wait_policy.stream_idle_timeout,
+            progress,
+            keepalive_recorded: false,
             timeout_resends,
             done: false,
         })
@@ -465,17 +473,23 @@ impl AnthropicClient {
 
     /// `timeout_resends` is shared by every send of one logical request
     /// (including stream restarts) so post-send timeouts are re-sent at most
-    /// [`MAX_TIMEOUT_RESENDS`] times in total.
+    /// [`MAX_TIMEOUT_RESENDS`] times in total. Also returns when the
+    /// successful attempt was sent, which starts its time-to-first-output.
     async fn send_with_retry(
         &self,
         request: &MessageRequest,
         timeout_resends: &mut u32,
-    ) -> Result<reqwest::Response, ApiError> {
+        deadline: Option<Instant>,
+    ) -> Result<(reqwest::Response, Instant), ApiError> {
         let mut attempts = 0;
         let mut last_error: Option<ApiError>;
 
         loop {
             attempts += 1;
+            let remaining = remaining_until(deadline);
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                return Err(request_limit_error(self.wait_policy.request_max_duration));
+            }
             self.record_trace(
                 "llm.attempt",
                 json!({
@@ -487,11 +501,13 @@ impl AnthropicClient {
                     "stream": request.stream,
                 }),
             );
-            match self.send_raw_request(request).await {
+            let sent_at = Instant::now();
+            let header_timeout = min_wait(self.wait_policy.response_header_timeout, remaining);
+            match self.send_raw_request(request, header_timeout).await {
                 Ok(response) => {
                     let response_trace = response_trace_value(response.headers());
                     match expect_success(response).await {
-                        Ok(response) => return Ok(response),
+                        Ok(response) => return Ok((response, sent_at)),
                         Err(error) if self.may_resend(&error, attempts, *timeout_resends) => {
                             if error.is_post_send_timeout() {
                                 *timeout_resends += 1;
@@ -557,6 +573,7 @@ impl AnthropicClient {
     async fn send_raw_request(
         &self,
         request: &MessageRequest,
+        header_timeout: Option<Duration>,
     ) -> Result<reqwest::Response, ApiError> {
         let is_oauth = self.auth.bearer_token().is_some() && self.auth.api_key().is_none();
         let request_url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
@@ -577,11 +594,7 @@ impl AnthropicClient {
         );
 
         request_builder = request_builder.json(request);
-        send_with_response_header_timeout(
-            request_builder,
-            self.wait_policy.response_header_timeout,
-        )
-        .await
+        send_with_response_header_timeout(request_builder, header_timeout).await
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
@@ -941,6 +954,18 @@ const SINGLE_REQUEST_HEADER_TIMEOUT_DEFAULT_SECS: i64 = 1800;
 const RESPONSE_HEADER_TIMEOUT_MIN_SECS: i64 = 30;
 const RESPONSE_HEADER_TIMEOUT_MAX_SECS: i64 = 3600;
 
+/// Default total wall-clock budget for one model request, first send through
+/// every resend and restart until its stream ends. The waits above bound each
+/// silence; this bounds their sum, e.g. four 5xx retries that each took
+/// minutes, or a stream that never stops trickling. 30 minutes is well past
+/// any answer a Chat turn waits for in one request.
+const REQUEST_MAX_DURATION_DEFAULT_SECS: i64 = 1800;
+/// Single-submission artifact jobs already wait up to 30 minutes for headers
+/// alone; their total budget leaves room for the stream after that.
+const SINGLE_REQUEST_MAX_DURATION_DEFAULT_SECS: i64 = 3600;
+const REQUEST_MAX_DURATION_MIN_SECS: i64 = 60;
+const REQUEST_MAX_DURATION_MAX_SECS: i64 = 7200;
+
 /// Slack added on top of the explicit waits for reqwest's own `read_timeout`,
 /// so the traced, cancellable timeouts always fire first.
 const HTTP_READ_TIMEOUT_BACKSTOP_SLACK: Duration = Duration::from_secs(30);
@@ -977,6 +1002,29 @@ fn parse_header_timeout_secs(raw: Option<&str>, default_secs: i64) -> Option<Dur
     Some(Duration::from_secs(clamped))
 }
 
+/// Pure parser for `ARIS_REQUEST_MAX_DURATION_SECS`. `<= 0` disables the
+/// total limit, otherwise clamps into `[60, 7200]` seconds. Missing, blank or
+/// unparseable values use `default_secs`.
+pub(crate) fn parse_request_max_duration_secs(
+    raw: Option<&str>,
+    default_secs: i64,
+) -> Option<Duration> {
+    let secs = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(default_secs);
+    if secs <= 0 {
+        return None;
+    }
+    let clamped = secs.clamp(REQUEST_MAX_DURATION_MIN_SECS, REQUEST_MAX_DURATION_MAX_SECS) as u64;
+    Some(Duration::from_secs(clamped))
+}
+
+fn request_max_duration_env() -> Option<String> {
+    std::env::var("ARIS_REQUEST_MAX_DURATION_SECS").ok()
+}
+
 /// Resolve the response-header wait from `ARIS_RESPONSE_HEADER_TIMEOUT_SECS`.
 /// Default 600s, clamp `[30, 3600]`, `0` / negative disables.
 #[must_use]
@@ -996,6 +1044,9 @@ pub struct StreamWaitPolicy {
     pub response_header_timeout: Option<Duration>,
     /// Silence between body chunks once the response has started.
     pub stream_idle_timeout: Option<Duration>,
+    /// Total time for one request, first send through every resend and
+    /// restart (`ARIS_REQUEST_MAX_DURATION_SECS`).
+    pub request_max_duration: Option<Duration>,
 }
 
 impl StreamWaitPolicy {
@@ -1004,6 +1055,10 @@ impl StreamWaitPolicy {
         Self {
             response_header_timeout: resolve_response_header_timeout(),
             stream_idle_timeout: resolve_stream_idle_timeout(),
+            request_max_duration: parse_request_max_duration_secs(
+                request_max_duration_env().as_deref(),
+                REQUEST_MAX_DURATION_DEFAULT_SECS,
+            ),
         }
     }
 
@@ -1028,6 +1083,10 @@ impl StreamWaitPolicy {
                 SINGLE_REQUEST_HEADER_TIMEOUT_DEFAULT_SECS,
             ),
             stream_idle_timeout: idle,
+            request_max_duration: parse_request_max_duration_secs(
+                request_max_duration_env().as_deref(),
+                SINGLE_REQUEST_MAX_DURATION_DEFAULT_SECS,
+            ),
         }
     }
 
@@ -1041,6 +1100,191 @@ impl StreamWaitPolicy {
         let header = self.response_header_timeout?;
         let idle = self.stream_idle_timeout?;
         Some(header.max(idle) + HTTP_READ_TIMEOUT_BACKSTOP_SLACK)
+    }
+}
+
+/// Times a streaming response by model *output*, not by bytes received.
+///
+/// Relays keep a quiet connection open with SSE comment lines (`: PING`),
+/// empty deltas, `response.in_progress` or Anthropic `ping` events. Each of
+/// those is a body chunk, so the per-chunk idle limit never fired while they
+/// flowed: a request whose model never answered waited with no error and no
+/// resend for as long as the relay kept pinging (a user watched "waiting for
+/// the model · 23:20"). Chunks without output therefore never extend these
+/// deadlines:
+/// - until the first output, the request has `response_header_timeout`
+///   counted from when it was sent (headers alone are not output), the same
+///   time-to-first-output budget a relay that withholds its headers gets;
+/// - after that, at most `stream_idle_timeout` may pass between outputs.
+///
+/// The per-chunk idle limit still applies on top, unchanged, and the whole
+/// request, resends and restarts included, ends at `request_max_duration`.
+#[derive(Debug, Clone)]
+pub struct StreamProgressClock {
+    first_output_limit: Option<Duration>,
+    between_output_limit: Option<Duration>,
+    request_limit: Option<Duration>,
+    request_started: Instant,
+    sent_at: Instant,
+    last_output_at: Option<Instant>,
+    chunks_since_output: u64,
+    chunks_without_output: u64,
+}
+
+impl StreamProgressClock {
+    /// Start timing a request whose first send is at `sent_at`.
+    #[must_use]
+    pub fn new(policy: StreamWaitPolicy, sent_at: Instant) -> Self {
+        Self {
+            first_output_limit: policy.response_header_timeout,
+            between_output_limit: policy.stream_idle_timeout,
+            request_limit: policy.request_max_duration,
+            request_started: sent_at,
+            sent_at,
+            last_output_at: None,
+            chunks_since_output: 0,
+            chunks_without_output: 0,
+        }
+    }
+
+    /// The request was sent again: its output clock starts over. The total
+    /// request limit and the count of chunks without output keep running.
+    pub fn restart(&mut self, sent_at: Instant) {
+        self.sent_at = sent_at;
+        self.last_output_at = None;
+        self.chunks_since_output = 0;
+    }
+
+    /// A chunk carried output (text, reasoning, or tool-call progress).
+    pub fn note_output(&mut self) {
+        self.last_output_at = Some(Instant::now());
+        self.chunks_since_output = 0;
+    }
+
+    /// A chunk arrived that carried no output (keep-alive, protocol framing).
+    pub fn note_chunk_without_output(&mut self) {
+        self.chunks_since_output = self.chunks_since_output.saturating_add(1);
+        self.chunks_without_output = self.chunks_without_output.saturating_add(1);
+    }
+
+    /// The output limit in force now: the first-output limit until something
+    /// was produced, the between-output limit after. `None` when disabled.
+    #[must_use]
+    pub fn output_limit(&self) -> Option<Duration> {
+        if self.last_output_at.is_some() {
+            self.between_output_limit
+        } else {
+            self.first_output_limit
+        }
+    }
+
+    fn output_deadline(&self) -> Option<Instant> {
+        let limit = self.output_limit()?;
+        Some(self.last_output_at.unwrap_or(self.sent_at) + limit)
+    }
+
+    /// When the whole request must be over, resends and restarts included.
+    #[must_use]
+    pub fn request_deadline(&self) -> Option<Instant> {
+        self.request_limit.map(|limit| self.request_started + limit)
+    }
+
+    /// The total request limit, for error messages.
+    #[must_use]
+    pub fn request_limit(&self) -> Option<Duration> {
+        self.request_limit
+    }
+
+    /// Whether the request has used up its total time.
+    #[must_use]
+    pub fn request_deadline_passed(&self) -> bool {
+        self.request_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// `wait` shortened to what is left of the total request time, for a
+    /// header wait or any other single wait inside the request.
+    #[must_use]
+    pub fn cap_wait(&self, wait: Option<Duration>) -> Option<Duration> {
+        min_wait(wait, remaining_until(self.request_deadline()))
+    }
+
+    /// How long the next chunk read may wait: the smallest of `chunk_idle`,
+    /// the time left before the output deadline, and the time left of the
+    /// whole request. `None` waits indefinitely.
+    #[must_use]
+    pub fn read_timeout(&self, chunk_idle: Option<Duration>) -> Option<Duration> {
+        let output = min_wait(chunk_idle, remaining_until(self.output_deadline()));
+        self.cap_wait(output)
+    }
+
+    /// Whether a read timeout means the output deadline passed, rather than
+    /// the per-chunk idle limit.
+    #[must_use]
+    pub fn output_deadline_passed(&self) -> bool {
+        self.output_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Chunks received since the last output (or since the request was sent).
+    #[must_use]
+    pub fn chunks_since_output(&self) -> u64 {
+        self.chunks_since_output
+    }
+
+    /// Chunks without output over the whole request, restarts included.
+    #[must_use]
+    pub fn chunks_without_output(&self) -> u64 {
+        self.chunks_without_output
+    }
+
+    /// Why a read timed out, for errors and traces. `chunk_idle` is the
+    /// per-chunk idle limit that was combined into the read timeout.
+    #[must_use]
+    pub fn timeout_detail(&self, chunk_idle: Option<Duration>) -> String {
+        if self.request_deadline_passed() {
+            return request_limit_detail(self.request_limit.unwrap_or_default());
+        }
+        if self.output_deadline_passed() {
+            let secs = self.output_limit().unwrap_or_default().as_secs();
+            let produced = if self.last_output_at.is_some() {
+                "no further output"
+            } else {
+                "no output"
+            };
+            if self.chunks_since_output > 0 {
+                return format!(
+                    "the model produced {produced} for {secs} seconds while the gateway kept the connection alive ({} chunk(s) without output)",
+                    self.chunks_since_output
+                );
+            }
+            return format!("the stream produced {produced} for {secs} seconds");
+        }
+        format!(
+            "the stream produced no output for {} seconds",
+            chunk_idle.unwrap_or_default().as_secs()
+        )
+    }
+}
+
+/// Why a request was abandoned at its total limit. Shared so both clients
+/// name the same knob.
+#[must_use]
+pub fn request_limit_detail(limit: Duration) -> String {
+    format!(
+        "the request used up its total time limit of {} seconds (resends and restarts included; ARIS_REQUEST_MAX_DURATION_SECS)",
+        limit.as_secs()
+    )
+}
+
+fn remaining_until(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+fn min_wait(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -1185,6 +1429,10 @@ pub struct MessageStream {
     /// On elapse the stream goes through the existing mid-body abort
     /// retry path (same gates as a transient reqwest::Error).
     idle_timeout: Option<Duration>,
+    /// Output deadlines that `ping` events and other output-free chunks do
+    /// not extend; combined with `idle_timeout` on every chunk read.
+    progress: StreamProgressClock,
+    keepalive_recorded: bool,
     /// Post-send timeout resends already spent on this request, shared with
     /// `send_with_retry`; capped by [`MAX_TIMEOUT_RESENDS`].
     timeout_resends: u32,
@@ -1367,47 +1615,66 @@ impl MessageStream {
                     self.events_emitted = self.events_emitted.saturating_add(1);
                     return Ok(Some(parsed_event));
                 }
+                self.record_keepalive_summary();
                 return Ok(None);
             }
 
             // v0.4.14 C11 — wrap chunk read in tokio::time::timeout so
-            // a hung upstream (proxy holding the connection without
-            // sending keepalives) can't stall this loop forever. Idle
-            // elapse is treated equivalently to a mid-body abort and
-            // walks through the same restart gate.
+            // a hung upstream can't stall this loop forever. The limit is
+            // the per-chunk idle wait capped by the output deadline, which
+            // `ping` events do not extend (see `StreamProgressClock`).
+            // Elapse is treated equivalently to a mid-body abort and walks
+            // through the same restart gate.
             let chunk_future = self.response.chunk();
-            let chunk_result = match self.idle_timeout {
+            let chunk_result = match self.progress.read_timeout(self.idle_timeout) {
                 Some(dur) => match tokio::time::timeout(dur, chunk_future).await {
                     Ok(inner) => inner,
                     Err(_elapsed) => {
+                        // A finished message the gateway merely failed to
+                        // close is complete, not an error to continue from.
+                        if self.observed_terminal {
+                            self.done = true;
+                            continue;
+                        }
+                        let no_output = self.progress.output_deadline_passed();
+                        let detail = self.progress.timeout_detail(self.idle_timeout);
+                        let reason = if no_output { "no_output_timeout" } else { "idle_timeout" };
                         if !self.has_emitted_meaningful_content
                             && self.stream_retries_remaining > 0
                             && self.timeout_resends < MAX_TIMEOUT_RESENDS
+                            && !self.progress.request_deadline_passed()
                         {
                             self.stream_retries_remaining -= 1;
                             self.timeout_resends += 1;
                             eprintln!(
-                                "stream restart (idle timeout {}s, {} attempt(s) left)",
-                                dur.as_secs(),
+                                "stream restart ({detail}; {} attempt(s) left)",
                                 self.stream_retries_remaining
                             );
                             self.record_stream_retry(
-                                "idle_timeout",
-                                Some(json!({ "idleTimeoutSeconds": dur.as_secs() })),
+                                reason,
+                                Some(json!({
+                                    "timeoutSeconds": dur.as_secs(),
+                                    "message": &detail,
+                                    "chunksWithoutOutput": self.progress.chunks_since_output(),
+                                })),
                             );
                             self.try_refresh_stream().await?;
                             continue;
                         }
                         return Err(ApiError::Api {
                             status: reqwest::StatusCode::REQUEST_TIMEOUT,
-                            error_type: Some("stream_idle_timeout".to_string()),
+                            error_type: Some(if self.progress.request_deadline_passed() {
+                                "request_deadline_exceeded".to_string()
+                            } else if no_output {
+                                "stream_no_output_timeout".to_string()
+                            } else {
+                                "stream_idle_timeout".to_string()
+                            }),
                             message: Some(format!(
-                                "Anthropic stream idle timeout ({}s, retries exhausted or partial output already emitted)",
-                                dur.as_secs()
+                                "Anthropic stream timed out: {detail} (retries exhausted or partial output already emitted)"
                             )),
                             body: format!(
-                                "Anthropic stream idle timeout after {}s with no chunk; retries exhausted or partial output already emitted",
-                                dur.as_secs()
+                                "Anthropic stream timed out: {detail}; retries exhausted or partial output already emitted"
                             ),
                             retryable: false,
                         });
@@ -1417,7 +1684,16 @@ impl MessageStream {
             };
             match chunk_result {
                 Ok(Some(chunk)) => {
-                    self.pending.extend(self.parser.push_with_raw(&chunk)?);
+                    let parsed = self.parser.push_with_raw(&chunk)?;
+                    if parsed
+                        .iter()
+                        .any(|event| event_is_meaningful_content(&event.event))
+                    {
+                        self.progress.note_output();
+                    } else {
+                        self.progress.note_chunk_without_output();
+                    }
+                    self.pending.extend(parsed);
                 }
                 Ok(None) => {
                     self.done = true;
@@ -1463,12 +1739,17 @@ impl MessageStream {
     /// died before any event reached the caller.
     async fn try_refresh_stream(&mut self) -> Result<(), ApiError> {
         tokio::time::sleep(STREAM_RETRY_BACKOFF).await;
-        let response = self
+        let (response, sent_at) = self
             .inner
-            .send_with_retry(&self.request, &mut self.timeout_resends)
+            .send_with_retry(
+                &self.request,
+                &mut self.timeout_resends,
+                self.progress.request_deadline(),
+            )
             .await?;
         self.request_id = request_id_from_headers(response.headers());
         self.response = response;
+        self.progress.restart(sent_at);
         self.parser = SseParser::new();
         self.pending.clear();
         self.done = false;
@@ -1479,6 +1760,27 @@ impl MessageStream {
         self.has_emitted_meaningful_content = false;
         self.observed_terminal = false;
         Ok(())
+    }
+
+    /// Chunks that carried no output are invisible in the raw-event trace (the
+    /// parser drops `ping` and comment lines), so record how many there were.
+    /// Without it a stream that idled behind keep-alives looks identical to
+    /// one whose connection was silent.
+    fn record_keepalive_summary(&mut self) {
+        let chunks = self.progress.chunks_without_output();
+        if self.keepalive_recorded || chunks == 0 {
+            return;
+        }
+        self.keepalive_recorded = true;
+        self.inner.record_trace(
+            "llm.keepalive",
+            json!({
+                "provider": "anthropic",
+                "model": &self.request.model,
+                "requestId": self.request_id.as_deref(),
+                "chunksWithoutOutput": chunks,
+            }),
+        );
     }
 
     fn record_stream_retry(&self, reason: &str, detail: Option<Value>) {
@@ -1494,6 +1796,18 @@ impl MessageStream {
                 "detail": detail,
             }),
         );
+    }
+}
+
+/// A request that used up its total time is never re-sent.
+fn request_limit_error(limit: Option<Duration>) -> ApiError {
+    let detail = request_limit_detail(limit.unwrap_or_default());
+    ApiError::Api {
+        status: reqwest::StatusCode::REQUEST_TIMEOUT,
+        error_type: Some("request_deadline_exceeded".to_string()),
+        message: Some(format!("Anthropic request stopped: {detail}")),
+        body: format!("Anthropic request stopped: {detail}"),
+        retryable: false,
     }
 }
 

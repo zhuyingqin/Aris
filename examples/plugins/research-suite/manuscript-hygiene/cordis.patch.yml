@@ -1,5 +1,7 @@
 # Starts server.py as a stdio MCP server. Arguments starting with ./ resolve
-# inside the installed snapshot; the server's working directory is the project.
+# inside the installed snapshot. The server reads the project through
+# SOMNIQ_WORKSPACE_ROOT (package.json declares workspace read); its working
+# directory is its own data directory.
 # On macOS and Linux use python3 as the command.
 - insert:
     - id: mcp

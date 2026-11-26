@@ -7,6 +7,7 @@ import {
   onChatDone,
   onChatError,
   onChatModelRetry,
+  onChatCompaction,
   onChatContextCompacted,
   onChatContextWarning,
   onChatThinkingDelta,
@@ -23,6 +24,7 @@ import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
 import { foldModelRetryNotice } from "./modelRetryNotice";
+import { applyCompactionProgress } from "./modelWait";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
 import { tr } from "../language";
 import { setClientChatStreamActivity } from "./chatActivity";
@@ -286,6 +288,13 @@ export function useChatStream({
           ...turn,
           blocks: foldModelRetryNotice(turn.blocks, event, language),
         }));
+      }),
+      onChatCompaction((event) => {
+        if (!isCurrentListener()) return;
+        flush(event.sessionId);
+        handlersRef.current.patchAssistant(event.sessionId, (turn) => (
+          applyCompactionProgress(turn, event.phase)
+        ));
       }),
       onChatPermissionRequest((request) => {
         if (!isCurrentListener()) return;

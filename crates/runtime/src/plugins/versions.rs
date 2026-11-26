@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    digest_files, package_files, InstalledPlugin, PackageFiles, PluginStore, Record, UiPage,
+    digest_files, package_files, source_files, InstalledPlugin, PackageFiles, PluginStore, Record, UiPage,
     UiPanel, PLUGIN_DRAFTS_DIR,
 };
 
@@ -103,6 +103,21 @@ pub struct PackageFileChange {
     pub after_bytes: usize,
 }
 
+/// What going back to an earlier version changes, shown before the click
+/// that approves it: the same capability diff an upgrade shows, against the
+/// installed version, and every file that differs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRollbackPreview {
+    pub version: String,
+    pub digest: String,
+    /// Whether that version would still pass today's checks.
+    pub can_enable: bool,
+    pub diagnostics: Vec<super::Diagnostic>,
+    pub plan: super::PluginUpgradePlan,
+    pub files: Vec<PackageFileChange>,
+}
+
 /// A draft panel's page with the declarations the frame needs to run it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,7 +159,7 @@ fn text(bytes: &[u8]) -> Option<String> {
         .flatten()
 }
 
-fn changes(before: &PackageFiles, after: &PackageFiles) -> Vec<PackageFileChange> {
+pub(super) fn changes(before: &PackageFiles, after: &PackageFiles) -> Vec<PackageFileChange> {
     let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
     paths
         .into_iter()
@@ -197,7 +212,7 @@ impl PluginStore {
 
     /// A draft's files, exactly as they were when `expected_digest` was shown.
     fn draft_files(source: &Path, expected_digest: &str) -> Result<PackageFiles, String> {
-        let files = package_files(source)?;
+        let files = source_files(source)?;
         if digest_files(&files) != expected_digest {
             return Err("The draft changed after this card was shown; ask for the upgrade again".into());
         }
@@ -248,6 +263,28 @@ impl PluginStore {
             page: super::ui::page_from_files(&files, &file, expected_digest)?,
             panel,
             store,
+        })
+    }
+
+    /// What going back to the earlier version `digest` of `name` would change.
+    /// The click that approves a rollback approves that version's code, so
+    /// the user sees this first, as they see an upgrade's diff.
+    pub fn rollback_preview(&self, name: &str, digest: &str) -> Result<PluginRollbackPreview, String> {
+        let (record, current) = self.installed_files(name)?;
+        let entry = record
+            .history
+            .iter()
+            .find(|version| version.digest == digest)
+            .ok_or("That is not an earlier version of this plugin")?;
+        let target = self.snapshot_files(digest)?;
+        let candidate = self.inspect(&target, &entry.source)?;
+        Ok(PluginRollbackPreview {
+            version: candidate.version.clone(),
+            digest: candidate.digest.clone(),
+            can_enable: candidate.can_enable,
+            diagnostics: candidate.diagnostics.clone(),
+            plan: self.upgrade_plan(&record, &candidate),
+            files: changes(&current, &target),
         })
     }
 

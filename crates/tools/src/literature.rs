@@ -12684,6 +12684,596 @@ pub fn validate_pdf_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Downloaded-PDF identity
+//
+// `validate_pdf_file` proves the bytes are a PDF, not that they are the paper
+// the caller asked for. A landing page can link the wrong file and a mirror can
+// serve another work; before this check both were filed under the requested
+// paper and reported as success (computer-use R0 baseline, C7-MISMATCH).
+//
+// The ladder, first rule that applies wins:
+//
+// 1. An expected DOI appears in the PDF metadata or front text -> verified.
+// 2. An expected (or landing-page) title matches the front text or the
+//    metadata title -> verified.
+// 3. The PDF declares DOIs and none of them is expected -> mismatch.
+// 4. The front text is readable in a trusted title's script yet shares under
+//    half of that title's significant words -> mismatch.
+// 5. Nothing was expected -> unchecked. Otherwise -> unverified: kept, and the
+//    verdict says so, because a scanned or CID-font PDF is not evidence of a
+//    wrong paper.
+//
+// Landing-page titles only ever confirm (rule 2): a heuristic page title must
+// not be able to reject a correct PDF. The browser worker runs the same ladder
+// before it saves anything (`judgeIdentity` in
+// `desktop/src-tauri/resources/literature_playwright_download.cjs`); keep the
+// two in step.
+// ---------------------------------------------------------------------------
+
+/// Characters of first-page text the identity check reads.
+pub const PDF_IDENTITY_FRONT_TEXT_CHARS: usize = 8_000;
+
+/// What a downloaded PDF is expected to be.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedPaperIdentity {
+    /// Normalised DOIs from the caller, the library record or the landing page.
+    #[serde(default)]
+    pub dois: Vec<String>,
+    /// Bibliographic titles from the caller or the library record. Trusted:
+    /// readable text that does not mention one of these is a mismatch.
+    #[serde(default)]
+    pub titles: Vec<String>,
+    /// Titles scraped from the landing page. They can confirm, never reject.
+    #[serde(default)]
+    pub page_titles: Vec<String>,
+}
+
+impl ExpectedPaperIdentity {
+    pub fn add_doi(&mut self, raw: &str) {
+        if let Some(doi) = normalize_doi(raw) {
+            if !self.dois.contains(&doi) {
+                self.dois.push(doi);
+            }
+        }
+    }
+
+    pub fn add_title(&mut self, raw: &str) {
+        push_identity_title(&mut self.titles, raw);
+    }
+
+    pub fn add_page_title(&mut self, raw: &str) {
+        push_identity_title(&mut self.page_titles, raw);
+    }
+
+    pub fn merge(&mut self, other: &ExpectedPaperIdentity) {
+        for doi in &other.dois {
+            self.add_doi(doi);
+        }
+        for title in &other.titles {
+            self.add_title(title);
+        }
+        for title in &other.page_titles {
+            self.add_page_title(title);
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dois.is_empty() && self.titles.is_empty() && self.page_titles.is_empty()
+    }
+}
+
+fn push_identity_title(titles: &mut Vec<String>, raw: &str) {
+    let title = collapse_whitespace(raw);
+    if title.is_empty()
+        || titles
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&title))
+    {
+        return;
+    }
+    titles.push(title);
+}
+
+/// What the PDF itself says it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PdfIdentityEvidence {
+    /// DOIs from the document information dictionary and XMP metadata.
+    pub metadata_dois: Vec<String>,
+    /// `/Title` and `dc:title` values.
+    pub metadata_titles: Vec<String>,
+    /// Text of the first page or two, in reading order as far as it is known.
+    pub front_text: String,
+}
+
+/// Ordered by strength, so the stronger of two verdicts is the larger one.
+/// `Mismatch` is never combined: it rejects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfIdentityStatus {
+    Mismatch,
+    Unchecked,
+    Unverified,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfIdentityVerdict {
+    pub status: PdfIdentityStatus,
+    /// `doi` or `title` when verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_by: Option<String>,
+    /// DOIs the PDF declares (metadata and front text).
+    #[serde(default)]
+    pub found_dois: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Lower-cased bare DOI (`10.<registrant>/<suffix>`) from a DOI, `doi:` form
+/// or doi.org URL; `None` when `raw` is not one.
+#[must_use]
+pub fn normalize_doi(raw: &str) -> Option<String> {
+    let mut value = raw.trim().to_lowercase();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi.org/",
+        "dx.doi.org/",
+        "doi:",
+        "doi ",
+    ] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            value = rest.trim_start().to_string();
+            break;
+        }
+    }
+    let value = value.replace("%2f", "/");
+    extract_dois(&value)
+        .into_iter()
+        .next()
+        .filter(|doi| value.starts_with(doi.as_str()))
+}
+
+/// Every DOI in `text`, lower-cased, trailing punctuation trimmed, in order of
+/// first appearance.
+#[must_use]
+pub fn extract_dois(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let bytes = lower.as_bytes();
+    let mut found: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = lower[from..].find("10.") {
+        let start = from + offset;
+        from = start + 3;
+        if start > 0 && bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut end = start + 3;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+            end += 1;
+        }
+        let registrant = lower[start + 3..end].split('.').next().map_or(0, str::len);
+        if !(4..=9).contains(&registrant) || end >= bytes.len() || bytes[end] != b'/' {
+            continue;
+        }
+        let suffix_start = end + 1;
+        end = suffix_start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || b"-._;()/:+".contains(&bytes[end]))
+        {
+            end += 1;
+        }
+        let doi = trim_doi_tail(&lower[start..end]);
+        if doi.len() > suffix_start - start && !found.iter().any(|known| known == doi) {
+            found.push(doi.to_string());
+        }
+        from = end.max(from);
+    }
+    found
+}
+
+fn trim_doi_tail(doi: &str) -> &str {
+    let mut doi = doi;
+    loop {
+        let trimmed = doi.trim_end_matches(['.', ',', ';', ':', '/']);
+        let trimmed = if trimmed.ends_with(')')
+            && trimmed.matches('(').count() < trimmed.matches(')').count()
+        {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        if trimmed.len() == doi.len() {
+            return doi;
+        }
+        doi = trimmed;
+    }
+}
+
+/// `doi` occurs in `squeezed` (lower-cased, whitespace removed) and is not just
+/// the prefix of a longer number. Removing whitespace lets a DOI broken across
+/// lines still count; text glued after it ("…0001Page 1") still counts too.
+fn doi_appears_in(doi: &str, squeezed: &str) -> bool {
+    let mut from = 0;
+    while let Some(offset) = squeezed[from..].find(doi) {
+        let end = from + offset + doi.len();
+        if !squeezed[end..].starts_with(|c: char| c.is_ascii_digit()) {
+            return true;
+        }
+        // DOIs start with the ASCII "1", so the next byte is a char boundary.
+        from += offset + 1;
+    }
+    false
+}
+
+const IDENTITY_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "via", "using", "based", "toward", "towards",
+    "its", "are", "our", "their", "this", "that", "than", "not", "but", "all", "can", "how",
+    "what", "why", "when", "does", "between", "under", "over", "through", "about", "among",
+    "within", "without",
+];
+
+const IDENTITY_FUNCTION_WORDS: &[&str] = &[
+    "the", "and", "of", "in", "to", "for", "with", "is", "are", "we", "this", "that", "on", "by",
+    "an", "as",
+];
+
+const IDENTITY_LATIN_FOLDS: &[(&str, char)] = &[
+    ("àáâãäåāăą", 'a'),
+    ("çćĉċč", 'c'),
+    ("ďđ", 'd'),
+    ("èéêëēĕėęě", 'e'),
+    ("ĝğġģ", 'g'),
+    ("ĥħ", 'h'),
+    ("ìíîïĩīĭįı", 'i'),
+    ("ĵ", 'j'),
+    ("ķ", 'k'),
+    ("ĺļľŀł", 'l'),
+    ("ñńņň", 'n'),
+    ("òóôõöøōŏő", 'o'),
+    ("ŕŗř", 'r'),
+    ("śŝşš", 's'),
+    ("ţťŧ", 't'),
+    ("ùúûüũūŭůűų", 'u'),
+    ("ŵ", 'w'),
+    ("ýÿŷ", 'y'),
+    ("źżž", 'z'),
+];
+
+/// Lower-case, fold Latin accents and ligatures, and drop the stand-alone
+/// accents PDF text extraction leaves behind ("Schro¨dinger").
+fn fold_for_identity(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars().flat_map(char::to_lowercase) {
+        match c {
+            '\u{0300}'..='\u{036F}'
+            | '\u{00A8}'
+            | '\u{00AF}'
+            | '\u{00B4}'
+            | '\u{00B8}'
+            | '\u{02C6}'
+            | '\u{02C7}'
+            | '\u{02D8}'..='\u{02DD}' => {}
+            '\u{FB00}' => out.push_str("ff"),
+            '\u{FB01}' => out.push_str("fi"),
+            '\u{FB02}' => out.push_str("fl"),
+            '\u{FB03}' => out.push_str("ffi"),
+            '\u{FB04}' => out.push_str("ffl"),
+            '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
+            c if c.is_ascii() => out.push(c),
+            c => out.push(
+                IDENTITY_LATIN_FOLDS
+                    .iter()
+                    .find(|(accented, _)| accented.contains(c))
+                    .map_or(c, |(_, base)| *base),
+            ),
+        }
+    }
+    out
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3040}'..='\u{30FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{AC00}'..='\u{D7AF}'
+    )
+}
+
+/// Latin/digit words and CJK character bigrams (CJK has no spaces to split on).
+fn identity_tokens(folded: &str) -> Vec<String> {
+    fn flush_cjk(run: &mut Vec<char>, tokens: &mut Vec<String>) {
+        if run.len() == 1 {
+            tokens.push(run[0].to_string());
+        }
+        for pair in run.windows(2) {
+            tokens.push(pair.iter().collect());
+        }
+        run.clear();
+    }
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut cjk = Vec::new();
+    for c in folded.chars() {
+        if is_cjk_char(c) {
+            if !word.is_empty() {
+                tokens.push(std::mem::take(&mut word));
+            }
+            cjk.push(c);
+        } else if c.is_alphanumeric() {
+            flush_cjk(&mut cjk, &mut tokens);
+            word.push(c);
+        } else {
+            if !word.is_empty() {
+                tokens.push(std::mem::take(&mut word));
+            }
+            flush_cjk(&mut cjk, &mut tokens);
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    flush_cjk(&mut cjk, &mut tokens);
+    tokens
+}
+
+fn is_significant_identity_token(token: &str) -> bool {
+    token.chars().any(is_cjk_char)
+        || (token.chars().count() >= 3 && !IDENTITY_STOPWORDS.contains(&token))
+}
+
+struct IdentityHaystack {
+    tokens: BTreeSet<String>,
+    squashed: String,
+}
+
+impl IdentityHaystack {
+    fn new(text: &str) -> Self {
+        let folded = fold_for_identity(text);
+        Self {
+            tokens: identity_tokens(&folded).into_iter().collect(),
+            squashed: folded.chars().filter(|c| c.is_alphanumeric()).collect(),
+        }
+    }
+}
+
+struct TitleOverlap {
+    /// The whole title, punctuation and spacing ignored, is in the text.
+    contained: bool,
+    significant: usize,
+    fraction: f64,
+    cjk: bool,
+}
+
+fn title_overlap(title: &str, haystack: &IdentityHaystack) -> TitleOverlap {
+    let folded = fold_for_identity(title);
+    let squashed: String = folded.chars().filter(|c| c.is_alphanumeric()).collect();
+    let cjk_chars = squashed.chars().filter(|c| is_cjk_char(*c)).count();
+    let cjk = cjk_chars * 2 > squashed.chars().count();
+    let long_enough = squashed.chars().count() >= if cjk_chars > 0 { 6 } else { 12 };
+    let mut significant: Vec<String> = identity_tokens(&folded)
+        .into_iter()
+        .filter(|token| is_significant_identity_token(token))
+        .collect();
+    significant.sort();
+    significant.dedup();
+    let present = significant
+        .iter()
+        .filter(|token| haystack.tokens.contains(*token))
+        .count();
+    TitleOverlap {
+        contained: long_enough && haystack.squashed.contains(&squashed),
+        significant: significant.len(),
+        fraction: if significant.is_empty() {
+            0.0
+        } else {
+            // A title has a handful of words; neither count nears 2^52.
+            f64::from(u32::try_from(present).unwrap_or(u32::MAX))
+                / f64::from(u32::try_from(significant.len()).unwrap_or(u32::MAX))
+        },
+        cjk,
+    }
+}
+
+fn title_confirms(overlap: &TitleOverlap) -> bool {
+    overlap.contained || (overlap.significant >= 3 && overlap.fraction >= 0.8)
+}
+
+/// (Latin text readable, CJK text readable). Garbage from CID fonts without a
+/// Unicode map has neither English function words nor CJK characters.
+fn identity_text_readable(front_text: &str) -> (bool, bool) {
+    let folded = fold_for_identity(front_text);
+    let tokens = identity_tokens(&folded);
+    let function_words = tokens
+        .iter()
+        .filter(|token| IDENTITY_FUNCTION_WORDS.contains(&token.as_str()))
+        .count();
+    let words = tokens
+        .iter()
+        .filter(|token| token.chars().count() >= 3 && token.chars().all(char::is_alphabetic))
+        .count();
+    let cjk = folded.chars().filter(|c| is_cjk_char(*c)).count();
+    (function_words >= 8 && words >= 40, cjk >= 80)
+}
+
+/// Run the identity ladder (see the section comment above).
+#[must_use]
+#[allow(clippy::too_many_lines)] // one rule per block, in ladder order
+pub fn judge_pdf_identity(
+    expected: &ExpectedPaperIdentity,
+    evidence: &PdfIdentityEvidence,
+) -> PdfIdentityVerdict {
+    let front: String = evidence
+        .front_text
+        .chars()
+        .take(PDF_IDENTITY_FRONT_TEXT_CHARS)
+        .collect();
+    let mut found_dois: Vec<String> = Vec::new();
+    for doi in evidence
+        .metadata_dois
+        .iter()
+        .flat_map(|value| extract_dois(value))
+        .chain(extract_dois(&front))
+    {
+        if !found_dois.contains(&doi) {
+            found_dois.push(doi);
+        }
+    }
+    let verdict =
+        |status, matched_by: Option<&str>, reason: String, found: &[String]| PdfIdentityVerdict {
+            status,
+            matched_by: matched_by.map(str::to_string),
+            found_dois: found.to_vec(),
+            reason,
+        };
+    if expected.is_empty() {
+        return verdict(
+            PdfIdentityStatus::Unchecked,
+            None,
+            "no expected DOI or title was given".to_string(),
+            &found_dois,
+        );
+    }
+
+    let squeezed: String = format!(
+        "{front}\n{}\n{}",
+        evidence.metadata_dois.join("\n"),
+        evidence.metadata_titles.join("\n")
+    )
+    .to_lowercase()
+    .chars()
+    .filter(|c| !c.is_whitespace())
+    .collect();
+    if let Some(doi) = expected
+        .dois
+        .iter()
+        .find(|doi| doi_appears_in(doi, &squeezed))
+    {
+        return verdict(
+            PdfIdentityStatus::Verified,
+            Some("doi"),
+            format!("the PDF carries DOI {doi}"),
+            &found_dois,
+        );
+    }
+
+    let haystack =
+        IdentityHaystack::new(&format!("{front}\n{}", evidence.metadata_titles.join("\n")));
+    if let Some(title) = expected
+        .titles
+        .iter()
+        .chain(&expected.page_titles)
+        .find(|title| title_confirms(&title_overlap(title, &haystack)))
+    {
+        return verdict(
+            PdfIdentityStatus::Verified,
+            Some("title"),
+            format!("the PDF's first page carries the title \u{201c}{title}\u{201d}"),
+            &found_dois,
+        );
+    }
+
+    if !expected.dois.is_empty() && !found_dois.is_empty() {
+        let shown = found_dois.iter().take(3).cloned().collect::<Vec<_>>();
+        return verdict(
+            PdfIdentityStatus::Mismatch,
+            None,
+            format!(
+                "the PDF declares DOI {} but {} was expected, and its first page does not carry the expected title",
+                shown.join(", "),
+                expected.dois.join(" or ")
+            ),
+            &found_dois,
+        );
+    }
+
+    let (latin_readable, cjk_readable) = identity_text_readable(&front);
+    for title in &expected.titles {
+        let overlap = title_overlap(title, &haystack);
+        let readable = if overlap.cjk {
+            cjk_readable
+        } else {
+            latin_readable
+        };
+        if readable && overlap.significant >= 3 && overlap.fraction < 0.5 {
+            return verdict(
+                PdfIdentityStatus::Mismatch,
+                None,
+                format!(
+                    "the PDF's first page does not carry the expected title \u{201c}{title}\u{201d} (only {:.0}% of its words appear) and has no expected DOI",
+                    overlap.fraction * 100.0
+                ),
+                &found_dois,
+            );
+        }
+    }
+
+    verdict(
+        PdfIdentityStatus::Unverified,
+        None,
+        if latin_readable || cjk_readable {
+            "the PDF text neither confirms nor contradicts the expected DOI or title".to_string()
+        } else {
+            "the PDF has no readable text or metadata naming the paper".to_string()
+        },
+        &found_dois,
+    )
+}
+
+/// The identity gate before a downloaded PDF enters the library: `Err` on a
+/// mismatch, with a message the caller can show as is.
+pub fn validate_pdf_identity(
+    expected: &ExpectedPaperIdentity,
+    evidence: &PdfIdentityEvidence,
+) -> Result<PdfIdentityVerdict, String> {
+    let verdict = judge_pdf_identity(expected, evidence);
+    if verdict.status == PdfIdentityStatus::Mismatch {
+        return Err(pdf_identity_mismatch_message(&verdict.reason));
+    }
+    Ok(verdict)
+}
+
+#[must_use]
+pub fn pdf_identity_mismatch_message(reason: &str) -> String {
+    format!(
+        "identity_mismatch: the downloaded PDF is not the requested paper: {reason}. It was discarded and not added to the library. Resolve the paper's landing page again, or ask the user for the right file; do not retry the same link."
+    )
+}
+
+/// DOI and title of a library paper, for checking a PDF downloaded for it.
+pub fn library_paper_identity_at(
+    base: &Path,
+    paper_id: &str,
+) -> Result<ExpectedPaperIdentity, String> {
+    let library = library_load_at(base)?;
+    let mut identity = ExpectedPaperIdentity::default();
+    if let Some(doi) = paper_id.strip_prefix("doi:") {
+        identity.add_doi(doi);
+    }
+    if let Some(paper) = library["papers"].as_array().and_then(|papers| {
+        papers
+            .iter()
+            .find(|paper| paper["id"].as_str() == Some(paper_id))
+    }) {
+        if let Some(doi) = paper["doi"].as_str() {
+            identity.add_doi(doi);
+        }
+        if let Some(title) = paper["title"].as_str() {
+            identity.add_title(title);
+        }
+    }
+    Ok(identity)
+}
+
 pub fn mark_pdf_downloaded_at(
     base: &Path,
     paper_id: &str,
@@ -12762,6 +13352,8 @@ fn browser_download_task_value(
             "Open the article page before downloading: MDPI rejects many direct HTTP PDF requests.",
         ),
     };
+    // `title` and `doi` are what the browser download verifies the PDF
+    // against, so they must be bibliographic facts or empty, never a guess.
     json!({
         "title": title,
         "doi": doi.unwrap_or_default(),
@@ -12836,14 +13428,14 @@ fn publisher_browser_route_for_url(url: &str) -> Option<PublisherBrowserRoute> {
     })
 }
 
+/// A bare URL carries no bibliographic identity. The file name is the
+/// caller's label, not the paper's title, and the browser download verifies
+/// the PDF against `title`, so the task leaves it empty instead of letting a
+/// stem like `s23073762` reject the right paper.
 #[must_use]
-pub fn browser_download_task_for_url(url: &str, file_name: &str) -> Option<Value> {
+pub fn browser_download_task_for_url(url: &str, _file_name: &str) -> Option<Value> {
     let route = publisher_browser_route_for_url(url)?;
-    Some(browser_download_task_value(
-        &route,
-        file_name.trim_end_matches(".pdf"),
-        None,
-    ))
+    Some(browser_download_task_value(&route, "", None))
 }
 
 fn download_pdf_response(

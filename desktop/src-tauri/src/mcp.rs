@@ -546,11 +546,12 @@ fn config_loader_for(project_root: &Path, global_path: &Path) -> ConfigLoader {
     ConfigLoader::default_for(project_root).with_global_mcp_config(global_path)
 }
 
+/// The servers a turn may start: the user's global file only. A project's own
+/// `.mcp.json` is workspace content (a cloned repository can carry one), so it
+/// is never loaded, and never copied into the global file either: that copy
+/// used to happen on the first load whenever no global file existed yet.
 pub(crate) fn config_loader(project_root: &Path) -> ConfigLoader {
     let global_path = global_mcp_path();
-    if let Err(error) = migrate_project_stdio_to_global_if_needed(project_root, &global_path) {
-        eprintln!("SomniQ desktop: could not migrate project MCP settings: {error}");
-    }
     match migrate_managed_preset_servers_if_needed(&global_path) {
         Ok(true) => aris_chat::clear_mcp_discovery_cache(),
         Ok(false) => {}
@@ -753,31 +754,10 @@ fn write_global_stdio_servers(
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn migrate_project_stdio_to_global_if_needed(
-    project_root: &Path,
-    global_path: &Path,
-) -> Result<bool, String> {
-    if global_path.exists() {
-        return Ok(false);
-    }
-    let project_path = project_root.join(".mcp.json");
-    if !project_path.is_file() {
-        return Ok(false);
-    }
-    let project_config = read_json_object(&project_path)?;
-    let servers = parse_global_stdio_servers(&project_config, &project_path)?;
-    if servers.is_empty() {
-        return Ok(false);
-    }
-    write_global_stdio_servers(global_path, servers)?;
-    Ok(true)
-}
-
 #[tauri::command]
 pub fn mcp_config_get(projects: State<ProjectState>) -> Result<McpConfigView, String> {
     let project_root = current_project_path(projects.inner())?;
     let path = global_mcp_path();
-    migrate_project_stdio_to_global_if_needed(&project_root, &path)?;
     mcp_config_get_for(&project_root, &path)
 }
 
@@ -935,31 +915,22 @@ mod tests {
     }
 
     #[test]
-    fn first_global_load_copies_project_stdio_without_modifying_the_project_file() {
+    fn a_projects_own_mcp_json_is_neither_loaded_nor_copied_into_the_global_file() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let project = temporary.path().join("project");
         let global = temporary.path().join("config").join("mcp.json");
         std::fs::create_dir_all(&project).expect("project dir");
-        let original = r#"{"note":"legacy","mcpServers":{"legacy":{"type":"stdio","command":"legacy-mcp"},"remote":{"type":"http","url":"https://example.test/mcp"}}}"#;
-        std::fs::write(project.join(".mcp.json"), original).expect("legacy project config");
+        // A cloned repository can carry this; it must not run on the first turn.
+        let original = r#"{"mcpServers":{"cloned":{"type":"stdio","command":"cloned-mcp"}}}"#;
+        std::fs::write(project.join(".mcp.json"), original).expect("project config");
 
-        assert!(migrate_project_stdio_to_global_if_needed(&project, &global)
-            .expect("migration should succeed"));
-        let migrated = read_json_object(&global).expect("global config");
-        let servers = migrated
-            .get("mcpServers")
-            .and_then(Value::as_object)
-            .expect("global servers");
-        assert!(servers.contains_key("legacy"));
-        assert!(!servers.contains_key("remote"));
-        assert_eq!(
-            std::fs::read_to_string(project.join(".mcp.json")).expect("legacy config retained"),
-            original
-        );
-        assert!(
-            !migrate_project_stdio_to_global_if_needed(&project, &global)
-                .expect("migration is one-time")
-        );
+        let config = config_loader_for(&project, &global).load().expect("config loads");
+        assert!(!config.mcp().servers().contains_key("cloned"));
+        let view = mcp_config_get_for(&project, &global).expect("settings view");
+        assert!(view.servers.is_empty());
+        assert!(view.merged_servers.iter().all(|server| server.name != "cloned"));
+        assert!(!global.exists(), "the global file is the user's to create");
+        assert_eq!(std::fs::read_to_string(project.join(".mcp.json")).expect("project config kept"), original);
     }
 
     #[test]

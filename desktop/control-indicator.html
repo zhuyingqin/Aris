@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SomniQ</title>
+    <style>
+      /* The window is a transparent, undecorated strip; only the pill paints. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .pill {
+        box-sizing: border-box;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 8px 0 16px;
+        border-radius: 999px;
+        /* Opaque: text from the window behind must not show through. */
+        background: rgb(24, 24, 28);
+        border: 1px solid rgba(239, 68, 68, 0.75);
+        color: #f5f5f5;
+        font-size: 13px;
+        cursor: default;
+      }
+      .dot {
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ef4444;
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+        animation: pulse 1.6s ease-out infinite;
+      }
+      @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+        70% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+      }
+      .text {
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-weight: 600;
+      }
+      .elapsed {
+        flex: none;
+        font-variant-numeric: tabular-nums;
+        color: #c8c8cc;
+        font-weight: 400;
+      }
+      button {
+        flex: none;
+        height: 30px;
+        padding: 0 14px;
+        border-radius: 999px;
+        border: 1px solid #ef4444;
+        background: #ef4444;
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { background: #dc2626; }
+      button:disabled { opacity: 0.6; cursor: default; }
+      @media (prefers-reduced-motion: reduce) {
+        .dot { animation: none; }
+      }
+      /* ?border=1: a frame around the window SomniQ is reading. */
+      .frame { display: none; }
+      .border-mode .pill { display: none; }
+      .border-mode .frame {
+        display: block;
+        position: fixed;
+        inset: 0;
+        box-sizing: border-box;
+        border: 3px solid #ef4444;
+        border-radius: 8px;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="frame" aria-hidden="true"></div>
+    <div class="pill" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="text" id="text">SomniQ 电脑操作模式运行中</span>
+      <span class="elapsed" id="elapsed"></span>
+      <button type="button" id="stop">停止</button>
+    </div>
+    <script type="module" src="/src/computerControl/indicator.ts"></script>
+  </body>
+</html>

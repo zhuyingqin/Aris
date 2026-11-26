@@ -26,7 +26,10 @@ SERVER_VERSION = "0.1.0"
 MAX_FINDINGS = 200
 MAX_FILES = 200
 
-ROOT = os.path.realpath(os.getcwd())
+# The project it checks: SOMNIQ_WORKSPACE_ROOT, which the host sets because
+# package.json declares workspace read. The working directory is the plugin's
+# own data directory, never the project.
+ROOT = os.path.realpath(os.environ.get("SOMNIQ_WORKSPACE_ROOT") or os.getcwd())
 
 
 # ---------------------------------------------------------------- files

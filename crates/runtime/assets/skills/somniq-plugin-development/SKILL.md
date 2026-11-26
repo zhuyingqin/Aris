@@ -244,6 +244,23 @@ Deliver one small working version first; refine after the user has it.
    stored as plain text). Check the server before previewing:
    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python server.py`
    (`python3` on macOS/Linux) must print one JSON line listing your tools.
+   **Declare what each server needs** in `package.json` under
+   `somniq.capabilities` (one entry per `serverName`; without it the package
+   cannot be enabled): `network` (`none`, or `required` with optional
+   `hosts`), `workspace` (`none`, `read` or `write`), `env` (variable names to
+   pass from the user's computer) and `workspaceFiles` (project files it
+   needs). Declare the least that works. The server starts in its own data
+   directory with a cleared environment: find package files with
+   `SOMNIQ_PLUGIN_ROOT` or `./` paths, keep state in `SOMNIQ_PLUGIN_DATA`, read
+   the project through `SOMNIQ_WORKSPACE_ROOT` (only with `workspace` read or
+   write) and declared project files from `SOMNIQ_PLUGIN_FILES` (the copies the
+   user approved; editing the original takes a new approval to reach the
+   plugin, so tell them). Prefer putting code in the package over
+   `workspaceFiles`. Avoid launchers that download code at start (`npx`,
+   `uvx`); when the user wants an existing MCP server that needs one, pin an
+   exact version. `inspect` lists the rules and how far this computer
+   enforces each limit: tell the user honestly which ones only rest on the
+   plugin ("declared").
 5. **Preview until clean.** Call
    `{"action": "preview", "source": ".somniq/plugin-drafts/<short-name>"}`.
    Fix every diagnostic: each has `file`, `path` and a `hint`. Repeat until
@@ -254,8 +271,9 @@ Deliver one small working version first; refine after the user has it.
    "digest": "<digest from that preview>"}`; it installs disabled. Then call
    `{"action": "request_enable", "name": "<package name>"}`. Before that call,
    tell the user in one or two sentences what the plugin adds and, for MCP,
-   the command it will run: the card shows the same facts, and they decide on
-   it. The call waits for their click.
+   the command it will run and what it declared (network, project access,
+   variables, project files): the card shows the same facts with how far each
+   is enforced, and they decide on it. The call waits for their click.
 7. **After the decision.** On `next-turn`, end this turn: tell the user it is
    approved and what to check (new tools and skills are attached when a turn
    starts, so they are not callable yet). SomniQ then starts one verification

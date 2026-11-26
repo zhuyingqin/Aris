@@ -1,0 +1,6 @@
+{
+  "note": "Test-only account for the local R0 publisher fixture (127.0.0.1). Not a real credential for any service.",
+  "accounts": [
+    { "username": "r0-reader", "password": "r0-fixture-only-7Qm2" }
+  ]
+}

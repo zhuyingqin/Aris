@@ -1,0 +1,10 @@
+{
+  "identifier": "computer-control-indicator",
+  "description": "The always-on-top \"SomniQ is controlling this computer\" pill shown on every monitor while a computer-use turn runs. It reads the control status, listens for changes and asks the app to stop; it never moves, resizes or closes itself.",
+  "windows": [
+    "computer-control-indicator-*"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

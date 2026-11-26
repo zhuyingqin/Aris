@@ -62,6 +62,24 @@ function FileDiff({ file, language }: { file: PackageFileChange; language: Langu
   </li>;
 }
 
+/** Every file a version change touches, folded behind one button: the
+ *  Plugins page shows it for upgrades and rollbacks, as the Chat card does. */
+export function ChangedFiles({ files, error, language }: { files: PackageFileChange[] | null; error?: string; language: Language }) {
+  const copy = COPY[language];
+  const [open, setOpen] = useState(false);
+  if (error) return <p className="plugin-review-note is-error" role="alert">{error}</p>;
+  if (!files) return <p className="plugin-review-note">{copy.loading}</p>;
+  if (!files.length) return null;
+  return <div className="plugin-review">
+    <div className="plugin-review-actions">
+      <button type="button" className={`plugin-review-button${open ? " is-active" : ""}`} aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <SvgIcon name="document" size={13} />{open ? copy.hideFiles : copy.files(files.length)}
+      </button>
+    </div>
+    {open && <ul className="plugin-review-files">{files.map((file) => <FileDiff key={file.path} file={file} language={language} />)}</ul>}
+  </div>;
+}
+
 export default function PluginUpgradeReview({ card, projectPath, language }: {
   card: PluginApprovalCard; projectPath: string; language: Language;
 }) {

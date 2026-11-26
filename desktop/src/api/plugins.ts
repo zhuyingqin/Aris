@@ -12,8 +12,18 @@ export interface PluginPreview {
   capabilities: {
     skills: string[];
     skillRoots: string[];
-    mcpServers: { name: string; command: string; args: string[]; env?: Record<string, string> }[];
+    mcpServers: {
+      name: string; command: string; args: string[]; env?: Record<string, string>;
+      /** What it declared it needs (`somniq.capabilities`); absent means it cannot be enabled. */
+      capability?: McpCapability | null;
+      /** Code its command line runs from outside the package. */
+      launch?: LaunchNote[];
+    }[];
     uiPanels: UiPanel[];
+    /** Scripts in its Skill directories; run with Bash, they get the full environment. */
+    skillScripts?: string[];
+    /** How far this computer enforces each limit (present with MCP servers). */
+    enforcement?: CapabilityEnforcement | null;
     /** Criteria the package adds to the independent Reviewer (`somniq.reviewer`). Absent on older backends. */
     reviewRubrics?: ReviewRubric[];
     /** Official plugins the package needs (`somniq.requires`); absent on older backends. */
@@ -61,6 +71,32 @@ export interface InstalledPlugin extends PluginPreview {
   /** On for every project of this computer; `enabled` is this project's own
    *  switch for it. Absent from older backends. */
   global?: boolean;
+  /** The project files its servers are handed: the approved copy and the original now. */
+  workspaceFiles?: WorkspaceFileState[];
+  /** The originals' digest now: what turning it on approves. */
+  workspaceFilesDigest?: string | null;
+}
+export interface WorkspaceFileState { path: string; approved?: string; current?: string }
+
+export type Enforcement = "enforced" | "best-effort" | "declared";
+export interface CapabilityEnforcement {
+  environment: Enforcement; hostControls: Enforcement; workingDirectory: Enforcement; processTree: Enforcement;
+  workspaceFiles: Enforcement; networkNone: Enforcement; networkHosts: Enforcement; workspaceAccess: Enforcement;
+}
+export interface McpCapability {
+  env?: string[];
+  network: { access: "none" | "required"; hosts?: string[] };
+  workspace: "none" | "read" | "write";
+  workspaceFiles?: string[];
+}
+export type LaunchNote =
+  | { kind: "runtime-fetch"; launcher: string; spec: string }
+  | { kind: "outside-snapshot"; program: string };
+export interface CapabilityChange {
+  item: "declaration" | "env" | "network" | "hosts" | "workspace" | "workspaceFiles";
+  added?: string[]; removed?: string[]; from?: string; to?: string;
+  /** Gives the server more than before. */
+  expands: boolean;
 }
 /** A version an upgrade replaced; its snapshot stays on this computer. */
 export interface PluginVersion { version: string; digest: string; source: string; replacedAt: number }
@@ -85,6 +121,10 @@ export interface McpServerDiff {
   envAdded: string[];
   envRemoved: string[];
   envChanged: string[];
+  /** What its declaration gains or drops. */
+  capabilities?: CapabilityChange[];
+  /** Code fetched or run from outside the package, new in this version. */
+  launchAdded?: LaunchNote[];
 }
 export interface CapabilityDiff {
   skills: ListChange;
@@ -175,6 +215,17 @@ export const pluginsInstall = (projectPath: string, source: string, expectedDige
 export const pluginsUpgrade = (projectPath: string, source: string, expectedDigest: string, expectedCurrentDigest: string, approve: boolean) =>
   changed(projectPath, invoke<InstalledPlugin>("plugins_upgrade", { projectPath, source, expectedDigest, expectedCurrentDigest, approve }));
 /** Put back an earlier version; `approve` keeps a running package running on it. */
+/** What going back to an earlier version changes: shown before the click that approves it. */
+export interface PluginRollbackPreview {
+  version: string;
+  digest: string;
+  canEnable: boolean;
+  diagnostics: PluginPreview["diagnostics"];
+  plan: PluginUpgradePlan;
+  files: PackageFileChange[];
+}
+export const pluginsRollbackPreview = (projectPath: string, name: string, digest: string) =>
+  invoke<PluginRollbackPreview>("plugins_rollback_preview", { projectPath, name, digest });
 export const pluginsRollback = (projectPath: string, name: string, digest: string, expectedCurrentDigest: string, approve: boolean) =>
   changed(projectPath, invoke<InstalledPlugin>("plugins_rollback", { projectPath, name, digest, expectedCurrentDigest, approve }));
 /** Every file an upgrade card's draft changes; refused if the draft changed since the card. */
@@ -182,8 +233,11 @@ export const pluginsDraftChanges = (projectPath: string, source: string, digest:
   invoke<PackageFileChange[]>("plugins_draft_changes", { projectPath, source, digest });
 /** `expectedDigest`: the version the page showed. A click then acts on exactly
  *  that version and is refused if it changed since (say, an agent upgraded it). */
-export const pluginsSetEnabled = (projectPath: string, name: string, enabled: boolean, expectedDigest?: string) =>
-  changed(projectPath, invoke<InstalledPlugin>("plugins_set_enabled", { projectPath, name, enabled, expectedDigest: expectedDigest ?? null }));
+export const pluginsSetEnabled = (projectPath: string, name: string, enabled: boolean, expectedDigest?: string, expectedFiles?: string | null) =>
+  changed(projectPath, invoke<InstalledPlugin>("plugins_set_enabled", { projectPath, name, enabled, expectedDigest: expectedDigest ?? null, expectedFiles: expectedFiles ?? null }));
+/** What changed in the project files a plugin is handed since their copies were approved. */
+export const pluginsWorkspaceFileChanges = (projectPath: string, name: string) =>
+  invoke<PackageFileChange[]>("plugins_workspace_file_changes", { projectPath, name });
 /** Turn "all projects" on (the package then runs in every project) or off
  *  (it stays enabled in this project only). */
 export const pluginsSetGlobal = (projectPath: string, name: string, global: boolean, expectedDigest?: string) =>
@@ -193,10 +247,17 @@ export const pluginsRemove = (projectPath: string, name: string, expectedDigest?
 
 /** Plugin-authored text: one string, or per language. `es` is optional; Spanish falls back to `en`. */
 export type UiText = string | { en: string; cn: string; es?: string };
-/** What a click does. The host does it on the user's click; no package code runs. */
+/** What a click does, on the user's click. `tool` runs the package's own MCP
+ *  tools directly (no conversation); the others are the host's own actions. */
 export type UiClick =
   | { type: "prompt"; text: UiText; send?: boolean }
-  | { type: "open-file"; path: string };
+  | { type: "open-file"; path: string }
+  | { type: "tool"; calls: UiToolCall[] };
+/** One step of a `tool` action; `into` names the widget that shows its output. */
+export interface UiToolCall { tool: string; arguments?: Record<string, unknown>; into?: string }
+/** An MCP tool of the package a panel runs without a conversation. `auto`:
+ *  its page may run it without the user's click. */
+export interface UiPanelTool { name: string; auto?: boolean }
 export interface UiField {
   key: string;
   label: UiText;
@@ -229,14 +290,19 @@ export interface UiPanel {
   scope?: "session" | "project";
   /** The package's own HTML draws this panel, in a sandboxed frame. */
   page?: string;
-  /** A web address the host embeds as the whole panel. No package code runs
-   *  and the site gets no bridge or plugin data. */
+  /** A web address the host embeds in the panel; the site gets no bridge or
+   *  plugin data. Alone (always in the sidebar) it is the whole panel; a
+   *  `nav.page` panel can show it beside its own page or widgets. */
   web?: string;
+  /** Where the web region sits beside a page or widgets. Default `below`. */
+  webLayout?: "below" | "right";
   /** Another panel of the same package whose data this panel's page reads
    *  and writes; this panel then keeps none of its own. */
   dataPanel?: string;
   /** The page may propose background work tasks; the user decides on each. */
   proposeTasks?: boolean;
+  /** MCP tools of the package this panel runs without a conversation. */
+  tools?: UiPanelTool[];
   widgets: UiWidget[];
 }
 export interface ActiveUiPanel extends UiPanel {
@@ -287,6 +353,26 @@ export const pluginsUiStateGet = (projectPath: string, name: string, panelId: st
 export const pluginsUiStateUpdate = (projectPath: string, name: string, panelId: string, sessionId: string, expectedRevision: number, action: UiAction) =>
   invoke<UiPanelState>("plugins_ui_state_update", { projectPath, name, panelId, sessionId, expectedRevision, action });
 
+/** Which tools a view asks to run: a `tool` button or form the user clicked
+ *  (the backend reads its calls from the reviewed declaration), or one call
+ *  from the panel's own page. */
+export type PanelToolRequest =
+  | { from: "widget"; widgetId: string; values?: Record<string, string | boolean> }
+  /** Several calls are one run: a click that starts them is one gesture. */
+  | { from: "page"; calls: { tool: string; arguments?: unknown }[]; gesture: boolean };
+export interface PanelToolResult { tool: string; text: string; structured?: unknown; isError: boolean; into?: string }
+export interface PanelToolOutcome {
+  /** Each call made, in order, the failed one included. */
+  results: PanelToolResult[];
+  /** Why the run stopped before its last call. */
+  error?: string;
+  cancelled: boolean;
+}
+/** Run the package's own MCP tools for a panel, with no conversation. */
+export const pluginsUiRunTool = (projectPath: string, name: string, panelId: string, sessionId: string, runId: string, request: PanelToolRequest) =>
+  invoke<PanelToolOutcome>("plugins_ui_run_tool", { projectPath, name, panelId, sessionId, runId, request });
+export const pluginsUiCancelTool = (runId: string) => invoke<void>("plugins_ui_cancel_tool", { runId });
+
 /** What a `PluginManager` call asks the user to allow. Built by the backend
  *  from the installed or previewed package, never from model input. */
 export interface PluginApprovalCard {
@@ -299,11 +385,13 @@ export interface PluginApprovalCard {
   capabilities: {
     skills: string[];
     /** `page`: the panel runs the package's own HTML and JavaScript, sandboxed. */
-    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean; web?: string | null; proposeTasks?: boolean }[];
+    uiPanels: { id: string; slot: string; title: UiText; widgets: number; page?: boolean; web?: string | null; proposeTasks?: boolean; tools?: UiPanelTool[] }[];
     /** Criteria the independent Reviewer will check; the Executor never sees them. */
     reviewRubrics?: { id: string; title: UiText; criteria: number; appliesWhen: string[] }[];
     /** Environment variable names only; values never leave the backend. */
-    mcpServers: { name: string; command: string; args: string[]; envKeys: string[]; requestTimeoutSecs?: number | null }[];
+    mcpServers: { name: string; command: string; args: string[]; envKeys: string[]; requestTimeoutSecs?: number | null; capability?: McpCapability | null; launch?: LaunchNote[] }[];
+    enforcement?: CapabilityEnforcement | null;
+    skillScripts?: string[];
     /** Official plugins it needs; it does not run while one is off. */
     requires?: string[];
   };

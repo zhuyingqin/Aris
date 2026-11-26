@@ -1589,6 +1589,7 @@ fn a_task_row_records_the_plugin_set_its_run_froze() {
                 name: "@lab/evidence".into(),
                 version: "1.2.3".into(),
                 digest: "a".repeat(64),
+                files: None,
             }],
             fingerprint: "f".repeat(64),
             frozen_at_ms: 7,

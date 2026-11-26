@@ -1,0 +1,637 @@
+{
+  "kind": "r0-uia-probe",
+  "date": "2026-11-25T23:25:19.289Z",
+  "probe": "target\\release\\somniq-computer-probe.exe",
+  "repeat": 3,
+  "os": "Microsoft Windows [�汾 10.0.26200.9974]",
+  "apps": {
+    "fixture": {
+      "snapshot": {
+        "ok": true,
+        "window": {
+          "exe": "powershell.exe",
+          "class": "WindowsForms10.Window.8.app.0.39ca2f6_r13_ad1",
+          "dpi": 96,
+          "tier": "read_only"
+        },
+        "foregroundChanged": false,
+        "cursorMoved": false,
+        "runs": [
+          {
+            "strategy": "walker",
+            "fetchMs": [
+              226.2,
+              113.5,
+              156.8
+            ],
+            "medianFetchMs": 156.8,
+            "convertMs": 0,
+            "crossProcessCalls": 38,
+            "stoppedBy": null,
+            "elements": 19,
+            "maxDepth": 3,
+            "named": 18,
+            "offscreen": 1,
+            "password": 1,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 1,
+              "invoke": 8,
+              "legacy_only": 7,
+              "none": 0,
+              "scroll": 0,
+              "select": 0,
+              "text": 0,
+              "toggle": 1,
+              "value": 4
+            },
+            "frameworks": {
+              "(none)": 8,
+              "WinForm": 11
+            },
+            "views": {
+              "all": {
+                "approxTokens": 201,
+                "chars": 618,
+                "eligible": 18,
+                "hiddenOffscreen": 1,
+                "shown": 18,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 170,
+                "chars": 541,
+                "eligible": 14,
+                "hiddenOffscreen": 1,
+                "shown": 14,
+                "truncated": false
+              }
+            }
+          },
+          {
+            "strategy": "subtree",
+            "fetchMs": [
+              91.8,
+              85.2,
+              79.6
+            ],
+            "medianFetchMs": 85.2,
+            "convertMs": 0.9,
+            "crossProcessCalls": 1,
+            "stoppedBy": null,
+            "elements": 19,
+            "maxDepth": 3,
+            "named": 18,
+            "offscreen": 1,
+            "password": 1,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 1,
+              "invoke": 8,
+              "legacy_only": 7,
+              "none": 0,
+              "scroll": 0,
+              "select": 0,
+              "text": 0,
+              "toggle": 1,
+              "value": 4
+            },
+            "frameworks": {
+              "(none)": 8,
+              "WinForm": 11
+            },
+            "views": {
+              "all": {
+                "approxTokens": 201,
+                "chars": 618,
+                "eligible": 18,
+                "hiddenOffscreen": 1,
+                "shown": 18,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 170,
+                "chars": 541,
+                "eligible": 14,
+                "hiddenOffscreen": 1,
+                "shown": 14,
+                "truncated": false
+              }
+            }
+          }
+        ]
+      },
+      "refs": {
+        "title": "3",
+        "password": "5",
+        "agree": "6",
+        "save": "11",
+        "submit": "12"
+      },
+      "interactiveView": "[e1] Window \"SomniQ CU R0 Fixture r0-mwwr4ftj\"\n  [e3] Edit \"论文题名\" focused [value]\n  [e5] Edit \"测试密码\" password(值不读取) [value]\n  [e6] CheckBox \"同意测试条款\" toggle=off [invoke,toggle]\n  [e8] ComboBox \"投稿会议\" [value]\n    [e10] Button \"打开\" [invoke]\n  [e11] Button \"保存草稿\" [invoke]\n  [e12] Button \"提交（禁止）\" [invoke]\n  [e14] TitleBar \"\" value=\"SomniQ CU R0 Fixture r0-mwwr4ftj\" [value]\n    [e15] MenuBar \"系统\"\n      [e16] MenuItem \"系统\" collapsed [invoke,expand]\n    [e17] Button \"最小化\" [invoke]\n    [e18] Button \"最大化\" [invoke]\n    [e19] Button \"关闭\" [invoke]\n",
+      "acts": [
+        {
+          "label": "set_value 论文题名",
+          "ok": true,
+          "errorCode": null,
+          "expectedError": null,
+          "asExpected": true,
+          "actionMs": 22.2,
+          "walkMs": 115.2,
+          "foregroundChanged": false,
+          "cursorMoved": false,
+          "windowActivated": false,
+          "fixtureEvents": [
+            "text:title"
+          ]
+        },
+        {
+          "label": "toggle 同意测试条款",
+          "ok": true,
+          "errorCode": null,
+          "expectedError": null,
+          "asExpected": true,
+          "actionMs": 60.8,
+          "walkMs": 113.6,
+          "foregroundChanged": false,
+          "cursorMoved": false,
+          "windowActivated": true,
+          "fixtureEvents": [
+            "window:deactivated",
+            "window:activated",
+            "toggle:agree"
+          ]
+        },
+        {
+          "label": "invoke 保存草稿",
+          "ok": true,
+          "errorCode": null,
+          "expectedError": null,
+          "asExpected": true,
+          "actionMs": 51.3,
+          "walkMs": 120.7,
+          "foregroundChanged": false,
+          "cursorMoved": false,
+          "windowActivated": true,
+          "fixtureEvents": [
+            "window:deactivated",
+            "window:activated",
+            "click:save"
+          ]
+        },
+        {
+          "label": "set_value 测试密码 (must refuse)",
+          "ok": false,
+          "errorCode": "PROTECTED_TARGET",
+          "expectedError": "PROTECTED_TARGET",
+          "asExpected": true,
+          "actionMs": null,
+          "walkMs": null,
+          "foregroundChanged": null,
+          "cursorMoved": null,
+          "windowActivated": false,
+          "fixtureEvents": []
+        },
+        {
+          "label": "stale ref (name changed)",
+          "ok": false,
+          "errorCode": "STALE_SNAPSHOT",
+          "expectedError": "STALE_SNAPSHOT",
+          "asExpected": true,
+          "actionMs": null,
+          "walkMs": null,
+          "foregroundChanged": null,
+          "cursorMoved": null,
+          "windowActivated": false,
+          "fixtureEvents": []
+        },
+        {
+          "label": "ref out of range",
+          "ok": false,
+          "errorCode": "STALE_SNAPSHOT",
+          "expectedError": "STALE_SNAPSHOT",
+          "asExpected": true,
+          "actionMs": null,
+          "walkMs": null,
+          "foregroundChanged": null,
+          "cursorMoved": null,
+          "windowActivated": false,
+          "fixtureEvents": []
+        }
+      ],
+      "shellBypass": {
+        "ran": true,
+        "output": "done",
+        "fixtureEvents": [],
+        "titleWritten": false,
+        "passwordWritten": false
+      }
+    },
+    "notepad": {
+      "snapshot": {
+        "ok": true,
+        "window": {
+          "exe": "notepad.exe",
+          "class": "Notepad",
+          "dpi": 120,
+          "tier": "requires_grant"
+        },
+        "foregroundChanged": false,
+        "cursorMoved": false,
+        "runs": [
+          {
+            "strategy": "walker",
+            "fetchMs": [
+              232.3,
+              131.5,
+              131.5
+            ],
+            "medianFetchMs": 131.5,
+            "convertMs": 0,
+            "crossProcessCalls": 168,
+            "stoppedBy": null,
+            "elements": 84,
+            "maxDepth": 6,
+            "named": 71,
+            "offscreen": 28,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 8,
+              "invoke": 16,
+              "legacy_only": 14,
+              "none": 0,
+              "scroll": 2,
+              "select": 20,
+              "text": 27,
+              "toggle": 5,
+              "value": 2
+            },
+            "frameworks": {
+              "(none)": 6,
+              "Win32": 6,
+              "XAML": 72
+            },
+            "views": {
+              "all": {
+                "approxTokens": 669,
+                "chars": 2235,
+                "eligible": 51,
+                "hiddenOffscreen": 16,
+                "shown": 51,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 606,
+                "chars": 1984,
+                "eligible": 46,
+                "hiddenOffscreen": 16,
+                "shown": 46,
+                "truncated": false
+              }
+            }
+          },
+          {
+            "strategy": "subtree",
+            "fetchMs": [
+              82.1,
+              68.9,
+              68.7
+            ],
+            "medianFetchMs": 68.9,
+            "convertMs": 3.4,
+            "crossProcessCalls": 1,
+            "stoppedBy": null,
+            "elements": 84,
+            "maxDepth": 6,
+            "named": 71,
+            "offscreen": 28,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 8,
+              "invoke": 16,
+              "legacy_only": 14,
+              "none": 0,
+              "scroll": 2,
+              "select": 20,
+              "text": 27,
+              "toggle": 5,
+              "value": 2
+            },
+            "frameworks": {
+              "(none)": 6,
+              "Win32": 6,
+              "XAML": 72
+            },
+            "views": {
+              "all": {
+                "approxTokens": 669,
+                "chars": 2235,
+                "eligible": 51,
+                "hiddenOffscreen": 16,
+                "shown": 51,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 606,
+                "chars": 1984,
+                "eligible": 46,
+                "hiddenOffscreen": 16,
+                "shown": 46,
+                "truncated": false
+              }
+            }
+          }
+        ]
+      },
+      "markersVisible": {
+        "interactive": {
+          "R0-NOTE-MARKER-3C9D": true
+        },
+        "all": {
+          "R0-NOTE-MARKER-3C9D": true
+        }
+      },
+      "actGate": "NOT_FIXTURE"
+    },
+    "explorer": {
+      "snapshot": {
+        "ok": true,
+        "window": {
+          "exe": "explorer.exe",
+          "class": "CabinetWClass",
+          "dpi": 120,
+          "tier": "requires_grant"
+        },
+        "foregroundChanged": false,
+        "cursorMoved": false,
+        "runs": [
+          {
+            "strategy": "walker",
+            "fetchMs": [
+              593.2,
+              348.8,
+              372.4
+            ],
+            "medianFetchMs": 372.4,
+            "convertMs": 0,
+            "crossProcessCalls": 302,
+            "stoppedBy": null,
+            "elements": 151,
+            "maxDepth": 8,
+            "named": 123,
+            "offscreen": 17,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 49,
+              "invoke": 51,
+              "legacy_only": 30,
+              "none": 0,
+              "scroll": 4,
+              "select": 31,
+              "text": 17,
+              "toggle": 3,
+              "value": 59
+            },
+            "frameworks": {
+              "(none)": 12,
+              "DirectUI": 33,
+              "Win32": 33,
+              "XAML": 73
+            },
+            "views": {
+              "all": {
+                "approxTokens": 1852,
+                "chars": 6455,
+                "eligible": 129,
+                "hiddenOffscreen": 12,
+                "shown": 129,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 1659,
+                "chars": 5740,
+                "eligible": 108,
+                "hiddenOffscreen": 12,
+                "shown": 108,
+                "truncated": false
+              }
+            }
+          },
+          {
+            "strategy": "subtree",
+            "fetchMs": [
+              225.1,
+              214.1,
+              208.8
+            ],
+            "medianFetchMs": 214.1,
+            "convertMs": 6.4,
+            "crossProcessCalls": 1,
+            "stoppedBy": null,
+            "elements": 151,
+            "maxDepth": 8,
+            "named": 123,
+            "offscreen": 17,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 49,
+              "invoke": 51,
+              "legacy_only": 30,
+              "none": 0,
+              "scroll": 4,
+              "select": 31,
+              "text": 17,
+              "toggle": 3,
+              "value": 59
+            },
+            "frameworks": {
+              "(none)": 12,
+              "DirectUI": 33,
+              "Win32": 33,
+              "XAML": 73
+            },
+            "views": {
+              "all": {
+                "approxTokens": 1852,
+                "chars": 6455,
+                "eligible": 129,
+                "hiddenOffscreen": 12,
+                "shown": 129,
+                "truncated": false
+              },
+              "interactive": {
+                "approxTokens": 1659,
+                "chars": 5740,
+                "eligible": 108,
+                "hiddenOffscreen": 12,
+                "shown": 108,
+                "truncated": false
+              }
+            }
+          }
+        ]
+      },
+      "markersVisible": {
+        "interactive": {
+          "a-latest-looking-name.pdf": true,
+          "m-actually-newest.pdf": true,
+          "z-middle.pdf": true
+        },
+        "all": {
+          "a-latest-looking-name.pdf": true,
+          "m-actually-newest.pdf": true,
+          "z-middle.pdf": true
+        }
+      }
+    },
+    "wps": {
+      "snapshot": {
+        "ok": true,
+        "window": {
+          "exe": "wps.exe",
+          "class": "Qt5QWindowIcon",
+          "dpi": 120,
+          "tier": "requires_grant"
+        },
+        "foregroundChanged": false,
+        "cursorMoved": true,
+        "runs": [
+          {
+            "strategy": "walker",
+            "fetchMs": [
+              17790.7,
+              1592.4,
+              947.8
+            ],
+            "medianFetchMs": 1592.4,
+            "convertMs": 0,
+            "crossProcessCalls": 568,
+            "stoppedBy": null,
+            "elements": 284,
+            "maxDepth": 26,
+            "named": 30,
+            "offscreen": 0,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 0,
+              "invoke": 284,
+              "legacy_only": 0,
+              "none": 0,
+              "scroll": 0,
+              "select": 0,
+              "text": 2,
+              "toggle": 3,
+              "value": 284
+            },
+            "frameworks": {
+              "Qt": 284
+            },
+            "views": {
+              "all": {
+                "approxTokens": 3106,
+                "chars": 12034,
+                "eligible": 284,
+                "hiddenOffscreen": 0,
+                "shown": 196,
+                "truncated": true
+              },
+              "interactive": {
+                "approxTokens": 3106,
+                "chars": 12034,
+                "eligible": 284,
+                "hiddenOffscreen": 0,
+                "shown": 196,
+                "truncated": true
+              }
+            }
+          },
+          {
+            "strategy": "subtree",
+            "fetchMs": [
+              684.5,
+              536.6,
+              565.7
+            ],
+            "medianFetchMs": 565.7,
+            "convertMs": 11,
+            "crossProcessCalls": 1,
+            "stoppedBy": null,
+            "elements": 243,
+            "maxDepth": 21,
+            "named": 21,
+            "offscreen": 0,
+            "password": 0,
+            "childrenErrors": 0,
+            "actions": {
+              "expand": 0,
+              "invoke": 243,
+              "legacy_only": 0,
+              "none": 0,
+              "scroll": 0,
+              "select": 0,
+              "text": 0,
+              "toggle": 0,
+              "value": 243
+            },
+            "frameworks": {
+              "Qt": 243
+            },
+            "views": {
+              "all": {
+                "approxTokens": 3058,
+                "chars": 12020,
+                "eligible": 243,
+                "hiddenOffscreen": 0,
+                "shown": 207,
+                "truncated": true
+              },
+              "interactive": {
+                "approxTokens": 3058,
+                "chars": 12020,
+                "eligible": 243,
+                "hiddenOffscreen": 0,
+                "shown": 207,
+                "truncated": true
+              }
+            }
+          }
+        ]
+      },
+      "markersVisible": {
+        "interactive": {
+          "R0-COMMENT-7F3A": false,
+          "R0-INSERT-91C2": false,
+          "R0-DELETE-55E0": false
+        },
+        "all": {
+          "R0-COMMENT-7F3A": false,
+          "R0-INSERT-91C2": false,
+          "R0-DELETE-55E0": false
+        }
+      },
+      "lockFiles": [
+        "~$nuscript-review-r0-mwwr4ftj.docx"
+      ]
+    }
+  },
+  "listing": {
+    "elapsedMs": 9.0075,
+    "listed": 33,
+    "hiddenByPolicy": 1,
+    "dpis": [
+      144,
+      120,
+      96
+    ],
+    "tiers": {
+      "requires_grant": 26,
+      "read_only": 7
+    }
+  },
+  "runDir": "C:\\Users\\wt\\AppData\\Local\\Temp\\somniq-cu-r0\\r0-mwwr4ftj"
+}

@@ -101,11 +101,17 @@ pub struct UiPanel {
     /// page reads and writes them through the host bridge, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
-    /// A web page the host embeds as the whole panel. The host draws the frame
-    /// itself; no package code runs, and the embedded site gets no bridge and
-    /// no plugin data. The address is shown on the approval card.
+    /// A web page the host embeds in the panel. The host draws its frame; the
+    /// embedded site gets no bridge and no plugin data. Alone it is the whole
+    /// panel; on a `nav.page` panel it can share the page with the panel's
+    /// own page or widgets, in a region of its own. The address is shown on
+    /// the approval card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<String>,
+    /// Where the web region sits when it shares a page with the panel's own
+    /// page or widgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_layout: Option<UiWebLayout>,
     /// Another panel of the same package whose data this panel's page reads
     /// and writes, instead of keeping its own: a glance in the summary and
     /// the full page it summarizes then show one store.
@@ -115,6 +121,12 @@ pub struct UiPanel {
     /// shown to the user, who creates it or not; the page never creates one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub propose_tasks: bool,
+    /// MCP tools of the package this panel may run without a conversation,
+    /// from a `tool` button or form or from its page. The approval card lists
+    /// them; a page may run one without the user's click only if it says
+    /// `auto`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<UiPanelTool>,
     #[serde(default)]
     pub widgets: Vec<UiWidget>,
 }
@@ -125,6 +137,18 @@ impl UiPanel {
         self.widgets.iter().find(|widget| widget.id() == id)
     }
 }
+
+/// The web region of a panel that also has a page or widgets: below them
+/// (full width) or to their right (full height).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiWebLayout {
+    #[default]
+    Below,
+    Right,
+}
+
+pub const UI_WEB_LAYOUTS: &[&str] = &["below", "right"];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -191,6 +215,65 @@ pub enum UiClick {
     },
     /// Open a project file in the side panel.
     OpenFile { path: String },
+    /// Run MCP tools of this package directly, in order, without a
+    /// conversation: the host calls each tool and may put its output in a
+    /// widget of the panel. Every tool must be one the panel declares in
+    /// `tools`, which the approval card lists.
+    Tool { calls: Vec<UiToolCall> },
+}
+
+/// One step of a `tool` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiToolCall {
+    /// The tool's own name, as the package's MCP server lists it.
+    pub tool: String,
+    /// The tool's arguments. In a form, a string `{{key}}` is replaced by the
+    /// form field of that key; a string that is only `{{key}}` takes the
+    /// field's value as it is (a checkbox gives true or false, a number field
+    /// a number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    /// A widget of the panel that shows the tool's output: its text for a
+    /// markdown or notes widget, otherwise its JSON in the widget's shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+}
+
+/// An MCP tool of the package that a panel may run without a conversation:
+/// from a `tool` button or form, or from the panel's own page. Written as the
+/// tool's name, or as `{ "name", "auto": true }` to let the page run it
+/// without the user's click (for a read-only tool such as a status check).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "UiPanelToolInput", rename_all = "camelCase")]
+pub struct UiPanelTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UiPanelToolInput {
+    Name(String),
+    Spec(UiPanelToolSpec),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UiPanelToolSpec {
+    name: String,
+    #[serde(default)]
+    auto: bool,
+}
+
+impl From<UiPanelToolInput> for UiPanelTool {
+    fn from(input: UiPanelToolInput) -> Self {
+        match input {
+            UiPanelToolInput::Name(name) => Self { name, auto: false },
+            UiPanelToolInput::Spec(UiPanelToolSpec { name, auto }) => Self { name, auto },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +387,44 @@ struct UiManifest {
     /// Review criteria for the independent Reviewer ([`super::reviewer`]).
     #[serde(default)]
     reviewer: Option<String>,
+    /// The oldest SomniQ that can run this package, when it uses something
+    /// an older one lacks. Read before anything else in the manifest, so an
+    /// older SomniQ that knows the field says plainly what to update.
+    #[serde(default)]
+    #[allow(dead_code)]
+    min_app_version: Option<String>,
+    /// What each MCP server needs; checked by [`super::capabilities`].
+    #[serde(default)]
+    #[allow(dead_code)]
+    capabilities: Option<serde_json::Value>,
+}
+
+/// The SomniQ version this is: what `minAppVersion` is compared with.
+pub const HOST_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A parse error that names a field or value this SomniQ does not know says
+/// why that can happen, instead of only that it did.
+fn explain_unknown(message: String) -> String {
+    if message.contains("unknown field") || message.contains("unknown variant") {
+        format!(
+            "{message}. This SomniQ ({HOST_APP_VERSION}) does not know it: the package may be written for a newer SomniQ. Update SomniQ, or ask the package's author to set somniq.minAppVersion so that older versions say so plainly"
+        )
+    } else {
+        message
+    }
+}
+
+/// `minAppVersion` against this SomniQ: `Some(problem)` when the package
+/// cannot run here, or the field is not a version.
+fn min_app_version_problem(required: &str) -> Option<String> {
+    let host = semver::Version::parse(HOST_APP_VERSION).ok()?;
+    match semver::Version::parse(required.trim()) {
+        Err(_) => Some(format!("somniq.minAppVersion must be a SomniQ version such as \"{HOST_APP_VERSION}\", not \"{required}\"")),
+        Ok(needed) if needed > host => Some(format!(
+            "This package needs SomniQ {needed} or newer; this is {HOST_APP_VERSION}. Update SomniQ to use it"
+        )),
+        Ok(_) => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -448,7 +569,84 @@ pub(super) const UI_CHART_KINDS: &[&str] = &["bar", "line"];
 pub(super) const UI_CLICK_ACTIONS: &[(&str, &str)] = &[
     ("prompt", "{ \"type\": \"prompt\", \"text\": string | { \"en\", \"cn\", \"es\"? }, \"send\"?: boolean }: puts text in the Chat composer, in the reader's language when text is localized; {{key}} is replaced by the form field of that key (a button has no fields); with send true the click sends it as the user's message"),
     ("open-file", "{ \"type\": \"open-file\", \"path\": project-relative file }: opens the file in the side panel"),
+    ("tool", "{ \"type\": \"tool\", \"calls\": [{ \"tool\": name, \"arguments\"?: object, \"into\"?: widget id }] } (schemaVersion 3, 1..8 calls): the click runs MCP tools of this package directly, one after another, with no conversation and no model; each tool must be listed in the panel's `tools`. A call stops the run when it fails. `into` names a widget of this panel that then shows the tool's output: its text in a markdown or notes widget, otherwise its JSON (structuredContent, or text that parses as JSON) in that widget's shape. In a form, a string \"{{key}}\" in arguments is replaced by the field of that key; a string that is only \"{{key}}\" takes the field's value as it is (true/false for a checkbox, a number for a number field). Use it for work that needs no judgment: start, stop, refresh status. Work that needs the agent to decide stays a prompt or a task"),
 ];
+/// The most MCP tools one panel may declare, and calls one action may make.
+pub(super) const MAX_UI_PANEL_TOOLS: usize = 16;
+pub(super) const MAX_UI_TOOL_CALLS: usize = 8;
+/// The arguments of one call, serialized.
+pub(super) const MAX_UI_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+const MAX_UI_TOOL_NAME_CHARS: usize = 64;
+
+/// An MCP tool name as a panel may write it: what servers name their tools.
+fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_UI_TOOL_NAME_CHARS
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+}
+
+/// What a click may refer to besides its own fields: the panel around it.
+struct ClickScope<'a> {
+    pages: bool,
+    tools: &'a [UiPanelTool],
+    widgets: &'a [UiWidget],
+}
+
+/// Every string inside a tool call's arguments, however deep.
+fn argument_strings<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(text) => found.push(text),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| argument_strings(item, found)),
+        serde_json::Value::Object(map) => map.values().for_each(|item| argument_strings(item, found)),
+        _ => {}
+    }
+}
+
+fn check_tool_calls(calls: &[UiToolCall], fields: &[&str], scope: &ClickScope) -> Result<(), String> {
+    if !scope.pages {
+        return Err(format!("A tool action needs schemaVersion {UI_SCHEMA_PAGE}"));
+    }
+    if calls.is_empty() || calls.len() > MAX_UI_TOOL_CALLS {
+        return Err(format!("A tool action needs 1..{MAX_UI_TOOL_CALLS} calls"));
+    }
+    for (index, call) in calls.iter().enumerate() {
+        let at = format!("calls/{index}");
+        if !scope.tools.iter().any(|tool| tool.name == call.tool) {
+            return Err(format!(
+                "{at}: {} is not in this panel's \"tools\"; list every tool a click runs there, so the approval card shows it",
+                call.tool
+            ));
+        }
+        if let Some(arguments) = &call.arguments {
+            let value = serde_json::Value::Object(arguments.clone());
+            if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > MAX_UI_TOOL_ARGUMENT_BYTES) {
+                return Err(format!("{at}: arguments can be at most {MAX_UI_TOOL_ARGUMENT_BYTES} bytes"));
+            }
+            let mut strings = vec![];
+            argument_strings(&value, &mut strings);
+            if let Some(key) = strings.into_iter().flat_map(placeholders).find(|key| !fields.contains(key)) {
+                return Err(format!(
+                    "{at}: {{{{{key}}}}} is not a field of this form; placeholders must name declared field keys"
+                ));
+            }
+        }
+        if let Some(target) = &call.into {
+            match scope.widgets.iter().find(|widget| widget.id() == target) {
+                None => return Err(format!("{at}/into: this panel declares no widget {target}")),
+                Some(widget) if widget.data_shape().is_none() => {
+                    return Err(format!(
+                        "{at}/into: the {} widget {target} holds no data; name a markdown, notes, json or other data widget",
+                        widget.type_name()
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
 
 fn short(text: &str, max: usize) -> bool {
     !text.trim().is_empty() && text.chars().count() <= max
@@ -467,8 +665,9 @@ fn placeholders(text: &str) -> Vec<&str> {
     found
 }
 
-fn check_click(action: &UiClick, fields: &[&str]) -> Result<(), String> {
+fn check_click(action: &UiClick, fields: &[&str], scope: &ClickScope) -> Result<(), String> {
     match action {
+        UiClick::Tool { calls } => check_tool_calls(calls, fields, scope),
         UiClick::Prompt { text, .. } => {
             if text.validate(MAX_UI_TEXT_CHARS).is_err() {
                 return Err(format!(
@@ -490,7 +689,7 @@ fn check_click(action: &UiClick, fields: &[&str]) -> Result<(), String> {
 }
 
 /// Checks the parts of a widget beyond its id and title.
-fn check_widget(widget: &UiWidget) -> Result<(), (&'static str, String)> {
+fn check_widget(widget: &UiWidget, scope: &ClickScope) -> Result<(), (&'static str, String)> {
     match widget {
         UiWidget::Table { columns, .. } => {
             let mut keys = BTreeSet::new();
@@ -540,13 +739,13 @@ fn check_widget(widget: &UiWidget) -> Result<(), (&'static str, String)> {
                 .validate(MAX_UI_TITLE_CHARS)
                 .map_err(|error| ("submit", error))?;
             let keys: Vec<&str> = keys.into_iter().collect();
-            check_click(&submit.action, &keys).map_err(|error| ("submit", error))
+            check_click(&submit.action, &keys, scope).map_err(|error| ("submit", error))
         }
         UiWidget::Button { label, action, .. } => {
             label
                 .validate(MAX_UI_TITLE_CHARS)
                 .map_err(|error| ("label", error))?;
-            check_click(action, &[]).map_err(|error| ("action", error))
+            check_click(action, &[], scope).map_err(|error| ("action", error))
         }
         _ => Ok(()),
     }
@@ -695,9 +894,19 @@ pub(super) fn inspect_ui(
             .in_file("package.json")
             .at(at)
     };
+    // First, before any field it may not know: is this SomniQ new enough?
+    if let Some(required) = value.get("minAppVersion") {
+        let problem = match required.as_str() {
+            Some(required) => min_app_version_problem(required),
+            None => Some("somniq.minAppVersion must be a version string".into()),
+        };
+        if let Some(problem) = problem {
+            return diagnostics.push(in_manifest(problem, "/somniq/minAppVersion"));
+        }
+    }
     let header: UiManifest = match serde_json::from_value(value.clone()) {
         Ok(header) => header,
-        Err(error) => return diagnostics.push(in_manifest(error.to_string(), "/somniq")),
+        Err(error) => return diagnostics.push(in_manifest(explain_unknown(error.to_string()), "/somniq")),
     };
     if header.manifest_version != UI_MANIFEST_VERSION {
         return diagnostics.push(in_manifest(
@@ -747,7 +956,7 @@ pub(super) fn inspect_ui(
     let document: UiDocument = match serde_json::from_slice(&file.bytes) {
         Ok(document) => document,
         Err(error) => {
-            return diagnostics.push(Diagnostic::error("ui", error.to_string()).in_file(file_name))
+            return diagnostics.push(Diagnostic::error("ui", explain_unknown(error.to_string())).in_file(file_name))
         }
     };
     let mut problems: Vec<(String, String)> = vec![];
@@ -884,21 +1093,53 @@ pub(super) fn inspect_ui(
                 problem(format!("{at}/page"), error);
             }
         }
+        if !panel.tools.is_empty() {
+            let mut names = BTreeSet::new();
+            let error = if !pages {
+                Some(format!("tools needs schemaVersion {UI_SCHEMA_PAGE}"))
+            } else if capabilities.mcp_servers.is_empty() {
+                Some("tools names MCP tools of this package, but the package declares no MCP server".into())
+            } else if panel.tools.len() > MAX_UI_PANEL_TOOLS {
+                Some(format!("A panel may declare at most {MAX_UI_PANEL_TOOLS} tools"))
+            } else if let Some(bad) = panel.tools.iter().find(|tool| !valid_tool_name(&tool.name) || !names.insert(&tool.name)) {
+                Some(format!(
+                    "Tool names must be unique and match [A-Za-z0-9_.-]{{1,{MAX_UI_TOOL_NAME_CHARS}}}: {}",
+                    bad.name
+                ))
+            } else if panel.page.is_none() && panel.tools.iter().any(|tool| tool.auto) {
+                Some("auto lets the panel's own page run a tool without the user's click; this panel has no page".into())
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                problem(format!("{at}/tools"), error);
+            }
+        }
+        // On a page of its own the web region can sit beside the panel's own
+        // page or widgets: they are separate frames, and the site still gets
+        // no bridge. The sidebar is too narrow to split, so there it is alone.
         if let Some(address) = &panel.web {
             let error = if !pages {
                 Some(format!("A web panel needs schemaVersion {UI_SCHEMA_PAGE}"))
             } else if brief {
                 Some(format!("A web panel cannot sit in {UI_SLOT_BRIEF}; use chat.sidebar or {UI_SLOT_NAV_PAGE}"))
-            } else if panel.page.is_some() || panel.data_panel.is_some() || panel.propose_tasks {
-                Some("A web panel shows only the web page: it takes no page, dataPanel or proposeTasks".into())
-            } else if !panel.widgets.is_empty() {
-                Some("A web panel keeps no data: remove its widgets".into())
+            } else if !page && (panel.page.is_some() || panel.data_panel.is_some() || panel.propose_tasks || !panel.tools.is_empty()) {
+                Some(format!("In chat.sidebar a web panel shows only the web page: it takes no page, dataPanel, proposeTasks or tools (a {UI_SLOT_NAV_PAGE} panel can show a page beside it)"))
+            } else if !page && !panel.widgets.is_empty() {
+                Some(format!("In chat.sidebar a web panel keeps no data: remove its widgets (a {UI_SLOT_NAV_PAGE} panel can show widgets beside it)"))
             } else {
                 check_web_address(address).err()
             };
             if let Some(error) = error {
                 problem(format!("{at}/web"), error);
             }
+        }
+        let shares_page = page && panel.web.is_some() && (panel.page.is_some() || !panel.widgets.is_empty());
+        if panel.web_layout.is_some() && !shares_page {
+            problem(
+                format!("{at}/webLayout"),
+                format!("webLayout places the web region of a {UI_SLOT_NAV_PAGE} panel that also has a page or widgets"),
+            );
         }
         // A panel that draws itself may keep no data at all.
         let fewest = usize::from(panel.page.is_none() && panel.web.is_none());
@@ -908,6 +1149,11 @@ pub(super) fn inspect_ui(
                 format!("Each UI panel must contain 1..{MAX_UI_WIDGETS} widgets (a panel with a page may have none)"),
             );
         }
+        let scope = ClickScope {
+            pages,
+            tools: &panel.tools,
+            widgets: &panel.widgets,
+        };
         let mut widgets = BTreeSet::new();
         for (position, widget) in panel.widgets.iter().enumerate() {
             let at = format!("{at}/widgets/{position}");
@@ -955,8 +1201,8 @@ pub(super) fn inspect_ui(
                 (_, Some(title)) => title
                     .validate(MAX_UI_TITLE_CHARS)
                     .map_err(|e| ("title", e))
-                    .and_then(|()| check_widget(widget)),
-                _ => check_widget(widget),
+                    .and_then(|()| check_widget(widget, &scope)),
+                _ => check_widget(widget, &scope),
             };
             if let Err((field, error)) = checked {
                 problem(format!("{at}/{field}"), error);
@@ -1595,6 +1841,243 @@ impl PluginStore {
             crate::atomic_file::write_replace_unlocked(&path, &bytes).map_err(|e| e.to_string())?;
             Ok(state)
         })
+    }
+}
+
+/// One direct tool run, checked against the reviewed declaration: the calls
+/// to make and the package servers that answer them.
+#[derive(Debug, Clone)]
+pub struct UiToolRun {
+    /// The package's approved MCP servers, by the runtime's name for them.
+    pub servers: BTreeMap<String, crate::ScopedMcpServerConfig>,
+    pub calls: Vec<UiToolCall>,
+    /// The installed version the calls come from, for the run record.
+    pub package_digest: String,
+}
+
+/// The project's record of tool runs started from panels: one JSON line per
+/// run, appended, under `.somniq/plugins`. When it grows past this, the older
+/// half moves to `tool-runs.1.jsonl` (replacing the one before).
+const TOOL_RUN_LOG: &str = "tool-runs.jsonl";
+const TOOL_RUN_LOG_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A form's value for a placeholder: a field's text, or its value as it is.
+fn fill_argument(value: &serde_json::Value, values: &BTreeMap<String, serde_json::Value>) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            // The whole string is one placeholder: the field's own value.
+            if let Some(inner) = text.trim().strip_prefix("{{").and_then(|rest| rest.strip_suffix("}}")) {
+                if !inner.contains("{{") && !inner.contains("}}") {
+                    return values
+                        .get(inner.trim())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::String(String::new()));
+                }
+            }
+            let mut out = String::new();
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find("{{") {
+                let after = &rest[start + 2..];
+                let Some(end) = after.find("}}") else { break };
+                out.push_str(&rest[..start]);
+                match values.get(after[..end].trim()) {
+                    Some(serde_json::Value::String(text)) => out.push_str(text),
+                    Some(other) => out.push_str(&other.to_string()),
+                    None => {}
+                }
+                rest = &after[end + 2..];
+            }
+            out.push_str(rest);
+            serde_json::Value::String(out)
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(|item| fill_argument(item, values)).collect()),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter().map(|(key, item)| (key.clone(), fill_argument(item, values))).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The value a tool's output puts in a widget: the text for a widget that
+/// holds text, otherwise the structured result or the text read as JSON.
+pub fn ui_tool_output_value(
+    widget: &UiWidget,
+    text: &str,
+    structured: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    if matches!(widget, UiWidget::Notes { .. }) {
+        let text: String = text.chars().take(MAX_LONG_TEXT_CHARS).collect();
+        return Ok(serde_json::Value::String(text));
+    }
+    if matches!(widget, UiWidget::Markdown { .. }) {
+        // Tools print lines; Markdown would run consecutive lines into one
+        // paragraph. A hard break at each line end keeps them as printed and
+        // changes nothing a tool wrote as Markdown on purpose.
+        let text = text.replace("\r\n", "\n").split('\n').map(str::trim_end).collect::<Vec<_>>().join("  \n");
+        let text: String = text.chars().take(MAX_LONG_TEXT_CHARS).collect();
+        return Ok(serde_json::Value::String(text));
+    }
+    if let Some(value) = structured {
+        return Ok(value.clone());
+    }
+    serde_json::from_str(text.trim()).map_err(|_| {
+        format!(
+            "the {} widget {} takes JSON ({}), but the tool returned text that is not JSON",
+            widget.type_name(),
+            widget.id(),
+            widget.data_shape().unwrap_or_default()
+        )
+    })
+}
+
+impl PluginStore {
+    /// The calls a `tool` button or form of a panel makes, with the form's
+    /// values filled in. The action comes from the reviewed declaration, never
+    /// from the caller: a view only says which widget the user clicked.
+    pub fn ui_tool_run_for_widget(
+        &self,
+        name: &str,
+        panel_id: &str,
+        widget_id: &str,
+        values: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<UiToolRun, String> {
+        let panel = self.ui_panel(name, panel_id)?;
+        let (action, fields) = match panel.widget(widget_id) {
+            Some(UiWidget::Button { action, .. }) => (action, &[][..]),
+            Some(UiWidget::Form { submit, fields, .. }) => (&submit.action, fields.as_slice()),
+            _ => return Err(format!("This panel has no button or form {widget_id}")),
+        };
+        let UiClick::Tool { calls } = action else {
+            return Err("This button does not run tools".into());
+        };
+        // Only declared fields, each a short text, a flag or a number.
+        let mut checked = BTreeMap::new();
+        for field in fields {
+            let value = match values.get(&field.key) {
+                None | Some(serde_json::Value::Null) => serde_json::Value::String(String::new()),
+                Some(serde_json::Value::String(text)) if text.chars().count() <= MAX_UI_TEXT_CHARS => {
+                    if field.input == UiInputKind::Number && !text.trim().is_empty() {
+                        let number = text
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|number| number.is_finite())
+                            .ok_or_else(|| format!("{} must be a number", field.key))?;
+                        // 3007 stays 3007, for a port or a count.
+                        if number.fract() == 0.0 && number.abs() < 9_007_199_254_740_992.0 {
+                            serde_json::Value::from(number as i64)
+                        } else {
+                            serde_json::Value::from(number)
+                        }
+                    } else {
+                        serde_json::Value::String(text.clone())
+                    }
+                }
+                Some(serde_json::Value::Bool(flag)) if field.input == UiInputKind::Checkbox => serde_json::Value::Bool(*flag),
+                Some(serde_json::Value::Number(number)) if field.input == UiInputKind::Number => serde_json::Value::Number(number.clone()),
+                Some(_) => return Err(format!("The value of {} does not fit its field", field.key)),
+            };
+            checked.insert(field.key.clone(), value);
+        }
+        if let Some(extra) = values.keys().find(|key| !fields.iter().any(|field| &field.key == *key)) {
+            return Err(format!("{extra} is not a field of this form"));
+        }
+        let calls = calls
+            .iter()
+            .map(|call| UiToolCall {
+                arguments: call.arguments.as_ref().map(|arguments| {
+                    arguments
+                        .iter()
+                        .map(|(key, value)| (key.clone(), fill_argument(value, &checked)))
+                        .collect()
+                }),
+                ..call.clone()
+            })
+            .collect();
+        Ok(UiToolRun {
+            servers: self.package_mcp_servers(name)?,
+            calls,
+            package_digest: self.installed_digest(name)?,
+        })
+    }
+
+    /// The calls a panel's own page asks for, made one after another as one
+    /// run: a click that starts several steps is one gesture, however long the
+    /// first step takes. Each tool must be one the panel declares; without the
+    /// user's click in the page every one must be `auto`.
+    pub fn ui_tool_run_for_page(
+        &self,
+        name: &str,
+        panel_id: &str,
+        calls: Vec<(String, Option<serde_json::Value>)>,
+        gesture: bool,
+    ) -> Result<UiToolRun, String> {
+        let panel = self.ui_panel(name, panel_id)?;
+        if panel.page.is_none() {
+            return Err("This panel has no page".into());
+        }
+        if calls.is_empty() || calls.len() > MAX_UI_TOOL_CALLS {
+            return Err(format!("A page runs 1..{MAX_UI_TOOL_CALLS} tool calls at a time"));
+        }
+        let mut checked = vec![];
+        for (tool, arguments) in calls {
+            let Some(declared) = panel.tools.iter().find(|declared| declared.name == tool) else {
+                return Err(format!("{tool} is not in this panel's \"tools\""));
+            };
+            if !gesture && !declared.auto {
+                return Err(format!(
+                    "somniq.tool(\"{tool}\") must follow the user's click or key press in this page; a tool the page runs by itself must be declared with \"auto\": true"
+                ));
+            }
+            let arguments = match arguments {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::Object(map)) => {
+                    if serde_json::to_vec(&map).map_or(true, |bytes| bytes.len() > MAX_UI_TOOL_ARGUMENT_BYTES) {
+                        return Err(format!("Tool arguments can be at most {MAX_UI_TOOL_ARGUMENT_BYTES} bytes"));
+                    }
+                    Some(map)
+                }
+                Some(_) => return Err("Tool arguments must be an object".into()),
+            };
+            checked.push(UiToolCall {
+                tool,
+                arguments,
+                into: None,
+            });
+        }
+        Ok(UiToolRun {
+            servers: self.package_mcp_servers(name)?,
+            calls: checked,
+            package_digest: self.installed_digest(name)?,
+        })
+    }
+
+    fn installed_digest(&self, name: &str) -> Result<String, String> {
+        Ok(self
+            .effective_record(name)?
+            .ok_or("UI plugin is not installed")?
+            .digest)
+    }
+
+    /// Append one run to the project's tool-run record. What a click ran is
+    /// part of the project's history, like an approval: who asked, which
+    /// version, which tools, how each ended. Argument values and output text
+    /// stay out (a form may carry a login code); their sizes go in.
+    pub fn record_tool_run(&self, entry: &serde_json::Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.root.join(TOOL_RUN_LOG);
+        fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
+        if fs::metadata(&path).is_ok_and(|meta| meta.len() > TOOL_RUN_LOG_BYTES) {
+            fs::rename(&path, self.root.join("tool-runs.1.jsonl")).map_err(|e| e.to_string())?;
+        }
+        let mut line = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&line))
+            .map_err(|e| e.to_string())
     }
 }
 

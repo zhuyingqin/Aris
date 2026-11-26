@@ -17,7 +17,7 @@ use std::path::Path;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{package_files, InstalledPlugin, PackageFiles, PluginMcp, PluginPreview, PluginStore, Record};
+use super::{source_files, InstalledPlugin, PackageFiles, PluginMcp, PluginPreview, PluginStore, Record};
 
 /// A package preview, plus what installing it would replace.
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +96,13 @@ pub struct McpServerDiff {
     pub env_added: Vec<String>,
     pub env_removed: Vec<String>,
     pub env_changed: Vec<String>,
+    /// What its declaration gives it that it did not have, and what it drops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<super::CapabilityChange>,
+    /// Code its command line fetches or runs from outside the snapshot, new
+    /// in this version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_added: Vec<super::LaunchNote>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -151,12 +158,35 @@ fn diff(
             .ui_panels
             .iter()
             // A panel gaining or losing its own page is a change to review.
-            // So is a web panel's address: a different site is a different panel.
-            .map(|panel| match (&panel.page, panel.propose_tasks, &panel.web) {
-                (_, _, Some(web)) => format!("{} (web: {web})", panel.id),
-                (Some(_), true, None) => format!("{} (page, tasks)", panel.id),
-                (Some(_), false, None) => format!("{} (page)", panel.id),
-                (None, _, None) => panel.id.clone(),
+            // So is a web panel's address: a different site is a different
+            // panel. A page and a site on one panel list both.
+            .map(|panel| {
+                let mut parts = vec![];
+                if panel.page.is_some() {
+                    parts.push("page".to_string());
+                    if panel.propose_tasks {
+                        parts.push("tasks".into());
+                    }
+                }
+                if let Some(web) = &panel.web {
+                    parts.push(format!("web: {web}"));
+                }
+                // Tools the panel runs without a conversation, and which of
+                // them its page may run unasked.
+                if !panel.tools.is_empty() {
+                    let tools = panel
+                        .tools
+                        .iter()
+                        .map(|tool| if tool.auto { format!("{} auto", tool.name) } else { tool.name.clone() })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    parts.push(format!("tools: {tools}"));
+                }
+                if parts.is_empty() {
+                    panel.id.clone()
+                } else {
+                    format!("{} ({})", panel.id, parts.join(", "))
+                }
             })
             .collect()
     };
@@ -220,6 +250,13 @@ fn diff(
             .filter(|(key, value)| new_env.get(*key).is_some_and(|next| next != *value))
             .map(|(key, _)| key.clone())
             .collect();
+        let capability_changes = super::capability_changes(
+            old.and_then(|server| server.capability.as_ref()),
+            new.and_then(|server| server.capability.as_ref()),
+        );
+        let launch_added: Vec<super::LaunchNote> = new
+            .map(|server| server.launch.iter().filter(|note| !old.is_some_and(|old| old.launch.contains(note))).cloned().collect())
+            .unwrap_or_default();
         let change = match (old, new) {
             (None, Some(_)) => ServerChange::Added,
             (Some(_), None) => ServerChange::Removed,
@@ -227,7 +264,9 @@ fn diff(
                 if old_line == new_line
                     && env_changed.is_empty()
                     && old.env.keys().eq(new.env.keys())
-                    && old.request_timeout_secs == new.request_timeout_secs =>
+                    && old.request_timeout_secs == new.request_timeout_secs
+                    && capability_changes.is_empty()
+                    && launch_added.is_empty() =>
             {
                 ServerChange::Unchanged
             }
@@ -249,6 +288,8 @@ fn diff(
                 .cloned()
                 .collect(),
             env_changed,
+            capabilities: capability_changes,
+            launch_added,
         });
     }
     let mut diff = CapabilityDiff {
@@ -299,7 +340,7 @@ impl PluginStore {
         Ok(PluginImportPreview { package, upgrade })
     }
 
-    fn upgrade_plan(&self, record: &Record, candidate: &PluginPreview) -> PluginUpgradePlan {
+    pub(super) fn upgrade_plan(&self, record: &Record, candidate: &PluginPreview) -> PluginUpgradePlan {
         let current = self.inspect_record(record);
         let change = if record.digest == candidate.digest {
             VersionChange::Identical
@@ -342,7 +383,7 @@ impl PluginStore {
         expected_current_digest: &str,
         approve: bool,
     ) -> Result<InstalledPlugin, String> {
-        let files = package_files(source.as_ref())?;
+        let files = source_files(source.as_ref())?;
         let source = crate::canonicalize(source).map_err(|e| e.to_string())?;
         self.replace_with(&files, &source.to_string_lossy(), expected_digest, expected_current_digest, approve)
     }
@@ -369,7 +410,7 @@ impl PluginStore {
                     .into(),
             );
         }
-        self.mutate(|| {
+        let replaced = self.mutate(|| {
             let registry = self.registry()?;
             let record = registry
                 .packages
@@ -395,6 +436,8 @@ impl PluginStore {
             // Read the approval before touching anything, so a damaged
             // approvals file stops the upgrade instead of half-applying it.
             let previous_approval = self.approved_digest(&record.name)?;
+            let previous_files = self.previous_file_set(&record.name)?;
+            let declared = super::capabilities::declared_workspace_files(&candidate.capabilities);
 
             // ── Stage: the new snapshot sits beside the old one ───────────
             self.publish_snapshot(&files, &candidate.digest)?;
@@ -403,6 +446,10 @@ impl PluginStore {
             // ── Switch: approval, then the registry ───────────────────────
             let next_approval = approve.then_some(candidate.digest.as_str());
             let moves_approval = previous_approval.as_deref() != next_approval;
+            if approve && !declared.is_empty() {
+                // The new version runs with copies of the project files as they are now.
+                self.approve_workspace_files(&record.name, &candidate.digest, &declared, None)?;
+            }
             if moves_approval {
                 self.set_approval(&record.name, next_approval)?;
             }
@@ -426,9 +473,20 @@ impl PluginStore {
                 Ok(next)
             });
             match commit {
-                Ok(next) => Ok(self.view(&next.packages[&record.name])),
+                Ok(next) => {
+                    // The old version's copies are not this version's: only an
+                    // approved version that declares files has a set, the one
+                    // just written. A stale set would keep its copies forever.
+                    if !approve || declared.is_empty() {
+                        let _ = self.withdraw_workspace_files(&record.name);
+                    }
+                    Ok(self.view(&next.packages[&record.name]))
+                }
                 Err(error) => {
                     // ── Roll back: the old version and its approval stay ──
+                    if approve && !declared.is_empty() {
+                        let _ = self.restore_file_set(&record.name, previous_files.clone());
+                    }
                     if moves_approval {
                         if let Err(restore) =
                             self.set_approval(&record.name, previous_approval.as_deref())
@@ -441,6 +499,10 @@ impl PluginStore {
                     Err(error)
                 }
             }
-        })
+        });
+        // Copies the old version was approved with, now unused, can go;
+        // the old snapshot stays as an earlier version.
+        self.collect_unused();
+        replaced
     }
 }

@@ -38,6 +38,15 @@
 
 .plugin-task-from strong { color: var(--text); font-weight: 600; }
 
+/* What does not wait for the task board: set apart from the line above it. */
+.plugin-task-effects {
+  padding: 8px 10px;
+  border-left: 2px solid var(--amber, #d29922);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--amber, #d29922) 8%, transparent);
+  color: var(--text);
+}
+
 .plugin-task-report code {
   font-family: var(--font-mono);
   font-size: 11px;

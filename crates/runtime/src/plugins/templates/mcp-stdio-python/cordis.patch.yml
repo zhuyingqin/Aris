@@ -1,6 +1,8 @@
 # Starts server.py as a stdio MCP server. Arguments starting with ./ resolve
 # inside the installed snapshot, not the draft directory; the server's working
-# directory is the project.
+# directory is its own data directory, never the project. What it may use
+# (network, project files, variables from this computer) is declared in
+# package.json under somniq.capabilities.
 - insert:
     - id: mcp
       name: '@deepseek-ai/dsh-mcp-client'

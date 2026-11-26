@@ -532,7 +532,7 @@ M1 之后的反馈是"还是三列"：三列只是示例模板的设计，但单
   - 传 `replace: true` 时，先把旧草稿改名为 `<名>-previous-N` 再写入，从不删除。
 - **版本历史**：
   - 记录：`Record.history` 记录每次被替换的版本（版本号、digest、来源、替换时间），新的在前，最多 20 条，超出上限时保留原版。`Record.original` 在安装时记下原版的 digest。在此之前装的包，若从未升级过，第一次升级时把被替换的版本当作原版。
-  - 存储：快照按内容寻址，本来就不会被清理，所以历史只是一份索引。旧版本读取时会忽略这些新字段，`Registry` 的 `deny_unknown_fields` 只作用在顶层。
+  - 存储：快照按内容寻址，历史只是一份索引。历史里列着的版本一直被当作在用，不会被回收（回收规则见 plugin-capabilities.md 的"快照回收"）。旧版本读取时会忽略这些新字段，`Registry` 的 `deny_unknown_fields` 只作用在顶层。
   - 回退：`rollback` 与 `upgrade` 共用同一个事务 `replace_with`。只能回到历史里的 digest，并且要校验快照完整、当前 digest 与用户看到的一致。回退来源按历史记录保留，被替换的版本进入历史。
   - 入口：回退只在插件页上提供，Agent 工具不能回退。用户点击"确认回退"即视为批准；插件原本在运行时，回退后继续运行。
 - **升级审批卡片**：
@@ -631,8 +631,9 @@ M1 之后的反馈是"还是三列"：三列只是示例模板的设计，但单
 所以另加一种**由宿主绘制**的面板：
 
 - `ui.json`（schemaVersion 3）的面板声明 `"web": "<地址>"`，可放 `nav.page` 或
-  `chat.sidebar`，不能放 `chat.brief`；不得同时有 `page`、`dataPanel`、`proposeTasks`、
-  `widgets`。没有包代码运行，嵌入的网站拿不到 `somniq` 桥和任何插件数据。
+  `chat.sidebar`，不能放 `chat.brief`。在 `chat.sidebar` 里它独占整个面板，不得同时有
+  `page`、`dataPanel`、`proposeTasks`、`widgets`；`nav.page` 面板可以与自绘页面或组件
+  同屏，见下文“网页与页面同屏”。嵌入的网站拿不到 `somniq` 桥和任何插件数据。
 - 地址校验（`ui.rs::check_web_address`）：
   - 只收 `https`，明文 `http` 只限 localhost、127.0.0.1、[::1]；
   - 不得带用户名或密码，长度不超过 2048；
@@ -666,3 +667,248 @@ WebView2 收到新窗口请求时，如果没有处理器，wry 会静默 `SetHa
 - 主文档里的外链点击另由 `desktop/src/externalLinks.ts` 在冒泡阶段接管，没有组件
   先认领的才处理。这样同窗口导航的外链也不会把应用窗口带走。
 - 插件自绘页面的沙箱没有 `allow-popups`，`window.open` 在框架内就被拦截，不受影响。
+
+### 网页与页面同屏（2026-11-25）
+
+起因：QQ 农场插件把“农场控制台”（自绘页面，按钮提议后台任务）和“农场面板”
+（`web: http://127.0.0.1:3007`）拆成两个导航入口，用户问为什么不能放在一起。原因有两层：
+
+- `web` 被做成面板的独占模式。校验拒绝它与 `page`、组件同在，前端三选一渲染。
+- 声明式按钮只有 `prompt` 和 `open-file` 两种动作，想“不发消息就派后台任务”只能写
+  自绘页面；自绘页面没有网络，又嵌不了 3007。
+
+独占换来的隔离并不存在。无头 Edge（与 WebView2 同内核）实测，结构照
+`pluginPageDocument.ts`：沙箱页面执行 `top.frames[i].postMessage(数据, "*")`，同窗口的
+网页框架能收到（来源为 `null`）；页面放在 `hidden` 容器里也一样。CSP 和 sandbox 都不管
+跨框架消息。Chat 视图始终挂载，切走时只是隐藏（`App.tsx`），所以 `chat.brief` 自绘页面
+与任意 `web` 面板本来就同处一个顶层文档。
+
+现在的规则：
+
+- `nav.page` 面板可以把 `web` 与 `page`（以及 `proposeTasks`、`dataPanel`）组合，或与
+  声明式组件组合。`chat.sidebar` 太窄，不分栏，`web` 仍独占。
+- 可选 `webLayout`：`below`（默认，页面或组件在上，网页在下占满宽度）或 `right`
+  （页面或组件在左，网页在右占满高度）。只能出现在既有 `web` 又有页面或组件的
+  `nav.page` 面板上，其他情况报 `/panels/N/webLayout`。
+- 宿主绘制（`PluginPage.tsx` 的 `SplitPage`）：一个页头，含包名、网页地址、重新加载、
+  在浏览器中打开；下面是两个区域，中间是可拖动、可用方向键调节、双击复位的分隔条
+  （`role="separator"`）。比例限定在 15%–85%，只有用户动过才按
+  `somniq-plugin-split:<包名>:<面板 id>` 记在 localStorage。拖动时两个框架都设为
+  `pointer-events: none`，否则指针会被框架吞掉。“重新加载”只重载网页，不动自绘页面。
+- 两个区域仍是两个框架：桥只给包的页面，网站拿不到桥和插件数据，也不能脚本化页面
+  （无源沙箱，跨源）。
+- 如实披露：既然页面能把消息送进同窗口的网页框架，批准卡片
+  （`pluginPanelNotes.ts`，对话卡片与插件页共用）把自绘页面写成“不能**直接**联网”；
+  同一个包里任何面板嵌了网页时，自绘页面的说明里点名这些地址：“它能把面板数据交给
+  本插件嵌入的网页 <地址>”。
+- 升级差异的面板键按组合列出：`<id> (page, tasks, web: <地址>)`。网页面板加上自绘页面
+  是一项要重新批准的变更。
+
+未做 / 已知限制：
+
+- 跨包通道仍在：A 包的页面也能给 B 包的网页框架发消息，前提是 B 的网站愿意接收。
+  浏览器层面挡不住；真正切断只能把网页放进原生子 webview（Tauri 多 webview），代价是
+  它会盖住应用自己的菜单和弹窗。
+- 桥上没有“重新加载网页”调用：页面派出的“启动服务”任务完成后，用户要自己点重新加载。
+- 声明式按钮仍不能提议后台任务；补一个 `task` 点击动作后，“组件 + 网页”就能完全不带
+  包代码。
+
+## 页面出口加固（2026-11-25）
+
+插件全功能审查发现，"自绘页面不能联网、不能替用户做事"在三处不成立。本节是修法。
+
+### WebRTC
+
+无头 Edge 实测：页面 CSP 写了 `connect-src 'none'; webrtc 'block'`，`RTCPeerConnection`
+照样能建，本机 UDP 监听收到页面发出的 STUN Binding Request。Chromium 不执行 CSP 的
+`webrtc` 指令，STUN/TURN 也不算 `connect-src` 请求，所以 CSP 挡不住；数据可以编在 TURN
+用户名或 STUN 主机名里带出去。现在分两层去掉 WebRTC：
+
+- 引导脚本（`pluginPageBootstrap.js`）在页面代码之前把 `RTCPeerConnection`、
+  `webkitRTCPeerConnection` 等定义成不可配置的 `undefined`；去不掉就和 IPC 一样停掉页面。
+- 页面可以再建 `srcdoc` 子框架，引导脚本不在那里运行。所以应用窗口另挂一段全框架初始化
+  脚本（`src-tauri/src/opaque_frame_guard.js`，`commands::harden_app_webview` 用
+  `initialization_script_for_all_frames` 挂到主窗口和写作伴随窗口）：凡是 `self.origin`
+  为 `"null"` 的框架（插件页面及它建的任何框架）都去掉 WebRTC；应用本身和嵌入的网页
+  （有自己的来源）不受影响。
+
+实测（`%TEMP%\somniq-pm-probe-scripts\probe.mjs`，真实引导脚本 + 真实 CSP 结构）：
+
+| 情形 | 结果 |
+| --- | --- |
+| 页面自己建 `RTCPeerConnection` | 引导脚本挡住（not a constructor） |
+| 页面建的 `srcdoc` 子框架里建，不跑全框架脚本 | 建成，收到 5 个 STUN 包 |
+| 同上，全框架脚本作为子框架第一段脚本运行 | `RTCPeerConnection` 为 `undefined`，0 个包 |
+
+无头 Edge 里用 CDP `Page.addScriptToEvaluateOnNewDocument` 注入时，脚本没有进入 `srcdoc`
+框架，所以第三行是把脚本放在子框架开头模拟的。WebView2 的初始化脚本会进入这类框架：
+M1 应用内实测时插件页面框架（本身就是 `srcdoc` 里的 `srcdoc`）里能看到 wry 注入的
+`__TAURI_INTERNALS__`。"页面建的子框架里也注入了"这一点还没有在应用里复测；macOS/Linux
+上 `initialization_script_for_all_frames` 是否进入沙箱 `srcdoc` 框架也未实测。
+
+### 插件面板里的外部图片
+
+页面经 `dataPanel` 写进宿主绘制的 markdown 组件的 `![](https://…?数据)`，原来由主窗口直接
+加载（应用 `csp` 为 `null`），不需要任何点击。现在 `MarkdownContent` 有 `remoteImages`
+开关，插件数据组件传 `false`：
+
+- 正文图片、指向图片的链接预览、`<think>` 块里的图片三条路径都拦；
+- 外部图片显示为"外部图片未加载 · 主机名"，图片链接保留为普通链接（点了才去浏览器）；
+- "外部"按 `ChatImagePreview.isRemoteImageSource` 判断：网址、`//主机`、UNC 路径
+  （Windows 读 UNC 走 SMB）、带主机的 `file://`、解码后指向 UNC 的 `asset://`。markdown
+  会把反斜杠编码成 `%5C`，预览又会解码回去，所以编码前后两种形式都要查。
+- 对话正文照旧显示外部图片。
+
+### 任务提议
+
+原来提议框一弹出就聚焦"创建并开始"，页面也不需要用户操作就能弹，拒绝后还能立刻再弹。
+用户在输入框打字时弹出，下一个回车或空格就会启动一个由页面写 prompt 的后台任务。现在：
+
+- 引导脚本在页面代码之前装上捕获阶段的 `pointerdown`、`keydown`、`click` 监听，只认
+  `isTrusted` 事件；`somniq.task` 只在用户在这个页面里点击或按键后 5 秒内有效，否则宿主
+  拒绝（"must follow the user's click or key press"）。合成事件不算，实测 `gesture: false`。
+- 用户拒绝后 6 秒内（比 5 秒手势窗口长）同一页面不能再提（`TASK_DECLINE_COOLDOWN_MS`）。
+- 提议框默认聚焦"不创建"；"创建""创建并开始"在弹出 600 ms 后才可点
+  （`TASK_PROPOSAL_ARM_MS`）。
+
+手势标记靠桥的通道令牌不被页面拿到。原来 `post` 用 `message.channel = channel` 赋值，页面
+在 `Object.prototype` 上装 `channel` 的 setter 就能偷走令牌、伪造消息。现在引导脚本先捕获
+`Object.defineProperty` 和 `Date.now`，用无原型的描述符定义 `channel`（有原型时，装在原型上
+的 `writable` getter 会以 `this.value` 读到令牌）。实测两种偷法都拿不到。
+
+### 未做
+
+- ~~`prompt`、`openPanel`、`openFile` 仍不需要用户手势、不限频。~~ 已改（见下文“第二轮”）。
+- DNS 预取等不经 CSP 的低带宽侧信道仍未评估。
+- 同窗口 postMessage 给网页框架的通道仍在（批准卡片已如实披露）。
+
+## 面板直接运行插件工具（`tools` / `tool` 动作 / `somniq.tool`，2026-11-25）
+
+起因：插件按钮原来只有 `prompt`（往对话发一段话）和 `open-file`，页面只能 `somniq.task`
+提议后台任务。凡是要运行插件代码的，都得经过一轮模型：农场插件 9 个按钮全是"发一段话让
+模型调用 qqfarm_stop，再用 PluginPanel 刷新"，控制台页"启动服务"更是一整个后台任务加一轮
+独立审查。启停、刷新、换码这类确定步骤不需要判断，应该点了就跑。
+
+### 声明
+
+- 面板 `tools`：本插件自己的 MCP 工具里，这个面板可以不经对话直接运行的那些，写工具名，
+  或 `{ "name", "auto": true }`。要求 schemaVersion 3、包里声明了 MCP 服务器、最多 16 个；
+  `auto` 只对有页面的面板有意义（页面可不经点击自行运行，适合只读的状态查询）。
+  侧栏的网页面板仍然只能是网页本身，不带 `tools`。
+- 按钮 / 表单动作 `{ "type": "tool", "calls": [{ "tool", "arguments"?, "into"? }] }`：
+  1..8 步按顺序跑，每步的工具必须在 `tools` 里；`into` 指向本面板一个存数据的组件，
+  markdown / notes 放文本，其余放 `structuredContent` 或能解析成 JSON 的文本，按该组件的
+  形状校验。表单里 `"{{key}}"` 整串替换成字段原值（复选框是布尔、数字字段是数），嵌在
+  文本里的按文本拼接。
+- 页面：`somniq.tool(name, args?)` 跑一步，`somniq.tool([{ tool, arguments? }, ...])`
+  一次点击跑多步（同一次运行，手势只在开始时检查，否则抓 Code 240 秒之后的换码会因为
+  "离点击超过 5 秒"被拒）；`somniq.stopTools()` 停掉本页还在跑的运行。没有手势时只能
+  跑 `auto` 工具；同一页面最多两个运行并行。
+
+### 执行
+
+`plugins_ui_run_tool`（`desktop/src-tauri/src/plugins.rs`）：
+
+1. 按钮 / 表单只传组件 id 和字段值，要跑的调用由后端从**已审阅的声明**里读
+   （`PluginStore::ui_tool_run_for_widget`），视图不能夹带别的工具或参数；页面调用由
+   `ui_tool_run_for_page` 再次核对 `tools` 和 `auto`。
+2. 服务器用 `package_mcp_servers` 的配置起，和对话回合起插件 MCP 一样是插件进程
+   （清空的环境、数据目录为工作目录、属于 SomniQ 进程树）。跑完不关，留给下一次点击
+   （见“第二轮”的常驻服务器）。
+3. 每步单独计时，上限 30 分钟（和农场插件声明的 `toolCallTimeoutMs` 一致），视图随时可停
+   （`plugins_ui_cancel_tool`，按运行 id）。某步失败（JSON-RPC 错误、`isError`、输出放不进
+   组件）就停在那一步，后面的不跑、不写。
+4. 写了组件就发 `plugin-panel-changed`，打开着的面板和页面刷新。
+
+用户权限模式（只读 / 工作区写入 / 完全访问）管的是模型调用工具；这里是用户自己点的，
+不经过模型，也就不走权限提示。对应的披露在批准卡片上：每个面板列出能直接运行的工具，
+以及哪些可由页面自行运行（`pluginPanelNotes.ts`）；升级时 `tools` 变化（含 `auto`）
+算面板变化，列在差异里。
+
+### 验证
+
+- runtime：声明校验（未声明、放进不存数据的组件、占位符不是字段、无 MCP 服务器、
+  `auto` 无页面、重名、schema 2、侧栏网页面板）、表单值的类型与替换、页面调用的手势与
+  `auto`、多步、输出转换、升级差异。
+- desktop：用 `mcp-stdio-python` 模板起真实服务器跑按钮——顺序调用并写组件、失败即停、
+  输出不合形状拒存、开始前停止。
+- 前端：工具按钮 / 表单（运行中计时与停止、失败原话、桌面外禁用），页面桥（auto、手势、
+  多步、停止），批准卡片文字。
+- 应用内实测（2026-11-25，debug 版）：侧栏刷新 3 秒写回三组件；控制台页加载即自动读状态，
+  真实鼠标点击走手势路径；插件页披露正确。实测发现并修了两处：工具文本的 ANSI 颜色码
+  （`strip_terminal_codes`）、多行文本写进 markdown 组件时挤成一段（每行加硬换行）。
+
+## 插件第二轮修补（2026-11-25）
+
+### 快照里的字节码
+
+快照校验比对全部文件。两个漏洞：插件的 Python 代码 import 自己的模块时，Python 会往快照里
+写 `__pycache__`，快照随即“被改过”；包里也可以带一个与 `.py` 不一致的 pyc（不检查源码的
+hash 型 pyc），审的是源码、跑的是字节码。修法：
+
+- 读草稿（预览、安装、升级、卡片里的文件列表）用 `source_files`，跳过 `__pycache__` 和
+  `.pyc` / `.pyo`；读快照仍用严格的 `package_files`，之后出现的字节码照样算改动。
+  已有快照里安装时带进去的 pyc 不受影响（它们本就算在 digest 里）。
+- 插件进程最后设 `PYTHONPYCACHEPREFIX=<数据目录>/.pycache`：Python 只在那里读写字节码，
+  快照里的 pyc 不再被读。`PYTHONPYCACHEPREFIX`、`PYTHONDONTWRITEBYTECODE` 加进保留名单。
+- 没做快照只读：Windows 上只读文件会让卸载删不掉。
+
+### 升级、回退如实列出变化
+
+- 插件页的升级预览也列出改动的文件（`ChangedFiles`，复用 Chat 卡片的逐行差异）；声明没变
+  但文件变了时，不再说“没有变化”，而是“声明没变，但有 N 个文件改了”。
+- Chat 卡片：环境变量**值**变了（名字没变）也列出来（只列名称），`executionUnchanged`
+  要求每个服务器都 `unchanged`。
+- 回退：先用 `plugins_rollback_preview` 取那个版本相对当前版本的能力差异和文件改动，显示后
+  “回退”才可点；那个版本通不过现在的检查时，回退后保持停用、不批准。
+
+### 任务提议卡片
+
+加一行：只有文件要等验收；任务调用的插件工具（MCP）和命令立刻在本机生效、不能撤回；
+按用户的默认权限运行，权限不够时会被拒绝。
+
+### 面板工具运行
+
+- 常驻服务器：一次运行后服务器留着（按插件名 + 每个服务器配置的 hash 记），空闲 5 分钟
+  关；正在被另一个运行用（比如 240 秒的抓 Code）时这次运行自己起一套、用完关。被停止、
+  超时或传输出错的运行，其服务器不再复用。启用 / 停用 / 全局开关 / 升级 / 回退 / 删除 /
+  Agent 或卡片改了插件，都关掉全部常驻服务器。实测同一服务器连续两次点击 pid 相同。
+- 页面不经点击自行运行的工具，每页每分钟最多 12 次。
+- 运行记录：每次运行往项目的 `.somniq/plugins/tool-runs.jsonl` 追加一行——时间、插件与版本
+  digest、面板、从哪里发起（按钮 / 页面）、是否用户点击、计划的调用（工具名、参数名、写到
+  哪个组件）、每步结果（成败、写到哪里、输出字数、耗时）、是否被停、错误。参数值和输出
+  正文不记（表单里可能是登录 Code）。超过 2 MB 时旧的挪到 `tool-runs.1.jsonl`。
+
+### 声明最低版本
+
+已经发布的旧版本只会对新字段报“unknown field”，补救不了。往后：
+
+- `somniq.minAppVersion`：在解析清单其余部分之前先比对；本机版本更旧时只给一条
+  “需要 SomniQ X 或更新，这是 Y，请更新”。
+- 清单或 `ui.json` 里出现不认识的字段 / 取值时，错误后面说明“可能是为更新的 SomniQ 写的”。
+- `inspect` 的规则里给出 `hostVersion`，Agent 写用到新功能的插件时据此填写。
+
+### 页面保存冲突
+
+页面保存时碰上别人（Agent）刚写过：重读一次；Agent 改的是别的组件就照常再存；改的是
+同一个组件就拒绝这次保存，并把 Agent 的新值推给页面，由页面决定是否再存。以前会直接拿
+页面的值覆盖。
+
+### 页面切换动作
+
+`somniq.prompt`、`somniq.openFile`、`somniq.openPanel` 只在用户在页面里点击或按键后 5 秒内
+有效，且每秒至多一次，否则忽略；引导脚本随消息带上手势标记。
+
+### 验证
+
+runtime 插件测试 89 个（新增：字节码不进包且之后出现算改动、Python 进程字节码写到数据目录
+（真实进程）、回退预览、运行记录与轮转、最低版本与未知字段说明）；desktop 插件测试 16 个
+（常驻服务器复用 / 变更后与被停后不复用、环境变量值变化不折叠卡片、颜色码）；前端：插件页
+升级文件列表与回退预览、Chat 卡片环境变量值、任务卡说明、页面冲突、切换动作的手势与限频、
+自行运行限频。第二轮改动未做应用内实测。
+
+### 未做
+
+- 快照未设只读；Agent 可无卡片停用审稿细则包；保留环境变量名单仍缺 `PYTHONUSERBASE` 等；
+  预览向模型透露细则 id；页面内联器缺陷；每次读取都重算快照校验值。
+- 运行记录目前只是文件，插件页还没有界面查看。

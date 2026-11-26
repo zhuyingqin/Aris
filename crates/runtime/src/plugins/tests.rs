@@ -45,7 +45,9 @@ fn fixture(root: &Path, name: &str) -> PathBuf {
         source.join("package.json"),
         serde_json::to_vec(&serde_json::json!({
             "name": name, "version":"1.2.3", "description":"Evidence bundle",
-            "dsh":{"manifestVersion":1,"bundle":{"patch":["base.yml","overlay.yml"]}}
+            "dsh":{"manifestVersion":1,"bundle":{"patch":["base.yml","overlay.yml"]}},
+            // Its MCP server says what it needs, or it cannot be enabled.
+            "somniq":{"manifestVersion":1,"capabilities":{"schemaVersion":1,"mcp":{"evidence":{"network":{"access":"none"},"workspace":"none"}}}}
         }))
         .unwrap(),
     )
@@ -1259,6 +1261,8 @@ fn second_fixture(root: &Path) -> PathBuf {
             .replace("serverName: evidence", "serverName: second");
         fs::write(source.join(file), patch).unwrap();
     }
+    let manifest = fs::read_to_string(source.join("package.json")).unwrap().replace("\"evidence\":{\"network\"", "\"second\":{\"network\"");
+    fs::write(source.join("package.json"), manifest).unwrap();
     fs::remove_dir_all(source.join("skills/plugin-evidence")).unwrap();
     fs::create_dir_all(source.join("skills/plugin-second")).unwrap();
     fs::write(
@@ -1313,6 +1317,7 @@ fn a_frozen_plugin_set_survives_a_mid_run_toggle() {
             name: "first".into(),
             version: "1.2.3".into(),
             digest: first.digest.clone(),
+            files: None,
         }]
     );
     // Only the skill directory is readable, never the whole snapshot.
@@ -2422,6 +2427,7 @@ fn a_changed_criterion_is_an_upgrade_change_to_review() {
 
 fn web_fixture(root: &Path, name: &str, version: &str, web: &str) -> PathBuf {
     let source = ui_fixture(&root.join(version), name);
+    fs::write(source.join("page.html"), "<!doctype html><p>console</p>").unwrap();
     let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
     manifest["version"] = version.into();
     fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
@@ -2478,11 +2484,59 @@ fn a_web_panel_embeds_only_a_checked_address_and_nothing_else() {
     let long = format!("https://example.org/{}", "a".repeat(2048));
     assert!(problems(&|v| v["panels"][0]["web"] = long.clone().into())[0].1.contains("at most"));
 
-    // A web panel is only the web page: no package code, no data.
-    let found = problems(&|v| v["panels"][0]["widgets"] = serde_json::json!([{"id":"n","type":"notes","title":"N"}]));
+    // In the sidebar a web panel is only the web page: no package code, no data.
+    let sidebar = |v: &mut serde_json::Value| {
+        v["panels"][0]["slot"] = "chat.sidebar".into();
+        v["panels"][0]["scope"] = "session".into();
+    };
+    let found = problems(&|v| {
+        sidebar(v);
+        v["panels"][0]["widgets"] = serde_json::json!([{"id":"n","type":"notes","title":"N"}]);
+    });
     assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("keeps no data")), "{found:?}");
-    let found = problems(&|v| v["panels"][0]["page"] = "./ui.json".into());
-    assert!(found.iter().any(|(at, _)| at == "/panels/0/web"), "{found:?}");
+    let found = problems(&|v| {
+        sidebar(v);
+        v["panels"][0]["page"] = "./page.html".into();
+    });
+    assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("shows only the web page")), "{found:?}");
+
+    // On a page of its own the site can share the page with widgets, or with
+    // the package's page and the tasks it proposes, in either layout.
+    assert!(problems(&|v| v["panels"][0]["widgets"] = serde_json::json!([{"id":"n","type":"notes","title":"N"}])).is_empty());
+    for layout in [None, Some("below"), Some("right")] {
+        let found = problems(&|v| {
+            v["panels"][0]["page"] = "./page.html".into();
+            v["panels"][0]["proposeTasks"] = true.into();
+            v["panels"][0]["widgets"] = serde_json::json!([{"id":"result","type":"markdown","title":"Result"}]);
+            if let Some(layout) = layout {
+                v["panels"][0]["webLayout"] = layout.into();
+            }
+        });
+        assert!(found.is_empty(), "{layout:?}: {found:?}");
+    }
+    let preview = {
+        let mut value = base.clone();
+        value["panels"][0]["page"] = "./page.html".into();
+        value["panels"][0]["webLayout"] = "right".into();
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        store.preview(&source).unwrap()
+    };
+    assert_eq!(preview.capabilities.ui_panels[0].web_layout, Some(super::UiWebLayout::Right));
+    // webLayout places a site beside something: never on a site alone or without one.
+    let found = problems(&|v| v["panels"][0]["webLayout"] = "right".into());
+    assert!(found.iter().any(|(at, _)| at == "/panels/0/webLayout"), "{found:?}");
+    let found = problems(&|v| {
+        v["panels"][0].as_object_mut().unwrap().remove("web");
+        v["panels"][0]["page"] = "./page.html".into();
+        v["panels"][0]["webLayout"] = "below".into();
+    });
+    assert!(found.iter().any(|(at, _)| at == "/panels/0/webLayout"), "{found:?}");
+    assert!(!problems(&|v| {
+        v["panels"][0]["page"] = "./page.html".into();
+        v["panels"][0]["webLayout"] = "left".into();
+    })
+    .is_empty());
+
     let found = problems(&|v| v["panels"][0]["slot"] = "chat.brief".into());
     assert!(found.iter().any(|(at, m)| at == "/panels/0/web" && m.contains("chat.brief")), "{found:?}");
     let found = problems(&|v| v["schemaVersion"] = 2.into());
@@ -2501,6 +2555,25 @@ fn changing_a_web_panels_address_is_an_upgrade_change_to_review() {
     let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
     assert!(plan.diff.changed);
     assert_eq!(plan.diff.ui_panels.added, ["tool (web: https://tool.example.org)"]);
+    assert_eq!(plan.diff.ui_panels.removed, ["tool (web: http://localhost:3007)"]);
+}
+
+#[test]
+fn a_page_joining_a_web_panel_is_an_upgrade_change_to_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("web-console-upgrade");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &web_fixture(temp.path(), "@lab/tool", "1.0.0", "http://localhost:3007"));
+    let next = web_fixture(temp.path(), "@lab/tool", "1.1.0", "http://localhost:3007");
+    let mut ui: serde_json::Value = serde_json::from_slice(&fs::read(next.join("ui.json")).unwrap()).unwrap();
+    ui["panels"][0]["page"] = "./page.html".into();
+    ui["panels"][0]["proposeTasks"] = true.into();
+    fs::write(next.join("ui.json"), serde_json::to_vec(&ui).unwrap()).unwrap();
+    let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
+    assert!(plan.diff.changed);
+    assert_eq!(plan.diff.ui_panels.added, ["tool (page, tasks, web: http://localhost:3007)"]);
     assert_eq!(plan.diff.ui_panels.removed, ["tool (web: http://localhost:3007)"]);
 }
 
@@ -2826,4 +2899,844 @@ fn the_configuration_trust_store_is_refused_but_plugin_data_is_not() {
     assert!(!is_trust_store_path(&config.join("plugin-data").join("x")));
     let moved = format!("echo {{}} > {}", config.join("plugins").join("global.json").display());
     assert!(command_names_plugin_store(&moved), "{moved}");
+}
+
+/// A package with an MCP server and two panels that run its tools: a console
+/// page that may check status by itself, and a sidebar panel whose button and
+/// form run tools and show their output.
+fn tool_fixture(root: &Path, version: &str) -> PathBuf {
+    let source = fixture(&root.join(version), "@lab/farm");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest["version"] = version.into();
+    manifest["somniq"]["ui"] = "ui.json".into();
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    fs::write(source.join("page.html"), "<!doctype html><p>console</p>").unwrap();
+    fs::write(source.join("ui.json"), serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 3,
+        "panels": [{
+            "id": "console", "slot": "nav.page", "title": "Console", "scope": "project", "page": "./page.html",
+            "tools": ["farm_start", { "name": "farm_status", "auto": true }],
+            "widgets": [{ "id": "state", "type": "json", "title": "State" }]
+        }, {
+            "id": "status", "slot": "chat.sidebar", "title": "Farm", "scope": "project",
+            "tools": ["farm_start", "farm_stop", "farm_status", "farm_apply"],
+            "widgets": [
+                { "id": "status", "type": "markdown", "title": "Service" },
+                { "id": "numbers", "type": "metrics", "title": "Numbers" },
+                { "id": "start", "type": "button", "label": "Start", "action": { "type": "tool", "calls": [
+                    { "tool": "farm_start" }, { "tool": "farm_status", "into": "status" }
+                ] } },
+                { "id": "apply", "type": "form", "title": "Apply", "fields": [
+                    { "key": "code", "label": "Code", "input": "text" },
+                    { "key": "force", "label": "Force", "input": "checkbox" },
+                    { "key": "port", "label": "Port", "input": "number" }
+                ], "submit": { "label": "Apply", "action": { "type": "tool", "calls": [
+                    { "tool": "farm_apply", "arguments": {
+                        "code": "{{code}}", "force": "{{force}}", "port": "{{ port }}",
+                        "note": "code {{code}} on {{port}}", "nested": ["{{code}}", 3]
+                    } }
+                ] } } }
+            ]
+        }]
+    })).unwrap()).unwrap();
+    source
+}
+
+#[test]
+fn a_panel_runs_only_the_mcp_tools_it_declares() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = tool_fixture(temp.path(), "1.0.0");
+    let base: serde_json::Value = serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    let problems = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        fs::write(source.join("ui.json"), serde_json::to_vec(&value).unwrap()).unwrap();
+        let preview = store.preview(&source).unwrap();
+        assert_eq!(preview.can_enable, preview.diagnostics.is_empty());
+        preview.diagnostics.into_iter().map(|d| (d.path.unwrap_or_default(), d.message)).collect::<Vec<_>>()
+    };
+    let has = |found: &[(String, String)], at: &str, text: &str| found.iter().any(|(path, message)| path == at && message.contains(text));
+    assert!(problems(&|_| {}).is_empty());
+    let preview = store.preview(&source).unwrap();
+    assert_eq!(preview.capabilities.ui_panels[0].tools, [
+        UiPanelTool { name: "farm_start".into(), auto: false },
+        UiPanelTool { name: "farm_status".into(), auto: true },
+    ]);
+
+    // A click runs only what the panel lists, so the card shows every tool.
+    let found = problems(&|v| v["panels"][1]["widgets"][2]["action"]["calls"][0]["tool"] = "farm_wipe".into());
+    assert!(has(&found, "/panels/1/widgets/2/action", "farm_wipe"), "{found:?}");
+    // Output goes into a widget of this panel that holds data.
+    let found = problems(&|v| v["panels"][1]["widgets"][2]["action"]["calls"][1]["into"] = "start".into());
+    assert!(has(&found, "/panels/1/widgets/2/action", "holds no data"), "{found:?}");
+    let found = problems(&|v| v["panels"][1]["widgets"][2]["action"]["calls"][1]["into"] = "nowhere".into());
+    assert!(has(&found, "/panels/1/widgets/2/action", "declares no widget nowhere"), "{found:?}");
+    // A placeholder names a field of the form, however deep it sits.
+    let found = problems(&|v| v["panels"][1]["widgets"][3]["submit"]["action"]["calls"][0]["arguments"]["nested"][0] = "{{secret}}".into());
+    assert!(has(&found, "/panels/1/widgets/3/submit", "{{secret}}"), "{found:?}");
+    let found = problems(&|v| v["panels"][1]["widgets"][2]["action"]["calls"] = serde_json::json!([]));
+    assert!(has(&found, "/panels/1/widgets/2/action", "1..8 calls"), "{found:?}");
+    // auto lets a page run a tool unasked; a panel without a page has none.
+    let found = problems(&|v| v["panels"][1]["tools"][0] = serde_json::json!({ "name": "farm_start", "auto": true }));
+    assert!(has(&found, "/panels/1/tools", "no page"), "{found:?}");
+    let found = problems(&|v| v["panels"][1]["tools"][1] = "farm_start".into());
+    assert!(has(&found, "/panels/1/tools", "unique"), "{found:?}");
+    let found = problems(&|v| v["panels"][1]["tools"][1] = "farm stop!".into());
+    assert!(has(&found, "/panels/1/tools", "farm stop!"), "{found:?}");
+    let found = problems(&|v| v["panels"][1]["tools"][1] = serde_json::json!({ "name": "farm_stop", "when": "always" }));
+    assert!(!found.is_empty(), "an unknown key in a tool entry is refused");
+    // Schema 2 had no tools.
+    let found = problems(&|v| v["schemaVersion"] = 2.into());
+    assert!(has(&found, "/panels/1/tools", "schemaVersion 3"), "{found:?}");
+    // A web panel in the sidebar is still the site alone.
+    let found = problems(&|v| {
+        v["panels"][1]["web"] = "http://localhost:3007".into();
+        v["panels"][1]["widgets"] = serde_json::json!([]);
+    });
+    assert!(has(&found, "/panels/1/web", "tools"), "{found:?}");
+
+    // Tools are the package's own: a package with no MCP server has none to run.
+    fs::write(source.join("ui.json"), serde_json::to_vec(&base).unwrap()).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("dsh");
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let found = store.preview(&source).unwrap().diagnostics.into_iter().map(|d| (d.path.unwrap_or_default(), d.message)).collect::<Vec<_>>();
+    assert!(has(&found, "/panels/0/tools", "no MCP server"), "{found:?}");
+}
+
+#[test]
+fn a_tool_click_takes_its_calls_from_the_declaration_and_the_form_values_into_its_arguments() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("farm-project");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &tool_fixture(temp.path(), "1.0.0"));
+
+    // A button: its own calls, served with the package's approved server.
+    let run = store.ui_tool_run_for_widget("@lab/farm", "status", "start", &BTreeMap::new()).unwrap();
+    assert_eq!(run.calls.iter().map(|call| call.tool.as_str()).collect::<Vec<_>>(), ["farm_start", "farm_status"]);
+    assert_eq!(run.calls[1].into.as_deref(), Some("status"));
+    assert_eq!(run.servers.len(), 1);
+    assert!(run.servers.keys().all(|name| name.ends_with("_evidence")), "{:?}", run.servers.keys());
+
+    // A form: a value that is the whole placeholder keeps its type; one
+    // inside other text is spliced in as text.
+    let values = BTreeMap::from([
+        ("code".to_string(), serde_json::json!("A1\"B")),
+        ("force".to_string(), serde_json::json!(true)),
+        ("port".to_string(), serde_json::json!("3007")),
+    ]);
+    let run = store.ui_tool_run_for_widget("@lab/farm", "status", "apply", &values).unwrap();
+    let arguments = serde_json::Value::Object(run.calls[0].arguments.clone().unwrap());
+    assert_eq!(arguments, serde_json::json!({
+        "code": "A1\"B", "force": true, "port": 3007,
+        "note": "code A1\"B on 3007", "nested": ["A1\"B", 3]
+    }));
+    // An empty field is an empty string, not a missing argument.
+    let run = store.ui_tool_run_for_widget("@lab/farm", "status", "apply", &BTreeMap::new()).unwrap();
+    assert_eq!(run.calls[0].arguments.as_ref().unwrap()["code"], "");
+
+    // Only declared fields, each in its field's kind.
+    let refused = |values: BTreeMap<String, serde_json::Value>| store.ui_tool_run_for_widget("@lab/farm", "status", "apply", &values).unwrap_err();
+    assert!(refused(BTreeMap::from([("extra".to_string(), serde_json::json!("x"))])).contains("extra"));
+    assert!(refused(BTreeMap::from([("port".to_string(), serde_json::json!("not a port"))])).contains("number"));
+    assert!(refused(BTreeMap::from([("code".to_string(), serde_json::json!({"x": 1}))])).contains("code"));
+    assert!(refused(BTreeMap::from([("code".to_string(), serde_json::json!("x".repeat(4001)))])).contains("code"));
+    // A widget that runs nothing, or none at all, is refused.
+    assert!(store.ui_tool_run_for_widget("@lab/farm", "status", "status", &BTreeMap::new()).is_err());
+    assert!(store.ui_tool_run_for_widget("@lab/farm", "status", "ghost", &BTreeMap::new()).is_err());
+
+    // A page runs declared tools as one run; unasked only auto ones.
+    let page = |calls: &[(&str, Option<serde_json::Value>)], gesture: bool| {
+        store.ui_tool_run_for_page(
+            "@lab/farm",
+            "console",
+            calls.iter().map(|(tool, arguments)| (tool.to_string(), arguments.clone())).collect(),
+            gesture,
+        )
+    };
+    let run = page(&[("farm_status", None)], false).unwrap();
+    assert_eq!(run.calls[0].tool, "farm_status");
+    assert!(run.calls[0].into.is_none());
+    let unasked = page(&[("farm_start", None)], false).unwrap_err();
+    assert!(unasked.contains("click"), "{unasked}");
+    // One click may start several steps, however long the first one takes.
+    let run = page(&[("farm_start", Some(serde_json::json!({"port": 1}))), ("farm_status", None)], true).unwrap();
+    assert_eq!(run.calls.iter().map(|call| call.tool.as_str()).collect::<Vec<_>>(), ["farm_start", "farm_status"]);
+    assert_eq!(run.calls[0].arguments.as_ref().unwrap()["port"], 1);
+    // Unasked, every step must be auto.
+    assert!(page(&[("farm_status", None), ("farm_start", None)], false).is_err());
+    assert!(page(&[], true).is_err());
+    assert!(page(&vec![("farm_status", None); MAX_UI_TOOL_CALLS + 1], false).is_err());
+    // Declared on another panel is not declared here; a panel without a page has no page calls.
+    assert!(page(&[("farm_stop", None)], true).is_err());
+    assert!(store.ui_tool_run_for_page("@lab/farm", "status", vec![("farm_stop".into(), None)], true).is_err());
+    assert!(page(&[("farm_start", Some(serde_json::json!([1])))], true).is_err());
+    let big = serde_json::json!({ "blob": "x".repeat(MAX_UI_TOOL_ARGUMENT_BYTES) });
+    assert!(page(&[("farm_start", Some(big))], true).is_err());
+
+    // Turned off, nothing runs.
+    store.set_enabled("@lab/farm", false).unwrap();
+    assert!(store.ui_tool_run_for_widget("@lab/farm", "status", "start", &BTreeMap::new()).is_err());
+    assert!(page(&[("farm_status", None)], false).is_err());
+}
+
+#[test]
+fn a_tools_output_goes_into_a_widget_in_that_widgets_shape() {
+    let markdown = UiWidget::Markdown { id: "status".into(), title: UiText::Plain("Status".into()) };
+    let metrics = UiWidget::Metrics { id: "numbers".into(), title: UiText::Plain("Numbers".into()) };
+    // Text widgets take the text, even when it looks like JSON.
+    assert_eq!(ui_tool_output_value(&markdown, "{\"a\":1}", Some(&serde_json::json!({"a": 1}))).unwrap(), "{\"a\":1}");
+    // Printed lines stay lines in Markdown.
+    assert_eq!(ui_tool_output_value(&markdown, "Source: ok \r\nBuild: done\n\nPID 4", None).unwrap(), "Source: ok  \nBuild: done  \n  \nPID 4");
+    let notes = UiWidget::Notes { id: "notes".into(), title: UiText::Plain("Notes".into()) };
+    assert_eq!(ui_tool_output_value(&notes, "a\nb", None).unwrap(), "a\nb");
+    // Data widgets take the structured result first, then the text as JSON.
+    let structured = serde_json::json!([{"label": "Up", "value": 1}]);
+    assert_eq!(ui_tool_output_value(&metrics, "ignored", Some(&structured)).unwrap(), structured);
+    assert_eq!(ui_tool_output_value(&metrics, " [{\"label\":\"Up\",\"value\":2}] ", None).unwrap(), serde_json::json!([{"label": "Up", "value": 2}]));
+    let error = ui_tool_output_value(&metrics, "Service is up", None).unwrap_err();
+    assert!(error.contains("metrics widget numbers takes JSON"), "{error}");
+}
+
+#[test]
+fn a_change_to_the_tools_a_panel_runs_is_an_upgrade_change_to_review() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("farm-upgrade");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &tool_fixture(temp.path(), "1.0.0"));
+    let next = tool_fixture(temp.path(), "1.1.0");
+    let mut ui: serde_json::Value = serde_json::from_slice(&fs::read(next.join("ui.json")).unwrap()).unwrap();
+    // The page may now start the service by itself.
+    ui["panels"][0]["tools"][0] = serde_json::json!({ "name": "farm_start", "auto": true });
+    fs::write(next.join("ui.json"), serde_json::to_vec(&ui).unwrap()).unwrap();
+    let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
+    assert!(plan.diff.changed);
+    assert_eq!(plan.diff.ui_panels.added, ["console (page, tools: farm_start auto farm_status auto)"]);
+    assert_eq!(plan.diff.ui_panels.removed, ["console (page, tools: farm_start farm_status auto)"]);
+}
+
+#[test]
+fn a_package_never_carries_python_bytecode() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = test_store(&temp, &workspace);
+    let source = fixture(temp.path(), "@test/evidence");
+    let clean = store.preview(&source).unwrap().digest;
+    // Running a draft's scripts leaves bytecode behind; it is not part of the package.
+    fs::create_dir_all(source.join("__pycache__")).unwrap();
+    fs::write(source.join("__pycache__/server.cpython-312.pyc"), b"\x00bytecode").unwrap();
+    fs::create_dir_all(source.join("skills/plugin-evidence/__pycache__")).unwrap();
+    fs::write(source.join("skills/plugin-evidence/__pycache__/x.cpython-312.pyc"), b"x").unwrap();
+    fs::write(source.join("stray.PYC"), b"x").unwrap();
+    assert_eq!(store.preview(&source).unwrap().digest, clean);
+    let installed = install_enabled(&store, &source);
+    let snapshot = store.snapshot_path(&installed.digest);
+    assert!(!snapshot.join("__pycache__").exists());
+    assert!(!snapshot.join("stray.PYC").exists());
+    assert!(!snapshot.join("skills/plugin-evidence/__pycache__").exists());
+    // Bytecode that appears in a snapshot afterwards is still a change to it.
+    fs::create_dir_all(snapshot.join("__pycache__")).unwrap();
+    fs::write(snapshot.join("__pycache__/server.cpython-312.pyc"), b"x").unwrap();
+    let listed = store.list().unwrap();
+    assert!(listed[0].package.diagnostics.iter().any(|d| d.code == "integrity"), "{:?}", listed[0].package.diagnostics);
+}
+
+#[test]
+fn going_back_shows_what_that_version_changes_before_it_is_approved() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("rollback-preview");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let v1 = install_enabled(&store, &tool_fixture(temp.path(), "1.0.0"));
+    // 1.1.0 runs different server code under the same declarations.
+    let next = tool_fixture(temp.path(), "1.1.0");
+    fs::write(next.join("server.py"), "# a different server\n").unwrap();
+    let v2 = store.preview(&next).unwrap();
+    store.upgrade(&next, &v2.digest, &v1.digest, true).unwrap();
+
+    let back = store.rollback_preview("@lab/farm", &v1.digest).unwrap();
+    assert_eq!((back.version.as_str(), back.digest.as_str(), back.can_enable), ("1.0.0", v1.digest.as_str(), true));
+    assert_eq!(back.plan.current_version, "1.1.0");
+    assert_eq!(back.plan.change, VersionChange::Downgrade);
+    // Nothing declared differs, but the code does: the files say so.
+    assert!(!back.plan.diff.changed);
+    let files: Vec<_> = back.files.iter().map(|file| (file.path.as_str(), file.change)).collect();
+    assert!(files.contains(&("server.py", FileChangeKind::Changed)), "{files:?}");
+    assert!(files.contains(&("package.json", FileChangeKind::Changed)), "{files:?}");
+    let server = back.files.iter().find(|file| file.path == "server.py").unwrap();
+    assert_eq!(server.before.as_deref(), Some("# a different server\n"));
+    // Only a version this plugin had.
+    assert!(store.rollback_preview("@lab/farm", &"0".repeat(64)).is_err());
+    assert!(store.rollback_preview("@lab/other", &v1.digest).is_err());
+}
+
+#[test]
+fn every_panel_tool_run_is_recorded_in_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("farm-record");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let installed = install_enabled(&store, &tool_fixture(temp.path(), "1.0.0"));
+    // The plan names the version its calls come from.
+    let run = store.ui_tool_run_for_widget("@lab/farm", "status", "start", &BTreeMap::new()).unwrap();
+    assert_eq!(run.package_digest, installed.digest);
+
+    store.record_tool_run(&serde_json::json!({ "plugin": "@lab/farm", "n": 1 })).unwrap();
+    store.record_tool_run(&serde_json::json!({ "plugin": "@lab/farm", "n": 2 })).unwrap();
+    let log = crate::somniq_project_dir(&project).join("plugins").join("tool-runs.jsonl");
+    let lines: Vec<serde_json::Value> = fs::read_to_string(&log).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(lines.iter().map(|line| line["n"].as_i64().unwrap()).collect::<Vec<_>>(), [1, 2]);
+    // A record that grew too large moves aside and a new one starts.
+    fs::write(&log, vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+    store.record_tool_run(&serde_json::json!({ "n": 3 })).unwrap();
+    assert_eq!(fs::read_to_string(&log).unwrap().trim(), "{\"n\":3}");
+    assert!(log.with_file_name("tool-runs.1.jsonl").exists());
+}
+
+#[test]
+fn a_package_for_a_newer_somniq_says_so_instead_of_naming_a_field() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_store(&temp, temp.path().join("project"));
+    let source = tool_fixture(temp.path(), "1.0.0");
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    let with_min = |min: serde_json::Value| {
+        let mut next = manifest.clone();
+        next["somniq"]["minAppVersion"] = min;
+        fs::write(source.join("package.json"), serde_json::to_vec(&next).unwrap()).unwrap();
+        store.preview(&source).unwrap().diagnostics.into_iter().map(|d| (d.path.unwrap_or_default(), d.message)).collect::<Vec<_>>()
+    };
+    // Newer than this SomniQ: one plain message, before any field it may not know.
+    let found = with_min("999.0.0".into());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "/somniq/minAppVersion");
+    assert!(found[0].1.contains(&format!("needs SomniQ 999.0.0 or newer; this is {HOST_APP_VERSION}")), "{found:?}");
+    // This version or older runs it.
+    assert!(with_min(HOST_APP_VERSION.into()).is_empty());
+    assert!(with_min("0.1.0".into()).is_empty());
+    let found = with_min("soon".into());
+    assert!(found.iter().any(|(at, message)| at == "/somniq/minAppVersion" && message.contains("SomniQ version")), "{found:?}");
+    assert!(!with_min(4.into()).is_empty());
+
+    // Without it, a field this SomniQ does not know is explained, not only named.
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut ui: serde_json::Value = serde_json::from_slice(&fs::read(source.join("ui.json")).unwrap()).unwrap();
+    ui["panels"][0]["shortcuts"] = serde_json::json!(["ctrl+r"]);
+    fs::write(source.join("ui.json"), serde_json::to_vec(&ui).unwrap()).unwrap();
+    let found = store.preview(&source).unwrap().diagnostics;
+    assert!(found.iter().any(|d| d.message.contains("unknown field `shortcuts`") && d.message.contains("may be written for a newer SomniQ")), "{found:?}");
+}
+
+/// `fixture` with one change to its capability declaration.
+fn declared_fixture(root: &Path, name: &str, declare: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+    let source = fixture(root, name);
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    declare(&mut manifest["somniq"]["capabilities"]["mcp"]["evidence"]);
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    source
+}
+
+fn problems_of(store: &PluginStore, source: &Path) -> Vec<(String, String, String)> {
+    let preview = store.preview(source).unwrap();
+    assert_eq!(preview.can_enable, !preview.diagnostics.iter().any(|d| d.severity == "error"));
+    preview.diagnostics.into_iter().map(|d| (d.code, d.path.unwrap_or_default(), d.message)).collect()
+}
+
+#[test]
+fn every_mcp_server_says_what_it_needs_and_nothing_else() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("scripts")).unwrap();
+    fs::write(project.join("scripts/normalize.py"), "print(1)\n").unwrap();
+    let store = test_store(&temp, &project);
+    let has = |found: &[(String, String, String)], code: &str, at: &str| found.iter().any(|(c, path, _)| c == code && path.starts_with(at));
+    let mut n = 0;
+    let mut check = |declare: &dyn Fn(&mut serde_json::Value)| {
+        n += 1;
+        let source = declared_fixture(&temp.path().join(format!("case{n}")), "@test/evidence", |value| declare(value));
+        problems_of(&store, &source)
+    };
+
+    // The fixture's own declaration passes and is attached to its server.
+    assert!(check(&|_| {}).is_empty());
+    let found = check(&|value| {
+        value["env"] = serde_json::json!(["CROSSREF_MAILTO"]);
+        value["network"] = serde_json::json!({ "access": "required", "hosts": ["api.crossref.org", "*.example.org"] });
+        value["workspace"] = "read".into();
+        value["workspaceFiles"] = serde_json::json!(["scripts/normalize.py"]);
+    });
+    assert!(found.is_empty(), "{found:?}");
+
+    // Each field is checked where it is.
+    let at = "/somniq/capabilities/mcp/evidence";
+    assert!(has(&check(&|value| value["env"] = serde_json::json!(["1BAD"])), "env-key", at));
+    assert!(has(&check(&|value| value["env"] = serde_json::json!(["node_options"])), "env-reserved", at));
+    assert!(has(&check(&|value| value["env"] = serde_json::json!(["SOMNIQ_ANYTHING"])), "env-reserved", at));
+    assert!(has(&check(&|value| value["env"] = serde_json::json!(["HTTPS_PROXY"])), "env-reserved", at));
+    assert!(has(&check(&|value| value["env"] = serde_json::json!(["A", "a"])), "env-key", at));
+    assert!(has(&check(&|value| value["network"] = serde_json::json!({ "access": "none", "hosts": ["x.org"] })), "capabilities-field", at));
+    assert!(has(&check(&|value| value["network"] = serde_json::json!({ "access": "required", "hosts": ["https://x.org/path"] })), "capabilities-field", at));
+    assert!(has(&check(&|value| value["network"] = serde_json::json!({ "access": "sometimes" })), "capabilities-field", at));
+    assert!(has(&check(&|value| value["workspace"] = "everything".into()), "capabilities-field", at));
+    assert!(has(&check(&|value| { value.as_object_mut().unwrap().remove("network"); }), "capabilities-field", at));
+    assert!(has(&check(&|value| value["shell"] = true.into()), "capabilities-field", at));
+    for bad in ["../outside.py", "C:/x.py", "/etc/passwd", ".somniq/plugins/registry.json"] {
+        assert!(has(&check(&|value| value["workspaceFiles"] = serde_json::json!([bad])), "workspace-file", at), "{bad}");
+    }
+    // Declared files must be in the project to copy.
+    assert!(check(&|value| value["workspaceFiles"] = serde_json::json!(["scripts/missing.py"])).iter().any(|(code, _, message)| code == "workspace-file" && message.contains("does not exist")));
+
+    // A server with no declaration cannot be enabled; a declaration for a server that is not there is an error.
+    let found = check(&|value| *value = serde_json::Value::Null);
+    assert!(found.iter().any(|(code, _, _)| code == "capabilities-field"), "{found:?}");
+    let source = fixture(&temp.path().join("none"), "@test/evidence");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(source.join("package.json")).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("somniq");
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let found = problems_of(&store, &source);
+    assert!(has(&found, "capabilities-missing", "/somniq/capabilities/mcp/evidence"), "{found:?}");
+    let preview = store.preview(&source).unwrap();
+    assert!(!preview.can_enable && preview.diagnostics.iter().all(|d| d.hint.is_some()));
+    manifest["somniq"] = serde_json::json!({ "manifestVersion": 1, "capabilities": { "schemaVersion": 1, "mcp": {
+        "evidence": { "network": { "access": "none" }, "workspace": "none" },
+        "ghost": { "network": { "access": "none" }, "workspace": "none" }
+    } } });
+    fs::write(source.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(has(&problems_of(&store, &source), "capabilities-server", "/somniq/capabilities/mcp/ghost"));
+    // A package with only Skills or panels needs no declaration.
+    let skills_only = fixture(&temp.path().join("skills-only"), "@test/skills");
+    for file in ["base.yml", "overlay.yml"] {
+        let patch = fs::read_to_string(skills_only.join(file)).unwrap();
+        let cut = patch.find("  - id: mcp").or_else(|| patch.find("- id: mcp")).unwrap();
+        fs::write(skills_only.join(file), &patch[..cut]).unwrap();
+    }
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(skills_only.join("package.json")).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("somniq");
+    fs::write(skills_only.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(problems_of(&store, &skills_only).iter().all(|(code, _, _)| !code.starts_with("capabilities")));
+}
+
+#[test]
+fn code_from_outside_the_snapshot_is_named_or_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let server = |command: &str, args: &[&str]| PluginMcp {
+        name: "s".into(),
+        command: command.into(),
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+        env: BTreeMap::new(),
+        request_timeout_secs: None,
+        capability: None,
+        launch: vec![],
+    };
+    let snapshot = temp.path().join("snapshot");
+    let notes = |server: PluginMcp| launch_notes(&server, &snapshot, &project);
+    // Downloads at start: only with an exact version, and then named.
+    for (command, args) in [("npx", vec!["-y", "@scope/tool"]), ("npx", vec!["tool@latest"]), ("npx", vec!["tool@^1.2.0"]), ("uvx", vec!["tool"]), ("cmd", vec!["/c", "npx", "-y", "tool"]), ("pipx", vec!["run", "tool"]), ("pnpm", vec!["dlx", "tool"])] {
+        let refused = notes(server(command, &args)).unwrap_err();
+        assert_eq!(refused.code, "runtime-fetch", "{command} {args:?}");
+    }
+    for (command, args, spec) in [
+        ("npx", vec!["-y", "@scope/tool@1.2.3"], "@scope/tool@1.2.3"),
+        ("npx.cmd", vec!["tool@0.4.0-beta.1"], "tool@0.4.0-beta.1"),
+        ("uvx", vec!["--from", "tool==2.0.1", "tool-server"], "tool==2.0.1"),
+        ("cmd", vec!["/c", "npx", "-y", "tool@1.0.0"], "tool@1.0.0"),
+        ("deno", vec!["run", "https://deno.land/x/srv@1.2.3/main.ts"], "https://deno.land/x/srv@1.2.3/main.ts"),
+    ] {
+        let found = notes(server(command, &args)).unwrap();
+        assert!(matches!(&found[..], [LaunchNote::RuntimeFetch { spec: s, .. }] if s == spec), "{command} {args:?}: {found:?}");
+    }
+    // A package file, or an interpreter on PATH, is nothing to say.
+    assert!(notes(server("python", &[snapshot.join("server.py").to_str().unwrap()])).unwrap().is_empty());
+    assert!(notes(server("deno", &["run", "./server.ts"])).unwrap().is_empty());
+    // A program elsewhere on the computer is named; one in the project is refused.
+    let elsewhere = temp.path().join("tools").join("server.exe");
+    assert!(matches!(&notes(server(elsewhere.to_str().unwrap(), &[])).unwrap()[..], [LaunchNote::OutsideSnapshot { .. }]));
+    let inside = project.join("bin").join("server.exe");
+    assert_eq!(notes(server(inside.to_str().unwrap(), &[])).unwrap_err().code, "workspace-file");
+    // And a whole package that does it is not enabled.
+    let source = fixture(&temp.path().join("fetching"), "@test/fetching");
+    for file in ["base.yml", "overlay.yml"] {
+        let patch = fs::read_to_string(source.join(file)).unwrap().replace("command: python", "command: npx").replace("['./server.py', '--safe']", "['-y', 'some-mcp']").replace("['./server.py']", "['-y', 'some-mcp']");
+        fs::write(source.join(file), patch).unwrap();
+    }
+    let found = store.preview(&source).unwrap();
+    assert!(!found.can_enable && found.diagnostics.iter().any(|d| d.code == "runtime-fetch"), "{:?}", found.diagnostics);
+}
+
+#[test]
+fn a_servers_declaration_reaches_its_launcher_and_no_further() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    let source = declared_fixture(temp.path(), "@test/evidence", |value| {
+        value["env"] = serde_json::json!(["CROSSREF_MAILTO"]);
+        value["network"] = serde_json::json!({ "access": "required" });
+        value["workspace"] = "read".into();
+    });
+    install_enabled(&store, &source);
+    let servers = store.active_mcp_servers().unwrap();
+    let crate::McpServerConfig::Stdio(stdio) = &servers.values().next().unwrap().config else { panic!("stdio") };
+    assert_eq!(stdio.env.get(crate::PLUGIN_PASSTHROUGH_ENV).map(String::as_str), Some("CROSSREF_MAILTO"));
+    assert_eq!(stdio.env.get(crate::PLUGIN_NETWORK_ENV).map(String::as_str), Some("required"));
+    assert!(stdio.env.contains_key(crate::PLUGIN_WORKSPACE_ENV));
+    assert!(!stdio.env.contains_key(crate::PLUGIN_FILES_ENV));
+
+    // Declaring less gives less.
+    let plain = declared_fixture(&temp.path().join("plain"), "@test/plain", |_| {});
+    let other = test_store(&temp, temp.path().join("other"));
+    fs::create_dir_all(temp.path().join("other")).unwrap();
+    install_enabled(&other, &plain);
+    let servers = other.active_mcp_servers().unwrap();
+    let crate::McpServerConfig::Stdio(stdio) = &servers.values().next().unwrap().config else { panic!("stdio") };
+    for key in [crate::PLUGIN_PASSTHROUGH_ENV, crate::PLUGIN_NETWORK_ENV, crate::PLUGIN_WORKSPACE_ENV, crate::PLUGIN_FILES_ENV] {
+        assert!(!stdio.env.contains_key(key), "{key}");
+    }
+}
+
+#[test]
+fn a_server_is_handed_the_approved_copies_of_its_project_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("scripts")).unwrap();
+    fs::write(project.join("scripts/normalize.py"), "VERSION = 1\n").unwrap();
+    let store = test_store(&temp, &project);
+    let source = declared_fixture(temp.path(), "@test/evidence", |value| {
+        value["workspaceFiles"] = serde_json::json!(["scripts/normalize.py"]);
+    });
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    store.install(&source, &preview.digest).unwrap();
+    let files_view = |store: &PluginStore| {
+        let servers = store.active_mcp_servers().unwrap();
+        let crate::McpServerConfig::Stdio(stdio) = &servers.values().next().unwrap().config else { panic!("stdio") };
+        stdio.env.get(crate::PLUGIN_FILES_ENV).map(PathBuf::from)
+    };
+    // The view the page showed is what a click approves.
+    let shown = store.list().unwrap()[0].workspace_files_digest.clone().unwrap();
+    store.set_enabled_shown_files("@test/evidence", true, &preview.digest, Some(&shown)).unwrap();
+    let view = files_view(&store).expect("the approved copies are handed over");
+    assert_eq!(fs::read_to_string(view.join("scripts/normalize.py")).unwrap(), "VERSION = 1\n");
+    let run = PluginRun::begin(&store, "chat turn");
+
+    // The original changes: the plugin keeps the approved copy and the page says so.
+    fs::write(project.join("scripts/normalize.py"), "VERSION = 2\n").unwrap();
+    let listed = &store.list().unwrap()[0];
+    assert!(listed.enabled, "a changed original does not stop the plugin");
+    assert_ne!(listed.workspace_files[0].approved, listed.workspace_files[0].current);
+    assert_eq!(fs::read_to_string(files_view(&store).unwrap().join("scripts/normalize.py")).unwrap(), "VERSION = 1\n");
+    let changes = store.workspace_file_changes("@test/evidence").unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!((changes[0].before.as_deref(), changes[0].after.as_deref()), (Some("VERSION = 1\n"), Some("VERSION = 2\n")));
+
+    // A click on what was shown before the change is refused; on the new view it approves the new copy.
+    assert_eq!(store.set_enabled_shown_files("@test/evidence", true, &preview.digest, Some(&shown)).unwrap_err(), WORKSPACE_FILES_CHANGED_SINCE_SHOWN);
+    let fresh = store.list().unwrap()[0].workspace_files_digest.clone().unwrap();
+    store.set_enabled_shown_files("@test/evidence", true, &preview.digest, Some(&fresh)).unwrap();
+    assert_eq!(fs::read_to_string(files_view(&store).unwrap().join("scripts/normalize.py")).unwrap(), "VERSION = 2\n");
+    // The run that started before keeps its set, and is told to restart.
+    let listed = &store.list().unwrap()[0];
+    assert_eq!(listed.workspace_files[0].approved, listed.workspace_files[0].current);
+    assert_ne!(PluginRun::begin(&store, "next turn").set().fingerprint, run.set().fingerprint);
+
+    // Files of this project cannot follow the plugin into every project.
+    assert!(store.set_global("@test/evidence", true).unwrap_err().contains("files of this project"));
+    // Turning it off withdraws the copies with the approval.
+    store.set_enabled("@test/evidence", false).unwrap();
+    assert!(store.approved_file_set("@test/evidence", &preview.digest).unwrap().is_none());
+    // Approved without its files (an approval written before they were declared), it does not run.
+    store.set_enabled("@test/evidence", true).unwrap();
+    store.withdraw_workspace_files("@test/evidence").unwrap();
+    let listed = &store.list().unwrap()[0];
+    assert!(!listed.enabled);
+    assert!(listed.package.diagnostics.iter().any(|d| d.code == "approval-required"));
+}
+
+/// The copies and views in the trust store, by kind.
+fn file_copies(temp: &tempfile::TempDir) -> (Vec<String>, Vec<String>) {
+    let list = |dir: &str| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(test_user_root(temp).join(dir))
+            .map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    (list("files"), list("file-views"))
+}
+
+/// A project whose `scripts/collect.py` holds `text`, with `@test/evidence`
+/// installed from a draft that declares it.
+fn handed_project(temp: &tempfile::TempDir, dir: &str, text: &str) -> (PluginStore, PathBuf, PluginPreview) {
+    let project = temp.path().join(dir);
+    fs::create_dir_all(project.join("scripts")).unwrap();
+    fs::write(project.join("scripts/collect.py"), text).unwrap();
+    let store = test_store(temp, &project);
+    let source = declared_fixture(&temp.path().join(format!("{dir}-draft")), "@test/evidence", |value| {
+        value["workspaceFiles"] = serde_json::json!(["scripts/collect.py"]);
+    });
+    let preview = store.preview(&source).unwrap();
+    assert!(preview.can_enable, "{:?}", preview.diagnostics);
+    store.install(&source, &preview.digest).unwrap();
+    (store, project, preview)
+}
+
+#[test]
+fn removing_a_plugin_deletes_the_copies_no_other_project_uses() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    // Two projects hand the plugin the same bytes: one copy, one view.
+    let text = "LABEL = 'removing-a-plugin'\n";
+    let (first, _, _) = handed_project(&temp, "first", text);
+    let (second, _, _) = handed_project(&temp, "second", text);
+    first.set_enabled("@test/evidence", true).unwrap();
+    second.set_enabled("@test/evidence", true).unwrap();
+    let (blobs, views) = file_copies(&temp);
+    assert_eq!((blobs.len(), views.len()), (1, 1), "{blobs:?} {views:?}");
+    // Something this module never wrote is not its to delete.
+    fs::write(test_user_root(&temp).join("file-views").join("README"), "kept").unwrap();
+
+    first.remove("@test/evidence").unwrap();
+    let mut kept = vec![views[0].clone(), "README".to_string()];
+    kept.sort();
+    assert_eq!(file_copies(&temp), (blobs.clone(), kept), "the other project still uses them");
+    second.remove("@test/evidence").unwrap();
+    assert_eq!(file_copies(&temp), (vec![], vec!["README".to_string()]));
+}
+
+#[test]
+fn a_replaced_copy_stays_while_a_run_holds_it_and_goes_when_the_run_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (store, project, preview) = handed_project(&temp, "rerun", "LABEL = 'replaced-copy-1'\n");
+    store.set_enabled("@test/evidence", true).unwrap();
+    let (_, before) = file_copies(&temp);
+    let run = PluginRun::begin(&store, "chat turn");
+    assert_eq!(run.set().get("@test/evidence").unwrap().files.as_deref(), Some(before[0].as_str()));
+
+    // A new approval of new contents: the run keeps reading its view.
+    fs::write(project.join("scripts/collect.py"), "LABEL = 'replaced-copy-2'\n").unwrap();
+    let fresh = store.list().unwrap()[0].workspace_files_digest.clone().unwrap();
+    store.set_enabled_shown_files("@test/evidence", true, &preview.digest, Some(&fresh)).unwrap();
+    let (blobs, views) = file_copies(&temp);
+    assert_eq!(blobs.len(), 1, "only the approved copy's bytes stay: {blobs:?}");
+    assert_eq!(views.len(), 2, "{views:?}");
+    let held = test_user_root(&temp).join("file-views").join(&before[0]).join("scripts/collect.py");
+    assert_eq!(fs::read_to_string(&held).unwrap(), "LABEL = 'replaced-copy-1'\n");
+
+    // The run ends: its view goes on a thread of its own.
+    drop(run);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while held.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!held.exists(), "the view no run holds is deleted");
+    assert_eq!(file_copies(&temp).1.len(), 1);
+
+    // Turning the plugin off withdraws the last approval and its copies.
+    store.set_enabled("@test/evidence", false).unwrap();
+    assert_eq!(file_copies(&temp), (vec![], vec![]));
+}
+
+#[test]
+fn an_upgrade_that_stops_handing_files_lets_their_copies_go() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (store, _, preview) = handed_project(&temp, "upgrade", "LABEL = 'upgrade-drops-files'\n");
+    store.set_enabled("@test/evidence", true).unwrap();
+    assert_eq!(file_copies(&temp).1.len(), 1);
+    let next = declared_fixture(&temp.path().join("v2"), "@test/evidence", |_| {});
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(next.join("package.json")).unwrap()).unwrap();
+    manifest["version"] = "1.3.0".into();
+    fs::write(next.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let candidate = store.preview(&next).unwrap();
+    store.upgrade(&next, &candidate.digest, &preview.digest, true).unwrap();
+    assert!(store.approved_file_set("@test/evidence", &preview.digest).unwrap().is_none(), "the old version's set is withdrawn");
+    assert_eq!(file_copies(&temp), (vec![], vec![]));
+}
+
+/// The snapshots in the trust store, and the digests retired from it.
+fn snapshots(temp: &tempfile::TempDir) -> (Vec<String>, Vec<String>) {
+    let list = |dir: &str, digest_of: fn(&str) -> Option<&str>| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(test_user_root(temp).join(dir))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| digest_of(&entry.file_name().to_string_lossy()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    (
+        list("packages", |name| valid_digest(name).then_some(name)),
+        list("packages-retired", |name| name.split_once('-').map(|(digest, _)| digest)),
+    )
+}
+
+/// A project with an installed package of its own name (so its digest is
+/// shared with no other test).
+fn snapshot_project(temp: &tempfile::TempDir, dir: &str, name: &str) -> (PluginStore, PathBuf, PluginPreview) {
+    let project = temp.path().join(dir);
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(temp, &project);
+    let source = fixture(&temp.path().join(format!("{dir}-src")), name);
+    let preview = store.preview(&source).unwrap();
+    store.install(&source, &preview.digest).unwrap();
+    (store, project, preview)
+}
+
+#[test]
+fn nothing_is_collected_until_the_known_projects_are_synced_and_a_retired_snapshot_comes_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (store, project, preview) = snapshot_project(&temp, "unsynced", "@test/snap-unsynced");
+    store.remove("@test/snap-unsynced").unwrap();
+    // A project SomniQ has not told the trust store about could name it.
+    assert_eq!(snapshots(&temp), (vec![preview.digest.clone()], vec![]));
+
+    PluginStore::sync_known_projects_at(&test_user_root(&temp), &[project]).unwrap();
+    assert_eq!(snapshots(&temp), (vec![], vec![preview.digest.clone()]), "unused once every known project is seen");
+
+    // Looked up again (the same package previewed and installed), it is back.
+    let source = temp.path().join("unsynced-src").join("@test-snap-unsynced");
+    let again = store.preview(&source).unwrap();
+    assert_eq!(again.digest, preview.digest);
+    assert_eq!(snapshots(&temp), (vec![preview.digest.clone()], vec![]));
+    store.install(&source, &again.digest).unwrap();
+    assert!(store.list().unwrap()[0].package.can_enable);
+}
+
+#[test]
+fn a_snapshot_another_project_or_an_earlier_version_names_stays() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (first, first_project, v1) = snapshot_project(&temp, "keeps-a", "@test/snap-shared");
+    let (second, second_project, _) = snapshot_project(&temp, "keeps-b", "@test/snap-shared");
+    PluginStore::sync_known_projects_at(&test_user_root(&temp), &[first_project, second_project]).unwrap();
+    let next = fixture_v2(&temp.path().join("keeps-next"), "@test/snap-shared");
+    let v2 = first.preview(&next).unwrap();
+    first.upgrade(&next, &v2.digest, &v1.digest, false).unwrap();
+    let mut both = vec![v1.digest.clone(), v2.digest.clone()];
+    both.sort();
+    assert_eq!(snapshots(&temp).0, both);
+
+    // The other project leaves; the first still keeps v1 as an earlier version.
+    second.remove("@test/snap-shared").unwrap();
+    assert_eq!(snapshots(&temp), (both.clone(), vec![]));
+    first.remove("@test/snap-shared").unwrap();
+    assert_eq!(snapshots(&temp), (vec![], both));
+}
+
+#[test]
+fn a_project_snapshot_index_follows_the_projects_somniq_knows() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (_, kept_project, kept) = snapshot_project(&temp, "known", "@test/snap-known");
+    let (forgotten, forgotten_project, gone) = snapshot_project(&temp, "forgotten", "@test/snap-forgotten");
+    let root = test_user_root(&temp);
+    PluginStore::sync_known_projects_at(&root, &[kept_project.clone(), forgotten_project]).unwrap();
+    assert_eq!(snapshots(&temp).1, Vec::<String>::new());
+
+    // A project SomniQ no longer lists keeps nothing...
+    PluginStore::sync_known_projects_at(&root, &[kept_project]).unwrap();
+    assert_eq!(snapshots(&temp), (vec![kept.digest.clone()], vec![gone.digest.clone()]));
+    // ...until it is used again: its package is still there to run.
+    let listed = forgotten.list().unwrap();
+    assert!(listed[0].package.can_enable, "{:?}", listed[0].package.diagnostics);
+    assert!(snapshots(&temp).0.contains(&gone.digest));
+}
+
+#[test]
+fn a_run_keeps_its_snapshot_until_it_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let (store, project, preview) = snapshot_project(&temp, "running", "@test/snap-running");
+    store.set_enabled("@test/snap-running", true).unwrap();
+    PluginStore::sync_known_projects_at(&test_user_root(&temp), &[project]).unwrap();
+    let run = PluginRun::begin(&store, "chat turn");
+    assert!(run.set().contains("@test/snap-running", &preview.digest));
+
+    store.remove("@test/snap-running").unwrap();
+    assert_eq!(snapshots(&temp).0, vec![preview.digest.clone()], "the run still reads it");
+    drop(run);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !snapshots(&temp).0.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(snapshots(&temp), (vec![], vec![preview.digest.clone()]));
+}
+
+#[test]
+fn retired_snapshots_go_after_their_days() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let root = test_user_root(&temp);
+    let retired = root.join("packages-retired");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let old = format!("{}-{}", "a".repeat(64), now - (RETIRED_SNAPSHOT_DAYS + 1) * 24 * 60 * 60);
+    let recent = format!("{}-{}", "b".repeat(64), now - 60);
+    for name in [&old, &recent, &"c".repeat(64).to_string()] {
+        fs::create_dir_all(retired.join(name)).unwrap();
+        fs::write(retired.join(name).join("package.json"), "{}").unwrap();
+    }
+    // What an interrupted deletion left, and a stray staging directory.
+    fs::create_dir_all(retired.join(format!("{}-1.delete", "d".repeat(64)))).unwrap();
+    fs::create_dir_all(root.join("packages").join(".tmp-staging")).unwrap();
+
+    PluginStore::sync_known_projects_at(&root, &[]).unwrap();
+    let mut left: Vec<String> = fs::read_dir(&retired).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, vec![recent, "c".repeat(64)], "only names this module wrote, past their days, go");
+    assert!(root.join("packages").join(".tmp-staging").exists());
+}
+
+#[test]
+fn an_upgrade_that_gives_a_server_more_says_what_it_gains() {
+    let temp = tempfile::tempdir().unwrap();
+    let _config = ConfigRoot::set(&temp);
+    let project = temp.path().join("caps-upgrade");
+    fs::create_dir_all(&project).unwrap();
+    let store = test_store(&temp, &project);
+    install_enabled(&store, &declared_fixture(&temp.path().join("v1"), "@test/evidence", |value| {
+        value["network"] = serde_json::json!({ "access": "required", "hosts": ["api.crossref.org"] });
+    }));
+    let next = declared_fixture(&temp.path().join("v2"), "@test/evidence", |value| {
+        value["env"] = serde_json::json!(["CROSSREF_MAILTO"]);
+        value["network"] = serde_json::json!({ "access": "required" });
+        value["workspace"] = "read".into();
+    });
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(next.join("package.json")).unwrap()).unwrap();
+    manifest["version"] = "1.3.0".into();
+    fs::write(next.join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let plan = store.preview_import(&next).unwrap().upgrade.expect("an upgrade");
+    assert!(plan.diff.changed);
+    let server = &plan.diff.mcp_servers[0];
+    assert_eq!(server.change, ServerChange::Changed, "same command line, more access: not unchanged");
+    let item = |name: &str| server.capabilities.iter().find(|change| change.item == name).unwrap_or_else(|| panic!("{name}: {:?}", server.capabilities));
+    assert!(item("env").expands && item("env").added == ["CROSSREF_MAILTO"]);
+    // From a list of hosts to anywhere is more, not less.
+    assert!(item("hosts").expands && item("hosts").to.as_deref() == Some("*"));
+    assert!(item("workspace").expands && item("workspace").to.as_deref() == Some("read"));
+    assert!(server.capabilities.iter().all(|change| change.item != "network"));
+    // Giving up access is a change too, but not a gain.
+    let back = capability_changes(
+        Some(&McpCapability { env: vec!["A".into()], network: NetworkCapability { access: NetworkAccess::Required, hosts: None }, workspace: WorkspaceAccess::Write, workspace_files: vec![] }),
+        Some(&McpCapability { env: vec![], network: NetworkCapability { access: NetworkAccess::None, hosts: None }, workspace: WorkspaceAccess::Read, workspace_files: vec![] }),
+    );
+    assert_eq!(back.len(), 3);
+    assert!(back.iter().all(|change| !change.expands), "{back:?}");
 }

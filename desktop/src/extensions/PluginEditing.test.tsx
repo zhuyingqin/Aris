@@ -13,7 +13,7 @@ import PluginUpgradeReview from "./PluginUpgradeReview";
 vi.mock("../api/plugins", async (original) => ({
   ...(await original<typeof import("../api/plugins")>()),
   pluginsUiPage: vi.fn(), pluginsUiStateGet: vi.fn(), pluginsUiStateUpdate: vi.fn(), pluginsDraftPage: vi.fn(), pluginsDraftChanges: vi.fn(),
-  pluginsList: vi.fn(), pluginsRollback: vi.fn(), bridgeBackendPluginChanges: vi.fn(),
+  pluginsList: vi.fn(), pluginsRollback: vi.fn(), pluginsRollbackPreview: vi.fn(), bridgeBackendPluginChanges: vi.fn(),
 }));
 vi.mock("../api/tauri", () => ({ openExternalUrl: vi.fn(), isTauri: () => false, textDiffLines: vi.fn(), textThreeWayMerge: vi.fn() }));
 vi.mock("../chat/MarkdownContent", () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
@@ -135,6 +135,12 @@ describe("earlier versions", () => {
   it("lists them with the original marked, and goes back only after a confirmation", async () => {
     vi.mocked(api.pluginsList).mockResolvedValue([item]);
     vi.mocked(api.pluginsRollback).mockResolvedValue({ ...item, version: "0.1.0", digest: "a".repeat(64), history: [] });
+    const none = { added: [], removed: [] };
+    vi.mocked(api.pluginsRollbackPreview).mockResolvedValue({
+      version: "0.1.0", digest: "a".repeat(64), canEnable: true, diagnostics: [], files: [],
+      plan: { currentVersion: "0.1.2", currentDigest: "c".repeat(64), currentEnabled: true, change: "downgrade",
+        diff: { skills: none, uiPanels: none, mcpServers: [], commands: none, envKeys: none, changed: false } },
+    });
     render(<PluginPackages projectPath="F:/project" language="cn" onChanged={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /历史版本 2/ }));
     const list = screen.getByRole("list", { name: "历史版本 2" });
@@ -144,6 +150,9 @@ describe("earlier versions", () => {
     fireEvent.click(within(rows[1]).getByRole("button", { name: /回退到这个版本/ }));
     expect(api.pluginsRollback).not.toHaveBeenCalled();
     expect(screen.getByText(/v0.1.0 会替换当前的 v0.1.2/)).toBeTruthy();
+    // The click approves that version, so what it changes is on screen first.
+    expect(api.pluginsRollbackPreview).toHaveBeenCalledWith("F:/project", plugin, "a".repeat(64));
+    await waitFor(() => expect((screen.getByRole("button", { name: "确认回退" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "确认回退" }));
     await waitFor(() => expect(api.pluginsRollback).toHaveBeenCalledWith("F:/project", plugin, "a".repeat(64), "c".repeat(64), true));
   });

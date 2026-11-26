@@ -692,7 +692,17 @@ const DURABLE_EVENT_KIND_PREFIX: &str = "agent.";
 /// Without this the checkpoint after the turn erased them (seen in-app), so
 /// whether memory is ever used could not be measured from real sessions. Both
 /// carry references and counts, not the recalled text (a few hundred bytes).
-const DURABLE_EVENT_KINDS: &[&str] = &["lesson_recall", "memory_recall"];
+/// `computer_use_mode` is the record of when a chat was switched into or out
+/// of computer-use mode; it is written before the turn that resets the log,
+/// so without this the first turn's reset erased it (seen in-app).
+const DURABLE_EVENT_KINDS: &[&str] = &[
+    "lesson_recall",
+    "memory_recall",
+    "computer_use_mode",
+    // Which window the user let an agent read, and each read of it.
+    "computer_access",
+    "computer_observation",
+];
 
 /// What a compaction pass removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

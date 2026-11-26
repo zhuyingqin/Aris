@@ -3859,3 +3859,87 @@ fn an_unavailable_review_records_every_sent_criterion_as_unreported() {
     assert!(stray.issues[0].criterion.is_none());
     assert!(stray.rubrics.is_none());
 }
+
+#[test]
+fn computer_use_catalog_is_the_allow_list_and_nothing_that_runs_code() {
+    let full = aris_chat::chat_tool_specs(all_tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS));
+    assert!(full.iter().any(|spec| spec.name == "bash"), "fixture: the full registry has bash");
+    let narrowed = computer_use_tool_specs(full);
+    let names: Vec<&str> = narrowed.iter().map(|spec| spec.name.as_str()).collect();
+    for name in &names {
+        assert!(COMPUTER_USE_TOOLS.contains(name), "{name} is not on the allow-list");
+    }
+    for expected in ["read_file", "glob_search", "grep_search", ASK_USER_QUESTION_TOOL] {
+        assert!(names.contains(&expected), "{expected} missing from the computer-use catalog");
+    }
+    for hard_blocked in COMPUTER_USE_HARD_BLOCKED_TOOLS {
+        assert!(!names.contains(hard_blocked), "{hard_blocked} leaked into the catalog");
+        assert!(
+            !COMPUTER_USE_TOOLS.contains(hard_blocked),
+            "{hard_blocked} is both allowed and hard-blocked"
+        );
+    }
+}
+
+#[test]
+fn computer_use_policy_refuses_unlisted_tools_under_the_default_full_access_mode() {
+    let catalog = computer_use_tool_specs(aris_chat::chat_tool_specs(all_tool_specs_for(
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
+    )));
+    let policy = aris_chat::permission_policy_for_tools(catalog, PermissionMode::DangerFullAccess)
+        .with_catalog_only();
+    for unlisted in ["bash", "PowerShell", "REPL", "NotebookExecute", "mcp__playwright__browser_run_code_unsafe", "spawn_agent"] {
+        assert!(
+            matches!(policy.authorize(unlisted, "{}", None), runtime::PermissionOutcome::Deny { .. }),
+            "{unlisted} was allowed"
+        );
+    }
+    assert_eq!(
+        policy.authorize("read_file", "{}", None),
+        runtime::PermissionOutcome::Allow
+    );
+}
+
+#[test]
+fn host_layer_refuses_everything_off_the_computer_use_allow_list() {
+    for denied in ["bash", "PowerShell", "ComputeJobSubmit", "PluginPanel", "mcp__codex__codex", "write_file"] {
+        let error = validate_computer_use_tool_access(true, denied).expect_err(denied);
+        assert!(error.to_string().contains("computer-use mode"), "{denied}: {error}");
+    }
+    assert!(validate_computer_use_tool_access(true, "read_file").is_ok());
+    // Off, the check never interferes with an ordinary chat.
+    assert!(validate_computer_use_tool_access(false, "bash").is_ok());
+}
+
+#[test]
+fn computer_use_mode_cannot_change_while_the_session_runs() {
+    let state = ChatState::default();
+    let session = "computer-use-test-session";
+    assert!(!computer_use_mode_for(&state, session));
+    assert!(set_computer_use_mode(&state, session, true).unwrap(), "first switch changes it");
+    assert!(!set_computer_use_mode(&state, session, true).unwrap(), "repeat is a no-op");
+    assert!(computer_use_mode_for(&state, session));
+    assert!(computer_controlling_sessions(&state).is_empty(), "nothing runs yet");
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    state.running_turns.lock().unwrap().insert(
+        session.to_string(),
+        RunningTurn {
+            turn_id: 1,
+            cancelled: cancelled.clone(),
+            blocks_project_switch: false,
+        },
+    );
+    assert_eq!(computer_controlling_sessions(&state), vec![session.to_string()]);
+    assert!(set_computer_use_mode(&state, session, false).is_err());
+    assert!(computer_use_mode_for(&state, session), "refused switch kept the mode");
+
+    // A stopped turn no longer counts as controlling the computer, even
+    // before its worker has unwound.
+    cancelled.store(true, Ordering::SeqCst);
+    assert!(computer_controlling_sessions(&state).is_empty());
+
+    state.running_turns.lock().unwrap().clear();
+    assert!(set_computer_use_mode(&state, session, false).unwrap());
+    assert!(!computer_use_mode_for(&state, session));
+}

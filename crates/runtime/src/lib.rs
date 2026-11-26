@@ -337,6 +337,21 @@ pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
 pub const PLUGIN_ROOT_ENV: &str = "SOMNIQ_PLUGIN_ROOT";
 /// The plugin's own writable directory, also set by the host.
 pub const PLUGIN_DATA_ENV: &str = "SOMNIQ_PLUGIN_DATA";
+/// Host instructions to the launcher, from the server's capability
+/// declaration; the plugin process never sees them. Names of variables to
+/// pass from this computer, comma-separated.
+pub const PLUGIN_PASSTHROUGH_ENV: &str = "SOMNIQ_PLUGIN_PASSTHROUGH";
+/// `required` when the server declared it needs the network: it then gets
+/// the research proxy and certificate variables.
+pub const PLUGIN_NETWORK_ENV: &str = "SOMNIQ_PLUGIN_NETWORK";
+/// The registered project, when the server declared workspace access.
+pub const PLUGIN_WORKSPACE_ENV: &str = "SOMNIQ_PLUGIN_WORKSPACE";
+/// What the plugin process sees: the directory the run works in (the
+/// project, or a work task's worktree), only when it declared workspace access.
+pub const PLUGIN_WORKSPACE_ROOT_ENV: &str = "SOMNIQ_WORKSPACE_ROOT";
+/// What the plugin process sees: the read-only copies of the workspace files
+/// it declared, as approved.
+pub const PLUGIN_FILES_ENV: &str = "SOMNIQ_PLUGIN_FILES";
 pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
 /// SomniQ user-level skills directory.

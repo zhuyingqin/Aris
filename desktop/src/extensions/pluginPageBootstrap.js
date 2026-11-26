@@ -7,18 +7,30 @@
 // transport left under this CSP is `chrome.webview`, removed here. If it
 // cannot be removed the page never runs.
 //
+// WebRTC is the one network path the CSP cannot close: Chromium does not
+// enforce `webrtc 'block'`, and STUN/TURN traffic is not a `connect-src`
+// request. Its constructors are removed here before the page runs.
+//
 // This covers the page's own realm only. A child frame the page creates is a
 // fresh realm where this script never ran and `chrome.webview` is intact; what
-// refuses a command sent from there is Tauri's origin check on the native side
-// (see docs/development-logic/chat-ui-plugins.md).
+// refuses a command sent from there is Tauri's origin check on the native side,
+// and what takes WebRTC away there is the app's script for every frame without
+// an origin (`opaque_frame_guard.js`; see docs/development-logic/chat-ui-plugins.md).
 (function (channel, initial) {
   "use strict";
   var own = document.currentScript;
   if (own) own.remove();
+  // The page's code runs after this and may replace any built-in it can reach,
+  // including setters on Object.prototype. What the bridge relies on is taken now.
+  var define = Object.defineProperty;
+  var now = Date.now;
   // frame -> the host's shell frame -> the app
   var host = window.parent.parent;
   var post = function (message) {
-    message.channel = channel;
+    // Defined, not assigned: an assignment would run a "channel" setter the
+    // page put on Object.prototype. The descriptor has no prototype either, or
+    // a "writable" getter put there would be read with the channel as `this.value`.
+    define(message, "channel", { __proto__: null, value: channel, enumerable: true });
     host.postMessage(message, "*");
   };
   var hide = function (target, key) {
@@ -28,16 +40,28 @@
       /* Verified below. */
     }
   };
-  ["__TAURI_INTERNALS__", "__TAURI__", "ipc", "isTauri", "webkit"].forEach(function (key) {
+  var WEBRTC = ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCIceTransport", "RTCSctpTransport", "RTCDtlsTransport", "RTCDataChannel"];
+  ["__TAURI_INTERNALS__", "__TAURI__", "ipc", "isTauri", "webkit"].concat(WEBRTC).forEach(function (key) {
     hide(window, key);
   });
   if (window.chrome && window.chrome.webview !== undefined) hide(window.chrome, "webview");
   if (window.chrome && window.chrome.webview !== undefined) hide(window, "chrome");
-  if (window.chrome && window.chrome.webview !== undefined) {
+  if ((window.chrome && window.chrome.webview !== undefined) || window.RTCPeerConnection !== undefined || window.webkitRTCPeerConnection !== undefined) {
     post({ type: "error", message: "isolation" });
     window.stop();
     throw new Error("Native IPC isolation failed");
   }
+
+  // A task proposal must follow the user's own click or key press in this
+  // page. Synthetic events are not trusted, and these listeners run before any
+  // the page adds, so it can neither fake nor hide them.
+  var GESTURE_MS = 5000;
+  var gestureAt = -Infinity;
+  ["pointerdown", "keydown", "click"].forEach(function (type) {
+    window.addEventListener(type, function (event) {
+      if (event.isTrusted) gestureAt = now();
+    }, true);
+  });
 
   var state = { language: initial.language, locale: initial.locale || initial.language, theme: initial.theme, data: initial.data, files: initial.files || {} };
   var resolve = function (reference) {
@@ -81,11 +105,13 @@
     };
   };
   var call = function (method, args) {
+    // Read before the promise: the page cannot run code in between.
+    var gesture = now() - gestureAt <= GESTURE_MS;
     return new Promise(function (resolve, reject) {
       var id = ++sequence;
       // Only a data call answers with the panel's data.
       pending.set(id, { resolve: resolve, reject: reject, data: method === "data" || method === "set" });
-      post({ type: "call", id: id, method: method, args: args });
+      post({ type: "call", id: id, method: method, args: args, gesture: gesture });
     });
   };
   window.addEventListener("message", function (event) {
@@ -138,7 +164,8 @@
        * shows it to the user, who creates it, starts it or declines; the page
        * never creates one itself. `reportTo` names a widget of this panel the
        * task writes its conclusion into when it finishes. Resolves to
-       * { status: "started" | "created" | "declined", taskId? }.
+       * { status: "started" | "created" | "declined", taskId? }. Only
+       * within a few seconds of the user's click or key press in this page.
        */
       task: function (spec) {
         spec = spec || {};
@@ -162,9 +189,36 @@
       onTasks: function (listener) {
         return subscribe("tasks", listener);
       },
-      /** Put text in the Chat composer. The user sends it. */
+      /**
+       * Run MCP tools of this package that the panel lists in "tools",
+       * directly, with no conversation. tool(name, args?) resolves to
+       * { text, structured }; tool([{ tool, arguments? }, ...]) makes the
+       * calls one after another as one run and resolves to
+       * [{ tool, text, structured }], so a click that starts several steps is
+       * one click however long the first step takes. Rejects with the failing
+       * tool's error, and stops there. Without the user's click or key press
+       * in this page in the last few seconds, only tools declared with
+       * "auto": true run.
+       */
+      tool: function (name, args) {
+        if (Array.isArray(name)) {
+          return call("tool", {
+            calls: name.map(function (step) {
+              step = step || {};
+              return { tool: String(step.tool), arguments: step.arguments == null ? null : step.arguments };
+            }),
+          });
+        }
+        return call("tool", { calls: [{ tool: String(name), arguments: args == null ? null : args }], single: true });
+      },
+      /** Stop this page's tool runs that are still going; each rejects as stopped. */
+      stopTools: function () {
+        return call("stopTools");
+      },
+      /** Put text in the Chat composer. The user sends it. Only from a handler
+       * of the user's click or key press in this page. */
       prompt: function (text) {
-        post({ type: "prompt", text: String(text) });
+        post({ type: "prompt", text: String(text), gesture: now() - gestureAt <= GESTURE_MS });
       },
       /** A file of the package (an image, a font, data), by path relative to the page, as a data: URL. */
       asset: function (path) {
@@ -180,13 +234,13 @@
         for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         return new TextDecoder().decode(bytes);
       },
-      /** Open a project-relative file beside the chat. */
+      /** Open a project-relative file beside the chat. Only after the user's click or key press. */
       openFile: function (path) {
-        post({ type: "open-file", path: String(path) });
+        post({ type: "open-file", path: String(path), gesture: now() - gestureAt <= GESTURE_MS });
       },
-      /** Open another panel of this package that is a page in the navigation rail. */
+      /** Open another panel of this package that is a page in the navigation rail. Only after the user's click or key press. */
       openPanel: function (id) {
-        post({ type: "open-panel", panel: String(id) });
+        post({ type: "open-panel", panel: String(id), gesture: now() - gestureAt <= GESTURE_MS });
       },
       /** Ask for a frame this tall, in CSS pixels; only a glance in the project summary is sized by its page. */
       resize: function (height) {

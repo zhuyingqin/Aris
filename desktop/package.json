@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.92",
+  "version": "0.4.93",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
@@ -13,10 +13,11 @@
     "build": "vite build",
     "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",
     "build:vscodium": "node scripts/build-vscodium-resource.cjs",
+    "build:computer-helper": "node scripts/build-computer-helper-resource.cjs",
     "analyze:longmemeval-paired": "node scripts/analyze-longmemeval-paired.cjs",
     "analyze:longmemeval-builtin": "node scripts/analyze-longmemeval-builtin.cjs",
     "analyze:longmemeval-research-layers": "node scripts/analyze-longmemeval-research-layers.cjs",
-    "build:resources": "node scripts/prepare-resources.cjs && npm run build:playwright-mcp && npm run build:vscodium",
+    "build:resources": "node scripts/prepare-resources.cjs && npm run build:playwright-mcp && npm run build:vscodium && npm run build:computer-helper",
     "build:internal": "node scripts/build-internal-installer.cjs",
     "generate:updater-json": "node scripts/generate-updater-json.cjs",
     "preview": "vite preview",

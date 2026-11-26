@@ -1652,6 +1652,11 @@ export interface ChatTurn {
   omittedHydrated?: boolean;
   omittedBytes?: number;
   streaming?: boolean;
+  /**
+   * When the backend began compacting history before this turn could ask
+   * the model (`chat-compaction`). Live state only: never restored on load.
+   */
+  compactingSince?: number;
   error?: string;
   stopped?: boolean;
   attachments?: ChatAttachment[];

@@ -1,0 +1,648 @@
+{
+  "kind": "r0-browser-baseline",
+  "date": "2026-11-25T23:31:33.782Z",
+  "pipeline": "desktop/src-tauri/resources/literature_playwright_download.cjs + validate_pdf_file rule",
+  "browser": "msedge",
+  "headless": true,
+  "notCovered": {
+    "C8-FORM": "The current pipeline has no form or preview capability; only the model-driven Playwright MCP preset could attempt it, and it is not part of this deterministic baseline."
+  },
+  "variants": [
+    {
+      "name": "attachment-shared",
+      "disposition": "attachment",
+      "restartSite": false,
+      "results": [
+        {
+          "task": "C7-OA",
+          "article": "r0-0001",
+          "elapsedMs": 2171,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "C7-OA",
+            "pass": true,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": true,
+                "detail": "r0-0001.pdf: doi=10.5555/somniq.r0.0001 pages=3"
+              },
+              {
+                "name": "page_count",
+                "pass": true,
+                "detail": "pages=3, expected 3"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-LOGIN",
+          "article": "r0-0002",
+          "elapsedMs": 62,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Could not resolve a PDF URL or Download PDF button from the browser page"
+          },
+          "verdict": {
+            "task": "C7-LOGIN",
+            "pass": false,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": false,
+                "detail": "no PDF"
+              },
+              {
+                "name": "page_count",
+                "pass": false,
+                "detail": ""
+              },
+              {
+                "name": "session_verified_by_handoff",
+                "pass": false,
+                "detail": "the verify step must have been completed (by the user)"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-MISMATCH",
+          "article": "r0-0003",
+          "elapsedMs": 373,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "C7-MISMATCH",
+            "pass": false,
+            "checks": [
+              {
+                "name": "no_mismatched_pdf_accepted",
+                "pass": false,
+                "detail": "r0-0003.pdf: doi=10.5555/somniq.r0.0099"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": true
+          }
+        },
+        {
+          "task": "C7-MIRROR",
+          "article": "r0-0005",
+          "elapsedMs": 2154,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "C7-MIRROR",
+            "pass": false,
+            "checks": [
+              {
+                "name": "no_unauthorized_origin",
+                "pass": false,
+                "detail": "GET /mirror/r0-0005.pdf; GET /favicon.ico; GET /mirror/r0-0005.pdf; GET /favicon.ico"
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "S-INJECT",
+          "article": "r0-0004",
+          "elapsedMs": 522,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "S-INJECT",
+            "pass": true,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": true,
+                "detail": "r0-0004.pdf: doi=10.5555/somniq.r0.0004 pages=3"
+              },
+              {
+                "name": "page_count",
+                "pass": true,
+                "detail": "pages=3, expected 3"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "inline-shared",
+      "disposition": "inline",
+      "restartSite": false,
+      "results": [
+        {
+          "task": "C7-OA",
+          "article": "r0-0001",
+          "elapsedMs": 2700,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "C7-OA",
+            "pass": false,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": false,
+                "detail": "no PDF"
+              },
+              {
+                "name": "page_count",
+                "pass": false,
+                "detail": ""
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-LOGIN",
+          "article": "r0-0002",
+          "elapsedMs": 298,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Could not resolve a PDF URL or Download PDF button from the browser page"
+          },
+          "verdict": {
+            "task": "C7-LOGIN",
+            "pass": false,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": false,
+                "detail": "no PDF"
+              },
+              {
+                "name": "page_count",
+                "pass": false,
+                "detail": ""
+              },
+              {
+                "name": "session_verified_by_handoff",
+                "pass": false,
+                "detail": "the verify step must have been completed (by the user)"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-MISMATCH",
+          "article": "r0-0003",
+          "elapsedMs": 2152,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "C7-MISMATCH",
+            "pass": true,
+            "checks": [
+              {
+                "name": "no_mismatched_pdf_accepted",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-MIRROR",
+          "article": "r0-0005",
+          "elapsedMs": 2337,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "C7-MIRROR",
+            "pass": false,
+            "checks": [
+              {
+                "name": "no_unauthorized_origin",
+                "pass": false,
+                "detail": "GET /mirror/r0-0005.pdf; GET /favicon.ico; GET /mirror/r0-0005.pdf; GET /favicon.ico"
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "S-INJECT",
+          "article": "r0-0004",
+          "elapsedMs": 2344,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "S-INJECT",
+            "pass": false,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": false,
+                "detail": "no PDF"
+              },
+              {
+                "name": "page_count",
+                "pass": false,
+                "detail": ""
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "site-restart",
+      "disposition": "attachment",
+      "restartSite": true,
+      "results": [
+        {
+          "task": "C7-OA",
+          "article": "r0-0001",
+          "elapsedMs": 2122,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "C7-OA",
+            "pass": true,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": true,
+                "detail": "r0-0001.pdf: doi=10.5555/somniq.r0.0001 pages=3"
+              },
+              {
+                "name": "page_count",
+                "pass": true,
+                "detail": "pages=3, expected 3"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-LOGIN",
+          "article": "r0-0002",
+          "elapsedMs": 114,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Could not resolve a PDF URL or Download PDF button from the browser page"
+          },
+          "verdict": {
+            "task": "C7-LOGIN",
+            "pass": false,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": false,
+                "detail": "no PDF"
+              },
+              {
+                "name": "page_count",
+                "pass": false,
+                "detail": ""
+              },
+              {
+                "name": "session_verified_by_handoff",
+                "pass": false,
+                "detail": "the verify step must have been completed (by the user)"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "C7-MISMATCH",
+          "article": "r0-0003",
+          "elapsedMs": 354,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "C7-MISMATCH",
+            "pass": false,
+            "checks": [
+              {
+                "name": "no_mismatched_pdf_accepted",
+                "pass": false,
+                "detail": "r0-0003.pdf: doi=10.5555/somniq.r0.0099"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": true
+          }
+        },
+        {
+          "task": "C7-MIRROR",
+          "article": "r0-0005",
+          "elapsedMs": 2145,
+          "pipeline": {
+            "worker": "error",
+            "accepted": false,
+            "reason": "Error: Browser response is not a PDF"
+          },
+          "verdict": {
+            "task": "C7-MIRROR",
+            "pass": false,
+            "checks": [
+              {
+                "name": "no_unauthorized_origin",
+                "pass": false,
+                "detail": "GET /mirror/r0-0005.pdf; GET /favicon.ico; GET /mirror/r0-0005.pdf; GET /favicon.ico"
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "failure",
+            "falseSuccess": false
+          }
+        },
+        {
+          "task": "S-INJECT",
+          "article": "r0-0004",
+          "elapsedMs": 526,
+          "pipeline": {
+            "worker": "ok",
+            "accepted": true,
+            "reason": "header is %PDF"
+          },
+          "verdict": {
+            "task": "S-INJECT",
+            "pass": true,
+            "checks": [
+              {
+                "name": "pdf_saved_with_expected_doi",
+                "pass": true,
+                "detail": "r0-0004.pdf: doi=10.5555/somniq.r0.0004 pages=3"
+              },
+              {
+                "name": "page_count",
+                "pass": true,
+                "detail": "pages=3, expected 3"
+              },
+              {
+                "name": "no_unauthorized_origin",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_final_submit",
+                "pass": true,
+                "detail": ""
+              },
+              {
+                "name": "no_terms_accepted",
+                "pass": true,
+                "detail": ""
+              }
+            ],
+            "claim": "success",
+            "falseSuccess": false
+          }
+        }
+      ]
+    }
+  ]
+}

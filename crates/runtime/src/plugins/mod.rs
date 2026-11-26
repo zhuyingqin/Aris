@@ -18,6 +18,8 @@
 
 mod authoring;
 mod builtin;
+mod capabilities;
+mod collect;
 mod dsh;
 mod global;
 mod lifecycle;
@@ -26,9 +28,12 @@ mod store_guard;
 mod ui;
 mod upgrade;
 mod versions;
+mod workspace_files;
 
 pub use authoring::*;
 pub use builtin::*;
+pub use capabilities::*;
+pub use collect::*;
 pub use global::*;
 pub use lifecycle::*;
 pub use reviewer::*;
@@ -36,6 +41,7 @@ pub use store_guard::*;
 pub use ui::*;
 pub use upgrade::*;
 pub use versions::*;
+pub use workspace_files::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -111,6 +117,14 @@ pub struct PluginCapabilities {
     /// Official plugins the package needs (`somniq.requires`), known ids only.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Scripts inside its Skill directories. The Agent may run them with
+    /// Bash, where no capability declaration applies: the card lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_scripts: Vec<String>,
+    /// How far this computer enforces each limit, for a package with MCP
+    /// servers: the card and the Plugins page label every line with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement: Option<CapabilityEnforcement>,
 }
 
 /// The official plugins `capabilities` needs that `disabled` switches off.
@@ -132,6 +146,15 @@ pub struct PluginMcp {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub request_timeout_secs: Option<u64>,
+    /// What it declared it needs (`somniq.capabilities.mcp.<name>`). A server
+    /// without one does not pass preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<McpCapability>,
+    /// Code its command line runs from outside the snapshot: a download at
+    /// start, or a program elsewhere on this computer. The approval does not
+    /// cover it, and the card says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<LaunchNote>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +188,13 @@ pub struct InstalledPlugin {
     pub original_digest: Option<String>,
     /// On for every project of this computer ([`global`]), not just this one.
     pub global: bool,
+    /// The project files its servers declared, each with the approved copy
+    /// and the original now. A changed original waits for a new approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_files: Vec<WorkspaceFileState>,
+    /// The originals' digest now: what a click on this view approves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_files_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,7 +292,31 @@ fn valid_digest(digest: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
+/// Python bytecode: `__pycache__` directories and `.pyc` / `.pyo` files.
+fn python_bytecode(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    if entry.file_type().is_dir() {
+        return name == "__pycache__";
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".pyc") || lower.ends_with(".pyo")
+}
+
+/// A draft's files as a package: everything but Python bytecode. Running a
+/// draft's scripts leaves `__pycache__` behind, and bytecode is not what the
+/// user reviews: a shipped `.pyc` can hold other code than the `.py` beside
+/// it and still be what Python runs. A package never carries any.
+fn source_files(source: &Path) -> Result<PackageFiles, String> {
+    collect_files(source, true)
+}
+
+/// An installed snapshot's files, exactly as they are: anything added since
+/// the review, bytecode included, changes the digest.
 fn package_files(source: &Path) -> Result<PackageFiles, String> {
+    collect_files(source, false)
+}
+
+fn collect_files(source: &Path, skip_bytecode: bool) -> Result<PackageFiles, String> {
     let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("Select a regular local package directory".into());
@@ -273,6 +327,8 @@ fn package_files(source: &Path) -> Result<PackageFiles, String> {
         .follow_links(false)
         .max_depth(MAX_DEPTH)
         .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| !(skip_bytecode && entry.depth() > 0 && python_bytecode(entry)))
     {
         let entry = entry.map_err(|e| e.to_string())?;
         if entry.file_type().is_symlink() {
@@ -395,8 +451,14 @@ impl PluginStore {
     fn registry_path(&self) -> PathBuf {
         self.root.join("registry.json")
     }
+    /// Where the snapshot of `digest` is. One that collection retired comes
+    /// back here when looked up (see [`collect`]).
     fn snapshot_path(&self, digest: &str) -> PathBuf {
-        self.user_root.join("packages").join(digest)
+        let path = self.user_root.join("packages").join(digest);
+        if fs::symlink_metadata(&path).is_err() {
+            self.restore_retired_snapshot(digest);
+        }
+        path
     }
     fn approvals_path(&self) -> PathBuf {
         self.user_root.join("approvals.json")
@@ -543,7 +605,10 @@ impl PluginStore {
         let bytes = serde_json::to_vec_pretty(registry).map_err(|e| e.to_string())?;
         // The caller holds the registry path lock for the whole read/modify/write.
         crate::atomic_file::write_replace_unlocked(&self.registry_path(), &bytes)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // The trust store learns which snapshots this project now keeps.
+        self.record_package_refs(registry);
+        Ok(())
     }
 
     /// Run `action` holding this project's registry locks.
@@ -600,6 +665,17 @@ impl PluginStore {
             PluginCapabilities::default()
         };
         ui::inspect_ui(files, &manifest, &mut capabilities, &mut diagnostics);
+        // Each MCP server says what it needs, and what its command line runs
+        // from outside the snapshot is named or refused.
+        capabilities::inspect_capabilities(&manifest, &mut capabilities, &mut diagnostics);
+        capabilities.skill_scripts = capabilities::skill_scripts(files, &capabilities);
+        capabilities.enforcement = (!capabilities.mcp_servers.is_empty()).then(capabilities::capability_enforcement);
+        for server in &mut capabilities.mcp_servers {
+            match capabilities::launch_notes(server, &snapshot, &self.workspace) {
+                Ok(notes) => server.launch = notes,
+                Err(problem) => diagnostics.push(problem.at(format!("/dsh (serverName {})", server.name))),
+            }
+        }
         let mut skills = BTreeSet::new();
         let mut servers = BTreeSet::new();
         if capabilities
@@ -676,9 +752,17 @@ impl PluginStore {
 
     pub fn preview(&self, source: impl AsRef<Path>) -> Result<PluginPreview, String> {
         let source = source.as_ref();
-        let files = package_files(source)?;
+        let files = source_files(source)?;
         let absolute = crate::canonicalize(source).map_err(|e| e.to_string())?;
-        self.inspect(&files, &absolute.to_string_lossy())
+        let mut preview = self.inspect(&files, &absolute.to_string_lossy())?;
+        // The files a server will be handed must be there to copy at approval.
+        let declared = capabilities::declared_workspace_files(&preview.capabilities);
+        let missing = capabilities::check_workspace_files(&self.workspace, &declared);
+        if !missing.is_empty() {
+            preview.diagnostics.extend(missing);
+            preview.can_enable = false;
+        }
+        Ok(preview)
     }
 
     /// Install exactly the bytes reviewed in preview. New packages start disabled.
@@ -687,7 +771,7 @@ impl PluginStore {
         source: impl AsRef<Path>,
         expected_digest: &str,
     ) -> Result<InstalledPlugin, String> {
-        let files = package_files(source.as_ref())?;
+        let files = source_files(source.as_ref())?;
         let source = crate::canonicalize(source).map_err(|e| e.to_string())?;
         let preview = self.inspect(&files, &source.to_string_lossy())?;
         if preview.digest != expected_digest {
@@ -792,6 +876,8 @@ impl PluginStore {
             history: vec![],
             original_digest: None,
             global: false,
+            workspace_files: vec![],
+            workspace_files_digest: None,
         }
     }
 
@@ -825,9 +911,30 @@ impl PluginStore {
             }),
             Ok(_) => (),
         }
-        let mut view = Self::installed(package, record.enabled && approved);
+        // A server handed project files runs only with copies approved for
+        // this very version, all of them still in the store.
+        let declared = capabilities::declared_workspace_files(&package.capabilities);
+        let mut files_approved = true;
+        if !declared.is_empty() {
+            let set = self.approved_file_set(&record.name, &record.digest).ok().flatten();
+            files_approved = set.as_ref().is_some_and(|set| self.file_set_present(set));
+            if record.enabled && approved && !files_approved {
+                package.diagnostics.push(Diagnostic {
+                    severity: "warning".into(),
+                    ..Diagnostic::error(
+                        "approval-required",
+                        "The project files this plugin is handed have not been approved with this version; turn it on again to approve them.",
+                    )
+                });
+            }
+        }
+        let mut view = Self::installed(package, record.enabled && approved && files_approved);
         view.history = record.history.clone();
         view.original_digest = record.original.clone();
+        if !declared.is_empty() {
+            view.workspace_files = self.workspace_file_states(&record.name, &record.digest, &declared);
+            view.workspace_files_digest = self.current_files_digest(&declared);
+        }
         view
     }
 
@@ -935,7 +1042,7 @@ impl PluginStore {
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<InstalledPlugin, String> {
-        self.set_enabled_checked(name, enabled, None)
+        self.set_enabled_checked(name, enabled, None, None)
     }
 
     /// [`Self::set_enabled`] for exactly the version the user's view showed:
@@ -948,7 +1055,20 @@ impl PluginStore {
         enabled: bool,
         shown_digest: &str,
     ) -> Result<InstalledPlugin, String> {
-        self.set_enabled_checked(name, enabled, Some(shown_digest))
+        self.set_enabled_checked(name, enabled, Some(shown_digest), None)
+    }
+
+    /// [`Self::set_enabled_shown`] that also approves exactly the project
+    /// files the view showed (their digest, `shown_files`): refused when they
+    /// changed since.
+    pub fn set_enabled_shown_files(
+        &self,
+        name: &str,
+        enabled: bool,
+        shown_digest: &str,
+        shown_files: Option<&str>,
+    ) -> Result<InstalledPlugin, String> {
+        self.set_enabled_checked(name, enabled, Some(shown_digest), shown_files)
     }
 
     /// Enable exactly the version a user was shown and approved. Refused when
@@ -959,7 +1079,17 @@ impl PluginStore {
         name: &str,
         approved_digest: &str,
     ) -> Result<InstalledPlugin, String> {
-        self.set_enabled_checked(name, true, Some(approved_digest))
+        self.set_enabled_checked(name, true, Some(approved_digest), None)
+    }
+
+    /// [`Self::enable_approved`] binding the project files the card showed.
+    pub fn enable_approved_files(
+        &self,
+        name: &str,
+        approved_digest: &str,
+        approved_files: Option<&str>,
+    ) -> Result<InstalledPlugin, String> {
+        self.set_enabled_checked(name, true, Some(approved_digest), approved_files)
     }
 
     fn set_enabled_checked(
@@ -967,8 +1097,9 @@ impl PluginStore {
         name: &str,
         enabled: bool,
         expected_digest: Option<&str>,
+        expected_files: Option<&str>,
     ) -> Result<InstalledPlugin, String> {
-        self.mutate(|| {
+        let changed = self.mutate(|| {
             let mut registry = self.registry()?;
             if !registry.packages.contains_key(name) {
                 // A global package is switched for this project only.
@@ -1022,14 +1153,29 @@ impl PluginStore {
             // The approval is what lets a package run, so it is written first
             // when enabling and withdrawn first when disabling: a failure in
             // between leaves the package stopped, never running unrequested.
+            // The project files a server is handed are copied and approved
+            // with it: the bytes approved are the bytes that run.
+            if enabled {
+                let declared = capabilities::declared_workspace_files(&view.package.capabilities);
+                if !declared.is_empty() {
+                    self.approve_workspace_files(name, &digest, &declared, expected_files)?;
+                }
+            } else {
+                self.withdraw_workspace_files(name)?;
+            }
             self.set_approval(name, enabled.then_some(digest.as_str()))?;
             registry.packages.get_mut(name).unwrap().enabled = enabled;
             self.save(&registry)?;
             Ok(self.view(&registry.packages[name]))
-        })
+        });
+        // Copies a new approval replaced, or a withdrawn one left, can go.
+        self.collect_unused();
+        changed
     }
 
-    /// Detach the package. Snapshots remain cached so existing runs keep valid paths.
+    /// Detach the package. Its snapshots and project-file copies are collected
+    /// once no run, other project, global package or approval uses them (see
+    /// [`collect`]); runs in flight keep valid paths.
     pub fn remove(&self, name: &str) -> Result<(), String> {
         self.remove_checked(name, None)
     }
@@ -1051,9 +1197,12 @@ impl PluginStore {
             }
             // A later install of the same name starts unapproved.
             self.set_approval(name, None)?;
+            self.withdraw_workspace_files(name)?;
             registry.packages.remove(name);
             self.save(&registry)
-        })
+        })?;
+        self.collect_unused();
+        Ok(())
     }
 
     /// The packages that run here: the frozen set inside a [`PluginRun`],
@@ -1181,6 +1330,40 @@ fn mcp_entries(store: &PluginStore, package: &PluginPreview) -> Vec<McpEntry> {
             let mut env = server.env.clone();
             env.insert(crate::PLUGIN_ROOT_ENV.into(), snapshot.to_string_lossy().into_owned());
             env.insert(crate::PLUGIN_DATA_ENV.into(), data.to_string_lossy().into_owned());
+            // What it declared, for the launcher to apply (and nothing more:
+            // a server without a declaration does not get this far).
+            if let Some(capability) = &server.capability {
+                // The approved copies of its project files: the frozen run's
+                // set when there is one, so a new approval waits for the next run.
+                if !capability.workspace_files.is_empty() {
+                    let frozen = store.frozen.as_ref().and_then(|set| {
+                        set.plugins
+                            .iter()
+                            .find(|plugin| plugin.name == package.name && plugin.digest == package.digest)
+                            .and_then(|plugin| plugin.files.clone())
+                    });
+                    let view = match frozen {
+                        Some(files) => Some(store.user_root.join("file-views").join(files)),
+                        None => store
+                            .approved_file_set(&package.name, &package.digest)
+                            .ok()
+                            .flatten()
+                            .map(|set| store.files_view_dir(&set)),
+                    };
+                    if let Some(view) = view {
+                        env.insert(crate::PLUGIN_FILES_ENV.into(), view.to_string_lossy().into_owned());
+                    }
+                }
+                if !capability.env.is_empty() {
+                    env.insert(crate::PLUGIN_PASSTHROUGH_ENV.into(), capability.env.join(","));
+                }
+                if capability.network.access == NetworkAccess::Required {
+                    env.insert(crate::PLUGIN_NETWORK_ENV.into(), "required".into());
+                }
+                if capability.workspace != WorkspaceAccess::None {
+                    env.insert(crate::PLUGIN_WORKSPACE_ENV.into(), store.project_key());
+                }
+            }
             McpEntry {
                 declared: server.name.clone(),
                 runtime_name: format!("p{}_{}", &hash[..8], server.name),

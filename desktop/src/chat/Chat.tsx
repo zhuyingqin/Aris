@@ -43,6 +43,7 @@ import {
 } from "../store";
 import { tr } from "../language";
 import { SvgIcon } from "../SvgIcon";
+import { useComputerUse } from "./ComputerUseControls";
 import type {
   ChatTurn,
   ChatTodoItem,
@@ -542,6 +543,7 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
     updateSession,
     setEditingTurnId: composer.setEditingTurnId,
   });
+  const computerUse = useComputerUse(currentId, setError);
   const commands = useChatCommands({
     currentId,
     currentSessionRef,
@@ -2070,6 +2072,21 @@ export default function Chat({ embedded = false, prepareEditorContext }: ChatPro
           permission={currentSession?.remoteAgent || workflowSession ? null : run.permission}
           permissionBusy={run.permissionBusy}
           onPermissionChange={run.changePermission}
+          // Only a local chat the user drives: remote agents, workflows and
+          // work tasks run elsewhere or unattended.
+          computerUse={currentSession?.remoteAgent || workflowSession || workTaskSession
+            ? null
+            : {
+                enabled: computerUse.enabled,
+                busy: computerUse.busy,
+                controlling: computerUse.controlling,
+                controlSinceMs: computerUse.controlSinceMs,
+                observingTitle: computerUse.observingTitle,
+                pendingAccess: computerUse.pendingAccess,
+                onChange: (enabled) => void computerUse.change(enabled),
+                onStop: () => void computerUse.stop(),
+                onRespondAccess: (toolUseId, hwnd) => void computerUse.respondAccess(toolUseId, hwnd),
+              }}
           modelName={activeModel}
           modelOptions={workflowSession ? [] : run.modelSelectOptions}
           modelPricing={modelPricing}

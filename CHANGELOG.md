@@ -1,5 +1,55 @@
 # ARIS-Code Changelog
 
+## v0.4.93 (2026-11-25)
+
+- **Computer-use mode (first version)** — a per-chat "Computer use" switch in
+  the Chat composer. It is off again after a restart and cannot be changed while
+  a turn is running. In this mode the model gets only a fixed allow-list of
+  tools: reading project files, asking the user, and five new window tools.
+  Anything else is refused under every permission mode. MCP servers and project
+  hooks do not start, and the host refuses blocked tools a second time. The
+  window tools (`computer_request_access`, `computer_snapshot`,
+  `computer_find`, `computer_screenshot`, `computer_release`) can only read one
+  window the user picks on an approval card. The card names the model and
+  endpoint that will receive the content. Password fields are never read.
+  Messaging, mail, meeting, remote-desktop and other AI clients cannot be
+  picked. Access ends with the turn. While a turn runs, each monitor shows a
+  "SomniQ is controlling this computer" bar with a Stop button, and the window
+  being read gets a red frame. Every grant and read is kept in the session log.
+  The helper `somniq-computer.exe` (new `crates/computer`, Windows) is bundled
+  by `npm run build:resources`.
+- **Plugin capabilities** — packages declare what their servers need:
+  environment variables by name, network access, and project files. Plugin
+  processes now get only what was declared and approved. They do not inherit
+  shell proxies, and network plugins use SomniQ's own proxy setting. Declared
+  project files are run from a copy. Commands that download code at run time
+  (`npx`, `uvx`, `pipx run`, …) are labelled. Upgrade and rollback reviews list
+  every capability change, with a warning on anything that widens access.
+  Unused package snapshots are cleaned up after 30 days.
+- **Plugin fixes from the full audit** — Python bytecode is no longer written
+  into reviewed snapshots. A package can declare a minimum app version. Page
+  saves detect conflicting edits. Page actions that run tools need a click.
+  Plugin panels can run a plugin's own tools directly (buttons, `tool` actions,
+  `somniq.tool`) without going through the chat. Web panels can share the
+  screen with pages.
+- **Model requests** — output deadlines now count real output. Keep-alive
+  chunks (SSE comments, empty deltas, `response.in_progress`) no longer keep a
+  silent request alive. Each request also has a total time limit: 30 minutes,
+  or 60 for single-submission artifact jobs. Set it with
+  `ARIS_REQUEST_MAX_DURATION_SECS`; `0` turns it off. A request that used its
+  whole time limit is not re-sent. After 10 minutes without output, the wait
+  notice says the request looks stuck instead of "still reasoning", and
+  context compaction shows its own progress instead of counting as a model
+  wait.
+- **Downloaded PDFs are checked against the requested paper** — before a PDF is
+  filed, its DOI or title must match the paper that was asked for. A landing
+  page that links the wrong file, or a mirror that serves another work, is now
+  reported as a mismatch and the file is deleted. Before, such files were
+  filed as the requested paper.
+- **External images in chat** — Markdown images from other hosts and network
+  paths (`\\server\…`, `//host/…`, including percent-encoded forms) are not
+  loaded. A note shows the host instead.
+
 ## v0.4.92 (2026-11-25)
 
 - **Chat history search** — past chats are indexed by character pairs, so
