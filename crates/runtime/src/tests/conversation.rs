@@ -144,7 +144,7 @@ fn concurrent_identical_compactions_share_one_in_flight_summary() {
             leader_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             started_tx.send(()).expect("announce leader");
             release_rx.recv().expect("release leader");
-            Some(("<summary>shared</summary>".to_string(), Some(7)))
+            Some(Some(("<summary>shared</summary>".to_string(), Some(7))))
         })
     });
     started_rx.recv().expect("leader should start");
@@ -154,7 +154,7 @@ fn concurrent_identical_compactions_share_one_in_flight_summary() {
     let follower = std::thread::spawn(move || {
         run_compaction_singleflight(follower_key, || {
             follower_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(("<summary>duplicate</summary>".to_string(), Some(99)))
+            Some(Some(("<summary>duplicate</summary>".to_string(), Some(99))))
         })
     });
 
@@ -5851,3 +5851,324 @@ fn turn_context_rides_on_this_turns_user_message_in_requests_only() {
     assert!(last > 4);
 }
 
+/// A removed transcript that needs several Map calls and a Reduce.
+fn map_reduce_sized_session() -> Session {
+    let filler = "context ".repeat(1_000); // ~8k chars per message
+    let mut session = Session::new();
+    for index in 0..40 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "ask {index} {filler}"
+            )));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("reply {index} {filler}"),
+            }]));
+    }
+    session
+}
+
+const CANCEL_TEST_SUMMARY: &str =
+    "<summary>\n## Current Focus\n- condensed notes of the asks and replies\n</summary>";
+
+fn is_summary_request(request: &ApiRequest) -> bool {
+    request
+        .system_prompt
+        .iter()
+        .any(|prompt| prompt.contains("You are compacting"))
+}
+
+/// Answers its first `ok_summaries` summary requests, then fails them the way
+/// an executor reports a Stop that arrived while it waited on the provider.
+/// Any other request is the chat model finishing the turn; those are counted.
+#[derive(Clone)]
+struct InterruptedAfterCalls {
+    summary_calls: std::rc::Rc<std::cell::Cell<usize>>,
+    chat_calls: std::rc::Rc<std::cell::Cell<usize>>,
+    ok_summaries: usize,
+}
+
+impl InterruptedAfterCalls {
+    fn new(ok_summaries: usize) -> Self {
+        Self {
+            summary_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+            chat_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+            ok_summaries,
+        }
+    }
+}
+
+impl ApiClient for InterruptedAfterCalls {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        if !is_summary_request(&request) {
+            self.chat_calls.set(self.chat_calls.get() + 1);
+            return Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ]);
+        }
+        let call = self.summary_calls.get() + 1;
+        self.summary_calls.set(call);
+        if call > self.ok_summaries {
+            return Err(RuntimeError::new("interrupted by user"));
+        }
+        Ok(vec![
+            AssistantEvent::TextDelta(CANCEL_TEST_SUMMARY.to_string()),
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
+/// Records compaction progress and fallback events by their display names.
+struct CompactionEventLog {
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl crate::EventSink for CompactionEventLog {
+    fn emit(&mut self, event: &crate::RuntimeEvent) {
+        if matches!(
+            event.event_type,
+            crate::EventType::CompactionProgress { .. }
+                | crate::EventType::CompactionSummaryFallback { .. }
+        ) {
+            self.events
+                .lock()
+                .expect("compaction events")
+                .push(event.event_type.to_string());
+        }
+    }
+}
+
+#[test]
+fn a_stop_during_map_reduce_abandons_the_compaction_and_keeps_the_session() {
+    let session = map_reduce_sized_session();
+    let before = session.messages.clone();
+    let client = InterruptedAfterCalls::new(1);
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        session,
+        client.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(client.clone())
+    .with_event_sink(Box::new(CompactionEventLog {
+        events: std::sync::Arc::clone(&events),
+    }));
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+
+    assert_eq!(result.removed_message_count, 0);
+    assert_eq!(
+        result.summary_source,
+        crate::compact::CompactionSummarySource::Skipped
+    );
+    assert_eq!(
+        runtime.session.messages, before,
+        "a stopped compaction must not swap history for a deterministic summary"
+    );
+    assert_eq!(
+        client.summary_calls.get(),
+        2,
+        "nothing may be sent after the request that reported the Stop"
+    );
+    assert_eq!(
+        *events.lock().expect("compaction events"),
+        vec![
+            "compaction_progress:started".to_string(),
+            "compaction_progress:finished".to_string(),
+        ],
+        "a cancelled summary still closes its progress and is not a fallback"
+    );
+
+    // Later compactions in the same stopped turn send nothing either.
+    runtime.compact(CompactionConfig::manual(None));
+    assert_eq!(client.summary_calls.get(), 2);
+}
+
+#[test]
+fn a_stop_between_summary_calls_sends_no_further_request() {
+    /// The Stop lands while the first Map call is running; that call still
+    /// returns a summary, as a provider that already answered would.
+    #[derive(Clone)]
+    struct StopsTheTurn {
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+        stop: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+    impl ApiClient for StopsTheTurn {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls.set(self.calls.get() + 1);
+            self.stop.set(true);
+            Ok(vec![
+                AssistantEvent::TextDelta(CANCEL_TEST_SUMMARY.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+    struct StoppableTools(std::rc::Rc<std::cell::Cell<bool>>);
+    impl ToolExecutor for StoppableTools {
+        fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            Err(ToolError::new(format!("no tool `{tool_name}` here")))
+        }
+        fn is_cancelled(&self) -> bool {
+            self.0.get()
+        }
+    }
+
+    let session = map_reduce_sized_session();
+    let before = session.messages.clone();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let stop = std::rc::Rc::new(std::cell::Cell::new(false));
+    let summarizer = StopsTheTurn {
+        calls: std::rc::Rc::clone(&calls),
+        stop: std::rc::Rc::clone(&stop),
+    };
+    let mut runtime = ConversationRuntime::new(
+        session,
+        summarizer.clone(),
+        StoppableTools(std::rc::Rc::clone(&stop)),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(summarizer);
+
+    let result = runtime.compact(CompactionConfig::manual(None));
+
+    assert_eq!(calls.get(), 1, "the remaining Map calls must not be sent");
+    assert_eq!(result.removed_message_count, 0);
+    assert_eq!(runtime.session.messages, before);
+}
+
+#[test]
+fn a_stop_during_an_in_turn_compaction_ends_the_turn_without_a_model_request() {
+    let client = InterruptedAfterCalls::new(0);
+    let mut runtime = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        client.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(client.clone());
+
+    let error = runtime
+        .run_turn("continue", None)
+        .expect_err("a Stop during the compaction must end the turn");
+
+    assert!(error.is_interrupted(), "unexpected error: {error}");
+    assert_eq!(client.summary_calls.get(), 1);
+    assert_eq!(
+        client.chat_calls.get(),
+        0,
+        "the uncompacted history must not be sent to the chat model"
+    );
+}
+
+#[test]
+fn compaction_reports_progress_only_when_it_asks_a_summarizer() {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scripted = ScriptedSummaryApi::new(CANCEL_TEST_SUMMARY, None);
+    let mut runtime = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        scripted.clone(),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_summarizer(scripted)
+    .with_event_sink(Box::new(CompactionEventLog {
+        events: std::sync::Arc::clone(&events),
+    }));
+    let result = runtime.compact(CompactionConfig::manual(None));
+    assert!(result.removed_message_count > 0, "compaction must fire");
+    assert_eq!(
+        *events.lock().expect("compaction events"),
+        vec![
+            "compaction_progress:started".to_string(),
+            "compaction_progress:finished".to_string(),
+        ]
+    );
+
+    let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut deterministic = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        ScriptedSummaryApi::new(CANCEL_TEST_SUMMARY, None),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000)
+    .with_event_sink(Box::new(CompactionEventLog {
+        events: std::sync::Arc::clone(&quiet),
+    }));
+    deterministic.compact(CompactionConfig::manual(None));
+    assert!(
+        quiet
+            .lock()
+            .expect("compaction events")
+            .iter()
+            .all(|event| !event.starts_with("compaction_progress")),
+        "an instant deterministic summary has no progress to show"
+    );
+}
+
+#[test]
+fn a_cancelled_flight_leader_hands_the_summary_to_a_waiting_caller() {
+    let key = CompactionFlightKey {
+        session_id: "abandoned-flight-session".to_string(),
+        slice_hash: [0x3c; 32],
+    };
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let leader_key = key.clone();
+    let leader = std::thread::spawn(move || {
+        run_compaction_singleflight(leader_key, || {
+            started_tx.send(()).expect("announce leader");
+            release_rx.recv().expect("release leader");
+            None
+        })
+    });
+    started_rx.recv().expect("leader should start");
+
+    let follower_key = key.clone();
+    let follower = std::thread::spawn(move || {
+        run_compaction_singleflight(follower_key, || {
+            Some(Some(("<summary>own</summary>".to_string(), Some(3))))
+        })
+    });
+
+    let mut follower_registered = false;
+    for _ in 0..1_000 {
+        let strong_count = in_flight_compactions()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .map_or(0, std::sync::Arc::strong_count);
+        if strong_count >= 3 {
+            follower_registered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(follower_registered, "the second caller should wait on the flight");
+    release_tx.send(()).expect("release leader");
+
+    assert_eq!(leader.join().expect("leader thread"), None);
+    assert_eq!(
+        follower.join().expect("follower thread"),
+        Some(Some(("<summary>own</summary>".to_string(), Some(3)))),
+        "the waiter must summarize itself, not inherit the cancelled non-answer"
+    );
+    assert!(!in_flight_compactions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&key));
+}

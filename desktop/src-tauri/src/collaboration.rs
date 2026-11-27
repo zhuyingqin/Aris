@@ -622,6 +622,16 @@ impl aris_executor::StreamObserver for ChildObserver {
             || self.parent_cancel.load(Ordering::SeqCst)
             || Instant::now() >= self.deadline
     }
+    fn cancel_probe(&self) -> Option<aris_executor::CancelProbe> {
+        let cancel = Arc::clone(&self.cancel);
+        let parent_cancel = Arc::clone(&self.parent_cancel);
+        let deadline = self.deadline;
+        Some(Arc::new(move || {
+            cancel.load(Ordering::SeqCst)
+                || parent_cancel.load(Ordering::SeqCst)
+                || Instant::now() >= deadline
+        }))
+    }
     fn on_tool_call(&mut self, id: &str, name: &str, _input: &str) -> Result<(), RuntimeError> {
         if self.is_cancelled() || !self.control.is_current_turn(&self.session, &self.turn) {
             return Err(RuntimeError::new("interrupted by user"));

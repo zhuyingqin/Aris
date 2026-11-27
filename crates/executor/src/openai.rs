@@ -919,12 +919,12 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
 /// Reasoning level to send alongside `model`, already clamped to what that
 /// model accepts. `None` when the model takes no level at all.
 ///
-/// The configured level is a *wish*: it is global across models, so a level
-/// one model has and another doesn't (`max`, `xhigh`, `none`) has to be
-/// narrowed per request rather than rejected at the point it was chosen.
+/// `wanted` is a *wish*, usually the global configured level. A model may not
+/// have it (`max`, `xhigh`, `none`), so it is narrowed per request rather than
+/// rejected at the point it was chosen.
 #[must_use]
-fn reasoning_level_for(model: &str) -> Option<&'static str> {
-    crate::reasoning_effort::closest_level(model, &crate::reasoning_effort::configured_level())
+fn reasoning_level_for(model: &str, wanted: &str) -> Option<&'static str> {
+    crate::reasoning_effort::closest_level(model, wanted)
 }
 
 /// Number of whole-stream restarts to attempt when chunk read fails (or
@@ -1332,7 +1332,12 @@ fn transport_label(use_responses_api: bool) -> &'static str {
 /// instead". Third-party proxies without that restriction opt back in with
 /// `ARIS_FORCE_REASONING_WITH_TOOLS=1`. On the Responses transport the effort
 /// travels in `reasoning.effort` instead, so this is never consulted there.
-fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) -> Option<String> {
+fn chat_reasoning_effort_for(
+    model: &str,
+    base_url: &str,
+    enable_tools: bool,
+    wanted: &str,
+) -> Option<String> {
     let model_lower = model.to_ascii_lowercase();
     let blocked = enable_tools
         && base_url.contains("api.openai.com")
@@ -1346,7 +1351,7 @@ fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) ->
         .as_deref()
         == Some("1");
     if !blocked || force_with_tools {
-        if let Some(level) = reasoning_level_for(model) {
+        if let Some(level) = reasoning_level_for(model, wanted) {
             return Some(level.to_string());
         }
     }
@@ -1530,6 +1535,7 @@ fn build_responses_body(
     enable_tools: bool,
     system_prompt: Option<&str>,
     prompt_cache_key: &str,
+    reasoning_wish: &str,
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -1540,7 +1546,7 @@ fn build_responses_body(
         "prompt_cache_key": prompt_cache_key,
         "reasoning": { "summary": "auto" },
     });
-    if let Some(level) = reasoning_level_for(model) {
+    if let Some(level) = reasoning_level_for(model, reasoning_wish) {
         body["reasoning"]["effort"] = json!(level);
     }
     if let Some(prompt) = system_prompt {
@@ -2086,6 +2092,9 @@ pub struct OpenAIRuntimeClient {
     /// Explicit provider identity for this connection, never written to a
     /// model registry by a configuration flag.
     send_routing_session_header: bool,
+    /// Reasoning level this client asks for instead of the global
+    /// `ARIS_REASONING_EFFORT`; see [`Self::with_reasoning_level`].
+    reasoning_level: Option<String>,
 }
 
 fn build_runtime_http_client(wait_policy: api::StreamWaitPolicy) -> Result<reqwest::Client, String> {
@@ -2128,6 +2137,7 @@ impl OpenAIRuntimeClient {
             single_request: false,
             max_output_tokens: None,
             send_routing_session_header: false,
+            reasoning_level: None,
         })
     }
 
@@ -2170,6 +2180,19 @@ impl OpenAIRuntimeClient {
         self.single_request = true;
         self.max_output_tokens = max_output_tokens;
         self.with_wait_policy(api::StreamWaitPolicy::single_request_from_env())
+    }
+
+    /// Ask for `level` instead of the chat's configured reasoning level, still
+    /// narrowed to what the model accepts.
+    ///
+    /// For side requests whose cost should not follow the chat's setting: a
+    /// compaction summary used to inherit `max` and think for minutes before
+    /// writing a word, once per Map-Reduce call.
+    #[must_use]
+    pub fn with_reasoning_level(mut self, level: &str) -> Self {
+        let level = level.trim().to_ascii_lowercase();
+        self.reasoning_level = (!level.is_empty()).then_some(level);
+        self
     }
 
     /// Propagate the session to OpenCode or a configured managed gateway.
@@ -2216,6 +2239,10 @@ impl ApiClient for OpenAIRuntimeClient {
         // (replaying it onto them only churned request bytes and broke
         // provider prefix caching).
         let supports_reasoning = supports_reasoning_content_replay(&self.model);
+        let reasoning_wish = self
+            .reasoning_level
+            .clone()
+            .unwrap_or_else(crate::reasoning_effort::configured_level);
         // Mutable: a `/v1/responses` request that the gateway cannot serve
         // falls back to chat/completions inside the send loop below, and the
         // stream parser must follow the transport it actually reached.
@@ -2239,6 +2266,7 @@ impl ApiClient for OpenAIRuntimeClient {
                     system_prompt.as_deref(),
                     &request.messages,
                 ),
+                &reasoning_wish,
             )
         } else {
             build_chat_completions_body(
@@ -2246,7 +2274,12 @@ impl ApiClient for OpenAIRuntimeClient {
                 convert_messages_openai(&request.messages, system_prompt.as_deref(), &self.model),
                 &active_tool_specs,
                 self.enable_tools,
-                chat_reasoning_effort_for(&self.model, &self.base_url, self.enable_tools),
+                chat_reasoning_effort_for(
+                    &self.model,
+                    &self.base_url,
+                    self.enable_tools,
+                    &reasoning_wish,
+                ),
             )
         };
 
@@ -2264,7 +2297,7 @@ impl ApiClient for OpenAIRuntimeClient {
             // than inheriting a chat's high reasoning budget.
             if let Some(level) = crate::reasoning_effort::closest_level(&self.model, "low") {
                 if use_responses_api { body["reasoning"]["effort"] = json!(level); }
-                else if chat_reasoning_effort_for(&self.model, &self.base_url, false).is_some() { body["reasoning_effort"] = json!(level); }
+                else if chat_reasoning_effort_for(&self.model, &self.base_url, false, "low").is_some() { body["reasoning_effort"] = json!(level); }
             }
         }
         // A model already known to take no images gets its image parts as text
@@ -2541,6 +2574,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &self.model,
                                     &self.base_url,
                                     self.enable_tools,
+                                    &reasoning_wish,
                                 ),
                             );
                             if strip_images {
@@ -2599,6 +2633,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     system_prompt.as_deref(),
                                     &request.messages,
                                 ),
+                                &reasoning_wish,
                             );
                             if strip_images {
                                 strip_image_parts_from_body(&mut body);

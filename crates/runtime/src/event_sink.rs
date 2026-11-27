@@ -72,6 +72,15 @@ pub enum EventType {
     CompactionSummaryFallback {
         reason: String,
     },
+    /// A compaction started or stopped asking the summarizer model.
+    ///
+    /// One summary can take minutes, and a compaction inside a turn's tool
+    /// loop otherwise looks exactly like a turn waiting on the chat model.
+    /// `Finished` follows every `Started`, also when the summary failed or was
+    /// cancelled.
+    CompactionProgress {
+        phase: CompactionPhase,
+    },
     /// The model-visible tool array changed mid-turn.
     ///
     /// Emitted because the turn-start routing snapshot is not the whole story:
@@ -100,6 +109,24 @@ pub enum EventType {
         /// answer a supervising agent receives as the turn's result.
         last_message: Option<String>,
     },
+}
+
+/// Which edge of a summarizing compaction an
+/// [`EventType::CompactionProgress`] marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionPhase {
+    Started,
+    Finished,
+}
+
+impl CompactionPhase {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Finished => "finished",
+        }
+    }
 }
 
 /// How a turn ended.
@@ -142,6 +169,9 @@ impl fmt::Display for EventType {
             } => write!(f, "tool_routing_changed:{active_tool_count}"),
             Self::CompactionSummaryFallback { reason } => {
                 write!(f, "compaction_summary_fallback:{reason}")
+            }
+            Self::CompactionProgress { phase } => {
+                write!(f, "compaction_progress:{}", phase.as_str())
             }
             Self::TurnStarted => write!(f, "turn_started"),
             Self::TurnFinished { outcome, .. } => write!(f, "turn_finished:{}", outcome.as_str()),
@@ -383,6 +413,14 @@ impl EventSink for JsonlEventSink {
                     event.timestamp,
                     escape_json(&sanitize_field(&self.session_id, 60)),
                     escape_json(&sanitize_field(reason, 80)),
+                )
+            }
+            EventType::CompactionProgress { phase } => {
+                format!(
+                    r#"{{"ts":"{}","session":"{}","event":"compaction_progress","phase":"{}"}}"#,
+                    event.timestamp,
+                    escape_json(&sanitize_field(&self.session_id, 60)),
+                    phase.as_str(),
                 )
             }
             EventType::ToolRoutingChanged {

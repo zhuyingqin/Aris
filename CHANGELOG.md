@@ -49,6 +49,14 @@
 - **External images in chat** — Markdown images from other hosts and network
   paths (`\\server\…`, `//host/…`, including percent-encoded forms) are not
   loaded. A note shows the host instead.
+- **Context compaction** — summaries now ask for low reasoning effort instead
+  of the chat's own setting. At `max`, `gpt-5.6-luna` thought for up to 2.5
+  minutes before each of a compaction's 4–6 summary calls, so one compaction
+  took 7–15 minutes. `ARIS_SUMMARIZER_REASONING_EFFORT` changes the level.
+  Stop now ends a compaction that is still summarizing and leaves the chat
+  history unchanged; before, the summary kept running after Stop and its
+  result was thrown away. Compaction between tool steps also shows
+  "Compacting context" instead of a model wait.
 
 ## v0.4.92 (2026-11-25)
 

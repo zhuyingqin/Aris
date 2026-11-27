@@ -2823,6 +2823,10 @@ struct DesktopWireTraceSink {
 
 struct DesktopRuntimeEventSink {
     session_id: String,
+    /// Where a summarizing compaction inside the turn reports its progress.
+    /// `None` where the caller reports it itself (the pre-turn compaction) or
+    /// nobody is watching.
+    compaction_progress: Option<(AppHandle, ChatEventDelivery)>,
 }
 
 impl runtime::EventSink for DesktopRuntimeEventSink {
@@ -2875,6 +2879,21 @@ impl runtime::EventSink for DesktopRuntimeEventSink {
                     "removedMessages": removed_messages,
                 }),
             ),
+            runtime::EventType::CompactionProgress { phase } => {
+                crate::chat_events::record_wire_event(
+                    &self.session_id,
+                    "context.compaction",
+                    json!({ "sessionId": &self.session_id, "phase": phase.as_str() }),
+                );
+                if let Some((app, delivery)) = &self.compaction_progress {
+                    let (phase, activity) = match phase {
+                        runtime::CompactionPhase::Started => ("started", "compacting"),
+                        runtime::CompactionPhase::Finished => ("finished", "thinking"),
+                    };
+                    emit_remote_chat_activity(*delivery, app, &self.session_id, activity);
+                    publish_compaction_progress(*delivery, app, &self.session_id, phase);
+                }
+            }
             runtime::EventType::CompactionSummaryFallback { reason } => {
                 if reason == "summarizer_model_unavailable" {
                     open_session_summarizer_circuit(&self.session_id);
@@ -3047,6 +3066,16 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+
+    fn cancel_probe(&self) -> Option<aris_executor::CancelProbe> {
+        Some(atomic_cancel_probe(&self.cancelled))
+    }
+}
+
+/// A cancel probe that reads `flag`.
+fn atomic_cancel_probe(flag: &Arc<AtomicBool>) -> aris_executor::CancelProbe {
+    let flag = Arc::clone(flag);
+    Arc::new(move || flag.load(Ordering::SeqCst))
 }
 
 struct PermissionPromptHandle {
@@ -4709,7 +4738,7 @@ fn maybe_auto_compact(
     session: Session,
     emit_to_desktop: bool,
     event_delivery: ChatEventDelivery,
-    cancelled: &AtomicBool,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<Session, String> {
     let window = context_window_for_model(model);
     let budget = compaction_budget_for_model(model);
@@ -4737,6 +4766,7 @@ fn maybe_auto_compact(
                 summarizer_model,
                 summarizer_config,
                 CompactionConfig::default(),
+                Some(cancelled),
             );
             // A Stop already ended the turn (the caller stopped waiting on
             // this thread); a late "finished" would land on the next turn.
@@ -4796,14 +4826,21 @@ fn compact_session_with_runtime(
     summarizer_model: Option<String>,
     summarizer_config: Option<aris_chat::SummarizerConfig>,
     compaction: CompactionConfig,
+    cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<runtime::CompactionResult, String> {
+    // With a Stop flag, the summary requests end as soon as it is set instead
+    // of running on after the turn has stopped waiting for them.
+    let observer: Box<dyn aris_executor::StreamObserver> = match cancelled {
+        Some(flag) => Box::new(aris_executor::CancelProbeObserver(atomic_cancel_probe(flag))),
+        None => Box::new(SilentStreamObserver),
+    };
     let runtime = aris_chat::build_conversation_runtime(
         session,
         executor_config,
         model,
         false,
         Vec::new(),
-        Box::new(SilentStreamObserver),
+        observer,
         NoToolsExecutor,
         aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
         Vec::new(),
@@ -4814,6 +4851,8 @@ fn compact_session_with_runtime(
     Ok(runtime
         .with_event_sink(Box::new(DesktopRuntimeEventSink {
             session_id: session_id.to_string(),
+            // The pre-turn caller reports this compaction's progress itself.
+            compaction_progress: None,
         }))
         .with_compaction_session_id(session_id)
         .compact(compaction))
@@ -5448,6 +5487,7 @@ fn run_chat_command(
                 summarizer_model,
                 summarizer_config,
                 CompactionConfig::manual(instruction.clone()),
+                None,
             )?;
             let removed = result.removed_message_count;
             let report = format_compact_report(&result);
@@ -9536,8 +9576,9 @@ async fn run_chat_turn_with_context(
         }
     });
     // Stop must end the turn even while a long compaction is still
-    // summarizing on the blocking pool. That thread finishes on its own and
-    // its result is dropped: it checks the flag before recording anything.
+    // summarizing on the blocking pool. That thread's summary requests watch
+    // the same flag and end early; its result is dropped, since it checks the
+    // flag before recording anything.
     let preflight = loop {
         match tokio::time::timeout(PREFLIGHT_CANCEL_POLL, &mut preflight_task).await {
             Ok(joined) => break joined,
@@ -10098,6 +10139,7 @@ async fn run_chat_turn_with_context(
             runtime,
             Box::new(DesktopRuntimeEventSink {
                 session_id: worker_session_id.clone(),
+                compaction_progress: Some((worker_app.clone(), event_delivery)),
             }),
         )
             .with_compaction_session_id(worker_session_id.clone())

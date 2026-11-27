@@ -116,8 +116,9 @@ pub use conversation::{
     ToolInvocation, ToolMedia, ToolOutput, TurnInput, TurnInputSource, TurnSummary,
 };
 pub use event_sink::{
-    epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink, TurnOutcome,
+    epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, CompactionPhase, EventSink,
+    EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink,
+    TurnOutcome,
 };
 pub use evidence_ledger::{
     evidence_guard_mode, EvidenceGuardMode, NO_NEW_EVIDENCE_BLOCK_CALLS,

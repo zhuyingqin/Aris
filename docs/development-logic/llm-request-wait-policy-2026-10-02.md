@@ -71,7 +71,16 @@ A user saw "Waiting for the model · 23:20" with no error and no retry notice. E
 
 ### Compaction is not a model wait
 
-Preflight auto-compaction can summarize a long history for minutes (up to 24 sequential summarizer calls). Desktop showed that as "Waiting for the model", because only remote clients got a `compacting` signal. It now emits `chat-compaction` (`started` / `finished`, recorded as `compaction_progress`). Chat shows "Compacting context · m:ss" and restarts the model-wait clock when compaction ends. Stop no longer waits for preflight to finish: the turn polls its cancel flag every 100ms and returns, and the abandoned compaction thread checks the flag before it records anything. Mid-turn compaction (between tool steps) still has no start signal.
+Preflight auto-compaction can summarize a long history for minutes (up to 24 sequential summarizer calls). Desktop showed that as "Waiting for the model", because only remote clients got a `compacting` signal. It now emits `chat-compaction` (`started` / `finished`, recorded as `compaction_progress`). Chat shows "Compacting context · m:ss" and restarts the model-wait clock when compaction ends. Stop no longer waits for preflight to finish: the turn polls its cancel flag every 100ms and returns, and the abandoned compaction thread checks the flag before it records anything.
+
+2026-11-26, from a GPT session's wire log: one compaction there took 7–15 minutes, and Stop did not end it.
+
+- **Reasoning level.** The summarizer (`gpt-5.6-luna`) inherited the chat's `reasoning_effort: "max"`. It thought for 24–162 s before its first word on each of the 4–6 sequential Map-Reduce calls, 43–304 s per call. Summaries now ask for `low` (`aris_chat::DEFAULT_SUMMARIZER_REASONING_LEVEL`, overridable with `ARIS_SUMMARIZER_REASONING_EFFORT`), narrowed per model like any level. This applies to both the OpenAI and the Anthropic client (`with_reasoning_level`).
+- **Stop ends the summary.** The summarizer used to run on a never-cancelled observer. It now watches the turn observer's `cancel_probe()`, and the runtime checks for cancellation before every summary call.
+  - A cancelled compaction leaves the session untouched; no deterministic fallback replaces history the next turn can still summarize.
+  - The turn returns "interrupted" before sending the uncompacted request.
+  - A singleflight leader that was cancelled marks its flight `Abandoned`, so a waiting caller summarizes the slice itself instead of inheriting the non-answer.
+- **Mid-turn progress.** Compaction between tool steps emits `EventType::CompactionProgress`. The main turn's sink forwards it as the same `chat-compaction` event (wire: `context.compaction`), so it also shows "Compacting context".
 
 After 10 minutes (the default first-output budget) with nothing new, the Chat hint changes from "deep reasoning may take a few minutes" to "past the default 10-minute wait limit; the model may be stuck".
 

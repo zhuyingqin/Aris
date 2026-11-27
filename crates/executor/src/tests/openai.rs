@@ -2489,7 +2489,7 @@ fn non_responses_models_keep_their_original_chat_request() {
         vec![json!({ "role": "user", "content": "hi" })],
         std::slice::from_ref(&spec),
         true,
-        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", true),
+        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", true, "high"),
     );
 
     assert_eq!(body["model"], "MiniMax-M3");
@@ -3471,4 +3471,60 @@ fn outdated_client_refusal_is_final_and_identifies_the_release() {
     assert_eq!(extra, 0, "the refusal was retried");
     let expected = format!("user-agent: {}", runtime::client_user_agent()).to_ascii_lowercase();
     assert!(request.to_ascii_lowercase().contains(&expected), "{request}");
+}
+
+/// A side request such as a compaction summary asks for its own level, not the
+/// chat's: a summary that inherited `max` thought for minutes per call.
+#[test]
+fn a_client_level_replaces_the_configured_reasoning_level() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let wire = read_mock_http_request(&mut stream);
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"<summary>ok</summary>\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        wire
+    });
+    let mut client = silent_gateway_client(
+        format!("http://{address}/v1"),
+        "gpt-5.6-luna",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(5)),
+            stream_idle_timeout: Some(Duration::from_secs(5)),
+            request_max_duration: None,
+        },
+    )
+    .with_reasoning_level("LOW ");
+    let events = client.stream(hello_request()).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text.contains("ok"))));
+    let wire = server.join().unwrap();
+    let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["reasoning_effort"], "low");
+}
+
+#[test]
+fn the_reasoning_wish_reaches_both_transports_narrowed_to_the_model() {
+    assert_eq!(
+        chat_reasoning_effort_for("gpt-5.6-luna", "http://gateway.local/v1", false, "low").as_deref(),
+        Some("low")
+    );
+    // A model without levels still sends none, whatever is wished for.
+    assert_eq!(
+        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", false, "low"),
+        None
+    );
+    let body = build_responses_body(
+        "gpt-5.6-luna",
+        Vec::new(),
+        &[],
+        false,
+        None,
+        "cache-key",
+        "low",
+    );
+    assert_eq!(body["reasoning"]["effort"], "low");
 }

@@ -4,7 +4,7 @@ use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
 use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
 
 use super::{
-    anthropic_thinking_plan, convert_messages, is_thinking_request_rejected,
+    anthropic_thinking_plan, anthropic_thinking_plan_at, convert_messages, is_thinking_request_rejected,
     mark_stable_prefix_cache_breakpoints, merge_anthropic_stream_usage, projected_tool_specs,
     push_text_event, response_to_events, AnthropicRuntimeClient, AnthropicThinkingPlan,
     ExecutorToolSpec, StreamObserver,
@@ -437,4 +437,18 @@ fn a_rejected_thinking_request_is_resent_without_thinking() {
     assert!(second.get("thinking").is_none(), "{second}");
     assert!(second.get("output_config").is_none(), "{second}");
     assert!(!second.to_string().contains("sig-from-another-provider"));
+}
+
+#[test]
+fn a_requested_level_steers_claude_thinking_instead_of_the_configured_one() {
+    let adaptive = anthropic_thinking_plan_at("claude-opus-4-7", "low", 128_000, &[]);
+    assert_eq!(adaptive.output_config, Some(serde_json::json!({ "effort": "low" })));
+
+    let manual = anthropic_thinking_plan_at(
+        "claude-haiku-4-5-20251001",
+        "low",
+        64_000,
+        &[ConversationMessage::user_text("summarize")],
+    );
+    assert_eq!(manual.thinking.and_then(|thinking| thinking.budget_tokens), Some(1_024));
 }

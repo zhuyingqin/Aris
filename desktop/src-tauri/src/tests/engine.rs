@@ -2552,6 +2552,7 @@ fn unsupported_summarizer_opens_and_reset_clears_the_session_circuit() {
 
     let mut sink = DesktopRuntimeEventSink {
         session_id: session_id.clone(),
+        compaction_progress: None,
     };
     runtime::EventSink::emit(
         &mut sink,
