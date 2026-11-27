@@ -60,6 +60,8 @@ export default defineConfig({
         // The screenshot overlay gets its own entry so it does not have to
         // parse the workspace bundle before it can paint a frozen capture.
         overlay: fileURLToPath(new URL("overlay.html", import.meta.url)),
+        // The "SomniQ is controlling this computer" pill, one per monitor.
+        controlIndicator: fileURLToPath(new URL("control-indicator.html", import.meta.url)),
       },
     },
   },

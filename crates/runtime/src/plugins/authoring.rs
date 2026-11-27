@@ -40,6 +40,14 @@ const DIAGNOSTIC_HINTS: &[(&str, &str)] = &[
     ("integrity", "The installed copy is missing or was modified; remove the plugin and install it again from its source directory."),
     ("approvals", "This computer's plugin approvals file is unreadable; the user has to repair or remove it."),
     ("approval-required", "Only the user can approve a package, by turning it on in the Plugins page; ask them to."),
+    ("capabilities-missing", "Add somniq.capabilities to package.json: { \"schemaVersion\": 1, \"mcp\": { \"<serverName>\": { \"network\": { \"access\": \"none\" }, \"workspace\": \"none\", \"env\": [] } } }, one entry per MCP server, declaring only what it needs."),
+    ("capabilities-server", "Name only serverNames the package's dsh-mcp-client rows declare under somniq.capabilities.mcp."),
+    ("capabilities-field", "Check somniq.capabilities against PluginManager inspect's capability rules: schemaVersion 1; per server env (names), network { access: none | required, hosts? }, workspace (none | read | write), workspaceFiles?."),
+    ("env-key", "Use variable names of letters, digits and _ that do not start with a digit, each once."),
+    ("env-reserved", "Do not pass or set reserved variables (platform, proxy, certificate, interpreter-loader and SOMNIQ_/ARIS_ ones); find package files with SOMNIQ_PLUGIN_ROOT and keep state in SOMNIQ_PLUGIN_DATA."),
+    ("env-overlap", "A variable is either set by the package (dsh env) or passed from this computer (capabilities env), not both."),
+    ("workspace-file", "Copy the code into the package, or list project files under workspaceFiles (regular files, project-relative, not under .somniq/, up to 16 and 4 MiB) and read them from SOMNIQ_PLUGIN_FILES."),
+    ("runtime-fetch", "Pin the package the launcher downloads to an exact version (name@1.2.3, @scope/name@1.2.3 or name==1.2.3), or put the code in the package."),
 ];
 
 #[must_use]
@@ -86,8 +94,28 @@ pub struct AuthoringContract {
     pub skills: SkillRules,
     pub ui: UiRules,
     pub reviewer: ReviewerRules,
+    /// `somniq.capabilities`: what each MCP server declares it needs.
+    pub capabilities: CapabilityRules,
     pub templates: Vec<TemplateSummary>,
     pub diagnostic_hints: Vec<DiagnosticHint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRules {
+    pub manifest: &'static str,
+    pub schema_version: u32,
+    pub fields: &'static str,
+    pub process: &'static str,
+    pub max_env: usize,
+    pub max_hosts: usize,
+    pub max_workspace_files: usize,
+    pub max_workspace_file_bytes: u64,
+    pub runtime_fetch_launchers: &'static [&'static str],
+    pub guidance: &'static [&'static str],
+    /// How far this computer enforces each limit: tell the user honestly.
+    pub enforcement: super::CapabilityEnforcement,
+    pub enforcement_meanings: &'static [(&'static str, &'static str)],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +165,9 @@ pub struct SkillRules {
 pub struct UiRules {
     pub manifest: &'static str,
     pub manifest_version: u32,
+    /// `somniq.minAppVersion`, and the SomniQ version doing this inspection.
+    pub min_app_version: &'static str,
+    pub host_version: &'static str,
     pub schema_version: u32,
     pub slots: &'static [&'static str],
     /// What each slot is, and what it asks of a panel.
@@ -156,8 +187,14 @@ pub struct UiRules {
     /// A panel's optional `page`: HTML of the package that draws the panel.
     pub page: &'static str,
     pub max_page_bytes: usize,
-    /// A panel's optional `web`: a web page the host embeds as the panel.
+    /// A panel's optional `web`: a web page the host embeds in the panel.
     pub web: &'static str,
+    /// `webLayout` values, and where the web region goes beside a page or widgets.
+    pub web_layouts: &'static [&'static str],
+    pub web_layout: &'static str,
+    /// A panel's optional `tools`: MCP tools of the package it runs without a
+    /// conversation.
+    pub tools: &'static str,
     /// Panel `scope` values: whose data the panel shows.
     pub scopes: &'static [&'static str],
     pub scope: &'static str,
@@ -264,6 +301,26 @@ pub fn authoring_contract() -> AuthoringContract {
     built_in.sort_unstable();
     AuthoringContract {
         draft_directory: PLUGIN_DRAFTS_DIR,
+        capabilities: CapabilityRules {
+            manifest: "package.json `somniq.capabilities`: { \"schemaVersion\": 1, \"mcp\": { \"<serverName>\": { \"env\"?: [names], \"network\": { \"access\": \"none\" | \"required\", \"hosts\"?: [host names] }, \"workspace\": \"none\" | \"read\" | \"write\", \"workspaceFiles\"?: [project-relative files] } } }. Required for every MCP server (one entry per serverName); a package with only skills, panels or rubrics needs none. It can sit beside somniq.ui in the same somniq object.",
+            schema_version: super::CAPABILITIES_SCHEMA_VERSION,
+            fields: "env: names of variables passed from the user's computer (values never shown), not reserved names and not also set in the server's own dsh env. network.access: none, or required (then the server gets SomniQ's research proxy and certificate variables); hosts: the addresses it means to reach, omitted means any. workspace: none, read or write; not none gives SOMNIQ_WORKSPACE_ROOT (the project, or a work task's worktree). workspaceFiles: project files (regular files, not under .somniq/) the server needs; the user approves copies, read from SOMNIQ_PLUGIN_FILES at the same relative paths, and a changed original waits for a new approval.",
+            process: "A plugin MCP server starts with a cleared environment: platform variables, SOMNIQ_PLUGIN_ROOT (the package snapshot), SOMNIQ_PLUGIN_DATA (its own writable directory, also the working directory; never the project), TEMP/TMP under it, PYTHONUTF8, its own dsh env, and only what its declaration adds. Its processes end with SomniQ.",
+            max_env: super::MAX_PASSTHROUGH_ENV,
+            max_hosts: super::MAX_NETWORK_HOSTS,
+            max_workspace_files: super::MAX_WORKSPACE_FILES,
+            max_workspace_file_bytes: super::MAX_WORKSPACE_FILE_BYTES,
+            runtime_fetch_launchers: super::RUNTIME_FETCH_LAUNCHERS,
+            guidance: &[
+                "Declare the least each server needs: network none and workspace none unless it really reaches out or reads the project.",
+                "Put the code in the package and find it with SOMNIQ_PLUGIN_ROOT or ./ paths; keep state in SOMNIQ_PLUGIN_DATA.",
+                "Use workspaceFiles only when the user wants a script from their project, and tell them that editing it takes a new approval to reach the plugin.",
+                "Avoid launchers that download code at start (npx, uvx...) unless the user wants an existing MCP server; then pin an exact version.",
+                "Tell the user which limits this computer only trusts the plugin to keep (enforcement: declared).",
+            ],
+            enforcement: super::capability_enforcement(),
+            enforcement_meanings: super::ENFORCEMENT_MEANINGS,
+        },
         package: PackageRules {
             manifest_file: "package.json",
             name: "An npm name: lowercase letters, digits, '-', '_' or '.', optionally scoped as @scope/name (for example @local/hypothesis-log). Installing a second package with the same name is an upgrade.",
@@ -316,8 +373,10 @@ pub fn authoring_contract() -> AuthoringContract {
             built_in,
         },
         ui: UiRules {
-            manifest: "package.json `somniq`: { \"manifestVersion\": 1, \"ui\": \"./ui.json\" }",
+            manifest: "package.json `somniq`: { \"manifestVersion\": 1, \"ui\": \"./ui.json\", \"minAppVersion\"?: \"<SomniQ version>\" }",
             manifest_version: ui::UI_MANIFEST_VERSION,
+            min_app_version: "Optional in package.json `somniq`: the oldest SomniQ version that can run the package, e.g. \"minAppVersion\": \"0.4.93\". A SomniQ older than that refuses the package with a message to update, instead of an error about a field it does not know. Set it when the package uses something recent (hostVersion is the version inspecting it now); leave it out otherwise, so older versions keep running the package.",
+            host_version: ui::HOST_APP_VERSION,
             schema_version: ui::UI_SCHEMA_VERSION,
             slots: ui::UI_SLOTS,
             slot: "chat.sidebar: a tab beside the conversation (a page there is about 320-480 px wide). chat.brief (schemaVersion 3): a small glance at the top of the Chat's project summary, about 280-340 px wide; it must set \"scope\": \"project\", takes only small widgets (text, metrics, progress, list, markdown, button, todo-list, json), and a page there is as tall as it asks with somniq.resize (40-320 px); the user can fold it, and its header offers Open when its dataPanel is a nav.page panel. nav.page: a page of its own, opened from an icon in the app's navigation rail and laid out in columns; it must set \"scope\": \"project\", cannot hold an agent-plan widget, and its buttons and forms take the user back to Chat with the prompt in the composer. The rail shows the first three pages of a project and lists the rest under More.",
@@ -339,13 +398,16 @@ pub fn authoring_contract() -> AuthoringContract {
             max_title_chars: ui::MAX_UI_TITLE_CHARS,
             max_text_chars: ui::MAX_UI_TEXT_CHARS,
             text: "A string, or { \"en\": \"...\", \"cn\": \"...\", \"es\": \"...\" }: en and cn are required, es (Spanish) is optional and Spanish readers see en without it. Shown as plain text with line breaks kept.",
-            panel_fields: &["id", "slot", "title", "icon", "iconPath", "order", "scope", "page", "web", "dataPanel", "proposeTasks", "widgets"],
-            web: "Optional, schemaVersion 3, chat.sidebar or nav.page (not chat.brief): an absolute address (https, or plain http only for localhost / 127.0.0.1 / [::1]; no user name or password; at most 2048 characters) the host embeds as the whole panel, e.g. a local tool's web UI such as \"http://localhost:3007\". The host draws the frame; the panel takes no page, dataPanel, proposeTasks or widgets. The embedded site runs as itself, with no window.somniq bridge, no plugin data and no access to the app; links it opens in a new window go to the system browser. The user sees the address on the approval card, and changing it is a change to review. Many public sites refuse to be embedded (X-Frame-Options / frame-ancestors); the panel header always offers Open in browser. Prefer this over a page when the content already lives at a URL.",
-            page: "Optional, schemaVersion 3, in either slot: a package-relative .html file (UTF-8, at most 1 MiB) that draws the whole panel itself, with its own HTML, CSS and JavaScript, instead of the host drawing the widgets. It may link other package files by relative path and they are inlined before it loads: <link rel=stylesheet> (with @import and url()), <script src>, <img src>/srcset, poster and CSS fonts; vendor libraries as package files. ES modules are .mjs files imported as \"pkg:<package-relative path>\" (relative module imports do not resolve). Scripts read other files with somniq.asset(path) (a data: URL) and somniq.text(path) (text), path relative to the page. These files together (js, mjs, css, html, json, txt, csv, md, images, fonts, audio, video, wasm) may be up to 12 MiB. It runs in a sandboxed frame with no network, no storage and no access to the app; anything it loads from a URL is blocked. The panel's widgets are then its data stores (usually one or more json widgets; none is allowed for a page that keeps no data). The page talks to the host only through window.somniq: `await somniq.ready()` gives { language: \"en\" | \"cn\", theme: { mode, colors }, data: { <widget id>: value } }; `await somniq.set(widgetId, value)` saves one widget's value in that widget's shape and rejects with the reason when it does not fit; `await somniq.data()` re-reads; `somniq.onData(fn)` and `somniq.onTheme(fn)` are called on changes, including the agent's PluginPanel writes; `somniq.prompt(text)` puts text in the Chat composer for the user to send (a page never sends a message itself); `somniq.openFile(path)` opens a project-relative file beside the chat; `somniq.openPanel(panelId)` opens a nav.page panel of the same package; `somniq.resize(px)` sets the height of a chat.brief glance (ignored elsewhere); `await somniq.task({ title, prompt, reportTo? })` proposes a background work task, and only on a panel that sets \"proposeTasks\": true: the app shows the proposal to the user, who may edit it and then starts it, only creates it, or declines, and the call resolves to { status: \"started\" | \"created\" | \"declined\", taskId? } (one proposal at a time; title up to 120 characters, prompt up to 8000). The task runs on the task board in its own working copy, with a line naming the plugin added to its prompt. reportTo, allowed only on a \"scope\": \"project\" panel, names one of the panel's widgets: the finished task is asked to write its conclusion there with PluginPanel, so the page shows the result through onData. That write is a request the task may not follow; what the page can rely on is `await somniq.tasks()` and `somniq.onTasks(fn)`: the tasks this page proposed, newest first, as the task board records them, { taskId, title, status, state: \"todo\" | \"active\" | \"waiting\" | \"ready\" | \"done\" | \"failed\" | \"canceled\", phase?, reportTo?, review?: { verdict, summary, round, exhausted, issues, rubrics? }, result?: { summary, filesChanged, files, artifacts, merged }, error? }, pushed again whenever one of them changes. Draw a task's row from its state, not from what the page saved when it asked. A panel with a page may set `dataPanel` to the id of another panel of the same package with the same scope: it then declares no widgets and its page reads and writes that panel's widgets, so a glance and the full page show one store, and a save in either reaches the other through onData. Theme colors are set on <html> as CSS variables --somniq-bg, --somniq-surface, --somniq-raised, --somniq-border, --somniq-text, --somniq-muted, --somniq-accent and --somniq-font, with data-theme=\"light\" | \"dark\"; use them so the page follows the app's theme. Treat widget values as untrusted input: build DOM with textContent, never innerHTML.",
+            panel_fields: &["id", "slot", "title", "icon", "iconPath", "order", "scope", "page", "web", "webLayout", "dataPanel", "proposeTasks", "tools", "widgets"],
+            tools: "Optional, schemaVersion 3, on a panel with widgets or a page, in a package that declares an MCP server: the package's own MCP tools this panel may run directly, with no conversation and no model, up to 16, each written as its name (\"farm_status\") or as { \"name\": \"farm_status\", \"auto\": true }. A `tool` button or form (see clickActions) may run only tools listed here, and the panel's page runs them with `await somniq.tool(name, arguments?)`. A page may call a tool only from a handler of the user's click or key press in the page (within 5 seconds of it), unless the tool is declared with auto: true, which lets the page run it by itself, on load or on a timer; keep auto for tools that only read (a status check). The approval card lists every tool here and says which ones the page may run unasked; changing the list is a change to review. Choose by whether the work needs judgment: start, stop, refresh status, apply a saved setting are tool actions; investigating a failure or deciding what to do next is a prompt or a task for the agent.",
+            web: "Optional, schemaVersion 3, chat.sidebar or nav.page (not chat.brief): an absolute address (https, or plain http only for localhost / 127.0.0.1 / [::1]; no user name or password; at most 2048 characters) the host embeds in the panel, e.g. a local tool's web UI such as \"http://localhost:3007\". The host draws its frame. The embedded site runs as itself, with no window.somniq bridge, no plugin data and no access to the app; links it opens in a new window go to the system browser. In chat.sidebar the site is the whole panel: it takes no page, dataPanel, proposeTasks or widgets. A nav.page panel may combine it with its own page (and proposeTasks, dataPanel) or with widgets: the host shows them and the site in two regions of one page, split by a divider the user can drag (see webLayout), e.g. a console page whose buttons propose tasks above the tool it controls. The page and the site stay separate frames: the page cannot read or script the site, but both are open in one window and can exchange messages, so the approval card tells the user the page can hand its data to that address. The user sees the address on the approval card, and changing it is a change to review. Many public sites refuse to be embedded (X-Frame-Options / frame-ancestors); the header always offers Open in browser. Prefer this over a page when the content already lives at a URL.",
+            web_layouts: ui::UI_WEB_LAYOUTS,
+            web_layout: "Optional, only on a nav.page panel that has web together with a page or widgets: \"below\" (default; the page or widgets on top, the site below at full width) or \"right\" (the page or widgets on the left, the site on the right at full height). The user can drag the divider; the host remembers it.",
+            page: "Optional, schemaVersion 3, in either slot: a package-relative .html file (UTF-8, at most 1 MiB) that draws the whole panel itself, with its own HTML, CSS and JavaScript, instead of the host drawing the widgets. It may link other package files by relative path and they are inlined before it loads: <link rel=stylesheet> (with @import and url()), <script src>, <img src>/srcset, poster and CSS fonts; vendor libraries as package files. ES modules are .mjs files imported as \"pkg:<package-relative path>\" (relative module imports do not resolve). Scripts read other files with somniq.asset(path) (a data: URL) and somniq.text(path) (text), path relative to the page. These files together (js, mjs, css, html, json, txt, csv, md, images, fonts, audio, video, wasm) may be up to 12 MiB. It runs in a sandboxed frame with no network, no storage and no access to the app; anything it loads from a URL is blocked. The panel's widgets are then its data stores (usually one or more json widgets; none is allowed for a page that keeps no data). The page talks to the host only through window.somniq: `await somniq.ready()` gives { language: \"en\" | \"cn\", theme: { mode, colors }, data: { <widget id>: value } }; `await somniq.set(widgetId, value)` saves one widget's value in that widget's shape and rejects with the reason when it does not fit; `await somniq.data()` re-reads; `somniq.onData(fn)` and `somniq.onTheme(fn)` are called on changes, including the agent's PluginPanel writes; `somniq.prompt(text)` puts text in the Chat composer for the user to send (a page never sends a message itself); `somniq.openFile(path)` opens a project-relative file beside the chat; `somniq.openPanel(panelId)` opens a nav.page panel of the same package; these three act only from a handler of the user's click or key press in the page (within 5 seconds of it) and at most once a second, and are ignored otherwise, so call them from a button, never on load or on a timer; `somniq.resize(px)` sets the height of a chat.brief glance (ignored elsewhere); `await somniq.tool(name, arguments?)` runs one MCP tool of this package that the panel lists in `tools`, directly, with no conversation, and resolves to { text, structured } (the tool's text output and its structuredContent, or null) or rejects with the tool's error; `await somniq.tool([{ tool, arguments? }, ...])` (up to 8) makes the calls one after another as one run and resolves to [{ tool, text, structured }], stopping at and rejecting with the first failure, so one click can start a long step and the steps after it (a later separate call would no longer count as the click's); without the user's click or key press in the page in the last 5 seconds only tools declared with auto: true run, and at most 12 such runs a minute, so a page refreshes status on load and on a timer of a minute or so with an auto tool, and starts or stops a service from a button handler; the package's server stays running for a few minutes after a run, so the next click answers without starting it again; at most two runs of one page go at once, and `await somniq.stopTools()` stops the page's runs still going (each then rejects as stopped), e.g. from a Stop button beside a long step;`await somniq.task({ title, prompt, reportTo? })` proposes a background work task, and only on a panel that sets \"proposeTasks\": true, from a handler of the user's own click or key press in the page (within 5 seconds of it; a proposal on load, on a timer or after a synthetic event is refused, and so is one within a few seconds after the user declined): the app shows the proposal to the user, who may edit it and then starts it, only creates it, or declines, and the call resolves to { status: \"started\" | \"created\" | \"declined\", taskId? } (one proposal at a time; title up to 120 characters, prompt up to 8000). The task runs on the task board in its own working copy, with a line naming the plugin added to its prompt. reportTo, allowed only on a \"scope\": \"project\" panel, names one of the panel's widgets: the finished task is asked to write its conclusion there with PluginPanel, so the page shows the result through onData. That write is a request the task may not follow; what the page can rely on is `await somniq.tasks()` and `somniq.onTasks(fn)`: the tasks this page proposed, newest first, as the task board records them, { taskId, title, status, state: \"todo\" | \"active\" | \"waiting\" | \"ready\" | \"done\" | \"failed\" | \"canceled\", phase?, reportTo?, review?: { verdict, summary, round, exhausted, issues, rubrics? }, result?: { summary, filesChanged, files, artifacts, merged }, error? }, pushed again whenever one of them changes. Draw a task's row from its state, not from what the page saved when it asked. A panel with a page may set `dataPanel` to the id of another panel of the same package with the same scope: it then declares no widgets and its page reads and writes that panel's widgets, so a glance and the full page show one store, and a save in either reaches the other through onData. Theme colors are set on <html> as CSS variables --somniq-bg, --somniq-surface, --somniq-raised, --somniq-border, --somniq-text, --somniq-muted, --somniq-accent and --somniq-font, with data-theme=\"light\" | \"dark\"; use them so the page follows the app's theme. Treat widget values as untrusted input: build DOM with textContent, never innerHTML.",
             max_page_bytes: ui::MAX_UI_PAGE_BYTES,
             scopes: ui::UI_SCOPES,
             scope: "Optional, default session: each conversation has its own copy of the panel's data. project: one copy shared by every conversation of the project, for a board that outlives a chat.",
-            data: "A panel shows data; it does not compute it. The agent reads and fills the widgets with the PluginPanel tool (list, read, write), each write replacing one widget's value in the shape given as that widget's `value` here. Nothing in the package runs outside a panel's own page, and a page can only draw and store data: to compute something, the agent does the work (with its own tools or the package's MCP server) and writes the result. A button or form starts that work by putting a prompt in the composer.",
+            data: "A panel shows data; it does not compute it. The agent reads and fills the widgets with the PluginPanel tool (list, read, write), each write replacing one widget's value in the shape given as that widget's `value` here. A page can only draw and store data. Work that needs no judgment runs without the agent: a `tool` button or form, or the page's somniq.tool, calls the package's own MCP tools (listed in the panel's `tools`) and can put their output straight into a widget. Work that needs the agent to decide starts with a prompt button or form, which puts a prompt in the composer, or with a task the page proposes; the agent then does the work (with its own tools or the package's MCP server) and writes the result.",
             click_actions: ui::UI_CLICK_ACTIONS
                 .iter()
                 .map(|(kind, shape)| UiClickRule { kind, shape })

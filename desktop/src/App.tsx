@@ -522,8 +522,13 @@ export default function App() {
   const [pluginPageKey, setPluginPageKey] = useState<string | null>(null);
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
-    setPluginPageKey(null);
-    startTabTransition(() => setTab(nextTab));
+    // One commit for both: closing the page urgently while the tab change waits
+    // in the transition would leave the Plugins module (the page's place) on
+    // screen for a moment on the way to the next module.
+    startTabTransition(() => {
+      setPluginPageKey(null);
+      setTab(nextTab);
+    });
     setProjectMenuOpen(false);
     setUserMenuOpen(false);
   }, [setTab, startTabTransition]);
@@ -1235,7 +1240,7 @@ export default function App() {
           {renderedTab === "extensions" && (
             <ErrorBoundary resetKey={pluginPage ? "plugin-page" : "extensions"} fallback={renderViewFallback}>
               {pluginPage && currentProject
-                ? <PluginPage panel={pluginPage} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
+                ? <PluginPage panel={pluginPage} store={pluginPage.dataPanel ? pluginPages.all.find((other) => other.pluginName === pluginPage.pluginName && other.id === pluginPage.dataPanel) : undefined} projectPath={currentProject.path} language={language} onAction={runPluginPageAction} />
                 : <Extensions />}
             </ErrorBoundary>
           )}

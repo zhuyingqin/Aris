@@ -134,3 +134,57 @@ fn prompt_mode_with_no_prompter_denies_instead_of_silently_allowing() {
         "Prompt mode without a prompter must Deny, not silently Allow"
     );
 }
+
+#[test]
+fn unregistered_tools_run_under_danger_full_access_without_catalog_only() {
+    // The gap catalog-only closes: an unregistered name needs
+    // DangerFullAccess, which the desktop default mode already has.
+    let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+        .with_tool_requirement("read_file", PermissionMode::ReadOnly);
+    assert_eq!(policy.authorize("bash", "{}", None), PermissionOutcome::Allow);
+    assert!(!policy.is_catalog_only());
+}
+
+#[test]
+fn catalog_only_denies_unlisted_tools_in_every_mode_without_prompting() {
+    for mode in [
+        PermissionMode::ReadOnly,
+        PermissionMode::WorkspaceWrite,
+        PermissionMode::DangerFullAccess,
+        PermissionMode::Prompt,
+        PermissionMode::Allow,
+    ] {
+        let policy = PermissionPolicy::new(mode)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+            .with_catalog_only();
+        let mut prompter = RecordingPrompter {
+            seen: Vec::new(),
+            allow: true,
+        };
+        let outcome = policy.authorize("bash", "{}", Some(&mut prompter));
+        match outcome {
+            PermissionOutcome::Deny { reason } => {
+                assert!(reason.contains("not available in this session"), "{reason}");
+            }
+            PermissionOutcome::Allow => panic!("{mode:?} let an unlisted tool through"),
+        }
+        assert!(
+            prompter.seen.is_empty(),
+            "{mode:?} asked the user about a tool that must not be approvable"
+        );
+    }
+}
+
+#[test]
+fn catalog_only_keeps_ordinary_rules_for_listed_tools() {
+    let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+        .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+        .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite)
+        .with_catalog_only();
+    assert!(policy.is_catalog_only());
+    assert_eq!(policy.authorize("read_file", "{}", None), PermissionOutcome::Allow);
+    assert!(matches!(
+        policy.authorize("write_file", "{}", None),
+        PermissionOutcome::Deny { .. }
+    ));
+}

@@ -5,6 +5,8 @@ import { chatPluginApprovalRespond, type PluginApprovalCard } from "../api/plugi
 import PluginUpgradeReview from "../extensions/PluginUpgradeReview";
 import { officialPluginName } from "../extensions/officialPlugins";
 import { uiText } from "../extensions/useChatPluginPanels";
+import { panelCapabilityNotes } from "../extensions/pluginPanelNotes";
+import { CapabilityChanges, EnforcementLegend, ServerCapabilities, SkillScriptsNote } from "../extensions/PluginCapabilities";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource } from "./ChatImagePreview";
 import ChatImageReference from "./ChatImageReference";
@@ -995,13 +997,11 @@ const PLUGIN_APPROVAL_COPY = {
     failed: "没有完成",
     skills: "Skill",
     panels: "侧栏面板",
-    ownPage: "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
-    webPage: (url: string) => `（嵌入网页：${url}）`,
-    proposesTasks: "（可提议后台任务，每次都需你确认）",
     rubrics: "审查细则",
     rubricsNote: "独立 Reviewer 每次审查都会检查这些条目，Executor 看不到它们",
     commands: "会在这台电脑上运行的命令",
     envKeys: "环境变量（只列名称）",
+    envValues: "值改了的环境变量（只列名称）",
     requires: "依赖的官方插件（关闭时它不运行）",
     upgradeFrom: (version: string) => `从 ${version} 升级`,
     executionUnchanged: "运行的命令和环境变量都没有变化",
@@ -1024,13 +1024,11 @@ const PLUGIN_APPROVAL_COPY = {
     failed: "Not completed",
     skills: "Skills",
     panels: "Sidebar panels",
-    ownPage: " (own page: runs the package's page code, sandboxed, no network)",
-    webPage: (url: string) => ` (embeds the web page ${url})`,
-    proposesTasks: " (may propose background tasks; you confirm each one)",
     rubrics: "Review rubrics",
     rubricsNote: "The independent Reviewer checks these on every review; the Executor never sees them",
     commands: "Commands this computer will run",
     envKeys: "Environment variables (names only)",
+    envValues: "Environment variables whose value changed (names only)",
     requires: "Official plugins it needs (it does not run while one is off)",
     upgradeFrom: (version: string) => `Upgrade from ${version}`,
     executionUnchanged: "No command or environment variable changes",
@@ -1053,13 +1051,11 @@ const PLUGIN_APPROVAL_COPY = {
     failed: "No se completó",
     skills: "Skills",
     panels: "Paneles laterales",
-    ownPage: " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)",
-    webPage: (url: string) => ` (incrusta la página web ${url})`,
-    proposesTasks: " (puede proponer tareas en segundo plano; confirmas cada una)",
     rubrics: "Rúbricas de revisión",
     rubricsNote: "El Revisor independiente las comprueba en cada revisión; el Ejecutor nunca las ve",
     commands: "Comandos que ejecutará este equipo",
     envKeys: "Variables de entorno (solo nombres)",
+    envValues: "Variables de entorno cuyo valor cambió (solo nombres)",
     requires: "Plugins oficiales que necesita (no se ejecuta mientras alguno esté desactivado)",
     upgradeFrom: (version: string) => `Actualizar desde ${version}`,
     executionUnchanged: "Sin cambios en comandos ni variables de entorno",
@@ -1176,6 +1172,15 @@ function PluginApprovalCall({
             <>
               {listChange(copy.commands, diff.commands)}
               {listChange(copy.envKeys, diff.envKeys)}
+              {/* Same name, new value: a different address or flag the server runs with. */}
+              {(() => {
+                const changed = [...new Set((diff.mcpServers ?? []).flatMap((server) => server.envChanged.map((key) => `${key} (${server.name})`)))];
+                return changed.length > 0 && <div className="chat-plugin-approval-change">
+                  <span className="chat-plugin-approval-label">{copy.envValues}</span>
+                  {changed.map((item) => <code key={item}>~ {item}</code>)}
+                </div>;
+              })()}
+              {(diff.mcpServers ?? []).map((server) => <CapabilityChanges key={server.name} server={server.name} changes={server.capabilities} language={language} />)}
             </>
           )
         ) : null}
@@ -1191,7 +1196,7 @@ function PluginApprovalCall({
           ) : (
             <dl className="chat-plugin-approval-capabilities">
               {skills.length > 0 && <><dt>{copy.skills}</dt><dd>{skills.join(", ")}</dd></>}
-              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{uiPanels.map((panel) => uiText(panel.title, language) + (panel.page ? copy.ownPage : "") + (panel.web ? copy.webPage(panel.web) : "") + (panel.proposeTasks ? copy.proposesTasks : "")).join(", ")}</dd></>}
+              {uiPanels.length > 0 && <><dt>{copy.panels}</dt><dd>{panelCapabilityNotes(uiPanels, language).join(", ")}</dd></>}
               {(card.capabilities.reviewRubrics?.length ?? 0) > 0 && (
                 <>
                   <dt>{copy.rubrics}</dt>
@@ -1211,6 +1216,20 @@ function PluginApprovalCall({
                 <>
                   <dt>{copy.envKeys}</dt>
                   <dd>{mcpServers.flatMap((server) => server.envKeys).join(", ")}</dd>
+                </>
+              )}
+              {mcpServers.length > 0 && (
+                <>
+                  {/* Each server's declared needs, with how far this computer enforces each. */}
+                  <dt>{tr(language, "能做什么", "What it may do", "Lo que puede hacer")}</dt>
+                  <dd>
+                    {mcpServers.map((server) => <div key={server.name} className="chat-plugin-approval-server">
+                      <strong>{server.name}</strong>
+                      <ServerCapabilities capability={server.capability} launch={server.launch} enforcement={card.capabilities.enforcement} language={language} />
+                    </div>)}
+                    <SkillScriptsNote scripts={card.capabilities.skillScripts} language={language} />
+                    {card.capabilities.enforcement && <EnforcementLegend declared language={language} />}
+                  </dd>
                 </>
               )}
               {(card.capabilities.requires?.length ?? 0) > 0 && (

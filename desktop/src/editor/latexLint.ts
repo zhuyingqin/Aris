@@ -2,7 +2,8 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { latexProjectSymbols, type LatexSymbol } from "./latexComplete";
-import { scanLatexStructure, updateLatexStructure, type LatexCommand, type LatexStructureIndex } from "./latex/latexStructure";
+import type { LatexCommand } from "./latex/latexStructure";
+import { PendingLatexStructure } from "./latex/pendingStructure";
 import { LATEX_LINT_COPY } from "./latex/latexCopy";
 import { useStore } from "../store";
 
@@ -27,6 +28,13 @@ export interface LatexCompileMarker {
 /** Replaces the compile markers shown in a view (empty clears them). */
 export const setLatexCompileMarkers = StateEffect.define<LatexCompileMarker[]>();
 
+/**
+ * Re-runs the lint pass without an edit — after the project's labels or
+ * bibliography finish loading, for instance. `@codemirror/lint` otherwise
+ * re-checks only when the document or its config changes.
+ */
+export const refreshLatexDiagnostics = StateEffect.define<null>();
+
 const compileMarkers = StateField.define<LatexCompileMarker[]>({
   create: () => [],
   update(value, transaction) {
@@ -37,15 +45,12 @@ const compileMarkers = StateField.define<LatexCompileMarker[]>({
   },
 });
 
-/** Shared transaction-aware semantic index. Ordinary prose edits map the
- * existing ranges through the ChangeSet; only TeX-structural edits rescan. */
-export const latexSemanticIndex = StateField.define<LatexStructureIndex>({
-  create: (state) => scanLatexStructure(state.doc.toString()),
+/** Shared transaction-aware semantic index, brought up to date when the
+ * linter reads it rather than on every keystroke (see `PendingLatexStructure`). */
+export const latexSemanticIndex = StateField.define<PendingLatexStructure>({
+  create: (state) => PendingLatexStructure.of(state.doc),
   update(value, transaction) {
-    if (!transaction.docChanged) return value;
-    const source = transaction.newDoc.toString();
-    return updateLatexStructure(value, source, transaction.changes)
-      ?? scanLatexStructure(source);
+    return transaction.docChanged ? value.next(transaction.changes, transaction.newDoc) : value;
   },
 });
 
@@ -68,20 +73,39 @@ function markerDiagnostics(state: EditorState): Diagnostic[] {
   return diagnostics;
 }
 
-const REFERENCE_COMMANDS = new Set(["ref", "eqref", "autoref", "cref", "Cref", "pageref", "nameref", "vref"]);
-const CITATION_COMMANDS = new Set(["cite", "citep", "citet", "citealp", "citealt", "citeauthor", "citeyear", "parencite", "textcite", "autocite", "footcite"]);
+const REFERENCE_COMMANDS = new Set([
+  "ref", "eqref", "autoref", "cref", "Cref", "pageref", "nameref", "vref", "Vref", "cpageref", "labelcref", "autopageref",
+]);
+const CITATION_COMMANDS = new Set([
+  "cite", "citep", "citet", "citealp", "citealt", "citeauthor", "citeyear", "parencite", "textcite", "autocite", "footcite",
+  "Citep", "Citet", "Citeauthor", "citeyearpar", "citenum", "Parencite", "Textcite", "Autocite", "smartcite", "supercite", "nocite",
+]);
 
 function firstArgument(command: LatexCommand): string {
   return command.requiredArguments[0]?.value.trim() ?? "";
 }
 
+/** `label=…` keys in environment options (`\begin{lstlisting}[label=lst:a]`). */
+export function optionLabels(source: string): string[] {
+  const labels: string[] = [];
+  const options = /\\begin\s*\{[^}]+\}\s*\[([^\]]*)\]/g;
+  for (let match = options.exec(source); match; match = options.exec(source)) {
+    const label = /(?:^|,)\s*label\s*=\s*\{?\s*([^,}\]\s]+)/.exec(match[1]);
+    if (label) labels.push(label[1]);
+  }
+  return labels;
+}
+
 function referenceDiagnostics(state: EditorState): Diagnostic[] {
   const symbols = latexProjectSymbols();
-  const structure = state.field(latexSemanticIndex);
+  const structure = state.field(latexSemanticIndex).get();
   const copy = LATEX_LINT_COPY[useStore.getState().language];
   const diagnostics: Diagnostic[] = [];
 
   const knownLabels = new Set(symbols.labels.map((label: LatexSymbol) => label.name));
+  // `\begin{lstlisting}[label=lst:x]`, tcolorbox's `label=` and friends define
+  // labels too; without them every `\ref` to a listing read as undefined.
+  for (const name of optionLabels(structure.source)) knownLabels.add(name);
   const localLabels = new Map<string, number>();
   for (const command of structure.commandsNamed("label")) {
     const name = firstArgument(command);
@@ -90,6 +114,15 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
     const seen = localLabels.get(name);
     if (seen === undefined) {
       localLabels.set(name, command.from);
+      if (symbols.crossFileDuplicateLabels?.has(name)) {
+        diagnostics.push({
+          from: command.from,
+          to: command.to,
+          severity: "warning",
+          source: "latex",
+          message: copy.duplicateLabelAcrossFiles(name),
+        });
+      }
       continue;
     }
     diagnostics.push({
@@ -100,8 +133,6 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
       message: copy.duplicateLabel(name),
     });
   }
-  // Labels the project index knows about but that were defined more than once
-  // across files are reported by whichever file holds the duplicate, above.
 
   for (const command of structure.commands.filter((candidate) => REFERENCE_COMMANDS.has(candidate.name))) {
     for (const key of firstArgument(command).split(",")) {
@@ -117,14 +148,20 @@ function referenceDiagnostics(state: EditorState): Diagnostic[] {
     }
   }
 
-  // Only lint citations once the project actually has a bibliography index;
-  // otherwise a project whose .bib hasn't loaded yet lights up entirely.
-  if (symbols.citations.length > 0) {
-    const knownKeys = new Set(symbols.citations.map((citation: LatexSymbol) => citation.name));
+  // Citations are checked against the document's own bibliography, and only
+  // once it is known (see `bibliographyKeys`): the library's keys used to
+  // count, so any non-empty library switched the check on — flagging every
+  // `\cite` of a `thebibliography` document and of a `.bib` still loading.
+  if (symbols.bibliographyKeys) {
+    const knownKeys = new Set(symbols.bibliographyKeys);
+    for (const command of structure.commandsNamed("bibitem")) {
+      const key = firstArgument(command);
+      if (key) knownKeys.add(key);
+    }
     for (const command of structure.commands.filter((candidate) => CITATION_COMMANDS.has(candidate.name))) {
       for (const key of firstArgument(command).split(",")) {
         const name = key.trim();
-        if (!name || knownKeys.has(name)) continue;
+        if (!name || name === "*" || knownKeys.has(name)) continue;
         diagnostics.push({
           from: command.from,
           to: command.to,
@@ -160,7 +197,14 @@ export function latexLint(options: { gutter: boolean }): Extension {
   return [
     compileMarkers,
     latexSemanticIndex,
-    linter((view: EditorView) => latexDiagnostics(view.state), { delay: 400 }),
+    linter((view: EditorView) => latexDiagnostics(view.state), {
+      delay: 400,
+      // Markers arrive after a build, with no edit to trigger the linter;
+      // without this they stayed invisible until the next keystroke, which
+      // then cleared them.
+      needsRefresh: (update) => update.transactions.some((transaction) =>
+        transaction.effects.some((effect) => effect.is(setLatexCompileMarkers) || effect.is(refreshLatexDiagnostics))),
+    }),
     ...(options.gutter ? [lintGutter()] : []),
   ];
 }

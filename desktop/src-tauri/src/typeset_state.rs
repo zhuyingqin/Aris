@@ -34,6 +34,8 @@ const TYPESET_REVISION_EXTENSIONS: &[&str] = &[
     "dtx", "ins", "tikz", "pgf", "pdf", "png", "jpg", "jpeg", "eps", "ps", "svg", "webp",
 ];
 const REVISION_LEDGER_VERSION: u32 = 1;
+/// 1 = revisions also cover the `.somniq` LaTeX library folders.
+const REVISION_SCOPE_VERSION: u32 = 1;
 const REVISION_LEDGER_FILE: &str = "ledger.json";
 
 /// Suffixes the LaTeX toolchain regenerates on every compile.
@@ -296,6 +298,11 @@ struct TypesetRevisionLedger {
     version: u32,
     head_revision_id: Option<String>,
     revisions: Vec<TypesetProjectRevision>,
+    /// Which file scope the stored manifests cover. Ledgers written before the
+    /// `.somniq` LaTeX library folders were tracked deserialize as 0 and are
+    /// brought forward by [`migrate_revision_scope`].
+    #[serde(default)]
+    scope_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,6 +404,54 @@ pub struct TypesetComment {
     resolved: bool,
     created_at_ms: u128,
     updated_at_ms: u128,
+    /// A discussion under the comment. Absent in files written before replies
+    /// existed, and left out when empty so those files serialize unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    replies: Vec<TypesetCommentReply>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetCommentReply {
+    #[serde(default)]
+    id: String,
+    body: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
+    created_at_ms: u128,
+}
+
+const MAX_COMMENT_REPLIES: usize = 200;
+
+/// Trims each reply, names its author, and stamps the ones the client sent
+/// without an id; a reply is never empty and never longer than a comment.
+fn normalize_comment_replies(replies: &mut Vec<TypesetCommentReply>, timestamp: u128) -> Result<(), String> {
+    replies.retain(|reply| !reply.body.trim().is_empty());
+    if replies.len() > MAX_COMMENT_REPLIES {
+        return Err(format!("a Typeset comment holds at most {MAX_COMMENT_REPLIES} replies"));
+    }
+    for (index, reply) in replies.iter_mut().enumerate() {
+        if reply.body.chars().count() > 4_000 {
+            return Err("a Typeset comment reply must contain 1 to 4000 characters".to_string());
+        }
+        reply.body = reply.body.trim().to_string();
+        reply.author = reply.author.trim().chars().take(120).collect();
+        if reply.author.is_empty() {
+            reply.author = "You".to_string();
+        }
+        reply.origin = reply.origin.trim().chars().take(80).collect();
+        if reply.origin.is_empty() {
+            reply.origin = "user".to_string();
+        }
+        if reply.id.trim().is_empty() {
+            reply.id = format!("reply-{timestamp}-{index}");
+            reply.created_at_ms = timestamp;
+        }
+    }
+    Ok(())
 }
 
 fn now_ms() -> u128 {
@@ -678,11 +733,23 @@ fn is_typeset_revision_path(path: &str, stems: &BTreeSet<String>) -> bool {
 }
 
 fn load_revision_ledger(root: &Path) -> Result<TypesetRevisionLedger, String> {
+    load_revision_ledger_tracking_migration(root).map(|(ledger, _)| ledger)
+}
+
+/// Load the ledger, also reporting whether it was brought forward to the
+/// current file scope in memory. A writer holding the revision lock must then
+/// save it even when it has nothing else to record: until it is persisted the
+/// migration is redone on every load, and a capture whose live files equal
+/// the (just backfilled) head would otherwise never record a later edit.
+fn load_revision_ledger_tracking_migration(
+    root: &Path,
+) -> Result<(TypesetRevisionLedger, bool), String> {
     let mut ledger: TypesetRevisionLedger =
         read_json(&revision_ledger_path(root))?.unwrap_or(TypesetRevisionLedger {
             version: REVISION_LEDGER_VERSION,
             head_revision_id: None,
             revisions: Vec::new(),
+            scope_version: REVISION_SCOPE_VERSION,
         });
     // Old ledgers can include unrelated files, scratch files and build output.
     // Dropping them on load makes the repair retroactive: without
@@ -699,7 +766,56 @@ fn load_revision_ledger(root: &Path) -> Result<TypesetRevisionLedger, String> {
                     && !operation.previous_path.as_deref().is_some_and(&excluded))
         });
     }
-    Ok(ledger)
+    let migrated = migrate_revision_scope(root, &mut ledger)?;
+    Ok((ledger, migrated))
+}
+
+/// Bring a ledger recorded under an older file scope forward.
+///
+/// Scope 1 added the `.somniq` LaTeX library folders. Their files were never
+/// snapshotted, so no revision knows them — and the restore sweep now covers
+/// them, so restoring any older revision would *delete* every library paper,
+/// while the first capture would report the whole library as one giant
+/// addition to review. Instead tracking starts now: each library file is
+/// recorded with its current bytes in every revision that lacks it, as if it
+/// had always looked like this. No operation is synthesized, restoring an old
+/// revision leaves those documents as they are at migration time, and every
+/// later edit is recorded normally.
+fn migrate_revision_scope(root: &Path, ledger: &mut TypesetRevisionLedger) -> Result<bool, String> {
+    if ledger.scope_version >= REVISION_SCOPE_VERSION {
+        return Ok(false);
+    }
+    if !ledger.revisions.is_empty() {
+        let library_paths = project_revision_files(root)?
+            .into_iter()
+            .filter(|path| {
+                revision_relative_path(root, path)
+                    .is_ok_and(|relative| is_latex_library_revision_path(&relative))
+            })
+            .collect::<Vec<_>>();
+        let library_files = snapshot_paths(root, library_paths)?;
+        if !library_files.is_empty() {
+            for revision in &mut ledger.revisions {
+                let known = revision
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<BTreeSet<_>>();
+                let missing = library_files
+                    .iter()
+                    .filter(|file| !known.contains(&file.path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if missing.is_empty() {
+                    continue;
+                }
+                revision.files.extend(missing);
+                revision.files.sort_by(|left, right| left.path.cmp(&right.path));
+            }
+        }
+    }
+    ledger.scope_version = REVISION_SCOPE_VERSION;
+    Ok(true)
 }
 
 fn save_revision_ledger(root: &Path, ledger: &TypesetRevisionLedger) -> Result<(), String> {
@@ -721,6 +837,58 @@ fn is_revision_internal_directory(name: &str) -> bool {
         name,
         ".git" | ".somniq" | "node_modules" | "target" | "__pycache__"
     )
+}
+
+/// Whether the revision walk keeps (and descends into) a non-root entry.
+///
+/// `.somniq` is application state — chat sessions, these revision blobs, the
+/// literature library — with one exception: the LaTeX library folders right
+/// under the workspace's own `.somniq` (`papers/`, `slides/`, …), where every
+/// document created from the Typeset start page lives. Leaving those out gave
+/// a new paper no project history, no restore and no change-set review.
+fn revision_walk_admits(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    // Atomic writes leave a short-lived `.tmpXXXXXX` sibling. Snapshotting it
+    // records a file that the very next rename destroys, so review can never
+    // reconcile the revision against the live project again.
+    if files::is_transient_temp_file(&name) {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    if entry.depth() == 1 && lower == tools::layout::PROJECT_DATA_DIR {
+        return entry.file_type().is_dir();
+    }
+    let under_project_data = entry.depth() == 2
+        && entry
+            .path()
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|parent| {
+                parent
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(tools::layout::PROJECT_DATA_DIR)
+            });
+    if under_project_data {
+        return entry.file_type().is_dir()
+            && tools::layout::LATEX_LIBRARY_DIRS.contains(&lower.as_str());
+    }
+    !is_revision_internal_directory(&lower)
+}
+
+/// True for a workspace-relative path inside one of the `.somniq` LaTeX
+/// library folders that [`revision_walk_admits`] lets into revisions.
+fn is_latex_library_revision_path(relative: &str) -> bool {
+    let normalized = relative.replace('\\', "/");
+    let mut parts = normalized.split('/');
+    parts
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(tools::layout::PROJECT_DATA_DIR))
+        && parts.next().is_some_and(|second| {
+            tools::layout::LATEX_LIBRARY_DIRS
+                .iter()
+                .any(|library| second.eq_ignore_ascii_case(library))
+        })
+        && parts.next().is_some()
 }
 
 /// Every workspace file a revision may contain.
@@ -750,15 +918,7 @@ fn project_revision_candidates(root: &Path) -> Result<Vec<(PathBuf, String)>, St
             // `filter_entry` also visits the root, and rejecting the root yields an
             // empty walk. The workspace is in scope by definition, whatever it is
             // called, so only its contents are filtered.
-            if entry.depth() == 0 {
-                return true;
-            }
-            let name = entry.file_name().to_string_lossy();
-            // Atomic writes leave a short-lived `.tmpXXXXXX` sibling. Snapshotting
-            // it records a file that the very next rename destroys, so review can
-            // never reconcile the revision against the live project again.
-            !is_revision_internal_directory(&name.to_ascii_lowercase())
-                && !files::is_transient_temp_file(&name)
+            entry.depth() == 0 || revision_walk_admits(entry)
         })
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
@@ -1207,7 +1367,7 @@ fn capture_project_revision_at_unlocked(
 ) -> Result<TypesetProjectRevision, String> {
     let files = snapshot_project_files(root)?;
     let comments = snapshot_comments(root)?;
-    let mut ledger = load_revision_ledger(root)?;
+    let (mut ledger, scope_migrated) = load_revision_ledger_tracking_migration(root)?;
     if ledger.version != REVISION_LEDGER_VERSION {
         return Err(format!(
             "unsupported Typeset revision ledger version {}",
@@ -1224,7 +1384,11 @@ fn capture_project_revision_at_unlocked(
     });
     if let Some(previous) = head_revision(&ledger) {
         if previous.files == files && previous.comments == comments && label.is_none() {
-            return Ok(previous.clone());
+            let previous = previous.clone();
+            if scope_migrated {
+                save_revision_ledger(root, &ledger)?;
+            }
+            return Ok(previous);
         }
     }
     let parent = head_revision(&ledger).cloned();
@@ -1287,9 +1451,13 @@ fn capture_project_revision_at(
 /// their succeeding write/rename/delete then becomes one durable revision.
 pub(crate) fn ensure_project_revision(root: &Path) -> Result<TypesetProjectRevision, String> {
     let _guard = lock_revision_state()?;
-    let ledger = load_revision_ledger(root)?;
+    let (ledger, scope_migrated) = load_revision_ledger_tracking_migration(root)?;
     if let Some(revision) = head_revision(&ledger) {
-        return Ok(revision.clone());
+        let revision = revision.clone();
+        if scope_migrated {
+            save_revision_ledger(root, &ledger)?;
+        }
+        return Ok(revision);
     }
     capture_project_revision_at_unlocked(
         root,
@@ -1428,6 +1596,26 @@ fn workspace_path_for_revision(root: &Path, relative: &str) -> Result<PathBuf, S
 
 fn revision_blob_bytes(root: &Path, content_hash: &str) -> Result<Vec<u8>, String> {
     fs::read(revision_blob_path(root, content_hash)?).map_err(|error| error.to_string())
+}
+
+/// The text a revision recorded for one file, for the history panel's
+/// line-by-line comparison. `None` for images and other binary content, and
+/// for anything too large to show — the comparison then stays file-level.
+#[tauri::command]
+pub async fn typeset_revision_blob_text(content_hash: String) -> Result<Option<String>, String> {
+    off_main_thread(move || {
+        let root = files::workspace_root()?;
+        let bytes = revision_blob_bytes(&root, &content_hash)?;
+        Ok(revision_blob_text(&bytes))
+    })
+    .await
+}
+
+fn revision_blob_text(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > MAX_STATE_CONTENT_BYTES || bytes.contains(&0) {
+        return None;
+    }
+    files::decode_text_bytes(bytes).ok()
 }
 
 /// True when the workspace file already holds exactly the bytes a manifest
@@ -2349,8 +2537,152 @@ pub fn typeset_change_proposal_clear(path: String) -> Result<(), String> {
     remove_if_present(state_path(&root, "proposals", &format!("{key}.json")))
 }
 
+/// Carry a file's path-keyed Typeset state — comments, per-file history,
+/// recovery drafts and review proposals — over to its new name after a
+/// rename or move (`to` may be a directory: every file in it moves).
+///
+/// That state is filed under a hash of the workspace path, so a rename used to
+/// orphan it: the file's comments simply vanished, and its history with them.
+pub(crate) fn migrate_path_state(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    let moves = if to.is_dir() {
+        WalkDir::new(to)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| {
+                let relative = entry.path().strip_prefix(to).ok()?.to_path_buf();
+                Some((from.join(relative), entry.into_path()))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(from.to_path_buf(), to.to_path_buf())]
+    };
+    for (old, new) in moves {
+        let old_path = files::display_workspace_path(&old, root);
+        let new_path = files::display_workspace_path(&new, root);
+        let old_key = format!("{:x}", Sha256::digest(old_path.as_bytes()));
+        let new_key = format!("{:x}", Sha256::digest(new_path.as_bytes()));
+        for area in ["comments", "recovery", "proposals", "tracked"] {
+            let source = state_path(root, area, &format!("{old_key}.json"));
+            if source.is_file() {
+                move_path_state_file(&source, &state_path(root, area, &format!("{new_key}.json")), &old_path, &new_path)?;
+            }
+        }
+        let history = state_path(root, "history", &old_key);
+        if history.is_dir() {
+            let target = state_path(root, "history", &new_key);
+            fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+            for entry in fs::read_dir(&history).map_err(|error| error.to_string())?.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    move_path_state_file(&path, &target.join(entry.file_name()), &old_path, &new_path)?;
+                }
+            }
+            let _ = fs::remove_dir(&history);
+        }
+    }
+    Ok(())
+}
+
+/// Move one state file, rewriting the `path` fields that still name the old file.
+fn move_path_state_file(source: &Path, target: &Path, old_path: &str, new_path: &str) -> Result<(), String> {
+    fn rename_paths(value: &mut serde_json::Value, old_path: &str, new_path: &str) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, field) in object.iter_mut() {
+                    if key == "path" && field.as_str() == Some(old_path) {
+                        *field = serde_json::Value::String(new_path.to_string());
+                    } else {
+                        rename_paths(field, old_path, new_path);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    rename_paths(item, old_path, new_path);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut value: serde_json::Value = match read_json(source)? {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+    rename_paths(&mut value, old_path, new_path);
+    write_json(target, &value)?;
+    remove_if_present(source.to_path_buf())
+}
+
 fn comments_path(root: &Path, key: &str) -> PathBuf {
     state_path(root, "comments", &format!("{key}.json"))
+}
+
+/// One tracked insertion or deletion in a source, as the editor keeps it.
+/// `from..to` is the inserted text (an insertion) or the point the deleted
+/// `text` was taken from (a deletion). `before`/`after` are a little of the
+/// surrounding text, so the change can be found again after an outside edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetTrackedChange {
+    id: String,
+    kind: String,
+    from: usize,
+    to: usize,
+    text: String,
+    #[serde(default)]
+    before: String,
+    #[serde(default)]
+    after: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    created_at_ms: u128,
+}
+
+const MAX_TRACKED_CHANGES: usize = 5_000;
+
+fn tracked_changes_path(root: &Path, key: &str) -> PathBuf {
+    state_path(root, "tracked", &format!("{key}.json"))
+}
+
+fn validate_tracked_changes(changes: &[TypesetTrackedChange]) -> Result<(), String> {
+    if changes.len() > MAX_TRACKED_CHANGES {
+        return Err(format!("a source keeps at most {MAX_TRACKED_CHANGES} tracked changes"));
+    }
+    let mut bytes = 0usize;
+    for change in changes {
+        if change.kind != "insert" && change.kind != "delete" {
+            return Err(format!("unknown tracked change kind: {}", change.kind));
+        }
+        if change.from > change.to || (change.kind == "delete" && change.from != change.to) {
+            return Err("a tracked change has an invalid range".to_string());
+        }
+        bytes += change.text.len() + change.before.len() + change.after.len();
+    }
+    if bytes > MAX_STATE_CONTENT_BYTES {
+        return Err("tracked changes exceed the size limit".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn typeset_tracked_changes_load(path: String) -> Result<Vec<TypesetTrackedChange>, String> {
+    let (root, _, key) = source_identity(&path)?;
+    Ok(read_json(&tracked_changes_path(&root, &key))?.unwrap_or_default())
+}
+
+/// Replaces a source's tracked changes; an empty list removes the file.
+#[tauri::command]
+pub fn typeset_tracked_changes_save(path: String, changes: Vec<TypesetTrackedChange>) -> Result<(), String> {
+    validate_tracked_changes(&changes)?;
+    let (root, _, key) = source_identity(&path)?;
+    let target = tracked_changes_path(&root, &key);
+    if changes.is_empty() {
+        return remove_if_present(target);
+    }
+    write_json(&target, &changes)
 }
 
 #[tauri::command]
@@ -2385,6 +2717,7 @@ pub fn typeset_comment_upsert(
     if comment.origin.is_empty() {
         comment.origin = "user".to_string();
     }
+    normalize_comment_replies(&mut comment.replies, timestamp)?;
     if comment.id.trim().is_empty() {
         comment.id = format!("comment-{timestamp}");
         comment.created_at_ms = timestamp;
@@ -2524,11 +2857,19 @@ pub fn typeset_history_read(path: String, id: String) -> Result<TypesetHistoryEn
         .ok_or_else(|| "Typeset history entry not found".to_string())
 }
 
-fn searchable_project_files(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
-    WalkDir::new(root)
+/// The LaTeX sources of one project: everything under `scope` (the folder the
+/// Typeset file tree shows), never the rest of the workspace. `.somniq` below
+/// the scope is skipped, so a project at the workspace root does not reach
+/// into the library papers, while a library paper's own folder is searched
+/// when it is the scope.
+fn searchable_project_files(scope: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    WalkDir::new(scope)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             !matches!(
                 name.as_str(),
@@ -2561,39 +2902,146 @@ fn literal_pattern(query: &str, case_sensitive: bool) -> Result<regex::Regex, St
         .map_err(|error| error.to_string())
 }
 
+/// The workspace's Typeset choices (main document, engine), shared with the
+/// agent's LaTeXCompile through `.somniq/typeset/settings.json`.
+#[tauri::command]
+pub async fn typeset_project_settings_read() -> Result<tools::LatexProjectSettings, String> {
+    off_main_thread(|| Ok(tools::read_latex_project_settings(&files::workspace_root()?))).await
+}
+
+#[tauri::command]
+pub async fn typeset_project_settings_write(settings: tools::LatexProjectSettings) -> Result<(), String> {
+    off_main_thread(move || tools::write_latex_project_settings(&files::workspace_root()?, &settings)).await
+}
+
+/// The project folder a search or replace is confined to. `None`/empty means
+/// the workspace root (a project whose root document sits there); a file path
+/// is taken as its folder. The scope must exist inside the workspace.
+fn project_scope_root(workspace: &Path, scope_path: Option<&str>) -> Result<PathBuf, String> {
+    let Some(raw) = scope_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(workspace.to_path_buf());
+    };
+    let candidate = Path::new(raw);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+    let target = candidate
+        .canonicalize()
+        .map_err(|error| format!("project search folder is not available: {error}"))?;
+    let target = if target.is_dir() {
+        target
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "project search folder could not be resolved".to_string())?
+    };
+    if !target.starts_with(workspace) {
+        return Err("project search folder is outside the current workspace".to_string());
+    }
+    Ok(target)
+}
+
+/// Decode a project source for search/replace, without the display-only
+/// mojibake repair `files::decode_text_bytes` applies to UTF-8: a replace
+/// writes the whole file back, and must change nothing but the matches. A
+/// UTF-8 BOM is dropped here; [`files::encode_text_like_bytes`] restores it.
+fn decode_project_source(bytes: &[u8]) -> Option<String> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text.strip_prefix('\u{feff}').unwrap_or(text).to_string()),
+        Err(_) => files::decode_text_bytes(bytes).ok(),
+    }
+}
+
+fn project_search_at(
+    workspace: &Path,
+    scope: &Path,
+    pattern: &regex::Regex,
+) -> Vec<TypesetProjectSearchMatch> {
+    let mut matches = Vec::new();
+    for path in searchable_project_files(scope) {
+        let bytes = match fs::read(&path) {
+            Ok(bytes) if bytes.len() <= MAX_STATE_CONTENT_BYTES => bytes,
+            _ => continue,
+        };
+        let Some(source) = decode_project_source(&bytes) else {
+            continue;
+        };
+        for (line_index, line) in source.lines().enumerate() {
+            for found in pattern.find_iter(line) {
+                matches.push(TypesetProjectSearchMatch {
+                    path: files::display_workspace_path(&path, workspace),
+                    line: line_index + 1,
+                    column: line[..found.start()].chars().count() + 1,
+                    preview: line.trim().chars().take(240).collect(),
+                });
+                if matches.len() >= MAX_PROJECT_SEARCH_MATCHES {
+                    return matches;
+                }
+            }
+        }
+    }
+    matches
+}
+
+/// Replace every match under `scope`, writing each file back in the encoding,
+/// BOM and line endings it already had — a GBK chapter must stay GBK.
+fn project_replace_at(
+    workspace: &Path,
+    scope: &Path,
+    pattern: &regex::Regex,
+    query: &str,
+    replacement: &str,
+) -> Result<TypesetProjectReplaceResult, String> {
+    ensure_project_revision(workspace)?;
+    let mut files_changed = 0;
+    let mut replacements = 0;
+    for path in searchable_project_files(scope) {
+        let bytes = match fs::read(&path) {
+            Ok(bytes) if bytes.len() <= MAX_STATE_CONTENT_BYTES => bytes,
+            _ => continue,
+        };
+        let Some(source) = decode_project_source(&bytes) else {
+            continue;
+        };
+        let count = pattern.find_iter(&source).count();
+        if count == 0 {
+            continue;
+        }
+        let updated = pattern.replace_all(&source, regex::NoExpand(replacement));
+        let encoded = files::encode_text_like_bytes(&updated, &bytes);
+        runtime::write_file_atomically(&path, &encoded).map_err(|error| error.to_string())?;
+        files_changed += 1;
+        replacements += count;
+    }
+    if files_changed > 0 {
+        record_project_mutation(
+            workspace,
+            "project-replace",
+            "user",
+            "bulk-replace",
+            Some(query.trim().chars().take(500).collect()),
+        )?;
+    }
+    Ok(TypesetProjectReplaceResult {
+        files_changed,
+        replacements,
+    })
+}
+
 #[tauri::command]
 pub async fn typeset_project_search(
     query: String,
     case_sensitive: bool,
+    scope_path: Option<String>,
 ) -> Result<Vec<TypesetProjectSearchMatch>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let pattern = literal_pattern(&query, case_sensitive)?;
         let root = files::workspace_root()?;
-        let mut matches = Vec::new();
-        for path in searchable_project_files(&root) {
-            let bytes = match fs::read(&path) {
-                Ok(bytes) if bytes.len() <= MAX_STATE_CONTENT_BYTES => bytes,
-                _ => continue,
-            };
-            let source = match files::decode_text_bytes(&bytes) {
-                Ok(source) => source,
-                Err(_) => continue,
-            };
-            for (line_index, line) in source.lines().enumerate() {
-                for found in pattern.find_iter(line) {
-                    matches.push(TypesetProjectSearchMatch {
-                        path: files::display_workspace_path(&path, &root),
-                        line: line_index + 1,
-                        column: line[..found.start()].chars().count() + 1,
-                        preview: line.trim().chars().take(240).collect(),
-                    });
-                    if matches.len() >= MAX_PROJECT_SEARCH_MATCHES {
-                        return Ok(matches);
-                    }
-                }
-            }
-        }
-        Ok(matches)
+        let scope = project_scope_root(&root, scope_path.as_deref())?;
+        Ok(project_search_at(&root, &scope, &pattern))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2604,45 +3052,13 @@ pub async fn typeset_project_replace(
     query: String,
     replacement: String,
     case_sensitive: bool,
+    scope_path: Option<String>,
 ) -> Result<TypesetProjectReplaceResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let pattern = literal_pattern(&query, case_sensitive)?;
         let root = files::workspace_root()?;
-        ensure_project_revision(&root)?;
-        let mut files_changed = 0;
-        let mut replacements = 0;
-        for path in searchable_project_files(&root) {
-            let bytes = match fs::read(&path) {
-                Ok(bytes) if bytes.len() <= MAX_STATE_CONTENT_BYTES => bytes,
-                _ => continue,
-            };
-            let source = match files::decode_text_bytes(&bytes) {
-                Ok(source) => source,
-                Err(_) => continue,
-            };
-            let count = pattern.find_iter(&source).count();
-            if count == 0 {
-                continue;
-            }
-            let updated = pattern.replace_all(&source, regex::NoExpand(&replacement));
-            runtime::write_file_atomically(&path, updated.as_bytes())
-                .map_err(|error| error.to_string())?;
-            files_changed += 1;
-            replacements += count;
-        }
-        if files_changed > 0 {
-            record_project_mutation(
-                &root,
-                "project-replace",
-                "user",
-                "bulk-replace",
-                Some(query.trim().chars().take(500).collect()),
-            )?;
-        }
-        Ok(TypesetProjectReplaceResult {
-            files_changed,
-            replacements,
-        })
+        let scope = project_scope_root(&root, scope_path.as_deref())?;
+        project_replace_at(&root, &scope, &pattern, &query, &replacement)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2655,6 +3071,74 @@ mod scope_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracked_changes_are_validated_before_they_are_kept() {
+        let change = |kind: &str, from: usize, to: usize| TypesetTrackedChange {
+            id: "t1".into(),
+            kind: kind.into(),
+            from,
+            to,
+            text: "word".into(),
+            before: String::new(),
+            after: String::new(),
+            author: "You".into(),
+            created_at_ms: 1,
+        };
+        assert!(validate_tracked_changes(&[change("insert", 3, 7), change("delete", 9, 9)]).is_ok());
+        assert!(validate_tracked_changes(&[change("rewrite", 3, 7)]).is_err());
+        assert!(validate_tracked_changes(&[change("insert", 7, 3)]).is_err());
+        assert!(validate_tracked_changes(&[change("delete", 3, 7)]).is_err(), "a deletion is a point");
+
+        let old: TypesetTrackedChange = serde_json::from_str(r#"{"id":"t","kind":"insert","from":0,"to":1,"text":"a"}"#)
+            .expect("context and author are optional");
+        assert_eq!(old.author, "");
+    }
+
+    /// Replies arrive from the client without ids or times; they are stamped
+    /// once, kept as sent afterwards, and an old comment file without any
+    /// replies reads and writes back exactly as before.
+    #[test]
+    fn comment_replies_are_stamped_once_and_absent_replies_stay_absent() {
+        let old: TypesetComment = serde_json::from_str(
+            r#"{"id":"c1","path":"main.tex","from":0,"to":4,"selectedText":"Body","body":"Fix","author":"You","origin":"user","resolved":false,"createdAtMs":1,"updatedAtMs":1}"#,
+        )
+        .expect("old comment");
+        assert!(old.replies.is_empty());
+        assert!(!serde_json::to_string(&old).expect("serialize").contains("replies"));
+
+        let mut replies = vec![
+            TypesetCommentReply { id: String::new(), body: "  Agreed  ".into(), author: String::new(), origin: String::new(), created_at_ms: 0 },
+            TypesetCommentReply { id: "reply-1".into(), body: "Kept".into(), author: "Ann".into(), origin: "chat".into(), created_at_ms: 5 },
+            TypesetCommentReply { id: String::new(), body: "   ".into(), author: String::new(), origin: String::new(), created_at_ms: 0 },
+        ];
+        normalize_comment_replies(&mut replies, 42).expect("normalize");
+        assert_eq!(replies.len(), 2, "an empty reply is dropped");
+        assert_eq!(replies[0].body, "Agreed");
+        assert_eq!(replies[0].author, "You");
+        assert_eq!(replies[0].id, "reply-42-0");
+        assert_eq!(replies[0].created_at_ms, 42);
+        assert_eq!((replies[1].id.as_str(), replies[1].created_at_ms), ("reply-1", 5));
+
+        let mut too_long = vec![TypesetCommentReply { id: String::new(), body: "x".repeat(4_001), author: String::new(), origin: String::new(), created_at_ms: 0 }];
+        assert!(normalize_comment_replies(&mut too_long, 1).is_err());
+    }
+
+    /// The history panel's line comparison reads blobs as text: a stored
+    /// source comes back as text (GBK included), an image does not.
+    #[test]
+    fn revision_blobs_read_back_as_text_only_when_they_are_text() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = store_revision_blob(root.path(), "\\section{引言}\n".as_bytes()).expect("blob");
+        let bytes = revision_blob_bytes(root.path(), &source).expect("read");
+        assert_eq!(revision_blob_text(&bytes).as_deref(), Some("\\section{引言}\n"));
+
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文\n");
+        assert_eq!(revision_blob_text(&gbk).as_deref(), Some("中文\n"));
+
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        assert_eq!(revision_blob_text(&png), None);
+    }
 
     /// Applying a manifest wrote every file it lists, each with its own
     /// `sync_all` and rename. Accepting a review that touches two files
@@ -3162,6 +3646,7 @@ mod tests {
             root.path(),
             &TypesetRevisionLedger {
                 version: REVISION_LEDGER_VERSION,
+                scope_version: REVISION_SCOPE_VERSION,
                 head_revision_id: Some(polluted.id.clone()),
                 revisions: vec![polluted],
             },
@@ -3320,6 +3805,7 @@ mod tests {
             root.path(),
             &TypesetRevisionLedger {
                 version: REVISION_LEDGER_VERSION,
+                scope_version: REVISION_SCOPE_VERSION,
                 head_revision_id: Some(polluted.id.clone()),
                 revisions: vec![polluted],
             },
@@ -3381,6 +3867,7 @@ mod tests {
             };
         let ledger = TypesetRevisionLedger {
             version: REVISION_LEDGER_VERSION,
+            scope_version: REVISION_SCOPE_VERSION,
             head_revision_id: Some("latest".to_string()),
             revisions: vec![
                 revision("base", None, vec![file("main.tex", "a")]),
@@ -3467,6 +3954,7 @@ mod tests {
         // base -> agent rewrites chapter.tex -> the user saves their own notes.
         let ledger = TypesetRevisionLedger {
             version: REVISION_LEDGER_VERSION,
+            scope_version: REVISION_SCOPE_VERSION,
             head_revision_id: Some("user-save".to_string()),
             revisions: vec![
                 revision(
@@ -3588,6 +4076,7 @@ mod tests {
         };
         let ledger = TypesetRevisionLedger {
             version: REVISION_LEDGER_VERSION,
+            scope_version: REVISION_SCOPE_VERSION,
             head_revision_id: Some("checkout".to_string()),
             revisions: vec![
                 revision(
@@ -3631,5 +4120,219 @@ mod tests {
         assert!(rebase_pending_change_set(Path::new("."), &ledger, &mut change_set, "checkout").expect("rebase"));
         assert_eq!(change_set.decisions.len(), 1);
         assert_eq!(change_set.decisions[0].decision, "pending");
+    }
+    fn write_workspace_file(root: &Path, relative: &str, body: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(path, body).expect("write workspace file");
+    }
+
+    fn revision_paths(revision: &TypesetProjectRevision) -> Vec<String> {
+        revision.files.iter().map(|file| file.path.clone()).collect()
+    }
+
+    /// Documents created from the Typeset start page live under
+    /// `.somniq/papers/…`. They belong in project revisions; the rest of
+    /// `.somniq` (sessions, revision blobs, scratch) must stay out.
+    #[test]
+    fn revisions_cover_latex_library_documents_but_not_app_state() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_workspace_file(root.path(), "main.tex", "root");
+        write_workspace_file(root.path(), ".somniq/papers/thesis/main.tex", "paper");
+        write_workspace_file(root.path(), ".somniq/papers/thesis/figures/plot.png", "png");
+        write_workspace_file(root.path(), ".somniq/slides/talk/main.tex", "slides");
+        write_workspace_file(root.path(), ".somniq/tmp/scratch.tex", "scratch");
+        write_workspace_file(root.path(), ".somniq/main.tex", "loose");
+        write_workspace_file(root.path(), ".somniq/papers/thesis/.somniq/nested.tex", "nested");
+        write_workspace_file(root.path(), "chapters/.somniq/papers/x.tex", "not the workspace data dir");
+
+        let revision = capture_project_revision_at(
+            root.path(),
+            None,
+            "baseline".to_string(),
+            "system".to_string(),
+            "baseline".to_string(),
+            None,
+        )
+        .expect("capture");
+
+        assert_eq!(
+            revision_paths(&revision),
+            vec![
+                ".somniq/papers/thesis/figures/plot.png",
+                ".somniq/papers/thesis/main.tex",
+                ".somniq/slides/talk/main.tex",
+                "main.tex",
+            ]
+        );
+    }
+
+    /// A ledger written before the library folders were tracked must not
+    /// surface the library as one giant addition, and restoring one of its
+    /// revisions must not delete the papers it never knew about.
+    #[test]
+    fn legacy_ledger_starts_tracking_library_documents_without_phantom_changes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        write_workspace_file(root.path(), "main.tex", "root v1");
+        let paper = ".somniq/papers/thesis/main.tex";
+        write_workspace_file(root.path(), paper, "paper v1");
+        let old_root = TypesetRevisionFile {
+            path: "main.tex".to_string(),
+            content_hash: store_revision_blob(root.path(), b"root v0").expect("blob"),
+            bytes: 7,
+        };
+        let current_root = TypesetRevisionFile {
+            path: "main.tex".to_string(),
+            content_hash: store_revision_blob(root.path(), b"root v1").expect("blob"),
+            bytes: 7,
+        };
+        let legacy = |id: &str, parent: Option<&str>, file: TypesetRevisionFile| TypesetProjectRevision {
+            id: id.to_string(),
+            parent_revision_id: parent.map(str::to_string),
+            label: None,
+            reason: "save".to_string(),
+            actor: "user".to_string(),
+            origin: "editor".to_string(),
+            evidence: None,
+            created_at_ms: 1,
+            files: vec![file],
+            comments: Vec::new(),
+            operations: Vec::new(),
+        };
+        // Scope 0 is what every ledger written before this change holds.
+        let mut ledger_json = serde_json::to_value(TypesetRevisionLedger {
+            version: REVISION_LEDGER_VERSION,
+            scope_version: REVISION_SCOPE_VERSION,
+            head_revision_id: Some("current".to_string()),
+            revisions: vec![
+                legacy("old", None, old_root),
+                legacy("current", Some("old"), current_root),
+            ],
+        })
+        .expect("ledger json");
+        ledger_json
+            .as_object_mut()
+            .expect("ledger object")
+            .remove("scopeVersion");
+        let ledger_path = revision_ledger_path(root.path());
+        fs::create_dir_all(ledger_path.parent().expect("parent")).expect("ledger dir");
+        fs::write(&ledger_path, serde_json::to_vec(&ledger_json).expect("bytes")).expect("ledger");
+
+        // A watcher or chat-done capture right after upgrading: nothing changed.
+        let head = record_project_mutation(root.path(), "external-change", "external", "watcher", None)
+            .expect("capture");
+        assert_eq!(head.id, "current", "the library must not become a new revision");
+        let stored: TypesetRevisionLedger = read_json(&ledger_path).expect("read").expect("ledger");
+        assert_eq!(stored.scope_version, REVISION_SCOPE_VERSION, "migration is persisted");
+        assert!(stored.revisions.iter().all(|revision| revision_paths(revision).contains(&paper.to_string())));
+
+        // Later edits to the paper are recorded like any other file.
+        write_workspace_file(root.path(), paper, "paper v2");
+        let edited = record_project_mutation(root.path(), "save", "user", "editor", None).expect("edit");
+        assert_ne!(edited.id, "current");
+        assert_eq!(
+            edited.operations.iter().map(|operation| operation.path.as_str()).collect::<Vec<_>>(),
+            vec![paper]
+        );
+
+        // Restoring a revision from before tracking began keeps the paper.
+        let ledger = load_revision_ledger(root.path()).expect("ledger");
+        let old = find_revision(&ledger, "old").expect("old revision").clone();
+        apply_project_revision_manifest(root.path(), &old).expect("restore");
+        assert_eq!(fs::read_to_string(root.path().join("main.tex")).expect("root"), "root v0");
+        assert_eq!(
+            fs::read_to_string(root.path().join(paper)).expect("paper survives the restore"),
+            "paper v1"
+        );
+    }
+    #[test]
+    fn project_replace_stays_inside_the_project_folder() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        write_workspace_file(&workspace, "thesis/main.tex", "Old title");
+        write_workspace_file(&workspace, "thesis/chapters/intro.tex", "Old intro");
+        write_workspace_file(&workspace, "other-paper/main.tex", "Old other");
+        write_workspace_file(&workspace, ".somniq/papers/draft/main.tex", "Old library");
+        // A project folder whose own name is on the skip list must still be walked.
+        write_workspace_file(&workspace, "target/main.tex", "Old target");
+        let pattern = literal_pattern("Old", true).expect("pattern");
+
+        let scope = project_scope_root(&workspace, Some("thesis")).expect("scope");
+        let found = project_search_at(&workspace, &scope, &pattern);
+        let mut paths = found.iter().map(|item| item.path.as_str()).collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(paths, vec!["thesis/chapters/intro.tex", "thesis/main.tex"]);
+        let result = project_replace_at(&workspace, &scope, &pattern, "Old", "New").expect("replace");
+        assert_eq!((result.files_changed, result.replacements), (2, 2));
+        assert_eq!(fs::read_to_string(workspace.join("thesis/main.tex")).unwrap(), "New title");
+        assert_eq!(fs::read_to_string(workspace.join("other-paper/main.tex")).unwrap(), "Old other");
+        assert_eq!(fs::read_to_string(workspace.join(".somniq/papers/draft/main.tex")).unwrap(), "Old library");
+
+        // A file path scopes to its folder; a library paper's folder is searchable.
+        let library = project_scope_root(&workspace, Some(".somniq/papers/draft/main.tex")).expect("scope");
+        assert_eq!(project_search_at(&workspace, &library, &pattern).len(), 1);
+        let target = project_scope_root(&workspace, Some("target")).expect("scope");
+        assert_eq!(project_search_at(&workspace, &target, &pattern).len(), 1);
+
+        // The workspace root is a project of its own and leaves `.somniq` alone.
+        let whole = project_scope_root(&workspace, None).expect("scope");
+        assert!(project_search_at(&workspace, &whole, &pattern)
+            .iter()
+            .all(|item| !item.path.starts_with(".somniq")));
+        assert!(project_scope_root(&workspace, Some("../")).is_err());
+    }
+
+    #[test]
+    fn project_replace_keeps_each_file_encoding_bom_and_line_endings() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let (gbk, _, _) = encoding_rs::GBK.encode("\\section{旧标题}\r\n正文\r\n");
+        fs::write(workspace.join("gbk.tex"), &gbk).expect("gbk");
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("\\section{旧标题}\n".as_bytes());
+        fs::write(workspace.join("bom.tex"), &bom).expect("bom");
+        let pattern = literal_pattern("旧标题", true).expect("pattern");
+
+        let found = project_search_at(&workspace, &workspace, &pattern);
+        assert!(found.iter().all(|item| item.column == 10), "the BOM must not shift columns");
+        project_replace_at(&workspace, &workspace, &pattern, "旧标题", "新标题").expect("replace");
+
+        let (expected_gbk, _, _) = encoding_rs::GBK.encode("\\section{新标题}\r\n正文\r\n");
+        assert_eq!(fs::read(workspace.join("gbk.tex")).unwrap(), expected_gbk.into_owned());
+        let mut expected_bom = vec![0xEF, 0xBB, 0xBF];
+        expected_bom.extend_from_slice("\\section{新标题}\n".as_bytes());
+        assert_eq!(fs::read(workspace.join("bom.tex")).unwrap(), expected_bom);
+    }
+    #[test]
+    fn comments_and_history_follow_a_renamed_file_and_folder() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let key = |path: &str| format!("{:x}", Sha256::digest(path.as_bytes()));
+        write_workspace_file(&workspace, "chapters/intro.tex", "body");
+        write_json(
+            &comments_path(&workspace, &key("chapters/intro.tex")),
+            &serde_json::json!([{ "id": "c1", "path": "chapters/intro.tex", "body": "note" }]),
+        )
+        .expect("comment");
+        write_json(
+            &state_path(&workspace, "history", &key("chapters/intro.tex")).join("h1.json"),
+            &serde_json::json!({ "id": "h1", "path": "chapters/intro.tex" }),
+        )
+        .expect("history");
+
+        fs::rename(workspace.join("chapters"), workspace.join("parts")).expect("rename folder");
+        migrate_path_state(&workspace, &workspace.join("chapters"), &workspace.join("parts")).expect("migrate");
+
+        let moved: serde_json::Value = read_json(&comments_path(&workspace, &key("parts/intro.tex")))
+            .expect("read")
+            .expect("comment moved");
+        assert_eq!(moved[0]["path"], "parts/intro.tex");
+        assert!(!comments_path(&workspace, &key("chapters/intro.tex")).exists());
+        let history: serde_json::Value = read_json(
+            &state_path(&workspace, "history", &key("parts/intro.tex")).join("h1.json"),
+        )
+        .expect("read")
+        .expect("history moved");
+        assert_eq!(history["path"], "parts/intro.tex");
     }
 }

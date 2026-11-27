@@ -2489,7 +2489,7 @@ fn non_responses_models_keep_their_original_chat_request() {
         vec![json!({ "role": "user", "content": "hi" })],
         std::slice::from_ref(&spec),
         true,
-        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", true),
+        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", true, "high"),
     );
 
     assert_eq!(body["model"], "MiniMax-M3");
@@ -2690,6 +2690,7 @@ fn post_send_header_timeout_is_resent_at_most_once() {
         api::StreamWaitPolicy {
             response_header_timeout: Some(Duration::from_millis(300)),
             stream_idle_timeout: Some(Duration::from_secs(30)),
+            request_max_duration: None,
         },
     );
     let error = client
@@ -2719,6 +2720,7 @@ fn idle_timeout_before_output_fails_visibly_after_one_resend() {
         api::StreamWaitPolicy {
             response_header_timeout: Some(Duration::from_secs(30)),
             stream_idle_timeout: Some(Duration::from_millis(300)),
+            request_max_duration: None,
         },
     );
     let error = client
@@ -2754,6 +2756,7 @@ fn stop_interrupts_the_response_header_wait() {
         api::StreamWaitPolicy {
             response_header_timeout: Some(Duration::from_secs(60)),
             stream_idle_timeout: Some(Duration::from_secs(60)),
+            request_max_duration: None,
         },
     );
     let started = std::time::Instant::now();
@@ -2767,6 +2770,334 @@ fn stop_interrupts_the_response_header_wait() {
     assert!(error.to_string().contains("interrupted by user"), "{error}");
     assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
     assert_eq!(requests, 1);
+}
+
+/// Mock gateway that answers every request with stream headers, writes
+/// `prelude` once, and then writes only `frame` every 50ms: a relay that keeps
+/// the connection alive while the model upstream stays quiet. Returns the
+/// number of requests it accepted once `stop` is set.
+fn spawn_keepalive_gateway(
+    prelude: &'static str,
+    frame: &'static str,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread::JoinHandle<usize>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn write_chunk(stream: &mut std::net::TcpStream, data: &str) -> std::io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        stream.write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())?;
+        stream.flush()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keep-alive gateway");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking keep-alive listener");
+    let address = listener.local_addr().expect("keep-alive gateway address");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = std::sync::Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let mut held: Vec<std::net::TcpStream> = Vec::new();
+        let mut accepted = 0;
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking keep-alive stream");
+                    read_mock_http_request(&mut stream);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                        )
+                        .expect("write keep-alive headers");
+                    write_chunk(&mut stream, prelude).expect("write keep-alive prelude");
+                    accepted += 1;
+                    held.push(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("keep-alive gateway accept failed: {error}"),
+            }
+            // A connection the client abandoned stops accepting writes.
+            held.retain_mut(|stream| write_chunk(stream, frame).is_ok());
+            thread::sleep(Duration::from_millis(50));
+        }
+        accepted
+    });
+    (format!("http://{address}/v1"), stop, server)
+}
+
+/// Run one streaming request against `base_url` on a worker thread, giving up
+/// after `limit`. `None` means the client was still waiting.
+fn stream_within(
+    base_url: String,
+    transport: OpenAiTransport,
+    wait_policy: api::StreamWaitPolicy,
+    limit: Duration,
+) -> Option<Result<Vec<AssistantEvent>, String>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut client = silent_gateway_client(
+            base_url,
+            "keepalive-model",
+            Box::new(crate::NoopStreamObserver),
+            wait_policy,
+        )
+        .with_transport(transport);
+        let result = client.stream(hello_request());
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+    receiver.recv_timeout(limit).ok()
+}
+
+const KEEPALIVE_TEST_POLICY: api::StreamWaitPolicy = api::StreamWaitPolicy {
+    response_header_timeout: Some(Duration::from_millis(800)),
+    stream_idle_timeout: Some(Duration::from_millis(300)),
+    request_max_duration: None,
+};
+
+/// Regression for "等待模型响应 · 23:20" with no error: the idle limit was
+/// measured per HTTP body chunk, so bytes that carry no output (SSE comment
+/// pings, empty deltas, `response.in_progress`) restarted it, and a relay that
+/// pinged while the upstream never answered kept the turn waiting forever.
+/// Now the first output must arrive within the time-to-first-output budget,
+/// then the request is re-sent once and fails with an explanation.
+#[test]
+fn keepalive_frames_without_output_still_hit_the_output_deadline() {
+    let mut still_waiting = Vec::new();
+    for (transport, frame) in [
+        (OpenAiTransport::ChatCompletions, ": keep-alive\n\n"),
+        (
+            OpenAiTransport::ChatCompletions,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n",
+        ),
+        (
+            OpenAiTransport::Responses,
+            "data: {\"type\":\"response.in_progress\"}\n\n",
+        ),
+    ] {
+        let (base_url, stop, server) = spawn_keepalive_gateway("", frame);
+        // 800ms to first output, re-sent once: ~1.6s. Anything near the limit
+        // means the deadline never fired.
+        let outcome = stream_within(base_url, transport, KEEPALIVE_TEST_POLICY, Duration::from_secs(8));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let requests = server.join().expect("keep-alive gateway thread");
+        let Some(result) = outcome else {
+            still_waiting.push(format!("{transport:?} {frame:?} ({requests} request(s) sent)"));
+            continue;
+        };
+        let error = result.expect_err("a stream that never produces output must fail");
+        assert!(error.contains("kept the connection alive"), "{error}");
+        assert!(error.contains("Not re-sending again"), "{error}");
+        assert_eq!(requests, 1 + api::MAX_TIMEOUT_RESENDS as usize, "{frame:?}");
+    }
+    assert!(
+        still_waiting.is_empty(),
+        "still waiting after 8s; output-free chunks extended the wait: {still_waiting:?}"
+    );
+}
+
+/// After output started, keep-alives may not stretch the gap to the next
+/// output either. Partial output is kept (never re-sent, which would repeat
+/// it) and ends as a recoverable partial stop.
+#[test]
+fn keepalive_frames_after_output_end_the_stream_with_partial_output() {
+    let (base_url, stop, server) = spawn_keepalive_gateway(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ": keep-alive\n\n",
+    );
+    let outcome = stream_within(
+        base_url,
+        OpenAiTransport::ChatCompletions,
+        KEEPALIVE_TEST_POLICY,
+        Duration::from_secs(8),
+    );
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("keep-alive gateway thread");
+
+    let events = outcome
+        .expect("keep-alives after output must not extend the wait")
+        .expect("partial output is kept");
+    assert_eq!(requests, 1, "partial output must never be re-sent");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "partial")));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AssistantEvent::StopReason(reason) if reason == "stream_error_after_partial_output"
+    )));
+}
+
+/// A finished answer whose gateway keeps the connection open with pings is
+/// complete. It must not be reported as a partial stop, which would make the
+/// runtime ask the model to continue an answer it already finished.
+#[test]
+fn keepalive_after_finish_reason_completes_the_answer() {
+    let (base_url, stop, server) = spawn_keepalive_gateway(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+        ": keep-alive\n\n",
+    );
+    let outcome = stream_within(
+        base_url,
+        OpenAiTransport::ChatCompletions,
+        KEEPALIVE_TEST_POLICY,
+        Duration::from_secs(8),
+    );
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().expect("keep-alive gateway thread");
+
+    let events = outcome
+        .expect("a finished answer must not wait on the gateway's pings")
+        .expect("finished answer");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::StopReason(reason) if reason == "stop")));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AssistantEvent::StopReason(reason) if reason == "stream_error_after_partial_output"
+    )));
+}
+
+/// A healthy stream that keeps producing output may run far past the
+/// time-to-first-output budget: output resets the clock.
+#[test]
+fn steady_output_outlasts_the_first_output_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind steady gateway");
+    let address = listener.local_addr().expect("steady gateway address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept steady request");
+        read_mock_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+            )
+            .expect("write steady headers");
+        let mut write = |data: &str| {
+            stream
+                .write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())
+                .and_then(|()| stream.flush())
+                .expect("write steady chunk");
+        };
+        // 10 outputs 200ms apart: 2s total, well past the 800ms budget.
+        for index in 0..10 {
+            write(&format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{index}\"}}}}]}}\n\n"
+            ));
+            write(": keep-alive\n\n");
+            thread::sleep(Duration::from_millis(200));
+        }
+        write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        stream.write_all(b"0\r\n\r\n").expect("end steady stream");
+    });
+    let outcome = stream_within(
+        format!("http://{address}/v1"),
+        OpenAiTransport::ChatCompletions,
+        KEEPALIVE_TEST_POLICY,
+        Duration::from_secs(10),
+    );
+    server.join().expect("steady gateway thread");
+
+    let events = outcome.expect("steady stream finishes").expect("steady stream succeeds");
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AssistantEvent::TextDelta(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "0123456789");
+}
+
+/// The total request limit ends a stream that never stops trickling output.
+/// What streamed is kept as a partial answer and never re-sent.
+#[test]
+fn request_limit_ends_an_endless_stream_and_keeps_its_output() {
+    let (base_url, stop, server) = spawn_keepalive_gateway(
+        "",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n",
+    );
+    let policy = api::StreamWaitPolicy {
+        request_max_duration: Some(Duration::from_millis(1_500)),
+        ..KEEPALIVE_TEST_POLICY
+    };
+    let outcome = stream_within(base_url, OpenAiTransport::ChatCompletions, policy, Duration::from_secs(8));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().expect("endless gateway thread");
+
+    let events = outcome
+        .expect("the total limit must end an endless stream")
+        .expect("streamed output is kept");
+    assert_eq!(requests, 1, "partial output must never be re-sent");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text.starts_with('x'))));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AssistantEvent::StopReason(reason) if reason == "stream_error_after_partial_output"
+    )));
+}
+
+/// Each wait inside a request has its own limit, but 5xx answers have their
+/// own retry budget, so slow failures used to stack: four attempts that each
+/// took minutes. The total limit bounds the sum.
+#[test]
+fn request_limit_bounds_stacked_server_error_retries() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 503 gateway");
+    listener.set_nonblocking(true).expect("non-blocking 503 listener");
+    let address = listener.local_addr().expect("503 gateway address");
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = std::sync::Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let mut requests = 0;
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking 503 stream");
+                    read_mock_http_request(&mut stream);
+                    requests += 1;
+                    // A gateway that gives up on its upstream slowly.
+                    thread::sleep(Duration::from_secs(1));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("503 gateway accept failed: {error}"),
+            }
+        }
+        requests
+    });
+    let policy = api::StreamWaitPolicy {
+        response_header_timeout: Some(Duration::from_secs(5)),
+        stream_idle_timeout: Some(Duration::from_secs(5)),
+        request_max_duration: Some(Duration::from_millis(1_500)),
+    };
+    let started = std::time::Instant::now();
+    // Without the total limit: 4 attempts of 1s plus 1s + 2s + 4s backoff.
+    let outcome = stream_within(
+        format!("http://{address}/v1"),
+        OpenAiTransport::ChatCompletions,
+        policy,
+        Duration::from_secs(10),
+    );
+    let elapsed = started.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    let requests = server.join().expect("503 gateway thread");
+
+    let error = outcome
+        .expect("the total limit must end stacked retries")
+        .expect_err("a gateway that only fails must fail the request");
+    assert!(error.contains("total time limit"), "{error}");
+    assert!(elapsed < Duration::from_secs(6), "took {elapsed:?}");
+    assert!(requests < 4, "{requests} requests");
 }
 
 #[test]
@@ -2787,11 +3118,12 @@ fn artifact_accepts_late_headers_with_one_streamed_submission() {
     });
     let mut client = silent_gateway_client(
         format!("http://{address}/v1"), "deepseek-v4.1-flash", Box::new(crate::NoopStreamObserver),
-        api::StreamWaitPolicy { response_header_timeout: Some(Duration::from_millis(50)), stream_idle_timeout: Some(Duration::from_secs(2)) },
+        api::StreamWaitPolicy { response_header_timeout: Some(Duration::from_millis(50)), stream_idle_timeout: Some(Duration::from_secs(2)), request_max_duration: None },
     ).with_single_request_limit(None);
     assert_eq!(client.wait_policy, api::StreamWaitPolicy::single_request_from_env());
     client = client.with_wait_policy(api::StreamWaitPolicy {
         response_header_timeout: Some(Duration::from_secs(2)), stream_idle_timeout: Some(Duration::from_secs(2)),
+        request_max_duration: None,
     });
     let events = client.stream(hello_request()).unwrap();
     assert!(events.iter().any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "<svg/>")));
@@ -2810,6 +3142,7 @@ fn artifact_header_and_idle_timeouts_never_resend() {
             base_url, "silent-artifact", Box::new(crate::NoopStreamObserver), api::StreamWaitPolicy::from_env(),
         ).with_single_request_limit(None).with_wait_policy(api::StreamWaitPolicy {
             response_header_timeout: Some(Duration::from_millis(200)), stream_idle_timeout: Some(Duration::from_millis(200)),
+            request_max_duration: None,
         });
         let error = client.stream(hello_request()).unwrap_err();
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3138,4 +3471,60 @@ fn outdated_client_refusal_is_final_and_identifies_the_release() {
     assert_eq!(extra, 0, "the refusal was retried");
     let expected = format!("user-agent: {}", runtime::client_user_agent()).to_ascii_lowercase();
     assert!(request.to_ascii_lowercase().contains(&expected), "{request}");
+}
+
+/// A side request such as a compaction summary asks for its own level, not the
+/// chat's: a summary that inherited `max` thought for minutes per call.
+#[test]
+fn a_client_level_replaces_the_configured_reasoning_level() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let wire = read_mock_http_request(&mut stream);
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"<summary>ok</summary>\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        wire
+    });
+    let mut client = silent_gateway_client(
+        format!("http://{address}/v1"),
+        "gpt-5.6-luna",
+        Box::new(crate::NoopStreamObserver),
+        api::StreamWaitPolicy {
+            response_header_timeout: Some(Duration::from_secs(5)),
+            stream_idle_timeout: Some(Duration::from_secs(5)),
+            request_max_duration: None,
+        },
+    )
+    .with_reasoning_level("LOW ");
+    let events = client.stream(hello_request()).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text.contains("ok"))));
+    let wire = server.join().unwrap();
+    let body: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["reasoning_effort"], "low");
+}
+
+#[test]
+fn the_reasoning_wish_reaches_both_transports_narrowed_to_the_model() {
+    assert_eq!(
+        chat_reasoning_effort_for("gpt-5.6-luna", "http://gateway.local/v1", false, "low").as_deref(),
+        Some("low")
+    );
+    // A model without levels still sends none, whatever is wished for.
+    assert_eq!(
+        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", false, "low"),
+        None
+    );
+    let body = build_responses_body(
+        "gpt-5.6-luna",
+        Vec::new(),
+        &[],
+        false,
+        None,
+        "cache-key",
+        "low",
+    );
+    assert_eq!(body["reasoning"]["effort"], "low");
 }

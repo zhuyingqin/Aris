@@ -35,7 +35,20 @@ export type TableCell = {
   from: number;
   to: number;
   text: string;
+  /**
+   * False when the cell holds a `%` comment in the middle of its content:
+   * the in-place edit collapses the cell to one line, which would comment
+   * out the rest of the row.
+   */
+  editable?: boolean;
 };
+
+/**
+ * Why whole-table edits (rows, columns, alignment, borders) are refused:
+ * they re-serialize the environment, which would drop comments, `\\[2pt]` /
+ * `\\*` row options and break `\multicolumn`/`\multirow` spans.
+ */
+export type TableStructureLock = "comments" | "spans" | "rowOptions";
 
 export type TableRow = {
   cells: TableCell[];
@@ -67,7 +80,27 @@ export type TableModel = {
   booktabs: boolean;
   /** Newline + indent the source uses between rows, reused when adding one. */
   rowSeparator: string;
+  /** Set when a structural edit could not be written back losslessly. */
+  structureLock: TableStructureLock | null;
 };
+
+/** The end of the `%` comment starting at `index` (its newline, or the end). */
+function commentEnd(text: string, index: number): number {
+  const newline = text.indexOf("\n", index);
+  return newline < 0 ? text.length : newline;
+}
+
+/** First unescaped `%` in `text[from, to)`, or -1. */
+function commentStart(text: string, from: number, to: number): number {
+  for (let index = from; index < to; index += 1) {
+    if (text[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (text[index] === "%") return index;
+  }
+  return -1;
+}
 
 const RULE_COMMANDS = ["toprule", "midrule", "bottomrule", "hline", "cmidrule", "addlinespace", "specialrule"];
 
@@ -193,7 +226,7 @@ function readRules(segment: string): { rules: string[]; rest: number } {
   return { rules, rest: cursor };
 }
 
-/** Splits on `&` at brace depth 0, skipping `\&`. */
+/** Splits on `&` at brace depth 0, skipping `\&` and anything in a comment. */
 function splitCells(segment: string, offset: number): TableCell[] {
   const cells: TableCell[] = [];
   let depth = 0;
@@ -201,14 +234,35 @@ function splitCells(segment: string, offset: number): TableCell[] {
   const push = (from: number, to: number) => {
     let left = from;
     let right = to;
-    while (left < right && /\s/.test(segment[left])) left += 1;
+    // Whole comment lines before the content (`% header row`) are not part
+    // of the cell, and neither is a comment closing its last line.
+    for (;;) {
+      while (left < right && /\s/.test(segment[left])) left += 1;
+      if (segment[left] !== "%") break;
+      left = Math.min(right, commentEnd(segment, left) + 1);
+    }
     while (right > left && /\s/.test(segment[right - 1])) right -= 1;
-    cells.push({ from: offset + left, to: offset + right, text: segment.slice(left, right) });
+    let comment = commentStart(segment, left, right);
+    if (comment >= 0 && !segment.slice(comment, right).includes("\n")) {
+      right = comment;
+      while (right > left && /\s/.test(segment[right - 1])) right -= 1;
+      comment = commentStart(segment, left, right);
+    }
+    cells.push({
+      from: offset + left,
+      to: offset + right,
+      text: segment.slice(left, right),
+      editable: comment < 0,
+    });
   };
   for (let index = 0; index < segment.length; index += 1) {
     const char = segment[index];
     if (char === "\\") {
       index += 1;
+      continue;
+    }
+    if (char === "%") {
+      index = commentEnd(segment, index) - 1;
       continue;
     }
     if (char === "{") depth += 1;
@@ -241,6 +295,11 @@ function splitRowSegments(body: string): Array<{ from: number; to: number }> {
     if (char === "}") {
       depth -= 1;
       index += 1;
+      continue;
+    }
+    if (char === "%") {
+      // A `\\` or brace inside a comment is not the table's.
+      index = commentEnd(body, index);
       continue;
     }
     if (char === "\\" && body[index + 1] === "\\" && depth === 0) {
@@ -312,6 +371,13 @@ export function parseTable(source: string, from: number, to: number): TableModel
   if (rows.length === 0) return null;
 
   const separatorMatch = /\\\\(\s*\n[ \t]*)/.exec(body);
+  const structureLock: TableStructureLock | null = commentStart(body, 0, body.length) >= 0
+    ? "comments"
+    : /\\multi(?:column|row)(?![A-Za-z])/.test(body)
+      ? "spans"
+      : /\\\\(?:\*|\s*\[)/.test(body)
+        ? "rowOptions"
+        : null;
   return {
     environment: header[1] as TableModel["environment"],
     from,
@@ -328,6 +394,7 @@ export function parseTable(source: string, from: number, to: number): TableModel
     bodyTo,
     booktabs: /\\(top|mid|bottom)rule/.test(body),
     rowSeparator: separatorMatch?.[1] ?? "\n",
+    structureLock,
   };
 }
 
@@ -446,7 +513,7 @@ export function setTableBorders(model: TableModel, enabled: boolean): TableModel
 
 /** The change that rewrites one cell in place, leaving the rest untouched. */
 export function tableCellEdit(cell: TableCell, text: string): { from: number; to: number; insert: string } | null {
-  if (cell.from < 0) return null;
+  if (cell.from < 0 || cell.editable === false) return null;
   const insert = text.replace(/[\r\n]+/g, " ").trim();
   if (insert === cell.text) return null;
   return { from: cell.from, to: cell.to, insert };
@@ -456,6 +523,8 @@ export function tableCellEdit(cell: TableCell, text: string): { from: number; to
 export function tableStructureEdit(
   original: TableModel,
   next: TableModel,
-): { from: number; to: number; insert: string } {
+): { from: number; to: number; insert: string } | null {
+  // Never rewrite what serialization cannot reproduce (see `structureLock`).
+  if (original.structureLock) return null;
   return { from: original.from, to: original.to, insert: serializeTable(next) };
 }

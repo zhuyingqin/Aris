@@ -11,6 +11,7 @@ import {
   fileListDir,
   fileRename,
   fileReveal,
+  isTauri,
   typesetImportFile,
   type FileTreeEntry,
 } from "../api/tauri";
@@ -21,7 +22,7 @@ import { TYPESET_EDITOR_COPY } from "./i18n";
 import { basename, dirname, escapeLatexText, extension, sameWorkspacePath } from "./latexText";
 import { ToolIcon } from "./ToolIcon";
 import type { TypesetTemplate } from "./TypesetLibraryCopy";
-import { isBuildArtifactPath, TYPESET_IMAGE_EXTENSIONS, workDirForSource } from "./typesetPaths";
+import { isBuildArtifactPath, TYPESET_IMAGE_EXTENSIONS, TYPESET_TEXT_SOURCE_EXTENSIONS, workDirForSource } from "./typesetPaths";
 
 const DEFAULT_LATEX_DOCUMENT = `\\documentclass{article}
 \\usepackage[margin=1in]{geometry}
@@ -50,7 +51,28 @@ export function isAuxiliaryFile(path: string): boolean {
   return isBuildArtifactPath(path);
 }
 
-export function defaultSourceFor(_path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
+/** Han, kana and Hangul: text pdflatex cannot typeset without extra setup. */
+const CJK_TEXT = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]/;
+
+/**
+ * A new document whose title is Chinese (or Japanese/Korean) gets ctex and an
+ * explicit XeLaTeX request. Without them it was `\documentclass{article}` +
+ * a Chinese `\title`, which engine detection rightly sends to pdflatex — and
+ * pdflatex fails on the very first character.
+ */
+function withCjkSupport(source: string): string {
+  const lines = source.split("\n");
+  const classLine = lines.findIndex((line) => line.startsWith("\\documentclass"));
+  lines.splice(classLine + 1, 0, "\\usepackage[UTF8]{ctex}");
+  return `% !TeX program = xelatex\n${lines.join("\n")}`;
+}
+
+export function defaultSourceFor(path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
+  const source = templateSourceFor(path, template, title);
+  return CJK_TEXT.test(title) ? withCjkSupport(source) : source;
+}
+
+function templateSourceFor(_path: string, template: TypesetTemplate, title: string): string {
   const escapedTitle = escapeLatexText(title.trim() || "Untitled document");
   if (template === "beamer") {
     return `\\documentclass[aspectratio=169]{beamer}
@@ -459,14 +481,12 @@ export default function TypesetExplorer({
    * Overleaf's "upload" for a desktop app: pick files anywhere on disk and copy
    * them into the project, because a `\includegraphics` cannot reach outside it.
    */
-  const importFiles = async (parent: string) => {
-    setRowMenu(null);
+  /** Copy files from anywhere on disk into `parent` (a clash gets `-2`, …). */
+  const importSources = async (sources: readonly string[], parent: string) => {
+    if (sources.length === 0) return;
+    setOperationBusy(true);
+    setError(null);
     try {
-      const picked = await openFileDialog({ multiple: true, title: copy.importFile });
-      const sources = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
-      if (sources.length === 0) return;
-      setOperationBusy(true);
-      setError(null);
       for (const source of sources) {
         const name = source.split(/[\\/]/).pop();
         if (!name) continue;
@@ -480,6 +500,56 @@ export default function TypesetExplorer({
       setOperationBusy(false);
     }
   };
+  const importSourcesRef = useRef(importSources);
+  importSourcesRef.current = importSources;
+
+  const importFiles = async (parent: string) => {
+    setRowMenu(null);
+    try {
+      const picked = await openFileDialog({ multiple: true, title: copy.importFile });
+      const sources = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+      await importSources(sources, parent);
+    } catch (importError) {
+      setError(String(importError));
+    }
+  };
+
+  // Files dropped from the system file manager onto the tree are imported into
+  // the folder under the pointer (or the project root). The drop is a window-
+  // wide Tauri event, so it only counts when it lands on this visible tree.
+  const treeRef = useRef<HTMLDivElement | null>(null);
+  const rootPathRef = useRef(rootPath);
+  rootPathRef.current = rootPath;
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        if (disposed || event.payload.type !== "drop") return;
+        const tree = treeRef.current;
+        if (!tree || tree.offsetParent === null) return;
+        const scale = window.devicePixelRatio || 1;
+        const x = event.payload.position.x / scale;
+        const y = event.payload.position.y / scale;
+        const box = tree.getBoundingClientRect();
+        if (x < box.left || x > box.right || y < box.top || y > box.bottom) return;
+        const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-tree-path]");
+        const parent = row
+          ? row.dataset.treeDir === "true" ? row.dataset.treePath ?? "" : dirname(row.dataset.treePath ?? "")
+          : rootPathRef.current;
+        void importSourcesRef.current(event.payload.paths, parent);
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const renderEntry = (entry: FileTreeEntry, depth: number) => {
     const isExpanded = expanded.has(entry.path);
@@ -493,11 +563,13 @@ export default function TypesetExplorer({
     const hasLoadedChildren = Object.prototype.hasOwnProperty.call(children, entry.path);
     const ext = extension(entry.path);
     const isAux = !entry.isDir && isAuxiliaryFile(entry.path);
-    const openable = entry.isDir || ext === ".tex" || ext === ".pdf" || ext === ".bib" || TYPESET_IMAGE_EXTENSIONS.has(ext);
+    const openable = entry.isDir || ext === ".tex" || ext === ".pdf" || TYPESET_TEXT_SOURCE_EXTENSIONS.has(ext) || TYPESET_IMAGE_EXTENSIONS.has(ext);
     return (
       <div key={entry.path}>
         <button
           type="button"
+          data-tree-path={entry.path}
+          data-tree-dir={entry.isDir ? "true" : "false"}
           {...dragHandlers(entry)}
           className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${isAux ? " is-aux" : ""}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}${reviewPending || reviewChildren ? " review-pending" : ""}${dragged?.path === entry.path ? " dragging" : ""}${dropTarget === (entry.isDir ? entry.path : dirname(entry.path)) ? " drop-target" : ""}`}
           style={{ paddingLeft: `${depth * 12 + 4}px` }}
@@ -591,7 +663,7 @@ export default function TypesetExplorer({
       </div>
       <span className="typeset-sidebar-subpath" title={rootPath || rootName}>{rootPath || rootName}</span>
       {error && <div className="typeset-inline-error">{error}</div>}
-      <div className="typeset-tree file-tree-inner">
+      <div className="typeset-tree file-tree-inner" ref={treeRef}>
         <button type="button" className="typeset-tree-root entity-name" onClick={() => toggleDir(rootPath)}>
           <span className={`typeset-tree-caret is-dir${expanded.has(rootPath) ? " expanded" : ""}`}>
             <ToolIcon name="chevron" />

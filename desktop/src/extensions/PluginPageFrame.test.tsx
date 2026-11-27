@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api/plugins";
 import * as tauri from "../api/tauri";
@@ -7,7 +7,7 @@ import PluginPage from "./PluginPage";
 import { pluginPageDocument } from "./pluginPageDocument";
 
 vi.mock("../api/plugins", async (original) => ({
-  ...(await original<typeof import("../api/plugins")>()), pluginsUiPage: vi.fn(), pluginsUiStateGet: vi.fn(), pluginsUiStateUpdate: vi.fn(),
+  ...(await original<typeof import("../api/plugins")>()), pluginsUiPage: vi.fn(), pluginsUiStateGet: vi.fn(), pluginsUiStateUpdate: vi.fn(), pluginsUiRunTool: vi.fn(), pluginsUiCancelTool: vi.fn(),
 }));
 vi.mock("../api/tauri", () => ({ openExternalUrl: vi.fn(), workTaskCreate: vi.fn(), workTaskCreateAndStart: vi.fn(), workTaskList: vi.fn(), onWorkTaskChanged: vi.fn() }));
 vi.mock("../api/transport", async (original) => ({ ...(await original<typeof import("../api/transport")>()), hasNativeBackend: () => true }));
@@ -165,34 +165,68 @@ describe("PluginPageFrame", () => {
     expect(vi.mocked(api.pluginsUiStateUpdate).mock.calls[1][5]).toEqual({ type: "widgetSet", widgetId: "todos", value: [{ text: "Read", completed: true }] });
   });
 
-  it("retries once on the agent's newer revision, then reports the refusal", async () => {
+  it("saves again over another widget's newer write, never over the same widget's", async () => {
     await mount();
-    vi.mocked(api.pluginsUiStateUpdate)
-      .mockRejectedValueOnce("Plugin UI state changed in another window; reload before saving")
-      .mockResolvedValueOnce(stateOf(9, []))
-      .mockRejectedValueOnce("The json widget cards takes any JSON value: a value is outside the limits");
-    vi.mocked(api.pluginsUiStateGet).mockResolvedValue(stateOf(8, [{ id: "agent" }]));
+    const conflict = "Plugin UI state changed in another window; reload before saving";
     const call = { channel: "chan-chan-chan-chan-chan", type: "call", id: 1, method: "set", args: { widget: "cards", value: [] } };
+    const results = (id: number) => post.mock.calls.map(([message]) => message).filter((message) => message.id === id);
+
+    // The agent wrote this very widget in between: the page's save would drop
+    // that unseen, so it is refused and the page gets the agent's value.
+    vi.mocked(api.pluginsUiStateUpdate).mockRejectedValueOnce(conflict);
+    vi.mocked(api.pluginsUiStateGet).mockResolvedValue(stateOf(8, [{ id: "agent" }]));
     await deliver(call);
-    await waitFor(() => expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1, ok: true }), "*"));
-    expect(vi.mocked(api.pluginsUiStateUpdate).mock.calls.map((args) => args[4])).toEqual([3, 8]);
+    await waitFor(() => expect(results(1).at(-1)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("agent changed \"cards\"") })));
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: "data", data: expect.objectContaining({ cards: [{ id: "agent" }] }) }), "*");
+    expect(api.pluginsUiStateUpdate).toHaveBeenCalledTimes(1);
+
+    // The agent wrote another widget (todos): nothing of it is lost by saving cards again.
+    vi.mocked(api.pluginsUiStateUpdate).mockClear();
+    vi.mocked(api.pluginsUiStateUpdate)
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(stateOf(10, []))
+      .mockRejectedValueOnce("The json widget cards takes any JSON value: a value is outside the limits");
+    vi.mocked(api.pluginsUiStateGet).mockResolvedValue({ ...stateOf(9, [{ id: "agent" }]), todoLists: { todos: [{ id: "t2", text: "Agent's todo", completed: false }] } });
     await deliver({ ...call, id: 2 });
-    await waitFor(() => expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ id: 2, ok: false, error: expect.stringContaining("outside the limits") }), "*"));
+    await waitFor(() => expect(results(2).at(-1)).toEqual(expect.objectContaining({ ok: true })));
+    expect(vi.mocked(api.pluginsUiStateUpdate).mock.calls.map((args) => args[4])).toEqual([8, 9]);
+    // A refusal that is not a conflict is reported as it is.
+    await deliver({ ...call, id: 3 });
+    await waitFor(() => expect(results(3).at(-1)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("outside the limits") })));
   });
 
   it("hands prompts to the composer without ever sending them, and files to the side panel", async () => {
-    await mount();
-    const channel = "chan-chan-chan-chan-chan";
-    await deliver({ channel, type: "prompt", text: "Plan next steps", send: true });
-    expect(onAction).toHaveBeenLastCalledWith({ type: "prompt", text: "Plan next steps", send: false });
-    await deliver({ channel, type: "open-file", path: "results/log.md" });
-    expect(onAction).toHaveBeenLastCalledWith({ type: "open-file", path: "results/log.md" });
-    await deliver({ channel, type: "prompt", text: "x".repeat(4001) });
-    await deliver({ channel, type: "prompt", text: "   " });
-    await deliver({ channel, type: "prompt", text: { toString: () => "object" } });
-    await deliver({ channel, type: "open-file", path: 7 });
-    await deliver({ channel, type: "prompt", text: "From elsewhere" }, window);
-    expect(onAction).toHaveBeenCalledTimes(2);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      await mount();
+      const channel = "chan-chan-chan-chan-chan";
+      // `gesture`: the bootstrap saw the user's own click or key press in the page.
+      const later = () => vi.setSystemTime(Date.now() + 1500);
+      await deliver({ channel, type: "prompt", text: "Plan next steps", send: true, gesture: true });
+      expect(onAction).toHaveBeenLastCalledWith({ type: "prompt", text: "Plan next steps", send: false });
+      later();
+      await deliver({ channel, type: "open-file", path: "results/log.md", gesture: true });
+      expect(onAction).toHaveBeenLastCalledWith({ type: "open-file", path: "results/log.md" });
+      // On its own, a page changes nothing the user is looking at.
+      later();
+      await deliver({ channel, type: "prompt", text: "Unasked", gesture: false });
+      await deliver({ channel, type: "open-panel", panel: "tasks" });
+      // One a second, even right after a click: not a loop.
+      later();
+      await deliver({ channel, type: "open-file", path: "a.md", gesture: true });
+      await deliver({ channel, type: "open-file", path: "b.md", gesture: true });
+      expect(onAction).toHaveBeenCalledTimes(3);
+      expect(onAction).toHaveBeenLastCalledWith({ type: "open-file", path: "a.md" });
+      for (const bad of [{ type: "prompt", text: "x".repeat(4001) }, { type: "prompt", text: "   " }, { type: "prompt", text: { toString: () => "object" } }, { type: "open-file", path: 7 }]) {
+        later();
+        await deliver({ channel, ...bad, gesture: true });
+      }
+      later();
+      await deliver({ channel, type: "prompt", text: "From elsewhere", gesture: true }, window);
+      expect(onAction).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("pushes the agent's writes to the page and stops a page it cannot isolate", async () => {
@@ -209,9 +243,83 @@ describe("PluginPageFrame", () => {
     expect(screen.getByRole("alert").textContent).toContain("could not be isolated");
   });
 
+  it("runs a tool the panel declares for its page, and unasked only an auto one", async () => {
+    const channel = "chan-chan-chan-chan-chan";
+    // As the bootstrap sends somniq.tool(name, args).
+    const tool = (id: number, name: string, gesture: boolean, args: unknown = null) => ({ channel, type: "call", id, method: "tool", args: { calls: [{ tool: name, arguments: args }], single: true }, gesture });
+    const lastResult = (id: number) => post.mock.calls.map(([message]) => message).filter((message) => message.id === id).at(-1);
+    const farm: api.ActiveUiPanel = { ...panel, tools: [{ name: "farm_start" }, { name: "farm_status", auto: true }] };
+    vi.mocked(api.pluginsUiRunTool).mockResolvedValue({ results: [{ tool: "farm_status", text: "Up", structured: { up: true }, isError: false }], cancelled: false });
+    render(<PluginPage panel={farm} projectPath="F:/project" language="en" onAction={onAction} />);
+    const shell = await screen.findByTitle("Focus board") as HTMLIFrameElement;
+    Object.defineProperty(shell, "contentWindow", { value: { 0: pageWindow } });
+
+    // A status check the page may run by itself, on load or on a timer.
+    await deliver(tool(1, "farm_status", false));
+    await waitFor(() => expect(lastResult(1)).toEqual(expect.objectContaining({ ok: true, value: { text: "Up", structured: { up: true } } })));
+    expect(api.pluginsUiRunTool).toHaveBeenLastCalledWith("F:/project", "@local/focus-board", "focus-board", "", expect.any(String), { from: "page", calls: [{ tool: "farm_status", arguments: null }], gesture: false });
+    // Anything else waits for the user's own click or key press in the page.
+    await deliver(tool(2, "farm_start", false));
+    await waitFor(() => expect(lastResult(2)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("click or key press") })));
+    // A tool the panel does not list is refused before anything runs.
+    await deliver(tool(3, "farm_wipe", true));
+    await waitFor(() => expect(lastResult(3)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("not in this panel") })));
+    expect(api.pluginsUiRunTool).toHaveBeenCalledTimes(1);
+
+    // Unasked runs are a status check now and then, not a loop: 12 a minute.
+    for (let id = 100; id < 111; id++) {
+      await deliver(tool(id, "farm_status", false));
+      await waitFor(() => expect(lastResult(id)).toEqual(expect.objectContaining({ ok: true })));
+    }
+    await deliver(tool(111, "farm_status", false));
+    await waitFor(() => expect(lastResult(111)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("12 times in the last minute") })));
+    expect(api.pluginsUiRunTool).toHaveBeenCalledTimes(12);
+    // A click is not limited by it.
+    await deliver(tool(112, "farm_status", true));
+    await waitFor(() => expect(lastResult(112)).toEqual(expect.objectContaining({ ok: true })));
+    vi.mocked(api.pluginsUiRunTool).mockClear();
+    vi.mocked(api.pluginsUiRunTool).mockResolvedValue({ results: [{ tool: "farm_status", text: "Up", structured: { up: true }, isError: false }], cancelled: false });
+
+    // After a click it runs with the page's arguments; the tool's own error rejects the call.
+    vi.mocked(api.pluginsUiRunTool).mockResolvedValueOnce({ results: [{ tool: "farm_start", text: "Port 3007 is busy", isError: true }], error: "farm_start reported an error", cancelled: false });
+    await deliver(tool(4, "farm_start", true, { port: 3007 }));
+    await waitFor(() => expect(lastResult(4)).toEqual(expect.objectContaining({ ok: false, error: "Port 3007 is busy" })));
+    expect(api.pluginsUiRunTool).toHaveBeenLastCalledWith("F:/project", "@local/focus-board", "focus-board", "", expect.any(String), { from: "page", calls: [{ tool: "farm_start", arguments: { port: 3007 } }], gesture: true });
+
+    // Several steps from one click are one run, answered with every result.
+    vi.mocked(api.pluginsUiRunTool).mockResolvedValueOnce({ results: [
+      { tool: "farm_start", text: "Started", isError: false },
+      { tool: "farm_status", text: "Up", isError: false },
+    ], cancelled: false });
+    const steps = { channel, type: "call", id: 5, method: "tool", args: { calls: [{ tool: "farm_start", arguments: null }, { tool: "farm_status", arguments: null }] }, gesture: true };
+    await deliver(steps);
+    await waitFor(() => expect(lastResult(5)).toEqual(expect.objectContaining({ ok: true, value: [
+      { tool: "farm_start", text: "Started", structured: null },
+      { tool: "farm_status", text: "Up", structured: null },
+    ] })));
+    // Unasked, one step that is not auto refuses the whole run.
+    await deliver({ ...steps, id: 6, gesture: false });
+    await waitFor(() => expect(lastResult(6)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("farm_start") })));
+    // Counted since the rate-limit check above: the click with arguments and the two-step run.
+    expect(api.pluginsUiRunTool).toHaveBeenCalledTimes(2);
+
+    // The page can stop what it started, and the call says it was stopped.
+    let finish!: (outcome: api.PanelToolOutcome) => void;
+    vi.mocked(api.pluginsUiRunTool).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    vi.mocked(api.pluginsUiCancelTool).mockResolvedValue(undefined);
+    await deliver(tool(7, "farm_start", true));
+    const runId = vi.mocked(api.pluginsUiRunTool).mock.calls.at(-1)![4];
+    await deliver({ channel, type: "call", id: 8, method: "stopTools", gesture: false });
+    await waitFor(() => expect(lastResult(8)).toEqual(expect.objectContaining({ ok: true, value: 1 })));
+    expect(api.pluginsUiCancelTool).toHaveBeenCalledWith(runId);
+    await act(async () => finish({ results: [], cancelled: true }));
+    await waitFor(() => expect(lastResult(7)).toEqual(expect.objectContaining({ ok: false, error: "The tool run was stopped" })));
+  });
+
   it("asks the user before a page's task proposal becomes a background task", async () => {
     const channel = "chan-chan-chan-chan-chan";
-    const task = (id: number, args: Record<string, unknown>) => ({ channel, type: "call", id, method: "task", args });
+    // `gesture`: the bootstrap saw the user's own click or key press in the page.
+    const task = (id: number, args: Record<string, unknown>, gesture = true) => ({ channel, type: "call", id, method: "task", args, gesture });
     const lastResult = (id: number) => post.mock.calls.map(([message]) => message).filter((message) => message.id === id).at(-1);
 
     // A panel that did not declare proposeTasks is refused, and nothing is shown.
@@ -227,6 +335,11 @@ describe("PluginPageFrame", () => {
     const shell = await screen.findByTitle("Focus board") as HTMLIFrameElement;
     Object.defineProperty(shell, "contentWindow", { value: { 0: pageWindow } });
 
+    // A page cannot ask on its own, while the user is busy elsewhere.
+    await deliver(task(9, { title: "Unasked", prompt: "Unasked" }, false));
+    await waitFor(() => expect(lastResult(9)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("click or key press") })));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
     // A report target the panel does not declare is refused before asking anyone.
     await deliver(task(2, { title: "T", prompt: "P", reportTo: "nowhere" }));
     await waitFor(() => expect(lastResult(2)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("nowhere") })));
@@ -235,11 +348,18 @@ describe("PluginPageFrame", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).toContain("@local/focus-board");
     expect(dialog.textContent).toContain("findings");
+    // The working copy holds files back; what tools do on this computer is not held, and the card says so.
+    expect(within(dialog).getByRole("note").textContent).toMatch(/take effect on this computer right away.*cannot be undone/);
     // One proposal at a time: a second ask while the first waits is refused.
     await deliver(task(4, { title: "Again", prompt: "Again" }));
     await waitFor(() => expect(lastResult(4)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("already waiting") })));
     // The page's call has no answer until the user decides.
     expect(lastResult(3)).toBeUndefined();
+    // The safe answer has the focus, and accepting waits a moment.
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Decline" }));
+    const start = screen.getByRole("button", { name: "Create and start" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    await waitFor(() => expect(start.disabled).toBe(false), { timeout: 3000 });
 
     vi.mocked(tauri.workTaskList).mockResolvedValue([]);
     vi.mocked(tauri.workTaskCreateAndStart).mockResolvedValue({ id: "task-7" } as Awaited<ReturnType<typeof tauri.workTaskCreateAndStart>>);
@@ -261,6 +381,10 @@ describe("PluginPageFrame", () => {
     await act(async () => { (await screen.findByRole("button", { name: "Decline" })).click(); });
     await waitFor(() => expect(lastResult(5)).toEqual(expect.objectContaining({ ok: true, value: { status: "declined" } })));
     expect(tauri.workTaskCreate).not.toHaveBeenCalled();
+    // Right after a decline the page cannot ask again, even within its click.
+    await deliver(task(6, { title: "Again", prompt: "Again" }));
+    await waitFor(() => expect(lastResult(6)).toEqual(expect.objectContaining({ ok: false, error: expect.stringContaining("just declined") })));
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(tauri.workTaskCreateAndStart).toHaveBeenCalledTimes(1);
   });
 
@@ -336,7 +460,7 @@ describe("a page in the Chat sidebar", () => {
     expect(api.pluginsUiStateGet).toHaveBeenCalledWith("F:/project", "@local/focus-board", "focus-board", "s1");
     const pageWindow = { postMessage: vi.fn() };
     Object.defineProperty(shell, "contentWindow", { value: { 0: pageWindow } });
-    const event = new MessageEvent("message", { data: { channel: "side-side-side-side-side", type: "prompt", text: "Summarize" } });
+    const event = new MessageEvent("message", { data: { channel: "side-side-side-side-side", type: "prompt", text: "Summarize", gesture: true } });
     Object.defineProperty(event, "source", { value: pageWindow });
     await act(async () => { window.dispatchEvent(event); });
     expect(onPrompt).toHaveBeenCalledWith("Summarize", false);

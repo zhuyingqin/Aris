@@ -597,6 +597,26 @@ pub(crate) async fn switch_registered_project(
     })
 }
 
+/// Tell the plugin trust store which projects SomniQ knows, so a package
+/// snapshot no known project uses any more is collected, and one a project
+/// still names never is. Off the caller's thread: it reads every project's
+/// plugin registry. Unit tests never touch the user's trust store.
+pub(crate) fn sync_plugin_snapshot_index(projects: &ProjectState) {
+    let Ok(registry) = projects.registry.lock() else {
+        return;
+    };
+    let paths: Vec<PathBuf> = registry.projects.iter().map(|project| PathBuf::from(&project.path)).collect();
+    drop(registry);
+    if cfg!(test) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Err(error) = runtime::plugins::sync_known_projects(&paths) {
+            eprintln!("SomniQ plugins: package snapshot index not synced: {error}");
+        }
+    });
+}
+
 fn notify_project_changed(app: &AppHandle) {
     if let Err(error) = app.emit("project-changed", ()) {
         eprintln!("SomniQ desktop: could not notify project change: {error}");
@@ -639,7 +659,7 @@ pub async fn project_add(
     }
     let normalized = normalize_path(&canonical);
     let _switch_permit = crate::engine::begin_project_switch(chat_state.inner()).await?;
-    crate::engine::with_project_switch_guard(chat_state.inner(), || {
+    let added = crate::engine::with_project_switch_guard(chat_state.inner(), || {
         let mut registry = projects
             .registry
             .lock()
@@ -663,7 +683,9 @@ pub async fn project_add(
         };
         activate_with_environment_lock(&mut registry, &id)?;
         view(&registry)
-    })
+    })?;
+    sync_plugin_snapshot_index(projects.inner());
+    Ok(added)
 }
 
 #[tauri::command]
@@ -747,6 +769,7 @@ pub async fn project_remove(
         save_registry(&registry)?;
         view(&registry)
     })?;
+    sync_plugin_snapshot_index(projects.inner());
     notify_project_changed(&app);
     Ok(result)
 }

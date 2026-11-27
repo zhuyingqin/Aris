@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { PLUGIN_PANEL_CHANGED_EVENT, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiAction, type UiPanelState, type UiTodo } from "../api/plugins";
+import { PLUGIN_PANEL_CHANGED_EVENT, pluginsUiCancelTool, pluginsUiRunTool, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiAction, type UiPanelState, type UiTodo } from "../api/plugins";
+import { hasNativeBackend } from "../api/transport";
 import { SvgIcon } from "../SvgIcon";
 import type { Language } from "../store";
 import type { ChatTodoItem } from "../types";
-import { DataWidgetView, isDataWidget, type PanelActions } from "./ChatPluginDataWidgets";
+import { DataWidgetView, isDataWidget, type PanelActions, type PanelToolRun } from "./ChatPluginDataWidgets";
 import PluginEditButton from "./PluginEditButton";
 import PluginPageFrame from "./PluginPageFrame";
 import PluginWebFrame, { PluginWebControls, useWebPanelReload } from "./PluginWebFrame";
@@ -198,7 +199,16 @@ export function PanelBody({ panel, projectPath, sessionId, language, agentTodos,
       if (stale.current) void reload(true);
     }
   };
-  const actions: PanelActions = { onPrompt, onOpenFile };
+  // A tool button runs the package's own MCP tools with no conversation; what
+  // it writes into a widget arrives through the panel-changed event above.
+  const onRunTool = (widgetId: string, values?: Record<string, string | boolean>): PanelToolRun => {
+    const runId = crypto.randomUUID();
+    return {
+      done: pluginsUiRunTool(projectPath, panel.pluginName, panel.id, sessionId, runId, { from: "widget", widgetId, values }),
+      stop: () => { void pluginsUiCancelTool(runId).catch(() => undefined); },
+    };
+  };
+  const actions: PanelActions = { onPrompt, onOpenFile, onRunTool: hasNativeBackend() ? onRunTool : undefined };
   const disabled = loading || saving || Boolean(error) || !state;
   return <div className={`chat-plugin-panel${compact ? " is-compact" : ""}`} aria-label={uiText(panel.title, language)} aria-busy={loading || saving}>
     <div className="chat-plugin-panel-content">

@@ -94,11 +94,34 @@ pub trait StreamObserver: Send {
     fn is_cancelled(&self) -> bool {
         false
     }
+
+    /// A handle that answers [`Self::is_cancelled`] without the observer, so
+    /// a side request of the same turn (the compaction summarizer) stops when
+    /// the turn does. `None` when this observer is never cancelled.
+    fn cancel_probe(&self) -> Option<CancelProbe> {
+        None
+    }
 }
+
+/// A thread-safe "has this been cancelled?" check.
+pub type CancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 pub struct NoopStreamObserver;
 
 impl StreamObserver for NoopStreamObserver {}
+
+/// An observer that only reports cancellation, taken from `probe`.
+pub struct CancelProbeObserver(pub CancelProbe);
+
+impl StreamObserver for CancelProbeObserver {
+    fn is_cancelled(&self) -> bool {
+        (self.0)()
+    }
+
+    fn cancel_probe(&self) -> Option<CancelProbe> {
+        Some(Arc::clone(&self.0))
+    }
+}
 
 pub trait ExecutorTraceSink: Send + Sync {
     fn record(&self, kind: &str, payload: Value);
@@ -404,6 +427,17 @@ pub enum ExecutorClient {
     OpenAI(OpenAIRuntimeClient),
 }
 
+impl ExecutorClient {
+    /// Ask for `level` instead of the chat's configured reasoning level.
+    #[must_use]
+    pub fn with_reasoning_level(self, level: &str) -> Self {
+        match self {
+            Self::Anthropic(client) => Self::Anthropic(client.with_reasoning_level(level)),
+            Self::OpenAI(client) => Self::OpenAI(client.with_reasoning_level(level)),
+        }
+    }
+}
+
 impl ApiClient for ExecutorClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         match self {
@@ -456,6 +490,9 @@ pub struct AnthropicRuntimeClient {
     trace_sink: Option<Arc<dyn ExecutorTraceSink>>,
     cache_message_prefix: bool,
     bounded_request: bool,
+    /// Reasoning level this client asks for instead of the global
+    /// `ARIS_REASONING_EFFORT`; see [`Self::with_reasoning_level`].
+    reasoning_level: Option<String>,
 }
 
 impl AnthropicRuntimeClient {
@@ -487,6 +524,7 @@ impl AnthropicRuntimeClient {
             trace_sink: None,
             cache_message_prefix: false,
             bounded_request: false,
+            reasoning_level: None,
         })
     }
 
@@ -506,6 +544,16 @@ impl AnthropicRuntimeClient {
         self.bounded_request = true;
         self
     }
+
+    /// Ask for `level` instead of the chat's configured reasoning level, still
+    /// narrowed to what the model accepts. See
+    /// [`OpenAIRuntimeClient::with_reasoning_level`].
+    #[must_use]
+    pub fn with_reasoning_level(mut self, level: &str) -> Self {
+        let level = level.trim().to_ascii_lowercase();
+        self.reasoning_level = (!level.is_empty()).then_some(level);
+        self
+    }
 }
 
 /// What one Anthropic request asks for in thinking. Earlier thinking blocks go
@@ -523,12 +571,28 @@ impl AnthropicThinkingPlan {
 }
 
 /// The thinking request for `model` at the configured level.
+#[cfg(test)]
+fn anthropic_thinking_plan(
+    model: &str,
+    max_tokens: u32,
+    messages: &[ConversationMessage],
+) -> AnthropicThinkingPlan {
+    anthropic_thinking_plan_at(
+        model,
+        &reasoning_effort::configured_level(),
+        max_tokens,
+        messages,
+    )
+}
+
+/// The thinking request for `model` at the level `wanted`.
 ///
 /// Claude 4.6 and later take adaptive thinking steered by effort; 4.7 and
 /// later answer the old `{"type": "enabled"}` shape with a 400, and the 5.x
 /// models think by default. Only 3.7 – 4.5 still need a manual budget.
-fn anthropic_thinking_plan(
+fn anthropic_thinking_plan_at(
     model: &str,
+    wanted: &str,
     max_tokens: u32,
     messages: &[ConversationMessage],
 ) -> AnthropicThinkingPlan {
@@ -536,8 +600,7 @@ fn anthropic_thinking_plan(
     let Some(mode) = reasoning_effort::claude_thinking(model) else {
         return AnthropicThinkingPlan::default();
     };
-    let Some(level) = reasoning_effort::closest_level(model, &reasoning_effort::configured_level())
-    else {
+    let Some(level) = reasoning_effort::closest_level(model, wanted) else {
         return AnthropicThinkingPlan::default();
     };
     match mode {
@@ -675,7 +738,11 @@ impl ApiClient for AnthropicRuntimeClient {
         let thinking_plan = if self.bounded_request {
             AnthropicThinkingPlan::default()
         } else {
-            anthropic_thinking_plan(&self.model, self.max_tokens, &request.messages)
+            let wanted = self
+                .reasoning_level
+                .clone()
+                .unwrap_or_else(reasoning_effort::configured_level);
+            anthropic_thinking_plan_at(&self.model, &wanted, self.max_tokens, &request.messages)
         };
         let build_request = |plan: &AnthropicThinkingPlan| MessageRequest {
             model: self.model.clone(),

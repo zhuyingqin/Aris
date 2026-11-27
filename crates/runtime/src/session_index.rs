@@ -207,6 +207,7 @@ pub fn index_session(path: &Path, session: &Session) -> Result<(), String> {
     let desired = indexed_message_rows(path, session);
     let mut connection = open_index(parent)?;
     let existing = load_indexed_rows(&connection, session_id)?;
+    let desired = keep_first_seen_times(desired, &existing, session_start_from_id(session_id));
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -459,6 +460,73 @@ fn indexed_message_rows(path: &Path, session: &Session) -> Vec<IndexedMessageRow
         }
     }
     rows
+}
+
+/// Give every row the time its message was first seen, and a time at all.
+///
+/// A Session that is compacted or rewound is appended to its event log again
+/// behind a `session_reset`, which stamps every surviving message with the time
+/// of that rewrite; once the old rows are compacted away the original time is
+/// gone, and a month-old message reads as written today. The index is updated
+/// on every save, so it saw the original time: the k-th row with a given text
+/// keeps the earliest time the index gave the k-th row with that text.
+///
+/// Rows that still have no time (no event log, no embedded date) used to fall
+/// back to the Session file's modification time at query time, so continuing
+/// an old chat moved all of its history to today. They now inherit the time of
+/// the previous live message, else the Session's earliest known time (the
+/// start time encoded in its id counts).
+fn keep_first_seen_times(
+    mut rows: Vec<IndexedMessageRow>,
+    existing: &BTreeMap<usize, IndexedMessageRow>,
+    session_start_ms: Option<i64>,
+) -> Vec<IndexedMessageRow> {
+    let mut first_seen: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
+    for row in existing.values() {
+        first_seen.entry(row.content.as_str()).or_default().push(row.recorded_at);
+    }
+    let mut occurrence: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &mut rows {
+        let nth = occurrence.entry(row.content.clone()).or_default();
+        if let Some(&seen) = first_seen.get(row.content.as_str()).and_then(|times| times.get(*nth)) {
+            if seen > 0 && (row.recorded_at == 0 || seen < row.recorded_at) {
+                row.recorded_at = seen;
+            }
+        }
+        *nth += 1;
+    }
+    let earliest = rows
+        .iter()
+        .map(|row| row.recorded_at)
+        .filter(|time| *time > 0)
+        .chain(session_start_ms)
+        .min();
+    let mut previous_live = None;
+    for row in &mut rows {
+        let live = row.index < ARCHIVE_INDEX_BASE;
+        if row.recorded_at > 0 {
+            if live {
+                previous_live = Some(row.recorded_at);
+            }
+            continue;
+        }
+        // Archived rows are the oldest part of the Session.
+        let fill = if live { previous_live.or(earliest) } else { earliest };
+        if let Some(time) = fill {
+            row.recorded_at = time;
+        }
+    }
+    rows
+}
+
+/// The creation time desktop Session ids carry (`chat-1795406255665-3zf9ga`):
+/// the first run of exactly 13 digits that is a plausible epoch millisecond.
+pub(crate) fn session_start_from_id(session_id: &str) -> Option<i64> {
+    session_id
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|run| run.len() == 13)
+        .filter_map(|run| run.parse::<i64>().ok())
+        .find(|millis| (1_400_000_000_000..4_100_000_000_000).contains(millis))
 }
 
 fn session_event_timestamps(path: &Path) -> BTreeMap<usize, i64> {
@@ -1118,6 +1186,63 @@ fn search_sessions_internal(
     })
 }
 
+/// What recalled Session windows share with the question, for a caller that
+/// decides whether to deliver them at all. `score_micros` is rank-based and
+/// says nothing about absolute relevance, so this reports the question's
+/// tokens of the bigram projection, how many indexed messages contain each,
+/// and which of them each hit's anchor messages contain.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionRecallEvidence {
+    /// Indexed messages, the denominator of every document frequency.
+    pub messages: i64,
+    /// Query tokens in first-seen order, each with its document frequency.
+    pub query_terms: Vec<(String, i64)>,
+    /// Per hit, the query tokens its anchor messages contain.
+    pub anchor_terms: Vec<Vec<String>>,
+}
+
+pub fn session_recall_evidence(
+    sessions_dir: &Path,
+    query: &str,
+    hits: &[SessionSearchHit],
+) -> Result<SessionRecallEvidence, String> {
+    let connection = open_index(sessions_dir)?;
+    let messages = connection
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT COUNT(*) FROM messages_bigram_fts WHERE messages_bigram_fts MATCH ?1")
+        .map_err(|error| error.to_string())?;
+    let mut query_terms = Vec::new();
+    for term in bigram_query_terms(query) {
+        let frequency = statement
+            .query_row([fts_or_expression(std::slice::from_ref(&term))], |row| row.get(0))
+            .unwrap_or_default();
+        query_terms.push((term, frequency));
+    }
+    let anchor_terms = hits
+        .iter()
+        .map(|hit| {
+            let mut tokens = BTreeSet::new();
+            for message in hit.messages.iter().filter(|message| message.anchor) {
+                for_each_bigram_token(&message.content, |token| {
+                    tokens.insert(token);
+                });
+            }
+            query_terms
+                .iter()
+                .filter(|(term, _)| tokens.contains(term))
+                .map(|(term, _)| term.clone())
+                .collect()
+        })
+        .collect();
+    Ok(SessionRecallEvidence {
+        messages,
+        query_terms,
+        anchor_terms,
+    })
+}
+
 #[must_use]
 pub fn sessions_dir_from_env() -> PathBuf {
     crate::project_sessions_dir_from_env()
@@ -1317,39 +1442,45 @@ fn prune_missing_sessions(sessions_dir: &Path, seen: &BTreeSet<String>) -> Resul
         .into_iter()
         .filter(|session_id| !seen.contains(session_id))
     {
-        transaction
-            .execute(
-                "DELETE FROM messages_bigram_fts WHERE rowid IN
-                   (SELECT rowid FROM messages WHERE session_id = ?1)",
-                [&session_id],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM messages_fts WHERE session_id = ?1",
-                [&session_id],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM profile_fts WHERE session_id = ?1",
-                [&session_id],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM message_embeddings WHERE session_id = ?1",
-                [&session_id],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute("DELETE FROM messages WHERE session_id = ?1", [&session_id])
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute("DELETE FROM sessions WHERE session_id = ?1", [&session_id])
-            .map_err(|error| error.to_string())?;
+        delete_indexed_session(&transaction, &session_id)?;
     }
     transaction.commit().map_err(|error| error.to_string())
+}
+
+/// Drop a deleted Session from the search index now.
+///
+/// Without this a deleted chat stayed searchable -- and could be injected into
+/// a later turn's recall block -- until the next background repair, which only
+/// runs when a project is activated. An index that does not exist yet is not
+/// created.
+pub fn forget_indexed_session(sessions_dir: &Path, session_id: &str) -> Result<(), String> {
+    if !sessions_dir.join("session-index.sqlite3").exists() {
+        return Ok(());
+    }
+    let mut connection = open_index(sessions_dir)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    delete_indexed_session(&transaction, session_id)?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn delete_indexed_session(transaction: &Connection, session_id: &str) -> Result<(), String> {
+    // The bigram rows are keyed by `messages.rowid`, so they go first.
+    for statement in [
+        "DELETE FROM messages_bigram_fts WHERE rowid IN
+           (SELECT rowid FROM messages WHERE session_id = ?1)",
+        "DELETE FROM messages_fts WHERE session_id = ?1",
+        "DELETE FROM profile_fts WHERE session_id = ?1",
+        "DELETE FROM message_embeddings WHERE session_id = ?1",
+        "DELETE FROM messages WHERE session_id = ?1",
+        "DELETE FROM sessions WHERE session_id = ?1",
+    ] {
+        transaction
+            .execute(statement, [session_id])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn search_fts(

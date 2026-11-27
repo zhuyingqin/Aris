@@ -1,4 +1,4 @@
-import { EditorSelection, Facet, RangeSetBuilder, StateEffect, StateField, type EditorState, type RangeSet, type Transaction } from "@codemirror/state";
+import { EditorSelection, Facet, RangeSetBuilder, StateEffect, StateField, type ChangeSet, type EditorState, type RangeSet, type Transaction } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -22,11 +22,14 @@ import { tr } from "../language";
 /** Copy for widgets built outside React, in the current UI language. */
 const uiText = (cn: string, en: string, es: string) => tr(useStore.getState().language, cn, en, es);
 import { labelTarget } from "../editor/latexTooltips";
+import { mathMacrosFor, mathMacrosKey, stripLatexComments, type MathMacros } from "../editor/latex/mathMacros";
 import {
   LatexStructureIndex,
   matchBraceEnd as matchBrace,
+  latexEditsKeepStructure,
   scanLatexStructure,
   updateLatexStructure,
+  type LatexEdit,
   type LatexArgument,
   type LatexCommand,
   type LatexHeading,
@@ -254,6 +257,12 @@ const INLINE_TEXT_COMMANDS: Record<string, string> = {
   textsc: "cm-vis-smallcaps",
   textsubscript: "cm-vis-sub",
   textsuperscript: "cm-vis-sup",
+  textsf: "cm-vis-sans",
+  textrm: "cm-vis-upright",
+  textnormal: "cm-vis-upright",
+  textup: "cm-vis-upright",
+  textmd: "cm-vis-upright",
+  textsl: "cm-vis-slanted",
 };
 
 /**
@@ -313,7 +322,6 @@ const headingGutterMarker: Record<number, VisualGutterClassMarker> = {
 const commentMark = Decoration.mark({ class: "cm-vis-comment" });
 
 /** Indent a list item line so the bullet/number hangs like a rendered list. */
-const listItemLine = Decoration.line({ class: "cm-vis-list-line" });
 
 /** Center + shrink a caption line. */
 const captionLine = Decoration.line({ class: "cm-vis-caption-line" });
@@ -341,7 +349,44 @@ const activeMathSourceInline = Decoration.mark({
   class: "cm-vis-active-math-source cm-vis-active-math-source-inline",
 });
 
-const LIST_ENVIRONMENTS = new Set(["itemize", "enumerate"]);
+const LIST_ENVIRONMENTS = new Set(["itemize", "enumerate", "description"]);
+
+/** LaTeX's default `itemize` labels by nesting level. */
+function defaultItemizeBullet(depth: number): string {
+  return ["•", "–", "∗", "·"][Math.min(Math.max(depth, 1), 4) - 1];
+}
+
+function romanNumeral(value: number): string {
+  const numerals: Array<[number, string]> = [[10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"]];
+  let rest = value;
+  let output = "";
+  for (const [amount, letters] of numerals) {
+    while (rest >= amount) {
+      output += letters;
+      rest -= amount;
+    }
+  }
+  return output;
+}
+
+/** LaTeX's default `enumerate` labels by level: 1. / (a) / i. / A. */
+function defaultEnumerateLabel(index: number, depth: number): string {
+  const letter = (upper: boolean) => String.fromCharCode((upper ? 65 : 97) + ((index - 1) % 26));
+  switch (Math.min(Math.max(depth, 1), 4)) {
+    case 2: return `(${letter(false)})`;
+    case 3: return `${romanNumeral(index)}.`;
+    case 4: return `${letter(true)}.`;
+    default: return `${index}.`;
+  }
+}
+
+/** Item lines indent by nesting level, like the PDF. */
+const listItemLines = [1, 2, 3, 4].map((depth) => Decoration.line({
+  class: depth === 1 ? "cm-vis-list-line" : `cm-vis-list-line cm-vis-list-depth-${depth}`,
+}));
+function listItemLineAt(depth: number): Decoration {
+  return listItemLines[Math.min(Math.max(depth, 1), 4) - 1];
+}
 
 /** Memoized alignment line decorations (center / flushleft / flushright). */
 const alignLineCache: Record<string, Decoration> = {};
@@ -378,7 +423,9 @@ function replaceAuthorBlocks(input: string): string {
  * multi-space/wrap noise within a line still collapses.
  */
 function stripMarkup(input: string): string {
-  return replaceAuthorBlocks(input.replace(/%[^\n]*\n?/g, ""))
+  // `\%` is a printed percent sign, not a comment: `95\% CI` used to come out
+  // as `95\`, and a table cell lost everything after it.
+  return replaceAuthorBlocks(stripLatexComments(input))
     .replace(/\\textsubscript\s*\{\$?\\infty\$?\}/g, "∞")
     .replace(/\\textsubscript\s*\{([^{}]*)\}/g, "$1")
     .replace(/\$\\infty\$/g, "∞")
@@ -737,16 +784,17 @@ class CounterWidget extends WidgetType {
  * is exactly what a footnote is designed not to do.
  */
 class FootnoteWidget extends WidgetType {
-  constructor(private readonly text: string) {
+  constructor(private readonly text: string, private readonly number: number) {
     super();
   }
   eq(other: FootnoteWidget) {
-    return other.text === this.text;
+    return other.text === this.text && other.number === this.number;
   }
   toDOM() {
     const el = document.createElement("sup");
     el.className = "cm-vis-footnote";
-    el.textContent = "*";
+    // The number the PDF prints (counted in this file), not a bare "*".
+    el.textContent = String(this.number);
     el.title = this.text;
     return el;
   }
@@ -920,17 +968,19 @@ class PageBreakWidget extends WidgetType {
 
 /** List bullet / number marker shown in place of `\item`. */
 class ItemMarkerWidget extends WidgetType {
-  constructor(private readonly marker: string) {
+  constructor(private readonly marker: string, private readonly kind: "label" | "term" = "label") {
     super();
   }
   eq(other: ItemMarkerWidget) {
-    return other.marker === this.marker;
+    return other.marker === this.marker && other.kind === this.kind;
   }
   toDOM() {
     const el = document.createElement("span");
-    el.className = this.marker === "•"
-      ? "cm-vis-item-marker cm-vis-item-marker-bullet"
-      : "cm-vis-item-marker";
+    el.className = this.kind === "term"
+      ? "cm-vis-item-marker cm-vis-item-term"
+      : ["•", "–", "∗", "·"].includes(this.marker)
+        ? "cm-vis-item-marker cm-vis-item-marker-bullet"
+        : "cm-vis-item-marker";
     el.textContent = this.marker;
     return el;
   }
@@ -1151,10 +1201,62 @@ async function resolveFigurePath(imagePath: string, sourcePath: string | null): 
 }
 
 /** Build the caption `<div>` shared by figure and table widgets. */
+/**
+ * Math macros for captions, refreshed by every `buildDecorations` pass. A
+ * caption widget renders after that pass and always for the same document,
+ * so the module-level copy saves threading them through every float widget.
+ */
+let captionMathMacros: MathMacros = {};
+
+const CAPTION_CITE_RE = /\\(?:cite[tp]?|citeauthor|citeyear|citealp|citealt|parencite|textcite|autocite|footcite)\*?(?:\s*\[[^\]]*\])*\s*\{([^{}]*)\}/g;
+const CAPTION_REF_RE = /\\(?:ref|eqref|autoref|cref|Cref|nameref|pageref)\*?\s*\{([^{}]*)\}/g;
+
+/**
+ * A raw `\caption{…}` argument as display pieces: inline math for KaTeX, the
+ * rest as plain text. It used to be stripped to text first, which printed
+ * `$\alpha$` as `\alpha` and `\cite{k}` as `\citek`.
+ */
+function captionParts(raw: string): Array<{ text: string } | { math: string }> {
+  const source = stripLatexComments(raw)
+    .replace(CAPTION_CITE_RE, (_, keys: string) => `[${keys.split(",").map((key) => key.trim()).filter(Boolean).join(", ")}]`)
+    .replace(CAPTION_REF_RE, (_, label: string) => label.trim());
+  const parts: Array<{ text: string } | { math: string }> = [];
+  const pushText = (segment: string) => {
+    const stripped = stripMarkup(segment).replace(/\s+/g, " ");
+    if (!stripped) return;
+    // stripMarkup trims; keep the spaces that separate text from formulas.
+    const lead = /^\s/.test(segment) && parts.length > 0 ? " " : "";
+    const trail = /\s$/.test(segment) ? " " : "";
+    parts.push({ text: `${lead}${stripped}${trail}` });
+  };
+  const math = /(?<!\\)\$([^$]+)\$/g;
+  let cursor = 0;
+  for (let match = math.exec(source); match; match = math.exec(source)) {
+    pushText(source.slice(cursor, match.index));
+    parts.push({ math: match[1] });
+    cursor = match.index + match[0].length;
+  }
+  pushText(source.slice(cursor));
+  return parts;
+}
+
 function buildCaptionEl(caption: string): HTMLDivElement {
   const cap = document.createElement("div");
   cap.className = "cm-vis-caption";
-  cap.textContent = caption.replace(/\s+/g, " ").trim();
+  for (const part of captionParts(caption)) {
+    if ("math" in part) {
+      const span = document.createElement("span");
+      span.className = "cm-vis-caption-math";
+      try {
+        katex.render(part.math, span, { throwOnError: false, output: "html", macros: { ...captionMathMacros } });
+      } catch {
+        span.textContent = part.math;
+      }
+      cap.append(span);
+    } else {
+      cap.append(document.createTextNode(part.text));
+    }
+  }
   return cap;
 }
 
@@ -1195,37 +1297,91 @@ async function renderFigureInto(el: HTMLDivElement, imagePath: string, sourcePat
  * never a mix of independently-hidden pieces, which is what produced the
  * "reveals one line at a time" jumble.
  */
+/** Citation commands drawn as chips (natbib and biblatex families included). */
+const VISUAL_CITE_COMMANDS = new Set([
+  "cite", "cite*", "citep", "citet", "citep*", "citet*", "Citep", "Citet", "citealp", "citealt", "citeauthor",
+  "Citeauthor", "citeyear", "citeyearpar", "citenum", "parencite", "Parencite", "textcite", "Textcite",
+  "autocite", "Autocite", "footcite", "smartcite", "supercite", "nocite",
+]);
+
+/** Cross-reference commands drawn as chips (hyperref, cleveref, varioref, nameref). */
+const VISUAL_REFERENCE_COMMANDS = new Set([
+  "ref", "eqref", "autoref", "cref", "Cref", "pageref", "nameref", "vref", "Vref", "cpageref", "labelcref", "autopageref",
+]);
+
+/** Environments whose body TeX prints as code. */
+const VERBATIM_LIKE_ENVIRONMENTS = new Set(["verbatim", "verbatim*", "Verbatim", "lstlisting", "minted", "BVerbatim", "alltt"]);
+
+/** Environments inside a float that box one image and its own caption. */
+const SUB_FLOAT_ENVIRONMENTS = new Set(["subfigure", "subtable", "minipage", "subfloat"]);
+const DRAWING_ENVIRONMENTS = new Set(["tikzpicture", "pgfpicture"]);
+
+/** One image of a figure float, with its sub-figure caption if it has one. */
+type FigureItem = { path: string; caption: string };
+
+/** A placeholder card for one image; `renderFigureInto` swaps in the image. */
+function figureCard(path: string): HTMLDivElement {
+  const card = document.createElement("div");
+  const icon = createSvgIcon("image", 28, "cm-vis-figure-icon");
+  const name = document.createElement("div");
+  name.className = "cm-vis-figure-name";
+  name.textContent = path.split("/").pop() || path;
+  card.append(icon, name);
+  return card;
+}
+
 class FigureWidget extends WidgetType {
   constructor(
-    private readonly path: string,
+    private readonly figures: readonly FigureItem[],
     private readonly caption: string,
     private readonly sourcePath: string | null,
   ) {
     super();
   }
   eq(other: FigureWidget) {
-    return other.path === this.path && other.caption === this.caption && other.sourcePath === this.sourcePath;
+    return other.caption === this.caption
+      && other.sourcePath === this.sourcePath
+      && other.figures.length === this.figures.length
+      && other.figures.every((figure, index) =>
+        figure.path === this.figures[index].path && figure.caption === this.figures[index].caption);
   }
   toDOM() {
+    if (this.figures.length === 1 && !this.figures[0].caption) {
+      const el = figureCard(this.figures[0].path);
+      el.className = `cm-vis-figure ${BLOCK_TARGET_CLASS}`;
+      void renderFigureInto(el, this.figures[0].path, this.sourcePath)
+        .then(() => {
+          if (this.caption) el.append(buildCaptionEl(this.caption));
+        })
+        .catch(() => {
+          if (this.caption) el.append(buildCaptionEl(this.caption));
+        });
+      return el;
+    }
+    // Sub-figures side by side, each with its own caption, then the float's.
     const el = document.createElement("div");
-    el.className = `cm-vis-figure ${BLOCK_TARGET_CLASS}`;
-    const icon = createSvgIcon("image", 28, "cm-vis-figure-icon");
-    const name = document.createElement("div");
-    name.className = "cm-vis-figure-name";
-    name.textContent = this.path.split("/").pop() || this.path;
-    el.append(icon, name);
-    void renderFigureInto(el, this.path, this.sourcePath)
-      .then(() => {
-        if (this.caption) el.append(buildCaptionEl(this.caption));
-      })
-      .catch(() => {
-        if (this.caption) el.append(buildCaptionEl(this.caption));
-      });
+    el.className = `cm-vis-figure cm-vis-figure-group ${BLOCK_TARGET_CLASS}`;
+    const row = document.createElement("div");
+    row.className = "cm-vis-figure-row";
+    for (const figure of this.figures) {
+      const item = document.createElement("div");
+      item.className = "cm-vis-figure-item";
+      const image = figureCard(figure.path);
+      image.className = "cm-vis-figure-image";
+      item.append(image);
+      if (figure.caption) item.append(buildCaptionEl(figure.caption));
+      void renderFigureInto(image, figure.path, this.sourcePath).catch(() => undefined);
+      row.append(item);
+    }
+    el.append(row);
+    if (this.caption) el.append(buildCaptionEl(this.caption));
     return el;
   }
   destroy(dom: HTMLElement) {
-    const url = dom.dataset.objectUrl;
-    if (url) URL.revokeObjectURL(url);
+    for (const holder of [dom, ...dom.querySelectorAll<HTMLElement>("[data-object-url]")]) {
+      const url = holder.dataset.objectUrl;
+      if (url) URL.revokeObjectURL(url);
+    }
   }
   ignoreEvent = blockIgnoreEvent;
 }
@@ -1430,24 +1586,66 @@ function findFrameMatches(structure: LatexStructureIndex, from: number, to: numb
     .sort((left, right) => left.from - right.from || right.to - left.to);
 }
 
+/**
+ * How many `{…}` arguments common environments take after `\begin{name}`
+ * (optional `[…]` ones are skipped wherever they appear). Unknown ones take
+ * none: a following group may just as well be the first piece of content.
+ */
+const ENVIRONMENT_ARGUMENT_COUNTS = new Map<string, number>([
+  ["minipage", 1], ["subfigure", 1], ["subtable", 1], ["multicols", 1], ["multicols*", 1],
+  ["adjustbox", 1], ["otherlanguage", 1], ["thebibliography", 1], ["spacing", 1], ["minted", 1],
+  ["wrapfigure", 2], ["wraptable", 2], ["CJK", 2], ["CJK*", 2], ["list", 2], ["tcolorbox", 0],
+  ["tabularx", 2], ["tabular*", 2], ["tabulary", 2], ["xltabular", 2], ["alignat", 1], ["alignat*", 1],
+]);
+
+/** The end of `count` brace arguments (and any optional ones) after `from`. */
+function environmentArgumentsEnd(text: string, from: number, count: number): number {
+  let end = from;
+  let remaining = count;
+  for (;;) {
+    let cursor = end;
+    while (cursor < text.length && (text[cursor] === " " || text[cursor] === "\t")) cursor += 1;
+    if (text[cursor] === "[") {
+      const close = text.indexOf("]", cursor);
+      if (close < 0 || text.slice(cursor, close).includes("\n\n")) return end;
+      end = close + 1;
+      continue;
+    }
+    if (remaining === 0 || text[cursor] !== "{") return end;
+    const close = matchBrace(text, cursor);
+    if (close < 0) return end;
+    end = close;
+    remaining -= 1;
+  }
+}
+
+/** Environments drawn as tables; the width-first ones are rendered read-only. */
+const TABULAR_ENVIRONMENTS = new Set(["tabular", "longtable", "tabularx", "tabular*", "tabulary", "xltabular"]);
+
 function findTabularMatches(text: string, structure: LatexStructureIndex, from: number, to: number): TabularMatch[] {
   return structure.environments
-    .filter((environment) => (environment.name === "tabular" || environment.name === "longtable")
+    .filter((environment) => TABULAR_ENVIRONMENTS.has(environment.name)
       && environment.closed
       && environment.from >= from
       && environment.from < to)
     .map((environment) => {
       let bodyFrom = environment.bodyFrom;
-      while (bodyFrom < environment.bodyTo && /\s/.test(text[bodyFrom])) bodyFrom += 1;
-      if (text[bodyFrom] === "{") {
+      // `tabularx`, `tabular*` and friends take the table width before the
+      // column spec; stepping over one group only left `{lX}` in the body.
+      const groups = (ENVIRONMENT_ARGUMENT_COUNTS.get(environment.name) ?? 1) || 1;
+      for (let group = 0; group < groups; group += 1) {
+        while (bodyFrom < environment.bodyTo && /\s/.test(text[bodyFrom])) bodyFrom += 1;
+        if (text[bodyFrom] !== "{") break;
         const specEnd = matchBrace(text, bodyFrom);
-        if (specEnd > 0 && specEnd <= environment.bodyTo) bodyFrom = specEnd;
+        if (specEnd <= 0 || specEnd > environment.bodyTo) break;
+        bodyFrom = specEnd;
       }
+      const longtableLike = environment.name === "longtable" || environment.name === "xltabular";
       return {
         from: environment.from,
         to: environment.to,
         body: text.slice(bodyFrom, environment.bodyTo),
-        environment: environment.name as TabularMatch["environment"],
+        environment: (longtableLike ? "longtable" : "tabular") as TabularMatch["environment"],
         source: text.slice(environment.from, environment.to),
       };
     });
@@ -1467,6 +1665,15 @@ function editableTableModel(text: string, match: TabularMatch | undefined): Tabl
 }
 
 /** Make user-defined table macros legible without changing their source. */
+/** Cell commands whose arguments are all colour/size settings. */
+const TABLE_CELL_LAYOUT_ONLY = new Set([
+  "cellcolor", "rowcolor", "columncolor", "arrayrulecolor", "rule", "hspace", "vspace", "label", "rowstyle",
+]);
+/** Cell commands whose printed text is their last argument. */
+const TABLE_CELL_LAST_ARGUMENT_TEXT = new Set([
+  "multicolumn", "multirow", "colorbox", "fcolorbox", "href", "raisebox", "parbox", "makebox", "resizebox", "scalebox",
+]);
+
 function stripTableCellMarkup(input: string): string {
   let output = "";
   let cursor = 0;
@@ -1491,7 +1698,15 @@ function stripTableCellMarkup(input: string): string {
       const whitespace = /\s*/y;
       whitespace.lastIndex = argumentStart;
       whitespace.exec(input);
-      const nextArgument = whitespace.lastIndex;
+      let nextArgument = whitespace.lastIndex;
+      // Optional arguments (`\makecell[l]{…}`, `\cite[p.~3]{…}`) are layout,
+      // not text; stepping over them keeps the required ones in reach.
+      if (input[nextArgument] === "[") {
+        const close = input.indexOf("]", nextArgument);
+        if (close < 0) break;
+        argumentStart = close + 1;
+        continue;
+      }
       if (input[nextArgument] !== "{") break;
       argumentStart = nextArgument;
       const argumentEnd = matchBrace(input, argumentStart);
@@ -1505,7 +1720,14 @@ function stripTableCellMarkup(input: string): string {
       cursor = command.lastIndex;
       continue;
     }
-    if (name === "textcolor" && argumentsText.length > 1) {
+    if (TABLE_CELL_LAYOUT_ONLY.has(name)) {
+      // `\cellcolor{gray}` used to print "gray" into the cell.
+    } else if (TABLE_CELL_LAST_ARGUMENT_TEXT.has(name)) {
+      // `\multicolumn{2}{c}{Total}` is "Total", not "2 c Total".
+      output += argumentsText[argumentsText.length - 1];
+    } else if (/^cite/.test(name) || name === "parencite" || name === "textcite") {
+      output += `[${argumentsText.join(", ")}]`;
+    } else if (name === "textcolor" && argumentsText.length > 1) {
       output += argumentsText.slice(1).join(" ");
     } else if (name === "evidence" && argumentsText.length > 1) {
       output += `[${argumentsText[0]} p.${argumentsText[1]}]`;
@@ -1570,7 +1792,8 @@ function removeTableCaption(body: string): { body: string; caption: string } {
   if (rowBreak.exec(body)) afterCaption = rowBreak.lastIndex;
   return {
     body: body.slice(0, caption.index) + body.slice(afterCaption),
-    caption: stripTableCellMarkup(body.slice(openBrace + 1, captionEnd - 1)),
+    // Raw: `buildCaptionEl` renders its math and citations.
+    caption: body.slice(openBrace + 1, captionEnd - 1),
   };
 }
 
@@ -1605,12 +1828,16 @@ class MathWidget extends WidgetType {
     private readonly display: boolean,
     private readonly sourceRange: Range,
     private readonly editRange: Range,
+    /** The document's own `\newcommand`s; KaTeX knows none of them. */
+    private readonly macros: MathMacros,
+    private readonly macrosKey: string,
   ) {
     super();
   }
   eq(other: MathWidget) {
     return other.latex === this.latex
       && other.display === this.display
+      && other.macrosKey === this.macrosKey
       && rangesEqual(other.sourceRange, this.sourceRange)
       && rangesEqual(other.editRange, this.editRange);
   }
@@ -1632,6 +1859,8 @@ class MathWidget extends WidgetType {
         displayMode: this.display,
         throwOnError: false,
         output: "html",
+        // A copy: KaTeX writes \gdef results back into the table it is given.
+        macros: { ...this.macros },
       });
     } catch {
       el.textContent = this.latex;
@@ -1833,7 +2062,13 @@ type VisualDecorations = {
   revealRanges: Range[];
   pointerSelecting: boolean;
   pendingRefresh: boolean;
+  /** The index of the text as last parsed (or mapped). */
   structure: LatexStructureIndex;
+  /**
+   * Prose-only edits made since `structure`, not yet mapped into it: mapping
+   * re-creates the whole index, so it waits until a rebuild needs it.
+   */
+  pendingStructure: ChangeSet | null;
 };
 
 function rangeInsertionIndex(ranges: Range[], from: number): number {
@@ -1845,6 +2080,37 @@ function rangeInsertionIndex(ranges: Range[], from: number): number {
     else high = middle;
   }
   return low;
+}
+
+/**
+ * Ranges kept sorted and merged as they are added, so "is this position inside
+ * any of them" is a binary search. The passes below ask once per command —
+ * tens of thousands of times on a thesis — and a scan per question made one
+ * rebuild quadratic in the document's length.
+ */
+class RangeUnion {
+  private readonly ranges: Range[] = [];
+
+  add(from: number, to: number): void {
+    if (to <= from) return;
+    let index = rangeInsertionIndex(this.ranges, from);
+    if (index > 0 && this.ranges[index - 1].to >= from) {
+      index -= 1;
+      from = this.ranges[index].from;
+      to = Math.max(to, this.ranges[index].to);
+    }
+    let end = index;
+    while (end < this.ranges.length && this.ranges[end].from <= to) {
+      to = Math.max(to, this.ranges[end].to);
+      end += 1;
+    }
+    this.ranges.splice(index, end - index, { from, to });
+  }
+
+  has(position: number): boolean {
+    const candidate = this.ranges[rangeInsertionIndex(this.ranges, position + 1) - 1];
+    return Boolean(candidate && position >= candidate.from && position < candidate.to);
+  }
 }
 
 function mergeRanges(ranges: Range[]): Range[] {
@@ -2096,8 +2362,11 @@ function buildDecorations(
   }
 
   // --- Math: display environments, \[…\], and inline $…$ (KaTeX widgets) ---
-  const mathRanges: Range[] = [];
-  const withinMath = (pos: number) => mathRanges.some((m) => pos >= m.from && pos < m.to);
+  const mathMacros = mathMacrosFor(state);
+  const mathMacrosTableKey = mathMacrosKey(mathMacros);
+  captionMathMacros = mathMacros;
+  const mathRanges = new RangeUnion();
+  const withinMath = (pos: number) => mathRanges.has(pos);
   const addMath = (
     from: number,
     to: number,
@@ -2107,7 +2376,7 @@ function buildDecorations(
     editTo: number = Math.max(editFrom, to - 1),
   ) => {
     if (withinFloatEnv(from) || withinTableEnv(from)) return;
-    mathRanges.push({ from, to });
+    mathRanges.add(from, to);
     // Both reveal their source on caret — display math used to stay permanently
     // rendered to avoid a page-shifting "jump", but the real bug was the CLICK
     // landing at the wrong position (see `visualBlockClick`), not the reveal
@@ -2125,7 +2394,7 @@ function buildDecorations(
       return;
     }
     hide(from, to, Decoration.replace({
-      widget: new MathWidget(latex.trim(), display, { from, to }, { from: editFrom, to: editTo }),
+      widget: new MathWidget(latex.trim(), display, { from, to }, { from: editFrom, to: editTo }, mathMacros, mathMacrosTableKey),
     }));
   };
 
@@ -2174,14 +2443,28 @@ function buildDecorations(
   // what produced "reveals one line at a time" as the caret passed through.
   const openFloatRanges: Range[] = [];
   const withinOpenFloat = (pos: number) => openFloatRanges.some((r) => pos >= r.from && pos < r.to);
+  /** Sub-figure boxes inside a float, which carry their own captions. */
+  // From the by-name indexes: filtering every command and environment once
+  // per float was quadratic on a figure-heavy document.
+  const subFloatEnvironments = structure.environmentsNamed(SUB_FLOAT_ENVIRONMENTS);
+  const captionCommands = structure.commandsNamed("caption");
+  const graphicsCommands = structure.commandsNamed("includegraphics");
+  const drawingEnvironments = structure.environmentsNamed(DRAWING_ENVIRONMENTS);
+  const subFloatRanges = (innerFrom: number, innerTo: number) => subFloatEnvironments
+    .filter((candidate) => candidate.from >= innerFrom && candidate.to <= innerTo)
+    .map((candidate) => ({ from: candidate.from, to: candidate.to }));
+  const captionsIn = (innerFrom: number, innerTo: number) => captionCommands.filter((command) =>
+    command.from >= innerFrom
+      && command.from < innerTo
+      && command.requiredArguments[0]);
+  /** The float's own caption — not the first sub-figure's "(a)" caption. Raw:
+   * `buildCaptionEl` renders its math and citations. */
   const readCaption = (innerFrom: number, innerTo: number): string => {
-    const argument = structure.commands.find((command) =>
-      command.name === "caption"
-        && command.from >= innerFrom
-        && command.from < innerTo
-        && command.requiredArguments[0],
-    )?.requiredArguments[0];
-    return argument ? stripMarkup(argument.value) : "";
+    const nested = subFloatRanges(innerFrom, innerTo);
+    const captions = captionsIn(innerFrom, innerTo);
+    const own = captions.filter((command) => !nested.some((range) => command.from >= range.from && command.from < range.to));
+    const chosen = own[own.length - 1] ?? captions[0];
+    return chosen?.requiredArguments[0]?.value ?? "";
   };
 
   for (const environment of floatEnvironments) {
@@ -2213,8 +2496,7 @@ function buildDecorations(
               caption || parsedTable?.caption,
               { from: envFrom, to: envTo },
               model,
-              structure.commands.some((command) => command.name === "caption"
-                && command.from >= innerFrom && command.from < tabularMatch.from),
+              captionCommands.some((command) => command.from >= innerFrom && command.from < tabularMatch.from),
             ),
             block: true,
           }),
@@ -2222,24 +2504,31 @@ function buildDecorations(
         continue;
       }
     } else {
-      const graphicsArgument = structure.commands.find((command) =>
-        command.name === "includegraphics"
-          && command.from >= innerFrom
-          && command.from < environment.bodyTo
-          && command.requiredArguments[0],
-      )?.requiredArguments[0];
-      if (graphicsArgument) {
+      // Every image in the float, each with the caption of the sub-figure it
+      // sits in. Showing only the first used to hide (b), (c)… and the
+      // float's own caption inside the one replace.
+      const nested = subFloatRanges(innerFrom, environment.bodyTo);
+      const figures: FigureItem[] = graphicsCommands
+        .filter((command) =>
+          command.from >= innerFrom
+            && command.from < environment.bodyTo
+            && command.requiredArguments[0])
+        .map((command) => {
+          const box = nested.find((range) => command.from >= range.from && command.from < range.to);
+          const subCaption = box ? captionsIn(box.from, box.to)[0]?.requiredArguments[0]?.value ?? "" : "";
+          return { path: command.requiredArguments[0]!.value.trim(), caption: subCaption };
+        });
+      if (figures.length > 0) {
         hide(
           envFrom,
           envTo,
-          Decoration.replace({ widget: new FigureWidget(graphicsArgument.value.trim(), caption, sourcePath), block: true }),
+          Decoration.replace({ widget: new FigureWidget(figures, caption, sourcePath), block: true }),
         );
         continue;
       }
       // SyncTeX associates the complete drawing box with its closing line.
-      const drawings = structure.environments.filter((candidate) =>
-        (candidate.name === "tikzpicture" || candidate.name === "pgfpicture")
-          && candidate.closed && candidate.from >= innerFrom && candidate.to <= environment.bodyTo,
+      const drawings = drawingEnvironments.filter((candidate) =>
+        candidate.closed && candidate.from >= innerFrom && candidate.to <= environment.bodyTo,
       );
       const drawing = drawings[0];
       if (drawing) {
@@ -2329,7 +2618,7 @@ function buildDecorations(
     ? cloneSectionNumberingState(numberingPrefix.state)
     : initialSectionNumberingState();
   const continuedNumbering = numberingPrefix?.continued ?? false;
-  const headingBraces: Range[] = [];
+  const headingBraces = new RangeUnion();
   // What the sectioning counters read at a given offset, so a theorem declared
   // `\newtheorem{thm}{Theorem}[section]` can print "Theorem 2.1" from the very
   // same walk that numbers the headings. Seeded at -1 with the injected prefix:
@@ -2370,7 +2659,7 @@ function buildDecorations(
     const level = sectionDisplayLevel(rank, rules);
     const label = advanceSectionNumber(numbering, { rank, starred: heading.starred }, rules);
     if (label) sectionMilestones.push({ from: heading.from, rank, label });
-    headingBraces.push({ from: heading.from, to: heading.to });
+    headingBraces.add(heading.from, heading.to);
 
     const cmdStart = heading.from;
     const cmdEnd = heading.commandTo; // command, optional short title, and opening brace
@@ -2397,7 +2686,7 @@ function buildDecorations(
     }
   }
 
-  const withinHeading = (pos: number) => headingBraces.some((h) => pos >= h.from && pos < h.to);
+  const withinHeading = (pos: number) => headingBraces.has(pos);
 
   // Simple preamble macros are common in research manuscripts for semantic
   // labels, abbreviations, and evidence citations. Expand their readable text
@@ -2472,14 +2761,67 @@ function buildDecorations(
   }
 
   // --- Footnotes: the marker the PDF prints, text on hover ---
+  let footnoteNumber = 0;
   for (const command of structure.commandsNamed("footnote")) {
     if (command.from < bodyStart || command.from >= scanEnd) continue;
     if (withinMath(command.from) || withinHeading(command.from)) continue;
     const argument = command.requiredArguments[0];
-    if (!argument || touchesSelection(command.from, command.to)) continue;
+    if (!argument) continue;
+    footnoteNumber += 1;
+    if (touchesSelection(command.from, command.to)) continue;
     hide(command.from, command.to, Decoration.replace({
-      widget: new FootnoteWidget(stripMarkup(argument.value).trim()),
+      widget: new FootnoteWidget(stripMarkup(argument.value).trim(), footnoteNumber),
     }));
+  }
+
+  // --- \textcolor{red}{text}: the text in its colour, markup hidden ---
+  for (const command of structure.commandsNamed("textcolor")) {
+    if (command.from < bodyStart || command.from >= scanEnd) continue;
+    if (withinHeading(command.from) || withinMath(command.from)) continue;
+    const [colour, body] = command.requiredArguments;
+    if (!colour || !body || touchesSelection(command.from, command.to)) continue;
+    if (!sourceWithoutComments(body.contentFrom, body.contentTo).trim()) continue;
+    // Plain colour names are CSS too; xcolor mixes (`red!50!black`) are not,
+    // and still lose their markup.
+    const name = colour.value.trim();
+    hide(command.from, body.contentFrom);
+    marks.push({
+      from: body.contentFrom,
+      to: body.contentTo,
+      value: /^[A-Za-z]+$/.test(name)
+        ? Decoration.mark({ class: "cm-vis-colored", attributes: { style: `color: ${name}` } })
+        : Decoration.mark({ class: "cm-vis-colored" }),
+    });
+    hide(body.contentTo, body.to);
+  }
+
+  // --- \url{…} / \nolinkurl{…}: the address as a link-styled run ---
+  // Their arguments are verbatim-like (`%` and `_` are literal), so they are
+  // found here rather than through the command index.
+  const urlRe = /\\(?:url|nolinkurl)\s*\{([^{}\n]*)\}/g;
+  urlRe.lastIndex = bodyStart;
+  for (let match = urlRe.exec(text); match && match.index < scanEnd; match = urlRe.exec(text)) {
+    const from = match.index;
+    const to = from + match[0].length;
+    const contentFrom = from + match[0].indexOf("{") + 1;
+    const contentTo = to - 1;
+    if (contentTo <= contentFrom || withinMath(from) || touchesSelection(from, to) || overlapsHidden(from, to)) continue;
+    if (structure.isComment(from)) continue;
+    hide(from, contentFrom);
+    marks.push({ from: contentFrom, to: contentTo, value: Decoration.mark({ class: "cm-vis-url" }) });
+    hide(contentTo, to);
+  }
+
+  // --- verbatim / listings: monospace; `comment` environments dim like % ---
+  for (const environment of structure.environments) {
+    if (!environment.closed || environment.from < bodyStart || environment.from >= scanEnd) continue;
+    if (environment.bodyTo <= environment.bodyFrom) continue;
+    if (VERBATIM_LIKE_ENVIRONMENTS.has(environment.name)) {
+      marks.push({ from: environment.bodyFrom, to: environment.bodyTo, value: Decoration.mark({ class: "cm-vis-raw-block" }) });
+    } else if (environment.name === "comment") {
+      // Typeset by nothing — reading it as body text misleads.
+      marks.push({ from: environment.bodyFrom, to: environment.bodyTo, value: commentMark });
+    }
   }
 
   // --- Inline text commands: \textbf{..} \emph{..} etc. ---
@@ -2495,24 +2837,6 @@ function buildDecorations(
     hide(command.from, argument.contentFrom);
     marks.push({ from: argument.contentFrom, to: argument.contentTo, value: Decoration.mark({ class: cls }) });
     hide(argument.contentTo, argument.to);
-  }
-
-  // --- Typographic source with a printed form (`~`, `---`, ``…'', \quad) ---
-  // Comments, maths and verbatim are excluded: `--` is a decrement there, not
-  // an en dash, and `~` inside maths is a spacing command of its own.
-  TYPOGRAPHIC_RE.lastIndex = bodyStart;
-  for (let match = TYPOGRAPHIC_RE.exec(text); match; match = TYPOGRAPHIC_RE.exec(text)) {
-    const from = match.index;
-    const to = from + match[0].length;
-    if (from < bodyStart) continue;
-    if (from >= scanEnd) break;
-    if (ignoredAt(from) || withinMath(from) || withinHeading(from)) continue;
-    // An escaped `\~` is a tie accent over the next character, not a space.
-    if (match[0] === "~" && text[from - 1] === "\\") continue;
-    if (touchesSelection(from, to) || overlapsHidden(from, to)) continue;
-    hide(from, to, Decoration.replace({
-      widget: new TypographicWidget(TYPOGRAPHIC_TEXT[match[0]], match[0]),
-    }));
   }
 
   // Hyperlinks keep their readable label inline while URL/source syntax stays
@@ -2534,29 +2858,36 @@ function buildDecorations(
   };
 
   // --- Citations: \cite{a,b} \citep \citet \parencite \textcite ---
-  const citeCommands = new Set(["cite", "citep", "citet", "parencite", "textcite", "autocite"]);
   for (const command of structure.commands) {
-    if (!citeCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
+    if (!VISUAL_CITE_COMMANDS.has(command.name) || command.from < bodyStart || command.from >= scanEnd) continue;
     if (withinHeading(command.from) || withinMath(command.from)) continue;
     const argument = command.requiredArguments[0];
     if (!argument) continue;
+    // `\cite[p.~3]{knuth}` — the page note is part of what the PDF prints.
+    const notes = command.optionalArguments
+      .map((optional) => stripMarkup(optional.value.replace(/~/g, " ")).trim())
+      .filter(Boolean);
     chipCommand(command.from, command.to, argument, (arg) => {
       const keys = arg.split(",").map((k) => k.trim()).filter(Boolean);
-      const label = keys.length === 0
-        ? "[cite]"
-        : keys.length === 1
-          ? `[${keys[0]}]`
-          : keys.length === 2
-            ? `[${keys.join("; ")}]`
-            : `[${keys[0]}; ${keys[1]}; +${keys.length - 2}]`;
-      return new ChipWidget(label, "cite", `\\${command.name}{${arg}} - click to edit LaTeX source`);
+      const listed = keys.length === 0
+        ? "cite"
+        : keys.length <= 2
+          ? keys.join("; ")
+          : `${keys[0]}; ${keys[1]}; +${keys.length - 2}`;
+      const withNote = notes.length > 0 ? `${listed}, ${notes[notes.length - 1]}` : listed;
+      const label = command.name === "nocite"
+        ? `nocite: ${listed}`
+        : /^cite(?:author|year)/i.test(command.name)
+          ? withNote
+          : `[${withNote}]`;
+      const optional = command.optionalArguments.map((optional) => `[${optional.value}]`).join("");
+      return new ChipWidget(label, "cite", `\\${command.name}${optional}{${arg}} - click to edit LaTeX source`);
     });
   }
 
   // --- Cross references: \ref \eqref \autoref \cref \pageref ---
-  const referenceCommands = new Set(["ref", "eqref", "autoref", "cref", "Cref", "pageref"]);
   for (const command of structure.commands) {
-    if (!referenceCommands.has(command.name) || command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
+    if (!VISUAL_REFERENCE_COMMANDS.has(command.name) || command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
     const argument = command.requiredArguments[0];
     if (argument) {
       chipCommand(command.from, command.to, argument, (arg) => {
@@ -2582,6 +2913,27 @@ function buildDecorations(
     }
   }
 
+  // --- Typographic source with a printed form (`~`, `---`, ``…'', \quad) ---
+  // (Runs after the citation and reference chips: a `~` inside
+  // `\cite[p.~3]{…}` would otherwise claim its range first and the chip,
+  // losing the overlap, would never be drawn.)
+  // Comments, maths and verbatim are excluded: `--` is a decrement there, not
+  // an en dash, and `~` inside maths is a spacing command of its own.
+  TYPOGRAPHIC_RE.lastIndex = bodyStart;
+  for (let match = TYPOGRAPHIC_RE.exec(text); match; match = TYPOGRAPHIC_RE.exec(text)) {
+    const from = match.index;
+    const to = from + match[0].length;
+    if (from < bodyStart) continue;
+    if (from >= scanEnd) break;
+    if (ignoredAt(from) || withinMath(from) || withinHeading(from)) continue;
+    // An escaped `\~` is a tie accent over the next character, not a space.
+    if (match[0] === "~" && text[from - 1] === "\\") continue;
+    if (touchesSelection(from, to) || overlapsHidden(from, to)) continue;
+    hide(from, to, Decoration.replace({
+      widget: new TypographicWidget(TYPOGRAPHIC_TEXT[match[0]], match[0]),
+    }));
+  }
+
   // --- \label{..}: dim to a small tag (not editable clutter in body text) ---
   for (const command of structure.commandsNamed("label")) {
     if (command.from < bodyStart || command.from >= scanEnd || withinMath(command.from)) continue;
@@ -2595,43 +2947,42 @@ function buildDecorations(
   }
 
   // --- Lists: bullet / number markers in place of \item ---
-  const openListRanges: Range[] = [];
-  const withinOpenList = (pos: number) => openListRanges.some((r) => pos >= r.from && pos < r.to);
   const itemCommands = structure.commandsNamed("item");
-  const listEnvironments = structure.environmentsNamed(LIST_ENVIRONMENTS)
+  const allListEnvironments = structure.environmentsNamed(LIST_ENVIRONMENTS);
+  const listEnvironments = allListEnvironments
     .filter((environment) => environment.from >= bodyStart && environment.from < scanEnd && environment.closed);
   for (const environment of listEnvironments) {
     const ordered = environment.name === "enumerate";
     const bodyFrom = environment.bodyFrom;
     const bodyTo = environment.bodyTo;
-    const listTo = environment.to;
     const listOption = environment.optionalArguments[0]
       ? text.slice(environment.optionalArguments[0].from, environment.optionalArguments[0].to)
       : undefined;
-    // Keep the begin/end declaration visual when the caret is on it. The list
-    // body alone is the editable region; treating the declaration as part of
-    // that region made a click on `\\begin{itemize}` leak raw syntax while the
-    // individual item widgets remained rendered.
-    const listIsEditing = state.selection.ranges.some((range) =>
-      range.empty
-        && range.from > bodyFrom
-        && range.from < bodyTo
-        && structure.environmentAt(range.from, LIST_ENVIRONMENTS) === environment,
-    );
-    if (listIsEditing) {
-      openListRanges.push({ from: environment.from, to: listTo });
-    }
-    // Hide the \begin / \end environment lines themselves.
-    if (!listIsEditing) {
-      hide(environment.beginFrom, environment.beginTo);
-      hide(environment.endFrom, environment.endTo);
-    }
+    // The declaration stays visual even with the caret on it, and so does the
+    // rest of the list while one item is being edited: only the `\item` the
+    // caret is actually on turns back into source (as in Overleaf). Revealing
+    // every marker and both declarations the moment the caret entered the
+    // list made a long list jump to raw LaTeX on every arrow key.
+    hide(environment.beginFrom, environment.beginTo);
+    hide(environment.endFrom, environment.endTo);
+    const description = environment.name === "description";
+    // Indentation counts every enclosing list; LaTeX's label level counts only
+    // lists of the same kind (`\@enumdepth`, `\@itemdepth`), so an enumerate
+    // inside an itemize still numbers 1., 2., …
+    const enclosing = allListEnvironments.filter((candidate) =>
+      candidate.from <= environment.from && candidate.to >= environment.to);
+    const depth = enclosing.length;
+    const labelDepth = enclosing.filter((candidate) => candidate.name === environment.name).length;
+    // Searched inside this list only: a search from the list onwards ran to
+    // the end of the document for every list that sets no spacing.
     const listSpacingRe = /\\setlength\s*(?:\{\\itemsep\}|\\itemsep)\s*\{[^}]*\}/g;
     listSpacingRe.lastIndex = bodyFrom;
     let spacing: RegExpExecArray | null;
+    const spacingAt = text.indexOf("\\setlength", bodyFrom);
+    if (spacingAt < 0 || spacingAt >= bodyTo) listSpacingRe.lastIndex = text.length;
     while ((spacing = listSpacingRe.exec(text)) && spacing.index < bodyTo) {
       if (ignoredAt(spacing.index)) continue;
-      if (!listIsEditing && !touchesSelection(spacing.index, spacing.index + spacing[0].length)) {
+      if (!touchesSelection(spacing.index, spacing.index + spacing[0].length)) {
         hide(spacing.index, spacing.index + spacing[0].length);
       }
     }
@@ -2650,11 +3001,20 @@ function buildDecorations(
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index];
       n += 1;
-      const itemRangeEnd = items[index + 1]?.from ?? bodyTo;
-      marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLine });
-      if (!listIsEditing && !touchesSelection(item.from, itemRangeEnd)) {
+      marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLineAt(depth) });
+      if (!touchesSelection(item.from, item.to)) {
         const customMarker = item.command.optionalArguments[0]?.value.trim();
-        const marker = customMarker || (ordered ? enumitemLabel(listOption, n) || `${n}.` : "•");
+        if (description) {
+          // `\item[Term]` prints the term in bold; a bare `\item` prints nothing.
+          if (customMarker) {
+            hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(stripMarkup(customMarker), "term") }));
+          } else {
+            hide(item.from, item.to);
+          }
+          continue;
+        }
+        const marker = customMarker
+          || (ordered ? enumitemLabel(listOption, n) || defaultEnumerateLabel(n, labelDepth) : defaultItemizeBullet(labelDepth));
         hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
       }
     }
@@ -2856,7 +3216,6 @@ function buildDecorations(
     if (environmentName === "frame") continue; // Beamer frame chrome is handled above
     if (withinMath(command.from)) continue; // selected math envs must reveal complete source
     if (withinOpenFloat(command.from)) continue; // open float is fully raw
-    if (withinOpenList(command.from)) continue; // open list is fully raw while editing
     if (withinAbstract(command.from)) continue; // abstract handles both its own markers above
     if (touchesSelection(command.from, command.to)) continue;
     // A `title=` key is printed prose, not chrome. `tcolorbox` and the boxes
@@ -2866,11 +3225,16 @@ function buildDecorations(
     const title = command.name === "begin"
       ? stripMarkup(enumitemOption(command.optionalArguments[0]?.value, "title") ?? "")
       : "";
+    // The marker's own arguments (`{0.48\textwidth}`, `{UTF8}{gbsn}`) are
+    // settings, not prose; hiding only `\begin{minipage}` left them printed.
+    const markerEnd = command.name === "begin"
+      ? environmentArgumentsEnd(text, command.to, ENVIRONMENT_ARGUMENT_COUNTS.get(environmentName) ?? 0)
+      : command.to;
     if (title) {
-      hide(command.from, command.to, Decoration.replace({ widget: new SectionLabelWidget(title) }));
+      hide(command.from, markerEnd, Decoration.replace({ widget: new SectionLabelWidget(title) }));
       continue;
     }
-    hide(command.from, command.to);
+    hide(command.from, markerEnd);
   }
 
   // --- Comment lines: dim from % to end of line ---
@@ -2965,7 +3329,18 @@ function buildDecorations(
     pointerSelecting: false,
     pendingRefresh: false,
     structure,
+    pendingStructure: null,
   };
+}
+
+/** The index for the text now in `state`, when it can be had without a rescan. */
+function currentStructure(value: VisualDecorations, state: EditorState): LatexStructureIndex | undefined {
+  const source = state.doc.toString();
+  if (value.structure.source === source) return value.structure;
+  if (value.pendingStructure && !value.pendingRefresh) {
+    return updateLatexStructure(value.structure, source, value.pendingStructure) ?? undefined;
+  }
+  return undefined;
 }
 
 function mapRangesThroughChanges(ranges: Range[], tr: Transaction): Range[] {
@@ -2997,8 +3372,18 @@ const visualDecorationField = StateField.define<VisualDecorations>({
     }
     if (tr.reconfigured) return buildDecorations(tr.state);
     if (tr.docChanged) {
-      const source = tr.state.doc.toString();
-      const mappedStructure = updateLatexStructure(value.structure, source, tr.changes);
+      // Whether the edit is prose is decided now, cheaply; the index itself is
+      // mapped only when a rebuild asks for it (`currentStructure`).
+      const edits: LatexEdit[] = [];
+      tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+        edits.push({ fromA, toA, removed: tr.startState.doc.sliceString(fromA, toA), inserted: inserted.toString() });
+      });
+      const pending = value.pendingStructure;
+      const keepsStructure = !value.pendingRefresh && latexEditsKeepStructure(
+        value.structure,
+        edits,
+        pending ? (position, assoc) => pending.invertedDesc.mapPos(position, assoc) : undefined,
+      );
       let touchesRenderedContent = false;
       tr.changes.iterChanges((fromA, toA) => {
         if (touchesRenderedContent) return;
@@ -3014,11 +3399,11 @@ const visualDecorationField = StateField.define<VisualDecorations>({
         atomic: value.atomic.map(tr.changes),
         gutterClasses: value.gutterClasses.map(tr.changes),
         revealRanges: mapRangesThroughChanges(value.revealRanges, tr),
-        // Ordinary prose edits update the semantic index immediately without a
-        // text scan. Structural edits keep the previous index until the shared
-        // idle rebuild, preserving correctness around TeX delimiters.
-        structure: mappedStructure ?? value.structure,
-        pendingRefresh: value.pendingRefresh || !mappedStructure || touchesRenderedContent,
+        // Prose edits queue up for the index. Structural edits keep the previous
+        // index until the shared idle rebuild, preserving correctness around
+        // TeX delimiters.
+        pendingStructure: keepsStructure ? (pending ? pending.compose(tr.changes) : tr.changes) : null,
+        pendingRefresh: value.pendingRefresh || !keepsStructure || touchesRenderedContent,
       };
     }
     const pointerEffect = tr.effects.find((effect) => effect.is(visualPointerSelecting));
@@ -3026,10 +3411,7 @@ const visualDecorationField = StateField.define<VisualDecorations>({
       if (pointerEffect.value) return { ...value, pointerSelecting: true };
       // Selection geometry is now final. Rebuilding once here reveals syntax
       // for a click, or restores the rendered form for a completed drag.
-      return buildDecorations(
-        tr.state,
-        value.structure.source === tr.state.doc.toString() ? value.structure : undefined,
-      );
+      return buildDecorations(tr.state, currentStructure(value, tr.state));
     }
     if (value.pointerSelecting) return value;
     // Most arrow-key moves stay in visible prose and do not affect which raw
@@ -3042,8 +3424,9 @@ const visualDecorationField = StateField.define<VisualDecorations>({
       // A text edit maps the old ranges immediately and schedules a fresh
       // parse. Do not combine that new document with the previous document's
       // structural offsets if the caret moves before the idle refresh fires.
-      if (value.structure.source !== tr.state.doc.toString()) return value;
-      return buildDecorations(tr.state, value.structure);
+      const structure = currentStructure(value, tr.state);
+      if (!structure) return value;
+      return buildDecorations(tr.state, structure);
     }
     return value;
   },

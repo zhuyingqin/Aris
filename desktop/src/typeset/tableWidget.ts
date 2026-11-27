@@ -43,6 +43,10 @@ export type TableToolbarCopy = {
   alignRight: string;
   toggleBorders: string;
   cellLabel: (row: number, column: number) => string;
+  /** Why the row/column/alignment/border tools are off for this table. */
+  structureLocked: string;
+  /** Title of a cell that can only be edited in Code mode. */
+  cellLocked: string;
 };
 
 /** Marks the cell the toolbar acts on. Kept on the DOM so a rebuilt widget can
@@ -97,6 +101,7 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
 
   const commitStructure = (next: TableModel) => {
     const change = tableStructureEdit(model, next);
+    if (!change) return;
     view.dispatch({ changes: change });
     view.focus();
   };
@@ -156,7 +161,9 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
 
       // A cell with no source of its own (a ragged row) cannot be written to
       // in place; it becomes editable after the next structural edit pads it.
-      if (cell && cell.from >= 0) {
+      if (cell && cell.from >= 0 && cell.editable === false) {
+        td.title = copy.cellLocked;
+      } else if (cell && cell.from >= 0) {
         td.contentEditable = "true";
         td.spellcheck = false;
         td.className = "cm-vis-table-cell";
@@ -173,6 +180,16 @@ export function buildTableGrid(options: TableGridOptions): HTMLElement {
     }
     table.append(tr);
   });
+
+  // Rewriting this environment would lose comments, row options or spans,
+  // so its whole-table tools stay visible but off, saying why.
+  if (model.structureLock) {
+    for (const tool of toolbar.querySelectorAll<HTMLButtonElement>("button")) {
+      tool.disabled = true;
+      tool.title = copy.structureLocked;
+    }
+    toolbar.dataset.locked = model.structureLock;
+  }
 
   container.append(toolbar, table);
   return container;

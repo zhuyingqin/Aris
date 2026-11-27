@@ -9,11 +9,14 @@ import { useStore } from "../store";
 import { TYPESET_EDITOR_COPY } from "./i18n";
 
 export default function TypesetProjectSearchPanel({
+  scopePath,
   onClose,
   onOpenMatch,
   onBeforeReplace,
   onReplaced,
 }: {
+  /** The project folder the file tree shows; search and replace stay inside it. */
+  scopePath: string | null;
   onClose: () => void;
   onOpenMatch: (match: TypesetProjectSearchMatch) => void;
   onBeforeReplace: () => Promise<boolean>;
@@ -25,6 +28,9 @@ export default function TypesetProjectSearchPanel({
   const [replacement, setReplacement] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [matches, setMatches] = useState<TypesetProjectSearchMatch[] | null>(null);
+  // What the listed matches were found with. Replace-all acts on exactly this,
+  // never on whatever the inputs were edited to after the search.
+  const [searched, setSearched] = useState<{ query: string; caseSensitive: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -33,7 +39,9 @@ export default function TypesetProjectSearchPanel({
     setBusy(true);
     setNotice(null);
     try {
-      setMatches(await typesetProjectSearch(query, caseSensitive));
+      const found = await typesetProjectSearch(query, caseSensitive, scopePath);
+      setMatches(found);
+      setSearched({ query, caseSensitive });
     } catch (reason) {
       setNotice(String(reason));
     } finally {
@@ -42,15 +50,15 @@ export default function TypesetProjectSearchPanel({
   };
 
   const replaceAll = async () => {
-    if (!matches?.length || !window.confirm(copy.projectReplaceConfirm(matches.length))) return;
+    if (!searched || !matches?.length || !window.confirm(copy.projectReplaceConfirm(matches.length))) return;
     setBusy(true);
     setNotice(null);
     try {
       if (!await onBeforeReplace()) return;
-      const result = await typesetProjectReplace(query, replacement, caseSensitive);
+      const result = await typesetProjectReplace(searched.query, replacement, searched.caseSensitive, scopePath);
       await onReplaced(result);
       setNotice(copy.projectReplaceDone(result.replacements, result.filesChanged));
-      setMatches(await typesetProjectSearch(query, caseSensitive));
+      setMatches(await typesetProjectSearch(searched.query, searched.caseSensitive, scopePath));
     } catch (reason) {
       setNotice(String(reason));
     } finally {

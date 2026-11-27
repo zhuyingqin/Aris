@@ -228,6 +228,11 @@ impl PluginStore {
                 if !view.enabled || !view.package.can_enable {
                     return Err("Turn the plugin on in this project before enabling it for all projects".into());
                 }
+                // Its approved project files are this project's; another
+                // project has other files, or none.
+                if !super::capabilities::declared_workspace_files(&view.package.capabilities).is_empty() {
+                    return Err("A plugin handed files of this project cannot run in all projects".into());
+                }
                 self.update_global(|list| {
                     if list.packages.contains_key(name) {
                         return Err("A plugin with this name is already on for all projects".into());

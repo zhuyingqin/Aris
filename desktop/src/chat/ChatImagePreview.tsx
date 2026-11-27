@@ -29,6 +29,41 @@ export function isPreviewableImagePath(value: string | null | undefined): value 
   return !/[\x00\r\n<>"`|?*]/.test(clean);
 }
 
+/** Whether showing `value` as an image would make the app fetch it from
+ *  another machine: a web address, a protocol-relative or UNC path
+ *  (`//host/x`, `\\host\x`; Windows reads UNC paths over SMB), or a file URL
+ *  or asset URL that names one. Data and blob URLs and local paths are not. */
+export function isRemoteImageSource(value: string): boolean {
+  const raw = value.trim();
+  // Markdown percent-encodes a path's backslashes (`%5C%5Cserver`), and the
+  // preview decodes them again before reading the file: check both forms.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return true;
+  }
+  return namesAnotherMachine(raw) || namesAnotherMachine(decoded);
+}
+
+function namesAnotherMachine(source: string): boolean {
+  if (/^[\\/]{2}/.test(source)) return true;
+  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(source)?.[1]?.toLowerCase();
+  // No scheme is a path; one letter is a Windows drive.
+  if (!scheme || scheme.length === 1) return false;
+  if (scheme === "data" || scheme === "blob") return false;
+  if (scheme === "file") return !/^file:\/\/(?:localhost)?\/(?![\\/])/i.test(source);
+  if (scheme === "asset") {
+    const path = source.replace(/^asset:\/\/[^/]*\//i, "");
+    try {
+      return /^[\\/]{2}/.test(decodeURIComponent(path));
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+
 export function isDirectImageSource(value: string | null | undefined): value is string {
   return Boolean(value && DIRECT_IMAGE_SOURCE_RE.test(value.trim()));
 }

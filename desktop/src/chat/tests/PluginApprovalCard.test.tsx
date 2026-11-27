@@ -148,6 +148,28 @@ describe("PluginManager approval card", () => {
     expect(screen.getByRole("button", { name: "Approve upgrade" })).toBeTruthy();
   });
 
+  it("names an environment variable whose value changed, not only new or removed names", () => {
+    renderTurn([
+      approvalBlock(enableCard({
+        kind: "upgrade",
+        version: "0.2.0",
+        currentVersion: "0.1.0",
+        executionUnchanged: false,
+        diff: {
+          skills: { added: [], removed: [] },
+          uiPanels: { added: [], removed: [] },
+          mcpServers: [{ name: "papers", change: "changed", before: "python ./server.py", after: "python ./server.py", envAdded: [], envRemoved: [], envChanged: ["API_BASE"] }],
+          commands: { added: [], removed: [] },
+          envKeys: { added: [], removed: [] },
+          changed: true,
+        },
+      })),
+    ]);
+    expect(screen.queryByText("No command or environment variable changes")).toBeNull();
+    expect(screen.getByText("Environment variables whose value changed (names only)")).toBeTruthy();
+    expect(screen.getByText("~ API_BASE (papers)")).toBeTruthy();
+  });
+
   it("never folds the card into a run of PluginManager calls", () => {
     renderTurn([
       { kind: "tool", id: "p0", name: "PluginManager", input: "{\"action\":\"preview\"}", output: "{}" },

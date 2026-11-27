@@ -496,7 +496,7 @@ pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Resu
     // the app's bookkeeping to the task branch and merge it into the user's
     // repository. Excluded only when it is untracked: a project that genuinely
     // versions `.somniq/` must still see its own changes.
-    checked(worktree, &["add", "-A"], "stage the task's changes")?;
+    stage_all(worktree)?;
     // Standalone deliverables are staged for the artifact store, not for the
     // branch. Unstaged unconditionally, because a project that versions
     // `.somniq/` would otherwise commit them and the user would have to merge
@@ -550,6 +550,72 @@ pub(crate) fn commit_all(worktree: &Path, message: &str, base_sha: &str) -> Resu
         "commit the task's changes",
     )?;
     Ok(true)
+}
+
+/// `git add -A`, minus any new file Git on Windows cannot index.
+///
+/// A turn that ran `cmd 2>nul` in Git Bash leaves a real file called `nul`
+/// in its checkout, and one such file makes `add -A` abort with "adding files
+/// failed" — failing the run after the whole model turn had already been
+/// spent. Those files are left untracked (they could never be checked out on
+/// Windows anyway) and everything else is staged by explicit path list.
+fn stage_all(worktree: &Path) -> Result<(), String> {
+    let untracked = run(
+        worktree,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    )?;
+    if !untracked.status.success() {
+        return Err(failure(&untracked, "list the task's new files"));
+    }
+    let unindexable = nul_paths(&untracked.stdout)
+        .into_iter()
+        .filter(|path| super::shadow::rejected_by_windows_git(path))
+        .collect::<BTreeSet<_>>();
+    if unindexable.is_empty() {
+        return checked(worktree, &["add", "-A"], "stage the task's changes").map(|_| ());
+    }
+    let changed = run(
+        worktree,
+        &[
+            "ls-files",
+            "-z",
+            "--modified",
+            "--deleted",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    if !changed.status.success() {
+        return Err(failure(&changed, "list the task's changes"));
+    }
+    let mut list = Vec::new();
+    for path in nul_paths(&changed.stdout).difference(&unindexable) {
+        list.extend_from_slice(path.as_bytes());
+        list.push(0);
+    }
+    if list.is_empty() {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let pathspec = std::env::temp_dir().join(format!(
+        "somniq-stage-{}-{stamp}.lst",
+        std::process::id()
+    ));
+    std::fs::write(&pathspec, &list)
+        .map_err(|error| format!("could not write {}: {error}", pathspec.display()))?;
+    let mut from_file = std::ffi::OsString::from("--pathspec-from-file=");
+    from_file.push(&pathspec);
+    let from_file = from_file.to_string_lossy().into_owned();
+    let staged = checked(
+        worktree,
+        &["add", "-A", &from_file, "--pathspec-file-nul"],
+        "stage the task's changes",
+    );
+    let _ = std::fs::remove_file(&pathspec);
+    staged.map(|_| ())
 }
 
 /// Whether Git still considers any path unmerged in this checkout.
@@ -1306,6 +1372,42 @@ mod tests {
             !committed.contains(".somniq"),
             "runtime scaffolding was committed: {committed}"
         );
+        discard(&project, &worktree, false).expect("discard");
+    }
+
+    /// A turn that redirected to `nul` in Git Bash leaves a real file by that
+    /// name. It used to abort `add -A` and fail the run after the whole model
+    /// turn; now it stays untracked and every other change is still committed —
+    /// edits, new files and deletions alike.
+    #[cfg(windows)]
+    #[test]
+    fn a_stray_nul_file_does_not_stop_the_task_commit() {
+        let fixture = Fixture::new();
+        let project = fixture.repo();
+        std::fs::write(project.join("gone.txt"), "old\n").expect("seed");
+        checked(&project, &["add", "-A"], "stage").expect("stage");
+        checked(&project, &["commit", "-m", "more"], "commit").expect("commit");
+        let worktree = create(&project, "proj-nul", "task-1").expect("create");
+        let tree = Path::new(&worktree.path);
+
+        std::fs::write(tree.join("README.md"), "edited\n").expect("edit");
+        std::fs::write(tree.join("answer.md"), "42\n").expect("new file");
+        std::fs::remove_file(tree.join("gone.txt")).expect("delete");
+        for relative in ["nul", "answer.aux"] {
+            let full = tree.join(relative).display().to_string().replace('/', "\\");
+            std::fs::write(format!(r"\\?\{full}"), b"").expect("create");
+        }
+
+        assert!(commit_all(tree, "task: answer", &worktree.base_sha).expect("commit"));
+        let committed = checked(tree, &["ls-files"], "list").expect("ls-files");
+        let files = committed.lines().collect::<Vec<_>>();
+        assert_eq!(files, vec!["README.md", "answer.aux", "answer.md"]);
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).expect("read"),
+            "edited\n"
+        );
+        let status = checked(tree, &["status", "--porcelain"], "status").expect("status");
+        assert_eq!(status.trim(), "?? nul", "only the device-named file stays behind");
         discard(&project, &worktree, false).expect("discard");
     }
 

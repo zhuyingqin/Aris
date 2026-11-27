@@ -13,7 +13,7 @@ use runtime::{
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashSet},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -169,6 +169,15 @@ async fn cancellable_backoff(duration: Duration, observer: &dyn StreamObserver) 
         () = tokio::time::sleep(duration) => true,
         () = wait_for_stream_cancel(observer) => false,
     }
+}
+
+/// Final error for a request that used up its total time. Never re-sent: by
+/// then every wait inside it has already had its full budget.
+fn request_limit_error(progress: &api::StreamProgressClock) -> RuntimeError {
+    RuntimeError::new(format!(
+        "OpenAI request stopped: {}\nNot re-sending: the gateway may still be processing (and billing) it.",
+        api::request_limit_detail(progress.request_limit().unwrap_or_default())
+    ))
 }
 
 /// Final error for a request abandoned on a post-send timeout. Says why it is
@@ -910,12 +919,12 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
 /// Reasoning level to send alongside `model`, already clamped to what that
 /// model accepts. `None` when the model takes no level at all.
 ///
-/// The configured level is a *wish*: it is global across models, so a level
-/// one model has and another doesn't (`max`, `xhigh`, `none`) has to be
-/// narrowed per request rather than rejected at the point it was chosen.
+/// `wanted` is a *wish*, usually the global configured level. A model may not
+/// have it (`max`, `xhigh`, `none`), so it is narrowed per request rather than
+/// rejected at the point it was chosen.
 #[must_use]
-fn reasoning_level_for(model: &str) -> Option<&'static str> {
-    crate::reasoning_effort::closest_level(model, &crate::reasoning_effort::configured_level())
+fn reasoning_level_for(model: &str, wanted: &str) -> Option<&'static str> {
+    crate::reasoning_effort::closest_level(model, wanted)
 }
 
 /// Number of whole-stream restarts to attempt when chunk read fails (or
@@ -1323,7 +1332,12 @@ fn transport_label(use_responses_api: bool) -> &'static str {
 /// instead". Third-party proxies without that restriction opt back in with
 /// `ARIS_FORCE_REASONING_WITH_TOOLS=1`. On the Responses transport the effort
 /// travels in `reasoning.effort` instead, so this is never consulted there.
-fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) -> Option<String> {
+fn chat_reasoning_effort_for(
+    model: &str,
+    base_url: &str,
+    enable_tools: bool,
+    wanted: &str,
+) -> Option<String> {
     let model_lower = model.to_ascii_lowercase();
     let blocked = enable_tools
         && base_url.contains("api.openai.com")
@@ -1337,7 +1351,7 @@ fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) ->
         .as_deref()
         == Some("1");
     if !blocked || force_with_tools {
-        if let Some(level) = reasoning_level_for(model) {
+        if let Some(level) = reasoning_level_for(model, wanted) {
             return Some(level.to_string());
         }
     }
@@ -1521,6 +1535,7 @@ fn build_responses_body(
     enable_tools: bool,
     system_prompt: Option<&str>,
     prompt_cache_key: &str,
+    reasoning_wish: &str,
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -1531,7 +1546,7 @@ fn build_responses_body(
         "prompt_cache_key": prompt_cache_key,
         "reasoning": { "summary": "auto" },
     });
-    if let Some(level) = reasoning_level_for(model) {
+    if let Some(level) = reasoning_level_for(model, reasoning_wish) {
         body["reasoning"]["effort"] = json!(level);
     }
     if let Some(prompt) = system_prompt {
@@ -1881,6 +1896,7 @@ async fn stream_restart_send(
     header_timeout: Option<Duration>,
     observer: &dyn StreamObserver,
     timeout_resends: &mut u32,
+    progress: &mut api::StreamProgressClock,
 ) -> Result<reqwest::Response, RuntimeError> {
     const RESTART_MAX_ATTEMPTS: u32 = 3;
     let mut attempt: u32 = 0;
@@ -1888,6 +1904,9 @@ async fn stream_restart_send(
         attempt += 1;
         if stream_cancel_requested(observer) {
             return Err(interrupted_error());
+        }
+        if progress.request_deadline_passed() {
+            return Err(request_limit_error(progress));
         }
         trace_record(
             trace_sink,
@@ -1906,9 +1925,11 @@ async fn stream_restart_send(
             .bearer_auth(api_key)
             .header("content-type", "application/json")
             .json(body);
+        // A re-sent request gets its own time-to-first-output budget.
+        progress.restart(Instant::now());
         let send_result = send_with_response_header_timeout(
             apply_openai_routing_session_header(http_request, routing_session_header_enabled, session_id),
-            header_timeout,
+            progress.cap_wait(header_timeout),
             observer,
         )
         .await;
@@ -2071,6 +2092,9 @@ pub struct OpenAIRuntimeClient {
     /// Explicit provider identity for this connection, never written to a
     /// model registry by a configuration flag.
     send_routing_session_header: bool,
+    /// Reasoning level this client asks for instead of the global
+    /// `ARIS_REASONING_EFFORT`; see [`Self::with_reasoning_level`].
+    reasoning_level: Option<String>,
 }
 
 fn build_runtime_http_client(wait_policy: api::StreamWaitPolicy) -> Result<reqwest::Client, String> {
@@ -2113,6 +2137,7 @@ impl OpenAIRuntimeClient {
             single_request: false,
             max_output_tokens: None,
             send_routing_session_header: false,
+            reasoning_level: None,
         })
     }
 
@@ -2155,6 +2180,19 @@ impl OpenAIRuntimeClient {
         self.single_request = true;
         self.max_output_tokens = max_output_tokens;
         self.with_wait_policy(api::StreamWaitPolicy::single_request_from_env())
+    }
+
+    /// Ask for `level` instead of the chat's configured reasoning level, still
+    /// narrowed to what the model accepts.
+    ///
+    /// For side requests whose cost should not follow the chat's setting: a
+    /// compaction summary used to inherit `max` and think for minutes before
+    /// writing a word, once per Map-Reduce call.
+    #[must_use]
+    pub fn with_reasoning_level(mut self, level: &str) -> Self {
+        let level = level.trim().to_ascii_lowercase();
+        self.reasoning_level = (!level.is_empty()).then_some(level);
+        self
     }
 
     /// Propagate the session to OpenCode or a configured managed gateway.
@@ -2201,6 +2239,10 @@ impl ApiClient for OpenAIRuntimeClient {
         // (replaying it onto them only churned request bytes and broke
         // provider prefix caching).
         let supports_reasoning = supports_reasoning_content_replay(&self.model);
+        let reasoning_wish = self
+            .reasoning_level
+            .clone()
+            .unwrap_or_else(crate::reasoning_effort::configured_level);
         // Mutable: a `/v1/responses` request that the gateway cannot serve
         // falls back to chat/completions inside the send loop below, and the
         // stream parser must follow the transport it actually reached.
@@ -2224,6 +2266,7 @@ impl ApiClient for OpenAIRuntimeClient {
                     system_prompt.as_deref(),
                     &request.messages,
                 ),
+                &reasoning_wish,
             )
         } else {
             build_chat_completions_body(
@@ -2231,7 +2274,12 @@ impl ApiClient for OpenAIRuntimeClient {
                 convert_messages_openai(&request.messages, system_prompt.as_deref(), &self.model),
                 &active_tool_specs,
                 self.enable_tools,
-                chat_reasoning_effort_for(&self.model, &self.base_url, self.enable_tools),
+                chat_reasoning_effort_for(
+                    &self.model,
+                    &self.base_url,
+                    self.enable_tools,
+                    &reasoning_wish,
+                ),
             )
         };
 
@@ -2249,7 +2297,7 @@ impl ApiClient for OpenAIRuntimeClient {
             // than inheriting a chat's high reasoning budget.
             if let Some(level) = crate::reasoning_effort::closest_level(&self.model, "low") {
                 if use_responses_api { body["reasoning"]["effort"] = json!(level); }
-                else if chat_reasoning_effort_for(&self.model, &self.base_url, false).is_some() { body["reasoning_effort"] = json!(level); }
+                else if chat_reasoning_effort_for(&self.model, &self.base_url, false, "low").is_some() { body["reasoning_effort"] = json!(level); }
             }
         }
         // A model already known to take no images gets its image parts as text
@@ -2329,10 +2377,18 @@ impl ApiClient for OpenAIRuntimeClient {
             // `api::MAX_TIMEOUT_RESENDS`.
             let mut timeout_resends: u32 = 0;
             let header_timeout = self.wait_policy.response_header_timeout;
+            // Output deadlines that keep-alive chunks (SSE comments, empty
+            // deltas, `response.in_progress`) do not extend, and the total
+            // time of this request across every send; see
+            // `api::StreamProgressClock`.
+            let mut progress = api::StreamProgressClock::new(self.wait_policy, Instant::now());
             let mut response = loop {
                 attempt += 1;
                 if stream_cancel_requested(self.observer.as_ref()) {
                     return Err(interrupted_error());
+                }
+                if progress.request_deadline_passed() {
+                    return Err(request_limit_error(&progress));
                 }
                 trace_record(
                     &trace_sink,
@@ -2353,13 +2409,16 @@ impl ApiClient for OpenAIRuntimeClient {
                     .header("content-type", "application/json")
                     .json(&body);
                 let routing_session_header_sent = routing_session_header_enabled;
+                // The attempt that gets through starts its own
+                // time-to-first-output budget when it is sent.
+                progress.restart(Instant::now());
                 let send_result = send_with_response_header_timeout(
                     apply_openai_routing_session_header(
                         http_request,
                         routing_session_header_enabled,
                         &self.session_id,
                     ),
-                    header_timeout,
+                    progress.cap_wait(header_timeout),
                     self.observer.as_ref(),
                 )
                 .await;
@@ -2515,6 +2574,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     &self.model,
                                     &self.base_url,
                                     self.enable_tools,
+                                    &reasoning_wish,
                                 ),
                             );
                             if strip_images {
@@ -2573,6 +2633,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     system_prompt.as_deref(),
                                     &request.messages,
                                 ),
+                                &reasoning_wish,
                             );
                             if strip_images {
                                 strip_image_parts_from_body(&mut body);
@@ -2891,12 +2952,13 @@ impl ApiClient for OpenAIRuntimeClient {
                     return Err(interrupted_error());
                 }
                 // v0.4.14 C11 — wrap chunk read in tokio::time::timeout so
-                // a hung upstream proxy can't stall this loop forever.
-                // Idle elapse is treated equivalently to a premature
-                // EOF / mid-body abort and walks through the same
-                // retry path.
+                // a hung upstream proxy can't stall this loop forever. The
+                // limit is the per-chunk idle wait capped by the output
+                // deadline, which output-free chunks do not extend.
+                // Elapse is treated equivalently to a premature EOF /
+                // mid-body abort and walks through the same retry path.
                 let chunk_future = response.chunk();
-                let chunk_result = match idle_timeout {
+                let chunk_result = match progress.read_timeout(idle_timeout) {
                     Some(dur) => match tokio::select! {
                         result = tokio::time::timeout(dur, chunk_future) => result,
                         () = wait_for_stream_cancel(observer.as_ref()) => {
@@ -2905,14 +2967,24 @@ impl ApiClient for OpenAIRuntimeClient {
                     } {
                         Ok(inner) => inner,
                         Err(_elapsed) => {
+                            // The model already finished; the gateway only
+                            // failed to close the connection. That answer is
+                            // complete, not a partial one to continue from.
+                            if observed_done || observed_finish_reason {
+                                break;
+                            }
+                            let no_output = progress.output_deadline_passed();
+                            let detail = progress.timeout_detail(idle_timeout);
                             let nothing_yet = nothing_emitted_yet(
                                 &events,
                                 &pending_tools,
                                 &current_reasoning,
                             );
+                            let request_over = progress.request_deadline_passed();
                             if nothing_yet
                                 && stream_retries_remaining > 0
                                 && timeout_resends < api::MAX_TIMEOUT_RESENDS
+                                && !request_over
                             {
                                 stream_retries_remaining -= 1;
                                 timeout_resends += 1;
@@ -2923,14 +2995,15 @@ impl ApiClient for OpenAIRuntimeClient {
                                         "provider": "openai-compatible",
                                         "model": &self.model,
                                         "phase": "stream",
-                                        "reason": "idle_timeout",
-                                        "idleTimeoutSeconds": dur.as_secs(),
+                                        "reason": if no_output { "no_output_timeout" } else { "idle_timeout" },
+                                        "timeoutSeconds": dur.as_secs(),
+                                        "message": &detail,
+                                        "chunksWithoutOutput": progress.chunks_since_output(),
                                         "retriesRemaining": stream_retries_remaining,
                                     }),
                                 );
                                 eprintln!(
-                                    "\x1b[33m  OpenAI stream restart (idle timeout {}s, {} attempt(s) left)\x1b[0m",
-                                    dur.as_secs(),
+                                    "\x1b[33m  OpenAI stream restart ({detail}; {} attempt(s) left)\x1b[0m",
                                     stream_retries_remaining
                                 );
                                 response = stream_restart_send(
@@ -2946,6 +3019,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     header_timeout,
                                     observer.as_ref(),
                                     &mut timeout_resends,
+                                    &mut progress,
                                 )
                                 .await?;
                                 stream_buf.clear();
@@ -2959,13 +3033,10 @@ impl ApiClient for OpenAIRuntimeClient {
                                 // reason here made the runtime auto-send a
                                 // continuation: one more hidden, billed resend
                                 // of a request the user never saw progress on.
-                                return Err(post_send_timeout_error(
-                                    &format!(
-                                        "the stream produced no output for {} seconds",
-                                        dur.as_secs()
-                                    ),
-                                    timeout_resends,
-                                ));
+                                if request_over {
+                                    return Err(request_limit_error(&progress));
+                                }
+                                return Err(post_send_timeout_error(&detail, timeout_resends));
                             }
                             events.push(AssistantEvent::StopReason(
                                 "stream_error_after_partial_output".to_string(),
@@ -3039,6 +3110,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     header_timeout,
                                     observer.as_ref(),
                                     &mut timeout_resends,
+                                    &mut progress,
                                 )
                                 .await?;
                                 stream_buf.clear();
@@ -3101,6 +3173,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 header_timeout,
                                 observer.as_ref(),
                                 &mut timeout_resends,
+                                &mut progress,
                             )
                             .await?;
                             stream_buf.clear();
@@ -3139,6 +3212,9 @@ impl ApiClient for OpenAIRuntimeClient {
                     }
                 };
 
+                // Whether this chunk moved the answer forward; anything else
+                // (comments, empty deltas, lifecycle events) is keep-alive.
+                let mut chunk_had_output = false;
                 // Process complete, strictly decoded SSE lines.
                 for line in lines {
 
@@ -3249,6 +3325,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                     header_timeout,
                                     observer.as_ref(),
                                     &mut timeout_resends,
+                                    &mut progress,
                                 )
                                 .await?;
                                 stream_buf.clear();
@@ -3276,6 +3353,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             "response.output_text.delta" | "response.refusal.delta" => {
                                 if let Some(delta) = parsed.get("delta").and_then(Value::as_str) {
                                     if !delta.is_empty() {
+                                        chunk_had_output = true;
                                         observer.on_text_delta(delta)?;
                                         push_text_event(&mut events, delta.to_string());
                                     }
@@ -3285,21 +3363,41 @@ impl ApiClient for OpenAIRuntimeClient {
                             | "response.reasoning_text.delta" => {
                                 if let Some(delta) = parsed.get("delta").and_then(Value::as_str) {
                                     if !delta.is_empty() {
+                                        chunk_had_output = true;
                                         observer.on_thinking_delta(delta)?;
                                         current_reasoning.push_str(delta);
                                     }
                                 }
                             }
                             "response.output_item.added" => {
+                                // A reasoning item opens a silent think; only
+                                // answer items (messages, tool calls) count.
+                                if parsed
+                                    .get("item")
+                                    .and_then(|item| item.get("type"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|kind| kind != "reasoning")
+                                {
+                                    chunk_had_output = true;
+                                }
                                 responses_tools.observe_output_item_added(&parsed);
                             }
                             "response.function_call_arguments.delta" => {
+                                if parsed
+                                    .get("delta")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|delta| !delta.is_empty())
+                                {
+                                    chunk_had_output = true;
+                                }
                                 responses_tools.observe_arguments_delta(&parsed);
                             }
                             "response.function_call_arguments.done" => {
+                                chunk_had_output = true;
                                 responses_tools.observe_arguments_done(&parsed);
                             }
                             "response.output_item.done" => {
+                                chunk_had_output = true;
                                 if let Some(item) = parsed.get("item") {
                                     if item.get("type").and_then(Value::as_str) == Some("reasoning") {
                                         current_responses_reasoning_items.push(item.clone());
@@ -3436,6 +3534,7 @@ impl ApiClient for OpenAIRuntimeClient {
                                 delta.get("reasoning_content").and_then(|r| r.as_str())
                             {
                                 if !rc.is_empty() {
+                                    chunk_had_output = true;
                                     observer.on_thinking_delta(rc)?;
                                     current_reasoning.push_str(rc);
                                 }
@@ -3444,6 +3543,7 @@ impl ApiClient for OpenAIRuntimeClient {
                             // Text content
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                 if !content.is_empty() {
+                                    chunk_had_output = true;
                                     observer.on_text_delta(content)?;
                                     push_text_event(&mut events, content.to_string());
                                 }
@@ -3453,6 +3553,9 @@ impl ApiClient for OpenAIRuntimeClient {
                             if let Some(tool_calls) =
                                 delta.get("tool_calls").and_then(|tc| tc.as_array())
                             {
+                                if !tool_calls.is_empty() {
+                                    chunk_had_output = true;
+                                }
                                 for tc in tool_calls {
                                     accumulate_tool_call(&mut pending_tools, tc);
                                 }
@@ -3486,9 +3589,29 @@ impl ApiClient for OpenAIRuntimeClient {
                     }
                 }
 
+                if chunk_had_output {
+                    progress.note_output();
+                } else {
+                    progress.note_chunk_without_output();
+                }
                 if done {
                     break;
                 }
+            }
+
+            // Keep-alive chunks never reach the raw-event trace (comments are
+            // skipped before it), so record how many there were. Without this
+            // a stream that idled behind pings looks like a silent connection.
+            if progress.chunks_without_output() > 0 {
+                trace_record(
+                    &trace_sink,
+                    "llm.keepalive",
+                    json!({
+                        "provider": "openai-compatible",
+                        "model": &self.model,
+                        "chunksWithoutOutput": progress.chunks_without_output(),
+                    }),
+                );
             }
 
             // Ensure MessageStop

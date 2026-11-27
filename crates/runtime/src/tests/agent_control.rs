@@ -1906,6 +1906,7 @@ fn agent_events_survive_event_log_compaction() {
     };
     // Rows before a checkpoint and before a reset are normally dead weight.
     let log = [
+        row(0, "computer_use_mode"),
         row(1, "agent.spawn"),
         row(2, "tool_call"),
         row(3, "agent.mail.sent"),
@@ -1936,18 +1937,20 @@ fn agent_events_survive_event_log_compaction() {
     assert_eq!(
         kept,
         vec![
+            "computer_use_mode",
             "agent.spawn",
             "agent.mail.sent",
             "session_reset",
             "agent.result",
             "lesson_recall",
+            "memory_recall",
             "session_checkpoint",
             "assistant_delta",
             "agent.close"
         ],
-        "the stream rows behind the reset and checkpoint went; every agent row and lesson_recall stayed"
+        "the stream rows behind the reset and checkpoint went; every agent row and the recall audit rows stayed"
     );
-    assert_eq!(outcome.removed_lines, 3);
+    assert_eq!(outcome.removed_lines, 2);
 }
 
 fn task_contract() -> AgentTask {

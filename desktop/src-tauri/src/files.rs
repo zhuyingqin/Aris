@@ -20,6 +20,26 @@ const MAX_TYPESET_DOCUMENTS: usize = 500;
 const MAX_TYPESET_TEX_FILES: usize = 5_000;
 const CHAT_ATTACHMENT_NAME_HEADER: &str = "x-somniq-attachment-name";
 const TYPESET_IMAGE_NAME_HEADER: &str = "x-somniq-image-name";
+/// Base64 of the workspace path of the root document a pasted image is for.
+const TYPESET_IMAGE_DOCUMENT_HEADER: &str = "x-somniq-image-document";
+
+/// Read the bytes of a command invoked with a `Uint8Array` payload.
+///
+/// Over Tauri's custom-protocol IPC the payload arrives as a raw body. If that
+/// protocol fails once in a page (a blocked or aborted `fetch`), Tauri switches
+/// the page to `postMessage` for the rest of its life, and the same payload
+/// arrives as a JSON array of numbers instead. Both forms carry the same bytes.
+pub(crate) fn invoke_body_bytes(body: &InvokeBody) -> Option<std::borrow::Cow<'_, [u8]>> {
+    match body {
+        InvokeBody::Raw(bytes) => Some(std::borrow::Cow::Borrowed(bytes.as_slice())),
+        InvokeBody::Json(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| value.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+            .collect::<Option<Vec<u8>>>()
+            .map(std::borrow::Cow::Owned),
+        InvokeBody::Json(_) => None,
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +73,9 @@ pub struct ImportedChatAttachment {
 #[serde(rename_all = "camelCase")]
 pub struct ImportedTypesetImage {
     pub path: String,
+    /// The path to write in `\includegraphics`: relative to the root
+    /// document's folder, which is where TeX resolves it.
+    pub include_path: String,
     pub name: String,
     pub bytes: u64,
 }
@@ -930,14 +953,47 @@ pub fn chat_import_attachment_data(
         .map_err(|error| format!("could not decode selected chat attachment name: {error}"))?;
     let source_name = String::from_utf8(name_bytes)
         .map_err(|error| format!("selected chat attachment name is not UTF-8: {error}"))?;
-    let InvokeBody::Raw(bytes) = request.body() else {
-        return Err("selected chat attachment did not contain a binary body".to_string());
-    };
-    import_chat_attachment_bytes_at(&workspace_root()?, &source_name, bytes)
+    let bytes = invoke_body_bytes(request.body())
+        .ok_or_else(|| "selected chat attachment did not contain a binary body".to_string())?;
+    import_chat_attachment_bytes_at(&workspace_root()?, &source_name, &bytes)
 }
 
 fn import_typeset_image_bytes_at(
     workspace: &Path,
+    source_name: &str,
+    bytes: &[u8],
+) -> Result<ImportedTypesetImage, String> {
+    import_typeset_image_bytes_for_document_at(workspace, None, source_name, bytes)
+}
+
+/// The folder a document's pasted figures go in: `figures/` beside the root
+/// document, so `\includegraphics{figures/...}` resolves when TeX runs there
+/// and the image travels with the project. Without a document, the
+/// workspace's own `figures/`.
+fn typeset_document_figures_dir(workspace: &Path, document: Option<&str>) -> Result<PathBuf, String> {
+    let Some(document) = document.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(workspace.join("figures"));
+    };
+    let candidate = Path::new(document);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+    let folder = candidate
+        .parent()
+        .ok_or_else(|| "the document folder for the pasted image could not be resolved".to_string())?
+        .canonicalize()
+        .map_err(|error| format!("the document folder for the pasted image is not available: {error}"))?;
+    if !folder.starts_with(workspace) {
+        return Err("the document for the pasted image is outside the current workspace".to_string());
+    }
+    Ok(folder.join("figures"))
+}
+
+fn import_typeset_image_bytes_for_document_at(
+    workspace: &Path,
+    document: Option<&str>,
     source_name: &str,
     bytes: &[u8],
 ) -> Result<ImportedTypesetImage, String> {
@@ -980,8 +1036,8 @@ fn import_typeset_image_bytes_at(
         return Err("pasted files must be PNG, JPEG, GIF, WebP, or SVG images".to_string());
     }
 
+    let figures_dir = typeset_document_figures_dir(workspace, document)?;
     crate::typeset_state::ensure_project_revision(workspace)?;
-    let figures_dir = workspace.join("figures");
     std::fs::create_dir_all(&figures_dir).map_err(|error| error.to_string())?;
     let stem = Path::new(&safe_name)
         .file_stem()
@@ -1003,8 +1059,13 @@ fn import_typeset_image_bytes_at(
         "visual-editor",
         Some(display_workspace_path(&destination, workspace)),
     )?;
+    let include_path = destination
+        .strip_prefix(figures_dir.parent().unwrap_or(workspace))
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| display_workspace_path(&destination, workspace));
     Ok(ImportedTypesetImage {
         path: display_workspace_path(&destination, workspace),
+        include_path,
         name: destination
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
@@ -1030,10 +1091,26 @@ pub fn typeset_import_image_data(
         .map_err(|error| format!("could not decode pasted image name: {error}"))?;
     let source_name = String::from_utf8(name_bytes)
         .map_err(|error| format!("pasted image name is not UTF-8: {error}"))?;
-    let InvokeBody::Raw(bytes) = request.body() else {
-        return Err("pasted image did not contain a binary body".to_string());
+    let bytes = invoke_body_bytes(request.body())
+        .ok_or_else(|| "pasted image did not contain a binary body".to_string())?;
+    let document = typeset_image_document_header(&request)?;
+    import_typeset_image_bytes_for_document_at(&workspace_root()?, document.as_deref(), &source_name, &bytes)
+}
+
+/// The optional root document a pasted image is for (older callers omit it).
+fn typeset_image_document_header(request: &tauri::ipc::Request<'_>) -> Result<Option<String>, String> {
+    let Some(encoded) = request.headers().get(TYPESET_IMAGE_DOCUMENT_HEADER) else {
+        return Ok(None);
     };
-    import_typeset_image_bytes_at(&workspace_root()?, &source_name, bytes)
+    let encoded = encoded
+        .to_str()
+        .map_err(|error| format!("pasted image document is invalid: {error}"))?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("could not decode pasted image document: {error}"))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| format!("pasted image document is not UTF-8: {error}"))
 }
 
 fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {
@@ -1528,6 +1605,9 @@ pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, Stri
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    // Comments and per-file history follow the file. The rename itself has
+    // happened, so failing to carry them over must not report it as failed.
+    let _ = crate::typeset_state::migrate_path_state(&root, &source, &target);
     crate::typeset_state::record_project_mutation(
         &root,
         "move",
@@ -1624,12 +1704,7 @@ pub fn file_delete(path: String) -> Result<(), String> {
     let (root, target) = resolve_workspace_existing_path(&path, false)?;
     crate::typeset_state::ensure_project_revision(&root)?;
     let display_path = display_workspace_path(&target, &root);
-    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
-    } else {
-        std::fs::remove_file(&target).map_err(|error| error.to_string())?;
-    }
+    move_to_workspace_trash(&root, &target)?;
     crate::typeset_state::record_project_mutation(
         &root,
         "delete",
@@ -1638,6 +1713,67 @@ pub fn file_delete(path: String) -> Result<(), String> {
         Some(display_path),
     )?;
     Ok(())
+}
+
+/// How long deleted files stay recoverable in `.somniq/trash`.
+const WORKSPACE_TRASH_RETENTION: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Delete by moving into `.somniq/trash/<ms>/<workspace path>` instead of
+/// erasing. Project revisions only cover LaTeX sources and figures, so a
+/// deleted folder of data or scripts used to be gone for good. Entries older
+/// than [`WORKSPACE_TRASH_RETENTION`] are purged on the way.
+fn move_to_workspace_trash(root: &Path, target: &Path) -> Result<PathBuf, String> {
+    let trash = tools::layout::project_data_dir_at(root).join("trash");
+    if target.starts_with(&trash) {
+        // Deleting inside the trash itself really deletes.
+        remove_path(target)?;
+        return Ok(target.to_path_buf());
+    }
+    prune_workspace_trash(&trash);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let relative = target.strip_prefix(root).unwrap_or(target);
+    let destination = trash.join(stamp.to_string()).join(relative);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match std::fs::rename(target, &destination) {
+        Ok(()) => Ok(destination),
+        // A different volume (a linked `.somniq`): fall back to deleting.
+        Err(_) => {
+            remove_path(target)?;
+            Ok(target.to_path_buf())
+        }
+    }
+}
+
+fn remove_path(target: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(target).map_err(|error| error.to_string())?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(target)
+    } else {
+        std::fs::remove_file(target)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn prune_workspace_trash(trash: &Path) {
+    let Ok(entries) = std::fs::read_dir(trash) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(WORKSPACE_TRASH_RETENTION)
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis());
+    for entry in entries.flatten() {
+        let stamp = entry.file_name().to_string_lossy().parse::<u128>().ok();
+        if let (Some(stamp), Some(cutoff)) = (stamp, cutoff) {
+            if stamp < cutoff {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1810,6 +1946,46 @@ mod text_decode_tests {
         assert!(
             import_typeset_image_bytes_at(workspace.path(), "notes.txt", b"not-image").is_err()
         );
+    }
+
+    #[test]
+    fn deleting_moves_into_the_workspace_trash_and_old_entries_are_purged() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace = workspace.path().canonicalize().expect("canonical workspace");
+        std::fs::create_dir_all(workspace.join("data")).expect("data");
+        std::fs::write(workspace.join("data/results.csv"), "a,b").expect("data file");
+        let stale = workspace.join(".somniq/trash/1/old.txt");
+        std::fs::create_dir_all(stale.parent().unwrap()).expect("stale trash");
+        std::fs::write(&stale, "old").expect("stale entry");
+
+        let moved = move_to_workspace_trash(&workspace, &workspace.join("data")).expect("trash");
+        assert!(!workspace.join("data").exists());
+        assert!(moved.join("results.csv").is_file(), "{}", moved.display());
+        assert!(moved.starts_with(workspace.join(".somniq/trash")));
+        // Entries past the retention window go on the next delete.
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn pasted_images_go_beside_the_root_document_tex_compiles() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace = workspace.path().canonicalize().expect("canonical workspace");
+        std::fs::create_dir_all(workspace.join(".somniq/papers/thesis")).expect("paper folder");
+        std::fs::write(workspace.join(".somniq/papers/thesis/main.tex"), "root").expect("root");
+        let imported = import_typeset_image_bytes_for_document_at(
+            &workspace,
+            Some(".somniq/papers/thesis/main.tex"),
+            "clipboard.png",
+            b"png",
+        )
+        .expect("import image");
+        assert!(imported.path.starts_with(".somniq/papers/thesis/figures/"), "{}", imported.path);
+        assert!(imported.include_path.starts_with("figures/"), "{}", imported.include_path);
+        assert!(workspace.join(&imported.path).is_file());
+        // Without a document the workspace's own figures/ is used, as before.
+        let loose = import_typeset_image_bytes_at(&workspace, "clipboard.png", b"png").expect("import");
+        assert_eq!(loose.path, loose.include_path);
+        assert!(import_typeset_image_bytes_for_document_at(&workspace, Some("../elsewhere/main.tex"), "a.png", b"png").is_err());
     }
 }
 

@@ -1799,3 +1799,127 @@ fn notification_after_timeout_still_times_out() {
         cleanup_script(&script_path);
     });
 }
+
+/// A plugin's Python imports its own modules from the reviewed snapshot.
+/// Python would cache their bytecode beside them, in the snapshot, which then
+/// no longer matches its digest; the host points the cache into the plugin's
+/// data directory instead, where the package cannot set it back.
+#[test]
+fn a_plugin_python_process_keeps_its_bytecode_out_of_the_snapshot() {
+    let root = temp_dir();
+    let snapshot = root.join("snapshot");
+    let data = root.join("data");
+    fs::create_dir_all(&snapshot).expect("snapshot");
+    fs::create_dir_all(&data).expect("data");
+    fs::write(snapshot.join("helper.py"), "VALUE = 1\n").expect("helper");
+    fs::write(
+        snapshot.join("main.py"),
+        "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport helper\nprint(os.environ.get('PYTHONPYCACHEPREFIX', ''), flush=True)\n",
+    )
+    .expect("main");
+    let transport = crate::mcp_client::McpStdioTransport {
+        command: python_command().to_string(),
+        args: vec![snapshot.join("main.py").to_string_lossy().into_owned()],
+        env: BTreeMap::from([
+            (crate::PLUGIN_ROOT_ENV.to_string(), snapshot.to_string_lossy().into_owned()),
+            (crate::PLUGIN_DATA_ENV.to_string(), data.to_string_lossy().into_owned()),
+        ]),
+        request_timeout_secs: None,
+    };
+    let runtime = Builder::new_current_thread().enable_all().build().expect("runtime");
+    let printed = runtime.block_on(async {
+        let mut process = McpStdioProcess::spawn(&transport).expect("spawn");
+        let line = process.read_line().await.expect("line");
+        let _ = process.wait().await;
+        line
+    });
+    assert_eq!(PathBuf::from(printed.trim()), data.join(".pycache"));
+    assert!(!snapshot.join("__pycache__").exists(), "bytecode was written into the snapshot");
+    assert!(data.join(".pycache").exists(), "bytecode goes to the plugin's data directory");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// What a plugin process actually gets: the platform variables, what its
+/// declaration asked for, nothing else from SomniQ, and none of the launcher's
+/// own instructions.
+#[test]
+fn a_plugin_process_gets_what_it_declared_and_nothing_else() {
+    let _lock = crate::test_env_lock();
+    let root = temp_dir();
+    let snapshot = root.join("snapshot");
+    let data = root.join("data");
+    let project = root.join("project");
+    for dir in [&snapshot, &data, &project] {
+        fs::create_dir_all(dir).expect("dir");
+    }
+    fs::write(
+        snapshot.join("dump.py"),
+        "import json, os\nprint(json.dumps({'env': dict(os.environ), 'cwd': os.getcwd()}), flush=True)\n",
+    )
+    .expect("script");
+    let previous: Vec<(&str, Option<std::ffi::OsString>)> = ["SOMNIQ_TEST_CANARY_SECRET", "CROSSREF_MAILTO", "ARIS_WEB_PROXY_URL", "HTTPS_PROXY", "SSL_CERT_FILE"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    std::env::set_var("SOMNIQ_TEST_CANARY_SECRET", "leak");
+    std::env::set_var("CROSSREF_MAILTO", "lab@example.org");
+    std::env::set_var("ARIS_WEB_PROXY_URL", "http://127.0.0.1:7890/");
+    std::env::set_var("HTTPS_PROXY", "http://user:secret@proxy.example:8080");
+    std::env::set_var("SSL_CERT_FILE", "C:/certs/campus.pem");
+    let dump = |extra: &[(&str, String)]| -> serde_json::Value {
+        let mut env = BTreeMap::from([
+            (crate::PLUGIN_ROOT_ENV.to_string(), snapshot.to_string_lossy().into_owned()),
+            (crate::PLUGIN_DATA_ENV.to_string(), data.to_string_lossy().into_owned()),
+        ]);
+        for (key, value) in extra {
+            env.insert((*key).to_string(), value.clone());
+        }
+        let transport = crate::mcp_client::McpStdioTransport {
+            command: python_command().to_string(),
+            args: vec![snapshot.join("dump.py").to_string_lossy().into_owned()],
+            env,
+            request_timeout_secs: None,
+        };
+        let runtime = Builder::new_current_thread().enable_all().build().expect("runtime");
+        runtime.block_on(async {
+            let mut process = McpStdioProcess::spawn(&transport).expect("spawn");
+            let line = process.read_line().await.expect("line");
+            let _ = process.wait().await;
+            serde_json::from_str(&line).expect("json")
+        })
+    };
+    let declared = dump(&[
+        (crate::PLUGIN_PASSTHROUGH_ENV, "CROSSREF_MAILTO,NOT_SET_ANYWHERE".into()),
+        (crate::PLUGIN_NETWORK_ENV, "required".into()),
+        (crate::PLUGIN_WORKSPACE_ENV, project.to_string_lossy().into_owned()),
+    ]);
+    let plain = dump(&[]);
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    let env = |dumped: &serde_json::Value, key: &str| dumped["env"].as_object().unwrap().iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.as_str().unwrap().to_string());
+    // SomniQ's own variables never reach a plugin, declared or not.
+    for dumped in [&declared, &plain] {
+        assert_eq!(env(dumped, "SOMNIQ_TEST_CANARY_SECRET"), None);
+        assert_eq!(env(dumped, "ARIS_WEB_PROXY_URL"), None);
+        for internal in [crate::PLUGIN_PASSTHROUGH_ENV, crate::PLUGIN_NETWORK_ENV, crate::PLUGIN_WORKSPACE_ENV] {
+            assert_eq!(env(dumped, internal), None, "{internal}");
+        }
+        assert_eq!(PathBuf::from(dumped["cwd"].as_str().unwrap()), data, "the working directory is never the project");
+    }
+    // Declared: the named variable, the research proxy (never the inherited
+    // one with its password), the certificate setting, the project.
+    assert_eq!(env(&declared, "CROSSREF_MAILTO").as_deref(), Some("lab@example.org"));
+    assert_eq!(env(&declared, "NOT_SET_ANYWHERE"), None);
+    assert_eq!(env(&declared, "HTTPS_PROXY").as_deref(), Some("http://127.0.0.1:7890"));
+    assert_eq!(env(&declared, "SSL_CERT_FILE").as_deref(), Some("C:/certs/campus.pem"));
+    assert_eq!(env(&declared, crate::PLUGIN_WORKSPACE_ROOT_ENV).map(PathBuf::from), Some(project.clone()));
+    // Not declared: none of it.
+    for key in ["CROSSREF_MAILTO", "HTTPS_PROXY", "SSL_CERT_FILE", crate::PLUGIN_WORKSPACE_ROOT_ENV] {
+        assert_eq!(env(&plain, key), None, "{key}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}

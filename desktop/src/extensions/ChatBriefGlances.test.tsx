@@ -102,9 +102,18 @@ describe("glances in the project summary", () => {
     const listen = (event: Event) => opened.push((event as CustomEvent<string>).detail);
     window.addEventListener(PLUGIN_OPEN_PAGE_EVENT, listen);
     fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    // As a click in the page sends it; one a second.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const later = () => vi.setSystemTime(Date.now() + 1500);
+    await deliver({ type: "open-panel", panel: "tasks", gesture: true });
+    later();
+    await deliver({ type: "open-panel", panel: "../escape", gesture: true });
+    later();
+    await deliver({ type: "open-panel", panel: 7, gesture: true });
+    later();
+    // Not on its own.
     await deliver({ type: "open-panel", panel: "tasks" });
-    await deliver({ type: "open-panel", panel: "../escape" });
-    await deliver({ type: "open-panel", panel: 7 });
+    vi.useRealTimers();
     window.removeEventListener(PLUGIN_OPEN_PAGE_EVENT, listen);
     const key = uiPanelKey({ pluginName: plugin, id: "tasks" });
     expect(opened).toEqual([key, key]);

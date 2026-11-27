@@ -7,6 +7,8 @@ import { useStore } from "../../store";
 import ChatMessage from "../ChatMessage";
 import { patchLastAssistantTurn } from "../model";
 import {
+  applyCompactionProgress,
+  compactionElapsedMs,
   formatWaitClock,
   MODEL_WAIT_VISIBLE_AFTER_MS,
   modelWaitElapsedMs,
@@ -119,7 +121,61 @@ describe("modelWaitElapsedMs", () => {
   });
 });
 
+describe("compaction progress", () => {
+  it("shows compaction instead of a model wait, then restarts the model clock when it ends", () => {
+    const sentAt = 1_000_000;
+    const sent = streamingTurn([], sentAt);
+    const compacting = applyCompactionProgress(sent, "started", sentAt + 1_000);
+    expect(applyCompactionProgress(compacting, "started", sentAt + 5_000)).toBe(compacting);
+    expect(compactionElapsedMs(compacting, sentAt + 181_000)).toBe(180_000);
+    expect(modelWaitElapsedMs(compacting, sentAt + 181_000)).toBeNull();
+
+    // The finished patch goes through the same path as a stream update, which
+    // stamps the fresh blocks array as the turn's newest activity.
+    const [finished] = patchLastAssistantTurn([compacting], (turn) => (
+      applyCompactionProgress(turn, "finished")
+    ));
+    expect(finished.compactingSince).toBeUndefined();
+    expect(finished.blocks).not.toBe(compacting.blocks);
+    expect(compactionElapsedMs(finished, Date.now())).toBeNull();
+    expect(modelWaitElapsedMs(finished, Date.now() + 4_000)).toBeGreaterThanOrEqual(3_900);
+    expect(modelWaitElapsedMs(finished, Date.now() + 4_000)).toBeLessThan(60_000);
+  });
+
+  it("ignores a finish without a start", () => {
+    const turn = streamingTurn([], 1_000);
+    expect(applyCompactionProgress(turn, "finished")).toBe(turn);
+  });
+
+  it("is never shown for a turn that stopped streaming", () => {
+    const turn = applyCompactionProgress(streamingTurn([], 1_000), "started", 1_000);
+    expect(compactionElapsedMs({ ...turn, streaming: false }, 5_000)).toBeNull();
+  });
+});
+
 describe("ModelWaitIndicator", () => {
+  it("says the history is being compacted, with its own clock", () => {
+    vi.useFakeTimers();
+    const turn = applyCompactionProgress(streamingTurn([], Date.now()), "started", Date.now());
+    renderTurn(turn);
+    act(() => { vi.advanceTimersByTime(2_000); });
+    expect(screen.getByText("Compacting context ·")).toBeTruthy();
+    expect(screen.getByText("0:02")).toBeTruthy();
+    expect(screen.getByText(/earlier history is being summarized/)).toBeTruthy();
+    expect(screen.queryByText(/Waiting for the model/)).toBeNull();
+  });
+
+  it("stops promising that reasoning just takes a while past the 10-minute limit", () => {
+    vi.useFakeTimers();
+    renderTurn(streamingTurn([], Date.now()));
+    act(() => { vi.advanceTimersByTime(599_000); });
+    expect(screen.getByText(/Deep reasoning may take a few minutes/)).toBeTruthy();
+    act(() => { vi.advanceTimersByTime(2_000); });
+    expect(screen.getByText("10:01")).toBeTruthy();
+    expect(screen.queryByText(/Deep reasoning may take a few minutes/)).toBeNull();
+    expect(screen.getByText(/past the default 10-minute wait limit/)).toBeTruthy();
+  });
+
   it("shows a ticking clock under a silent streaming turn and explains long waits", () => {
     vi.useFakeTimers();
     const turn = streamingTurn([], Date.now());

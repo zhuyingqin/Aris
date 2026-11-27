@@ -86,10 +86,12 @@
   （`crates/runtime/src/config.rs`），钩子从合并结果解析（`config.rs` 的
   `parse_optional_hooks_config`）。Desktop 的 Chat 回合用它构造 `HookRunner`
   （`conversation.rs`），钩子经 `cmd` / `sh` 运行（`hooks.rs`）。
-- Desktop `mcp.rs::migrate_project_stdio_to_global_if_needed` 在没有全局 MCP 文件时，
-  把项目 `.mcp.json` 里的 stdio 服务复制进全局配置。
+- ~~Desktop `mcp.rs::migrate_project_stdio_to_global_if_needed` 在没有全局 MCP 文件时，
+  把项目 `.mcp.json` 里的 stdio 服务复制进全局配置。~~ 2026-11-25 已删除：项目
+  `.mcp.json` 既不加载也不复制，测试
+  `a_projects_own_mcp_json_is_neither_loaded_nor_copied_into_the_global_file`。
 
-这两条另立任务处理（给项目级钩子和这次迁移加本机批准），不在本设计里改。
+项目级钩子另立任务处理（加本机批准），不在本设计里改。
 
 本期的价值在于：能管住的管住（环境、控制项、工作目录、进程树、交给插件的工作区文件），
 管不住的明说；同时让声明进入批准和升级差异，给以后的系统级强制和 Reviewer 审包留好挂点。
@@ -477,7 +479,7 @@ desktop：
 ## 不做
 
 - 插件之外的 MCP 服务的环境隔离（用户自己的配置，信任级别不同）。
-- 项目级钩子和 `.mcp.json` 迁移的批准（另立任务，见威胁模型）。
+- 项目级钩子的批准（另立任务，见威胁模型）。`.mcp.json` 迁移已于 2026-11-25 删除。
 - 文件系统隔离、`hosts` 白名单的强制、Skill 脚本的环境约束（见分期"以后"）。
 - 改变权限模式与 MCP 工具调用的关系（仍要求完全权限）。
 - 改变独立 Reviewer 或 Executor → Reviewer → revision 流程。
@@ -533,3 +535,126 @@ desktop：
   用户的批准卡片上；带审稿细则的包不能 `checkout` 进对话。
 - **插件页的操作绑定摘要**：启用、停用、移除、“所有项目”都带上页面显示的摘要，版本已变就拒绝。
 - **信任库防护**：文件工具和 Shell 命令检查都覆盖 `<SomniQ 配置>/plugins`（批准、快照、全局列表）。
+
+## 已落地的部分（2026-11-25，C2 能力清单）
+
+C-D1 到 C-D5 按上文建议定案：没有声明的 MCP 服务不能启用；`workspaceFiles` 以批准时的副本交给
+插件，原件变了插件继续用旧副本；运行时下载的启动器必须写死版本；联网代理只用
+`ARIS_WEB_PROXY_URL`。
+
+- **清单**：`somniq.capabilities`（schema 1）的解析与校验在 `crates/runtime/src/plugins/capabilities.rs`，
+  未知字段一律报错。诊断有 `capabilities-missing`、`capabilities-server`、`capabilities-field`、
+  `env-key`、`env-reserved`、`env-overlap`、`workspace-file`、`runtime-fetch` 八种，各自在
+  `authoring.rs` 有修法提示；`ui` 不再是必填项。
+- **进程环境**：宿主只把四个内部键写进 MCP 条目（`SOMNIQ_PLUGIN_PASSTHROUGH`、`SOMNIQ_PLUGIN_NETWORK`、
+  `SOMNIQ_PLUGIN_WORKSPACE`、`SOMNIQ_PLUGIN_FILES`），包的 `env` 不许用 `SOMNIQ_*`，所以只有宿主能写。
+  `mcp_stdio.rs::apply_plugin_env` 读这些键后决定子进程拿到什么，这几个键本身不进子进程：
+  - 透传：只从 SomniQ 进程环境里复制声明过的变量名；
+  - `network.access: required`：代理取自 `ARIS_WEB_PROXY_URL`（只收 http/https、不带账号密码和路径的
+    地址），设为 `HTTP(S)_PROXY` 及小写形式，另外带上 `NO_PROXY` 和证书相关变量；没设就不给代理，
+    继承来的 `HTTPS_PROXY` 不会传下去；
+  - `workspace` 不是 `none`：给 `SOMNIQ_WORKSPACE_ROOT`。工作任务里它取执行环境的
+    `ARIS_WORKSPACE_ROOT`（worktree），否则是项目根；
+  - `PYTHONPYCACHEPREFIX` 指向数据目录下的 `.pycache`，最后设置，包无法覆盖。
+- **项目文件副本**：
+  - 内容按哈希存进 `<配置>/plugins/files/<sha>`，每组批准生成一个只读视图
+    `<配置>/plugins/file-views/<文件集摘要>`，插件从 `SOMNIQ_PLUGIN_FILES` 读这个视图。
+  - 批准记在单独的 `<配置>/plugins/approved-files.json`，与包摘要绑定。
+  - 启用卡片和插件页都绑定页面显示时的文件集摘要；两次之间原件被改，批准会被拒绝。
+  - 冻结集带上文件集摘要，所以重新批准后，在途运行显示 `needs-restart`。
+  - 插件页有“项目文件已变”分组，可以看差异，点“批准新内容”生效。
+- **快照外的代码**：`npx`、`bunx`、`uvx`、`pnpm dlx`、`yarn dlx`、`pipx run`、`deno run <URL>` 识别为运行时下载
+  （包括经 `cmd /c` 启动的情况），没写死版本就报 `runtime-fetch`，写死了卡片上带“运行时下载”一行。
+  快照外的程序会被列出来；程序在项目目录里则直接报错，要求改用 `workspaceFiles`。
+- **升级差异**：每个服务的能力变化单列，给出前后值；扩大权限的（例如 `none` 变 `required`、新增透传名、
+  省略 `hosts`）在卡片和插件页高亮。新增的启动说明也会列出。只要能力或启动方式有变化，服务就不算“未变”。
+- **强制等级**：标签由 `capability_enforcement()` 给出，随能力一起显示在 Chat 卡片和插件页上，底部附等级说明。
+  - 已强制：环境变量、宿主控制项、工作目录、项目文件；进程树在 Windows 上已强制。
+  - 尽力而为：Unix 上的进程树。
+  - 仅声明：`network: none`、`hosts`、`workspace` 读写级别。
+- **作者侧**：
+  - `mcp-stdio-python` 模板带上 `none`/`none` 的声明；
+  - `manuscript-hygiene` 示例改为声明 `workspace: read`，并通过 `SOMNIQ_WORKSPACE_ROOT` 定位项目；
+  - Skill 第 4 步加了“声明每个服务需要什么”；
+  - `inspect` 契约返回字段、启动器、等级和等级说明。
+
+和上文设计不同的地方：
+
+- **没有升级 `approvals.json` 到 schema 2。** 文件批准单独放在 `approved-files.json`，原批准文件不动，
+  旧开发版仍然能读。
+- **强制等级没有记进批准**，所以“等级下降时要求重新批准”没有做。要等 C3：现在每个平台上的等级都是常量，不会下降。
+- **升级和回退的批准只做到一半。** 它们会拷当时原件的内容，但不像启用卡片那样核对“显示时的文件集摘要”。
+- **带 `workspaceFiles` 的包不能设为“所有项目”。** 副本属于某一个项目。
+- **副本视图没做系统级只读。** 只是在写入时去掉了写权限。
+- **C3（Linux 命名空间、Windows AppContainer 探路）都没做。**
+
+已有测试：
+
+- runtime 插件测试：声明校验、快照外代码识别、声明只到达对应启动器、副本交付与重新批准、升级差异标出扩大；
+- 真实 Python 进程测试：哨兵变量不泄漏，代理用 `ARIS_WEB_PROXY_URL` 而不是继承来的带密码地址，
+  内部键不可见，工作目录是数据目录，没声明时拿不到透传变量和 `SOMNIQ_WORKSPACE_ROOT`；
+- Desktop：启用卡片带能力和等级，显示之后原件被改则拒绝批准；
+- 前端：能力行、等级说明、扩大高亮、项目文件变更分组。
+
+应用内实测（2026-11-25，debug 版 + CDP，用户已退出正式版）：
+
+- 旧包：农场 0.11.3、WTOCK 0.1.0 没有声明，显示为不能启用，侧栏和导航里的面板也不出现。
+- `workspaceFiles`（独立测试项目）：
+  - 插件页启用时列出各项能力和等级；
+  - 进程只看到 34 个变量：声明透传的 `CAPTEST_PASS` 在，未声明的 `CAPTEST_SECRET` 不在，没有 `SOMNIQ_WORKSPACE_ROOT` 和代理；工作目录是数据目录；
+  - 插件写副本被拒（PermissionError）；
+  - 改原件后插件仍读旧副本，插件页出现“项目文件有新版本”和逐行差异；
+  - 批准后，常驻进程换成新视图，读到新内容。
+- Agent 自建 Crossref 插件（deepseek-v4.1-flash，约 3 分钟）：
+  - 声明由 Agent 自己写出：`CROSSREF_MAILTO` 透传、`api.crossref.org`、不访问项目，卡片与之一致；
+  - 批准后自动续跑，真实调用 Crossref 成功，未知 DOI 返回工具错误。
+
+实测中修了两处：
+
+- 缺声明时，插件页的标题写成“需要 DeepSeek 宿主能力”。现在声明类诊断单独用“还没写明需要什么”，并说明如何补。
+- 升级差异把“新增声明”显示成 `false → true`。现在改成一句话，具体内容看下方各行。
+
+副本回收（2026-11-25 补上）：
+
+- `PluginStore::collect_file_copies_at` 删掉没有任何东西再引用的副本（`plugins/files/<sha>`）和视图
+  （`plugins/file-views/<集合摘要>`，包括残留的 `.tmp` 暂存目录）。保留的条件：
+  - 本机任一项目的批准文件集仍列着它；
+  - 视图被本进程某个在途运行冻结着（`lifecycle::live_file_views`）。
+- 触发时机：启用、停用、移除、升级、回退成功之后；以及持有副本的运行结束时，在单独线程里执行，因为结束运行的
+  调用方可能正持有回收要用的锁。
+- 并发安全：
+  - 运行从冻结插件集到登记期间持有读闸，回收持有写闸，刚冻结的视图不会在登记前被删；
+  - 回收持有 `approvals.json` 的进程内路径锁，与所有插件变更串行，升级不会在"已批准新副本、还没决定是否恢复旧副本"
+    的中途被回收；
+  - 批准副本时，从写第一份副本到写入记录，全程持有 `approved-files.lock`，跨进程的回收看不到半成品。
+- 删除不跟随链接，也只删本模块写的名字（64 位十六进制，或其 `.tmp`）。删不掉的（Windows 上正被服务器打开的文件）
+  留到下次回收。
+- 升级到不再声明文件的版本，或升级时不批准，会撤回旧版本的文件集，否则那份过期的集合会让副本永远留着。
+- 已知边界：看不到另一个 SomniQ 进程的在途运行。那个运行冻结的视图可能在这边换批准后被删，它的服务器要到下一次运行、
+  拿到当前批准的视图后才能读文件。
+- 文件副本的回收后来并入 `plugins/collect.rs`，和快照共用一套闸门、路径锁和延后机制（见下一节）。
+
+快照回收（2026-11-25 补上，`crates/runtime/src/plugins/collect.rs`）：
+
+- 难点：快照（`packages/<digest>`）由本机所有项目共享，但每个项目的登记表放在各自项目里，信任库看不全谁在用。
+- 引用索引 `package-refs.json`：
+  - 记录每个已知项目的登记表列着哪些摘要：当前版本、`history` 里的早期版本、`original`；
+  - 每次写登记表时更新；
+  - 桌面端在启动、添加项目、移除项目时，用 SomniQ 的项目列表整体重建索引（`sync_known_projects`）；
+  - 从未重建过时（`synced: false`）一个快照也不回收，因为没见过的项目可能用着任何快照。
+- 仍在用的快照：
+  - 任一已知项目的登记表列着它；
+  - 全局列表列着它；
+  - 某条批准（`approvals.json`、`approved-files.json`）列着它；
+  - 本进程某个在途运行冻结着它。
+- 先退休、后删除：
+  - 没人用的快照先改名移到 `packages-retired/<digest>-<秒>`。下次有人按摘要查它（`snapshot_path`），会自动移回来。这覆盖两种情况：从列表移除后又加回的项目，以及从版本库恢复的登记表。
+  - 退休满 `RETIRED_SNAPSHOT_DAYS`（30 天）才删除。删除前先改名为 `.delete`，所以查找不会把删了一半的快照拿回来。
+  - Windows 上服务器还开着文件的快照改不了名，会整份留着，下次再试。
+- 延后：被在途运行挡住的副本、视图或快照，记下所属信任库；任何运行结束时，在单独线程里补一次回收。
+- 用户机器上的预演（只读计算）：23 个快照中，21 个仍被两个项目引用（主要是农场的当前版本和历史版本），只有 2 个会退休：
+  - `project-todo 0.1.0`
+  - `experiment-board 0.1.0`
+- 已知边界：
+  - 看不到另一个 SomniQ 进程的在途运行；
+  - 从 SomniQ 列表移除超过 30 天的项目，再加回来时，它独有的快照已被删除。这时插件页显示"快照不在本机，移除后重新安装"，与换一台电脑相同。

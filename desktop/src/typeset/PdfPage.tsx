@@ -3,6 +3,7 @@
 // (click-to-edit) surface, which is why it is its own module.
 import { Fragment, memo, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import { openExternalUrl } from "../api/tauri";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
 import { isPdfXrefError } from "../pdf/runtime";
 import { useStore } from "../store";
@@ -37,6 +38,12 @@ export interface PdfPageHighlight {
   height: number;
   nonce: number;
 }
+/** An internal link jumps within the PDF; a URL (`\href`, `\url`) opens in the browser. */
+function followPdfLink(link: PdfLinkRun, jump: (destination: unknown) => void): void {
+  if (link.url) void openExternalUrl(link.url);
+  else jump(link.destination);
+}
+
 export interface PdfClickPosition {
   page: number;
   x: number;
@@ -343,7 +350,7 @@ export const PdfPage = memo(function PdfPage({
           && y >= run.top && y <= run.top + run.height);
         if (!link) return;
         event.stopPropagation();
-        onPdfLinkClick(link.destination);
+        followPdfLink(link, onPdfLinkClick);
       }}
       // Inverse search is a *double* click, as in Overleaf, SumatraPDF and
       // TeXstudio. A single click is left to the reader: it focuses the pane
@@ -397,7 +404,7 @@ export const PdfPage = memo(function PdfPage({
                 // never intercepts a text-selection gesture underneath it.
                 if (event.detail !== 0) return;
                 event.stopPropagation();
-                onPdfLinkClick(link.destination);
+                followPdfLink(link, onPdfLinkClick);
               }}
             />
           ))}

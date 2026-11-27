@@ -3,7 +3,7 @@
 // panel's data, ask for a prompt to be put in the composer, and ask for a
 // project file to be opened. Everything else stays on this side.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PLUGIN_PANEL_CHANGED_EVENT, pluginsDraftPage, pluginsUiPage, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiPanel, type UiPanelState } from "../api/plugins";
+import { PLUGIN_PANEL_CHANGED_EVENT, pluginsDraftPage, pluginsUiCancelTool, pluginsUiPage, pluginsUiRunTool, pluginsUiStateGet, pluginsUiStateUpdate, samePluginProject, type ActiveUiPanel, type PluginPanelChange, type UiPanel, type UiPanelState, type UiPanelTool } from "../api/plugins";
 import type { Language } from "../store";
 import { hasNativeBackend } from "../api/transport";
 import { onWorkTaskChanged, workTaskList } from "../api/tauri";
@@ -18,6 +18,18 @@ const COPY = {
   es: { loading: "Abriendo página…", retry: "Recargar", isolation: "No se pudo aislar esta página, así que no se ejecutó." },
 };
 const MAX_PROMPT_CHARS = 4000;
+/** After the user declines a proposal, the page waits this long before it may
+ *  ask again, longer than a click in the page counts as one (5 s). */
+export const TASK_DECLINE_COOLDOWN_MS = 6000;
+/** Tool runs one page may have going at once (a long one and a status check). */
+export const MAX_PAGE_TOOL_RUNS = 2;
+/** Calls one `somniq.tool` run may make; the backend holds the same limit. */
+export const MAX_PAGE_TOOL_CALLS = 8;
+/** Runs a page may start without the user's click in one minute: a status
+ *  check now and then, not a loop that keeps a server busy. */
+export const MAX_UNASKED_TOOL_RUNS_PER_MINUTE = 12;
+/** The least time between two of a page's prompt / open-file / open-panel requests. */
+export const PAGE_ACTION_INTERVAL_MS = 1000;
 const MAX_PATH_CHARS = 1024;
 const THEME_TOKENS = { bg: "--bg-1", surface: "--bg-2", raised: "--bg-3", border: "--border", text: "--text", muted: "--text-dim", accent: "--accent" };
 
@@ -77,8 +89,16 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
   // A task the page proposed, waiting for the user; the page's call waits with it.
   const [proposal, setProposal] = useState<TaskProposal | null>(null);
   const asking = useRef<((outcome: TaskOutcome) => void) | null>(null);
-  const policy = useRef({ proposeTasks: false, title: "", projectScope: false });
-  policy.current = { proposeTasks: panel.proposeTasks === true, title: uiText(panel.title, language), projectScope: (store ?? panel).scope === "project" };
+  /** When the user last declined this page's proposal. */
+  const declinedAt = useRef(0);
+  const policy = useRef<{ proposeTasks: boolean; title: string; projectScope: boolean; tools: UiPanelTool[] }>({ proposeTasks: false, title: "", projectScope: false, tools: [] });
+  policy.current = { proposeTasks: panel.proposeTasks === true, title: uiText(panel.title, language), projectScope: (store ?? panel).scope === "project", tools: panel.tools ?? [] };
+  /** Tool runs this page has going, by run id. */
+  const toolRuns = useRef(new Set<string>());
+  /** When the page last started runs without the user's click. */
+  const unaskedRuns = useRef<number[]>([]);
+  /** When the page last filled the composer or opened a file or page. */
+  const lastSwitch = useRef(0);
   const { pluginName, id: pageId } = panel;
   // The data lives with the store panel; the page's files with this one.
   const panelId = store?.id ?? pageId;
@@ -140,9 +160,18 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
           window.dispatchEvent(new CustomEvent<PluginPanelChange>(PLUGIN_PANEL_CHANGED_EVENT, { detail: { projectPath, pluginName, panelId, origin: channel.current } }));
           return pageData(shape(), state.current);
         } catch (failure) {
-          // The agent wrote in between: take its revision and try once more.
           if (tries > 0 || !/reload before saving/i.test(String(failure))) throw failure;
+          // Someone (the agent) wrote in between. A write to another widget
+          // is no reason to refuse this one: take the new revision and save
+          // again. A write to this widget is: saving over it would drop it
+          // unseen, so the page gets the new value and decides.
+          const seen = state.current ? JSON.stringify(pageData(shape(), state.current)[widget.id] ?? null) : null;
           state.current = null;
+          const fresh = await load();
+          if (seen !== null && JSON.stringify(fresh[widget.id] ?? null) !== seen) {
+            send({ type: "data", data: fresh });
+            throw new Error(`The agent changed "${widget.id}" while the page was saving it; the page now has the agent's value. Save again if yours should replace it`);
+          }
         }
       }
     };
@@ -152,12 +181,17 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
      * user's: the call resolves when they decide. A draft being tried is
      * always declined, without showing anything.
      */
-    const propose = (args: { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined): Promise<TaskOutcome> => {
+    const propose = (args: { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined, gesture: boolean): Promise<TaskOutcome> => {
       if (draft) return Promise.resolve({ status: "declined" });
       const { proposeTasks, title: panelTitle, projectScope } = policy.current;
       if (!proposeTasks) return Promise.reject(new Error('This panel does not declare "proposeTasks": true'));
       if (!hasNativeBackend()) return Promise.reject(new Error("Background tasks need the SomniQ desktop app"));
       if (asking.current) return Promise.reject(new Error("A task proposal is already waiting for the user"));
+      // The bootstrap reports whether the user clicked or typed in this page in
+      // the last few seconds; a page cannot fake that. Without it a proposal
+      // would pop up while the user types elsewhere, or over and over.
+      if (!gesture) return Promise.reject(new Error("somniq.task must follow the user's click or key press in this page"));
+      if (Date.now() - declinedAt.current < TASK_DECLINE_COOLDOWN_MS) return Promise.reject(new Error("The user just declined a task proposal; wait before asking again"));
       const title = typeof args?.title === "string" ? args.title.trim() : "";
       const prompt = typeof args?.prompt === "string" ? args.prompt.trim() : "";
       if (!title || title.length > MAX_TASK_TITLE_CHARS) return Promise.reject(new Error(`A task title must contain 1..${MAX_TASK_TITLE_CHARS} characters`));
@@ -175,6 +209,52 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
         setProposal({ pluginName, pageId, panelTitle, title, prompt, report });
       });
     };
+    /**
+     * The page runs one MCP tool of its package, with no conversation. The
+     * tool must be in the panel's `tools`; without the user's click or key
+     * press in the page it must be declared `auto`. The backend checks both
+     * again against the reviewed declaration.
+     */
+    const runTool = async (args: { calls?: unknown; single?: unknown } | undefined, gesture: boolean) => {
+      if (draft) throw new Error("A draft being tried does not run tools");
+      if (!hasNativeBackend()) throw new Error("Tools need the SomniQ desktop app");
+      const asked = Array.isArray(args?.calls) ? args.calls as { tool?: unknown; arguments?: unknown }[] : [];
+      if (!asked.length || asked.length > MAX_PAGE_TOOL_CALLS) throw new Error(`somniq.tool runs 1..${MAX_PAGE_TOOL_CALLS} calls at a time`);
+      const calls = asked.map((call) => ({ tool: typeof call?.tool === "string" ? call.tool : "", arguments: call?.arguments ?? null }));
+      for (const { tool } of calls) {
+        const declared = policy.current.tools.find((item) => item.name === tool);
+        if (!declared) throw new Error(`${tool || "(no name)"} is not in this panel's "tools"`);
+        if (!gesture && !declared.auto) throw new Error(`somniq.tool("${tool}") must follow the user's click or key press in this page, or the tool must be declared with "auto": true`);
+      }
+      if (toolRuns.current.size >= MAX_PAGE_TOOL_RUNS) throw new Error(`This page already has ${MAX_PAGE_TOOL_RUNS} tool runs going`);
+      if (!gesture) {
+        const now = Date.now();
+        unaskedRuns.current = unaskedRuns.current.filter((at) => now - at < 60_000);
+        if (unaskedRuns.current.length >= MAX_UNASKED_TOOL_RUNS_PER_MINUTE) {
+          throw new Error(`This page ran tools by itself ${MAX_UNASKED_TOOL_RUNS_PER_MINUTE} times in the last minute; wait before the next run`);
+        }
+        unaskedRuns.current.push(now);
+      }
+      const runId = crypto.randomUUID();
+      toolRuns.current.add(runId);
+      try {
+        // One click, one run: the steps after a long first one still count as asked.
+        const outcome = await pluginsUiRunTool(projectPath, pluginName, pageId, sessionId, runId, { from: "page", calls, gesture });
+        const failed = outcome.results.find((result) => result.isError);
+        if (outcome.cancelled) throw new Error("The tool run was stopped");
+        if (outcome.error || failed || outcome.results.length < calls.length) throw new Error(failed?.text.trim() || outcome.error || "The tool run did not finish");
+        const results = outcome.results.map((result) => ({ tool: result.tool, text: result.text, structured: result.structured ?? null }));
+        return args?.single === true ? { text: results[0].text, structured: results[0].structured } : results;
+      } finally {
+        toolRuns.current.delete(runId);
+      }
+    };
+    /** Stopping needs no click: it only ends what this page started. */
+    const stopTools = async () => {
+      const runs = [...toolRuns.current];
+      await Promise.all(runs.map((runId) => pluginsUiCancelTool(runId).catch(() => undefined)));
+      return runs.length;
+    };
     // A draft being tried, or a page outside the desktop app, has no board.
     const hasBoard = !draft && hasNativeBackend();
     // Only a page that may propose tasks is told about them unasked.
@@ -186,12 +266,21 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
     };
     const receive = (event: MessageEvent) => {
       const from = page();
-      const message = event.data as { channel?: unknown; type?: unknown; id?: unknown; method?: unknown; args?: { widget?: unknown; value?: unknown }; text?: unknown; path?: unknown; panel?: unknown; height?: unknown } | null;
+      const message = event.data as { channel?: unknown; type?: unknown; id?: unknown; method?: unknown; args?: { widget?: unknown; value?: unknown }; gesture?: unknown; text?: unknown; path?: unknown; panel?: unknown; height?: unknown } | null;
       if (!from || event.source !== from || !message || typeof message !== "object" || message.channel !== channel.current) return;
       if (message.type === "error") { setSource(null); setError(copy.isolation); return; }
       if (message.type === "resize" && typeof message.height === "number" && Number.isFinite(message.height)) resize.current?.(Math.round(Math.min(GLANCE_HEIGHT.max, Math.max(GLANCE_HEIGHT.min, message.height))));
       // A draft being tried acts on nothing; it only draws and keeps its data in memory.
       if (draft && message.type !== "call") return;
+      // Filling the composer, opening a file or a page all change what the
+      // user is looking at: only right after their own click or key press in
+      // the page, and one per second, so a page cannot do it on its own or
+      // in a loop.
+      if (message.type === "prompt" || message.type === "open-file" || message.type === "open-panel") {
+        const now = Date.now();
+        if (message.gesture !== true || now - lastSwitch.current < PAGE_ACTION_INTERVAL_MS) return;
+        lastSwitch.current = now;
+      }
       // The page asks; the user sends. A page never sends a message by itself.
       if (message.type === "prompt" && typeof message.text === "string" && message.text.trim() && message.text.length <= MAX_PROMPT_CHARS) act.current({ type: "prompt", text: message.text, send: false });
       if (message.type === "open-file" && typeof message.path === "string" && message.path && message.path.length <= MAX_PATH_CHARS) act.current({ type: "open-file", path: message.path });
@@ -200,8 +289,11 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
       if (message.type !== "call" || typeof message.id !== "number") return;
       const { id, method, args } = message;
       const work = method === "data" ? load() : method === "set" ? (writes.current = writes.current.catch(() => undefined).then(() => write(args?.widget, args?.value)))
-        : method === "task" ? propose(args as { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined).then((outcome) => { if (outcome.status !== "declined") void pushTasks(); return outcome; })
-        : method === "tasks" ? tasks() : Promise.reject(new Error(`Unknown call: ${String(method)}`));
+        : method === "task" ? propose(args as { title?: unknown; prompt?: unknown; reportTo?: unknown } | undefined, message.gesture === true).then((outcome) => { if (outcome.status !== "declined") void pushTasks(); return outcome; })
+        : method === "tasks" ? tasks()
+        : method === "tool" ? runTool(args as { calls?: unknown; single?: unknown } | undefined, message.gesture === true)
+        : method === "stopTools" ? stopTools()
+        : Promise.reject(new Error(`Unknown call: ${String(method)}`));
       const mine = channel.current;
       void (work as Promise<unknown>).then(
         (value) => { if (mine === channel.current) send({ type: "result", id, ok: true, value }); },
@@ -259,6 +351,7 @@ export default function PluginPageFrame({ panel, store, projectPath, language, o
   // No `allow-same-origin`: the shell and the page inside it have no origin,
   // no storage and no way to reach this document.
   const decided = (outcome: TaskOutcome) => {
+    if (outcome.status === "declined") declinedAt.current = Date.now();
     asking.current?.(outcome);
     asking.current = null;
     setProposal(null);

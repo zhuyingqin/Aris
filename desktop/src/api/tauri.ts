@@ -251,6 +251,7 @@ import type {
   MemoryGovernanceHit,
   MemoryExplorerSnapshot,
   MemoryStatusView,
+  MemoryLessonsView,
   MemoryV2AtomView,
   MemoryV2BuildProgress,
   MemoryV2BuildStart,
@@ -644,6 +645,14 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const memoryStatus = () => invoke<MemoryStatusView>("memory_status");
 export const memoryV2Status = () => invoke<MemoryV2StatusView>("memory_v2_status");
+export const memoryLessonsStatus = () =>
+  invoke<MemoryLessonsView>("memory_lessons_status");
+export const memoryLessonsSetEnabled = (enabled: boolean) =>
+  invoke<void>("memory_lessons_set_enabled", { enabled });
+export const memoryLessonDelete = (lessonId: string) =>
+  invoke<boolean>("memory_lesson_delete", { lessonId });
+export const memoryLessonSetActive = (lessonId: string, active: boolean) =>
+  invoke<boolean>("memory_lesson_set_active", { lessonId, active });
 export const memoryV2ConfirmR3 = (atomId: string) =>
   invoke<boolean>("memory_v2_confirm_r3", { atomId });
 export const memoryV2PendingR3 = () =>
@@ -1958,6 +1967,12 @@ export const typesetRevisionCompare = (baseRevisionId: string, targetRevisionId:
     ? preview<TypesetRevisionComparison>({ baseRevisionId, targetRevisionId, operations: [] })
     : invoke<TypesetRevisionComparison>("typeset_revision_compare", { baseRevisionId, targetRevisionId });
 
+/** A revision's recorded text for one file (by content hash); null for binary or very large files. */
+export const typesetRevisionBlobText = (contentHash: string) =>
+  isFilePreviewMode()
+    ? preview<string | null>(null)
+    : invoke<string | null>("typeset_revision_blob_text", { contentHash });
+
 export const typesetRevisionRestoreFile = (revisionId: string, path: string) =>
   isFilePreviewMode()
     ? preview<TypesetProjectRevision>(previewRevision({ reason: "restore-file", origin: "history" }))
@@ -2117,7 +2132,41 @@ export interface TypesetComment {
   resolved: boolean;
   createdAtMs: number;
   updatedAtMs: number;
+  /** The discussion under the comment; absent on comments made before replies. */
+  replies?: TypesetCommentReply[];
 }
+
+export interface TypesetCommentReply {
+  /** Empty for a new reply; the backend stamps id and time. */
+  id: string;
+  body: string;
+  author: string;
+  origin: "user" | "chat" | "reviewer" | string;
+  createdAtMs: number;
+}
+
+/** A tracked insertion or deletion as stored, with its surrounding text. */
+export interface TypesetTrackedChangeRecord {
+  id: string;
+  kind: "insert" | "delete";
+  from: number;
+  to: number;
+  text: string;
+  before: string;
+  after: string;
+  author: string;
+  createdAtMs: number;
+}
+
+export const typesetTrackedChangesLoad = (path: string) =>
+  isFilePreviewMode()
+    ? preview<TypesetTrackedChangeRecord[]>([])
+    : invoke<TypesetTrackedChangeRecord[]>("typeset_tracked_changes_load", { path });
+
+export const typesetTrackedChangesSave = (path: string, changes: TypesetTrackedChangeRecord[]) =>
+  isFilePreviewMode()
+    ? preview<void>(undefined)
+    : invoke<void>("typeset_tracked_changes_save", { path, changes });
 
 export const typesetCommentsList = (path: string) =>
   isFilePreviewMode() ? preview<TypesetComment[]>([]) : invoke<TypesetComment[]>("typeset_comments_list", { path });
@@ -2130,15 +2179,41 @@ export const typesetCommentUpsert = (path: string, comment: TypesetComment) =>
 export const typesetCommentDelete = (path: string, id: string) =>
   isFilePreviewMode() ? preview(undefined) : invoke<void>("typeset_comment_delete", { path, id });
 
-export const typesetProjectSearch = (query: string, caseSensitive = false) =>
+/** Typeset choices stored with the workspace, so the agent's LaTeXCompile honours them too. */
+export interface TypesetProjectSettings {
+  mainDocument?: string | null;
+  engine?: "pdflatex" | "xelatex" | "lualatex" | null;
+}
+
+export const typesetProjectSettingsRead = () =>
+  isFilePreviewMode()
+    ? preview<TypesetProjectSettings>({})
+    : invoke<TypesetProjectSettings>("typeset_project_settings_read");
+
+export const typesetProjectSettingsWrite = (settings: TypesetProjectSettings) =>
+  isFilePreviewMode()
+    ? preview<void>(undefined)
+    : invoke<void>("typeset_project_settings_write", {
+      settings: {
+        ...(settings.mainDocument ? { mainDocument: settings.mainDocument } : {}),
+        ...(settings.engine ? { engine: settings.engine } : {}),
+      },
+    });
+
+/**
+ * Search the LaTeX sources of one project. `scopePath` is the project folder
+ * (workspace-relative; `""`/null is the workspace root). Other papers in the
+ * workspace are never searched or replaced.
+ */
+export const typesetProjectSearch = (query: string, caseSensitive = false, scopePath: string | null = null) =>
   isFilePreviewMode()
     ? preview<TypesetProjectSearchMatch[]>([])
-    : invoke<TypesetProjectSearchMatch[]>("typeset_project_search", { query, caseSensitive });
+    : invoke<TypesetProjectSearchMatch[]>("typeset_project_search", { query, caseSensitive, scopePath });
 
-export const typesetProjectReplace = (query: string, replacement: string, caseSensitive = false) =>
+export const typesetProjectReplace = (query: string, replacement: string, caseSensitive = false, scopePath: string | null = null) =>
   isFilePreviewMode()
     ? preview<TypesetProjectReplaceResult>({ filesChanged: 0, replacements: 0 })
-    : invoke<TypesetProjectReplaceResult>("typeset_project_replace", { query, replacement, caseSensitive });
+    : invoke<TypesetProjectReplaceResult>("typeset_project_replace", { query, replacement, caseSensitive, scopePath });
 
 /** Copy a user-selected file into the active project's durable chat uploads. */
 export const chatImportAttachment = (sourcePath: string) =>
@@ -2156,15 +2231,24 @@ export const chatImportAttachmentData = (sourceName: string, data: Uint8Array) =
   });
 
 export interface ImportedTypesetImage {
+  /** Workspace path of the stored image. */
   path: string;
+  /** What to write in `\includegraphics`: relative to the root document's folder. */
+  includePath?: string;
   name: string;
   bytes: number;
 }
 
-/** Store a clipboard image in the project's portable `figures/` directory. */
-export const typesetImportImageData = (sourceName: string, data: Uint8Array) =>
+/**
+ * Store a clipboard image in `figures/` beside `documentPath` (the root
+ * document TeX compiles; the workspace's `figures/` when omitted).
+ */
+export const typesetImportImageData = (sourceName: string, data: Uint8Array, documentPath?: string | null) =>
   tauriInvoke<ImportedTypesetImage>("typeset_import_image_data", data, {
-    headers: { "x-somniq-image-name": utf8Base64(sourceName) },
+    headers: {
+      "x-somniq-image-name": utf8Base64(sourceName),
+      ...(documentPath ? { "x-somniq-image-document": utf8Base64(documentPath) } : {}),
+    },
   });
 
 export const fileOpen = (path: string) =>
@@ -2369,6 +2453,20 @@ export const chatPermissionGet = (sessionId: string, projectId?: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId, projectId: projectId ?? null });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
   invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
+/** Computer-use mode: the session's tools shrink to an allow-list and an
+ *  on-screen indicator shows while its turns run. In memory, per session. */
+export const chatComputerUseGet = (sessionId: string) =>
+  invoke<boolean>("chat_computer_use_get", { sessionId });
+export const chatComputerUseSet = (sessionId: string, enabled: boolean) =>
+  invoke<boolean>("chat_computer_use_set", { sessionId, enabled });
+export const computerControlStatus = () =>
+  invoke<import("../computerControl/indicatorCopy").ControlStatus>("computer_control_status");
+export const computerControlStop = () => invoke<number>("computer_control_stop");
+/** Answer a window-access card: the chosen window's handle, or null to refuse. */
+export const computerAccessRespond = (toolUseId: string, hwnd: number | null) =>
+  invoke<void>("computer_access_respond", { toolUseId, hwnd });
+export const computerAccessPending = (sessionId: string) =>
+  invoke<import("../chat/ComputerUseControls").ComputerAccessRequest[]>("computer_access_pending", { sessionId });
 export const chatPermissionRespond = (promptId: string, allow: boolean) =>
   invoke<void>("chat_permission_respond", { promptId, allow });
 export const chatQuestionRespond = (toolUseId: string, answer: string) =>
@@ -2722,6 +2820,13 @@ export interface ChatModelRetryEvent {
 }
 export const onChatModelRetry = (handler: (event: ChatModelRetryEvent) => void) =>
   listen<ChatModelRetryEvent>("chat-model-retry", (e) => handler(e.payload));
+/** The turn is compacting history before it can ask the model. */
+export interface ChatCompactionEvent {
+  sessionId: string;
+  phase: "started" | "finished";
+}
+export const onChatCompaction = (handler: (event: ChatCompactionEvent) => void) =>
+  listen<ChatCompactionEvent>("chat-compaction", (e) => handler(e.payload));
 export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEvent) => void) =>
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>

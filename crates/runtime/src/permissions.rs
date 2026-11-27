@@ -50,6 +50,12 @@ pub enum PermissionOutcome {
 pub struct PermissionPolicy {
     active_mode: PermissionMode,
     tool_requirements: BTreeMap<String, PermissionMode>,
+    /// Refuse every tool that has no registered requirement, whatever the
+    /// active mode. Without this, an unregistered name counts as needing
+    /// `DangerFullAccess`, so under that mode (the desktop default) a model can
+    /// call a tool that was deliberately left out of a narrowed catalog just by
+    /// naming it.
+    catalog_only: bool,
 }
 
 impl PermissionPolicy {
@@ -58,7 +64,23 @@ impl PermissionPolicy {
         Self {
             active_mode,
             tool_requirements: BTreeMap::new(),
+            catalog_only: false,
         }
+    }
+
+    /// Only tools registered with [`Self::with_tool_requirement`] can ever be
+    /// allowed; any other name is denied outright, without a prompt and even
+    /// in `Allow` mode. For sessions whose catalog is an allow-list (computer
+    /// use), where "not offered" has to mean "not callable".
+    #[must_use]
+    pub fn with_catalog_only(mut self) -> Self {
+        self.catalog_only = true;
+        self
+    }
+
+    #[must_use]
+    pub fn is_catalog_only(&self) -> bool {
+        self.catalog_only
     }
 
     #[must_use]
@@ -92,6 +114,15 @@ impl PermissionPolicy {
         input: &str,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        // Checked before every mode shortcut: a catalog-only policy has no
+        // mode, prompt, or answer that can make an unlisted tool callable.
+        if self.catalog_only && !self.tool_requirements.contains_key(tool_name) {
+            return PermissionOutcome::Deny {
+                reason: format!(
+                    "tool '{tool_name}' is not available in this session; only the tools offered this turn can be called, and this cannot be approved"
+                ),
+            };
+        }
         let current_mode = self.active_mode();
         let required_mode = self.required_mode_for(tool_name);
         // Allow mode always bypasses checks.

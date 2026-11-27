@@ -9,6 +9,7 @@ vi.mock("../api/plugins", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/plugins")>()),
   pluginsList: vi.fn(), pluginsPreview: vi.fn(), pluginsInstall: vi.fn(),
   pluginsSetEnabled: vi.fn(), pluginsSetGlobal: vi.fn(), pluginsRemove: vi.fn(), pluginsUpgrade: vi.fn(), pluginsCheckMcp: vi.fn(),
+  pluginsDraftChanges: vi.fn(), pluginsRollbackPreview: vi.fn(), pluginsRollback: vi.fn(), pluginsWorkspaceFileChanges: vi.fn(),
   bridgeBackendPluginChanges: vi.fn(),
 }));
 
@@ -56,6 +57,13 @@ beforeEach(() => {
   vi.mocked(api.pluginsInstall).mockResolvedValue(installed);
   vi.mocked(api.pluginsSetEnabled).mockResolvedValue(enabled);
   vi.mocked(api.pluginsRemove).mockResolvedValue();
+  vi.mocked(api.pluginsDraftChanges).mockResolvedValue([]);
+});
+
+const serverChange: api.PackageFileChange = { path: "server.py", change: "changed", binary: false, before: "print(1)\n", after: "print(2)\n", beforeBytes: 9, afterBytes: 9 };
+const sameDeclarations = (): api.CapabilityDiff => ({
+  skills: noChange, uiPanels: noChange, mcpServers: [{ name: "papers", change: "unchanged", before: "python ./server.py", after: "python ./server.py", envAdded: [], envRemoved: [], envChanged: [] }],
+  commands: noChange, envKeys: noChange, changed: false,
 });
 afterEach(cleanup);
 
@@ -81,7 +89,7 @@ describe("Plugin packages", () => {
     expect(api.pluginsSetEnabled).not.toHaveBeenCalled();
     fireEvent.click(within(enableConfirm).getByRole("button", { name: "确认启用" }));
     await screen.findByText("已启用");
-    expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, true, preview.digest);
+    expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, true, preview.digest, undefined);
     // Removal asks first.
     fireEvent.click(screen.getByRole("button", { name: "移除 @lab/evidence" }));
     expect(api.pluginsRemove).not.toHaveBeenCalled();
@@ -97,7 +105,7 @@ describe("Plugin packages", () => {
     render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
     await screen.findByText("dsh-goal requires DeepSeek host");
     fireEvent.click(screen.getByRole("switch", { name: "Disable @lab/evidence" }));
-    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, false, preview.digest));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, preview.name, false, preview.digest, null));
     await waitFor(() => expect(screen.getByRole<HTMLButtonElement>("switch", { name: "Enable @lab/evidence" }).disabled).toBe(true));
   });
 
@@ -137,7 +145,7 @@ describe("Plugin packages", () => {
     expect(within(card).getByText("1 Skills")).toBeTruthy();
     expect(within(card).queryByText(/MCP/)).toBeNull();
     fireEvent.click(within(card).getByRole("switch", { name: "Enable @somniq/panels" }));
-    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true, installed.digest));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@somniq/panels", true, installed.digest, undefined));
     expect(screen.queryByRole("group", { name: "Enable @somniq/panels" })).toBeNull();
   });
 
@@ -167,6 +175,18 @@ describe("Plugin packages", () => {
     expect(within(card).getByText("Can't enable yet")).toBeTruthy();
     expect(within(card).queryByText("Needs DeepSeek host capabilities")).toBeNull();
     expect(within(card).getByText(/cannot be replaced by a plugin/)).toBeTruthy();
+  });
+
+  it("tells a package without a capability declaration to declare, not to wait for the host", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([{
+      ...installed, canEnable: false, status: "blocked", lifecycle: lifecycle("blocked"),
+      diagnostics: [{ code: "capabilities-missing", message: "The MCP server evidence does not declare what it needs", severity: "error" }],
+    }]);
+    render(<PluginPackages projectPath={projectPath} language="cn" onChanged={onChanged} />);
+    const card = await screen.findByRole("article", { name: "@lab/evidence" });
+    expect(within(card).getByText("还没写明需要什么")).toBeTruthy();
+    expect(within(card).getByText(/somniq\.capabilities/)).toBeTruthy();
+    expect(within(card).queryByText("需要 DeepSeek 宿主能力")).toBeNull();
   });
   it("says which official plugin a waiting package needs instead of calling it disabled", async () => {
     vi.mocked(api.pluginsList).mockResolvedValue([{
@@ -279,6 +299,82 @@ describe("Plugin packages", () => {
     fireEvent.click(screen.getByText("Preview"));
     expect(await screen.findByRole("button", { name: "Upgrade and disable" })).toBeTruthy();
     expect(screen.getByText(/the package is disabled by the upgrade/)).toBeTruthy();
+  });
+
+  it("lists every file an upgrade changes and never calls changed code no change", async () => {
+    vi.mocked(api.pluginsList).mockResolvedValue([enabled]);
+    vi.mocked(api.pluginsPreview).mockResolvedValue(upgradePreview(upgradePlan({ diff: sameDeclarations() })));
+    vi.mocked(api.pluginsDraftChanges).mockResolvedValue([serverChange]);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    await screen.findByRole("article", { name: "@lab/evidence" });
+    await previewSource("en");
+    // The files come from the draft checked against the digest this preview shows.
+    await waitFor(() => expect(api.pluginsDraftChanges).toHaveBeenCalledWith(projectPath, pkg.source, "b".repeat(64)));
+    const diff = await screen.findByRole("group", { name: "Compared with the version approved on this computer" });
+    expect(within(diff).getByText(/but 1 files changed: the code that runs may differ/)).toBeTruthy();
+    expect(within(diff).queryByText(/^No change to/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show changed files (1)" }));
+    expect(screen.getByText("server.py")).toBeTruthy();
+  });
+
+  it("shows what going back to a version changes before the click that approves it", async () => {
+    const older: api.PluginVersion = { version: "1.2.0", digest: "c".repeat(64), source: pkg.source, replacedAt: 1_795_600_000 };
+    vi.mocked(api.pluginsList).mockResolvedValue([{ ...enabled, history: [older] }]);
+    let shown!: (preview: api.PluginRollbackPreview) => void;
+    vi.mocked(api.pluginsRollbackPreview).mockReturnValueOnce(new Promise((resolve) => { shown = resolve; }));
+    vi.mocked(api.pluginsRollback).mockResolvedValue({ ...enabled, version: "1.2.0", digest: older.digest });
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Earlier versions 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Go back to this version" }));
+    expect(api.pluginsRollbackPreview).toHaveBeenCalledWith(projectPath, "@lab/evidence", older.digest);
+    // Nothing to approve until it is on screen.
+    const confirm = screen.getByRole("button", { name: "Go back" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(screen.getByText("Reading what this version changes…")).toBeTruthy();
+    shown({
+      version: "1.2.0", digest: older.digest, canEnable: true, diagnostics: [],
+      plan: upgradePlan({ change: "downgrade", diff: { ...sameDeclarations(), skills: { added: [], removed: ["audit-claims"] }, changed: true } }),
+      files: [serverChange],
+    });
+    const diff = await screen.findByRole("group", { name: "Compared with the version approved on this computer" });
+    expect(within(diff).getByText("− audit-claims")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show changed files (1)" })).toBeTruthy();
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.pluginsRollback).toHaveBeenCalledWith(projectPath, "@lab/evidence", older.digest, "a".repeat(64), true));
+
+    // A version that no longer passes the checks goes back disabled, not approved.
+    cleanup();
+    vi.mocked(api.pluginsRollback).mockClear();
+    vi.mocked(api.pluginsRollbackPreview).mockResolvedValueOnce({
+      version: "1.2.0", digest: older.digest, canEnable: false, diagnostics: [{ code: "ui", message: "unknown field", severity: "error" }],
+      plan: upgradePlan({ change: "downgrade", diff: sameDeclarations() }), files: [],
+    });
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Earlier versions 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Go back to this version" }));
+    expect(await screen.findByText(/no longer passes the checks/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await waitFor(() => expect(api.pluginsRollback).toHaveBeenCalledWith(projectPath, "@lab/evidence", older.digest, "a".repeat(64), false));
+  });
+
+  it("keeps the approved copy of a changed project file until the user approves the new one", async () => {
+    const handed: api.InstalledPlugin = {
+      ...enabled,
+      workspaceFiles: [{ path: "scripts/normalize.py", approved: "1".repeat(64), current: "2".repeat(64) }],
+      workspaceFilesDigest: "d".repeat(64),
+    };
+    vi.mocked(api.pluginsList).mockResolvedValue([handed]);
+    vi.mocked(api.pluginsWorkspaceFileChanges).mockResolvedValue([{ path: "scripts/normalize.py", change: "changed", binary: false, before: "V = 1\n", after: "V = 2\n", beforeBytes: 6, afterBytes: 6 }]);
+    render(<PluginPackages projectPath={projectPath} language="en" onChanged={onChanged} />);
+    const notice = await screen.findByRole("group", { name: "Project files changed" });
+    expect(within(notice).getByText(/keeps using the copies you approved of scripts\/normalize.py/)).toBeTruthy();
+    expect(api.pluginsWorkspaceFileChanges).toHaveBeenCalledWith(projectPath, "@lab/evidence");
+    fireEvent.click(await within(notice).findByRole("button", { name: "Show changed files (1)" }));
+    expect(within(notice).getByText("scripts/normalize.py")).toBeTruthy();
+    // The click approves the contents this view showed, nothing newer.
+    fireEvent.click(within(notice).getByRole("button", { name: "Approve the new contents" }));
+    await waitFor(() => expect(api.pluginsSetEnabled).toHaveBeenCalledWith(projectPath, "@lab/evidence", true, pkg.digest, "d".repeat(64)));
   });
 
   it("shows a change an agent or an approval card made in the Chat", async () => {

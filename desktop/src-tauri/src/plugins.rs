@@ -69,10 +69,12 @@ pub async fn plugins_upgrade(
     approve: bool,
 ) -> Result<InstalledPlugin, String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || {
+    let result = off_main_thread(move || {
         store.upgrade(source, &expected_digest, &expected_current_digest, approve)
     })
-    .await
+    .await;
+    forget_warm_panel_servers();
+    result
 }
 
 /// Put an earlier version of a package back. The click is the user's, so
@@ -87,7 +89,34 @@ pub async fn plugins_rollback(
     approve: bool,
 ) -> Result<InstalledPlugin, String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || store.rollback(&name, &digest, &expected_current_digest, approve)).await
+    let result = off_main_thread(move || store.rollback(&name, &digest, &expected_current_digest, approve)).await;
+    forget_warm_panel_servers();
+    result
+}
+
+/// What going back to an earlier version changes, for the confirmation the
+/// click approves.
+#[tauri::command]
+pub async fn plugins_rollback_preview(
+    projects: State<'_, ProjectState>,
+    project_path: String,
+    name: String,
+    digest: String,
+) -> Result<runtime::plugins::PluginRollbackPreview, String> {
+    let store = bound_store(&current_project_path(&projects)?, &project_path)?;
+    off_main_thread(move || store.rollback_preview(&name, &digest)).await
+}
+
+/// What changed in the project files a plugin is handed since their copies
+/// were approved: what turning it on again would approve.
+#[tauri::command]
+pub async fn plugins_workspace_file_changes(
+    projects: State<'_, ProjectState>,
+    project_path: String,
+    name: String,
+) -> Result<Vec<runtime::plugins::PackageFileChange>, String> {
+    let store = bound_store(&current_project_path(&projects)?, &project_path)?;
+    off_main_thread(move || store.workspace_file_changes(&name)).await
 }
 
 /// Every file an upgrade card's draft changes, with both sides' text.
@@ -162,14 +191,18 @@ pub async fn plugins_set_enabled(
     name: String,
     enabled: bool,
     expected_digest: Option<String>,
+    expected_files: Option<String>,
 ) -> Result<InstalledPlugin, String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    // The page sends the digest it showed; enabling then approves exactly that.
-    off_main_thread(move || match expected_digest {
-        Some(digest) => store.set_enabled_shown(&name, enabled, &digest),
+    // The page sends the digest it showed (and the project files' digest it
+    // showed); enabling then approves exactly that.
+    let result = off_main_thread(move || match expected_digest {
+        Some(digest) => store.set_enabled_shown_files(&name, enabled, &digest, expected_files.as_deref()),
         None => store.set_enabled(&name, enabled),
     })
-    .await
+    .await;
+    forget_warm_panel_servers();
+    result
 }
 
 /// Turn "all projects" on or off for a package of this project.
@@ -182,11 +215,13 @@ pub async fn plugins_set_global(
     expected_digest: Option<String>,
 ) -> Result<InstalledPlugin, String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || match expected_digest {
+    let result = off_main_thread(move || match expected_digest {
         Some(digest) => store.set_global_shown(&name, global, &digest),
         None => store.set_global(&name, global),
     })
-    .await
+    .await;
+    forget_warm_panel_servers();
+    result
 }
 
 #[tauri::command]
@@ -197,11 +232,13 @@ pub async fn plugins_remove(
     expected_digest: Option<String>,
 ) -> Result<(), String> {
     let store = bound_store(&current_project_path(&projects)?, &project_path)?;
-    off_main_thread(move || match expected_digest {
+    let result = off_main_thread(move || match expected_digest {
         Some(digest) => store.remove_confirmed(&name, &digest),
         None => store.remove(&name),
     })
-    .await
+    .await;
+    forget_warm_panel_servers();
+    result
 }
 
 #[tauri::command]
@@ -255,6 +292,564 @@ pub async fn plugins_ui_page(
     off_main_thread(move || store.ui_page(&name, &panel_id)).await
 }
 
+// ── Tools a panel runs without a conversation ──────────────────────────────
+//
+// A `tool` button or form, or a page's `somniq.tool`, calls the package's own
+// MCP tools directly: no model, no turn, no prompt. The calls come from the
+// reviewed declaration (a view only names the widget the user clicked), every
+// tool must be listed in the panel's `tools`, which the approval card shows,
+// and the servers are started exactly as a Chat turn starts them: the
+// package's approved configuration, as a plugin process.
+
+/// How long the package's servers get to start and list their tools.
+const PANEL_TOOL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(45);
+/// The longest one call may run (a first build can take this long); the user
+/// can stop it sooner.
+const PANEL_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// The most text of one call kept for the view.
+const PANEL_TOOL_TEXT_CHARS: usize = 32_000;
+
+/// Which run a view asks for: a button or form of the panel, or one call from
+/// the panel's own page.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "from", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum PanelToolRequest {
+    Widget {
+        widget_id: String,
+        #[serde(default)]
+        values: std::collections::BTreeMap<String, Value>,
+    },
+    Page {
+        /// Made one after another, as one run.
+        calls: Vec<PageToolCall>,
+        /// The user clicked or typed in the page in the last few seconds.
+        #[serde(default)]
+        gesture: bool,
+    },
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageToolCall {
+    tool: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelToolResult {
+    pub tool: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured: Option<Value>,
+    pub is_error: bool,
+    /// The widget the output was put in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// How long the call took, for the run record.
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelToolOutcome {
+    /// Each call made, in order, the failed one included.
+    pub results: Vec<PanelToolResult>,
+    /// Why the run stopped before its last call, or why it could not start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub cancelled: bool,
+}
+
+/// Stop signals of the runs in flight, by the id the view gave each.
+static PANEL_TOOL_RUNS: std::sync::LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Removes a run's stop signal however the run ends.
+struct PanelToolRunGuard(String);
+impl Drop for PanelToolRunGuard {
+    fn drop(&mut self) {
+        if let Ok(mut runs) = PANEL_TOOL_RUNS.lock() {
+            runs.remove(&self.0);
+        }
+    }
+}
+
+/// `text` without ANSI escape sequences (colours, cursor moves): ESC `[` up
+/// to its final letter, ESC `]` up to BEL or ESC `\`, and any other ESC with
+/// the character after it.
+fn strip_terminal_codes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The text a tool returned, as Chat shows it to the model.
+fn panel_tool_text(result: &runtime::McpToolCallResult) -> String {
+    let mut parts = vec![];
+    for content in &result.content {
+        match content.kind.as_str() {
+            "text" => {
+                if let Some(text) = content.data.get("text").and_then(Value::as_str) {
+                    parts.push(text.to_string());
+                }
+            }
+            "resource" => {
+                if let Some(text) = content
+                    .data
+                    .get("resource")
+                    .and_then(|resource| resource.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    parts.push(text.to_string());
+                }
+            }
+            "image" => parts.push("[image]".into()),
+            other => parts.push(format!("[MCP content: {other}]")),
+        }
+    }
+    // A panel is not a terminal: colour codes from a tool's log only show as noise.
+    let text = strip_terminal_codes(&parts.join("\n"));
+    if text.chars().count() > PANEL_TOOL_TEXT_CHARS {
+        let kept: String = text.chars().take(PANEL_TOOL_TEXT_CHARS).collect();
+        format!("{kept}\n…")
+    } else {
+        text
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn plugins_ui_run_tool(
+    app: AppHandle,
+    projects: State<'_, ProjectState>,
+    project_path: String,
+    name: String,
+    panel_id: String,
+    session_id: String,
+    run_id: String,
+    request: PanelToolRequest,
+) -> Result<PanelToolOutcome, String> {
+    let workspace = current_project_path(&projects)?;
+    let store = Arc::new(bound_store(&workspace, &project_path)?);
+    if run_id.is_empty() || run_id.len() > 128 {
+        return Err("A tool run needs an id".into());
+    }
+    // Who asked, for the run record: a button or form (always a click), or
+    // the page, with or without one.
+    let (asked_from, asked_by, asked_with_click) = match &request {
+        PanelToolRequest::Widget { widget_id, .. } => ("widget", widget_id.clone(), true),
+        PanelToolRequest::Page { gesture, .. } => ("page", panel_id.clone(), *gesture),
+    };
+    // A page can run its tools without a click and never passes through the
+    // chat runtime's policy, so while a computer-use turn is running it would
+    // be an unchecked way to execute code. A user's own click still works.
+    if !asked_with_click && crate::computer_control::is_active(&app) {
+        return Err(runtime::ui_lang::tr(
+            "电脑操作进行中：插件页面暂时不能在没有点击的情况下运行工具",
+            "Computer use is running: plugin pages cannot run tools without a click right now",
+            "El uso del ordenador está en curso: las páginas de complementos no pueden ejecutar herramientas sin un clic por ahora",
+        ));
+    }
+    let plan = {
+        let (store, name, panel_id) = (store.clone(), name.clone(), panel_id.clone());
+        off_main_thread(move || match request {
+            PanelToolRequest::Widget { widget_id, values } => {
+                store.ui_tool_run_for_widget(&name, &panel_id, &widget_id, &values)
+            }
+            PanelToolRequest::Page { calls, gesture } => store.ui_tool_run_for_page(
+                &name,
+                &panel_id,
+                calls.into_iter().map(|call| (call.tool, call.arguments)).collect(),
+                gesture,
+            ),
+        })
+        .await?
+    };
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut runs = PANEL_TOOL_RUNS.lock().map_err(|_| "tool runs poisoned".to_string())?;
+        if runs.contains_key(&run_id) {
+            return Err("A run with this id is already going".into());
+        }
+        runs.insert(run_id.clone(), stop.clone());
+    }
+    let _guard = PanelToolRunGuard(run_id);
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let planned: Vec<Value> = plan
+        .calls
+        .iter()
+        .map(|call| {
+            json!({
+                "tool": call.tool,
+                // Names only: a value may be a login code the user typed.
+                "argumentKeys": call.arguments.as_ref().map(|arguments| arguments.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                "into": call.into,
+            })
+        })
+        .collect();
+    let digest = plan.package_digest.clone();
+    let (outcome, changed) = run_panel_tools(store.clone(), plan, &name, &panel_id, &session_id, stop).await;
+    let record = json!({
+        "at": started_at,
+        "runId": _guard.0,
+        "plugin": name,
+        "packageDigest": digest,
+        "panel": panel_id,
+        "from": asked_from,
+        "by": asked_by,
+        "click": asked_with_click,
+        "planned": planned,
+        "results": outcome.results.iter().map(|result| json!({
+            "tool": result.tool,
+            "ok": !result.is_error,
+            "into": result.into,
+            "outputChars": result.text.chars().count(),
+            "elapsedMs": result.elapsed_ms,
+        })).collect::<Vec<_>>(),
+        "cancelled": outcome.cancelled,
+        "error": outcome.error,
+    });
+    let recorded = off_main_thread(move || store.record_tool_run(&record)).await;
+    if let Err(error) = recorded {
+        eprintln!("SomniQ desktop: could not record a panel tool run: {error}");
+    }
+    if changed {
+        emit_plugin_panel_changed(
+            &app,
+            &workspace,
+            &PanelChange {
+                plugin: name,
+                panel: panel_id,
+            },
+        );
+    }
+    Ok(outcome)
+}
+
+/// Make a run's calls in order and put each output where it is declared to
+/// go. Returns what happened and whether a widget changed. Separate from the
+/// command so a test can drive it against a real server.
+pub(crate) async fn run_panel_tools(
+    store: Arc<PluginStore>,
+    plan: runtime::plugins::UiToolRun,
+    name: &str,
+    panel_id: &str,
+    session_id: &str,
+    stop: Arc<tokio::sync::Notify>,
+) -> (PanelToolOutcome, bool) {
+    let mut outcome = PanelToolOutcome::default();
+    enum Step<T> {
+        Done(T),
+        Stopped,
+        TimedOut,
+    }
+    let key = warm_key(name, &plan.servers);
+    // The package's servers from an earlier run, when they are free; a run
+    // already using them (a long capture) leaves this one to start its own.
+    let reused = warm_entry(&key)
+        .and_then(|entry| entry.manager.clone().try_lock_owned().ok().map(|guard| (entry, guard)));
+    let (mut held, tools, failures) = match reused {
+        Some((entry, guard)) => {
+            let tools = entry.tools.clone();
+            (Held::Warm(entry, guard), tools, vec![])
+        }
+        None => {
+            let mut manager = runtime::McpServerManager::from_servers(&plan.servers);
+            let discovered = tokio::select! {
+                found = manager.discover_tools_resilient_with_timeout(PANEL_TOOL_DISCOVERY_TIMEOUT) => Step::Done(found),
+                () = stop.notified() => Step::Stopped,
+            };
+            let Step::Done((tools, failures)) = discovered else {
+                let _ = manager.shutdown().await;
+                outcome.cancelled = true;
+                return (outcome, false);
+            };
+            // Kept for the next click only when every server answered.
+            let held = if failures.is_empty() { keep_warm(&key, manager, &tools) } else { Held::Fresh(manager) };
+            (held, tools, failures)
+        }
+    };
+    let manager: &mut runtime::McpServerManager = match &mut held {
+        Held::Warm(_, guard) => &mut **guard,
+        Held::Fresh(manager) => manager,
+    };
+    // A stopped, timed-out or failed transport leaves the server in a state
+    // nobody can vouch for: it is not used again.
+    let mut broken = false;
+    let mut changed = false;
+    for call in &plan.calls {
+        let routes = tools.iter().filter(|tool| tool.raw_name == call.tool).collect::<Vec<_>>();
+        let qualified = match routes.as_slice() {
+            [route] => route.qualified_name.clone(),
+            [] => {
+                let why = if failures.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " ({})",
+                        failures.iter().map(|(server, error)| format!("{server}: {error}")).collect::<Vec<_>>().join("; ")
+                    )
+                };
+                outcome.error = Some(format!("The package's MCP server has no tool {}{why}", call.tool));
+                break;
+            }
+            _ => {
+                outcome.error = Some(format!("More than one MCP server of this package has a tool {}", call.tool));
+                break;
+            }
+        };
+        let arguments = call.arguments.clone().map(Value::Object).unwrap_or_else(|| json!({}));
+        let call_started = std::time::Instant::now();
+        let response = tokio::select! {
+            response = manager.call_tool(&qualified, Some(arguments)) => Step::Done(response),
+            () = stop.notified() => Step::Stopped,
+            () = tokio::time::sleep(PANEL_TOOL_CALL_TIMEOUT) => Step::TimedOut,
+        };
+        let response = match response {
+            Step::Done(Ok(response)) => response,
+            Step::Done(Err(error)) => {
+                broken = true;
+                outcome.error = Some(format!("{}: {error}", call.tool));
+                break;
+            }
+            Step::Stopped => {
+                broken = true;
+                outcome.cancelled = true;
+                break;
+            }
+            Step::TimedOut => {
+                broken = true;
+                outcome.error = Some(format!(
+                    "{} did not finish within {} minutes",
+                    call.tool,
+                    PANEL_TOOL_CALL_TIMEOUT.as_secs() / 60
+                ));
+                break;
+            }
+        };
+        if let Some(error) = response.error {
+            outcome.error = Some(format!("{}: {} ({})", call.tool, error.message, error.code));
+            break;
+        }
+        let Some(result) = response.result else {
+            outcome.error = Some(format!("{} returned no result", call.tool));
+            break;
+        };
+        let text = panel_tool_text(&result);
+        let is_error = result.is_error == Some(true);
+        let mut entry = PanelToolResult {
+            tool: call.tool.clone(),
+            text,
+            structured: result.structured_content.clone(),
+            is_error,
+            into: None,
+            elapsed_ms: call_started.elapsed().as_millis() as u64,
+        };
+        if is_error {
+            outcome.error = Some(format!("{} reported an error", call.tool));
+            outcome.results.push(entry);
+            break;
+        }
+        if let Some(target) = &call.into {
+            let written = {
+                let (store, name, panel_id, session_id, target) =
+                    (store.clone(), name.to_string(), panel_id.to_string(), session_id.to_string(), target.clone());
+                let (text, structured) = (entry.text.clone(), entry.structured.clone());
+                off_main_thread(move || {
+                    let panel = store.ui_panel(&name, &panel_id)?;
+                    let widget = panel
+                        .widget(&target)
+                        .ok_or_else(|| format!("This panel declares no widget {target}"))?;
+                    let value = runtime::plugins::ui_tool_output_value(widget, &text, structured.as_ref())?;
+                    store.ui_widget_set(&name, &panel_id, &session_id, &target, value)
+                })
+                .await
+            };
+            match written {
+                Ok(_) => {
+                    entry.into = Some(target.clone());
+                    changed = true;
+                }
+                Err(error) => {
+                    outcome.error = Some(format!("{} → {target}: {error}", call.tool));
+                    outcome.results.push(entry);
+                    break;
+                }
+            }
+        }
+        outcome.results.push(entry);
+    }
+    release(&key, held, broken).await;
+    (outcome, changed)
+}
+
+// ── Servers kept between panel tool runs ───────────────────────────────────
+//
+// Starting a package's server (Python, say) is most of what a click on a
+// status button costs. After a run its servers stay up for the next one,
+// for a few idle minutes, keyed by the package and the exact configuration
+// that started them: an upgrade or a changed setting is a new key. Any change
+// to the project's packages (enable, disable, upgrade, rollback, remove)
+// closes them all, so a disabled package keeps nothing running.
+
+/// How long kept servers wait for the next click.
+const WARM_PANEL_SERVER_IDLE: Duration = Duration::from_secs(5 * 60);
+
+struct WarmPanelServers {
+    manager: Arc<tokio::sync::Mutex<runtime::McpServerManager>>,
+    tools: Vec<runtime::ManagedMcpTool>,
+    last_used: Mutex<std::time::Instant>,
+}
+
+static WARM_PANEL_SERVERS: std::sync::LazyLock<Mutex<HashMap<String, Arc<WarmPanelServers>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The servers one run uses: kept ones it borrowed, or its own.
+enum Held {
+    Warm(Arc<WarmPanelServers>, tokio::sync::OwnedMutexGuard<runtime::McpServerManager>),
+    Fresh(runtime::McpServerManager),
+}
+
+fn warm_key(name: &str, servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>) -> String {
+    let mut key = name.to_string();
+    for (server, config) in servers {
+        key.push_str(&format!("\n{server}={}", runtime::scoped_mcp_config_hash(config)));
+    }
+    key
+}
+
+fn warm_entry(key: &str) -> Option<Arc<WarmPanelServers>> {
+    WARM_PANEL_SERVERS.lock().ok()?.get(key).cloned()
+}
+
+/// Keep `manager` for later runs, unless another run kept one for the same
+/// key first; either way this run holds what it uses.
+fn keep_warm(key: &str, manager: runtime::McpServerManager, tools: &[runtime::ManagedMcpTool]) -> Held {
+    let Ok(mut kept) = WARM_PANEL_SERVERS.lock() else {
+        return Held::Fresh(manager);
+    };
+    if kept.contains_key(key) {
+        return Held::Fresh(manager);
+    }
+    let entry = Arc::new(WarmPanelServers {
+        manager: Arc::new(tokio::sync::Mutex::new(manager)),
+        tools: tools.to_vec(),
+        last_used: Mutex::new(std::time::Instant::now()),
+    });
+    let Ok(guard) = entry.manager.clone().try_lock_owned() else {
+        unreachable!("a manager nobody else has seen is free")
+    };
+    kept.insert(key.to_string(), entry.clone());
+    drop(kept);
+    start_warm_reaper();
+    Held::Warm(entry, guard)
+}
+
+async fn release(key: &str, held: Held, broken: bool) {
+    match held {
+        Held::Warm(entry, guard) if !broken => {
+            if let Ok(mut last) = entry.last_used.lock() {
+                *last = std::time::Instant::now();
+            }
+            drop(guard);
+        }
+        Held::Warm(entry, mut guard) => {
+            if let Ok(mut kept) = WARM_PANEL_SERVERS.lock() {
+                if kept.get(key).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+                    kept.remove(key);
+                }
+            }
+            let _ = guard.shutdown().await;
+        }
+        Held::Fresh(mut manager) => {
+            let _ = manager.shutdown().await;
+        }
+    }
+}
+
+/// Close every kept server; the next run starts afresh. A run still using
+/// one finishes first.
+pub(crate) fn forget_warm_panel_servers() {
+    let drained: Vec<_> = match WARM_PANEL_SERVERS.lock() {
+        Ok(mut kept) => kept.drain().map(|(_, entry)| entry).collect(),
+        Err(_) => return,
+    };
+    for entry in drained {
+        tauri::async_runtime::spawn(async move {
+            let _ = entry.manager.lock().await.shutdown().await;
+        });
+    }
+}
+
+/// Once a minute, close kept servers nobody has used for a while.
+fn start_warm_reaper() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        tauri::async_runtime::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let idle: Vec<_> = match WARM_PANEL_SERVERS.lock() {
+                    Ok(mut kept) => {
+                        let stale: Vec<String> = kept
+                            .iter()
+                            .filter(|(_, entry)| {
+                                entry.last_used.lock().is_ok_and(|last| last.elapsed() > WARM_PANEL_SERVER_IDLE)
+                                    && entry.manager.try_lock().is_ok()
+                            })
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        stale.iter().filter_map(|key| kept.remove(key)).collect()
+                    }
+                    Err(_) => continue,
+                };
+                for entry in idle {
+                    let _ = entry.manager.lock().await.shutdown().await;
+                }
+            }
+        });
+    });
+}
+
+/// Stops a run a view started; a run that already ended is not an error.
+#[tauri::command]
+pub async fn plugins_ui_cancel_tool(run_id: String) -> Result<(), String> {
+    if let Some(stop) = PANEL_TOOL_RUNS
+        .lock()
+        .map_err(|_| "tool runs poisoned".to_string())?
+        .get(&run_id)
+    {
+        stop.notify_one();
+    }
+    Ok(())
+}
+
 /// Tells every view that a project's plugins changed outside the view's own
 /// API calls: an agent's `PluginManager` call or a click on an approval card.
 /// The frontend re-dispatches it as the `somniq:plugins-changed` window event,
@@ -263,6 +858,8 @@ pub async fn plugins_ui_page(
 pub(crate) const PLUGINS_CHANGED_EVENT: &str = "plugins-changed";
 
 pub(crate) fn emit_plugins_changed(app: &AppHandle, plugin_root: &Path) {
+    // An agent's change or an approval card: kept panel servers may be stale.
+    forget_warm_panel_servers();
     let _ = app.emit(
         PLUGINS_CHANGED_EVENT,
         json!({ "projectPath": plugin_root.to_string_lossy() }),
@@ -372,6 +969,9 @@ pub(crate) enum ApprovalRequest {
         name: String,
         version: String,
         digest: String,
+        /// The digest of the project files the card showed, when the
+        /// package's servers are handed any: the click approves those bytes.
+        files: Option<String>,
     },
     /// Replace a running package: approved, the new version keeps running.
     Upgrade {
@@ -784,7 +1384,10 @@ fn request_enable(
     if !plugin.package.can_enable {
         return Err(blocked("request_enable", &plugin.package));
     }
-    let card = approval_card("enable", &plugin.package, None);
+    let mut card = approval_card("enable", &plugin.package, None);
+    // The project files its servers are handed, as they are now: the copies
+    // the click approves.
+    card["workspaceFiles"] = json!(plugin.workspace_files);
     approval_result(
         call,
         "request_enable",
@@ -792,6 +1395,7 @@ fn request_enable(
             name: plugin.package.name.clone(),
             version: plugin.package.version.clone(),
             digest: plugin.package.digest.clone(),
+            files: plugin.workspace_files_digest.clone(),
         },
         card,
         "Approved: the plugin is available from the next turn. End this turn now and tell the user what to check; verify it in the next turn.",
@@ -910,13 +1514,19 @@ fn approval_card(
         "capabilities": capabilities_output(&package.capabilities),
         "currentVersion": current.map(|(version, _)| version),
         "diff": current.map(|(_, diff)| diff),
-        // Nothing this computer would start, or the keys it passes, changes:
-        // the card can be one line.
+        // Nothing this computer would start, the keys it passes or their
+        // values, changes: the card can be one line. A value is part of how a
+        // server runs (a different URL, a different flag) even when its name
+        // is not new.
         "executionUnchanged": current.map(|(_, diff)| {
             diff.commands.added.is_empty()
                 && diff.commands.removed.is_empty()
                 && diff.env_keys.added.is_empty()
                 && diff.env_keys.removed.is_empty()
+                && diff
+                    .mcp_servers
+                    .iter()
+                    .all(|server| server.change == runtime::plugins::ServerChange::Unchanged)
                 // A page's code can change with nothing declared changing.
                 && !package.capabilities.ui_panels.iter().any(|panel| panel.page.is_some())
         }),
@@ -1075,8 +1685,8 @@ pub(crate) fn respond_to_plugin_approval(
     }
     let store = PluginStore::for_workspace(&plugin_root);
     let applied = match &request {
-        ApprovalRequest::Enable { name, digest, .. } => {
-            store.enable_approved(name, digest).map(Some)
+        ApprovalRequest::Enable { name, digest, files, .. } => {
+            store.enable_approved_files(name, digest, files.as_deref()).map(Some)
         }
         ApprovalRequest::Upgrade {
             source,
@@ -1170,6 +1780,9 @@ fn capabilities_view(capabilities: &runtime::plugins::PluginCapabilities, rubric
             "dataPanel": panel.data_panel,
             // The page may propose background work tasks; each needs the user's click.
             "proposeTasks": panel.propose_tasks,
+            // MCP tools of the package the panel runs with no conversation;
+            // `auto` ones its page may run without the user's click.
+            "tools": panel.tools,
         })).collect::<Vec<_>>(),
         // Criteria the independent Reviewer will check; the Executor never sees them.
         "reviewRubrics": capabilities.review_rubrics.iter().map(|rubric| if rubric_text {
@@ -1188,7 +1801,16 @@ fn capabilities_view(capabilities: &runtime::plugins::PluginCapabilities, rubric
             "args": server.args,
             "envKeys": server.env.keys().collect::<Vec<_>>(),
             "requestTimeoutSecs": server.request_timeout_secs,
+            // What it declared it needs (variable names only) and what its
+            // command line runs from outside the package.
+            "capability": server.capability,
+            "launch": server.launch,
         })).collect::<Vec<_>>(),
+        // How far this computer enforces each limit; the card labels every
+        // line with it rather than guessing in the view.
+        "enforcement": capabilities.enforcement,
+        // Skill scripts the Agent may run with Bash, outside any declaration.
+        "skillScripts": capabilities.skill_scripts,
         // Official plugins it needs; it does not run while one is off.
         "requires": capabilities.requires,
     })
@@ -2137,5 +2759,226 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         assert!(bound_store(temp.path(), other.path().to_str().unwrap()).is_err());
         assert!(bound_store(temp.path(), temp.path().to_str().unwrap()).is_ok());
+    }
+
+    /// A `tool` button starts the package's own server the way a Chat turn
+    /// does, makes its calls in order and fills the widgets they name; a
+    /// failing tool stops the run, and output that does not fit is not stored.
+    #[test]
+    fn a_tool_button_runs_the_packages_own_server_and_fills_its_widgets() {
+        let temp = tempfile::tempdir().unwrap();
+        let _config = ConfigRoot::set(&temp.path().join("config"));
+        let workspace = temp.path().join("project");
+        let draft = workspace.join(".somniq/plugin-drafts/farm");
+        for file in runtime::plugins::plugin_template("mcp-stdio-python").unwrap() {
+            write(&draft, file.path, &file.content);
+        }
+        let server = std::fs::read_to_string(draft.join("server.py")).unwrap();
+        let tools = [
+            "def echo(arguments):",
+            "    return json.dumps(arguments, sort_keys=True)",
+            "",
+            "",
+            "def numbers(arguments):",
+            "    return json.dumps([{\"label\": \"Up\", \"value\": 1}])",
+            "",
+            "",
+            "def fail(arguments):",
+            "    raise RuntimeError(\"port 3007 is busy\")",
+            "",
+            "",
+            "def pid(arguments):",
+            "    import os",
+            "    return str(os.getpid())",
+            "",
+            "",
+            "TOOLS = {",
+            "    \"pid\": {\"description\": \"Pid\", \"inputSchema\": {\"type\": \"object\"}, \"handler\": pid},",
+            "    \"echo\": {\"description\": \"Echo\", \"inputSchema\": {\"type\": \"object\"}, \"handler\": echo},",
+            "    \"numbers\": {\"description\": \"Numbers\", \"inputSchema\": {\"type\": \"object\"}, \"handler\": numbers},",
+            "    \"fail\": {\"description\": \"Fail\", \"inputSchema\": {\"type\": \"object\"}, \"handler\": fail},",
+        ]
+        .join("\n");
+        assert!(server.contains("TOOLS = {"));
+        write(&draft, "server.py", &server.replacen("TOOLS = {", &tools, 1));
+        let mut manifest: Value = serde_json::from_str(&std::fs::read_to_string(draft.join("package.json")).unwrap()).unwrap();
+        manifest["somniq"]["ui"] = json!("./ui.json");
+        write(&draft, "package.json", &manifest.to_string());
+        write(&draft, "ui.json", &json!({ "schemaVersion": 3, "panels": [{
+            "id": "farm", "slot": "chat.sidebar", "title": "Farm", "scope": "project",
+            "tools": ["ping", "echo", "numbers", "fail", "pid"],
+            "widgets": [
+                { "id": "log", "type": "markdown", "title": "Log" },
+                { "id": "numbers", "type": "metrics", "title": "Numbers" },
+                { "id": "go", "type": "button", "label": "Go", "action": { "type": "tool", "calls": [
+                    { "tool": "ping" },
+                    { "tool": "echo", "arguments": { "port": 3007 }, "into": "log" },
+                    { "tool": "numbers", "into": "numbers" }
+                ] } },
+                { "id": "broken", "type": "button", "label": "Broken", "action": { "type": "tool", "calls": [
+                    { "tool": "fail" }, { "tool": "echo", "into": "log" }
+                ] } },
+                { "id": "wrong", "type": "button", "label": "Wrong", "action": { "type": "tool", "calls": [
+                    { "tool": "echo", "into": "numbers" }
+                ] } },
+                { "id": "who", "type": "button", "label": "Who", "action": { "type": "tool", "calls": [{ "tool": "pid" }] } }
+            ]
+        }] }).to_string());
+        let store = Arc::new(PluginStore::for_workspace(&workspace));
+        let preview = store.preview(&draft).unwrap();
+        assert!(preview.can_enable, "{:?}", preview.diagnostics);
+        store.install(&draft, &preview.digest).unwrap();
+        store.set_enabled(&preview.name, true).unwrap();
+        let name = preview.name.clone();
+        let run = |widget: &str| {
+            let plan = store.ui_tool_run_for_widget(&name, "farm", widget, &Default::default()).unwrap();
+            tauri::async_runtime::block_on(run_panel_tools(store.clone(), plan, &name, "farm", "", Arc::new(tokio::sync::Notify::new())))
+        };
+
+        let (outcome, changed) = run("go");
+        assert!(outcome.error.is_none() && !outcome.cancelled, "{outcome:?}");
+        assert!(changed);
+        let texts = outcome.results.iter().map(|result| result.text.as_str()).collect::<Vec<_>>();
+        assert_eq!(texts, ["pong", "{\"port\": 3007}", "[{\"label\": \"Up\", \"value\": 1}]"]);
+        assert_eq!(outcome.results[1].into.as_deref(), Some("log"));
+        let state = store.ui_state_get(&name, "farm", "").unwrap();
+        assert_eq!(state.data["log"], "{\"port\": 3007}");
+        assert_eq!(state.data["numbers"], json!([{ "label": "Up", "value": 1 }]));
+
+        // A failing tool ends the run: nothing after it runs or is written.
+        let (outcome, changed) = run("broken");
+        assert!(!changed);
+        assert_eq!(outcome.results.len(), 1);
+        assert!(outcome.results[0].is_error && outcome.results[0].text.contains("port 3007 is busy"), "{outcome:?}");
+        assert!(outcome.error.as_deref().unwrap_or_default().contains("fail"), "{outcome:?}");
+
+        // Output that does not fit its widget is refused and the widget keeps its value.
+        let (outcome, changed) = run("wrong");
+        assert!(!changed);
+        assert!(outcome.error.as_deref().unwrap_or_default().contains("echo → numbers"), "{outcome:?}");
+        assert_eq!(store.ui_state_get(&name, "farm", "").unwrap().data["numbers"], json!([{ "label": "Up", "value": 1 }]));
+
+        // The next click finds the server still running: no second start.
+        let pid = |outcome: PanelToolOutcome| outcome.results[0].text.clone();
+        let first = pid(run("who").0);
+        assert_eq!(pid(run("who").0), first, "the kept server answers the next click");
+        // A change to the project's packages closes it; the next click starts afresh.
+        forget_warm_panel_servers();
+        let after_change = pid(run("who").0);
+        assert_ne!(after_change, first);
+
+        // A stop leaves the server in an unknown state: it is not used again.
+        let stop = Arc::new(tokio::sync::Notify::new());
+        stop.notify_one();
+        let plan = store.ui_tool_run_for_widget(&name, "farm", "go", &Default::default()).unwrap();
+        let (outcome, changed) = tauri::async_runtime::block_on(run_panel_tools(store.clone(), plan, &name, "farm", "", stop));
+        assert!(outcome.cancelled && outcome.results.is_empty() && !changed, "{outcome:?}");
+        assert_ne!(pid(run("who").0), after_change, "a stopped run's server is not kept");
+    }
+
+    /// A tool's log is printed for a terminal; its colour codes must not show in a panel.
+    #[test]
+    fn a_tools_terminal_colours_do_not_reach_the_panel() {
+        assert_eq!(strip_terminal_codes("\u{1b}[32minfo\u{1b}[39m ready"), "info ready");
+        assert_eq!(strip_terminal_codes("\u{1b}]0;title\u{7}line \u{1b}]8;;x\u{1b}\\ok"), "line ok");
+        assert_eq!(strip_terminal_codes("中文 plain [32m"), "中文 plain [32m");
+    }
+
+    /// A server that runs with a different value under the same variable name
+    /// (another address, another flag) is not "nothing changed".
+    #[test]
+    fn an_upgrade_that_changes_an_environment_value_is_not_a_one_line_card() {
+        let temp = tempfile::tempdir().unwrap();
+        let _config = ConfigRoot::set(&temp.path().join("config"));
+        let turn = Turn::new(&temp.path().join("project"));
+        let dir = ".somniq/plugin-drafts/tools";
+        let draft = turn.workspace.join(dir);
+        for file in runtime::plugins::plugin_template("mcp-stdio-python").unwrap() {
+            write(&draft, file.path, &file.content);
+        }
+        let patch = std::fs::read_to_string(draft.join("cordis.patch.yml")).unwrap();
+        let with_env = |value: &str| patch.replace("        toolCallTimeoutMs: 60000", &format!("        toolCallTimeoutMs: 60000\n        env:\n          API_BASE: {value}"));
+        write(&draft, "cordis.patch.yml", &with_env("http://127.0.0.1:8001"));
+        let v1 = turn.call(json!({"action": "preview", "source": dir})).unwrap();
+        let store = PluginStore::for_workspace(&turn.workspace);
+        store.install(turn.workspace.join(dir), v1["digest"].as_str().unwrap()).unwrap();
+        store.set_enabled(v1["name"].as_str().unwrap(), true).unwrap();
+
+        write(&draft, "cordis.patch.yml", &with_env("https://elsewhere.example"));
+        let mut manifest: Value = serde_json::from_str(&std::fs::read_to_string(draft.join("package.json")).unwrap()).unwrap();
+        manifest["version"] = json!("0.2.0");
+        write(&draft, "package.json", &manifest.to_string());
+        let v2 = turn.call(json!({"action": "preview", "source": dir})).unwrap();
+        std::thread::scope(|scope| {
+            let request = {
+                let turn = &turn;
+                let digest = v2["digest"].clone();
+                scope.spawn(move || turn.call_with_id("env-1", json!({"action": "upgrade", "source": dir, "digest": digest})))
+            };
+            let card = turn.card("env-1");
+            assert_eq!(card["executionUnchanged"], false, "{card}");
+            let servers = card["diff"]["mcpServers"].as_array().unwrap();
+            assert!(servers.iter().any(|server| server["envChanged"] == json!(["API_BASE"])), "{card}");
+            // The value itself stays off the card.
+            assert!(!card.to_string().contains("elsewhere.example"), "{card}");
+            turn.respond("env-1", card["digest"].as_str().unwrap(), false).unwrap();
+            request.join().unwrap().unwrap();
+        });
+    }
+
+    /// The enable card shows what each server declared and how far this
+    /// computer enforces it, and the click approves exactly the project files
+    /// the card showed: a change in between is refused.
+    #[test]
+    fn the_enable_card_shows_capabilities_and_binds_the_project_files_it_showed() {
+        let temp = tempfile::tempdir().unwrap();
+        let _config = ConfigRoot::set(&temp.path().join("config"));
+        let turn = Turn::new(&temp.path().join("project"));
+        write(&turn.workspace, "scripts/normalize.py", "V = 1\n");
+        let dir = ".somniq/plugin-drafts/handed";
+        let draft = turn.workspace.join(dir);
+        for file in runtime::plugins::plugin_template("mcp-stdio-python").unwrap() {
+            write(&draft, file.path, &file.content);
+        }
+        let mut manifest: Value = serde_json::from_str(&std::fs::read_to_string(draft.join("package.json")).unwrap()).unwrap();
+        manifest["somniq"]["capabilities"]["mcp"]["example"]["workspaceFiles"] = json!(["scripts/normalize.py"]);
+        write(&draft, "package.json", &manifest.to_string());
+        let preview = turn.call(json!({"action": "preview", "source": dir})).unwrap();
+        assert_eq!(preview["canEnable"], true, "{preview}");
+        turn.call(json!({"action": "install", "source": dir, "digest": preview["digest"]})).unwrap();
+        let name = preview["name"].as_str().unwrap().to_string();
+
+        let ask = |id: &'static str, change_before_click: bool| {
+            std::thread::scope(|scope| {
+                let request = {
+                    let turn = &turn;
+                    let name = name.clone();
+                    scope.spawn(move || turn.call_with_id(id, json!({"action": "request_enable", "name": name})))
+                };
+                let card = turn.card(id);
+                let server = &card["capabilities"]["mcpServers"][0];
+                assert_eq!(server["capability"]["network"]["access"], "none", "{card}");
+                assert_eq!(server["capability"]["workspaceFiles"], json!(["scripts/normalize.py"]));
+                assert_eq!(card["capabilities"]["enforcement"]["environment"], "enforced");
+                assert_eq!(card["capabilities"]["enforcement"]["networkNone"], "declared");
+                assert_eq!(card["workspaceFiles"][0]["path"], "scripts/normalize.py");
+                if change_before_click {
+                    write(&turn.workspace, "scripts/normalize.py", "V = 2\n");
+                }
+                let answer = turn.respond(id, card["digest"].as_str().unwrap(), true).unwrap();
+                let _ = request.join().unwrap();
+                answer
+            })
+        };
+        // The file changed after the card showed it: nothing is approved.
+        let refused = ask("handed-1", true);
+        assert!(refused.error.as_deref().unwrap_or_default().contains("changed after they were shown"), "{:?}", refused.error);
+        assert!(!turn.plugin(&name).unwrap().enabled);
+        // As shown: approved, and the copy is what the server gets.
+        let approved = ask("handed-2", false);
+        assert!(approved.error.is_none(), "{:?}", approved.error);
+        let running = turn.plugin(&name).unwrap();
+        assert!(running.enabled);
+        assert_eq!(running.workspace_files[0].approved, running.workspace_files[0].current);
     }
 }

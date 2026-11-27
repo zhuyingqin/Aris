@@ -10,7 +10,7 @@ use super::{
     llm_review_override_section, mcp_result_to_tool_output, mcp_tool_timeout_policy_with_defaults,
     mcp_tool_timeout_with_default, merge_mcp_tool_search_results, model_developer,
     model_identity_section, permission_policy_for_tools, resolve_settings_executor_config,
-    resolve_summarizer_model, route_chat_tools, tool_schema_context_overhead_tokens,
+    resolve_summarizer_model, route_chat_tools, summarizer_observer, tool_schema_context_overhead_tokens,
     ChatExecutorConfig, ChatToolSpec, McpToolTimeoutPolicy, ToolRoutingMode, MAX_ACTIVE_TOOLS,
     MAX_ROUTED_TOOLS,
 };
@@ -2161,4 +2161,24 @@ fn language_preference_names_the_fallback_language() {
     assert!(super::language_preference_section("es").contains("use Spanish."));
     assert!(super::language_preference_section("en").contains("use English."));
     assert!(super::language_preference_section("").contains("use English."));
+}
+
+#[test]
+fn the_summarizer_stops_when_the_turn_observer_is_cancelled() {
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stopped);
+    let observer = summarizer_observer(Some(std::sync::Arc::new(move || {
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    })));
+    assert!(!observer.is_cancelled());
+    stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(observer.is_cancelled(), "Stop must reach a summary in flight");
+
+    // A turn whose observer cannot be cancelled gives the summarizer nothing to watch.
+    assert!(!summarizer_observer(None).is_cancelled());
+}
+
+#[test]
+fn summaries_default_to_a_low_reasoning_level() {
+    assert_eq!(super::DEFAULT_SUMMARIZER_REASONING_LEVEL, "low");
 }

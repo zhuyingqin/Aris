@@ -40,6 +40,20 @@ export function isBuildArtifactPath(path: string | null | undefined): boolean {
 export function outputPathFor(sourcePath: string): string {
   return sourcePath.replace(/\.tex$/i, ".pdf");
 }
+/**
+ * Plain-text project files that are edited in Typeset but are not LaTeX
+ * documents themselves: bibliographies, styles, classes and their helpers.
+ * They open in Code mode as part of the document already open, so a compile
+ * still builds that document's root.
+ */
+export const TYPESET_TEXT_SOURCE_EXTENSIONS = new Set([
+  ".bib", ".bst", ".sty", ".cls", ".clo", ".def", ".cfg", ".bbx", ".cbx", ".lbx", ".tikz",
+]);
+
+export function isTypesetTextSourcePath(path: string | null | undefined): path is string {
+  return Boolean(path && TYPESET_TEXT_SOURCE_EXTENSIONS.has(extension(path)));
+}
+
 export function isTypesetImagePath(path: string | null | undefined): path is string {
   return Boolean(path && TYPESET_IMAGE_EXTENSIONS.has(extension(path)));
 }
@@ -50,6 +64,24 @@ export function normalizeNewTypesetPath(path: string): string {
 }
 export function workDirForSource(path: string | null | undefined): string {
   return path ? dirname(path) : "";
+}
+
+/**
+ * The workspace path of the file a compiler diagnostic names. TeX runs in the
+ * compile root's folder, so with `-file-line-error` it reports `./main.tex`
+ * or `./chapters/intro.tex` relative to that folder — never the workspace
+ * path the editor knows the file by. Absolute paths are returned as they are.
+ */
+export function diagnosticWorkspacePath(reportedPath: string, compileRootPath: string): string {
+  const reported = normalizePath(reportedPath.trim());
+  if (/^(?:[A-Za-z]:\/|\/)/.test(reported)) return reported;
+  const parts: string[] = [];
+  for (const part of [...dirname(compileRootPath).split("/"), ...reported.split("/")]) {
+    if (!part || part === ".") continue;
+    if (part === ".." && parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
 }
 
 const IS_WINDOWS_RUNTIME = typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);

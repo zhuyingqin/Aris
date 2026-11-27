@@ -10,6 +10,7 @@ import { useStore, type Language } from "../store";
 import { tr } from "../language";
 import { useAppearance } from "../appearance";
 import { SvgIcon } from "../SvgIcon";
+import { ComputerAccessCard, ComputerUseBanner, ComputerUsePill, type ComputerAccessRequest } from "./ComputerUseControls";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import ChatImagePreview from "./ChatImagePreview";
 import ChatReasoningPanel from "./ChatReasoningPanel";
@@ -337,6 +338,18 @@ interface Props {
   permission?: PermissionModeView | null;
   permissionBusy?: boolean;
   onPermissionChange?: (mode: string) => void;
+  /** Computer-use toggle and banner; omitted where the mode does not apply. */
+  computerUse?: {
+    enabled: boolean;
+    busy: boolean;
+    controlling: boolean;
+    controlSinceMs: number | null;
+    observingTitle?: string | null;
+    pendingAccess?: ComputerAccessRequest | null;
+    onChange: (enabled: boolean) => void;
+    onStop: () => void;
+    onRespondAccess?: (toolUseId: string, hwnd: number | null) => void;
+  } | null;
   modelName?: string | null;
   modelOptions?: { value: string; label: string }[];
   modelPricing?: ModelPricingState | null;
@@ -387,6 +400,7 @@ function ChatComposer({
   permission,
   permissionBusy,
   onPermissionChange,
+  computerUse,
   modelName,
   modelOptions,
   modelPricing,
@@ -872,6 +886,22 @@ function ChatComposer({
           )}
         </div>
       )}
+      {computerUse?.pendingAccess && computerUse.onRespondAccess && (
+        <ComputerAccessCard
+          language={language}
+          request={computerUse.pendingAccess}
+          onRespond={computerUse.onRespondAccess}
+        />
+      )}
+      {computerUse?.enabled && (
+        <ComputerUseBanner
+          language={language}
+          controlling={computerUse.controlling}
+          controlSinceMs={computerUse.controlSinceMs}
+          observingTitle={computerUse.observingTitle ?? null}
+          onStop={computerUse.onStop}
+        />
+      )}
       <div className="chat-input">
         {dragging && <div className="chat-drop-overlay">{copy.dropFiles}</div>}
         <input
@@ -1087,6 +1117,15 @@ function ChatComposer({
                   </div>
                 )}
               </div>
+            )}
+            {computerUse && (
+              <ComputerUsePill
+                language={language}
+                enabled={computerUse.enabled}
+                // Fixed for a running turn: the backend refuses the switch then.
+                disabled={computerUse.busy || busy}
+                onChange={computerUse.onChange}
+              />
             )}
             <button
               type="button"

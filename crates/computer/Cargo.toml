@@ -1,0 +1,57 @@
+[package]
+name = "computer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Desktop observation for SomniQ computer use: the read-only somniq-computer helper (R2) and the R0 probe."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Window screenshots are sent to the model as PNG.
+png = "0.17.16"
+
+# Windows UI Automation is a COM API, which `windows-sys` cannot call, so this
+# crate uses `windows` (windows-rs). Declared per-target so the workspace still
+# builds on the Linux and macOS CI runners; there the probe reports "Windows
+# only" and the platform-independent snapshot/policy modules stay testable.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Com",
+  # VARIANT (cached UIA property values) is gated on Com + Ole.
+  "Win32_System_Ole",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  # PrintWindow lives in Storage::Xps.
+  "Win32_Storage_Xps",
+  "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "somniq-computer-probe"
+path = "src/bin/probe.rs"
+
+# The helper process the desktop app talks to over stdio (protocol.rs).
+[[bin]]
+name = "somniq-computer"
+path = "src/bin/helper.rs"
+
+# Mirrors `[workspace.lints]` but downgrades `unsafe_code` from `forbid` to
+# `deny` (same pattern as `crates/notebook`) so the single audited
+# `platform/windows/ffi.rs` module can opt in with `#![allow(unsafe_code)]`.
+# Unsafe stays denied everywhere else in the crate.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"

@@ -1,8 +1,8 @@
 // Widgets an agent fills with `PluginPanel`, and the two that act on a click.
 // The backend checked every value against its widget's shape before storing
 // it, so these render what they are given; the casts below name that shape.
-import { useId, useState } from "react";
-import type { UiChartData, UiClick, UiField, UiListItem, UiMetric, UiProgress, UiTableCell, UiText, UiWidget } from "../api/plugins";
+import { useEffect, useId, useRef, useState } from "react";
+import type { PanelToolOutcome, UiChartData, UiClick, UiField, UiListItem, UiMetric, UiProgress, UiTableCell, UiText, UiWidget } from "../api/plugins";
 import { openExternalUrl } from "../api/tauri";
 import MarkdownContent from "../chat/MarkdownContent";
 import { SvgIcon } from "../SvgIcon";
@@ -17,16 +17,19 @@ const COPY = {
     empty: "还没有内容。让 Agent 更新这个面板后，会显示在这里。", rows: (n: number) => `${n} 行`, items: (n: number) => `${n} 项`,
     openFile: "在侧栏打开", openLink: "在浏览器打开", showData: "查看数据", category: "类别", choose: "请选择…",
     yes: "是", no: "否", fills: "填入输入框", sends: "直接发送", opens: "打开文件",
+    runs: "直接运行插件工具，不经过对话", running: "正在运行", stop: "停止", done: "已完成", stopped: "已停止", failed: "失败",
   },
   en: {
     empty: "Nothing here yet. It appears once the agent updates this panel.", rows: (n: number) => `${n} rows`, items: (n: number) => `${n} items`,
     openFile: "Open in side panel", openLink: "Open in browser", showData: "View data", category: "Category", choose: "Choose…",
     yes: "yes", no: "no", fills: "Fills the composer", sends: "Sends right away", opens: "Opens the file",
+    runs: "Runs the plugin's tools directly, without a conversation", running: "Running", stop: "Stop", done: "Done", stopped: "Stopped", failed: "Failed",
   },
   es: {
     empty: "Aún no hay nada. Aparecerá cuando el agente actualice este panel.", rows: (n: number) => `${n} filas`, items: (n: number) => `${n} elementos`,
     openFile: "Abrir en el panel lateral", openLink: "Abrir en el navegador", showData: "Ver datos", category: "Categoría", choose: "Elige…",
     yes: "sí", no: "no", fills: "Rellena el cuadro de mensaje", sends: "Se envía al instante", opens: "Abre el archivo",
+    runs: "Ejecuta las herramientas del plugin directamente, sin conversación", running: "En ejecución", stop: "Detener", done: "Listo", stopped: "Detenido", failed: "Falló",
   },
 };
 
@@ -38,7 +41,13 @@ export interface PanelActions {
   /** Put text in the composer; with `send`, also send it when nothing else is pending. */
   onPrompt?: (text: string, send: boolean) => void;
   onOpenFile?: (path: string) => void;
+  /** Run a `tool` button or form of this panel: the backend reads the calls
+   *  from the reviewed declaration, so only the widget and the form's values go. */
+  onRunTool?: (widgetId: string, values?: Record<string, string | boolean>) => PanelToolRun;
 }
+
+/** A tool run in flight: what it ends with, and how to stop it. */
+export interface PanelToolRun { done: Promise<PanelToolOutcome>; stop: () => void }
 
 /** `{{key}}` → the form's value. One pass: a value is never scanned again. */
 export function fillPrompt(template: string, values: Record<string, string>): string {
@@ -48,13 +57,69 @@ export function fillPrompt(template: string, values: Record<string, string>): st
 function runClick(action: UiClick, actions: PanelActions, language: Language, values: Record<string, string> = {}) {
   // A prompt may be written per language, like the panel's labels.
   if (action.type === "prompt") actions.onPrompt?.(fillPrompt(text(action.text, language), values).trim(), action.send === true);
-  else actions.onOpenFile?.(action.path);
+  else if (action.type === "open-file") actions.onOpenFile?.(action.path);
 }
 const clickHint = (action: UiClick, language: Language) => {
   const copy = COPY[language];
+  if (action.type === "tool") return `${copy.runs}: ${action.calls.map((call) => call.tool).join(" → ")}`;
   return action.type === "open-file" ? `${copy.opens}: ${action.path}` : action.send ? copy.sends : copy.fills;
 };
-const clickable = (action: UiClick, actions: PanelActions) => action.type === "prompt" ? Boolean(actions.onPrompt) : Boolean(actions.onOpenFile);
+const clickable = (action: UiClick, actions: PanelActions) => action.type === "prompt" ? Boolean(actions.onPrompt)
+  : action.type === "tool" ? Boolean(actions.onRunTool) : Boolean(actions.onOpenFile);
+
+type ToolRunState =
+  | { phase: "idle" }
+  | { phase: "running"; since: number; stop: () => void }
+  | { phase: "ended"; outcome: PanelToolOutcome };
+
+/** Runs a `tool` click and keeps what happened, for the line under the button. */
+function useToolRun(actions: PanelActions) {
+  const [run, setRun] = useState<ToolRunState>({ phase: "idle" });
+  const [, tick] = useState(0);
+  const live = useRef(true);
+  useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+  // The elapsed time is the only sign a long tool is still going.
+  useEffect(() => {
+    if (run.phase !== "running") return;
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [run.phase]);
+  const start = (widgetId: string, values?: Record<string, string | boolean>) => {
+    if (!actions.onRunTool || run.phase === "running") return;
+    const started = actions.onRunTool(widgetId, values);
+    setRun({ phase: "running", since: Date.now(), stop: started.stop });
+    started.done.then(
+      (outcome) => { if (live.current) setRun({ phase: "ended", outcome }); },
+      (failure) => { if (live.current) setRun({ phase: "ended", outcome: { results: [], cancelled: false, error: failure instanceof Error ? failure.message : String(failure) } }); },
+    );
+  };
+  return { run, start };
+}
+
+const elapsed = (since: number) => {
+  const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+};
+const clip = (value: string, max = 600) => value.length > max ? `${value.slice(0, max)}…` : value;
+
+/** What a tool run did, under its button: running with a stop, or how it ended. */
+function ToolRunLine({ run, language }: { run: ToolRunState; language: Language }) {
+  const copy = COPY[language];
+  if (run.phase === "idle") return null;
+  if (run.phase === "running") return <p className="chat-plugin-tool-run" role="status">
+    <span className="chat-plugin-tool-spinner" aria-hidden="true" />{copy.running} · {elapsed(run.since)}
+    <button type="button" className="chat-plugin-tool-stop" onClick={run.stop}>{copy.stop}</button>
+  </p>;
+  const { outcome } = run;
+  const failed = outcome.results.find((result) => result.isError);
+  if (outcome.cancelled) return <p className="chat-plugin-tool-run" role="status">{copy.stopped}</p>;
+  if (outcome.error || failed) return <p className="chat-plugin-tool-run is-error" role="alert">
+    <SvgIcon name="warning" size={12} />{copy.failed}: {clip(failed?.text.trim() || outcome.error || "")}
+  </p>;
+  // Output that went into a widget shows there; anything else is shown here.
+  const shown = outcome.results.filter((result) => !result.into && result.text.trim()).map((result) => result.text.trim()).join("\n");
+  return <p className="chat-plugin-tool-run" role="status"><SvgIcon name="check" size={12} />{shown ? clip(shown) : copy.done}</p>;
+}
 
 function Empty({ language }: { language: Language }) {
   return <p className="chat-plugin-empty">{COPY[language].empty}</p>;
@@ -188,16 +253,22 @@ function ChartWidget({ title, kind, data, language }: { title: string; kind: "ba
   </WidgetSection>;
 }
 
-function FormWidget({ title, fields, submit, language, actions }: {
-  title: string; fields: UiField[]; submit: { label: UiText; action: UiClick }; language: Language; actions: PanelActions;
+function FormWidget({ id: formId, title, fields, submit, language, actions }: {
+  id: string; title: string; fields: UiField[]; submit: { label: UiText; action: UiClick }; language: Language; actions: PanelActions;
 }) {
   const copy = COPY[language];
   const base = useId();
   const [values, setValues] = useState<Record<string, string | boolean>>({});
   const set = (key: string, value: string | boolean) => setValues((current) => ({ ...current, [key]: value }));
+  const tool = useToolRun(actions);
   return <WidgetSection title={title} icon="edit">
     <form className="chat-plugin-form" onSubmit={(event) => {
       event.preventDefault();
+      // A tool gets each field as it is: a checkbox's flag, the text typed.
+      if (submit.action.type === "tool") return tool.start(formId, Object.fromEntries(fields.map((field) => {
+        const value = values[field.key];
+        return [field.key, field.input === "checkbox" ? value === true : String(value ?? "").trim()];
+      })));
       runClick(submit.action, actions, language, Object.fromEntries(fields.map((field) => {
         const value = values[field.key];
         return [field.key, field.input === "checkbox" ? (value === true ? copy.yes : copy.no) : String(value ?? "").trim()];
@@ -219,8 +290,9 @@ function FormWidget({ title, fields, submit, language, actions }: {
         </div>;
       })}
       <div className="chat-plugin-form-actions"><span className="chat-plugin-caption">{clickHint(submit.action, language)}</span>
-        <button type="submit" className="chat-plugin-button chat-plugin-action" disabled={!clickable(submit.action, actions)}>{text(submit.label, language)}</button>
+        <button type="submit" className="chat-plugin-button chat-plugin-action" disabled={!clickable(submit.action, actions) || tool.run.phase === "running"}>{text(submit.label, language)}</button>
       </div>
+      <ToolRunLine run={tool.run} language={language} />
     </form>
   </WidgetSection>;
 }
@@ -230,10 +302,21 @@ type DataWidget = Exclude<UiWidget, { type: "todo-list" | "notes" | "agent-plan"
 export const isDataWidget = (widget: UiWidget): widget is DataWidget =>
   !["todo-list", "notes", "agent-plan", "text", "json"].includes(widget.type);
 
-export function DataWidgetView({ widget, value, language, actions }: { widget: DataWidget; value: unknown; language: Language; actions: PanelActions }) {
-  if (widget.type === "button") return <button type="button" className="chat-plugin-button chat-plugin-action chat-plugin-standalone" title={clickHint(widget.action, language)} disabled={!clickable(widget.action, actions)} onClick={() => runClick(widget.action, actions, language)}>
-    <SvgIcon name={widget.action.type === "open-file" ? "document" : widget.action.send ? "send" : "sparkle"} size={12} />{text(widget.label, language)}
+function ButtonWidget({ widget, language, actions }: { widget: Extract<UiWidget, { type: "button" }>; language: Language; actions: PanelActions }) {
+  const tool = useToolRun(actions);
+  const { action } = widget;
+  const icon = action.type === "tool" ? "play" : action.type === "open-file" ? "document" : action.send ? "send" : "sparkle";
+  const button = <button type="button" className="chat-plugin-button chat-plugin-action chat-plugin-standalone" title={clickHint(action, language)}
+    disabled={!clickable(action, actions) || tool.run.phase === "running"} aria-busy={tool.run.phase === "running"}
+    onClick={() => action.type === "tool" ? tool.start(widget.id) : runClick(action, actions, language)}>
+    <SvgIcon name={icon} size={12} />{text(widget.label, language)}
   </button>;
+  if (action.type !== "tool") return button;
+  return <div className="chat-plugin-tool">{button}<ToolRunLine run={tool.run} language={language} /></div>;
+}
+
+export function DataWidgetView({ widget, value, language, actions }: { widget: DataWidget; value: unknown; language: Language; actions: PanelActions }) {
+  if (widget.type === "button") return <ButtonWidget widget={widget} language={language} actions={actions} />;
   const title = text(widget.title, language);
   switch (widget.type) {
     case "table": return <TableWidget title={title} columns={widget.columns} rows={value as Record<string, UiTableCell>[] | undefined} language={language} />;
@@ -241,9 +324,11 @@ export function DataWidgetView({ widget, value, language, actions }: { widget: D
     case "list": return <ListWidget title={title} items={value as UiListItem[] | undefined} language={language} actions={actions} />;
     case "progress": return <ProgressWidget title={title} progress={value as UiProgress | undefined} language={language} />;
     case "chart": return <ChartWidget title={title} kind={widget.chart} data={value as UiChartData | undefined} language={language} />;
-    case "form": return <FormWidget title={title} fields={widget.fields} submit={widget.submit} language={language} actions={actions} />;
+    case "form": return <FormWidget id={widget.id} title={title} fields={widget.fields} submit={widget.submit} language={language} actions={actions} />;
+    // A page can write this text, and the app shows it unasked: images on
+    // another machine are named, never fetched, or the page would have a way out.
     case "markdown": return <WidgetSection title={title} icon="document">
-      {typeof value === "string" && value.trim() ? <div className="chat-plugin-markdown"><MarkdownContent text={value} /></div> : <Empty language={language} />}
+      {typeof value === "string" && value.trim() ? <div className="chat-plugin-markdown"><MarkdownContent text={value} remoteImages={false} /></div> : <Empty language={language} />}
     </WidgetSection>;
   }
 }

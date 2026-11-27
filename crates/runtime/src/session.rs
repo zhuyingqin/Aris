@@ -688,10 +688,21 @@ const SESSION_CHECKPOINT_KIND: &str = "session_checkpoint";
 /// started whom and who told whom what, so compaction never removes them.
 const DURABLE_EVENT_KIND_PREFIX: &str = "agent.";
 /// Small audit rows nothing else records: which past lessons were attached to
-/// which failed tool call. Without this the checkpoint after the turn erased
-/// every `lesson_recall` row (seen in-app), so a delivered lesson could not be
-/// traced afterwards.
-const DURABLE_EVENT_KINDS: &[&str] = &["lesson_recall"];
+/// which failed tool call, and which history each turn's recall block carried.
+/// Without this the checkpoint after the turn erased them (seen in-app), so
+/// whether memory is ever used could not be measured from real sessions. Both
+/// carry references and counts, not the recalled text (a few hundred bytes).
+/// `computer_use_mode` is the record of when a chat was switched into or out
+/// of computer-use mode; it is written before the turn that resets the log,
+/// so without this the first turn's reset erased it (seen in-app).
+const DURABLE_EVENT_KINDS: &[&str] = &[
+    "lesson_recall",
+    "memory_recall",
+    "computer_use_mode",
+    // Which window the user let an agent read, and each read of it.
+    "computer_access",
+    "computer_observation",
+];
 
 /// What a compaction pass removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

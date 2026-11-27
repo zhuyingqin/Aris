@@ -477,3 +477,37 @@ describe("MarkdownContent local links", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 });
+
+describe("text whose images stay local", () => {
+  it("names an image on another machine instead of fetching it, and still shows local ones", () => {
+    const text = [
+      "![chart](https://x.example/?d=secret)",
+      // Markdown reads `\\` as one backslash: this is the UNC path \\server\share\a.png.
+      "![unc](\\\\\\\\server\\share\\a.png)",
+      "![relative](//x.example/a.png)",
+      "[as a link](https://x.example/b.png)",
+      "![inline](data:image/png;base64,iVBORw0KGgo=)",
+      "<think>![inside](https://x.example/think.png)</think>",
+    ].join("\n\n");
+    const { container } = render(<MarkdownContent text={text} remoteImages={false} />);
+    const sources = [...container.querySelectorAll("img")].map((image) => image.getAttribute("src") ?? "");
+    expect(sources.some((src) => /x\.example|server/.test(src))).toBe(false);
+    expect(sources).toContain("data:image/png;base64,iVBORw0KGgo=");
+    expect(container.querySelectorAll(".md-blocked-image")).toHaveLength(3);
+    expect(container.querySelector(".md-blocked-image")?.textContent).toMatch(/^chart · .+ · x\.example$/);
+    // A link to a remote image stays a link the user may follow.
+    const link = screen.getByRole("link", { name: "as a link" });
+    expect(link.getAttribute("href")).toBe("https://x.example/b.png");
+  });
+
+  it("drops a remote image inside a thinking block without loading it", () => {
+    const { container } = render(<ThinkBlock content="![inside](https://x.example/think.png)" revealWhileTurnStreaming remoteImages={false} />);
+    expect([...container.querySelectorAll("img")].some((image) => (image.getAttribute("src") ?? "").includes("x.example"))).toBe(false);
+  });
+
+  it("keeps showing remote images in the conversation itself", () => {
+    const { container } = render(<MarkdownContent text="![chart](https://x.example/a.png)" />);
+    expect(container.querySelector(".md-blocked-image")).toBeNull();
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("https://x.example/a.png");
+  });
+});

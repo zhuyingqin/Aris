@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
   onChatModelRetry: vi.fn(),
+  onChatCompaction: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
   onChatReview: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../../api/tauri", () => ({
   onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
   onChatModelRetry: mocks.onChatModelRetry,
+  onChatCompaction: mocks.onChatCompaction,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatReview: mocks.onChatReview,
@@ -56,6 +58,7 @@ const listenerMocks = [
   mocks.onChatToolProgress,
   mocks.onChatToolResult,
   mocks.onChatModelRetry,
+  mocks.onChatCompaction,
   mocks.onChatPermissionRequest,
   mocks.onChatPermissionResolved,
   mocks.onChatReview,
@@ -188,6 +191,33 @@ describe("useChatStream concurrent sessions", () => {
       message: "The model connection is temporarily unstable; retrying (2/4, continuing in about 1s).",
       retry: { attempt: 2, maxAttempts: 4, count: 1 },
     });
+  });
+
+  it("marks the live turn while the backend compacts history, then clears it", () => {
+    let compactionHandler: ((event: { sessionId: string; phase: "started" | "finished" }) => void) | null = null;
+    mocks.onChatCompaction.mockImplementation((handler) => {
+      compactionHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let turn: ChatTurn = { id: "assistant", role: "assistant", blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      turn = patch(turn);
+    });
+    renderHook(() => useChatStream({ patchAssistant, onComplete: vi.fn(), onError: vi.fn() }));
+
+    act(() => {
+      compactionHandler?.({ sessionId: "chat-compact", phase: "started" });
+    });
+    expect(patchAssistant).toHaveBeenLastCalledWith("chat-compact", expect.any(Function));
+    expect(turn.compactingSince).toEqual(expect.any(Number));
+    expect(turn.streaming).toBe(true);
+
+    act(() => {
+      compactionHandler?.({ sessionId: "chat-compact", phase: "finished" });
+    });
+    expect(turn.compactingSince).toBeUndefined();
+    expect(turn.blocks).toEqual([]);
   });
 
   it("collapses a burst of retries into one live notice instead of stacking banners", () => {

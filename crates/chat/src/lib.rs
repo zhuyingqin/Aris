@@ -2701,13 +2701,47 @@ pub fn resolve_summarizer_model(
     default_summarizer_model(config, model)
 }
 
+/// Reasoning level for compaction summaries when nothing overrides it.
+///
+/// A summary restates what is already in the transcript, so it gains little
+/// from deep reasoning, and it is not the chat's request: inheriting the chat's
+/// `max` made `gpt-5.6-luna` think for 24-162 s before writing anything, on
+/// every one of a compaction's Map-Reduce calls, so one compaction ran 7-15
+/// minutes.
+pub const DEFAULT_SUMMARIZER_REASONING_LEVEL: &str = "low";
+
+/// The level summaries ask for: `ARIS_SUMMARIZER_REASONING_EFFORT` when set,
+/// else [`DEFAULT_SUMMARIZER_REASONING_LEVEL`]. Narrowed per model like any
+/// other level, so a model without levels still sends none.
+#[must_use]
+pub fn summarizer_reasoning_level() -> String {
+    std::env::var("ARIS_SUMMARIZER_REASONING_EFFORT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SUMMARIZER_REASONING_LEVEL.to_string())
+}
+
+/// The summarizer's observer: it streams nothing to the chat, but stops when
+/// the turn's own observer is cancelled.
+fn summarizer_observer(
+    cancel_probe: Option<aris_executor::CancelProbe>,
+) -> Box<dyn aris_executor::StreamObserver> {
+    match cancel_probe {
+        Some(probe) => Box::new(aris_executor::CancelProbeObserver(probe)),
+        None => Box::new(aris_executor::NoopStreamObserver),
+    }
+}
+
 fn resolve_summarizer_client_with_trace(
     chat_config: &ChatExecutorConfig,
     chat_model: &str,
     configured_model: Option<&str>,
     configured_provider: Option<SummarizerConfig>,
+    cancel_probe: Option<aris_executor::CancelProbe>,
     trace_sink: Option<Arc<dyn aris_executor::ExecutorTraceSink>>,
 ) -> Option<aris_executor::ExecutorClient> {
+    let reasoning_level = summarizer_reasoning_level();
     if let Some(configured_provider) = configured_provider {
         let model = resolve_summarizer_model(
             &configured_provider.executor_config,
@@ -2721,10 +2755,11 @@ fn resolve_summarizer_client_with_trace(
             model,
             false,
             Vec::new(),
-            Box::new(aris_executor::NoopStreamObserver),
+            summarizer_observer(cancel_probe),
             trace_sink,
         )
-        .ok();
+        .ok()
+        .map(|client| client.with_reasoning_level(&reasoning_level));
     }
 
     resolve_summarizer_model(chat_config, chat_model, configured_model).and_then(|summary_model| {
@@ -2737,10 +2772,11 @@ fn resolve_summarizer_client_with_trace(
             summary_model,
             false,
             Vec::new(),
-            Box::new(aris_executor::NoopStreamObserver),
+            summarizer_observer(cancel_probe),
             trace_sink,
         )
         .ok()
+        .map(|client| client.with_reasoning_level(&reasoning_level))
     })
 }
 
@@ -2931,12 +2967,15 @@ where
     // Best-effort cheap-model summarizer for compaction. Built before the main
     // client consumes `executor_config`/`model`; it reuses the same provider
     // auth with a small model and no tools. Any construction failure is
-    // swallowed so compaction falls back to the text-assembly summary.
+    // swallowed so compaction falls back to the text-assembly summary. It
+    // watches the turn observer's cancellation, so Stop ends a summary that is
+    // still waiting on the provider instead of letting it run to completion.
     let summarizer = resolve_summarizer_client_with_trace(
         &executor_config,
         &model,
         summarizer_model.as_deref(),
         summarizer_config,
+        observer.cancel_probe(),
         trace_sink.clone(),
     );
     let client = build_executor_client_with_trace(

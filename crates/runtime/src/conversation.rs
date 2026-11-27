@@ -14,7 +14,7 @@ use crate::compact::{
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{
-    now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent, TurnOutcome,
+    now_iso8601, CompactionPhase, EventSink, EventType, NoopEventSink, RuntimeEvent, TurnOutcome,
 };
 use crate::evidence_ledger::{evidence_guard_mode, EvidenceGuardMode, EvidenceLedger};
 use crate::file_ops::ReadImageOutput;
@@ -148,6 +148,10 @@ struct CompactionFlightKey {
 enum CompactionFlightState {
     Running,
     Finished(SharedCompactionSummary),
+    /// The leader was cancelled before it had an answer. Its "no summary" is
+    /// not one, so waiters try again (one of them as the new leader) instead
+    /// of degrading to the deterministic summary.
+    Abandoned,
 }
 
 #[derive(Debug)]
@@ -180,19 +184,24 @@ struct CompactionFlightLeader {
 
 impl CompactionFlightLeader {
     fn finish(mut self, result: SharedCompactionSummary) -> SharedCompactionSummary {
-        self.publish(result.clone());
+        self.publish(CompactionFlightState::Finished(result.clone()));
         self.published = true;
         result
     }
 
-    fn publish(&self, result: SharedCompactionSummary) {
+    fn abandon(mut self) {
+        self.publish(CompactionFlightState::Abandoned);
+        self.published = true;
+    }
+
+    fn publish(&self, outcome: CompactionFlightState) {
         {
             let mut state = self
                 .flight
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *state = CompactionFlightState::Finished(result);
+            *state = outcome;
             self.flight.ready.notify_all();
         }
         let mut flights = in_flight_compactions()
@@ -210,50 +219,65 @@ impl CompactionFlightLeader {
 impl Drop for CompactionFlightLeader {
     fn drop(&mut self) {
         if !self.published {
-            self.publish(None);
+            self.publish(CompactionFlightState::Finished(None));
         }
     }
 }
 
+/// Run `run` for `key` unless another runtime is already summarizing the same
+/// slice, in which case wait for and share its answer.
+///
+/// `run` returns `None` when it was cancelled; that caller gets `None` back and
+/// anyone waiting on it runs the summary itself.
 fn run_compaction_singleflight(
     key: CompactionFlightKey,
-    run: impl FnOnce() -> SharedCompactionSummary,
-) -> SharedCompactionSummary {
-    let (flight, is_leader) = {
-        let mut flights = in_flight_compactions()
+    run: impl FnOnce() -> Option<SharedCompactionSummary>,
+) -> Option<SharedCompactionSummary> {
+    loop {
+        let (flight, is_leader) = {
+            let mut flights = in_flight_compactions()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(flight) = flights.get(&key) {
+                (Arc::clone(flight), false)
+            } else {
+                let flight = Arc::new(CompactionFlight::new());
+                flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        };
+
+        if is_leader {
+            let leader = CompactionFlightLeader {
+                key,
+                flight,
+                published: false,
+            };
+            return match run() {
+                Some(result) => Some(leader.finish(result)),
+                None => {
+                    leader.abandon();
+                    None
+                }
+            };
+        }
+
+        let mut state = flight
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(flight) = flights.get(&key) {
-            (Arc::clone(flight), false)
-        } else {
-            let flight = Arc::new(CompactionFlight::new());
-            flights.insert(key.clone(), Arc::clone(&flight));
-            (flight, true)
-        }
-    };
-
-    if is_leader {
-        return CompactionFlightLeader {
-            key,
-            flight,
-            published: false,
-        }
-        .finish(run());
-    }
-
-    let mut state = flight
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    loop {
-        match &*state {
-            CompactionFlightState::Running => {
-                state = flight
-                    .ready
-                    .wait(state)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match &*state {
+                CompactionFlightState::Running => {
+                    state = flight
+                        .ready
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                CompactionFlightState::Finished(result) => return Some(result.clone()),
+                // The abandoned flight is already out of the table.
+                CompactionFlightState::Abandoned => break,
             }
-            CompactionFlightState::Finished(result) => return result.clone(),
         }
     }
 }
@@ -769,6 +793,11 @@ pub struct ConversationRuntime<C, T> {
     /// this runtime. The desktop also remembers it for the rest of the session.
     summarizer_circuit_open: bool,
     summarizer_failure_event_pending: bool,
+    /// A summary request in this turn saw the turn cancelled. The compaction
+    /// is abandoned with the session untouched, and the turn loop treats the
+    /// flag as the Stop it was: the executor clears the process-wide interrupt
+    /// when it reports one, so that flag alone may already read false.
+    compaction_cancelled: bool,
     /// Stable identity used to coalesce concurrent attempts to summarize the
     /// same archived slice. Desktop supplies its real chat/session id; direct
     /// runtimes receive a process-unique fallback to avoid cross-session reuse.
@@ -810,6 +839,15 @@ pub struct ConversationRuntime<C, T> {
     evidence_ledger: EvidenceLedger,
     evidence_guard_mode: EvidenceGuardMode,
     evidence_observed_tool_uses: HashSet<String>,
+    /// Text the caller wants the model to see with this turn's user message
+    /// only (the per-turn recall block when it is placed on the user side).
+    /// It is added to the request copy of that message, never to the Session,
+    /// so history stays as the user wrote it and earlier turns keep their
+    /// cached prefix. Cleared when the turn ends.
+    turn_context: Option<String>,
+    /// The user message the context belongs to, to find it again after an
+    /// in-turn compaction moves messages around.
+    turn_context_anchor: Option<ConversationMessage>,
 }
 
 /// A turn's model-visible tool projection, as the caller computes it.
@@ -948,6 +986,7 @@ where
             summarizer: None,
             summarizer_circuit_open: false,
             summarizer_failure_event_pending: false,
+            compaction_cancelled: false,
             compaction_session_id,
             focus_nudge_enabled: focus_nudge_enabled_from_env(),
             last_focus_nudge_tool_calls: None,
@@ -962,6 +1001,8 @@ where
             evidence_ledger: EvidenceLedger::default(),
             evidence_guard_mode: evidence_guard_mode(),
             evidence_observed_tool_uses: HashSet::new(),
+            turn_context: None,
+            turn_context_anchor: None,
         }
     }
 
@@ -1005,6 +1046,21 @@ where
     /// prompt merely *quotes* a research request — chat-title and intent
     /// inference both quote one, and both need the bare model output. Such a
     /// turn cannot retrieve anything, so it has no coverage to declare.
+    /// Text for the next turn's request only, attached to that turn's user
+    /// message. See the `turn_context` field.
+    pub fn set_turn_context(&mut self, text: Option<String>) {
+        self.turn_context = text.filter(|text| !text.trim().is_empty());
+    }
+
+    fn attach_turn_context(&self, messages: &mut [ConversationMessage]) {
+        let (Some(text), Some(anchor)) = (&self.turn_context, &self.turn_context_anchor) else {
+            return;
+        };
+        if let Some(message) = messages.iter_mut().rev().find(|message| *message == anchor) {
+            message.blocks.push(ContentBlock::Text { text: text.clone() });
+        }
+    }
+
     #[must_use]
     pub fn without_retrieval_guard(mut self) -> Self {
         self.retrieval_guard_enabled = false;
@@ -1193,11 +1249,14 @@ where
         user_message: ConversationMessage,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
+        self.compaction_cancelled = false;
         self.emit_event(EventType::TurnStarted);
         let result = self.run_turn_message_inner(user_message, prompter).and_then(|summary| {
             if let Some(source) = self.turn_input_source.as_mut() { source.checkpoint(&self.session)?; }
             Ok(summary)
         });
+        self.turn_context = None;
+        self.turn_context_anchor = None;
         let (outcome, last_message) = match &result {
             Ok(summary) => (TurnOutcome::Completed, last_assistant_text(summary)),
             Err(error) if error.is_interrupted() => (TurnOutcome::Interrupted, None),
@@ -1247,6 +1306,7 @@ where
         } else {
             TaskPlanCompletion::default()
         };
+        self.turn_context_anchor = self.turn_context.as_ref().map(|_| user_message.clone());
         self.session.messages.push(user_message);
 
         if self.resume_retrieval_on_next_user_message {
@@ -1395,9 +1455,15 @@ where
             if let Some(event) = self.prepare_context_for_request() {
                 merge_auto_compaction_event(&mut auto_compaction, event);
             }
+            // A Stop that landed while a compaction above was summarizing ends
+            // the turn here, not after a request for the uncompacted history.
+            if self.compaction_cancelled {
+                return Err(Self::interrupted_error());
+            }
 
             let mut messages = self.session.messages.clone();
             limit_request_images(&mut messages, request_image_limit);
+            self.attach_turn_context(&mut messages);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages,
@@ -1969,20 +2035,11 @@ where
         {
             config.preserve_target_tokens = Some(self.compaction_preserve_target_tokens());
         }
+        if self.compaction_cancelled {
+            return self.uncompacted_result();
+        }
         let Some(plan) = plan_compaction(&self.session, &config) else {
-            let tokens = estimate_session_tokens(&self.session);
-            return CompactionResult {
-                summary: String::new(),
-                formatted_summary: String::new(),
-                compacted_session: self.session.clone(),
-                removed_message_count: 0,
-                preserved_message_count: self.session.messages.len(),
-                tokens_before: tokens,
-                tokens_after: tokens,
-                summary_source: CompactionSummarySource::Skipped,
-                summary_output_tokens: None,
-                token_estimate_source: CompactionTokenEstimateSource::Heuristic,
-            };
+            return self.uncompacted_result();
         };
         let overflow = config.source == crate::compact::CompactionSource::Overflow;
         // A minimal pinned block for the overflow path — bounded to a share of
@@ -1997,8 +2054,26 @@ where
             None
         };
 
+        let summarizing = self.summarizer.is_some();
+        if summarizing {
+            self.emit_event(EventType::CompactionProgress {
+                phase: CompactionPhase::Started,
+            });
+        }
+        let llm_summary = self.llm_summarize(&plan.removed, config.instruction.as_deref());
+        if summarizing {
+            self.emit_event(EventType::CompactionProgress {
+                phase: CompactionPhase::Finished,
+            });
+        }
+        // Stopped mid-summary: keep the session exactly as it was. A
+        // deterministic summary here would replace history that the next turn
+        // can still summarize properly.
+        if self.compaction_cancelled {
+            return self.uncompacted_result();
+        }
         let (mut summary, summary_source, summary_output_tokens) = if let Some((summary, usage)) =
-            self.llm_summarize(&plan.removed, config.instruction.as_deref())
+            llm_summary
         {
             (summary, CompactionSummarySource::Llm, usage)
         } else {
@@ -2067,6 +2142,23 @@ where
         result
     }
 
+    /// The result of a compaction that removed nothing.
+    fn uncompacted_result(&self) -> CompactionResult {
+        let tokens = estimate_session_tokens(&self.session);
+        CompactionResult {
+            summary: String::new(),
+            formatted_summary: String::new(),
+            compacted_session: self.session.clone(),
+            removed_message_count: 0,
+            preserved_message_count: self.session.messages.len(),
+            tokens_before: tokens,
+            tokens_after: tokens,
+            summary_source: CompactionSummarySource::Skipped,
+            summary_output_tokens: None,
+            token_estimate_source: CompactionTokenEstimateSource::Heuristic,
+        }
+    }
+
     #[must_use]
     pub fn estimated_tokens(&self) -> usize {
         estimate_session_tokens(&self.session)
@@ -2088,7 +2180,7 @@ where
     }
 
     fn cancellation_requested(&self) -> bool {
-        crate::is_interrupted() || self.tool_executor.is_cancelled()
+        crate::is_interrupted() || self.compaction_cancelled || self.tool_executor.is_cancelled()
     }
 
     /// Fold everything the source has ready into the session as one message,
@@ -2757,8 +2849,10 @@ where
             slice_hash: compaction_slice_hash(&segments, instruction),
         };
         run_compaction_singleflight(key, || {
-            self.llm_summarize_segments(removed, &segments, instruction)
+            let summary = self.llm_summarize_segments(removed, &segments, instruction);
+            (!self.compaction_cancelled).then_some(summary)
         })
+        .flatten()
     }
 
     fn llm_summarize_segments(
@@ -2870,10 +2964,20 @@ where
             if *remaining_calls == 0 {
                 return None;
             }
+            // Checked before every call, so a Stop between the Map calls of a
+            // long transcript ends the compaction instead of sending the rest.
+            if self.cancellation_requested() {
+                self.compaction_cancelled = true;
+                return None;
+            }
             *remaining_calls -= 1;
             let response = self.summarizer.as_mut()?.stream(current.clone());
             let events = match response {
                 Ok(events) => events,
+                Err(error) if error.is_interrupted() => {
+                    self.compaction_cancelled = true;
+                    return None;
+                }
                 Err(error) if is_permanent_summarizer_error(&error) => {
                     self.summarizer = None;
                     self.summarizer_circuit_open = true;

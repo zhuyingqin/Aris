@@ -36,6 +36,11 @@ pub fn task_output_dir_at(base: &Path) -> PathBuf {
     project_data_dir_at(base).join(TASK_OUTPUT_DIR)
 }
 
+/// The `.somniq` subfolders that hold user documents created from the LaTeX
+/// library (one folder per document kind). Everything else under `.somniq` is
+/// application state.
+pub const LATEX_LIBRARY_DIRS: &[&str] = &[PAPERS_DIR, SLIDES_DIR, POSTER_DIR, REPORTS_DIR];
+
 pub const ROOT_DISPLAY_ORDER: &[&str] = &[
     SLIDES_DIR,
     POSTER_DIR,

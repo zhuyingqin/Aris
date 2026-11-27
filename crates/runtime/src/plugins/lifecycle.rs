@@ -18,7 +18,7 @@
 //! WorkTask run freezes its plugin set (name and digest) when it starts and
 //! resolves plugins only from that set until it ends.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -40,6 +40,10 @@ pub struct FrozenPlugin {
     pub name: String,
     pub version: String,
     pub digest: String,
+    /// The approved set of its project files, when its servers declared
+    /// any: a new approval of other contents is a different set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<String>,
 }
 
 /// The packages one run may use, fixed when it started. Recorded in the run's
@@ -86,6 +90,10 @@ impl PluginSet {
             hash.update(plugin.name.as_bytes());
             hash.update(b"@");
             hash.update(plugin.digest.as_bytes());
+            if let Some(files) = &plugin.files {
+                hash.update(b"+files:");
+                hash.update(files.as_bytes());
+            }
             hash.update(b"\n");
         }
         // Only switched-off official plugins enter the hash, so a set with
@@ -139,6 +147,11 @@ impl PluginStore {
                 .running_given(&disabled)?
                 .into_iter()
                 .map(|plugin| FrozenPlugin {
+                    files: self
+                        .approved_file_set(&plugin.package.name, &plugin.package.digest)
+                        .ok()
+                        .flatten()
+                        .map(|set| super::workspace_files::files_digest(&set.files)),
                     name: plugin.package.name,
                     version: plugin.package.version,
                     digest: plugin.package.digest,
@@ -185,8 +198,9 @@ fn new_token() -> String {
 /// While it lives, every [`PluginStore::for_execution`] inside a context bound
 /// with [`Self::bind`] resolves plugins from the frozen set, so enabling,
 /// disabling, upgrading or removing a package cannot change what the run (or
-/// its review) can use. Snapshots are content-addressed and never deleted, so
-/// the frozen digests stay readable for the whole run.
+/// its review) can use. Snapshots are content-addressed, and collection (see
+/// [`super::collect`]) keeps the frozen digests and project-file views until
+/// the run ends, so they stay readable for the whole run.
 pub struct PluginRun {
     token: String,
     set: Arc<PluginSet>,
@@ -208,6 +222,8 @@ impl PluginRun {
     /// plugins (as an unreadable registry always has) instead of later ones.
     #[must_use]
     pub fn begin(store: &PluginStore, label: impl Into<String>) -> Self {
+        // Collection waits until this run is registered holding what it froze.
+        let collection_gate = super::collect::hold_collection();
         let set = store
             .freeze()
             .unwrap_or_else(|error| {
@@ -238,6 +254,7 @@ impl PluginRun {
                 readable_dirs: readable_dirs.clone(),
             },
         );
+        drop(collection_gate);
         Self {
             token,
             set,
@@ -328,7 +345,27 @@ pub fn current_plugin_run() -> Option<PluginRunBinding> {
 impl Drop for PluginRun {
     fn drop(&mut self) {
         lock_runs().remove(&self.token);
+        // What collection left because a run held it can go once none does.
+        super::collect::run_deferred_collections();
     }
+}
+
+/// The package digests the runs in this process froze: their snapshots stay
+/// while any of them is in flight.
+pub(super) fn live_package_digests() -> BTreeSet<String> {
+    lock_runs()
+        .values()
+        .flat_map(|entry| entry.set.plugins.iter().map(|plugin| plugin.digest.clone()))
+        .collect()
+}
+
+/// The project-file views the runs in this process froze: kept while any
+/// of them is in flight.
+pub(super) fn live_file_views() -> BTreeSet<String> {
+    lock_runs()
+        .values()
+        .flat_map(|entry| entry.set.plugins.iter().filter_map(|plugin| plugin.files.clone()))
+        .collect()
 }
 
 /// A run's frozen set, or an empty one when the token is unknown here (never

@@ -1427,12 +1427,72 @@ fn apply_plugin_env(command: &mut Command, env: &BTreeMap<String, String>, plugi
     command.env("PYTHONIOENCODING", "utf-8");
     #[cfg(windows)]
     command.env("NoDefaultCurrentDirectoryInExePath", "1");
+    // What the server declared (see `plugins::capabilities`): variables from
+    // this computer by name, the network settings it needs, the directory
+    // the run works in. Only what was declared and approved.
+    if let Some(names) = env.get(crate::PLUGIN_PASSTHROUGH_ENV) {
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
+    if env.get(crate::PLUGIN_NETWORK_ENV).is_some_and(|value| value == "required") {
+        if let Some(proxy) = plugin_proxy_url() {
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                command.env(key, &proxy);
+            }
+        }
+        // Campus and company networks that intercept TLS need these.
+        for key in ["NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+    }
+    if let Some(project) = env.get(crate::PLUGIN_WORKSPACE_ENV) {
+        // A work task's turn works in its worktree; anything else in the project.
+        let root = crate::execution_env_var_os("ARIS_WORKSPACE_ROOT")
+            .filter(|root| !root.is_empty())
+            .unwrap_or_else(|| project.into());
+        command.env(crate::PLUGIN_WORKSPACE_ROOT_ENV, root);
+    }
     // The package's own variables, already checked against the reserved
-    // names at preview, and the host's SOMNIQ_PLUGIN_ROOT / _DATA.
+    // names at preview, and the host's SOMNIQ_PLUGIN_ROOT / _DATA / _FILES.
+    // The launcher's own instructions stay out of the process.
     for (key, value) in env {
+        if [crate::PLUGIN_PASSTHROUGH_ENV, crate::PLUGIN_NETWORK_ENV, crate::PLUGIN_WORKSPACE_ENV].contains(&key.as_str()) {
+            continue;
+        }
         command.env(key, value);
     }
+    // Python keeps its bytecode beside the source unless told otherwise: in
+    // the reviewed snapshot, where a new file makes the package look tampered
+    // with, and where a shipped .pyc could run instead of the source the user
+    // reviewed. With a prefix it reads and writes bytecode only there. Set
+    // last, so nothing can move it back.
+    command.env("PYTHONPYCACHEPREFIX", plugin.data.join(PLUGIN_PYCACHE_DIR));
 }
+
+/// The research proxy for a plugin that needs the network: SomniQ's own
+/// setting (`ARIS_WEB_PROXY_URL`), never a proxy inherited from the shell
+/// that started SomniQ, which may carry a password. Only an http(s) address
+/// of host and port is passed.
+fn plugin_proxy_url() -> Option<String> {
+    let value = std::env::var("ARIS_WEB_PROXY_URL").ok()?;
+    let parsed = url::Url::parse(value.trim()).ok()?;
+    let plain = matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && matches!(parsed.path(), "" | "/")
+        && parsed.query().is_none()
+        && parsed.fragment().is_none();
+    plain.then(|| value.trim().trim_end_matches('/').to_string())
+}
+
+/// Where a plugin's Python bytecode goes, inside its data directory.
+pub(crate) const PLUGIN_PYCACHE_DIR: &str = ".pycache";
 
 fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
     for (key, value) in env {

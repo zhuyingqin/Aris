@@ -176,6 +176,7 @@ fn legacy_queue_with_only_unrelated_files_no_longer_blocks_the_editor() {
         root,
         &TypesetRevisionLedger {
             version: REVISION_LEDGER_VERSION,
+            scope_version: REVISION_SCOPE_VERSION,
             head_revision_id: Some(target.id.clone()),
             revisions: vec![base.clone(), target.clone()],
         },

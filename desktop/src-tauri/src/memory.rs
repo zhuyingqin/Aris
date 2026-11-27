@@ -147,33 +147,44 @@ impl MemoryState {
         }
     }
 
+    /// The system-placed block, as earlier callers and tests expect it.
+    #[cfg(test)]
     pub(crate) fn builtin_research_recall_prompt(
         &self,
         project_id: &str,
         session_id: &str,
         query: &str,
     ) -> Option<String> {
+        self.builtin_research_recall(project_id, session_id, query, RecallPlacement::System)
+    }
+
+    /// The per-turn recall block for `placement` (see [`recall_placement`]),
+    /// logged as a `memory_recall` row either way. `Off` searches nothing.
+    pub(crate) fn builtin_research_recall(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        query: &str,
+        placement: RecallPlacement,
+    ) -> Option<String> {
+        if placement == RecallPlacement::Off {
+            crate::chat_events::record_event(
+                session_id,
+                "memory_recall",
+                json!({
+                    "project_id": project_id,
+                    "placement": placement.as_str(),
+                    "empty": true,
+                    "query_digest": recall_query_digest(query),
+                    "query_chars": query.chars().count(),
+                    "delivered": [],
+                }),
+            );
+            return None;
+        }
         let started = std::time::Instant::now();
         let mode = research_memory_v2_mode();
-        let session_hits = runtime::search_sessions(
-            &state::sessions_dir_for_project(project_id),
-            Some(query),
-            None,
-            8,
-            5,
-        )
-        .ok()
-        .and_then(|result| match result {
-            SessionSearchResult::Search { results, .. } => Some(
-                results
-                    .into_iter()
-                    .filter(|hit| is_general_memory_session_id(&hit.session_id))
-                    .take(RESEARCH_RECALL_SESSION_HITS)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+        let session_hits = recall_session_hits(project_id, query, Some(session_id));
         // Legacy v1 R1--R3 is intentionally absent here. If v2 or its remote
         // backend is unavailable, the safe fallback is authoritative R0 only.
         let (r3, recalled) = if mode.allows_prompt() {
@@ -201,6 +212,13 @@ impl MemoryState {
             json!({
                 "project_id": project_id,
                 "empty": empty,
+                // Which history reached the prompt, and which question asked
+                // for it: enough to rebuild the block from the index offline
+                // and test whether the answer used it, without logging text.
+                "placement": placement.as_str(),
+                "query_digest": recall_query_digest(query),
+                "query_chars": query.chars().count(),
+                "delivered": report.delivered_session_messages(),
                 "latency_ms": started.elapsed().as_millis() as u64,
                 "budget_chars": report.budget_chars,
                 "used_chars": report.used_chars,
@@ -427,6 +445,77 @@ const LESSON_BATCH_MAX_WAIT_MS: i64 = 15 * 60_000;
 const LESSON_WRITER_MAX_ATTEMPTS: i64 = 3;
 const LESSON_WRITER_KNOWN_LINES: usize = 30;
 static LESSON_WRITER_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Retention runs with the writer, at most this often.
+const LESSON_CLEANUP_INTERVAL_MS: i64 = 3_600_000;
+static LESSON_LAST_CLEANUP_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Lessons attached to failed calls in turns that have not ended yet:
+/// session id -> (tool_use_id, lesson ids). Settled by
+/// [`settle_delivered_lessons`] when the turn ends.
+type DeliveredLessons = BTreeMap<String, Vec<(String, Vec<String>)>>;
+static DELIVERED_LESSONS: Mutex<DeliveredLessons> = Mutex::new(BTreeMap::new());
+
+/// Called when lessons were attached to a failed tool result: counts the
+/// delivery and remembers it so the turn's end can tell whether it helped.
+pub(crate) fn note_lessons_delivered(session_id: &str, tool_use_id: &str, lesson_ids: &[String]) {
+    if let Err(error) = runtime::LessonStore::default().record_recalled(lesson_ids) {
+        eprintln!("SomniQ lesson recall count skipped: {error}");
+    }
+    if let Ok(mut delivered) = DELIVERED_LESSONS.lock() {
+        // Turns that never ended (a crash, a stop) must not grow this forever.
+        if delivered.len() > 256 {
+            delivered.clear();
+        }
+        delivered
+            .entry(session_id.to_string())
+            .or_default()
+            .push((tool_use_id.to_string(), lesson_ids.to_vec()));
+    }
+}
+
+/// At turn end: a lesson delivered for a failed call helped if that call was
+/// fixed later in the turn. Deliveries for calls not in this turn (the turn
+/// that made them was stopped) are dropped without a verdict.
+pub(crate) fn settle_delivered_lessons(session_id: &str, session: &runtime::Session) {
+    let Some(pending) = DELIVERED_LESSONS
+        .lock()
+        .ok()
+        .and_then(|mut delivered| delivered.remove(session_id))
+    else {
+        return;
+    };
+    let turn = runtime::last_turn_messages(&session.messages);
+    let fixed = runtime::fixed_failure_ids(turn);
+    let in_turn: BTreeSet<&str> = turn
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let store = runtime::LessonStore::default();
+    for (tool_use_id, lesson_ids) in pending {
+        if !in_turn.contains(tool_use_id.as_str()) {
+            continue;
+        }
+        if let Err(error) = store.record_outcome(&lesson_ids, fixed.contains(&tool_use_id)) {
+            eprintln!("SomniQ lesson outcome skipped: {error}");
+        }
+    }
+}
+
+/// The user deleted a chat: its lessons go unless another chat taught them.
+pub(crate) fn forget_session_lessons(session_id: &str) {
+    if let Ok(mut delivered) = DELIVERED_LESSONS.lock() {
+        delivered.remove(session_id);
+    }
+    match runtime::LessonStore::default().forget_session(session_id) {
+        Ok(0) => {}
+        Ok(count) => eprintln!("SomniQ lessons: deleted {count} learned only from a deleted chat"),
+        Err(error) => eprintln!("SomniQ lessons of a deleted chat stay until cleanup: {error}"),
+    }
+}
 
 /// `memory_lessons_enabled` (default on) gates both writing and recall.
 pub(crate) fn lessons_enabled() -> bool {
@@ -456,6 +545,17 @@ pub(crate) fn spawn_lesson_writer() {
     let spawned = std::thread::Builder::new()
         .name("somniq-lesson-writer".to_string())
         .spawn(move || {
+            let now = lesson_now_ms();
+            if now - LESSON_LAST_CLEANUP_MS.load(Ordering::SeqCst) >= LESSON_CLEANUP_INTERVAL_MS {
+                LESSON_LAST_CLEANUP_MS.store(now, Ordering::SeqCst);
+                match store.cleanup(now) {
+                    Ok(report) if report != runtime::LessonCleanup::default() => {
+                        eprintln!("SomniQ lesson cleanup: {report:?}");
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("SomniQ lesson cleanup skipped: {error}"),
+                }
+            }
             drain_lesson_jobs(&store);
             LESSON_WRITER_RUNNING.store(false, Ordering::SeqCst);
         });
@@ -528,14 +628,14 @@ pub(crate) fn past_lessons_for_failure(
     input: &str,
     output: &str,
     project_id: &str,
-) -> Option<(String, usize)> {
+) -> Option<(String, Vec<String>)> {
     if !lessons_enabled() {
         return None;
     }
     match runtime::LessonStore::default().recall_for_failure(tool_name, input, output) {
         Ok(lessons) if !lessons.is_empty() => Some((
             runtime::render_recalled_lessons(&lessons, project_id),
-            lessons.len(),
+            lessons.iter().map(|lesson| lesson.id.clone()).collect(),
         )),
         Ok(_) => None,
         Err(error) => {
@@ -581,27 +681,25 @@ fn run_memory_oneshot(system: &str, prompt: &str) -> Result<String, String> {
     .map(|run| run.text)
 }
 
-/// Whether the background screening pipeline runs on its own. **On by default.**
+/// Whether the background screening pipeline runs on its own. **Off by
+/// default** since 2026-11-23; `memory_v2_background_screening: true` turns it
+/// back on, and captures are still queued so a manual build can mine them.
 ///
-/// It is expensive, and it was briefly switched off in favour of deterministic
-/// inline capture. Measured against the real store that was a bad trade: only
-/// 8 of 106 durable memories describe a tool call, so deterministic capture
-/// alone loses ~92% of what the library actually contains -- research problems,
-/// theoretical framing, validation scope. None of that involves a tool.
-///
-/// The cost problem is real but was mostly not the pipeline itself: each call
-/// carried the whole ~10.6 KB `research-review` skill, about 9,700 of the
-/// ~13,000 input tokens a capture used to spend. Sending only the memory
-/// instructions (`run_memory_oneshot`) cuts a capture to ~3,300 tokens with no
-/// loss of coverage.
-///
-/// This switch is kept so the pipeline can be turned off once agent-authored
-/// inline writes cover the semantic cases, not before.
+/// It had been turned back on for coverage: only 8 of 106 durable memories
+/// describe a tool call, so deterministic capture alone would lose research
+/// problems, framing and validation scope. The 2026-11-22 replay measured what
+/// matters instead -- whether stored memory answers later questions. On local
+/// history the extracted atoms answered 2-3% of 132 "what did we decide
+/// earlier" probes and of 104 repeated-pitfall events, while plain search over
+/// the raw Sessions (which already contain that framing) answered ~70% of the
+/// former, and short failure lessons ~65% of the latter. Each surviving atom
+/// still costs ~3,300 input tokens of Reviewer calls. Existing atoms stay
+/// readable; see `docs/development-logic/memory-l0-l1.md`.
 fn research_memory_v2_background_screening() -> bool {
     crate::config::load_object()
         .get("memory_v2_background_screening")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn research_memory_v2_mode() -> ResearchMemoryV2Mode {
@@ -1334,6 +1432,50 @@ pub async fn memory_v2_status(
     .await
 }
 
+/// The lesson list for Settings: every lesson learned from fixed tool
+/// failures (all projects: a lesson is recalled across projects), and the
+/// switch that gates writing and recall.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryLessonsView {
+    pub enabled: bool,
+    pub lessons: Vec<runtime::LessonView>,
+}
+
+const LESSON_LIST_LIMIT: usize = 500;
+
+#[tauri::command]
+pub async fn memory_lessons_status() -> Result<MemoryLessonsView, String> {
+    spawn_memory_task(|| {
+        Ok(MemoryLessonsView {
+            enabled: lessons_enabled(),
+            lessons: runtime::LessonStore::default().list_views(LESSON_LIST_LIMIT)?,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn memory_lessons_set_enabled(enabled: bool) -> Result<(), String> {
+    spawn_memory_task(move || {
+        crate::config::persist_values(&[("memory_lessons_enabled", serde_json::Value::Bool(enabled))])
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn memory_lesson_delete(lesson_id: String) -> Result<bool, String> {
+    spawn_memory_task(move || runtime::LessonStore::default().delete(lesson_id.trim())).await
+}
+
+/// `active: false` archives the lesson (kept, not recalled); `true` restores
+/// it, also from `stale`.
+#[tauri::command]
+pub async fn memory_lesson_set_active(lesson_id: String, active: bool) -> Result<bool, String> {
+    spawn_memory_task(move || runtime::LessonStore::default().set_status(lesson_id.trim(), active))
+        .await
+}
+
 /// Explicitly confirms one R3 candidate. There is no corresponding automatic
 /// command; a pending R3 atom cannot be injected until this succeeds.
 #[tauri::command]
@@ -1606,25 +1748,7 @@ pub async fn memory_recall_preview(
     spawn_memory_task(move || {
         let started = std::time::Instant::now();
         let mode = research_memory_v2_mode();
-        let session_hits = runtime::search_sessions(
-            &state::sessions_dir_for_project(&project_id),
-            Some(&query),
-            None,
-            8,
-            5,
-        )
-        .ok()
-        .and_then(|result| match result {
-            SessionSearchResult::Search { results, .. } => Some(
-                results
-                    .into_iter()
-                    .filter(|hit| is_general_memory_session_id(&hit.session_id))
-                    .take(RESEARCH_RECALL_SESSION_HITS)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+        let session_hits = recall_session_hits(&project_id, &query, None);
         let (r3, recalled) = if mode.allows_prompt() {
             recall_v2_atoms(&project_id, "preview", &query)?
         } else {
@@ -1741,6 +1865,29 @@ fn export_memory(project_id: String) -> Result<String, String> {
     }
 }
 
+/// The Session windows (R0) a turn's recall block may carry: the search's
+/// best chat Sessions other than `own_session`. The turn's own Session is
+/// already in the context window or its compaction summary; on 400 replayed
+/// real turns it took a top-2 slot 40% of the time, resending what the model
+/// had just read.
+fn recall_session_hits(
+    project_id: &str,
+    query: &str,
+    own_session: Option<&str>,
+) -> Vec<runtime::SessionSearchHit> {
+    match runtime::search_sessions(&state::sessions_dir_for_project(project_id), Some(query), None, 8, 5) {
+        Ok(SessionSearchResult::Search { results, .. }) => results
+            .into_iter()
+            .filter(|hit| {
+                is_general_memory_session_id(&hit.session_id)
+                    && own_session != Some(hit.session_id.as_str())
+            })
+            .take(RESEARCH_RECALL_SESSION_HITS)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn memory_root() -> PathBuf {
     state::config_dir().join("memory")
 }
@@ -1846,6 +1993,76 @@ fn render_builtin_research_recall_reported(
 /// V2 renderer.  It deliberately has no parameter that can carry a legacy
 /// `ResearchMemoryRecall`: the type boundary itself prevents an accidental
 /// reintroduction of v1 R1--R3 into normal prompt assembly.
+/// Where a turn's recall block goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecallPlacement {
+    /// Last section of the system prompt (the original placement). The block
+    /// changes every turn, so every request re-reads the whole history at full
+    /// price: the cached prefix ends at the system prompt.
+    System,
+    /// Appended to this turn's user message in the request only
+    /// (`ConversationRuntime::set_turn_context`); earlier turns keep their
+    /// cached prefix.
+    User,
+    Off,
+}
+
+impl RecallPlacement {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// `memory_recall_placement` in config: `off` (the default), `system`, `user`,
+/// or `alternate`: each Session is assigned `system` or `user` by a stable hash
+/// of its id, so one Session never switches and both arms see the same kind of
+/// traffic. The arm is recorded in every `memory_recall` row; `usage_report.py`
+/// compares cache reads and use.
+///
+/// Off by default since 2026-11-24: judged blind on 400 replayed real turns,
+/// 11% of the windows the block delivered were useful (about 5,300 characters a
+/// turn), and no lexical gate kept the useful ones without dropping nearly all
+/// deliveries. The model still reaches history through `session_search`.
+pub(crate) fn recall_placement(session_id: &str) -> RecallPlacement {
+    let configured = crate::config::load_object()
+        .get("memory_recall_placement")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    match configured.as_str() {
+        "system" => RecallPlacement::System,
+        "user" => RecallPlacement::User,
+        "alternate" => placement_arm(session_id),
+        _ => RecallPlacement::Off,
+    }
+}
+
+fn placement_arm(session_id: &str) -> RecallPlacement {
+    // FNV-1a: stable across builds and platforms, unlike `DefaultHasher`.
+    let hash = session_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    if hash % 2 == 0 {
+        RecallPlacement::System
+    } else {
+        RecallPlacement::User
+    }
+}
+
+/// First 16 hex digits of SHA-256 over the trimmed question: matches the turn's
+/// user message offline (it survives Session rewrites) without storing it.
+fn recall_query_digest(query: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(query.trim().as_bytes());
+    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn render_v2_research_recall_reported(
     r3: &[runtime::ResearchMemoryV2Atom],
     recalled: &[runtime::ResearchMemoryV2Atom],
@@ -2010,6 +2227,10 @@ pub struct MemoryRecallEntry {
     pub chars: usize,
     pub anchor: bool,
     pub source_session_id: Option<String>,
+    /// For R0 lines: the Session message the line quotes, so a turn's
+    /// delivery can be traced without logging the text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_message_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2038,7 +2259,36 @@ impl RecallReport {
             chars: text.chars().count(),
             anchor,
             source_session_id,
+            source_message_index: None,
         });
+    }
+
+    fn admit_session_message(
+        &mut self,
+        label: String,
+        text: &str,
+        anchor: bool,
+        session_id: &str,
+        message_index: usize,
+    ) {
+        self.admit("R0", label, text, anchor, Some(session_id.to_string()));
+        if let Some(entry) = self.entries.last_mut() {
+            entry.source_message_index = Some(message_index);
+        }
+    }
+
+    /// `{session_id, message_index}` of every R0 line that reached the prompt.
+    fn delivered_session_messages(&self) -> Vec<serde_json::Value> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.layer == "R0")
+            .filter_map(|entry| {
+                Some(json!({
+                    "session_id": entry.source_session_id.as_deref()?,
+                    "message_index": entry.source_message_index?,
+                }))
+            })
+            .collect()
     }
 
     fn skip(&mut self, layer: &str, label: String, reason: &str, text: &str) {
@@ -2371,12 +2621,12 @@ fn render_research_session_section(
         for (index, candidate) in candidates.iter().enumerate() {
             if candidate.hit == hit_index && admitted[index] {
                 output.push_str(&candidate.line);
-                report.admit(
-                    "R0",
+                report.admit_session_message(
                     format!("{} #{}", hits[hit_index].session_id, candidate.position),
                     &candidate.content,
                     candidate.anchor,
-                    Some(hits[hit_index].session_id.clone()),
+                    &hits[hit_index].session_id,
+                    hits[hit_index].messages[candidate.position].index,
                 );
             }
         }
@@ -3265,6 +3515,91 @@ mod tests {
             "legacy R1 leaked into the v2 renderer: {recall:?}"
         );
         assert!(recall.payload["used_chars"].as_u64().unwrap_or_default() > 0);
+        // Which question asked is recorded as a digest, never as text.
+        assert!(recall.payload["delivered"].is_array(), "{recall:?}");
+        assert_eq!(recall.payload["query_digest"].as_str().map(str::len), Some(16));
+        assert!(!recall.payload.to_string().contains("记忆索引的存储引擎"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn placement_arms_are_stable_per_session_and_both_are_used() {
+        let arms: Vec<_> = (0..200).map(|n| placement_arm(&format!("chat-{n}-x"))).collect();
+        assert!(arms.contains(&RecallPlacement::System) && arms.contains(&RecallPlacement::User));
+        let user = arms.iter().filter(|arm| **arm == RecallPlacement::User).count();
+        assert!((60..=140).contains(&user), "{user} of 200 sessions on the user side");
+        assert_eq!(placement_arm("chat-1795406255665-3zf9ga"), placement_arm("chat-1795406255665-3zf9ga"));
+    }
+
+    #[test]
+    fn the_per_turn_recall_block_is_off_unless_configured() {
+        let (root, _guards, _serial) = migration_fixture("r0-default-off");
+        assert_eq!(recall_placement("chat-1795406255665-3zf9ga"), RecallPlacement::Off);
+        assert_eq!(recall_placement("chat-1795406255666-abcdef"), RecallPlacement::Off);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_off_arm_records_its_turn_without_searching() {
+        let (root, _guards, _serial) = migration_fixture("r0-off");
+        let memory = MemoryState::default();
+        let block = memory.builtin_research_recall("project-migration", "chat-off", "任何问题", RecallPlacement::Off);
+        assert!(block.is_none());
+        let events = crate::chat_events::read_events_for_session("chat-off", None).expect("events");
+        let recall = events.iter().find(|event| event.kind == "memory_recall").expect("row");
+        assert_eq!(recall.payload["placement"], "off");
+        assert!(recall.payload.get("latency_ms").is_none(), "nothing was searched: {recall:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_recall_row_names_each_delivered_session_message_without_its_text() {
+        let (root, _guards, _serial) = migration_fixture("r0-delivered");
+        let project_id = "project-migration";
+        let sessions = state::sessions_dir_for_project(project_id);
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let session = Session {
+            version: 1,
+            messages: vec![
+                runtime::ConversationMessage::user_text("风机数据统一用 SCADA 十分钟粒度重采样。"),
+                runtime::ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "好的，风机数据按 SCADA 十分钟粒度处理。".to_string(),
+                }]),
+            ],
+            compactions: Vec::new(),
+        };
+        session
+            .save_to_path(sessions.join("chat-old.json"))
+            .expect("save session");
+        runtime::sync_sessions_dir(&sessions).expect("index sessions");
+
+        let memory = MemoryState::default();
+        let block = memory
+            .builtin_research_recall_prompt(project_id, "chat-now", "风机数据用什么粒度？")
+            .expect("R0 delivers the old session");
+        assert!(block.contains("SCADA"), "{block}");
+
+        let events = crate::chat_events::read_events_for_session("chat-now", None).expect("events");
+        let recall = events
+            .iter()
+            .find(|event| event.kind == "memory_recall")
+            .expect("recall event");
+        let delivered = recall.payload["delivered"].as_array().expect("delivered");
+        assert!(
+            delivered
+                .iter()
+                .any(|item| item["session_id"] == "chat-old" && item["message_index"] == 0),
+            "{recall:?}"
+        );
+        assert_eq!(recall.payload["placement"], "system");
+        let row = recall.payload.to_string();
+        assert!(!row.contains("SCADA") && !row.contains("风机"), "text leaked into the audit row: {row}");
+
+        // The same question asked inside that Session recalls nothing from it:
+        // the model already has it in context.
+        let own = memory.builtin_research_recall_prompt(project_id, "chat-old", "风机数据用什么粒度？");
+        assert!(own.as_ref().is_none_or(|block| !block.contains("SCADA")), "{own:?}");
 
         let _ = fs::remove_dir_all(root);
     }

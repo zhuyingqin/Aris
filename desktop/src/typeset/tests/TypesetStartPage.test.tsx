@@ -182,3 +182,16 @@ describe("LaTeX library folder browsing", () => {
     expect(screen.queryByText("Overview")).toBeNull();
   });
 });
+
+describe("journal and thesis templates", () => {
+  it("creates a thesis from its starter, on the report shelf", () => {
+    const view = props();
+    render(<TypesetStartPage {...view} />);
+    fireEvent.click(screen.getAllByRole("button", { name: /New LaTeX document/ })[0]);
+    const dialog = screen.getByRole("dialog", { name: "New LaTeX document" });
+    fireEvent.change(within(dialog).getByLabelText("Document title"), { target: { value: "My Thesis" } });
+    fireEvent.click(within(dialog).getByRole("radio", { name: /English thesis/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create document" }));
+    expect(view.onCreateSource).toHaveBeenCalledWith(".somniq/reports/My-Thesis/main.tex", "report", "My Thesis", "thesis-en");
+  });
+});

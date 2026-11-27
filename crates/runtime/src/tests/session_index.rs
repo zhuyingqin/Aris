@@ -1,5 +1,6 @@
 use super::{
-    bigram_index_text, bigram_query_terms, recency_weight, BIGRAM_READY_FLAG,
+    bigram_index_text, bigram_query_terms, forget_indexed_session, index_session, recency_weight,
+    session_start_from_id, BIGRAM_READY_FLAG,
     open_index, pending_session_embedding_inputs, recent_session_messages, search_sessions,
     search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
     session_index_stats, set_metadata_flag, sync_sessions_dir, upsert_session_message_embeddings,
@@ -561,5 +562,88 @@ fn removed_sessions_and_rewritten_messages_leave_no_stale_bigram_rows() {
     fs::remove_file(dir.join("chat-a.json")).expect("remove");
     sync_sessions_dir(&dir).expect("prune");
     assert!(search_session_ids(&dir, "光伏", 3).is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_deleted_chat_leaves_search_at_once_and_a_missing_index_is_not_created() {
+    let dir = temp_sessions_dir("forget-session");
+    save_text_session(&dir, "chat-a", "数据集用 SCADA 风机数据。", "好的。");
+    save_text_session(&dir, "chat-b", "风机数据要先清洗。", "好的。");
+    sync_sessions_dir(&dir).expect("index");
+    assert_eq!(search_session_ids(&dir, "风机数据", 3).len(), 2);
+    // chat_delete removes the files and then the rows, with no repair pass.
+    fs::remove_file(dir.join("chat-a.json")).expect("remove");
+    forget_indexed_session(&dir, "chat-a").expect("forget");
+    assert_eq!(search_session_ids(&dir, "风机数据", 3), vec!["chat-b".to_string()]);
+    let connection = open_index(&dir).expect("open");
+    let bigram_rows: i64 = connection
+        .query_row("SELECT count(*) FROM messages_bigram_fts WHERE messages_bigram_fts MATCH 'scada'", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(bigram_rows, 0);
+
+    let empty = temp_sessions_dir("forget-no-index");
+    forget_indexed_session(&empty, "chat-x").expect("no index is fine");
+    assert!(!empty.join("session-index.sqlite3").exists());
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty);
+}
+
+fn indexed_times(dir: &std::path::Path, session_id: &str) -> Vec<(usize, i64)> {
+    let connection = open_index(dir).expect("open");
+    let mut statement = connection
+        .prepare("SELECT message_index, recorded_at FROM messages WHERE session_id = ?1 ORDER BY message_index")
+        .expect("prepare");
+    let rows = statement
+        .query_map([session_id], |row| Ok((row.get::<_, i64>(0)? as usize, row.get(1)?)))
+        .expect("query");
+    rows.filter_map(Result::ok).collect()
+}
+
+#[test]
+fn a_rewritten_session_keeps_the_time_each_message_was_first_seen() {
+    let dir = temp_sessions_dir("first-seen");
+    let path = dir.join("chat-a.json");
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text("四月定下用 SCADA 风机数据。"));
+    session.save_to_path(&path).expect("save");
+    index_session(&path, &session).expect("index");
+    let original = indexed_times(&dir, "chat-a");
+    assert!(original[0].1 > 0, "{original:?}");
+
+    // A compaction or rewind appends the whole Session again behind a reset,
+    // stamped with the time of the rewrite (here: a year later).
+    let later = original[0].1 + 365 * 24 * 3_600_000;
+    let events = path.with_extension("events.jsonl");
+    let mut log = fs::read_to_string(&events).expect("log");
+    log.push_str(&format!("{{\"kind\":\"session_reset\",\"ts\":{later},\"payload\":{{}}}}\n"));
+    log.push_str(&format!("{{\"kind\":\"session_message\",\"ts\":{later},\"payload\":{{\"index\":0}}}}\n"));
+    log.push_str(&format!("{{\"kind\":\"session_message\",\"ts\":{later},\"payload\":{{\"index\":1}}}}\n"));
+    fs::write(&events, log).expect("rewrite log");
+    session.messages.push(ConversationMessage::user_text("十一月继续讨论。"));
+    index_session(&path, &session).expect("reindex");
+
+    let times = indexed_times(&dir, "chat-a");
+    assert_eq!(times[0].1, original[0].1, "the old message moved to the rewrite time: {times:?}");
+    assert_eq!(times[1].1, later, "the new message takes its own time: {times:?}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn messages_without_any_time_take_the_session_start_not_the_file_mtime() {
+    assert_eq!(session_start_from_id("chat-1795406255665-3zf9ga"), Some(1_795_406_255_665));
+    assert_eq!(session_start_from_id("wf-review-42"), None);
+    assert_eq!(session_start_from_id("chat-0000000000001-x"), None);
+
+    let dir = temp_sessions_dir("no-time");
+    let path = dir.join("chat-1700000000000-abc.json");
+    let mut session = Session::new();
+    session.messages.push(ConversationMessage::user_text("旧会话里定下的模板。"));
+    session.save_to_path(&path).expect("save");
+    // No event log at all: the history predates it.
+    let _ = fs::remove_file(path.with_extension("events.jsonl"));
+    index_session(&path, &session).expect("index");
+    let times = indexed_times(&dir, "chat-1700000000000-abc");
+    assert_eq!(times, vec![(0, 1_700_000_000_000)]);
     let _ = fs::remove_dir_all(dir);
 }

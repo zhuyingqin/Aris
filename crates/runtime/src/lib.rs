@@ -116,8 +116,9 @@ pub use conversation::{
     ToolInvocation, ToolMedia, ToolOutput, TurnInput, TurnInputSource, TurnSummary,
 };
 pub use event_sink::{
-    epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, EventSink, EventType,
-    JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink, TurnOutcome,
+    epoch_secs_now, iso8601_from_epoch_secs, now_iso8601, today_iso, CompactionPhase, EventSink,
+    EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent, TeeEventSink,
+    TurnOutcome,
 };
 pub use evidence_ledger::{
     evidence_guard_mode, EvidenceGuardMode, NO_NEW_EVIDENCE_BLOCK_CALLS,
@@ -271,9 +272,12 @@ pub use research_memory_v2::{
     ResearchMemoryV2Store, ToolEpisode, RESEARCH_MEMORY_V2_VERSION, TOOL_TRACE_FAILURE_MARKER,
 };
 pub use lesson_memory::{
-    failure_is_informative, last_turn_messages, lesson_request_body, lesson_turn_from_messages,
-    parse_lesson_reply, render_recalled_lessons, LessonDraft, LessonJob, LessonStore, LessonTurn,
-    RecalledLesson, LESSON_SYSTEM_PROMPT,
+    error_class, failure_is_informative, input_digest as lesson_input_digest,
+    lesson_error_digest, fixed_failure_ids, last_turn_messages,
+    lesson_request_body, lesson_turn_from_messages, parse_lesson_reply, render_recalled_lessons,
+    LessonCall, LessonCleanup, LessonDraft, LessonGates, LessonJob, LessonStore, LessonTurn,
+    LessonView, RecalledLesson,
+    LESSON_SYSTEM_PROMPT,
 };
 pub use retrieval_guard::{performs_retrieval, RetrievalGuardCheckpoint};
 pub use review_workflow::{
@@ -299,12 +303,12 @@ pub use session::{
     MessageRole, Session, SessionCompactionRecord, SessionError,
 };
 pub use session_index::{
-    index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
-    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state,
+    forget_indexed_session, index_session, pending_session_embedding_inputs, recent_session_messages, search_sessions,
+    search_sessions_filtered, search_sessions_hybrid, session_index_reindex_state, session_recall_evidence,
     session_index_stats, session_search_date_millis, sessions_dir_from_env, sync_sessions_dir,
     upsert_session_message_embeddings, RecentSessionMessage, SessionBrowseEntry,
     SessionEmbeddingInput, SessionIndexReindexState, SessionIndexStats, SessionMessageEmbedding,
-    SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+    SessionRecallEvidence, SessionSearchFilter, SessionSearchHit, SessionSearchMessage, SessionSearchResult,
 };
 pub use skill_registry::{
     activated_canonical_skill_name, registered_skill, RegisteredSkillResolution, SkillLifecycle,
@@ -334,6 +338,21 @@ pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
 pub const PLUGIN_ROOT_ENV: &str = "SOMNIQ_PLUGIN_ROOT";
 /// The plugin's own writable directory, also set by the host.
 pub const PLUGIN_DATA_ENV: &str = "SOMNIQ_PLUGIN_DATA";
+/// Host instructions to the launcher, from the server's capability
+/// declaration; the plugin process never sees them. Names of variables to
+/// pass from this computer, comma-separated.
+pub const PLUGIN_PASSTHROUGH_ENV: &str = "SOMNIQ_PLUGIN_PASSTHROUGH";
+/// `required` when the server declared it needs the network: it then gets
+/// the research proxy and certificate variables.
+pub const PLUGIN_NETWORK_ENV: &str = "SOMNIQ_PLUGIN_NETWORK";
+/// The registered project, when the server declared workspace access.
+pub const PLUGIN_WORKSPACE_ENV: &str = "SOMNIQ_PLUGIN_WORKSPACE";
+/// What the plugin process sees: the directory the run works in (the
+/// project, or a work task's worktree), only when it declared workspace access.
+pub const PLUGIN_WORKSPACE_ROOT_ENV: &str = "SOMNIQ_WORKSPACE_ROOT";
+/// What the plugin process sees: the read-only copies of the workspace files
+/// it declared, as approved.
+pub const PLUGIN_FILES_ENV: &str = "SOMNIQ_PLUGIN_FILES";
 pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
 /// SomniQ user-level skills directory.

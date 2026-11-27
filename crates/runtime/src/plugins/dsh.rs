@@ -527,6 +527,8 @@ fn translate_mcp(
         args: args.iter().map(|v| resolve(v)).collect::<Result<_, _>>()?,
         env,
         request_timeout_secs: timeout,
+        capability: None,
+        launch: vec![],
     });
     Ok(())
 }
@@ -551,7 +553,8 @@ pub(crate) fn reserved_env_key(key: &str) -> bool {
         "PROCESSOR_ARCHITECTURE", "OS", "USERNAME", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL",
         "LC_CTYPE", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
         // Host variables.
-        "TEMP", "TMP", "TMPDIR", "PYTHONUTF8", "PYTHONIOENCODING",
+        "TEMP", "TMP", "TMPDIR", "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONPYCACHEPREFIX",
+        "PYTHONDONTWRITEBYTECODE",
         "NODEFAULTCURRENTDIRECTORYINEXEPATH",
         // Proxy and certificate variables.
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",

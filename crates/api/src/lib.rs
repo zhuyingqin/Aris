@@ -9,7 +9,9 @@ pub use client::{
     connection_uses_routing_session_header, is_opencode_base_url,
     oauth_token_is_expired, read_base_url, read_send_betas, resolve_saved_oauth_token,
     resolve_response_header_timeout, resolve_startup_auth_source, resolve_stream_idle_timeout,
-    AnthropicClient, ApiTraceSink, AuthSource, MessageStream, OAuthTokenSet, StreamWaitPolicy,
+    request_limit_detail, AnthropicClient, ApiTraceSink, AuthSource, MessageStream, OAuthTokenSet,
+    StreamProgressClock,
+    StreamWaitPolicy,
     MAX_TIMEOUT_RESENDS, OPENCODE_SESSION_HEADER,
 };
 pub use error::ApiError;

@@ -11,10 +11,12 @@ declarations are deliberately excluded from the Desktop tool collection.
 Project files continue to provide non-MCP runtime settings such as permissions,
 hooks, and sandbox policy.
 
-When the global file does not exist yet, Desktop copies STDIO entries from the
-active project's legacy `.mcp.json` into it once. The project file is retained
-unchanged for recovery and interoperability; subsequent Desktop edits affect
-only the global file. Non-STDIO project entries are not promoted globally.
+A project's own `.mcp.json` is never loaded by Desktop and never copied into
+the global file. Until 2026-11-25 Desktop copied its STDIO entries into the
+global file whenever that file did not exist yet; a cloned repository could
+then start its servers on the first turn and in every project afterwards.
+Servers from such a file are added by the user in Settings, where they show
+what will run.
 
 The shared CLI configuration loader retains its normal Claude Code-compatible
 discovery behavior:

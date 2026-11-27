@@ -45,6 +45,19 @@ fn allowed_external_url(url: &str) -> bool {
     )
 }
 
+/// Run in every frame of the app's windows before the frame's own scripts:
+/// a frame without an origin of its own (a plugin page, or a frame such a page
+/// created) loses WebRTC, which its CSP cannot stop.
+pub const OPAQUE_FRAME_GUARD: &str = include_str!("opaque_frame_guard.js");
+
+/// What every app window is built with: new windows go to the system browser,
+/// and frames without an origin of their own get no WebRTC.
+pub fn harden_app_webview<R: tauri::Runtime>(
+    builder: tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>>,
+) -> tauri::WebviewWindowBuilder<'_, R, tauri::AppHandle<R>> {
+    route_new_windows_to_browser(builder).initialization_script_for_all_frames(OPAQUE_FRAME_GUARD)
+}
+
 /// Every new-window request of an app webview (`target="_blank"`,
 /// `window.open`, from the app or from a frame it embeds, such as a plugin's
 /// web panel) goes to the system browser; the webview itself never opens a

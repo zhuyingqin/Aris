@@ -54,6 +54,9 @@ export const CHAT_COPY: Record<Language, {
   emptyResponse: string;
   waitingForModel: string;
   modelWaitHint: string;
+  modelWaitStalledHint: string;
+  compactingContext: string;
+  compactionHint: string;
   toolRunning: string;
   toolFailed: string;
   toolSucceeded: string;
@@ -136,6 +139,9 @@ export const CHAT_COPY: Record<Language, {
     emptyResponse: "模型返回了空回复。",
     waitingForModel: "等待模型响应 ·",
     modelWaitHint: "深度推理可能需要几分钟，可随时停止。",
+    modelWaitStalledHint: "已超过默认的 10 分钟等待上限，模型可能卡住了，可以停止后重试。",
+    compactingContext: "正在压缩上下文 ·",
+    compactionHint: "对话较长，需要先总结较早的历史，可随时停止。",
     toolRunning: "运行中",
     toolFailed: "失败",
     toolSucceeded: "已完成",
@@ -217,6 +223,9 @@ export const CHAT_COPY: Record<Language, {
     emptyResponse: "Model returned an empty response.",
     waitingForModel: "Waiting for the model ·",
     modelWaitHint: "Deep reasoning may take a few minutes. You can stop at any time.",
+    modelWaitStalledHint: "This is past the default 10-minute wait limit. The model may be stuck; you can stop and retry.",
+    compactingContext: "Compacting context ·",
+    compactionHint: "This conversation is long, so earlier history is being summarized first. You can stop at any time.",
     toolRunning: "Running",
     toolFailed: "Failed",
     toolSucceeded: "Succeeded",
@@ -298,6 +307,9 @@ export const CHAT_COPY: Record<Language, {
     emptyResponse: "El modelo devolvió una respuesta vacía.",
     waitingForModel: "Esperando al modelo ·",
     modelWaitHint: "El razonamiento profundo puede tardar unos minutos. Puedes detenerlo en cualquier momento.",
+    modelWaitStalledHint: "Se superó el límite de espera predeterminado de 10 minutos. Puede que el modelo esté bloqueado; puedes detenerlo y reintentar.",
+    compactingContext: "Compactando el contexto ·",
+    compactionHint: "La conversación es larga, así que primero se resume el historial anterior. Puedes detenerlo en cualquier momento.",
     toolRunning: "En ejecución",
     toolFailed: "Falló",
     toolSucceeded: "Completado",

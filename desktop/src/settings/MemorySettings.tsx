@@ -27,6 +27,7 @@ import type {
 import { tr, useStore, type Language } from "../store";
 import { SETTINGS_COPY } from "./i18n";
 import MemoryExplorer from "./MemoryExplorer";
+import MemoryLessons from "./MemoryLessons";
 import MemoryRecallPreview from "./MemoryRecallPreview";
 
 // Browser-only preview data. It is never used inside the app: this page exists
@@ -372,6 +373,8 @@ export default function MemorySettings({ language }: Props) {
       <MemoryExplorer language={language} projectId={activeProjectId} />
 
       <MemoryRecallPreview language={language} projectId={activeProjectId} />
+
+      <MemoryLessons language={language} />
 
       <section className="sp-update-section memory-v2-section">
         <div className="sp-section-head memory-v2-heading">

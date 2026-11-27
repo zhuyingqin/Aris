@@ -783,6 +783,7 @@ fn read_timeout_backstop_never_fires_before_the_explicit_waits() {
     let policy = StreamWaitPolicy {
         response_header_timeout: Some(Duration::from_secs(600)),
         stream_idle_timeout: Some(Duration::from_secs(300)),
+        request_max_duration: None,
     };
     let backstop = policy.read_timeout_backstop().expect("both waits enabled");
     assert!(backstop > Duration::from_secs(600));
@@ -790,6 +791,7 @@ fn read_timeout_backstop_never_fires_before_the_explicit_waits() {
     let long_idle = StreamWaitPolicy {
         response_header_timeout: Some(Duration::from_secs(60)),
         stream_idle_timeout: Some(Duration::from_secs(1800)),
+        request_max_duration: None,
     };
     assert!(long_idle.read_timeout_backstop().expect("enabled") > Duration::from_secs(1800));
 
@@ -798,10 +800,12 @@ fn read_timeout_backstop_never_fires_before_the_explicit_waits() {
         StreamWaitPolicy {
             response_header_timeout: None,
             stream_idle_timeout: Some(Duration::from_secs(300)),
+            request_max_duration: None,
         },
         StreamWaitPolicy {
             response_header_timeout: Some(Duration::from_secs(600)),
             stream_idle_timeout: None,
+            request_max_duration: None,
         },
     ] {
         assert_eq!(policy.read_timeout_backstop(), None);
@@ -855,6 +859,7 @@ fn anthropic_artifact_waits_for_late_headers_and_never_resends_a_timeout() {
         let client = client.with_wait_policy(StreamWaitPolicy {
             response_header_timeout: Some(timeout),
             stream_idle_timeout: Some(Duration::from_secs(2)),
+            request_max_duration: None,
         });
         let request = MessageRequest {
             model: "claude-test".into(), max_tokens: 64, messages: vec![],
@@ -875,4 +880,167 @@ fn anthropic_artifact_waits_for_late_headers_and_never_resends_a_timeout() {
         });
         server.join().unwrap();
     }
+}
+
+const ANTHROPIC_PING: &str = "event: ping\ndata: {\"type\": \"ping\"}\n\n";
+
+/// Mock Anthropic gateway: stream headers, `prelude` once, then `frame` every
+/// 50ms until `stop` is set. Returns the request count.
+fn spawn_pinging_anthropic_gateway(
+    prelude: &'static str,
+    frame: &'static str,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread::JoinHandle<usize>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn write_chunk(stream: &mut std::net::TcpStream, data: &str) -> std::io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        stream.write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())?;
+        stream.flush()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag = std::sync::Arc::clone(&stop);
+    let server = thread::spawn(move || {
+        let mut held: Vec<std::net::TcpStream> = Vec::new();
+        let mut accepted = 0;
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut buffer = [0; 65536];
+                    let _ = stream.read(&mut buffer).unwrap();
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
+                        .unwrap();
+                    write_chunk(&mut stream, prelude).unwrap();
+                    accepted += 1;
+                    held.push(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("pinging gateway accept failed: {error}"),
+            }
+            held.retain_mut(|stream| write_chunk(stream, frame).is_ok());
+            thread::sleep(Duration::from_millis(50));
+        }
+        accepted
+    });
+    (format!("http://{address}"), stop, server)
+}
+
+fn drain_anthropic_stream_within(
+    base_url: String,
+    request_max_duration: Option<Duration>,
+    limit: Duration,
+) -> Option<Result<usize, crate::ApiError>> {
+    use super::StreamWaitPolicy;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let client = AnthropicClient::new("test-key")
+            .with_base_url(base_url)
+            .with_wait_policy(StreamWaitPolicy {
+                response_header_timeout: Some(Duration::from_millis(800)),
+                stream_idle_timeout: Some(Duration::from_millis(300)),
+                request_max_duration,
+            });
+        let request = MessageRequest {
+            model: "claude-test".into(), max_tokens: 64, messages: vec![],
+            system: None, tools: None, tool_choice: None, thinking: None, output_config: None, stream: true,
+        };
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut stream = client.stream_message(&request).await?;
+            let mut events = 0;
+            while stream.next_event().await?.is_some() {
+                events += 1;
+            }
+            Ok(events)
+        });
+        let _ = sender.send(result);
+    });
+    receiver.recv_timeout(limit).ok()
+}
+
+/// Regression: Anthropic `ping` events are body chunks, so they reset the
+/// per-chunk idle limit, and a gateway that pinged while the model never
+/// answered kept the request waiting forever. The first output must now
+/// arrive within the time-to-first-output budget; then one resend, then an
+/// explanatory error.
+#[test]
+fn anthropic_pings_without_output_hit_the_output_deadline() {
+    let (base_url, stop, server) = spawn_pinging_anthropic_gateway("", ANTHROPIC_PING);
+    let outcome = drain_anthropic_stream_within(base_url, None, Duration::from_secs(8));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().unwrap();
+
+    let error = outcome
+        .expect("pings must not extend the wait for output")
+        .expect_err("a stream that never produces output must fail");
+    assert!(error.to_string().contains("kept the connection alive"), "{error}");
+    assert_eq!(requests, 1 + super::MAX_TIMEOUT_RESENDS as usize);
+}
+
+/// A finished message whose gateway keeps pinging instead of closing is
+/// complete, not a timed-out partial answer.
+#[test]
+fn anthropic_pings_after_message_stop_complete_the_stream() {
+    let (base_url, stop, server) = spawn_pinging_anthropic_gateway(concat!(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ), ANTHROPIC_PING);
+    let outcome = drain_anthropic_stream_within(base_url, None, Duration::from_secs(8));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().unwrap();
+
+    let events = outcome
+        .expect("a finished message must not wait on the gateway's pings")
+        .expect("finished message is not an error");
+    assert_eq!(events, 4);
+    assert_eq!(requests, 1);
+}
+
+/// The total request limit ends a stream that never stops producing output,
+/// without re-sending it.
+#[test]
+fn anthropic_request_limit_ends_an_endless_stream() {
+    let (base_url, stop, server) = spawn_pinging_anthropic_gateway(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n",
+    );
+    let outcome = drain_anthropic_stream_within(
+        base_url,
+        Some(Duration::from_millis(1_500)),
+        Duration::from_secs(8),
+    );
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let requests = server.join().unwrap();
+
+    let error = outcome
+        .expect("the total limit must end an endless stream")
+        .expect_err("a stream cut at the total limit reports why");
+    assert!(error.to_string().contains("total time limit"), "{error}");
+    assert_eq!(requests, 1);
+}
+
+#[test]
+fn request_max_duration_parses_env() {
+    use super::parse_request_max_duration_secs;
+    assert_eq!(parse_request_max_duration_secs(None, 1800), Some(Duration::from_secs(1800)));
+    assert_eq!(parse_request_max_duration_secs(Some(" "), 1800), Some(Duration::from_secs(1800)));
+    assert_eq!(parse_request_max_duration_secs(Some("abc"), 3600), Some(Duration::from_secs(3600)));
+    assert_eq!(parse_request_max_duration_secs(Some("900"), 1800), Some(Duration::from_secs(900)));
+    assert_eq!(parse_request_max_duration_secs(Some("5"), 1800), Some(Duration::from_secs(60)));
+    assert_eq!(parse_request_max_duration_secs(Some("99999"), 1800), Some(Duration::from_secs(7200)));
+    assert_eq!(parse_request_max_duration_secs(Some("0"), 1800), None);
+    assert_eq!(parse_request_max_duration_secs(Some("-1"), 1800), None);
 }

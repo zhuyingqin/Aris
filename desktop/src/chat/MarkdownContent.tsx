@@ -21,7 +21,7 @@ import {
   useOpenChatFile,
   type ChatEvidenceReference,
 } from "./openChatFile";
-import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
+import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath, isRemoteImageSource } from "./ChatImagePreview";
 import ChatImageReference from "./ChatImageReference";
 import { imagePreviewKey, normalizeImagePreviewSource, type ImagePreviewScope } from "./imagePreviewIdentity";
 import MermaidDiagram from "./MermaidDiagram";
@@ -538,16 +538,40 @@ function markdownUrlTransform(url: string, key: string): string {
   return defaultUrlTransform(url);
 }
 
+/** The same, for text the app must not fetch images for by itself: an image
+ *  on another machine keeps no address, so nothing is requested. */
+function localImagesUrlTransform(url: string, key: string): string {
+  const next = markdownUrlTransform(url, key);
+  return key === "src" && isRemoteImageSource(next) ? "" : next;
+}
+
+/** An image on another machine, in text whose images stay local: named, never loaded. */
+function BlockedRemoteImage({ src, label }: { src: string; label?: string }) {
+  const language = useStore((state) => state.language);
+  const host = (() => {
+    try {
+      return new URL(src, "https://invalid.invalid/").host || src;
+    } catch {
+      return src;
+    }
+  })();
+  const note = tr(language, "外部图片未加载", "External image not loaded", "Imagen externa no cargada");
+  return <span className="md-blocked-image" title={src}>{label ? `${label} · ` : ""}{note} · {host}</span>;
+}
+
 function MarkdownLink({
   href,
   children,
   evidenceSources,
   imageReference = false,
+  remoteImages = true,
 }: {
   href?: string;
   children?: React.ReactNode;
   evidenceSources?: MarkdownEvidenceSource[];
   imageReference?: boolean;
+  /** false: a link to an image on another machine stays a link, never a preview. */
+  remoteImages?: boolean;
 }) {
   const language = useStore((state) => state.language);
   const openChatFile = useOpenChatFile();
@@ -570,7 +594,7 @@ function MarkdownLink({
       </button>
     );
   }
-  if (href && isPreviewableImagePath(normalizeImagePreviewSource(href))) {
+  if (href && isPreviewableImagePath(normalizeImagePreviewSource(href)) && (remoteImages || !isRemoteImageSource(href))) {
     const title = textFromReactNode(children) || decodeLocalHref(href);
     if (imageReference) return <ChatImageReference src={href} label={title} />;
     return (
@@ -605,10 +629,12 @@ export const ThinkBlock = memo(function ThinkBlock({
   content,
   streaming = false,
   revealWhileTurnStreaming = false,
+  remoteImages = true,
 }: {
   content: string;
   streaming?: boolean;
   revealWhileTurnStreaming?: boolean;
+  remoteImages?: boolean;
 }) {
   const autoOpen = streaming || revealWhileTurnStreaming;
   const language = useStore((state) => state.language);
@@ -692,7 +718,7 @@ export const ThinkBlock = memo(function ThinkBlock({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
-            urlTransform={markdownUrlTransform}
+            urlTransform={remoteImages ? markdownUrlTransform : localImagesUrlTransform}
           >
             {normalizeMathDelimiters(content)}
           </ReactMarkdown>
@@ -707,11 +733,15 @@ function MarkdownContent({
   streaming = false,
   evidenceSources = [],
   imagePreviewScope,
+  remoteImages = true,
 }: {
   text: string;
   streaming?: boolean;
   evidenceSources?: MarkdownEvidenceSource[];
   imagePreviewScope?: ImagePreviewScope;
+  /** false for text the app shows without anyone asking for it, such as a
+   *  plugin panel's: an image on another machine is named, never fetched. */
+  remoteImages?: boolean;
 }) {
   const language = useStore((state) => state.language);
   const rendered = useThrottledText(text, streaming);
@@ -735,6 +765,7 @@ function MarkdownContent({
               key={index}
               content={segment.content}
               streaming={Boolean(streaming && segment.open && index === segments.length - 1)}
+              remoteImages={remoteImages}
             />
           );
         }
@@ -769,13 +800,14 @@ function MarkdownContent({
               },
               a({ href, children, node }) {
                 return (
-                  <MarkdownLink href={href} evidenceSources={evidenceSources} imageReference={Boolean(node?.properties?.["data-chat-image-reference"])}>
+                  <MarkdownLink href={href} evidenceSources={evidenceSources} imageReference={Boolean(node?.properties?.["data-chat-image-reference"])} remoteImages={remoteImages}>
                     {children}
                   </MarkdownLink>
                 );
               },
               img({ src, alt, title, node }) {
                 if (!src) return null;
+                if (!remoteImages && isRemoteImageSource(src)) return <BlockedRemoteImage src={src} label={alt ?? title} />;
                 if (node?.properties?.["data-chat-image-reference"]) return <ChatImageReference src={src} label={alt ?? title} />;
                 return (
                   <ChatImagePreview

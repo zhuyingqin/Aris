@@ -3,16 +3,19 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import {
   bridgeBackendPluginChanges, PLUGINS_CHANGED_EVENT, samePluginProject,
-  pluginsCheckMcp, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsRollback, pluginsSetEnabled, pluginsSetGlobal, pluginsUpgrade,
-  type InstalledPlugin, type ListChange, type PluginImportPreview, type PluginLifecycle, type PluginMcpStatus,
-  type PluginPreview, type PluginState, type PluginUpgradePlan, type PluginVersion,
+  pluginsCheckMcp, pluginsDraftChanges, pluginsWorkspaceFileChanges, pluginsInstall, pluginsList, pluginsPreview, pluginsRemove, pluginsRollback, pluginsRollbackPreview, pluginsSetEnabled, pluginsSetGlobal, pluginsUpgrade,
+  type InstalledPlugin, type ListChange, type PackageFileChange, type PluginImportPreview, type PluginLifecycle, type PluginMcpStatus,
+  type PluginPreview, type PluginRollbackPreview, type PluginState, type PluginUpgradePlan, type PluginVersion,
 } from "../api/plugins";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { useStore, type Language } from "../store";
 import { languageLocale, tr } from "../language";
 import { uiText } from "./useChatPluginPanels";
+import { panelCapabilityNotes } from "./pluginPanelNotes";
 import { pluginCreationDraft, pluginNeedsRepair, pluginRepairDraft } from "./pluginAuthoringDrafts";
 import { officialPluginName } from "./officialPlugins";
+import { ChangedFiles } from "./PluginUpgradeReview";
+import { CapabilityChanges, EnforcementLegend, ServerCapabilities, SkillScriptsNote } from "./PluginCapabilities";
 import "./PluginPackages.css";
 
 const COPY = {
@@ -48,6 +51,8 @@ const COPY = {
     blockedTitle: "需要 DeepSeek 宿主能力",
     blockedNote: "此包依赖 SomniQ 尚未提供的宿主能力或配置，解决以下问题后才能启用。",
     blockedLocalTitle: "暂时不能启用", blockedLocalNote: "先处理下面的问题，再启用这个包。",
+    blockedDeclareTitle: "还没写明需要什么",
+    blockedDeclareNote: "SomniQ 只按插件在 package.json 的 somniq.capabilities 里写明的，给它的进程环境变量、网络代理和项目文件。给每个 MCP 服务补上声明（可以点「让 AI 修复」），再升级这个包。",
     approvalRequired: "项目文件要求运行这个包，但本机还没有批准这个版本，所以它不会运行。确认来源可信后打开开关即可批准。",
     confirmRemove: "移除后，此项目不再加载它的 Skills、MCP 和面板。会话中已保存的面板内容会保留。",
     confirm: "确认移除",
@@ -58,6 +63,8 @@ const COPY = {
     change: { upgrade: "升级", downgrade: "降级", "same-version": "同版本号、内容不同", identical: "与已安装版本相同" },
     diffApproved: "与本机已批准的版本相比", diffInstalled: "与已安装的版本相比",
     commands: "运行的命令", noChanges: "Skills、面板、命令和环境变量都没有变化。",
+    codeOnly: (n: number) => `声明的 Skills、面板、命令和环境变量没有变化，但有 ${n} 个文件改了：运行的代码可能不同，请看下面的文件改动。`,
+    rollbackLoading: "正在读取这个版本的改动…", rollbackBlockedNote: "这个版本现在通不过检查，回退后会保持停用。",
     upgradeApprove: "升级并重新批准", upgradeKeepDisabled: "升级并保持停用", upgradeAndDisable: "升级并停用",
     upgradeApproveNote: "新版本会以你的身份运行上面的命令。新版本就位前，旧版本及其批准一直有效；任一步失败都会回滚。正在运行的回合继续使用旧版本。",
     upgradeDisabledNote: "升级后保持停用，启用时再批准。正在运行的回合不受影响。",
@@ -106,6 +113,8 @@ const COPY = {
     blockedTitle: "Needs DeepSeek host capabilities",
     blockedNote: "This package relies on host capabilities or configuration SomniQ doesn't provide yet. Resolve these before enabling it.",
     blockedLocalTitle: "Can't enable yet", blockedLocalNote: "Resolve the issues below before enabling this package.",
+    blockedDeclareTitle: "Doesn't say what it needs yet",
+    blockedDeclareNote: "SomniQ gives a plugin's process only the variables, network proxy and project files it declares under somniq.capabilities in package.json. Add the declaration for each MCP server (Ask AI to fix can do it), then upgrade the package.",
     approvalRequired: "This project's files ask to run this package, but this computer hasn't approved this version, so it won't run. Turn it on once you trust the source to approve it.",
     confirmRemove: "This project will stop loading its Skills, MCP and panels. Panel content saved in conversations is kept.",
     confirm: "Remove package",
@@ -116,6 +125,8 @@ const COPY = {
     change: { upgrade: "Upgrade", downgrade: "Downgrade", "same-version": "Same version, different files", identical: "Same as installed" },
     diffApproved: "Compared with the version approved on this computer", diffInstalled: "Compared with the installed version",
     commands: "Commands", noChanges: "No change to Skills, panels, commands or environment keys.",
+    codeOnly: (n: number) => `No declared change to Skills, panels, commands or environment keys, but ${n} files changed: the code that runs may differ. See the file changes below.`,
+    rollbackLoading: "Reading what this version changes…", rollbackBlockedNote: "This version no longer passes the checks; it stays disabled after going back.",
     upgradeApprove: "Upgrade and re-approve", upgradeKeepDisabled: "Upgrade, keep disabled", upgradeAndDisable: "Upgrade and disable",
     upgradeApproveNote: "The new version runs the commands above as you. The installed version and its approval stay in force until the new one is in place, and any failure rolls back. Runs in progress keep the old version.",
     upgradeDisabledNote: "The package stays disabled; you approve it when you enable it. Runs in progress are not affected.",
@@ -164,6 +175,8 @@ const COPY = {
     blockedTitle: "Necesita capacidades del host DeepSeek",
     blockedNote: "Este paquete depende de capacidades o configuración del host que SomniQ aún no ofrece. Resuélvelas antes de activarlo.",
     blockedLocalTitle: "Aún no se puede activar", blockedLocalNote: "Resuelve los problemas de abajo antes de activar este paquete.",
+    blockedDeclareTitle: "Aún no indica lo que necesita",
+    blockedDeclareNote: "SomniQ solo da al proceso de un plugin las variables, el proxy de red y los archivos del proyecto que declara en somniq.capabilities de package.json. Añade la declaración de cada servidor MCP (Pedir a la IA que lo arregle puede hacerlo) y luego actualiza el paquete.",
     approvalRequired: "Los archivos de este proyecto piden ejecutar este paquete, pero este equipo no ha aprobado esta versión, así que no se ejecutará. Actívalo cuando confíes en el origen para aprobarlo.",
     confirmRemove: "Este proyecto dejará de cargar sus Skills, MCP y paneles. El contenido de los paneles guardado en las conversaciones se conserva.",
     confirm: "Quitar paquete",
@@ -174,6 +187,8 @@ const COPY = {
     change: { upgrade: "Actualización", downgrade: "Versión anterior", "same-version": "Misma versión, archivos distintos", identical: "Igual que la instalada" },
     diffApproved: "Comparado con la versión aprobada en este equipo", diffInstalled: "Comparado con la versión instalada",
     commands: "Comandos", noChanges: "Sin cambios en Skills, paneles, comandos ni variables de entorno.",
+    codeOnly: (n: number) => `Sin cambios declarados en Skills, paneles, comandos ni variables de entorno, pero cambiaron ${n} archivos: el código que se ejecuta puede ser distinto. Mira los cambios de archivos abajo.`,
+    rollbackLoading: "Leyendo lo que cambia esta versión…", rollbackBlockedNote: "Esta versión ya no pasa las comprobaciones; se queda desactivada tras volver atrás.",
     upgradeApprove: "Actualizar y volver a aprobar", upgradeKeepDisabled: "Actualizar y mantener desactivado", upgradeAndDisable: "Actualizar y desactivar",
     upgradeApproveNote: "La nueva versión ejecuta los comandos de arriba con tu usuario. La versión instalada y su aprobación siguen vigentes hasta que la nueva esté lista, y cualquier fallo se revierte. Las ejecuciones en curso conservan la versión anterior.",
     upgradeDisabledNote: "El paquete se queda desactivado; lo apruebas cuando lo actives. Las ejecuciones en curso no se ven afectadas.",
@@ -245,34 +260,67 @@ function CapabilityChips({ item, copy }: { item: PluginPreview; copy: Copy }) {
   return <div className="plugin-chips">{chips.length > 0 ? chips : <span className="plugin-chip is-empty">{copy.noCapabilities}</span>}</div>;
 }
 
-function McpServers({ servers, copy }: { servers: PluginPreview["capabilities"]["mcpServers"]; copy: Copy }) {
-  return <ul className="plugin-servers">{servers.map((server) => {
-    const env = Object.keys(server.env ?? {});
-    return <li key={server.name}>
-      <strong>{server.name}</strong><code>{[server.command, ...server.args].join(" ")}</code>
-      {env.length > 0 && <span className="plugin-env">{copy.envKeys}: {env.map((key) => <code key={key}>{key}</code>)}</span>}
-    </li>;
-  })}</ul>;
+function McpServers({ servers, copy, language, capabilities }: {
+  servers: PluginPreview["capabilities"]["mcpServers"]; copy: Copy; language: Language; capabilities: PluginPreview["capabilities"];
+}) {
+  return <>
+    <ul className="plugin-servers">{servers.map((server) => {
+      const env = Object.keys(server.env ?? {});
+      return <li key={server.name}>
+        <strong>{server.name}</strong><code>{[server.command, ...server.args].join(" ")}</code>
+        {env.length > 0 && <span className="plugin-env">{copy.envKeys}: {env.map((key) => <code key={key}>{key}</code>)}</span>}
+        {/* What it declared it needs, each line with how far this computer enforces it. */}
+        <ServerCapabilities capability={server.capability} launch={server.launch} enforcement={capabilities.enforcement} language={language} />
+      </li>;
+    })}</ul>
+    <SkillScriptsNote scripts={capabilities.skillScripts} language={language} />
+    {capabilities.enforcement && <EnforcementLegend declared language={language} />}
+  </>;
+}
+
+/** The project files a plugin is handed changed since their copies were
+ *  approved: it keeps running on the copies; this shows what changed and
+ *  approves the new contents on the user's click. */
+function WorkspaceFilesNotice({ item, projectPath, language, busy, onApprove }: {
+  item: InstalledPlugin; projectPath: string; language: Language; busy: boolean; onApprove: () => void;
+}) {
+  const files = item.workspaceFiles ?? [];
+  const changed = files.filter((file) => file.approved && file.current !== file.approved);
+  const [diff, setDiff] = useState<PackageFileChange[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    setDiff(null); setError("");
+    if (changed.length) pluginsWorkspaceFileChanges(projectPath, item.name).then((found) => { if (live) setDiff(found); }, (failure) => { if (live) setError(String(failure)); });
+    return () => { live = false; };
+    // The originals' digest changes when any of them does.
+  }, [projectPath, item.name, item.workspaceFilesDigest, changed.length]);
+  if (!item.enabled || !changed.length) return null;
+  const gone = changed.filter((file) => !file.current).map((file) => file.path);
+  return <div className="plugin-confirm is-caution" role="group" aria-label={tr(language, "项目文件有新版本", "Project files changed", "Archivos del proyecto cambiados")}>
+    <div className="plugin-confirm-body">
+      <strong><SvgIcon name="warning" size={14} />{tr(language, "项目文件有新版本", "Project files changed", "Archivos del proyecto cambiados")}</strong>
+      <p>{tr(language,
+        `插件仍在用批准时的副本：${changed.map((file) => file.path).join("、")}。看过改动并批准后，它才会用新内容。`,
+        `The plugin keeps using the copies you approved of ${changed.map((file) => file.path).join(", ")}. It uses the new contents once you look at the changes and approve them.`,
+        `El plugin sigue usando las copias aprobadas de ${changed.map((file) => file.path).join(", ")}. Usará el contenido nuevo cuando revises los cambios y los apruebes.`)}</p>
+      {gone.length > 0 && <p>{tr(language, `已不在项目里：${gone.join("、")}。`, `No longer in the project: ${gone.join(", ")}.`, `Ya no están en el proyecto: ${gone.join(", ")}.`)}</p>}
+      <ChangedFiles files={diff} error={error} language={language} />
+    </div>
+    <div className="plugin-confirm-actions">
+      <button type="button" className="ext-primary-btn" disabled={busy || !diff || gone.length > 0} onClick={onApprove}>
+        {tr(language, "批准新内容", "Approve the new contents", "Aprobar el contenido nuevo")}
+      </button>
+    </div>
+  </div>;
 }
 
 function PackageDetails({ item, copy, language, id }: { item: PluginPreview; copy: Copy; language: Language; id?: string }) {
   const { skills, mcpServers, uiPanels } = item.capabilities;
   return <dl className="plugin-details" id={id}>
     <div><dt>{copy.skills}</dt><dd>{skills.length ? <span className="plugin-tags">{skills.map((skill) => <code key={skill}>{skill}</code>)}</span> : copy.none}</dd></div>
-    <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} /> : copy.none}</dd></div>
-    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? uiPanels.map((panel) => uiText(panel.title, language)
-      + (panel.page ? tr(language,
-        "（自绘页面：运行插件自带的页面代码，在沙箱内，不能联网）",
-        " (own page: runs the package's page code, sandboxed, no network)",
-        " (página propia: ejecuta el código de página del paquete, en un sandbox y sin red)") : "")
-      + (panel.web ? tr(language,
-        `（嵌入网页：${panel.web}）`,
-        ` (embeds the web page ${panel.web})`,
-        ` (incrusta la página web ${panel.web})`) : "")
-      + (panel.proposeTasks ? tr(language,
-        "（可提议后台任务，每次都需你确认）",
-        " (may propose background tasks; you confirm each one)",
-        " (puede proponer tareas en segundo plano; confirmas cada una)") : "")).join(tr(language, "、", ", ", ", ")) : copy.none}</dd></div>
+    <div><dt>{copy.mcp}</dt><dd>{mcpServers.length ? <McpServers servers={mcpServers} copy={copy} language={language} capabilities={item.capabilities} /> : copy.none}</dd></div>
+    <div><dt>{copy.ui}</dt><dd>{uiPanels.length ? panelCapabilityNotes(uiPanels, language).join(tr(language, "、", ", ", ", ")) : copy.none}</dd></div>
     {(item.capabilities.reviewRubrics?.length ?? 0) > 0 && <div><dt>{copy.rubrics}</dt><dd><ul className="plugin-rubrics">{item.capabilities.reviewRubrics!.map((rubric) => <li key={rubric.id}>
       <strong>{uiText(rubric.title, language)}</strong>{rubric.appliesWhen?.length ? <span className="plugin-rubric-when"> · {tr(language, "触发词", "Triggers", "Activadores")}: {rubric.appliesWhen.join(", ")}</span> : null}
       <ul>{rubric.criteria.map((criterion) => <li key={criterion.id}><code>{criterion.severity}</code> {criterion.check}</li>)}</ul>
@@ -285,16 +333,25 @@ function PackageDetails({ item, copy, language, id }: { item: PluginPreview; cop
 
 /** Blockers SomniQ itself raises; anything else is a DSH host capability it lacks. */
 const LOCAL_BLOCKERS = new Set(["integrity", "approvals", "skill-builtin", "skill-alias", "duplicate-capability", "empty", "requires"]);
+/** What a package declares its MCP servers need (somniq.capabilities and the
+ *  package env it checks): the package must change, not the host. */
+const DECLARATION_BLOCKERS = new Set([
+  "capabilities-missing", "capabilities-server", "capabilities-field", "env-key", "env-reserved", "env-overlap", "workspace-file", "runtime-fetch",
+]);
 
 function Diagnostics({ item, copy }: { item: PluginPreview; copy: Copy }) {
   if (item.canEnable && item.diagnostics.length === 0) return null;
   const errors = item.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-  const local = errors.length > 0 && errors.every((diagnostic) => LOCAL_BLOCKERS.has(diagnostic.code));
+  const all = (codes: Set<string>) => errors.length > 0 && errors.every((diagnostic) => codes.has(diagnostic.code));
+  const declare = all(DECLARATION_BLOCKERS);
+  const local = !declare && errors.length > 0 && errors.every((diagnostic) => LOCAL_BLOCKERS.has(diagnostic.code) || DECLARATION_BLOCKERS.has(diagnostic.code));
+  const [title, note] = declare ? [copy.blockedDeclareTitle, copy.blockedDeclareNote]
+    : local ? [copy.blockedLocalTitle, copy.blockedLocalNote] : [copy.blockedTitle, copy.blockedNote];
   const warn = !item.canEnable || item.diagnostics.some((diagnostic) => diagnostic.severity !== "info");
   return <div className={`plugin-callout ${warn ? "is-warning" : "is-info"}`}>
     <SvgIcon name={warn ? "warning" : "info"} size={15} />
     <div>
-      {!item.canEnable && <><strong>{local ? copy.blockedLocalTitle : copy.blockedTitle}</strong><p>{local ? copy.blockedLocalNote : copy.blockedNote}</p></>}
+      {!item.canEnable && <><strong>{title}</strong><p>{note}</p></>}
       {item.diagnostics.length > 0 && <ul>{item.diagnostics.map((diagnostic, index) =>
         <li key={`${diagnostic.code}-${index}`}><code>{diagnostic.code}</code>
           <span>{diagnostic.code === "approval-required" ? copy.approvalRequired : diagnostic.message}</span></li>)}</ul>}
@@ -342,10 +399,20 @@ function McpHealth({ name, servers, copy, canCheck, checking, onCheck }: {
 }
 
 /** The versions upgrades replaced, newest first; any of them can come back. */
-function VersionHistory({ item, copy, language, busy, onRollback }: {
-  item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; onRollback: (version: PluginVersion) => void;
+function VersionHistory({ projectPath, item, copy, language, busy, onRollback }: {
+  projectPath: string; item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; onRollback: (version: PluginVersion, approve: boolean) => void;
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
+  // The click approves that version's code, so its changes are shown first.
+  const [shown, setShown] = useState<PluginRollbackPreview | null>(null);
+  const [shownError, setShownError] = useState("");
+  useEffect(() => {
+    let live = true;
+    setShown(null); setShownError("");
+    if (confirming) pluginsRollbackPreview(projectPath, item.name, confirming)
+      .then((found) => { if (live) setShown(found); }, (failure) => { if (live) setShownError(String(failure)); });
+    return () => { live = false; };
+  }, [projectPath, item.name, item.digest, confirming]);
   const history = item.history ?? [];
   const when = (seconds: number) => new Date(seconds * 1000).toLocaleString(languageLocale(language), { dateStyle: "medium", timeStyle: "short" });
   return <ol className="plugin-history" aria-label={copy.history(history.length)}>
@@ -362,19 +429,29 @@ function VersionHistory({ item, copy, language, busy, onRollback }: {
       </div>
       {confirming === version.digest && <div className="plugin-confirm is-caution" role="group" aria-label={copy.rollback}>
         <p>{copy.rollbackNote(version.version, item.version)}{item.enabled ? "" : ` ${copy.rollbackStopped}`}</p>
+        {shownError ? <p className="plugin-review-note is-error" role="alert">{shownError}</p>
+          : !shown ? <p className="plugin-review-note">{copy.rollbackLoading}</p>
+            : <>
+              {!shown.canEnable && item.enabled && <p>{copy.rollbackBlockedNote}</p>}
+              <UpgradeDiff plan={shown.plan} copy={copy} files={shown.files} language={language} />
+              <ChangedFiles files={shown.files} language={language} />
+            </>}
         <div className="plugin-confirm-actions">
           <button type="button" className="ext-secondary-btn" onClick={() => setConfirming(null)}>{copy.cancel}</button>
-          <button type="button" className="ext-primary-btn" disabled={busy} onClick={() => { setConfirming(null); onRollback(version); }}>{copy.confirmRollback}</button>
+          <button type="button" className="ext-primary-btn" disabled={busy || !shown || shown.digest !== version.digest}
+            onClick={() => { const approve = item.enabled && Boolean(shown?.canEnable); setConfirming(null); onRollback(version, approve); }}>{copy.confirmRollback}</button>
         </div>
       </div>}
     </li>)}
   </ol>;
 }
 
-function InstalledCard({ item, copy, language, busy, checking, onToggle, onSetGlobal, onRemove, onCheck, onRepair, onRollback }: {
+function InstalledCard({ projectPath, item, copy, language, busy, checking, onToggle, onSetGlobal, onRemove, onCheck, onRepair, onRollback, onApproveFiles }: {
+  projectPath: string;
+  onApproveFiles: () => void;
   item: InstalledPlugin; copy: Copy; language: Language; busy: boolean; checking: boolean;
   onToggle: () => void; onSetGlobal: (global: boolean) => void; onRemove: () => void; onCheck: () => void; onRepair: () => void;
-  onRollback: (version: PluginVersion) => void;
+  onRollback: (version: PluginVersion, approve: boolean) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -428,7 +505,7 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onSetGl
     {confirming === "global" && <div className="plugin-confirm is-caution" role="group" aria-label={global ? copy.globalOffTitle : copy.globalOnTitle}>
       <div className="plugin-confirm-body">
         <strong><SvgIcon name="desktop" size={14} />{global ? copy.globalOffTitle : copy.globalOnTitle}</strong>
-        {!global && servers.length > 0 && <><p>{copy.enableMcpTitle}</p><McpServers servers={servers} copy={copy} /></>}
+        {!global && servers.length > 0 && <><p>{copy.enableMcpTitle}</p><McpServers servers={servers} copy={copy} language={language} capabilities={item.capabilities} /></>}
         <p>{global ? copy.globalOffNote : copy.globalOnNote}</p>
       </div>
       <div className="plugin-confirm-actions">
@@ -443,7 +520,7 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onSetGl
     {confirming === "enable" && <div className="plugin-confirm is-caution" role="group" aria-label={`${copy.enable} ${item.name}`}>
       <div className="plugin-confirm-body">
         <strong><SvgIcon name="warning" size={14} />{copy.enableMcpTitle}</strong>
-        <McpServers servers={servers} copy={copy} />
+        <McpServers servers={servers} copy={copy} language={language} capabilities={item.capabilities} />
         <p>{copy.enableMcpNote}</p>
       </div>
       <div className="plugin-confirm-actions">
@@ -459,13 +536,14 @@ function InstalledCard({ item, copy, language, busy, checking, onToggle, onSetGl
       </div>
     </div>}
     <Diagnostics item={item} copy={copy} />
+    {projectPath && <WorkspaceFilesNotice item={item} projectPath={projectPath} language={language} busy={busy} onApprove={onApproveFiles} />}
     {pluginNeedsRepair(item) && <div className="plugin-repair">
       <button type="button" className="ext-secondary-btn" title={copy.askAiFixHint} onClick={onRepair}>
         <SvgIcon name="sparkle" size={13} />{copy.askAiFix}
       </button>
     </div>}
     {detailsOpen && <PackageDetails item={item} copy={copy} language={language} id={detailsId} />}
-    {historyOpen && earlier > 0 && !global && <VersionHistory item={item} copy={copy} language={language} busy={busy} onRollback={onRollback} />}
+    {historyOpen && earlier > 0 && !global && <VersionHistory projectPath={projectPath} item={item} copy={copy} language={language} busy={busy} onRollback={onRollback} />}
   </article>;
 }
 
@@ -478,7 +556,7 @@ function Changes({ change, extra }: { change: ListChange; extra?: string[] }) {
 }
 
 /** What the new version adds or drops against the installed (approved) one. */
-function UpgradeDiff({ plan, copy }: { plan: PluginUpgradePlan; copy: Copy }) {
+function UpgradeDiff({ plan, copy, files, language }: { plan: PluginUpgradePlan; copy: Copy; files?: PackageFileChange[] | null; language: Language }) {
   const { diff } = plan;
   const title = plan.currentEnabled ? copy.diffApproved : copy.diffInstalled;
   const envChanged = [...new Set(diff.mcpServers.flatMap((server) => server.envChanged))];
@@ -488,16 +566,28 @@ function UpgradeDiff({ plan, copy }: { plan: PluginUpgradePlan; copy: Copy }) {
   const shown = rows.filter(([, change, extra]) => change.added.length + change.removed.length + (extra?.length ?? 0) > 0);
   return <div className="plugin-diff" role="group" aria-label={title}>
     <strong>{title}</strong>
-    {shown.length === 0 && !diff.changed ? <p>{copy.noChanges}</p> : <dl className="plugin-details">
+    {shown.length === 0 && !diff.changed ? <p>{files?.length ? copy.codeOnly(files.length) : copy.noChanges}</p> : <dl className="plugin-details">
       {shown.map(([label, change, extra]) => <div key={label}><dt>{label}</dt><dd><Changes change={change} extra={extra} /></dd></div>)}
     </dl>}
+    {/* What each server's declaration gains (highlighted) or drops. */}
+    {diff.mcpServers.map((server) => <CapabilityChanges key={server.name} server={server.name} changes={server.capabilities} language={language} />)}
   </div>;
 }
 
-function UpgradePreview({ preview, plan, copy, language, busy, onCancel, onUpgrade }: {
-  preview: PluginImportPreview; plan: PluginUpgradePlan; copy: Copy; language: Language; busy: boolean;
+function UpgradePreview({ projectPath, preview, plan, copy, language, busy, onCancel, onUpgrade }: {
+  projectPath: string; preview: PluginImportPreview; plan: PluginUpgradePlan; copy: Copy; language: Language; busy: boolean;
   onCancel: () => void; onUpgrade: (approve: boolean) => void;
 }) {
+  // Every changed file, read from the draft checked against this preview's digest.
+  const [files, setFiles] = useState<PackageFileChange[] | null>(null);
+  const [filesError, setFilesError] = useState("");
+  useEffect(() => {
+    let live = true;
+    setFiles(null); setFilesError("");
+    if (plan.change !== "identical") pluginsDraftChanges(projectPath, preview.source, preview.digest)
+      .then((found) => { if (live) setFiles(found); }, (failure) => { if (live) setFilesError(String(failure)); });
+    return () => { live = false; };
+  }, [projectPath, preview.source, preview.digest, plan.change]);
   const identical = plan.change === "identical";
   const approve = plan.currentEnabled && preview.canEnable;
   const action = approve ? copy.upgradeApprove : plan.currentEnabled ? copy.upgradeAndDisable : copy.upgradeKeepDisabled;
@@ -512,7 +602,8 @@ function UpgradePreview({ preview, plan, copy, language, busy, onCancel, onUpgra
         </PackageHeading>
       </div>
       <Diagnostics item={preview} copy={copy} />
-      {!identical && <UpgradeDiff plan={plan} copy={copy} />}
+      {!identical && <UpgradeDiff plan={plan} copy={copy} files={files} language={language} />}
+      {!identical && <ChangedFiles files={files} error={filesError} language={language} />}
       <PackageDetails item={preview} copy={copy} language={language} />
     </article>
     <div className="plugin-import-actions">
@@ -628,7 +719,19 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
     if (!projectPath) return;
     const request = epoch.current;
     bound(async () => {
-      const result = await pluginsSetEnabled(projectPath, item.name, !item.enabled, item.digest);
+      // Turning it on approves the project files as this view showed them.
+      const result = await pluginsSetEnabled(projectPath, item.name, !item.enabled, item.digest, item.enabled ? null : item.workspaceFilesDigest);
+      if (epoch.current !== request) return;
+      replace(result); onChanged();
+    });
+  }
+
+  /** Approve the project files' new contents, exactly as this view showed them. */
+  function approveFiles(item: InstalledPlugin) {
+    if (!projectPath) return;
+    const request = epoch.current;
+    bound(async () => {
+      const result = await pluginsSetEnabled(projectPath, item.name, true, item.digest, item.workspaceFilesDigest);
       if (epoch.current !== request) return;
       replace(result); onChanged();
     });
@@ -654,12 +757,13 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
     });
   }
 
-  /** Put back an earlier version; a running package keeps running on it (this click approves it). */
-  function rollback(item: InstalledPlugin, version: PluginVersion) {
+  /** Put back an earlier version; a running package keeps running on it when
+   *  the user approved it after seeing what it changes. */
+  function rollback(item: InstalledPlugin, version: PluginVersion, approve: boolean) {
     if (!projectPath) return;
     const request = epoch.current;
     bound(async () => {
-      const result = await pluginsRollback(projectPath, item.name, version.digest, item.digest, item.enabled);
+      const result = await pluginsRollback(projectPath, item.name, version.digest, item.digest, approve);
       if (epoch.current !== request) return;
       replace(result); onChanged();
     });
@@ -734,7 +838,7 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
           }}><SvgIcon name="folder" size={14} />{copy.browse}</button>}
           <button type="submit" className="ext-secondary-btn" disabled={busy || !source.trim()}>{busy && !preview ? copy.working : copy.preview}</button>
         </form>
-        {preview && preview.upgrade && <UpgradePreview preview={preview} plan={preview.upgrade} copy={copy} language={language}
+        {preview && preview.upgrade && projectPath && <UpgradePreview projectPath={projectPath} preview={preview} plan={preview.upgrade} copy={copy} language={language}
           busy={busy} onCancel={closeImport} onUpgrade={upgrade} />}
         {preview && !preview.upgrade && <div className="plugin-import-preview">
           <span className="plugin-import-kicker">{copy.previewKicker}</span>
@@ -767,10 +871,10 @@ export default function PluginPackages({ projectPath, language, onChanged }: {
             onClick={() => askAi(pluginCreationDraft(language))}><SvgIcon name="sparkle" size={14} />{copy.askAiCreate}</button>
         </div>
       </div> : <div className="plugin-list">
-        {packages.map((item) => <InstalledCard key={item.name} item={item} copy={copy} language={language} busy={busy}
+        {packages.map((item) => <InstalledCard key={item.name} projectPath={projectPath ?? ""} item={item} copy={copy} language={language} busy={busy}
           checking={checking === item.name} onToggle={() => toggle(item)} onSetGlobal={(global) => setGlobal(item, global)}
           onRemove={() => remove(item)} onCheck={() => checkMcp(item)}
-          onRepair={() => askAi(pluginRepairDraft(item, projectPath, language))} onRollback={(version) => rollback(item, version)} />)}
+          onRepair={() => askAi(pluginRepairDraft(item, projectPath, language))} onRollback={(version, approve) => rollback(item, version, approve)} onApproveFiles={() => approveFiles(item)} />)}
       </div>}
       {packages.length > 0 && <p className="plugin-footnote"><SvgIcon name="info" size={13} />{copy.nextRun}</p>}
     </>}

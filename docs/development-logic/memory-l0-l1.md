@@ -119,10 +119,238 @@ different file.
   a recovery (it was treated as a flake), and every turn end wakes the writer so
   a batch that became due by waiting is not stranded until a restart.
 
+## Step 1: measuring real use (2026-11-23)
+
+What changed:
+
+- `memory_recall` rows (one per turn) are durable like `lesson_recall`, and
+  name what reached the prompt instead of only sizes: `delivered` lists each R0
+  line's `session_id` + `message_index`, `query_digest` is the first 16 hex
+  digits of SHA-256 over the trimmed question. No recalled text is logged.
+  `lesson_recall` rows add `lessonIds`.
+- `chat_delete` removes the Session's rows from the search index at once
+  (`forget_indexed_session`). Before, a deleted chat stayed searchable, and
+  could be injected into later turns, until the next project activation ran the
+  background repair.
+- Message times: a compaction or rewind re-appends the Session behind a
+  `session_reset`, which re-stamped every surviving message with the rewrite
+  time; rows without a time fell back to the Session file's mtime at query
+  time. Now the k-th row with a given text keeps the earliest time the index
+  gave it, and rows without a time inherit the previous live message's time or
+  the Session start encoded in its id (`chat-<13-digit ms>-…`).
+
+How to read it: `experiments/memory/scripts/usage_report.py` (aggregates only,
+read-only). "Used" = the answer contains an 8-character fragment found in the
+delivered history but not in the question or earlier in the session; it is a
+floor (paraphrase is missed). Lesson adoption = the next call of the same tool
+in the turn succeeds, with vs without lessons attached.
+
+Baseline from history before this change (`--all-sessions`, 995 sessions):
+433 older `memory_recall` rows survived compaction; a block was sent on 98.6%
+of those turns, 5,347 characters on average; recall latency p50 414 ms, p95
+4.1 s (the old LIKE path). After a failed tool call, the next call of the same
+tool succeeded 65.7% of the time (n = 1,211).
+
+## Step 2: stop the expensive part, compare placements (2026-11-23)
+
+- v2 background screening is **off by default**
+  (`memory_v2_background_screening`). Captures are still queued for a manual
+  build and existing atoms stay readable. Reason: on local history the atoms
+  answered 2-3% of both probe sets, at ~3,300 Reviewer input tokens per
+  surviving atom.
+- `memory_recall_placement` decides where the per-turn recall block goes:
+  `system` (the old placement, last system section), `user` (appended to this
+  turn's user message in the request only, via
+  `ConversationRuntime::set_turn_context`; never persisted), `off`, or
+  `alternate` (default while measuring: each Session gets `system` or `user`
+  by an FNV-1a hash of its id). Each `memory_recall` row records its
+  `placement`; `usage_report.py` reports, per arm, the "used" rate and the
+  executor's cache-read share from `run-state/usage-log.jsonl`.
+- Why `user` should cache better: a block that changes every turn at the end of
+  the system prompt invalidates the cached prefix for the whole history on
+  every turn; on the user side only the last turn's message changes.
+- Decision rule after 1-2 weeks: if fewer than 5% of delivered blocks are used,
+  deliver only above a reranker threshold; if `user` is not worse on use and
+  better on cache, make it the default.
+
+## Step 3: lesson quality and lifecycle (2026-11-23)
+
+- The fix of a failure is now the identical rerun after any successful step
+  (edit, install...), else the same-tool success whose input is closest to the
+  failed one -- no longer the first different call, which in-app was a byte
+  dump. The writer sees the steps between failure and fix ("then ..."), edit
+  contents included (`new_string`/`content` in the input digest), and is told
+  to name the concrete cause and change rather than the diagnosis.
+- `ungrounded` rejection: a lesson must share a word with the error and one
+  with the fixing call or a step before it.
+- Small stores (< 20 active lessons) need one more shared word.
+- Lifecycle (schema v2, migrated in place): each delivery counts (`recalled`);
+  at turn end a delivered lesson whose failure was fixed resets its unhelpful
+  streak, otherwise the streak grows, and two in a row make it `stale` (not
+  recalled). `lesson_sources` records every chat that taught a lesson; deleting
+  a chat deletes lessons no other chat taught, and its queued turns. Hourly
+  cleanup: finished jobs after 7 days, dropped jobs after 30, stale lessons 90
+  days after going stale; active lessons unused for 180 days, and any beyond
+  2,000, are archived.
+- Settings > Memory > "踩坑教训": the switch, every lesson with its counts and
+  status, turn off / restore, two-step delete.
+
+Replay on real data after the change: right lesson 67.3% dev / 65.4% test,
+unchanged; unrelated failures with a lesson attached 22.9%, unchanged. A floor
+of 3 shared words left the 8 wrong attachments in place and cost a dev hit;
+the shared-word counts of right and wrong attachments overlap (wrong: 2-8,
+mostly 6), so word overlap cannot reach the 15% target. Next lever: whether the
+lesson's tool matches the failing tool, which the v7 replay notes cannot test
+(they carry no tool); real lessons do.
+
+L0 replay with the step-1 time fixes, indexes rebuilt from scratch, top 2
+sessions, only history before the question: 50.7% dev / 45.8% test (36-37%
+test before L0). Top 3 sessions would give 54.8% / 50.8%, but this replay does
+not model the 6,000-character budget, so that is left for production data.
+
+## Step 4: always-on memory (2026-11-23)
+
+- MEMORY.md / USER.md limits are UTF-8 bytes and are now labelled so. Counting
+  characters would triple the per-turn token cost of Chinese memory; bytes give
+  English and Chinese about the same token budget.
+- L3 promotion, offline (`experiments/memory/scripts/eval_promotion.py`): over
+  ~21 weeks of local history (3,396 user sentences) only 19 carried a
+  persistence marker ("以后/一律/不要再/记住/always/never..."), none was said
+  again in another session 2+ days later (the designed gate never fired), and
+  4 of the 19 were real lasting rules (21% precision; the bar was 80%). All 4
+  were writing preferences and half said "记住" explicitly. Decision: no
+  automatic L3 proposals; explicit "remember this" stays with the memory tool
+  and its confirmation. L2 project cards were not built for the same reason:
+  project facts are already found in the raw sessions.
+
+## Step 5: what a lesson must share with the failure (2026-11-24)
+
+The 8 wrong attachments of step 3 were read one by one. None was about the
+tool: all 35 negatives are bash/PowerShell failures, so "same tool" filters
+nothing (and a check on the programs a command ran cost 3-6 hits for at most
+one negative; dropped). Five matched on path pieces (the project root
+`G:/2-博士期间资料/0- 毕业材料`, `E:\texlive\2025\bin\windows`), two of them
+not even errors (`where` output, a diff); three matched on stock wording
+("cannot access", "no such file or directory"). A held-out sample of 200 real
+failures from chats the benchmark never used added two more causes: the
+desktop's "Recovery hint: ..." line appended to every failed result (77 of
+200), and English function words ("the", "not", "too many"), which pass the
+20% document-frequency rule because most lessons are written in Chinese.
+
+Recall now (`LessonGates`, all on in the product):
+
+- `key_error_lines` drops the "Recovery hint:" line.
+- Shared words are counted on the error without its paths, without stock
+  error wording (whole words only, so `FileNotFoundError` keeps its `error`)
+  and without English function words. When that leaves fewer than the floor,
+  every remaining specific word must be shared: `rg: command not found`
+  becomes `rg`, which the ripgrep lesson shares and the coreutils one does not.
+  Nothing left means nothing is attached. Keeping the last two path components
+  instead lifted the floor back up and lost 8 dev hits.
+- A lesson about another known kind of failure is skipped (`error_class`: 13
+  kinds such as command_missing, path_missing, encoding, edit_mismatch; unknown
+  on either side passes). Schema v3 stores the kind; older lessons get it from
+  the error line in their cause key.
+
+Replay (`examples/memory_replay.rs l1` on `l1_enriched.json`, whose notes carry
+their source call, read back by `experiments/memory/scripts/enrich_l1_notes.py`;
+`sample_failures.py` adds the held-out split; `MEMORY_REPLAY_GATES` picks the
+rules):
+
+| | before | after |
+|---|---|---|
+| right lesson, dev | 34/52 (65.4%) | 36/52 (69.2%) |
+| right lesson, test | 35/52 (67.3%) | 35/52 (67.3%) |
+| benchmark negatives with a lesson | 8/35 (22.9%) | 2/35 (5.7%) |
+| held-out failures with a lesson | 104/200 (52%) | 73/200 (36.5%) |
+
+"before" already includes the tool name in the indexed text (the old replay
+notes had none: 67.3/65.4% there) and the Recovery-hint filter. Each rule alone
+helps (stock wording alone: 4/35, 43%); together is best. The held-out split
+is unlabelled: of the 30 attachments the rules removed, about 28 read as wrong
+(lost: `head: command not found`, a Playwright port refusal); of 25 sampled
+that remain, about 13 are right or related. So wrong attachments on random
+failures fall from roughly 31% to 18% while right ones are mostly kept. The 35
+negatives were read while designing the rules, so 5.7% is optimistic; the
+held-out numbers are the honest ones. Recall time about 30 ms per failure.
+
+### Larger held-out set, judged blind (2026-11-24)
+
+`sample_failures.py ... all` takes every failed call in local history (all
+projects and the no-project chats) except the 142 the benchmark labelled, one
+per tool + error opening: 894 failures. With the replay's JSON export
+(`MEMORY_REPLAY_JSON`), every (failure, lesson) pair either rule set attaches
+was stratified and a sample judged by 8 independent subagents, blind to the
+stratum, as applies / related / unrelated (`judge_report.py`):
+
+| stratum | pairs | judged | applies |
+|---|---|---|---|
+| benchmark right lessons (control) | 159 | 60 | 97% |
+| benchmark negatives' attachments (control) | 24 | 24 | 4% |
+| attached by old rules only | 673 | 300 | 5% (3-8%) |
+| attached by new rules only | 161 | 161 | 14% (9-20%) |
+| attached by both | 766 | 250 | 40% (35-47%) |
+
+The judges agree with the benchmark labels (97% / 96%). Weighted by stratum
+size, on the 894 failures:
+
+| | failures with a lesson | lessons attached | apply | do not |
+|---|---|---|---|---|
+| old rules | 533 | 1,439 | ~343 (24%) | ~1,096 |
+| new rules (floor 2) | 380 | 927 | ~331 (36%) | ~596 |
+| new rules, floor 3 | 265 | 650 | ~298 (46%) | ~352 |
+| new rules, floor 4 | 212 | 502 | ~246 (49%) | ~256 |
+
+So the new rules remove ~46% of the lessons that do not apply for ~3% of those
+that do. Rank does not separate them (38/33/36% apply at ranks 1/2/3); the
+number of shared specific words does: pairs sharing exactly 2 apply 10% of the
+time, 4 or more about 50%. A floor of 3 removes another ~244 non-applying
+lessons for ~33 applying ones and costs 7 of 104 benchmark hits (dev 36->32,
+test 35->32). Decision (2026-11-24): the floor is 3 -- a wrong lesson is worse
+than none, and wrong attachments also blur the unhelpful-streak signal that
+retires lessons (`LESSON_RECALL_MIN_SHARED`; replays can still set it with
+`MEMORY_REPLAY_MIN_SHARED`). Product replay: right lesson 32/52 dev, 32/52
+test; benchmark negatives 1/35; held-out failures with a lesson 265/894; about
+46% of attached lessons apply. Stores under 20 active lessons still need one
+word more.
+
+## Step 6: what the per-turn recall block delivers (2026-11-24)
+
+Replay: `memory_replay recall` over 400 real user turns sampled from the
+corpus, each searched as production does at that moment (history before the
+turn), plus the 132 probes (`prep_recall_gate.py`). The two windows a turn would
+receive were judged blind (`judge_recall.py`; 805 pairs, 8 judges; known-right
+probe windows 86% "useful", known-wrong pairs 0%).
+
+- **The turn's own Session took a top-2 slot on 40% of turns** (159/400): the
+  block resent what the model had just read. `recall_session_hits` (shared by
+  the turn's recall and the Settings preview) now drops the asking Session.
+- Without it, **11% of delivered windows are useful** (76/702; first window
+  12%, second 10%); 66 of 400 turns get at least one useful window. The rest
+  is "same project, changes nothing" (49%) or unrelated (41%), about 5,300
+  characters a turn.
+- Lexical evidence does not rescue it. Gating on query bigrams the anchor
+  shares (`session_recall_evidence`: document frequency per token) reaches
+  ~60% useful only by delivering on ~3% of turns (11-15 windows, 8-9 of the 76
+  useful ones kept, no probe kept), and that threshold was picked on the same
+  labels. Most shared "distinctive" bigrams straddle two words ("到服", "们为").
+  A question repeated verbatim in the earlier Session is useful 21% of the
+  time.
+- Where it does help: a Session's first turn got a useful window 31% of the
+  time (29/94), later turns 14% (37/268). Users almost never point back
+  ("上次", "之前", "last time": 18 of 1,560 corpus turns, none of the useful
+  deliveries).
+
+Decision (user, 2026-11-24): **the per-turn block is off by default**
+(`memory_recall_placement` unset = `off`; `system`, `user` and `alternate`
+still opt in). The model reaches history through `session_search`.
+
 ## Not in this change
 
-- The per-turn system-prompt recall block still exists (it now ranks with the
-  bigram path). Removing it should be an A/B switch measured on answer quality
-  and cached tokens first.
-- L2/L3 promotion (project card, user rules) is designed but untested.
-- Lessons have no UI yet.
+- What replaces the block, if anything. Candidates, cheapest first: tell the
+  model to search history at a Session's start or on a reference it cannot
+  resolve (it searches on 3.2% of turns today); a start-of-Session card showing
+  the user where the project stands, delivered only on their click; letting the
+  user attach an earlier chat like a file; a short per-project progress note
+  written at Session end; a cheap-model gate on first turns only.
+- L2/L3 promotion: replayed offline in step 4 and not built.

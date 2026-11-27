@@ -4826,6 +4826,28 @@ fn school_route_explains_the_account_gateway_refusals() {
 }
 
 #[test]
+fn school_route_missing_channel_for_a_paid_group_is_a_server_gap() {
+    // A Pro member whose group has no scopus-search channel: the server was
+    // never configured for it, so the error must not ask for a membership.
+    let body = r#"{"error":{"code":"","message":"No available channel for model scopus-search under group pro (distributor)","type":"new_api_error"}}"#;
+    let server = ScopusFixtureServer::spawn(vec![(503, body); 3]);
+    let error = run_fixture_search(&fixture_access(&server, None, &signed_in_account), 30)
+        .expect_err("no channel");
+    assert!(
+        error.contains("HTTP 503")
+            && error.contains("server configuration problem")
+            && error.contains("`pro`")
+            && !error.contains("needs a Go"),
+        "{error}"
+    );
+    assert_eq!(
+        source_failure_status(&error),
+        runtime::SourceAttemptStatus::Failed,
+        "{error}"
+    );
+}
+
+#[test]
 fn school_route_upstream_failure_keeps_the_channel_message() {
     // The research channel's own answer when the school fails. New API refunds
     // it, so the generic provider retries stay free.
@@ -4878,4 +4900,279 @@ fn normalized_title_keeps_chinese_titles_distinct() {
         normalized_title("基于深度学习的图像分割"),
         normalized_title("面向遥感影像的目标检测")
     );
+}
+
+// --- Downloaded-PDF identity (computer-use R0, C7-MISMATCH) ---------------
+
+fn identity(dois: &[&str], titles: &[&str], page_titles: &[&str]) -> ExpectedPaperIdentity {
+    let mut expected = ExpectedPaperIdentity::default();
+    for doi in dois {
+        expected.add_doi(doi);
+    }
+    for title in titles {
+        expected.add_title(title);
+    }
+    for title in page_titles {
+        expected.add_page_title(title);
+    }
+    expected
+}
+
+fn evidence(
+    metadata_dois: &[&str],
+    metadata_titles: &[&str],
+    front_text: &str,
+) -> PdfIdentityEvidence {
+    PdfIdentityEvidence {
+        metadata_dois: metadata_dois
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        metadata_titles: metadata_titles
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        front_text: front_text.to_string(),
+    }
+}
+
+/// A first page of ordinary English prose that is about something else.
+const UNRELATED_FRONT_PAGE: &str = "Graph Neural Networks for Traffic Forecasting
+Abstract. We study the problem of forecasting traffic on road networks and show that
+a graph model of the sensors is able to capture the spatial structure of the data.
+In this paper we propose a method that is trained on the history of each sensor and
+on the topology of the network. The results on two public benchmarks are reported in
+the experiments, and the model is compared with recurrent and convolutional baselines
+that are common in the literature on this problem. We find that the graph structure is
+the main source of the improvement and that the model is robust to missing readings.";
+
+#[test]
+fn normalize_doi_accepts_doi_forms_and_rejects_non_dois() {
+    assert_eq!(
+        normalize_doi("https://doi.org/10.1109/TPAMI.2020.1234567.").as_deref(),
+        Some("10.1109/tpami.2020.1234567")
+    );
+    assert_eq!(
+        normalize_doi("doi: 10.3390/s23073762").as_deref(),
+        Some("10.3390/s23073762")
+    );
+    assert_eq!(
+        normalize_doi("https://doi.org/10.1000%2Fxyz").as_deref(),
+        Some("10.1000/xyz")
+    );
+    assert_eq!(
+        normalize_doi("10.1002/(SICI)1097-4636(199908)46").as_deref(),
+        Some("10.1002/(sici)1097-4636(199908)46")
+    );
+    assert_eq!(normalize_doi("10.12/too-short-registrant"), None);
+    assert_eq!(normalize_doi("arXiv:2301.12345"), None);
+    assert_eq!(
+        normalize_doi("see 10.1000/xyz"),
+        None,
+        "a DOI inside prose is not a DOI field"
+    );
+}
+
+#[test]
+fn extract_dois_trims_punctuation_and_skips_longer_numbers() {
+    assert_eq!(
+        extract_dois("(see doi:10.1000/abc), and https://doi.org/10.5555/x.y; 110.1234/no"),
+        vec!["10.1000/abc".to_string(), "10.5555/x.y".to_string()]
+    );
+    assert_eq!(
+        extract_dois("10.12/10.1234/abc"),
+        vec!["10.1234/abc".to_string()],
+        "a failed registrant must not hide a DOI that starts inside it"
+    );
+}
+
+#[test]
+fn pdf_identity_rejects_the_fixture_paper_served_under_another_doi() {
+    // C7-MISMATCH: the landing page is …0003, the link serves …0099.
+    let expected = identity(
+        &["10.5555/somniq.r0.0003"],
+        &[],
+        &["Mismatch Fixture: The Page Says One Paper"],
+    );
+    let served = evidence(
+        &["10.5555/somniq.r0.0099"],
+        &["A Different Paper Entirely"],
+        "A Different Paper Entirely\nDOI: 10.5555/somniq.r0.0099\nPage 1 of 2",
+    );
+    let verdict = judge_pdf_identity(&expected, &served);
+    assert_eq!(verdict.status, PdfIdentityStatus::Mismatch);
+    assert_eq!(
+        verdict.found_dois,
+        vec!["10.5555/somniq.r0.0099".to_string()]
+    );
+    let error = validate_pdf_identity(&expected, &served).expect_err("mismatch must be refused");
+    assert!(error.starts_with("identity_mismatch:"), "{error}");
+    assert!(error.contains("10.5555/somniq.r0.0099") && error.contains("10.5555/somniq.r0.0003"));
+}
+
+#[test]
+fn pdf_identity_finds_a_doi_glued_to_the_next_line_or_broken_across_lines() {
+    let expected = identity(&["10.5555/somniq.r0.0001"], &[], &[]);
+    // lopdf-style extraction without line breaks.
+    let glued = evidence(
+        &[],
+        &[],
+        "Open Access FixtureDOI: 10.5555/somniq.r0.0001Page 1 of 3",
+    );
+    let verdict = judge_pdf_identity(&expected, &glued);
+    assert_eq!(verdict.status, PdfIdentityStatus::Verified);
+    assert_eq!(verdict.matched_by.as_deref(), Some("doi"));
+
+    let broken = evidence(&[], &[], "https://doi.org/10.5555/somniq.\nr0.0001");
+    assert_eq!(
+        judge_pdf_identity(&expected, &broken).status,
+        PdfIdentityStatus::Verified
+    );
+
+    // In the metadata only (XMP prism:doi / Info /Subject).
+    let metadata = evidence(&["doi:10.5555/SOMNIQ.R0.0001"], &[], "");
+    assert_eq!(
+        judge_pdf_identity(&expected, &metadata).status,
+        PdfIdentityStatus::Verified
+    );
+}
+
+#[test]
+fn pdf_identity_does_not_take_a_longer_doi_for_the_expected_one() {
+    let expected = identity(&["10.5555/somniq.r0.0001"], &[], &[]);
+    let longer = evidence(&[], &[], "DOI: 10.5555/somniq.r0.00012");
+    assert_eq!(
+        judge_pdf_identity(&expected, &longer).status,
+        PdfIdentityStatus::Mismatch
+    );
+}
+
+#[test]
+fn pdf_identity_matches_titles_through_ligatures_accents_and_lost_spaces() {
+    let expected = identity(
+        &[],
+        &["Efficient Schrödinger Bridges for Diffusion Fine-Tuning"],
+        &[],
+    );
+    // A ligature, a stand-alone diaeresis and no word spacing, as raw
+    // extraction often yields.
+    let front = evidence(
+        &[],
+        &[],
+        "E\u{FB03}cientSchro\u{00A8}dingerBridgesforDi\u{FB00}usion\nFine-Tuning",
+    );
+    let verdict = judge_pdf_identity(&expected, &front);
+    assert_eq!(verdict.status, PdfIdentityStatus::Verified, "{verdict:?}");
+    assert_eq!(verdict.matched_by.as_deref(), Some("title"));
+
+    // The metadata title alone can confirm.
+    let metadata = evidence(
+        &[],
+        &["Efficient Schrödinger bridges for diffusion fine-tuning"],
+        "",
+    );
+    assert_eq!(
+        judge_pdf_identity(&expected, &metadata).status,
+        PdfIdentityStatus::Verified
+    );
+}
+
+#[test]
+fn pdf_identity_title_beats_a_different_doi_for_the_same_work() {
+    // The landing page is the journal version; the PDF is the preprint,
+    // which carries the arXiv DOI but the same title.
+    let expected = identity(
+        &["10.1109/tpami.2025.1234567"],
+        &["Measuring Reviewer Agreement in Autonomous Research"],
+        &[],
+    );
+    let preprint = evidence(
+        &["10.48550/arXiv.2501.01234"],
+        &[],
+        "Measuring Reviewer Agreement in Autonomous Research\nA. Author, B. Author",
+    );
+    assert_eq!(
+        judge_pdf_identity(&expected, &preprint).status,
+        PdfIdentityStatus::Verified
+    );
+}
+
+#[test]
+fn pdf_identity_readable_text_without_the_trusted_title_is_a_mismatch() {
+    let expected = identity(
+        &[],
+        &["Evidence Ledgers for Autonomous Research Agents"],
+        &[],
+    );
+    let verdict = judge_pdf_identity(&expected, &evidence(&[], &[], UNRELATED_FRONT_PAGE));
+    assert_eq!(verdict.status, PdfIdentityStatus::Mismatch, "{verdict:?}");
+
+    // A scraped landing-page title only ever confirms: the same text against
+    // a page title alone is unverified, not refused.
+    let page_only = identity(
+        &[],
+        &[],
+        &["Evidence Ledgers for Autonomous Research Agents"],
+    );
+    assert_eq!(
+        judge_pdf_identity(&page_only, &evidence(&[], &[], UNRELATED_FRONT_PAGE)).status,
+        PdfIdentityStatus::Unverified
+    );
+}
+
+#[test]
+fn pdf_identity_unreadable_pdfs_are_unverified_not_refused() {
+    let expected = identity(
+        &[],
+        &["Evidence Ledgers for Autonomous Research Agents"],
+        &[],
+    );
+    // Glyph ids from a CID font without a Unicode map.
+    let garbage = evidence(
+        &[],
+        &[],
+        "\u{0}\u{3}\u{11}G\u{5}\u{2}Kx\u{0}\u{1}\u{7}q 3 \u{12}\u{0}",
+    );
+    let verdict = judge_pdf_identity(&expected, &garbage);
+    assert_eq!(verdict.status, PdfIdentityStatus::Unverified);
+    assert!(validate_pdf_identity(&expected, &garbage).is_ok());
+
+    assert_eq!(
+        judge_pdf_identity(&ExpectedPaperIdentity::default(), &garbage).status,
+        PdfIdentityStatus::Unchecked
+    );
+}
+
+#[test]
+fn pdf_identity_handles_cjk_titles_and_does_not_judge_them_by_latin_text() {
+    let expected = identity(&[], &["基于深度学习的遥感影像目标检测方法研究"], &[]);
+    let chinese = evidence(
+        &[],
+        &[],
+        "基于深度学习的遥感影像\n目标检测方法研究\n张三 李四\n摘要：本文提出",
+    );
+    assert_eq!(
+        judge_pdf_identity(&expected, &chinese).status,
+        PdfIdentityStatus::Verified
+    );
+
+    // Only the English abstract was extractable: Latin text says nothing
+    // about a Chinese title.
+    assert_eq!(
+        judge_pdf_identity(&expected, &evidence(&[], &[], UNRELATED_FRONT_PAGE)).status,
+        PdfIdentityStatus::Unverified
+    );
+}
+
+#[test]
+fn browser_download_task_for_url_does_not_pass_the_file_name_off_as_a_title() {
+    // The browser download verifies the PDF against `title`; a file stem would
+    // reject the right paper.
+    let task = browser_download_task_for_url(
+        "https://www.mdpi.com/1424-8220/23/7/3762/pdf?version=1680753458",
+        "s23073762.pdf",
+    )
+    .expect("MDPI browser task");
+    assert_eq!(task["title"], "");
+    assert_eq!(task["doi"], "");
 }

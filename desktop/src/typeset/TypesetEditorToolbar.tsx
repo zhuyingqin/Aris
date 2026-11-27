@@ -1,6 +1,6 @@
 // The editor's formatting toolbar: headings, marks, lists, figures, tables,
 // citations and the search box, issued through `editorCommands`.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EditorView } from "@codemirror/view";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { suggestedCitationKey } from "../literature/literatureStore";
@@ -210,7 +210,6 @@ export default function TypesetEditorToolbar({
   compiling,
   editorRef,
   visualViewRef,
-  onChange,
   onModeChange,
   onNavigateToLine,
   onEditSlideSource,
@@ -222,6 +221,7 @@ export default function TypesetEditorToolbar({
   projectSearchLabel,
   onComments,
   commentsLabel,
+  trackChangesControl,
   onSearch,
   onUndo,
   path,
@@ -253,7 +253,6 @@ export default function TypesetEditorToolbar({
   compiling: boolean;
   editorRef: { current: SharedEditorHandle | null };
   visualViewRef: { current: EditorView | null };
-  onChange: (value: string) => void;
   onModeChange: (mode: EditorMode) => void;
   onNavigateToLine: (line: number) => void;
   onEditSlideSource: (line: number) => void;
@@ -265,6 +264,8 @@ export default function TypesetEditorToolbar({
   projectSearchLabel: string;
   onComments: () => void;
   commentsLabel: string;
+  /** The track-changes switch and list, beside comments. */
+  trackChangesControl?: ReactNode;
   onSearch: (start: number, end: number) => void;
   onUndo: () => void;
   path: string | null;
@@ -307,10 +308,9 @@ export default function TypesetEditorToolbar({
   const activeSlideIndex = activeSlide ? slides.indexOf(activeSlide) : -1;
   const safeCompiledVisual = slides.length > 0 && mode === "visual";
   // Every command below reads/writes at the *live* selection of whichever
-  // editor is active — see `activeEditorAdapter` for why Code mode (a plain
-  // textarea) and Visual mode (CodeMirror) need different `replace` backends.
+  // editor is active, as one undoable transaction (see `activeEditorAdapter`).
   const withSelection = (run: (adapter: EditorAdapter) => void) => {
-    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
+    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef);
     if (!adapter) return;
     run(adapter);
   };
@@ -325,7 +325,7 @@ export default function TypesetEditorToolbar({
   const insertHref = () => withSelection((adapter) => insertLink(adapter));
   const insertRef = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\ref{", "sec:label", "}"));
   const insertCitation = () => {
-    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
+    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef);
     if (!adapter) return;
     // Preserve the lightweight manual insertion behaviour for a brand-new
     // project; once there are library records, citations are always selected
@@ -385,7 +385,11 @@ export default function TypesetEditorToolbar({
    * formula. The structure index already knows which is which. */
   const insertSymbol = (symbol: LatexSymbolEntry) =>
     withSelection((adapter) => {
-      const insideMath = scanLatexStructure(adapter.text).isMath(Math.max(0, adapter.from - 1));
+      // Inside only when the characters on *both* sides of the caret are math:
+      // right after `$x$` (or right before it) the caret is in prose, and a
+      // symbol inserted there without its own `$…$` fails to compile.
+      const structure = scanLatexStructure(adapter.text);
+      const insideMath = structure.isMath(adapter.from) && structure.isMath(Math.max(0, adapter.from - 1));
       const text = symbolInsertion(symbol, insideMath);
       const [selectFrom, selectTo] = symbolSelectionRange(text);
       adapter.replace(adapter.from, adapter.to, text, adapter.from + selectFrom, adapter.from + selectTo);
@@ -534,6 +538,7 @@ export default function TypesetEditorToolbar({
           <button type="button" className="ol-cm-toolbar-button" title={commentsLabel} aria-label={commentsLabel} onClick={onComments}>
             <ToolIcon name="comments" />
           </button>
+          {trackChangesControl}
         </div>
         <div className="ol-cm-toolbar-button-group" aria-label={copy.textFormattingLabel}>
           <VisualToolbarMenu

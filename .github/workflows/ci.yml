@@ -41,6 +41,7 @@ jobs:
           - aris-chat
           - aris-executor
           - compute
+          - computer
           - notebook
           - remote-protocol
           - runtime

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ChangeSet, Text } from "@codemirror/state";
-import { clearLatexStructureCache, scanLatexStructure, updateLatexStructure } from "../../editor/latex/latexStructure";
+import { clearLatexStructureCache, latexEditsKeepStructure, scanLatexStructure, updateLatexStructure } from "../../editor/latex/latexStructure";
+import { PendingLatexStructure } from "../../editor/latex/pendingStructure";
 import { beamerSlidesForDocument, scanOutlineNodes } from "../outlineModel";
 
 beforeEach(() => clearLatexStructureCache());
@@ -162,5 +163,44 @@ describe("beamerSlidesForDocument", () => {
       ["slides/one.tex", "One"],
       ["slides/two.tex", "Two"],
     ]);
+  });
+});
+
+describe("PendingLatexStructure and the prose check", () => {
+  const source = String.raw`\begin{document}
+\section{Intro}\label{sec:a}
+Some prose here, \textbf{bold} too.
+\end{document}`;
+
+  it("composes prose edits and maps them once, to the same index a scan gives", () => {
+    let doc = Text.of(source.split("\n"));
+    let pending = PendingLatexStructure.resolved(scanLatexStructure(source), doc);
+    for (const word of [" more", " words"]) {
+      const at = doc.toString().indexOf("prose") + 5;
+      const changes = ChangeSet.of({ from: at, insert: word }, doc.length);
+      doc = changes.apply(doc);
+      pending = pending.next(changes, doc);
+      expect(pending.isResolved).toBe(false);
+    }
+    const mapped = pending.get();
+    clearLatexStructureCache();
+    const scanned = scanLatexStructure(doc.toString());
+    expect(mapped.source).toBe(scanned.source);
+    expect(mapped.commands.map((command) => [command.name, command.from, command.to]))
+      .toEqual(scanned.commands.map((command) => [command.name, command.from, command.to]));
+  });
+
+  it("finds an edit to a control word, even behind queued prose edits", () => {
+    const structure = scanLatexStructure(source);
+    const bold = source.indexOf(String.raw`\textbf`) + 3;
+    expect(latexEditsKeepStructure(structure, [{ fromA: bold, toA: bold, removed: "", inserted: "x" }])).toBe(false);
+    const prose = source.indexOf("prose") + 2;
+    expect(latexEditsKeepStructure(structure, [{ fromA: prose, toA: prose, removed: "", inserted: "x" }])).toBe(true);
+
+    // Ten characters were typed before the command since the index was made:
+    // a position in today's text maps back ten characters.
+    const shifted = (position: number) => position - 10;
+    expect(latexEditsKeepStructure(structure, [{ fromA: bold + 10, toA: bold + 10, removed: "", inserted: "x" }], shifted)).toBe(false);
+    expect(latexEditsKeepStructure(structure, [{ fromA: bold + 10, toA: bold + 10, removed: "", inserted: "x" }])).toBe(true);
   });
 });

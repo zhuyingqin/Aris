@@ -8,6 +8,8 @@ mod codebridge;
 mod codeserver;
 mod commands;
 mod compute;
+mod computer_control;
+mod computer_tools;
 mod config;
 /// Loopback HTTP host for the `AppCtx`-ported commands, used to drive the UI
 /// from a plain browser. Compiled only for the `aris-devserver` binary.
@@ -127,7 +129,7 @@ fn open_chat_companion_window(
         *pending = Some(handoff);
     }
 
-    let window = commands::route_new_windows_to_browser(WebviewWindowBuilder::new(
+    let window = commands::harden_app_webview(WebviewWindowBuilder::new(
         &app,
         "chat-companion",
         // `WebviewUrl::App` accepts an asset path, not a URL-with-query. A
@@ -712,12 +714,14 @@ pub fn run() {
         .manage(codeserver::CodeServerState::default())
         .manage(codebridge::CodeBridgeState::default())
         .manage(screenshot::ScreenshotState::default())
+        .manage(computer_control::ComputerControlState::default())
         .setup(|app| {
             // The main window is declared in tauri.conf.json but built here, so
-            // it can route new-window requests to the system browser.
+            // it can route new-window requests to the system browser and guard
+            // frames without an origin of their own (see `harden_app_webview`).
             let main = app.config().app.windows.iter().find(|window| window.label == "main" && !window.create).cloned();
             if let (Some(main), None) = (main, app.get_webview_window("main")) {
-                commands::route_new_windows_to_browser(WebviewWindowBuilder::from_config(app.handle(), &main)?)
+                commands::harden_app_webview(WebviewWindowBuilder::from_config(app.handle(), &main)?)
                     .build()?;
             }
             register_screenshot_shortcut(app.handle());
@@ -778,6 +782,8 @@ pub fn run() {
             }
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            // Which projects keep which plugin snapshots: what none keeps is collected.
+            projects::sync_plugin_snapshot_index(app.state::<projects::ProjectState>().inner());
             let browser_project =
                 projects::current_project_path(app.state::<projects::ProjectState>().inner())
                     .map_err(std::io::Error::other)?;
@@ -941,6 +947,10 @@ pub fn run() {
             memory::memory_status,
             memory::memory_v2_status,
             memory::memory_v2_confirm_r3,
+            memory::memory_lessons_status,
+            memory::memory_lessons_set_enabled,
+            memory::memory_lesson_delete,
+            memory::memory_lesson_set_active,
             memory::memory_v2_pending_r3,
             memory::memory_v2_wake,
             memory::memory_v2_history_preview,
@@ -1023,6 +1033,8 @@ pub fn run() {
             plugins::plugins_set_global,
             plugins::plugins_upgrade,
             plugins::plugins_rollback,
+            plugins::plugins_rollback_preview,
+            plugins::plugins_workspace_file_changes,
             plugins::plugins_draft_changes,
             plugins::plugins_draft_page,
             plugins::plugins_check_mcp,
@@ -1031,6 +1043,8 @@ pub fn run() {
             plugins::plugins_ui_state_get,
             plugins::plugins_ui_state_update,
             plugins::plugins_ui_page,
+            plugins::plugins_ui_run_tool,
+            plugins::plugins_ui_cancel_tool,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
             oracle_web::oracle_web_status,
@@ -1151,6 +1165,12 @@ pub fn run() {
             engine::collaboration::chat_agent_interrupt,
             engine::collaboration::chat_agent_trace,
             engine::chat_permission_set,
+            engine::chat_computer_use_get,
+            engine::chat_computer_use_set,
+            computer_control::computer_control_status,
+            computer_control::computer_control_stop,
+            computer_tools::computer_access_respond,
+            computer_tools::computer_access_pending,
             engine::chat_permission_respond,
             engine::chat_question_respond,
             plugins::chat_plugin_approval_respond,
@@ -1207,6 +1227,8 @@ pub fn run() {
             typeset_state::typeset_change_proposal_load,
             typeset_state::typeset_change_proposal_clear,
             typeset_state::typeset_comments_list,
+            typeset_state::typeset_tracked_changes_load,
+            typeset_state::typeset_tracked_changes_save,
             typeset_state::typeset_comment_upsert,
             typeset_state::typeset_comment_delete,
             typeset_state::typeset_history_create,
@@ -1225,6 +1247,9 @@ pub fn run() {
             typeset_state::typeset_changeset_resolve,
             typeset_state::typeset_project_search,
             typeset_state::typeset_project_replace,
+            typeset_state::typeset_project_settings_read,
+            typeset_state::typeset_project_settings_write,
+            typeset_state::typeset_revision_blob_text,
         ])
         .build(app_context())
         .expect("error while building SomniQ Studio")

@@ -1,5 +1,140 @@
 # ARIS-Code Changelog
 
+## v0.4.93 (2026-11-25)
+
+- **Computer-use mode (first version)** — a per-chat "Computer use" switch in
+  the Chat composer. It is off again after a restart and cannot be changed while
+  a turn is running. In this mode the model gets only a fixed allow-list of
+  tools: reading project files, asking the user, and five new window tools.
+  Anything else is refused under every permission mode. MCP servers and project
+  hooks do not start, and the host refuses blocked tools a second time. The
+  window tools (`computer_request_access`, `computer_snapshot`,
+  `computer_find`, `computer_screenshot`, `computer_release`) can only read one
+  window the user picks on an approval card. The card names the model and
+  endpoint that will receive the content. Password fields are never read.
+  Messaging, mail, meeting, remote-desktop and other AI clients cannot be
+  picked. Access ends with the turn. While a turn runs, each monitor shows a
+  "SomniQ is controlling this computer" bar with a Stop button, and the window
+  being read gets a red frame. Every grant and read is kept in the session log.
+  The helper `somniq-computer.exe` (new `crates/computer`, Windows) is bundled
+  by `npm run build:resources`.
+- **Plugin capabilities** — packages declare what their servers need:
+  environment variables by name, network access, and project files. Plugin
+  processes now get only what was declared and approved. They do not inherit
+  shell proxies, and network plugins use SomniQ's own proxy setting. Declared
+  project files are run from a copy. Commands that download code at run time
+  (`npx`, `uvx`, `pipx run`, …) are labelled. Upgrade and rollback reviews list
+  every capability change, with a warning on anything that widens access.
+  Unused package snapshots are cleaned up after 30 days.
+- **Plugin fixes from the full audit** — Python bytecode is no longer written
+  into reviewed snapshots. A package can declare a minimum app version. Page
+  saves detect conflicting edits. Page actions that run tools need a click.
+  Plugin panels can run a plugin's own tools directly (buttons, `tool` actions,
+  `somniq.tool`) without going through the chat. Web panels can share the
+  screen with pages.
+- **Model requests** — output deadlines now count real output. Keep-alive
+  chunks (SSE comments, empty deltas, `response.in_progress`) no longer keep a
+  silent request alive. Each request also has a total time limit: 30 minutes,
+  or 60 for single-submission artifact jobs. Set it with
+  `ARIS_REQUEST_MAX_DURATION_SECS`; `0` turns it off. A request that used its
+  whole time limit is not re-sent. After 10 minutes without output, the wait
+  notice says the request looks stuck instead of "still reasoning", and
+  context compaction shows its own progress instead of counting as a model
+  wait.
+- **Downloaded PDFs are checked against the requested paper** — before a PDF is
+  filed, its DOI or title must match the paper that was asked for. A landing
+  page that links the wrong file, or a mirror that serves another work, is now
+  reported as a mismatch and the file is deleted. Before, such files were
+  filed as the requested paper.
+- **External images in chat** — Markdown images from other hosts and network
+  paths (`\\server\…`, `//host/…`, including percent-encoded forms) are not
+  loaded. A note shows the host instead.
+- **Context compaction** — summaries now ask for low reasoning effort instead
+  of the chat's own setting. At `max`, `gpt-5.6-luna` thought for up to 2.5
+  minutes before each of a compaction's 4–6 summary calls, so one compaction
+  took 7–15 minutes. `ARIS_SUMMARIZER_REASONING_EFFORT` changes the level.
+  Stop now ends a compaction that is still summarizing and leaves the chat
+  history unchanged; before, the summary kept running after Stop and its
+  result was thrown away. Compaction between tool steps also shows
+  "Compacting context" instead of a model wait.
+
+## v0.4.92 (2026-11-25)
+
+- **Chat history search** — past chats are indexed by character pairs, so
+  Chinese text without word breaks is found reliably. A search takes about
+  40–80 ms instead of about 440 ms. Deleting a chat removes it from the index
+  immediately.
+- **Lessons from failures** — after a turn in which a failed tool call was
+  later fixed, a background call to a cheap model writes a short lesson. It
+  uses the Reviewer connection when one is set, otherwise the Executor's
+  cheap tier. When a tool fails, at most three lessons are appended to the
+  tool result. A lesson must be for the same kind of error and share at least
+  three specific words with the error. Paths, stock error wording, the
+  desktop's "Recovery hint" line and English function words are not counted.
+  Lessons are marked when recalled, unhelpful or stale. A lesson is deleted
+  with the only chat it came from, and an hourly cleanup keeps at most 2,000.
+  Settings → Memory lists the lessons. `memory_lessons_enabled` turns
+  lessons off.
+- **Automatic recall off by default** — past-chat excerpts are no longer added
+  to every turn. In a blind review of 400 replayed real turns, 11% of the
+  excerpts were useful. The model can still search history with
+  `session_search`. `memory_recall_placement` (`system`, `user` or
+  `alternate`) turns the block back on, and it no longer includes the current
+  chat. Background memory screening (v2) is also off by default.
+- **LaTeX compile** — without latexmk, compiles now run BibTeX or biber and
+  makeindex when the document needs them, then rerun until references settle
+  (at most four passes). Diagnostics come from the last pass's log and point
+  to the right chapter file, including `\include`d ones. They also include
+  BibTeX/biber errors and bad boxes. Chinese logs no longer crash the error
+  summary, and `Font shape … undefined` warnings are no longer reported as a
+  missing package. Waiting for an earlier compile can be cancelled, and
+  Ctrl+S during a compile is queued. The Agent's LaTeXCompile uses the main
+  document and engine chosen in the editor (`.somniq/typeset/settings.json`).
+- **LaTeX editor** — toolbar edits can be undone, and one undo history spans
+  the Visual and Code views. Compile errors show inline in the right file.
+  F12 or Ctrl+click goes to a label, citation or included file. F2 renames a
+  label in every file. Completion offers the document's own macros and
+  environments. Citation checks use the document's own `.bib`, and duplicate
+  labels across files are reported. Math previews use the document's
+  `\newcommand` macros. `.bib`, `.sty` and `.cls` files open from the file
+  tree in Code view.
+- **Visual editor** — tables with comments, `\multicolumn` or row options can
+  no longer be broken by structure edits. Visual mode now handles subfigures,
+  float captions, `description` lists, footnote numbers, `\url`,
+  `\textcolor` and citation variants. On a 6,800-line document a full
+  rebuild takes about 115 ms (was 330 ms), and per-keystroke checks take
+  about 2 ms (were about 35 ms).
+- **Track changes** — Code view can record insertions and deletions. Each
+  change, or all at once, can be accepted or rejected. Records are saved under
+  `.somniq/typeset/tracked/` and follow renamed files.
+- **Comments** — comments take replies, are highlighted in the source, open
+  from a hover card and export to Markdown.
+- **History** — project history compares two versions line by line. Papers,
+  slides, posters and reports under `.somniq/` are now included in history and
+  in project search. An AI edit to them now goes through change-set review.
+- **PDF sidebar** — an outline tree that highlights the current section, and
+  page thumbnails.
+- **Templates** — new documents can start from IEEE (two layouts), ACM,
+  Elsevier, LNCS or REVTeX, or from a Chinese or English thesis split into
+  chapters. A document with a Chinese title starts with ctex and XeLaTeX.
+- **Project files** — renaming a file keeps its comments, history and
+  tracked changes. Deleted files go to `.somniq/trash` for 30 days. Files can
+  be dragged in from the system, and a clashing name gets `-2`. Files changed
+  outside the app refresh the tree. Search and replace stay inside the
+  current folder and keep GBK files in GBK. Pasted images are saved in
+  `figures/` next to the main document. Project zips leave out hidden folders,
+  `.env` files and private keys. The demo-only "Review and revisions" panel
+  is gone.
+- **Scheduled tasks** — a folder containing a file Windows Git cannot store
+  (such as a stray `nul`) no longer fails every task. A task that creates such
+  a file no longer fails when committing. Snapshots of large folders no longer
+  stall for minutes on Git's background repack.
+- **Scopus (school route)** — when a paid membership group has no Scopus
+  channel on the server, the error says the server is misconfigured instead of
+  telling the member to upgrade.
+- **Binary uploads** — pasted images and clipboard copies keep working when a
+  page has fallen back from Tauri's custom-protocol IPC to `postMessage`.
+
 ## v0.4.91 (2026-11-19)
 
 - **Context windows** — models that ship a 1M-token window inside a smaller
